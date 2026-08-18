@@ -49,6 +49,7 @@ pub struct PackageAdmission {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SourceKind {
     CratesIo,
+    Git,
     Path,
     SystemVendoredPath,
 }
@@ -57,6 +58,7 @@ impl SourceKind {
     fn policy_name(self) -> &'static str {
         match self {
             Self::CratesIo => "crates.io",
+            Self::Git => "git",
             Self::Path => "path",
             Self::SystemVendoredPath => "system-vendored-path",
         }
@@ -406,6 +408,61 @@ impl PackageEvidence {
             source_tree_sha256: tree.sha256,
         })
     }
+
+    pub fn from_git(package: &ResolvedPackage) -> Result<Self> {
+        let ResolvedSource::Git {
+            physical_root,
+            source_tree_sha256,
+            ..
+        } = &package.source
+        else {
+            return Err(Error::failure(format!(
+                "`{} {}` is not a Git package",
+                package.key.name, package.key.version
+            )));
+        };
+        let manifest = package.local_manifest.as_ref().ok_or_else(|| {
+            Error::failure(format!(
+                "resolved Git package `{} {}` has no inspected manifest",
+                package.key.name, package.key.version
+            ))
+        })?;
+        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
+            Error::failure(format!(
+                "Git manifest has invalid version `{} {}`: {error}",
+                manifest.name, manifest.version.original
+            ))
+        })?;
+        if manifest.name != package.key.name
+            || manifest_version != package.key.version
+            || manifest.root != *physical_root
+        {
+            return Err(Error::failure(format!(
+                "Git manifest does not match resolved package `{} {}`",
+                package.key.name, package.key.version
+            )));
+        }
+        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::None)?;
+        if tree.sha256 != *source_tree_sha256 {
+            return Err(Error::failure(format!(
+                "Git source for `{} {}` changed after resolution",
+                package.key.name, package.key.version
+            )));
+        }
+        Ok(Self {
+            license: manifest.metadata.license.clone(),
+            build_script: manifest.build_script.is_some(),
+            proc_macro: manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro),
+            newly_acquired: false,
+            archive_bytes: None,
+            extracted_bytes: tree.total_bytes,
+            file_count: tree.file_count as u64,
+            source_tree_sha256: tree.sha256,
+        })
+    }
 }
 
 fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
@@ -437,6 +494,20 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
                     Fact::Value(manifest.metadata.license.clone())
                 }),
         },
+        ResolvedSource::Git {
+            source_tree_sha256, ..
+        } => Facts {
+            package,
+            source: SourceKind::Git,
+            checksum: Fact::Absent,
+            source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
+            license: package
+                .local_manifest
+                .as_ref()
+                .map_or(Fact::Unknown, |manifest| {
+                    Fact::Value(manifest.metadata.license.clone())
+                }),
+        },
     }
 }
 
@@ -444,7 +515,7 @@ fn complete_facts<'a>(package: &'a ResolvedPackage, evidence: &'a PackageEvidenc
     let source = source_kind(package);
     let checksum = match &package.source {
         ResolvedSource::CratesIo { checksum } => Fact::Value(hex(checksum)),
-        ResolvedSource::Path { .. } => Fact::Absent,
+        ResolvedSource::Path { .. } | ResolvedSource::Git { .. } => Fact::Absent,
     };
     Facts {
         package,
@@ -458,6 +529,7 @@ fn complete_facts<'a>(package: &'a ResolvedPackage, evidence: &'a PackageEvidenc
 fn source_kind(package: &ResolvedPackage) -> SourceKind {
     match &package.source {
         ResolvedSource::CratesIo { .. } => SourceKind::CratesIo,
+        ResolvedSource::Git { .. } => SourceKind::Git,
         ResolvedSource::Path {
             required_patch: Some(_),
             ..
@@ -468,7 +540,8 @@ fn source_kind(package: &ResolvedPackage) -> SourceKind {
 
 fn base_requires_allow(policy: &Policy, source: SourceKind) -> bool {
     source == SourceKind::SystemVendoredPath
-        || (source == SourceKind::CratesIo && policy.default == PolicyDefault::Deny)
+        || (matches!(source, SourceKind::CratesIo | SourceKind::Git)
+            && policy.default == PolicyDefault::Deny)
 }
 
 fn check_path_root(policy: &Policy, package: &ResolvedPackage) -> Result<()> {
@@ -556,7 +629,7 @@ fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
     match source {
         SourceKind::CratesIo => true,
-        SourceKind::Path | SourceKind::SystemVendoredPath => {
+        SourceKind::Git | SourceKind::Path | SourceKind::SystemVendoredPath => {
             rule.source.as_deref() == Some(source.policy_name())
         }
     }
@@ -568,7 +641,7 @@ fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
     match source {
         SourceKind::CratesIo => true,
-        SourceKind::Path | SourceKind::SystemVendoredPath => {
+        SourceKind::Git | SourceKind::Path | SourceKind::SystemVendoredPath => {
             rule.source.as_deref() == Some(source.policy_name())
         }
     }
@@ -590,6 +663,17 @@ fn check_evidence_identity(package: &ResolvedPackage, evidence: &PackageEvidence
         {
             Err(Error::failure(format!(
                 "path evidence does not match `{} {}`",
+                package.key.name, package.key.version
+            )))
+        }
+        ResolvedSource::Git {
+            source_tree_sha256, ..
+        } if evidence.newly_acquired
+            || evidence.archive_bytes.is_some()
+            || evidence.source_tree_sha256 != *source_tree_sha256 =>
+        {
+            Err(Error::failure(format!(
+                "Git evidence does not match `{} {}`",
                 package.key.name, package.key.version
             )))
         }

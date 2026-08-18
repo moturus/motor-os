@@ -7,9 +7,9 @@ Motor toolchain image. That preinstalled state lets the development image
 rebuild Red, curl, and Lorry offline; it is not required when Lorry is supplied
 another valid configuration and repositories.
 
-`stage2-seed.toml` freezes the packaging input: 51 crates.io objects and the
+`stage2-seed.toml` freezes the packaging input: 118 crates.io objects and the
 pinned Motor `cc 1.4.0`, `crossterm 0.29.0`, and `ring 0.17.14` Git trees. It
-also contains 28 lock-only packages used only when a validation test requests a
+also contains 27 lock-only packages used only when a validation test requests a
 Cargo oracle view. Oracle-only packages never enter the installed Lorry
 repository, its fingerprint, generated policy, or the Motor image seed.
 

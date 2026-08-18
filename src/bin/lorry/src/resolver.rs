@@ -10,7 +10,9 @@ use crate::cargo_registry::CargoRegistry;
 use crate::config::IncompatibleRustVersions;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{decode_hex, hex};
-use crate::manifest::{DependencySource, Lockfile, Manifest, Resolver as ResolverVersion};
+use crate::manifest::{
+    DependencySource, GitDependency, Lockfile, Manifest, Resolver as ResolverVersion,
+};
 use crate::repository::RepositorySet;
 use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
@@ -198,6 +200,47 @@ impl Catalog {
         Ok(())
     }
 
+    pub(crate) fn insert_git(&mut self, manifest: Manifest, source: ResolvedSource) -> Result<()> {
+        let ResolvedSource::Git {
+            logical_root,
+            physical_root,
+            source_tree_sha256,
+            cargo_source,
+            ..
+        } = &source
+        else {
+            return Err(Error::failure(
+                "internal Git candidate has a non-Git source",
+            ));
+        };
+        let cargo_source = cargo_source.clone();
+        let mut candidate = local_candidate(
+            manifest,
+            logical_root.clone(),
+            physical_root.clone(),
+            *source_tree_sha256,
+            false,
+            None,
+        )?;
+        candidate.source = source;
+        let records = self.records.entry(candidate.name.clone()).or_default();
+        if records.iter().any(|existing| {
+            existing.version == candidate.version
+                && matches!(
+                    &existing.source,
+                    ResolvedSource::Git { cargo_source: existing, .. } if existing == &cargo_source
+                )
+        }) {
+            return Err(Error::failure(format!(
+                "Git source repeats package `{} {}`",
+                candidate.name, candidate.version
+            )));
+        }
+        records.push(candidate);
+        records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn contains_required_patch(&self, id: &str) -> bool {
         self.records.values().flatten().any(|candidate| {
@@ -213,8 +256,21 @@ impl Catalog {
     }
 
     fn prepare(&mut self, dependency: &mut CandidateDependency) -> Result<()> {
-        if dependency.source == RequirementSource::CratesIo {
-            return self.prepare_registry(dependency);
+        match &dependency.source {
+            RequirementSource::CratesIo => return self.prepare_registry(dependency),
+            RequirementSource::Git(git) => {
+                if self.records(&dependency.package).iter().any(|candidate| {
+                    dependency.requirement.matches(&candidate.version)
+                        && source_matches(&candidate.source, &dependency.source)
+                }) {
+                    return Ok(());
+                }
+                return Err(Error::failure(format!(
+                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry vendor`",
+                    dependency.package, git.url
+                )));
+            }
+            RequirementSource::Path(_) => {}
         }
         let RequirementSource::Path(declared) = &mut dependency.source else {
             unreachable!();
@@ -449,6 +505,7 @@ fn local_candidate(
                 source: match &dependency.source {
                     DependencySource::CratesIo => RequirementSource::CratesIo,
                     DependencySource::Path(path) => RequirementSource::Path(path.clone()),
+                    DependencySource::Git(git) => RequirementSource::Git(git.clone()),
                 },
             })
         })
@@ -540,6 +597,7 @@ impl std::ops::Deref for CandidateDependency {
 enum RequirementSource {
     CratesIo,
     Path(PathBuf),
+    Git(GitDependency),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -662,6 +720,18 @@ pub enum ResolvedSource {
         patched_crates_io: bool,
         required_patch: Option<String>,
     },
+    Git {
+        cargo_source: String,
+        git_url: String,
+        requested_revision: String,
+        resolved_commit: String,
+        git_tree: String,
+        repository_tree_sha256: [u8; 32],
+        package_path: String,
+        logical_root: PathBuf,
+        physical_root: PathBuf,
+        source_tree_sha256: [u8; 32],
+    },
 }
 
 impl ResolvedSource {
@@ -669,6 +739,7 @@ impl ResolvedSource {
         match self {
             Self::CratesIo { .. } => PackageSourceKey::CratesIo,
             Self::Path { logical_root, .. } => PackageSourceKey::Path(logical_root.clone()),
+            Self::Git { cargo_source, .. } => PackageSourceKey::Git(cargo_source.clone()),
         }
     }
 }
@@ -677,6 +748,7 @@ impl ResolvedSource {
 pub enum PackageSourceKey {
     CratesIo,
     Path(PathBuf),
+    Git(String),
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1030,6 +1102,7 @@ fn root_requirements_and_features(
                 source: match &dependency.source {
                     DependencySource::CratesIo => RequirementSource::CratesIo,
                     DependencySource::Path(path) => RequirementSource::Path(path.clone()),
+                    DependencySource::Git(git) => RequirementSource::Git(git.clone()),
                 },
             },
         });
@@ -1851,7 +1924,18 @@ fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> b
         (ResolvedSource::Path { logical_root, .. }, RequirementSource::Path(required)) => {
             logical_root == required
         }
-        (ResolvedSource::CratesIo { .. }, RequirementSource::Path(_)) => false,
+        (ResolvedSource::Git { cargo_source, .. }, RequirementSource::Git(required)) => {
+            crate::git::parse_locked_source(cargo_source)
+                .is_ok_and(|locked| locked.matches(required))
+        }
+        (
+            ResolvedSource::CratesIo { .. },
+            RequirementSource::Path(_) | RequirementSource::Git(_),
+        )
+        | (ResolvedSource::Path { .. }, RequirementSource::Git(_))
+        | (ResolvedSource::Git { .. }, RequirementSource::CratesIo | RequirementSource::Path(_)) => {
+            false
+        }
     }
 }
 

@@ -11,6 +11,7 @@ MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
 BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
+GITOXIDE_DIR="$ROOT_DIR/../gitoxide"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
 IMAGE_NAME="motor-os-dev.qcow2"
@@ -87,6 +88,8 @@ SSH_KEY="$WORK/test.key"
 
 # shellcheck source=timing.sh
 source "$SCRIPT_DIR/timing.sh"
+# shellcheck source=gitoxide-fixture.sh
+source "$SCRIPT_DIR/gitoxide-fixture.sh"
 
 mkdir -p "$EVIDENCE_DIR"
 : >"$NATIVE_LOG"
@@ -226,7 +229,13 @@ prepare_host() {
         cp -R "$ROOT_DIR/src/sys/lib/moto-rt/src" \
             "$tree/src/sys/lib/moto-rt/src"
     done
+    stage_gitoxide_checkout "$GITOXIDE_DIR" "$WORK/gitoxide"
     copy_native_fixture "$WORK/native-fixture"
+    (
+        cd "$WORK/native-fixture"
+        HOME="$host_home" RUSTC="$host_rustc" "$WORK/lorry-seed" \
+            review >/dev/null
+    )
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
     rm -rf "$guest_tree/src/bin/lorry/target" \
@@ -282,6 +291,9 @@ run_native() {
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
+    remote_command "[ ! -d $REMOTE_ROOT/gitoxide ] || /system/bin/rm -r $REMOTE_ROOT/gitoxide"
+    remote_command "/system/bin/mkdir $REMOTE_ROOT/gitoxide"
+    upload_tree "$WORK/gitoxide" "$REMOTE_ROOT/gitoxide"
     remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
     if [ "$WARM" -eq 1 ]; then
         remote_command "[ ! -d $destination/src/bin/lorry/src ] || /system/bin/rm -r $destination/src/bin/lorry/src"

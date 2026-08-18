@@ -23,7 +23,8 @@ export HOME="$WORK/home"
 mkdir -p "$HOME/.config/lorry" "$WORK/project/src" \
     "$WORK/project/derive-answer/src" "$WORK/project/macro-helper/src" \
     "$WORK/project/.cargo"
-printf 'config-version = 1\ncargo-compat-version = "1.98"\n[cache]\ndirectory = "%s"\n[policy.rules.local-proc-macro]\naction = "allow"\nname = "derive-answer"\nsource = "path"\nallow-proc-macro = true\n' "$WORK/cache" \
+printf 'config-version = 1\ncargo-compat-version = "1.99"\n[cache]\ndirectory = "%s"\n[policy.rules.local-proc-macro]\naction = "allow"\nname = "derive-answer"\nsource = "path"\nallow-proc-macro = true\n' \
+    "$WORK/cache" \
     >"$HOME/.config/lorry/lorry.toml"
 printf '[target.%s]\nlinker = "%s"\nrustflags = ["--sysroot=%s"]\n' \
     "$MOTOR_TARGET" "$MOTOR_LINKER" "$MOTOR_SYSROOT" \

@@ -15,6 +15,16 @@ clap = { version = "=4.6.0", default-features = false, features = [
 flate2 = { version = "=1.1.9", default-features = false, features = [
     "rust_backend",
 ] }
+gix = { git = "https://github.com/moturus/gitoxide.git", branch = "gix-moturus", default-features = false, features = [
+    "blocking-network-client",
+    "sha1",
+] }
+gix-features = { git = "https://github.com/moturus/gitoxide.git", branch = "gix-moturus", default-features = false, features = [
+    "io-pipe",
+] }
+gix-transport = { git = "https://github.com/moturus/gitoxide.git", branch = "gix-moturus", default-features = false, features = [
+    "http-client",
+] }
 semver = { version = "=1.0.26", default-features = false, features = ["std"] }
 serde = { version = "=1.0.228", default-features = false, features = ["std"] }
 serde_json = { version = "=1.0.150", default-features = false, features = [

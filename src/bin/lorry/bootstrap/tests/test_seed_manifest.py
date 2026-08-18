@@ -12,20 +12,29 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 BUILD_SCRIPT_PACKAGES = {
     "crc32fast",
     "generic-array",
+    "getrandom",
+    "heapless",
     "libc",
     "parking_lot_core",
     "proc-macro2",
     "quote",
     "rustix",
     "rustls",
+    "rustversion",
     "semver",
     "serde",
     "serde_core",
     "serde_json",
     "signal-hook",
+    "thiserror",
     "zmij",
 }
-PROC_MACRO_PACKAGES = {"serde_derive"}
+PROC_MACRO_PACKAGES = {
+    "bisync_macros",
+    "rustversion",
+    "serde_derive",
+    "thiserror-impl",
+}
 
 
 def load_toml(name: str) -> dict[str, object]:
@@ -102,7 +111,7 @@ class SeedManifestTests(unittest.TestCase):
             for package in oracle
         }
         expected_registry = {**production, **oracle_identities}
-        self.assertEqual(len(oracle_identities), 12)
+        self.assertEqual(len(oracle_identities), 27)
         self.assertFalse(production.keys() & oracle_identities.keys())
         self.assertEqual(len(oracle_identities), len(oracle))
 

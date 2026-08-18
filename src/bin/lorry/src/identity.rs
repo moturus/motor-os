@@ -101,6 +101,7 @@ pub enum CargoSource<'a> {
     /// package is outside the workspace.
     Path(&'a str),
     CratesIo,
+    Git(&'a str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -210,6 +211,9 @@ pub fn cargo_unit_identity(input: &CargoUnitIdentityInput<'_>) -> Identity {
         CargoSource::CratesIo => {
             std::mem::discriminant(&SourceKind::Registry).hash(&mut shared);
             "https://github.com/rust-lang/crates.io-index".hash(&mut shared);
+        }
+        CargoSource::Git(source) => {
+            SourceKind::Git(source.to_owned()).hash(&mut shared);
         }
     }
 

@@ -78,13 +78,25 @@ fn execute_reconcile(
     }
     let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let config = Config::load(&initial_manifest.root)?;
+    let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
+    if cli.verbosity == Verbosity::Verbose {
+        eprintln!("Locked {}", lock.path().display());
+    }
     crate::git::materialize_manifest_patches(
         &initial_manifest.workspace_root,
+        &config.network,
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
     )?;
     let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    crate::git::materialize_locked_dependencies(
+        &initial_manifest,
+        &config.network,
+        &config.policy.limits,
+        accept_all,
+        cli.verbosity == Verbosity::Verbose,
+    )?;
     let previous = CompactState::load(&initial_manifest.root)?;
     let config = Config::load(&initial_manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
@@ -92,10 +104,6 @@ fn execute_reconcile(
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
 
-    let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
-    if cli.verbosity == Verbosity::Verbose {
-        eprintln!("Locked {}", lock.path().display());
-    }
     let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let forced = requested
         .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
@@ -553,6 +561,7 @@ fn prepare_with_loader(
         catalog.allow_unlocked_registry_candidates();
     }
     patch::configure(manifest, config, repositories, &mut catalog)?;
+    crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
     for key in proc_macros {
         catalog.annotate_proc_macro(key, true)?;
     }
@@ -758,6 +767,7 @@ impl<'a> Acquisition<'a> {
         for package in &resolution.packages {
             let package_evidence = match &package.source {
                 ResolvedSource::Path { .. } => PackageEvidence::from_path(package)?,
+                ResolvedSource::Git { .. } => PackageEvidence::from_git(package)?,
                 ResolvedSource::CratesIo { checksum } => {
                     let staged = self.state.as_ref().and_then(|state| {
                         state

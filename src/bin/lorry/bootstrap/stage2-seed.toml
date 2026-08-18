@@ -1,7 +1,7 @@
 manifest-version = 1
 repository-format-version = 1
 object-hash = "sha256"
-production-registry-object-count = 81
+production-registry-object-count = 118
 
 [limits]
 max-package-bytes = 16777216
@@ -48,7 +48,7 @@ name = "bitflags"
 version = "2.13.1"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -231,7 +231,7 @@ name = "lock_api"
 version = "0.4.14"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -249,7 +249,7 @@ name = "once_cell"
 version = "1.21.4"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["curl"]
+lock-graphs = ["stage2-core", "curl"]
 retained-archive = true
 retained-source = true
 
@@ -267,7 +267,7 @@ name = "parking_lot"
 version = "0.12.5"
 checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -276,7 +276,7 @@ name = "parking_lot_core"
 version = "0.9.12"
 checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -333,7 +333,7 @@ name = "scopeguard"
 version = "1.2.0"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -408,7 +408,7 @@ name = "smallvec"
 version = "1.15.2"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -508,7 +508,7 @@ name = "errno"
 version = "0.3.14"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -527,7 +527,7 @@ name = "linux-raw-sys"
 version = "0.12.1"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -536,7 +536,7 @@ name = "log"
 version = "0.4.33"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -574,7 +574,7 @@ name = "redox_syscall"
 version = "0.5.18"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 license = "MIT"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -592,7 +592,7 @@ name = "regex-automata"
 version = "0.4.18"
 checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["gears"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -610,7 +610,7 @@ name = "rustix"
 version = "1.1.4"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
 license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -697,7 +697,7 @@ name = "syn"
 version = "3.0.3"
 checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["gears"]
+lock-graphs = ["stage2-core", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -760,7 +760,7 @@ name = "windows-link"
 version = "0.2.1"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -769,7 +769,7 @@ name = "windows-sys"
 version = "0.61.2"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["red", "gears"]
+lock-graphs = ["stage2-core", "red", "gears"]
 retained-archive = true
 retained-source = true
 
@@ -781,6 +781,436 @@ retained-source = true
 
 
 
+
+[[crates-io]]
+name = "allocator-api2"
+version = "0.2.21"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "arc-swap"
+version = "1.9.2"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "base64"
+version = "0.22.1"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "bisync"
+version = "0.3.0"
+checksum = "5020822f6d6f23196ccaf55e228db36f9de1cf788052b37992e17cbc96ec41a7"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "bisync_macros"
+version = "0.2.3"
+checksum = "d21f40d350a700f6aa107e45fb26448cf489d34794b2ba4522181dc9f1173af6"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-proc-macro = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "bstr"
+version = "1.13.1"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "byteorder"
+version = "1.5.0"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+license = "Unlicense OR MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "bytes"
+version = "1.12.1"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+license = "MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "clru"
+version = "0.6.3"
+checksum = "197fd99cb113a8d5d9b6376f3aa817f32c1078f2343b714fff7d2ca44fdf67d5"
+license = "MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "faster-hex"
+version = "0.10.0"
+checksum = "7223ae2d2f179b803433d9c830478527e92b8117eab39460edae7f1614d9fb73"
+license = "MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "fastrand"
+version = "2.5.0"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+license = "Apache-2.0 OR MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "foldhash"
+version = "0.2.0"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+license = "Zlib"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "getrandom"
+version = "0.4.3"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "hash32"
+version = "0.3.1"
+checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "hashbrown"
+version = "0.16.1"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "heapless"
+version = "0.8.0"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "jiff"
+version = "0.2.35"
+checksum = "668b7183bd07af9a4885f5c35b0cc5c83c4607a913c16b7e17291832910d2dcc"
+license = "Unlicense OR MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "jiff-core"
+version = "0.1.0"
+checksum = "7feca88439efe53da3754500c1851dedf3cb36c524dd5cf8225cc0794de95d09"
+license = "Unlicense OR MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "memmap2"
+version = "0.9.11"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "nonempty"
+version = "0.12.0"
+checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
+license = "MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "percent-encoding"
+version = "2.3.2"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "prodash"
+version = "31.0.0"
+checksum = "962200e2d7d551451297d9fdce85138374019ada198e30ea9ede38034e27604c"
+license = "MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "rustversion"
+version = "1.0.23"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-build-script = true
+allow-proc-macro = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "same-file"
+version = "1.0.6"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+license = "Unlicense/MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "sha1"
+version = "0.10.7"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "sha1-checked"
+version = "0.10.0"
+checksum = "89f599ac0c323ebb1c6082821a54962b839832b03984598375bff3975b804423"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "shell-words"
+version = "1.1.1"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+license = "MIT/Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "stable_deref_trait"
+version = "1.2.1"
+checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "tempfile"
+version = "3.27.0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "thiserror"
+version = "2.0.20"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-build-script = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "thiserror-impl"
+version = "2.0.20"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+allow-proc-macro = true
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "tinyvec"
+version = "1.12.0"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+license = "Zlib OR Apache-2.0 OR MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "tinyvec_macros"
+version = "0.1.1"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+license = "MIT OR Apache-2.0 OR Zlib"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "unicode-bom"
+version = "2.0.3"
+checksum = "7eec5d1121208364f6793f7d2e222bf75a915c19557537745b195b253dd64217"
+license = "Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "unicode-normalization"
+version = "0.1.25"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+license = "MIT OR Apache-2.0"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "walkdir"
+version = "2.5.0"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+license = "Unlicense/MIT"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[crates-io]]
+name = "zlib-rs"
+version = "0.6.7"
+checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
+license = "Zlib"
+lock-graphs = ["stage2-core"]
+retained-archive = true
+retained-source = true
+
+[[cargo-oracle-crates-io]]
+name = "bitflags"
+version = "1.3.2"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "crossbeam-channel"
+version = "0.5.16"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "crossbeam-utils"
+version = "0.8.22"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "defmt"
+version = "1.1.1"
+checksum = "e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "defmt-macros"
+version = "1.1.1"
+checksum = "bad9c72e7ca2137e0dc3813245a0d282fd6daad32fd800af018306a9169b5fe8"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "defmt-parser"
+version = "1.0.0"
+checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "dunce"
+version = "1.0.5"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "encoding_rs"
+version = "0.8.35"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "jiff-static"
+version = "0.2.35"
+checksum = "3a69dcb3a21cfb32ce1cd056169337ca284af0766dd766e7878819b251a49204"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "jiff-tzdb"
+version = "0.1.8"
+checksum = "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "jiff-tzdb-platform"
+version = "0.1.3"
+checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "portable-atomic"
+version = "1.15.0"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "portable-atomic-util"
+version = "0.2.7"
+checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "r-efi"
+version = "6.0.0"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+lock-graphs = ["stage2-core"]
+
+[[cargo-oracle-crates-io]]
+name = "winapi-util"
+version = "0.1.11"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+lock-graphs = ["stage2-core"]
 
 [[cargo-oracle-crates-io]]
 name = "serde_derive"

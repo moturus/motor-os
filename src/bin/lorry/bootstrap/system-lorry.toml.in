@@ -19,7 +19,9 @@ default = "deny"
 path-roots = []
 
 [policy.limits]
-max-packages = 64
+# Lorry's deliberately minimal gix feature closure plus its own graph exceeds
+# the product default. This is an installation policy, not a global limit.
+max-packages = 192
 max-depth = 16
 max-package-bytes = 16777216
 max-extracted-package-bytes = 134217728

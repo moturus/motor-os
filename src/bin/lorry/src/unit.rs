@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::{Error, Result};
-use crate::hash::hex;
+use crate::hash::{Sha256, hex};
 use crate::identity::{
     CargoCompileMode, CargoCrateType, CargoDebugInfo, CargoPanicStrategy, CargoProfile,
     CargoProfileLto, CargoSource, CargoStrip, CargoTargetKind, CargoUnitIdentityInput,
@@ -122,6 +122,24 @@ impl SourceRemap {
         physical_root: &Path,
     ) -> Result<Self> {
         Self::content_addressed(workspace_root, "path", source_tree_sha256, physical_root)
+    }
+
+    pub fn git(
+        workspace_root: &Path,
+        cargo_source: &str,
+        package_path: &str,
+        physical_root: &Path,
+    ) -> Result<Self> {
+        let mut digest = Sha256::new();
+        digest.update(cargo_source.as_bytes());
+        let mut logical_root = workspace_root
+            .join(".lorry/git/sha256")
+            .join(hex(&digest.finish()))
+            .join("source");
+        if !package_path.is_empty() {
+            logical_root.push(package_path);
+        }
+        Self::new(workspace_root, &logical_root, physical_root)
     }
 
     fn content_addressed(
@@ -426,6 +444,7 @@ pub fn plan_dependency_units_with_remaps(
         let source_value;
         let source = match &key.package.source {
             PackageSourceKey::CratesIo => CargoSource::CratesIo,
+            PackageSourceKey::Git(source) => CargoSource::Git(source),
             PackageSourceKey::Path(root) => {
                 source_value = match source_remaps.get(&key.package) {
                     Some(remap) => remap
@@ -506,6 +525,7 @@ pub fn plan_dependency_units_with_remaps(
                 source_exclusions: source_exclusions.get(&key.package).copied().unwrap_or(
                     match key.package.source {
                         PackageSourceKey::CratesIo => Exclusions::CargoRegistryMarker,
+                        PackageSourceKey::Git(_) => Exclusions::None,
                         PackageSourceKey::Path(_) => Exclusions::GitAndTarget,
                     },
                 ),

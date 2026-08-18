@@ -7,6 +7,7 @@ pub struct TransferInfo {
     pub response_code: u16,
     pub url_effective: String,
     pub redirect_url: String,
+    pub content_type: String,
     pub size_download: u64,
 }
 
@@ -48,6 +49,9 @@ pub fn write_out(
                     }
                     "redirect_url" => {
                         write_value(info.redirect_url.as_bytes(), destination, stdout, stderr)?
+                    }
+                    "content_type" => {
+                        write_value(info.content_type.as_bytes(), destination, stdout, stderr)?
                     }
                     "size_download" => write_value(
                         info.size_download.to_string().as_bytes(),
@@ -127,6 +131,7 @@ mod tests {
             response_code: 302,
             url_effective: "https://example.test/old".into(),
             redirect_url: "https://example.test/new".into(),
+            content_type: "application/octet-stream".into(),
             size_download: 17,
         }
     }
@@ -137,7 +142,7 @@ mod tests {
         let mut stderr = Vec::new();
         write_out(
             "%{stderr}\\nstatus=%{response_code}\\nurl=%{url_effective}\\n\
-             redirect=%{redirect_url}\\nsize=%{size_download}\\n%%\\\\",
+             redirect=%{redirect_url}\\ntype=%{content_type}\\nsize=%{size_download}\\n%%\\\\",
             &info(),
             &mut stdout,
             &mut stderr,
@@ -147,7 +152,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
             "\nstatus=302\nurl=https://example.test/old\n\
-             redirect=https://example.test/new\nsize=17\n%\\"
+             redirect=https://example.test/new\ntype=application/octet-stream\nsize=17\n%\\"
         );
     }
 

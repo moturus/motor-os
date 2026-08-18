@@ -341,6 +341,101 @@ pub fn request(
     )
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitMetadata {
+    pub status: u16,
+    pub effective_url: String,
+    pub redirect_url: Option<String>,
+    pub content_type: String,
+    pub size: u64,
+}
+
+pub(crate) fn git_request(
+    executable: &Path,
+    url: &str,
+    ca_bundle: Option<&Path>,
+    destination: File,
+    max_body_bytes: u64,
+    headers: &[String],
+    body: Option<Vec<u8>>,
+) -> Result<(Vec<u8>, GitMetadata)> {
+    if max_body_bytes == 0 {
+        return Err(Error::failure(
+            "Git HTTP response body limit must be nonzero",
+        ));
+    }
+    let nonce = nonce()?;
+    let mut arguments = arguments(url, &nonce, ca_bundle, env!("CARGO_PKG_VERSION"))?;
+    let write_out = arguments
+        .iter()
+        .position(|argument| argument == "--write-out")
+        .ok_or_else(|| Error::failure("internal curl arguments omitted --write-out"))?;
+    arguments[write_out + 1] = format!(
+        "%{{stderr}}\nLORRY-CURL-GIT-1 {nonce}\n\
+         status=%{{response_code}}\n\
+         url=%{{url_effective}}\n\
+         redirect=%{{redirect_url}}\n\
+         type=%{{content_type}}\n\
+         size=%{{size_download}}\n\
+         END-LORRY-CURL-GIT-1 {nonce}\n"
+    )
+    .into();
+    let url_position = arguments
+        .iter()
+        .position(|argument| argument == "--url")
+        .ok_or_else(|| Error::failure("internal curl arguments omitted --url"))?;
+    let mut request_arguments =
+        Vec::with_capacity(headers.len() * 2 + usize::from(body.is_some()) * 2);
+    for header in headers {
+        request_arguments.push("--header".into());
+        request_arguments.push(header.into());
+    }
+    if body.is_some() {
+        request_arguments.push("--data-binary".into());
+        request_arguments.push("@-".into());
+    }
+    arguments.splice(url_position..url_position, request_arguments);
+
+    let mut command = Command::new(executable);
+    command
+        .args(arguments)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(if body.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let captured = capture(
+        &mut command,
+        destination,
+        max_body_bytes,
+        REQUEST_TIMEOUT,
+        body,
+    )?;
+    let parsed = parse_git_trailer(&captured.stderr, &nonce, captured.body_size);
+    if !captured.status.success() {
+        let diagnostic = parsed.map(|value| value.0).unwrap_or(captured.stderr);
+        let diagnostic = String::from_utf8_lossy(&diagnostic);
+        return Err(Error::failure(format!(
+            "curl `{}` failed{}{}",
+            executable.display(),
+            captured
+                .status
+                .code()
+                .map_or_else(String::new, |code| format!(" with status {code}")),
+            if diagnostic.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", diagnostic.trim())
+            }
+        )));
+    }
+    parsed
+}
+
 fn execute_request(
     executable: &Path,
     arguments: Vec<OsString>,
@@ -357,7 +452,13 @@ fn execute_request(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let captured = capture(&mut command, destination, max_body_bytes, process_timeout)?;
+    let captured = capture(
+        &mut command,
+        destination,
+        max_body_bytes,
+        process_timeout,
+        None,
+    )?;
     let parsed = parse_trailer(&captured.stderr, nonce, captured.body_size);
     if !captured.status.success() {
         let diagnostic = parsed.map(|value| value.0).unwrap_or(captured.stderr);
@@ -449,8 +550,39 @@ pub fn parse_trailer(
     nonce: &str,
     observed_size: u64,
 ) -> Result<(Vec<u8>, Metadata)> {
+    let (diagnostic, metadata, _) =
+        parse_control_trailer(stderr, nonce, observed_size, "LORRY-CURL-1", false)?;
+    Ok((diagnostic, metadata))
+}
+
+fn parse_git_trailer(
+    stderr: &[u8],
+    nonce: &str,
+    observed_size: u64,
+) -> Result<(Vec<u8>, GitMetadata)> {
+    let (diagnostic, metadata, content_type) =
+        parse_control_trailer(stderr, nonce, observed_size, "LORRY-CURL-GIT-1", true)?;
+    Ok((
+        diagnostic,
+        GitMetadata {
+            status: metadata.status,
+            effective_url: metadata.effective_url,
+            redirect_url: metadata.redirect_url,
+            content_type: content_type.unwrap_or_default(),
+            size: metadata.size,
+        },
+    ))
+}
+
+fn parse_control_trailer(
+    stderr: &[u8],
+    nonce: &str,
+    observed_size: u64,
+    marker: &str,
+    has_content_type: bool,
+) -> Result<(Vec<u8>, Metadata, Option<String>)> {
     validate_nonce(nonce)?;
-    let opening = format!("\nLORRY-CURL-1 {nonce}\n");
+    let opening = format!("\n{marker} {nonce}\n");
     let positions = stderr
         .windows(opening.len())
         .enumerate()
@@ -469,8 +601,11 @@ pub fn parse_trailer(
     let status = field(&mut lines, "status")?;
     let effective_url = field(&mut lines, "url")?;
     let redirect_url = field(&mut lines, "redirect")?;
+    let content_type = has_content_type
+        .then(|| field(&mut lines, "type").map(str::to_owned))
+        .transpose()?;
     let size = field(&mut lines, "size")?;
-    if lines.next() != Some(&format!("END-LORRY-CURL-1 {nonce}"))
+    if lines.next() != Some(&format!("END-{marker} {nonce}"))
         || lines.next() != Some("")
         || lines.next().is_some()
     {
@@ -505,6 +640,7 @@ pub fn parse_trailer(
             redirect_url: (!redirect_url.is_empty()).then(|| redirect_url.to_owned()),
             size,
         },
+        content_type,
     ))
 }
 
@@ -563,6 +699,7 @@ fn capture(
     destination: File,
     max_body_bytes: u64,
     timeout: Duration,
+    input: Option<Vec<u8>>,
 ) -> Result<Captured> {
     let mut child = command.spawn().map_err(|error| {
         Error::failure(format!(
@@ -578,6 +715,16 @@ fn capture(
         .stderr
         .take()
         .ok_or_else(|| Error::failure("curl stderr pipe was not created"))?;
+    let mut input_thread = if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            Error::failure("curl stdin pipe was not created")
+        })?;
+        Some(std::thread::spawn(move || stdin.write_all(&input)))
+    } else {
+        None
+    };
     let body_exceeded = Arc::new(AtomicBool::new(false));
     let stderr_exceeded = Arc::new(AtomicBool::new(false));
     let body_thread = copy_body(stdout, destination, body_exceeded.clone(), max_body_bytes);
@@ -605,6 +752,9 @@ fn capture(
             let _ = child.wait();
             let _ = body_thread.join();
             let _ = stderr_thread.join();
+            if let Some(thread) = input_thread.take() {
+                let _ = thread.join();
+            }
             return Err(Error::failure(message));
         }
         match child.try_wait() {
@@ -615,6 +765,9 @@ fn capture(
                 let _ = child.wait();
                 let _ = body_thread.join();
                 let _ = stderr_thread.join();
+                if let Some(thread) = input_thread.take() {
+                    let _ = thread.join();
+                }
                 return Err(Error::failure(format!(
                     "failed while waiting for curl: {error}"
                 )));
@@ -629,6 +782,14 @@ fn capture(
         .join()
         .map_err(|_| Error::failure("curl stderr capture thread panicked"))?
         .map_err(|error| Error::failure(format!("failed to read curl stderr: {error}")))?;
+    if let Some(thread) = input_thread.take() {
+        thread
+            .join()
+            .map_err(|_| Error::failure("curl request-body thread panicked"))?
+            .map_err(|error| {
+                Error::failure(format!("failed to write curl request body: {error}"))
+            })?;
+    }
     if body_exceeded.load(Ordering::Acquire) {
         return Err(Error::failure(format!(
             "curl response body exceeded the {max_body_bytes}-byte limit"
@@ -735,6 +896,20 @@ mod tests {
              redirect=https://static.crates.io/b\n\
              size={size}\n\
              END-LORRY-CURL-1 {NONCE}\n"
+        )
+        .into_bytes()
+    }
+
+    fn git_trailer(size: u64) -> Vec<u8> {
+        format!(
+            "certificate note\n\
+             \nLORRY-CURL-GIT-1 {NONCE}\n\
+             status=200\n\
+             url=https://example.com/repository.git/info/refs?service=git-upload-pack\n\
+             redirect=\n\
+             type=application/x-git-upload-pack-advertisement\n\
+             size={size}\n\
+             END-LORRY-CURL-GIT-1 {NONCE}\n"
         )
         .into_bytes()
     }
@@ -957,6 +1132,22 @@ mod tests {
         assert_eq!(metadata.size, 17);
 
         assert!(parse_trailer(&trailer(16), NONCE, 17).is_err());
+    }
+
+    #[test]
+    fn parses_git_content_type_from_the_authenticated_control_trailer() {
+        let (diagnostic, metadata) = parse_git_trailer(&git_trailer(521), NONCE, 521).unwrap();
+        assert_eq!(diagnostic, b"certificate note\n");
+        assert_eq!(metadata.status, 200);
+        assert_eq!(
+            metadata.effective_url,
+            "https://example.com/repository.git/info/refs?service=git-upload-pack"
+        );
+        assert_eq!(
+            metadata.content_type,
+            "application/x-git-upload-pack-advertisement"
+        );
+        assert_eq!(metadata.size, 521);
     }
 
     #[test]
@@ -1358,6 +1549,7 @@ mod tests {
             file,
             60 * 1024,
             Duration::from_secs(10),
+            None,
         )
         .unwrap();
         assert!(captured.status.success());
@@ -1379,7 +1571,7 @@ mod tests {
             ("stall", 1024, Duration::from_millis(20), "did not exit"),
         ] {
             let (path, file) = destination();
-            let error = capture(&mut child(action), file, body_limit, timeout)
+            let error = capture(&mut child(action), file, body_limit, timeout, None)
                 .err()
                 .unwrap();
             assert!(error.to_string().contains(expected), "{error}");

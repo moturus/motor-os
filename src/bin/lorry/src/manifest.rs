@@ -180,6 +180,21 @@ pub struct Dependency {
 pub enum DependencySource {
     CratesIo,
     Path(PathBuf),
+    Git(GitDependency),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDependency {
+    pub url: String,
+    pub selector: GitSelector,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GitSelector {
+    Head,
+    Branch(String),
+    Tag(String),
+    Revision(String),
 }
 
 #[allow(dead_code)]
@@ -289,7 +304,9 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo manifest")?;
-        let Some(workspace) = discover_workspace(&root, &path, &document)? else {
+        let allow_git_patches = !require_current_lock;
+        let Some(workspace) = discover_workspace(&root, &path, &document, allow_git_patches)?
+        else {
             let mut manifest =
                 Self::finish_root(root.clone(), path, document, &root, require_current_lock)?;
             if let Some(requested) = package
@@ -328,7 +345,13 @@ impl Manifest {
         lock_root: &Path,
         require_current_lock: bool,
     ) -> Result<Self> {
-        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Root)?;
+        let mut manifest = Self::parse_document(
+            &root,
+            &path,
+            &document,
+            ManifestMode::Root,
+            !require_current_lock,
+        )?;
         manifest.root = root;
         manifest.workspace_root = lock_root.to_owned();
         manifest.path = manifest.root.join(MANIFEST_NAME);
@@ -373,7 +396,8 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Dependency)?;
+        let mut manifest =
+            Self::parse_document(&root, &path, &document, ManifestMode::Dependency, false)?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
@@ -383,13 +407,13 @@ impl Manifest {
     #[cfg(test)]
     pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
-        Self::parse_document(root, path, &document, ManifestMode::Root)
+        Self::parse_document(root, path, &document, ManifestMode::Root, false)
     }
 
     #[cfg(test)]
     pub(crate) fn parse_dependency(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
-        Self::parse_document(root, path, &document, ManifestMode::Dependency)
+        Self::parse_document(root, path, &document, ManifestMode::Dependency, false)
     }
 
     fn parse_document(
@@ -397,6 +421,7 @@ impl Manifest {
         path: &Path,
         document: &Document,
         mode: ManifestMode,
+        allow_git_patches: bool,
     ) -> Result<Self> {
         validate_manifest_tables(path, document, mode)?;
         let package_item = document.root().get("package").ok_or_else(|| {
@@ -482,7 +507,7 @@ impl Manifest {
         )?;
         let features = parse_features(path, document)?;
         let patches = if mode == ManifestMode::Root {
-            parse_patches(path, document, root)?
+            parse_patches(path, document, root, allow_git_patches)?
         } else {
             Vec::new()
         };
@@ -533,7 +558,12 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
+    fn parse(
+        root: &Path,
+        path: &Path,
+        document: &Document,
+        allow_git_patches: bool,
+    ) -> Result<Self> {
         let item = document.root().get("workspace").ok_or_else(|| {
             Error::failure(format!(
                 "workspace manifest `{}` has no `[workspace]`",
@@ -623,7 +653,7 @@ impl Workspace {
             dev,
             release,
             resolver,
-            patches: parse_patches(path, document, root)?,
+            patches: parse_patches(path, document, root, allow_git_patches)?,
         })
     }
 
@@ -687,9 +717,10 @@ fn discover_workspace(
     current: &Path,
     path: &Path,
     document: &Document,
+    allow_git_patches: bool,
 ) -> Result<Option<Workspace>> {
     if document.root().contains_key("workspace") {
-        return Workspace::parse(current, path, document).map(Some);
+        return Workspace::parse(current, path, document, allow_git_patches).map(Some);
     }
     for parent in current.ancestors().skip(1) {
         let candidate = parent.join(MANIFEST_NAME);
@@ -700,7 +731,8 @@ fn discover_workspace(
         if !candidate_document.root().contains_key("workspace") {
             continue;
         }
-        let workspace = Workspace::parse(parent, &candidate, &candidate_document)?;
+        let workspace =
+            Workspace::parse(parent, &candidate, &candidate_document, allow_git_patches)?;
         if workspace.members.values().any(|member| member == current) {
             return Ok(Some(workspace));
         }
@@ -1443,6 +1475,10 @@ fn parse_dependency(
     const ALLOWED: &[&str] = &[
         "version",
         "path",
+        "git",
+        "branch",
+        "tag",
+        "rev",
         "package",
         "optional",
         "default-features",
@@ -1452,15 +1488,7 @@ fn parse_dependency(
         if !ALLOWED.contains(&key) {
             let unsupported = if matches!(
                 key,
-                "git"
-                    | "branch"
-                    | "tag"
-                    | "rev"
-                    | "registry"
-                    | "registry-index"
-                    | "workspace"
-                    | "artifact"
-                    | "lib"
+                "registry" | "registry-index" | "workspace" | "artifact" | "lib"
             ) {
                 format!("dependency source or mode `{key}` is not supported in Stage 2")
             } else {
@@ -1470,7 +1498,7 @@ fn parse_dependency(
                 path,
                 value.line(document),
                 unsupported,
-                "use a crates.io version or a local path dependency",
+                "use a crates.io version, Git source, or local path dependency",
             ));
         }
     }
@@ -1489,8 +1517,18 @@ fn parse_dependency(
         None => alias.to_owned(),
     };
     validate_package_name(path, line, &package)?;
-    let source = match lookup.get("path") {
-        Some(value) => {
+    let path_source = lookup.get("path");
+    let git_source = lookup.get("git");
+    if path_source.is_some() && git_source.is_some() {
+        return Err(Error::at(
+            path,
+            line,
+            format!("dependency `{alias}` declares both path and Git sources"),
+            "choose exactly one dependency source",
+        ));
+    }
+    let source = match (path_source, git_source) {
+        (Some(value), None) => {
             let declared = value.as_str().ok_or_else(|| {
                 type_error(
                     path,
@@ -1507,7 +1545,56 @@ fn parse_dependency(
             )?;
             DependencySource::Path(resolve_declared_path(root, declared))
         }
-        None => DependencySource::CratesIo,
+        (None, Some(value)) => {
+            let url = value.as_str().ok_or_else(|| {
+                type_error(
+                    path,
+                    value.line(document),
+                    &format!("dependencies.{alias}.git"),
+                    "a string",
+                )
+            })?;
+            validate_git_url(path, value.line(document), url)?;
+            let selectors = ["branch", "tag", "rev"]
+                .into_iter()
+                .filter_map(|key| lookup.get(key).map(|value| (key, value)))
+                .collect::<Vec<_>>();
+            if selectors.len() > 1 {
+                return Err(Error::at(
+                    path,
+                    line,
+                    format!("Git dependency `{alias}` selects more than one revision"),
+                    "use only one of branch, tag, or rev",
+                ));
+            }
+            let selector = match selectors.as_slice() {
+                [] => GitSelector::Head,
+                [(key, value)] => {
+                    let revision = value.as_str().ok_or_else(|| {
+                        type_error(
+                            path,
+                            value.line(document),
+                            &format!("dependencies.{alias}.{key}"),
+                            "a string",
+                        )
+                    })?;
+                    validate_git_revision(path, value.line(document), revision)?;
+                    match *key {
+                        "branch" => GitSelector::Branch(revision.to_owned()),
+                        "tag" => GitSelector::Tag(revision.to_owned()),
+                        "rev" => GitSelector::Revision(revision.to_owned()),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            };
+            DependencySource::Git(GitDependency {
+                url: url.to_owned(),
+                selector,
+            })
+        }
+        (None, None) => DependencySource::CratesIo,
+        (Some(_), Some(_)) => unreachable!(),
     };
     let requirement = match lookup.get("version") {
         Some(item) => {
@@ -1521,7 +1608,9 @@ fn parse_dependency(
             })?;
             parse_requirement(path, item.line(document), alias, text)?
         }
-        None if matches!(source, DependencySource::Path(_)) => VersionReq::STAR,
+        None if matches!(source, DependencySource::Path(_) | DependencySource::Git(_)) => {
+            VersionReq::STAR
+        }
         None => {
             return Err(Error::at(
                 path,
@@ -1551,6 +1640,45 @@ fn parse_dependency(
         target: target.map(str::to_owned),
         kind,
     })
+}
+
+fn validate_git_url(path: &Path, line: usize, url: &str) -> Result<()> {
+    if !url.starts_with("https://")
+        || !url.is_ascii()
+        || url
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b' ')
+        || url.contains(['#', '?'])
+        || url[8..].contains('@')
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("Git URL `{url}` is not a canonical anonymous HTTPS URL"),
+            "use an anonymous https:// URL without a query or fragment",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_git_revision(path: &Path, line: usize, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 1024
+        || value.starts_with('-')
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains("..")
+        || value.contains(['~', '^', ':', '?', '*', '[', '\\', ' '])
+        || value.ends_with(['.', '/'])
+        || value.contains("@{")
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("Git revision `{value}` is not safe"),
+            "use a branch, tag, or revision without Git revision operators",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_target_dependencies(
@@ -1637,7 +1765,12 @@ fn parse_features(path: &Path, document: &Document) -> Result<BTreeMap<String, V
     Ok(result)
 }
 
-fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<PathPatch>> {
+fn parse_patches(
+    path: &Path,
+    document: &Document,
+    root: &Path,
+    allow_git: bool,
+) -> Result<Vec<PathPatch>> {
     let Some(item) = document.root().get("patch") else {
         return Ok(Vec::new());
     };
@@ -1666,6 +1799,9 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 "an inline path table",
             )
         })?;
+        if allow_git && table.contains_key("git") {
+            continue;
+        }
         for (key, value) in table.iter() {
             if !matches!(key, "path" | "package") {
                 return Err(Error::at(
@@ -2017,8 +2153,7 @@ fn parse_lock_document(
         let version = parse_version(path, item_line(document, table, "version"), &version_text)?;
         let source = optional_string(path, document, table, "package", "source")?;
         if source.as_deref().is_some_and(|value| {
-            value != CRATES_IO_SOURCE
-                && (require_current_root || !value.starts_with("git+https://"))
+            value != CRATES_IO_SOURCE && crate::git::parse_locked_source(value).is_err()
         }) {
             return Err(Error::at(
                 path,
@@ -2027,14 +2162,13 @@ fn parse_lock_document(
                     "unsupported Cargo.lock source `{}`",
                     source.as_deref().unwrap()
                 ),
-                "run `lorry vendor` to materialize a root Git patch; builds support crates.io and local path package nodes only",
+                "use crates.io, a canonical pinned anonymous HTTPS Git source, or a local path package",
             ));
         }
         let checksum = optional_string(path, document, table, "package", "checksum")?;
         match (&source, &checksum) {
             (Some(_), Some(value)) if is_sha256(value) => {}
-            (Some(source), None) if !require_current_root && source.starts_with("git+https://") => {
-            }
+            (Some(source), None) if crate::git::parse_locked_source(source).is_ok() => {}
             (Some(_), _) => {
                 return Err(Error::at(
                     path,
@@ -2586,7 +2720,8 @@ codegen-units = 1
                       [hints]\nmostly-unused = true\nfuture-hint = \"ignored\"\n";
         let document = Document::parse(&path, "Cargo manifest", source.to_owned()).unwrap();
         let manifest =
-            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
+            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency, false)
+                .unwrap();
         assert_eq!(manifest.name, "hinted");
         assert!(manifest.dependencies.is_empty());
         assert!(manifest.features.is_empty());
@@ -2648,6 +2783,44 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(manifest.features.contains_key("fast+mode"));
         assert_eq!(manifest.patches[0].package, "ring");
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
+    }
+
+    #[test]
+    fn parses_direct_git_dependency_semantics() {
+        let source = RED.replace(
+            "[dependencies]",
+            "[dependencies]\n\
+             remote = { git = \"https://example.com/repo.git\", branch = \"stable\", \
+             package = \"actual\", version = \"^1.2\", optional = true, \
+             default-features = false, features = [\"fast\"] }",
+        );
+        let manifest = parsed(&source).unwrap();
+        let dependency = &manifest.dependencies[0];
+        assert_eq!(dependency.alias, "remote");
+        assert_eq!(dependency.package, "actual");
+        assert_eq!(dependency.requirement, VersionReq::parse("^1.2").unwrap());
+        assert!(dependency.optional);
+        assert!(!dependency.default_features);
+        assert_eq!(dependency.features, ["fast"]);
+        assert_eq!(
+            dependency.source,
+            DependencySource::Git(GitDependency {
+                url: "https://example.com/repo.git".to_owned(),
+                selector: GitSelector::Branch("stable".to_owned()),
+            })
+        );
+
+        for declaration in [
+            "{ git = \"https://example.com/repo.git\", path = \"../repo\" }",
+            "{ git = \"https://example.com/repo.git\", branch = \"a\", tag = \"b\" }",
+            "{ git = \"https://user@example.com/repo.git\" }",
+        ] {
+            let invalid = RED.replace(
+                "[dependencies]",
+                &format!("[dependencies]\nremote = {declaration}"),
+            );
+            assert!(parsed(&invalid).is_err(), "accepted `{declaration}`");
+        }
     }
 
     #[test]
@@ -2810,6 +2983,7 @@ members = ["ignored-member"]
             Path::new("/dependency/Cargo.toml"),
             &document,
             ManifestMode::Dependency,
+            false,
         )
         .unwrap();
         assert_eq!(manifest.links.as_deref(), Some("native"));
@@ -2890,7 +3064,7 @@ members = ["ignored-member"]
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 9);
+        assert_eq!(manifest.dependencies.len(), 12);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
@@ -2901,7 +3075,7 @@ members = ["ignored-member"]
                 && dependency.target.as_deref() == Some("cfg(target_os = \"linux\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 40);
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 153);
     }
 
     #[test]
@@ -3065,7 +3239,7 @@ members = ["ignored-member"]
             format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n"),
             RED.replace(
                 "[dependencies]",
-                "[dependencies]\nthing = { version = \"1\", git = \"https://example.test/x\" }",
+                "[dependencies]\nthing = { version = \"1\", registry = \"alternate\" }",
             ),
             RED.replace(
                 "[dependencies]",
@@ -3089,7 +3263,8 @@ members = ["ignored-member"]
         let source = format!("{RED}\n[lib]\nproc-macro = true\n");
         let document = Document::parse(&path, "Cargo manifest", source).unwrap();
         let manifest =
-            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency).unwrap();
+            Manifest::parse_document(root, &path, &document, ManifestMode::Dependency, false)
+                .unwrap();
         assert!(manifest.library.unwrap().proc_macro);
 
         let error = parsed(&format!("{RED}\n[lib]\nproc-macro = true\n")).unwrap_err();

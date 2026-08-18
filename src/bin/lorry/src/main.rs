@@ -52,15 +52,32 @@ use diagnostic::Result;
 const VERSION: &str = "0.1.0";
 
 fn main() {
-    let code = match run(std::env::args().skip(1)) {
+    #[cfg(target_os = "motor")]
+    let code = match std::thread::Builder::new()
+        .name("lorry".to_owned())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(command_main)
+    {
+        Ok(worker) => worker.join().unwrap_or(101),
+        Err(error) => {
+            eprintln!("error: failed to start lorry command thread: {error}");
+            101
+        }
+    };
+    #[cfg(not(target_os = "motor"))]
+    let code = command_main();
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+fn command_main() -> i32 {
+    match run(std::env::args().skip(1)) {
         Ok(code) => code,
         Err(error) => {
             eprint!("{}", error.render());
             error.exit_code()
         }
-    };
-    if code != 0 {
-        std::process::exit(code);
     }
 }
 

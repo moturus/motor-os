@@ -118,6 +118,24 @@ impl PreparedGraph {
                         )?)
                     }
                 }
+                ResolvedSource::Git {
+                    physical_root,
+                    cargo_source,
+                    package_path,
+                    ..
+                } => {
+                    complete_source_trees.insert(package.key.clone());
+                    if self.cargo_registry_mode {
+                        None
+                    } else {
+                        Some(SourceRemap::git(
+                            options.workspace_root,
+                            cargo_source,
+                            package_path,
+                            physical_root,
+                        )?)
+                    }
+                }
             };
             let Some(remap) = remap else {
                 continue;
@@ -284,6 +302,7 @@ fn locked_catalog(
             patch::configure_cargo_registry(manifest, config, &mut catalog)?
         }
     }
+    crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
     Ok(catalog)
 }
 
@@ -337,6 +356,13 @@ pub fn reconstruct_review(
                 resolve_selected(manifest, &catalog, inputs.options, &locked, selection)?;
             offline::validate_selected_resolution(manifest, &resolution)?;
             for package in &resolution.packages {
+                if matches!(package.source, ResolvedSource::Git { .. }) {
+                    if !evidence.contains_key(&package.key) {
+                        evidence.insert(package.key.clone(), PackageEvidence::from_git(package)?);
+                    }
+                    catalog.annotate_proc_macro(&package.key, evidence[&package.key].proc_macro)?;
+                    continue;
+                }
                 let ResolvedSource::CratesIo { checksum } = &package.source else {
                     continue;
                 };
@@ -493,6 +519,22 @@ fn prepare_locked_with(
                                 ))
                             })?;
                         let package_evidence = PackageEvidence::from_path(package)?;
+                        PreparedPackage {
+                            manifest: inspected_manifest,
+                            evidence: package_evidence,
+                            extracted: None,
+                            cargo_registry: false,
+                        }
+                    }
+                    ResolvedSource::Git { .. } => {
+                        let inspected_manifest =
+                            package.local_manifest.clone().ok_or_else(|| {
+                                Error::failure(format!(
+                                    "resolved Git package `{} {}` has no inspected manifest",
+                                    package.key.name, package.key.version
+                                ))
+                            })?;
+                        let package_evidence = PackageEvidence::from_git(package)?;
                         PreparedPackage {
                             manifest: inspected_manifest,
                             evidence: package_evidence,
@@ -812,6 +854,7 @@ mod tests {
                         ))
                     );
                 }
+                ResolvedSource::Git { .. } => panic!("fixture has no Git dependencies"),
             }
         }
         assert!(registry_remaps > 0);

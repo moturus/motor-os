@@ -17,7 +17,8 @@ builds reached from the repository `Makefile`.
 Normal Lorry operation consumes a package's `Cargo.toml` and `Cargo.lock`, the
 supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry vendor` additionally uses the configured
-curl executable and sparse registry. With the explicit `--use-cargo-registry`
+curl executable for sparse-registry and Git smart-HTTP traffic. With the
+explicit `--use-cargo-registry`
 option, build, run, and test may instead verify and read an already populated
 local Cargo archive/source cache. Lorry records its evidence on first use and
 trusts that evidence during later ordinary builds. None of these operations
@@ -50,7 +51,7 @@ A supported package has:
 - at most one library and 64 binary targets;
 - optional top-level `tests/*.rs` integration tests;
 - a current Cargo.lock version 4, including for dependency-free packages; and
-- only supported crates.io and local-path dependency declarations.
+- only supported crates.io, Git, and local-path dependency declarations.
 
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
@@ -58,8 +59,8 @@ build scripts, procedural-macro dependencies, and configured required local
 patches. Root build scripts and root build-dependencies are not operationally
 supported. The current parser accepts a dependency-free root `build.rs`, but
 the engine does not run it; do not use Lorry for such a package until that
-known conformance defect is fixed. Direct Git dependencies, alternative
-registries, selecting a procedural-macro package as the root, root dev
+known conformance defect is fixed. Alternative registries, selecting a
+procedural-macro package as the root, root dev
 dependencies selected for the build target, examples, benches, explicit test
 targets, and CLI feature selection are not supported. A target-conditioned
 root dev-dependency for a different target is ignored.
@@ -207,7 +208,7 @@ grants:
 
 ```toml
 format-version = 3
-review-format-version = 2
+review-format-version = 3
 review-sha256 = "..."
 
 [[context]]
@@ -340,26 +341,38 @@ marker and that evidence. Strict validation performs the archive/source
 comparison again. Lorry never fetches or repairs this cache, and it is not the
 normal Lorry repository workflow.
 
-## Git patch workflow
+## Git dependencies and patches
 
-Build, run, and test accept only already materialized local path patches. A
-Linux Git-patch materializer is present, but the current `vendor` command
-loads the manifest through the path-only parser before invoking it. As a
-result, an unmaterialized `[patch.crates-io]` Git entry currently fails before
-the bridge runs. This is a known command-ordering defect, not a supported
-workflow.
+`lorry vendor` supports direct Git dependencies and root
+`[patch.crates-io]` Git entries on Linux and Motor OS. Lorry uses its embedded
+gix client with the configured curl executable; it never invokes a `git`
+executable. Git transport is anonymous canonical HTTPS with credential,
+proxy, hook, filter, and ambient Git configuration disabled.
 
-Once that defect is fixed, Linux vendor is specified to fetch each anonymous
-canonical HTTPS patch pinned by an optional branch, tag, or revision, show its
-commit/tree/source evidence, and rewrite it to:
+A direct Git dependency must already have an exact 40-hex commit in
+Cargo.lock. Its branch, tag, `rev`, or default-HEAD selector remains update
+intent, while the locked commit is the immutable identity. Lorry supports
+renaming, version requirements, features, optional and target-conditioned
+direct dependencies, and multiple packages selected from one repository. It
+stores the verified snapshot below:
+
+```text
+.lorry/vendor/git/<cargo-source-sha256>/source
+```
+
+A root Git patch may select a branch, tag, revision, or default HEAD without
+an existing lock entry. Vendoring resolves one exact commit, records its
+evidence, and atomically rewrites the patch to:
 
 ```text
 .lorry/vendor/<patch>/source
 ```
 
-Until then, use a reviewed local path patch prepared outside Lorry. Motor OS
-does not run Git: transfer both the materialized project and populated Lorry
-repository. Direct Git dependencies remain unsupported.
+Both forms use a shallow fetch and record the canonical URL, requested
+selector, commit, Git tree, canonical source digest, file count, and byte
+count. Materialization accepts only bounded regular files and directories;
+submodules and symbolic links are rejected. Build, run, and test remain
+offline and verify the materialized source and provenance before use.
 
 ## Package build-script security
 
