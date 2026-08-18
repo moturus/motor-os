@@ -92,6 +92,7 @@ pub fn transfer(
         response_code: response.status,
         url_effective: url.as_str().to_owned(),
         redirect_url: response.redirect_url,
+        content_type: response.content_type,
         size_download: response.body_size,
     })
 }

@@ -1,6 +1,6 @@
 # Full native build gap analysis
 
-Status: repository audit on 2026-08-16. This is a findings document, not a
+Status: repository audit updated on 2026-08-18. This is a findings document, not a
 normative Lorry design. Accepted behavior belongs in `spec.md` and implementation
 rationale belongs in `design.md`.
 
@@ -49,7 +49,7 @@ compatibility gap.
 
 Lorry cannot yet build and Clippy-check the complete in-scope Rust surface or
 run the imager natively. Ordinary installed-target packages are close, but the
-milestone has eight real gaps:
+milestone has seven real gaps:
 
 1. Root `build.rs` is parsed but never run. This silently misbuilds the in-scope
    `dns-resolver` root and must be fixed before expanding compatibility.
@@ -60,16 +60,15 @@ milestone has eight real gaps:
 4. Several selected graphs exceed the default 64-package policy limit and all
    projects except Lorry still need reviewed admission state and an offline
    repository seed.
-5. The Git-patch bridge is currently unreachable through `lorry vendor`, and
-   `russhd` additionally needs first-class direct Git/monorepo sources.
-6. The kernel requires a custom JSON target and a narrow equivalent of Cargo's
+5. The kernel requires a custom JSON target and a narrow equivalent of Cargo's
    `-Z build-std` pipeline.
-7. The imager's current source/dependency graph is not Motor-buildable: it uses
+6. The imager's current source/dependency graph is not Motor-buildable: it uses
    a file-block-device module disabled on Motor and lacks the Motor Tokio patch.
-8. Lorry has no `clippy` command, and the development image does not yet stage
+7. Lorry has no `clippy` command, and the development image does not yet stage
    a Motor-native Clippy driver paired with its native rustc.
 
-Multiple binaries, selected-member workspaces, dependency build scripts,
+Multiple binaries, selected-member workspaces, crates.io/Git/path dependencies,
+root Git patches, dependency build scripts,
 procedural macros (including native Motor executable macros), target
 dependencies, rustflags, linkers, and Linux/Motor rustc execution are already
 present. Workspace-wide commands are not required by the current Makefile.
@@ -82,7 +81,7 @@ locked selection, not Lorry policy approval. All measured depths are at most
 15, so the default depth limit of 16 is sufficient. The counts are evidence
 for a configured package limit, not a reason to silently weaken the default.
 
-| Make target | Cargo package | Dependencies | Important non-current behavior |
+| Make target | Cargo package | Dependencies | Important requirements |
 |---|---|---:|---|
 | `kernel` | `kernel` in `src/sys` | 31 | shared lock v3; custom target; `build-std=core,alloc`; workspace Git entries |
 | `vdso` | `rt` in `src/sys` | 47 | shared lock v3; `--features netdev`; library plus binary |
@@ -206,13 +205,13 @@ currently requires version 4. There are two valid approaches:
 Supporting read-only v3 is the only approach that builds the checkout exactly
 as it exists today and is a small, bounded compatibility increment.
 
-The Git work has two levels. First, fix `vendor` ordering so the existing
-Linux root-patch bridge runs before the path-only manifest load. That bridge
-can materialize the crossterm, mio, ring, and tokio patches used here. Second,
-implement the first-class immutable Git source model from `design.md` for
-`russhd`'s direct `russh` dependency and the multiple packages selected from
-that repository. Native Git transport is not required: vendor on Linux and
-transfer the verified repository/sources to Motor.
+The Git source work identified by the original audit is complete. Vendor now
+materializes root Git patches before ordinary manifest loading and represents
+direct Git and monorepo packages as first-class immutable sources. The same
+gix smart-HTTP path runs on Linux and Motor, while build/run/test consume and
+verify the resulting snapshots offline. Building the full `russhd` graph still
+depends on the separate package-limit and admission preparation described
+below.
 
 Only `src/bin/lorry` currently has committed compact admission state. A full
 offline build therefore also needs a packaging operation that, for every root
@@ -348,18 +347,16 @@ input preparation is separate shell-script work outside this document.
 3. Bind and admit the installed Motor LLVM/SDK resources, add explicit
    root-script environment/resource admission, and prove the DNS root script
    natively.
-4. Fix Git-patch vendor ordering, prepare admission/repository state, raise
-   only installation policy limits, and build every installed-Motor-target
-   package except `russhd`.
-5. Add first-class Git sources and build `russhd` on Linux-to-Motor and native
-   Motor from the same pre-vendored snapshot.
-6. Add custom target/build-std support and build the kernel natively.
-7. Prepare the imager's Motor file backend and Motor Tokio source, admit its
+4. Prepare admission/repository state, raise only installation policy limits,
+   and build every installed-Motor-target package, including `russhd` from the
+   same reviewed Git snapshot on Linux-to-Motor and native Motor.
+5. Add custom target/build-std support and build the kernel natively.
+6. Prepare the imager's Motor file backend and Motor Tokio source, admit its
    offline graph, then build and run it natively against the prebuilt payloads.
-8. Build and stage the paired Motor-native Clippy driver, implement `lorry
+7. Build and stage the paired Motor-native Clippy driver, implement `lorry
    clippy`, and prove the ordinary, vdso-feature, proc-macro, build-script, and
    kernel custom-target cases, plus the imager.
-9. Switch in-scope Make build, run, and Clippy recipes to Lorry paths and
+8. Switch in-scope Make build, run, and Clippy recipes to Lorry paths and
    commands, then validate parallel publication. Leave boot and host-only
    recipes alone.
 

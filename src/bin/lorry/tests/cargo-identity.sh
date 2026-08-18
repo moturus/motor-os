@@ -22,7 +22,8 @@ LORRY_HOME="$WORK/home"
 GLOBAL_CACHE="$WORK/global-cache"
 HOST_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 mkdir -p "$LORRY_HOME/.config/lorry"
-printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$GLOBAL_CACHE" \
+printf 'config-version = 1\ncargo-compat-version = "1.99"\n[cache]\ndirectory = "%s"\n' \
+    "$GLOBAL_CACHE" \
     >"$LORRY_HOME/.config/lorry/lorry.toml"
 
 fail() {

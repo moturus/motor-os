@@ -1,0 +1,495 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use toml_edit::ImDocument;
+
+use crate::atomic::AtomicDirectory;
+use crate::config::{NetworkConfig, PolicyLimits};
+use crate::curl::Client;
+use crate::diagnostic::{Error, Result};
+use crate::hash::{Sha256, decode_hex, hex};
+use crate::lockfile::write_toml_string;
+use crate::manifest::{DependencySource, GitSelector, LockedPackage, Manifest};
+use crate::redirect::TrustPolicy;
+use crate::resolver::{Catalog, ResolvedSource};
+use crate::source_tree::{EntryKind, Exclusions, Tree};
+
+use super::LockedSource;
+use super::http::Remote;
+use super::materialize::{extract_tree, gix_error, tree_limits};
+
+#[derive(Clone)]
+struct Object {
+    source: PathBuf,
+    locked: LockedSource,
+    git_tree: String,
+    source_tree: Tree,
+}
+
+pub(crate) fn materialize_locked_dependencies(
+    manifest: &Manifest,
+    network: &NetworkConfig,
+    policy: &PolicyLimits,
+    accept_all: bool,
+    verbose: bool,
+) -> Result<()> {
+    if !has_git_dependency(manifest) {
+        return Ok(());
+    }
+    for locked in locked_sources(manifest)? {
+        let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
+        if destination.exists() {
+            load_object(&manifest.workspace_root, &locked, policy)?;
+            continue;
+        }
+        materialize_one(
+            &manifest.workspace_root,
+            &locked,
+            network,
+            policy,
+            accept_all,
+            verbose,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn configure_direct(
+    manifest: &Manifest,
+    policy: &PolicyLimits,
+    catalog: &mut Catalog,
+) -> Result<()> {
+    if !has_git_dependency(manifest) {
+        return Ok(());
+    }
+    let mut objects = BTreeMap::new();
+    let lock = manifest
+        .lock
+        .as_ref()
+        .ok_or_else(|| Error::failure("Git dependencies require Cargo.lock"))?;
+    for package in &lock.packages {
+        let Some(source) = package.source.as_deref() else {
+            continue;
+        };
+        let Ok(locked) = super::parse_locked_source(source) else {
+            continue;
+        };
+        if !objects.contains_key(source) {
+            objects.insert(
+                source.to_owned(),
+                load_object(&manifest.workspace_root, &locked, policy)?,
+            );
+        }
+        insert_locked_package(manifest, package, &objects[source], policy, catalog)?;
+    }
+    Ok(())
+}
+
+fn has_git_dependency(manifest: &Manifest) -> bool {
+    manifest
+        .dependencies
+        .iter()
+        .any(|dependency| matches!(dependency.source, DependencySource::Git(_)))
+}
+
+fn locked_sources(manifest: &Manifest) -> Result<Vec<LockedSource>> {
+    let mut sources = BTreeSet::new();
+    for package in manifest
+        .lock
+        .as_ref()
+        .ok_or_else(|| Error::failure("Git dependencies require Cargo.lock"))?
+        .packages
+        .iter()
+    {
+        let Some(source) = package.source.as_deref() else {
+            continue;
+        };
+        if super::parse_locked_source(source).is_ok() {
+            sources.insert(source.to_owned());
+        }
+    }
+    sources
+        .into_iter()
+        .map(|source| super::parse_locked_source(&source))
+        .collect()
+}
+
+fn materialize_one(
+    workspace: &Path,
+    locked: &LockedSource,
+    network: &NetworkConfig,
+    policy: &PolicyLimits,
+    accept_all: bool,
+    verbose: bool,
+) -> Result<()> {
+    let destination = object_root(workspace, &locked.cargo_source);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::failure("Git object destination has no parent"))?;
+    let staging = AtomicDirectory::new(parent, "git-source")?;
+    let repository_path = staging.path().join("repository.git");
+    let source = staging.path().join("source");
+    fs::create_dir(&source)
+        .map_err(|error| Error::failure(format!("failed to create Git source staging: {error}")))?;
+
+    let limits = tree_limits(policy)?;
+    let client = Client::discover(network)?;
+    let trust = Arc::new(Mutex::new(TrustPolicy::load_default()?));
+    let counter = Arc::new(AtomicU64::new(0));
+    let http_root = staging.path().join("http");
+    let worker_root = http_root.clone();
+    fs::create_dir(&http_root)
+        .map_err(|error| Error::failure(format!("failed to create Git HTTP staging: {error}")))?;
+    let open = gix::open::Options::isolated().config_overrides([format!(
+        "gitoxide.objects.allocLimit={}",
+        limits.max_file_bytes
+    )]);
+    let mut prepare = gix::clone::PrepareFetch::new(
+        locked.url.as_str(),
+        &repository_path,
+        gix::create::Kind::Bare,
+        gix::create::Options::default(),
+        open,
+    )
+    .map_err(gix_error)?
+    .with_revision(Some(locked.commit.clone()))
+    .map_err(gix_error)?;
+    prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+        1_u32.try_into().expect("one is nonzero"),
+    ));
+    let max_response_bytes = policy.max_transaction_bytes;
+    prepare = prepare.with_transport_factory(move |url, protocol| {
+        let id = counter.fetch_add(1, Ordering::Relaxed);
+        let remote = Remote::new(
+            client.clone(),
+            trust.clone(),
+            worker_root.join(id.to_string()),
+            max_response_bytes,
+            verbose,
+        )?;
+        Ok(Box::new(
+            gix_transport::client::blocking_io::http::Transport::new_http(
+                remote, url, protocol, false,
+            ),
+        ))
+    });
+    let (repository, _) = prepare
+        .fetch_only(gix::progress::Discard, &AtomicBool::default())
+        .map_err(gix_error)?;
+    fs::remove_dir(&http_root)
+        .map_err(|error| Error::failure(format!("failed to remove Git HTTP staging: {error}")))?;
+    let commit = repository.head_commit().map_err(gix_error)?;
+    let commit_id = commit.id.to_string();
+    if commit_id != locked.commit {
+        return Err(Error::failure(format!(
+            "Git source resolved to {commit_id}, not locked commit {}",
+            locked.commit
+        )));
+    }
+    let git_tree = commit.tree_id().map_err(gix_error)?.to_string();
+    let tree = commit.tree().map_err(gix_error)?;
+    extract_tree(&repository, &tree, &source, limits)?;
+    drop(tree);
+    drop(commit);
+    drop(repository);
+    fs::remove_dir_all(&repository_path).map_err(|error| {
+        Error::failure(format!(
+            "failed to remove private Git object staging: {error}"
+        ))
+    })?;
+    let source_tree = Tree::scan(&source, limits, Exclusions::None)?;
+    approve(locked, &git_tree, &source_tree, accept_all)?;
+    fs::write(
+        staging.path().join("git.toml"),
+        provenance(locked, &git_tree, &source_tree),
+    )
+    .map_err(|error| Error::failure(format!("failed to write Git provenance: {error}")))?;
+    staging.commit(&destination)
+}
+
+fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -> Result<Object> {
+    let root = object_root(workspace, &locked.cargo_source);
+    let metadata = fs::symlink_metadata(&root).map_err(|error| {
+        Error::failure(format!(
+            "Git source `{}` is not materialized: {error}",
+            locked.cargo_source
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::failure(format!(
+            "Git object `{}` is not a directory",
+            root.display()
+        )));
+    }
+    let document = ImDocument::parse(
+        fs::read_to_string(root.join("git.toml"))
+            .map_err(|error| Error::failure(format!("failed to read Git provenance: {error}")))?,
+    )
+    .map_err(|error| Error::failure(format!("invalid Git provenance: {error}")))?;
+    let allowed = [
+        "format-version",
+        "cargo-source",
+        "git-url",
+        "requested-revision",
+        "resolved-commit",
+        "git-tree",
+        "source-tree-sha256",
+    ];
+    if document.iter().any(|(key, _)| !allowed.contains(&key))
+        || document
+            .get("format-version")
+            .and_then(|item| item.as_integer())
+            != Some(1)
+        || string(&document, "cargo-source")? != locked.cargo_source
+        || string(&document, "git-url")? != locked.url
+        || string(&document, "requested-revision")? != requested(&locked.selector)
+        || string(&document, "resolved-commit")? != locked.commit
+    {
+        return Err(Error::failure(format!(
+            "Git provenance for `{}` does not match Cargo.lock",
+            locked.cargo_source
+        )));
+    }
+    let git_tree = string(&document, "git-tree")?;
+    if git_tree.len() != 40 || !git_tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::failure(
+            "Git provenance tree is not a full object ID",
+        ));
+    }
+    let expected = decode_hex::<32>(&string(&document, "source-tree-sha256")?)?;
+    let source = root.join("source");
+    let source_tree = Tree::scan(&source, tree_limits(policy)?, Exclusions::None)?;
+    if source_tree.sha256 != expected {
+        return Err(Error::failure(format!(
+            "materialized Git source `{}` changed after approval",
+            locked.cargo_source
+        )));
+    }
+    Ok(Object {
+        source,
+        locked: locked.clone(),
+        git_tree,
+        source_tree,
+    })
+}
+
+fn insert_locked_package(
+    manifest: &Manifest,
+    package: &LockedPackage,
+    object: &Object,
+    policy: &PolicyLimits,
+    catalog: &mut Catalog,
+) -> Result<()> {
+    let mut matches = Vec::new();
+    for entry in &object.source_tree.entries {
+        if entry.kind != EntryKind::File
+            || (entry.path != "Cargo.toml" && !entry.path.ends_with("/Cargo.toml"))
+        {
+            continue;
+        }
+        let path = object.source.join(&entry.path);
+        let document = match fs::read_to_string(&path)
+            .ok()
+            .and_then(|source| ImDocument::parse(source).ok())
+        {
+            Some(document) => document,
+            None => continue,
+        };
+        let Some(table) = document.get("package").and_then(|item| item.as_table()) else {
+            continue;
+        };
+        if table.get("name").and_then(|item| item.as_str()) == Some(&package.name)
+            && table.get("version").and_then(|item| item.as_str())
+                == Some(package.version.original.as_str())
+        {
+            matches.push(path.parent().expect("Cargo.toml has a parent").to_owned());
+        }
+    }
+    let [root] = matches.as_slice() else {
+        return Err(Error::failure(format!(
+            "Git source `{}` contains {} manifests for locked package `{} {}`",
+            object.locked.cargo_source,
+            matches.len(),
+            package.name,
+            package.version.original
+        )));
+    };
+    let inspected = Manifest::load_path_dependency(root)?;
+    let package_tree = Tree::scan(root, tree_limits(policy)?, Exclusions::None)?;
+    let relative = root.strip_prefix(&object.source).map_err(|_| {
+        Error::failure("Git package root escaped its materialized repository source")
+    })?;
+    let package_path = relative
+        .to_str()
+        .ok_or_else(|| Error::failure("Git package path is not valid UTF-8"))?;
+    let mut source_identity = Sha256::new();
+    source_identity.update(object.locked.cargo_source.as_bytes());
+    let mut logical_root = manifest
+        .workspace_root
+        .join(".lorry/git/sha256")
+        .join(hex(&source_identity.finish()))
+        .join("source");
+    if !package_path.is_empty() {
+        logical_root.push(package_path);
+    }
+    catalog.insert_git(
+        inspected,
+        ResolvedSource::Git {
+            cargo_source: object.locked.cargo_source.clone(),
+            git_url: object.locked.url.clone(),
+            requested_revision: requested(&object.locked.selector).to_owned(),
+            resolved_commit: object.locked.commit.clone(),
+            git_tree: object.git_tree.clone(),
+            repository_tree_sha256: object.source_tree.sha256,
+            package_path: package_path.to_owned(),
+            logical_root,
+            physical_root: root.clone(),
+            source_tree_sha256: package_tree.sha256,
+        },
+    )
+}
+
+fn object_root(workspace: &Path, cargo_source: &str) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(cargo_source.as_bytes());
+    workspace
+        .join(".lorry/vendor/git")
+        .join(hex(&digest.finish()))
+}
+
+fn provenance(locked: &LockedSource, git_tree: &str, source_tree: &Tree) -> String {
+    let mut output = String::from("format-version = 1\n");
+    for (name, value) in [
+        ("cargo-source", locked.cargo_source.as_str()),
+        ("git-url", locked.url.as_str()),
+        ("requested-revision", requested(&locked.selector)),
+        ("resolved-commit", locked.commit.as_str()),
+        ("git-tree", git_tree),
+    ] {
+        output.push_str(name);
+        output.push_str(" = ");
+        write_toml_string(&mut output, value);
+        output.push('\n');
+    }
+    output.push_str("source-tree-sha256 = ");
+    write_toml_string(&mut output, &hex(&source_tree.sha256));
+    output.push('\n');
+    output
+}
+
+fn string(document: &ImDocument<String>, key: &str) -> Result<String> {
+    document
+        .get(key)
+        .and_then(|item| item.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::failure(format!("Git provenance `{key}` must be a string")))
+}
+
+fn requested(selector: &GitSelector) -> &str {
+    match selector {
+        GitSelector::Head => "HEAD",
+        GitSelector::Branch(value) | GitSelector::Tag(value) | GitSelector::Revision(value) => {
+            value
+        }
+    }
+}
+
+fn approve(locked: &LockedSource, git_tree: &str, source: &Tree, accept_all: bool) -> Result<()> {
+    eprintln!(
+        "Git dependency\n  URL: {}\n  requested: {}\n  commit: {}\n  tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
+        locked.url,
+        requested(&locked.selector),
+        locked.commit,
+        git_tree,
+        hex(&source.sha256),
+        source.file_count,
+        source.total_bytes,
+    );
+    if accept_all {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        return Err(
+            Error::failure("Git dependency requires approval on non-interactive input")
+                .with_help("review the evidence, then rerun `lorry vendor --accept-all`"),
+        );
+    }
+    eprint!("Materialize this Git dependency? [y/N] ");
+    io::stderr()
+        .flush()
+        .map_err(|error| Error::failure(format!("failed to flush Git approval prompt: {error}")))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| Error::failure(format!("failed to read Git approval: {error}")))?;
+    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err(Error::failure("Git dependency was not approved"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(label: &str) -> PathBuf {
+        let mut digest = Sha256::new();
+        digest.update(label.as_bytes());
+        digest.update(&std::process::id().to_le_bytes());
+        let root =
+            std::env::temp_dir().join(format!("lorry-git-{label}-{}", hex(&digest.finish())));
+        fs::create_dir(&root).expect("test root is created");
+        root
+    }
+
+    fn locked() -> LockedSource {
+        LockedSource {
+            cargo_source: "git+https://example.com/repository.git?branch=main#0123456789abcdef0123456789abcdef01234567"
+                .to_owned(),
+            url: "https://example.com/repository.git".to_owned(),
+            selector: GitSelector::Branch("main".to_owned()),
+            commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        }
+    }
+
+    #[test]
+    fn verifies_materialized_objects_and_detects_source_changes() {
+        let workspace = root("object");
+        let locked = locked();
+        let root = object_root(&workspace, &locked.cargo_source);
+        let source = root.join("source");
+        fs::create_dir_all(&source).expect("source directory is created");
+        fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("manifest is written");
+        let limits = PolicyLimits::default();
+        let tree = Tree::scan(&source, tree_limits(&limits).unwrap(), Exclusions::None).unwrap();
+        fs::write(
+            root.join("git.toml"),
+            provenance(&locked, &"a".repeat(40), &tree),
+        )
+        .expect("provenance is written");
+
+        let object = load_object(&workspace, &locked, &limits).unwrap();
+        assert_eq!(object.source_tree.sha256, tree.sha256);
+        assert_eq!(object.git_tree, "a".repeat(40));
+
+        fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"changed\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("manifest is changed");
+        let error = load_object(&workspace, &locked, &limits)
+            .err()
+            .expect("tampered object must fail");
+        assert!(error.to_string().contains("changed after approval"));
+        fs::remove_dir_all(workspace).expect("test root is removed");
+    }
+}

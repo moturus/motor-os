@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 
 
-EXCLUDED_DIRECTORIES = {".git", "__pycache__", "target"}
+EXCLUDED_DIRECTORIES = {".git", ".lorry", "__pycache__", "target"}
 CROSSTERM_GIT_URL = "https://github.com/moturus/crossterm.git"
 CROSSTERM_BRANCH = "motor-os-support"
 CROSSTERM_VERSION = "0.29.0"

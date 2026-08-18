@@ -1319,6 +1319,9 @@ fn local_source_roots(resolution: &Resolution) -> Vec<PathBuf> {
             crate::resolver::ResolvedSource::Path { physical_root, .. } => {
                 Some(physical_root.clone())
             }
+            crate::resolver::ResolvedSource::Git { physical_root, .. } => {
+                Some(physical_root.clone())
+            }
             crate::resolver::ResolvedSource::CratesIo { .. } => None,
         })
         .collect::<Vec<_>>();

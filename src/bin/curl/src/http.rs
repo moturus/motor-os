@@ -9,6 +9,7 @@ const MAX_HEADERS: usize = 200;
 pub struct Response {
     pub status: u16,
     pub redirect_url: String,
+    pub content_type: String,
     pub body_size: u64,
 }
 
@@ -124,6 +125,7 @@ pub fn receive_response(
     Ok(Response {
         status: head.status,
         redirect_url,
+        content_type: head.content_type.unwrap_or_default(),
         body_size,
     })
 }
@@ -133,6 +135,7 @@ struct Head {
     content_length: Option<u64>,
     chunked: bool,
     location: Option<String>,
+    content_type: Option<String>,
 }
 
 fn read_head(reader: &mut impl BufRead, mut raw: Option<&mut Vec<u8>>) -> CurlResult<Head> {
@@ -162,6 +165,7 @@ fn read_head(reader: &mut impl BufRead, mut raw: Option<&mut Vec<u8>>) -> CurlRe
     let mut content_length = None;
     let mut transfer_encoding = None;
     let mut location = None;
+    let mut content_type = None;
 
     for count in 0..=MAX_HEADERS {
         let line = read_line(&mut consumed)?;
@@ -176,6 +180,7 @@ fn read_head(reader: &mut impl BufRead, mut raw: Option<&mut Vec<u8>>) -> CurlRe
                 content_length,
                 chunked: transfer_encoding.is_some(),
                 location,
+                content_type,
             });
         }
         if count == MAX_HEADERS {
@@ -203,6 +208,11 @@ fn read_head(reader: &mut impl BufRead, mut raw: Option<&mut Vec<u8>>) -> CurlRe
                 }
             }
             "location" if location.is_none() => location = Some(value),
+            "content-type" => {
+                if content_type.replace(value).is_some() {
+                    return Err(receive_error("duplicate Content-Type header"));
+                }
+            }
             _ => {}
         }
     }
@@ -465,11 +475,13 @@ mod tests {
     fn receives_content_length_and_redirect() {
         let (response, body) = receive(
             b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
+              Content-Type: application/octet-stream\r\n\
               Location: ../new\r\n\r\nbody",
         )
         .unwrap();
         assert_eq!(response.status, 302);
         assert_eq!(response.redirect_url, "https://example.test/new");
+        assert_eq!(response.content_type, "application/octet-stream");
         assert_eq!(response.body_size, 4);
         assert_eq!(body, b"body");
     }
@@ -512,6 +524,8 @@ mod tests {
                 Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"[..],
             &b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc"[..],
             &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nbody"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                Content-Type: text/html\r\n\r\n"[..],
             &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
                 2\r\na\r\n0\r\n\r\n"[..],
         ] {

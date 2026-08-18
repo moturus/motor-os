@@ -18,7 +18,7 @@ const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-
 struct Identity {
     name: String,
     version: Version,
-    registry: bool,
+    source: Option<String>,
 }
 
 struct Node {
@@ -37,7 +37,7 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
     let root = Identity {
         name: manifest.name.clone(),
         version: root_version,
-        registry: false,
+        source: None,
     };
     let mut identities = BTreeMap::new();
     for package in &resolution.packages {
@@ -66,6 +66,11 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
         let identity = identities[&package.key].clone();
         let checksum = match (&package.key.source, &package.source) {
             (PackageSourceKey::CratesIo, ResolvedSource::CratesIo { checksum }) => Some(*checksum),
+            (PackageSourceKey::Git(key_source), ResolvedSource::Git { cargo_source, .. })
+                if key_source == cargo_source =>
+            {
+                None
+            }
             (PackageSourceKey::Path(key_root), ResolvedSource::Path { logical_root, .. })
                 if key_root == logical_root =>
             {
@@ -87,6 +92,7 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
             },
         )?;
     }
+    preserve_inactive_dependencies(manifest, resolution, &mut nodes)?;
     preserve_unselected_workspace(manifest, &mut nodes)?;
 
     let identities = nodes.keys().cloned().collect::<Vec<_>>();
@@ -100,16 +106,13 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
         write_toml_string(&mut output, &node.identity.name);
         output.push_str("\nversion = ");
         write_toml_string(&mut output, &node.identity.version.to_string());
-        if node.identity.registry {
+        if let Some(source) = &node.identity.source {
             output.push_str("\nsource = ");
-            write_toml_string(&mut output, CRATES_IO_SOURCE);
-            output.push_str("\nchecksum = ");
-            write_toml_string(
-                &mut output,
-                &hex(&node
-                    .checksum
-                    .expect("registry lock node must have a checksum")),
-            );
+            write_toml_string(&mut output, source);
+            if let Some(checksum) = node.checksum {
+                output.push_str("\nchecksum = ");
+                write_toml_string(&mut output, &hex(&checksum));
+            }
         }
         if !node.dependencies.is_empty() {
             output.push_str("\ndependencies = [\n");
@@ -131,6 +134,82 @@ pub fn render(manifest: &Manifest, resolution: &Resolution) -> Result<Vec<u8>> {
     Ok(output.into_bytes())
 }
 
+fn preserve_inactive_dependencies(
+    manifest: &Manifest,
+    resolution: &Resolution,
+    nodes: &mut BTreeMap<Identity, Node>,
+) -> Result<()> {
+    let Some(lock) = manifest.lock.as_ref() else {
+        return Ok(());
+    };
+    let root_version = Version::parse(&manifest.version.original).map_err(|error| {
+        Error::failure(format!(
+            "root package has invalid version `{} {}`: {error}",
+            manifest.name, manifest.version.original
+        ))
+    })?;
+    let root = Identity {
+        name: manifest.name.clone(),
+        version: root_version,
+        source: None,
+    };
+    let mut selected = vec![(root, Some(manifest))];
+    selected.extend(resolution.packages.iter().map(|package| {
+        (
+            identity(package.key.clone()),
+            package.local_manifest.as_ref(),
+        )
+    }));
+
+    let mut pending = Vec::new();
+    for (identity, local_manifest) in selected {
+        let Some(locked) = lock
+            .packages
+            .iter()
+            .find(|package| locked_identity(package).is_ok_and(|locked| locked == identity))
+        else {
+            continue;
+        };
+        let node = nodes
+            .get_mut(&identity)
+            .ok_or_else(|| Error::failure("resolved Cargo.lock node disappeared"))?;
+        for reference in &locked.dependencies {
+            let dependency = crate::offline::resolve_lock_reference(reference, &lock.packages)?;
+            let dependency_identity = locked_identity(dependency)?;
+            if node.dependencies.contains(&dependency_identity)
+                || local_manifest.is_some_and(|manifest| {
+                    !manifest
+                        .dependencies
+                        .iter()
+                        .any(|declared| dependency_matches(declared, dependency))
+                })
+            {
+                continue;
+            }
+            node.dependencies.insert(dependency_identity);
+            pending.push(dependency);
+        }
+    }
+    preserve_locked_packages(lock, pending, nodes)
+}
+
+fn dependency_matches(dependency: &crate::manifest::Dependency, locked: &LockedPackage) -> bool {
+    if dependency.package != locked.name
+        || !Version::parse(&locked.version.original)
+            .is_ok_and(|version| dependency.requirement.matches(&version))
+    {
+        return false;
+    }
+    match (&dependency.source, locked.source.as_deref()) {
+        (crate::manifest::DependencySource::CratesIo, Some(CRATES_IO_SOURCE)) => true,
+        (crate::manifest::DependencySource::Path(_), None) => true,
+        (crate::manifest::DependencySource::Git(expected), Some(source)) => {
+            crate::git::parse_locked_source(source).is_ok_and(|source| source.matches(expected))
+        }
+        _ => false,
+    }
+}
+
 fn preserve_unselected_workspace(
     manifest: &Manifest,
     nodes: &mut BTreeMap<Identity, Node>,
@@ -142,7 +221,7 @@ fn preserve_unselected_workspace(
         .lock
         .as_ref()
         .ok_or_else(|| Error::failure("workspace vendoring requires the shared Cargo.lock"))?;
-    let mut pending = lock
+    let pending = lock
         .packages
         .iter()
         .filter(|package| {
@@ -151,32 +230,26 @@ fn preserve_unselected_workspace(
                 && manifest.workspace_members.contains(&package.name)
         })
         .collect::<Vec<_>>();
+    preserve_locked_packages(lock, pending, nodes)
+}
+
+fn preserve_locked_packages<'a>(
+    lock: &'a crate::manifest::Lockfile,
+    mut pending: Vec<&'a LockedPackage>,
+    nodes: &mut BTreeMap<Identity, Node>,
+) -> Result<()> {
     let mut preserved = BTreeSet::new();
     while let Some(package) = pending.pop() {
         let identity = locked_identity(package)?;
-        if !preserved.insert(identity.clone()) {
+        if nodes.contains_key(&identity) || !preserved.insert(identity.clone()) {
             continue;
         }
+        let mut dependencies = BTreeSet::new();
         for reference in &package.dependencies {
-            pending.push(crate::offline::resolve_lock_reference(
-                reference,
-                &lock.packages,
-            )?);
+            let dependency = crate::offline::resolve_lock_reference(reference, &lock.packages)?;
+            dependencies.insert(locked_identity(dependency)?);
+            pending.push(dependency);
         }
-    }
-    for package in &lock.packages {
-        let identity = locked_identity(package)?;
-        if !preserved.contains(&identity) || nodes.contains_key(&identity) {
-            continue;
-        }
-        let dependencies = package
-            .dependencies
-            .iter()
-            .map(|reference| {
-                crate::offline::resolve_lock_reference(reference, &lock.packages)
-                    .and_then(locked_identity)
-            })
-            .collect::<Result<_>>()?;
         let checksum = package
             .checksum
             .as_deref()
@@ -201,15 +274,11 @@ fn preserve_unselected_workspace(
 }
 
 fn locked_identity(package: &LockedPackage) -> Result<Identity> {
-    let registry = match package.source.as_deref() {
-        None => false,
-        Some(CRATES_IO_SOURCE) => true,
-        Some(source) => {
-            return Err(Error::failure(format!(
-                "unsupported Cargo.lock source `{source}` while preserving workspace members"
-            )));
-        }
-    };
+    if let Some(source) = package.source.as_deref()
+        && source != CRATES_IO_SOURCE
+    {
+        crate::git::parse_locked_source(source)?;
+    }
     Ok(Identity {
         name: package.name.clone(),
         version: Version::parse(&package.version.original).map_err(|error| {
@@ -218,7 +287,7 @@ fn locked_identity(package: &LockedPackage) -> Result<Identity> {
                 package.name, package.version.original
             ))
         })?,
-        registry,
+        source: package.source.clone(),
     })
 }
 
@@ -232,7 +301,11 @@ fn identity(key: PackageKey) -> Identity {
     Identity {
         name: key.name,
         version: key.version,
-        registry: key.source == PackageSourceKey::CratesIo,
+        source: match key.source {
+            PackageSourceKey::CratesIo => Some(CRATES_IO_SOURCE.to_owned()),
+            PackageSourceKey::Git(source) => Some(source),
+            PackageSourceKey::Path(_) => None,
+        },
     }
 }
 
@@ -240,11 +313,7 @@ fn insert_node(nodes: &mut BTreeMap<Identity, Node>, node: Node) -> Result<()> {
     if nodes.contains_key(&node.identity) {
         return Err(Error::failure(format!(
             "Cargo.lock cannot distinguish multiple {} packages named `{} {}`",
-            if node.identity.registry {
-                "crates.io"
-            } else {
-                "path"
-            },
+            node.identity.source.as_deref().unwrap_or("path"),
             node.identity.name,
             node.identity.version
         )));
@@ -283,10 +352,16 @@ fn dependency_reference(dependency: &Identity, identities: &[Identity]) -> Strin
         .iter()
         .filter(|candidate| candidate.version == dependency.version)
         .count();
-    if same_version == 1 || !dependency.registry {
+    if same_version == 1 || dependency.source.is_none() {
         base
     } else {
-        format!("{base} ({CRATES_IO_SOURCE})")
+        format!(
+            "{base} ({})",
+            dependency
+                .source
+                .as_deref()
+                .expect("sourced dependency has an identity")
+        )
     }
 }
 
@@ -447,5 +522,70 @@ mod tests {
         write(&fixture.0.join("Cargo.lock"), &rendered).unwrap();
         let loaded = Manifest::load(&fixture.0).unwrap();
         crate::offline::validate_resolution(&loaded, &resolution).unwrap();
+    }
+
+    #[test]
+    fn preserves_locked_inactive_dependencies_declared_by_path_packages() {
+        let fixture = Fixture::new();
+        let local_root = fixture.0.join("local");
+        fs::create_dir_all(local_root.join("src")).unwrap();
+        let root_source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                           [dependencies]\nlocal = { path = \"local\" }\n";
+        let local_source = "[package]\nname = \"local\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
+                            [dependencies]\ncfg-if = { version = \"=1.0.4\", optional = true }\n";
+        fs::write(fixture.0.join("Cargo.toml"), root_source).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "").unwrap();
+        fs::write(local_root.join("Cargo.toml"), local_source).unwrap();
+        fs::write(local_root.join("src/lib.rs"), "").unwrap();
+        let expected = format!(
+            concat!(
+                "# This file is automatically @generated by Cargo.\n",
+                "# It is not intended for manual editing.\n",
+                "version = 4\n\n",
+                "[[package]]\nname = \"cfg-if\"\nversion = \"1.0.4\"\n",
+                "source = \"{}\"\nchecksum = \"{}\"\n\n",
+                "[[package]]\nname = \"local\"\nversion = \"1.0.0\"\n",
+                "dependencies = [\n \"cfg-if\",\n]\n\n",
+                "[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n",
+                "dependencies = [\n \"local\",\n]\n",
+            ),
+            CRATES_IO_SOURCE,
+            hex(&[9; 32]),
+        );
+        fs::write(fixture.0.join("Cargo.lock"), &expected).unwrap();
+
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let local_manifest =
+            Manifest::parse(&local_root, &local_root.join("Cargo.toml"), local_source).unwrap();
+        let local_key = PackageKey {
+            name: "local".to_owned(),
+            version: Version::parse("1.0.0").unwrap(),
+            source: PackageSourceKey::Path(local_root.clone()),
+        };
+        let mut local = package(
+            local_key.clone(),
+            ResolvedSource::Path {
+                logical_root: local_root.clone(),
+                physical_root: local_root,
+                source_tree_sha256: [7; 32],
+                patched_crates_io: false,
+                required_patch: None,
+            },
+        );
+        local.local_manifest = Some(local_manifest);
+        let resolution = Resolution {
+            root_edges: vec![ResolvedEdge {
+                dependency_index: 0,
+                alias: "local".to_owned(),
+                kind: crate::sparse::DependencyKind::Normal,
+                parent_compile_kind: None,
+                compile_kind: crate::resolver::CompileKind::Target,
+                context: FeatureContext::Target(String::new()),
+                package: local_key,
+            }],
+            packages: vec![local],
+        };
+
+        assert_eq!(render(&manifest, &resolution).unwrap(), expected.as_bytes());
     }
 }

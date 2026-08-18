@@ -8,8 +8,13 @@ if [ "$#" -ne 1 ]; then
 fi
 
 LORRY="$(realpath "$1")"
-LORRY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
+GITOXIDE_DIR="$ROOT_DIR/../gitoxide"
+BOOTSTRAP="$LORRY_DIR/bootstrap"
+BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
+DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 TOOLCHAIN="nightly-2026-06-19"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -19,6 +24,22 @@ mkdir "$TMPDIR"
 unset CARGO_TARGET_DIR RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
 export LORRY_REVIEW_REAL_RUSTC
 LORRY_REVIEW_REAL_RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
+export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+
+TEST_HOME="$WORK/home"
+TEST_SYSTEM_REPOSITORY="$TEST_HOME/.config/lorry/system/vendor"
+TEST_USER_REPOSITORY="$TEST_HOME/.config/lorry/vendor"
+python3 "$BOOTSTRAP/install_stage2_seed.py" \
+    --manifest "$BOOTSTRAP/stage2-seed.toml" \
+    --build-repository "$BUILD_REPOSITORY" \
+    --host-repository "$TEST_SYSTEM_REPOSITORY" \
+    --host-user-repository "$TEST_USER_REPOSITORY" \
+    --host-config "$TEST_HOME/.config/lorry/lorry.toml" \
+    --image-repository "$WORK/image/vendor" \
+    --motor-config "$WORK/image/lorry.toml" \
+    --cache "$DOWNLOAD_CACHE" --mode full --offline \
+    --host-c-compiler "$(type -P clang)" --host-archiver "$(type -P ar)"
+export HOME="$TEST_HOME"
 
 SOURCE="$WORK/source"
 PROJECT="$SOURCE/src/bin/lorry"
@@ -29,7 +50,11 @@ mkdir -p "$PROJECT" "$SOURCE/src/sys/lib" \
 cp "$LORRY_DIR/Cargo.toml" "$LORRY_DIR/Cargo.lock" "$PROJECT/"
 cp -R "$LORRY_DIR/src" "$LORRY_DIR/.lorry" "$PROJECT/"
 cp -R "$ROOT_DIR/src/sys/lib/moto-rt" "$SOURCE/src/sys/lib/"
-cp "$HOME/.config/lorry/system/vendor/repository.toml" "$LOCAL_REPOSITORY/"
+cp "$TEST_SYSTEM_REPOSITORY/repository.toml" "$LOCAL_REPOSITORY/"
+
+# shellcheck source=gitoxide-fixture.sh
+source "$SCRIPT_DIR/gitoxide-fixture.sh"
+stage_gitoxide_checkout "$GITOXIDE_DIR" "$WORK/gitoxide"
 
 FAKE_RUSTC="$WORK/rustc-inspection-host"
 cat > "$FAKE_RUSTC" <<'EOF'
@@ -87,8 +112,8 @@ expect_failure() {
 }
 
 REPOSITORIES=(
-    "$HOME/.config/lorry/system/vendor"
-    "$HOME/.config/lorry/vendor"
+    "$TEST_SYSTEM_REPOSITORY"
+    "$TEST_USER_REPOSITORY"
     "$LOCAL_REPOSITORY"
 )
 snapshot "$WORK/before.snapshot" "$SOURCE" "${REPOSITORIES[@]}"

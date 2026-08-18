@@ -2,17 +2,121 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-#[cfg(any(target_os = "linux", test))]
 use toml_edit::Item;
 use toml_edit::{ImDocument, Value};
 
-#[cfg(target_os = "linux")]
 use crate::atomic::AtomicFile;
-use crate::config::PolicyLimits;
+use crate::config::{NetworkConfig, PolicyLimits};
 use crate::diagnostic::{Error, Result};
+use crate::manifest::{GitDependency, GitSelector};
+
+mod direct;
+mod http;
+mod materialize;
+
+pub(crate) use direct::{configure_direct, materialize_locked_dependencies};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LockedSource {
+    pub cargo_source: String,
+    pub url: String,
+    pub selector: GitSelector,
+    pub commit: String,
+}
+
+impl LockedSource {
+    pub(crate) fn matches(&self, dependency: &GitDependency) -> bool {
+        self.url == dependency.url && self.selector == dependency.selector
+    }
+}
+
+pub(crate) fn parse_locked_source(source: &str) -> Result<LockedSource> {
+    let value = source
+        .strip_prefix("git+")
+        .ok_or_else(|| Error::failure("Git lock source is missing its `git+` prefix"))?;
+    let (remote, commit) = value
+        .rsplit_once('#')
+        .ok_or_else(|| Error::failure("Git lock source is missing its commit fragment"))?;
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::failure(
+            "Git lock source commit is not 40 lowercase hexadecimal digits",
+        ));
+    }
+    let (url, query) = remote
+        .split_once('?')
+        .map_or((remote, None), |(url, query)| (url, Some(query)));
+    validate_git_url(url)?;
+    let selector = match query {
+        None => GitSelector::Head,
+        Some(query) => {
+            let (kind, value) = query.split_once('=').ok_or_else(|| {
+                Error::failure("Git lock source query is not one branch, tag, or rev selector")
+            })?;
+            if value.is_empty() || value.contains('&') {
+                return Err(Error::failure(
+                    "Git lock source query has an empty or multiple selector",
+                ));
+            }
+            let value = percent_decode(value)?;
+            validate_revision(&value)?;
+            match kind {
+                "branch" => GitSelector::Branch(value),
+                "tag" => GitSelector::Tag(value),
+                "rev" => GitSelector::Revision(value),
+                _ => {
+                    return Err(Error::failure(format!(
+                        "Git lock source has unsupported selector `{kind}`"
+                    )));
+                }
+            }
+        }
+    };
+    Ok(LockedSource {
+        cargo_source: source.to_owned(),
+        url: url.to_owned(),
+        selector,
+        commit: commit.to_owned(),
+    })
+}
+
+fn percent_decode(value: &str) -> Result<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let input = value.as_bytes();
+    let mut position = 0;
+    while position < input.len() {
+        if input[position] != b'%' {
+            bytes.push(input[position]);
+            position += 1;
+            continue;
+        }
+        let digits = input
+            .get(position + 1..position + 3)
+            .ok_or_else(|| Error::failure("Git lock source has incomplete percent encoding"))?;
+        let high = hex_digit(digits[0])?;
+        let low = hex_digit(digits[1])?;
+        bytes.push((high << 4) | low);
+        position += 3;
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| Error::failure("Git lock source selector is not valid UTF-8"))
+}
+
+fn hex_digit(value: u8) -> Result<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(Error::failure(
+            "Git lock source has invalid percent encoding",
+        )),
+    }
+}
 
 #[derive(Clone, Debug)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct GitPatch {
     alias: String,
     package: Option<String>,
@@ -37,25 +141,15 @@ impl Selector {
             Self::Branch(value) | Self::Tag(value) | Self::Revision(value) => value,
         }
     }
-
-    #[cfg(target_os = "linux")]
-    fn fetch_spec(&self) -> String {
-        match self {
-            Self::Head => "HEAD".to_owned(),
-            Self::Branch(value) => format!("refs/heads/{value}"),
-            Self::Tag(value) => format!("refs/tags/{value}"),
-            Self::Revision(value) => value.clone(),
-        }
-    }
 }
 
-#[cfg(any(target_os = "linux", test))]
 struct Materialized {
     path: String,
 }
 
 pub fn materialize_manifest_patches(
     root: &Path,
+    network: &NetworkConfig,
     limits: &PolicyLimits,
     accept_all: bool,
     verbose: bool,
@@ -78,41 +172,20 @@ pub fn materialize_manifest_patches(
         return Ok(false);
     }
 
-    #[cfg(target_os = "motor")]
-    {
-        let _ = (limits, accept_all, verbose);
-        return Err(Error::failure(
-            "Git patch materialization is not supported by `lorry vendor` on Motor OS",
-        )
-        .with_help(
-            "run `lorry vendor` on Linux, then copy the vendored project and repository to Motor OS",
-        ));
+    let mut patches = patches;
+    attach_locked_commits(root, &mut patches)?;
+    let mut replacements = Vec::new();
+    for patch in &patches {
+        let materialized =
+            materialize::materialize_one(root, patch, network, limits, accept_all, verbose)?;
+        replacements.push((patch.alias.clone(), patch.package.clone(), materialized));
     }
-
-    #[cfg(not(any(target_os = "linux", target_os = "motor")))]
-    return Err(Error::failure(
-        "Git patch materialization is supported by `lorry vendor` only on Linux",
-    ));
-
-    #[cfg(target_os = "linux")]
-    {
-        let mut patches = patches;
-        let git = linux::find_git()?;
-        attach_locked_commits(root, &mut patches)?;
-        let tree_limits = linux::tree_limits(limits)?;
-        let mut replacements = Vec::new();
-        for patch in &patches {
-            let materialized =
-                linux::materialize_one(root, patch, &git, tree_limits, accept_all, verbose)?;
-            replacements.push((patch.alias.clone(), patch.package.clone(), materialized));
-        }
-        let rewritten = rewrite_manifest(&source, &patches, &replacements)?;
-        let mut staged = AtomicFile::new(&manifest_path)?;
-        staged.write_all(rewritten.as_bytes())?;
-        staged.persist()?;
-        staged.commit()?;
-        Ok(true)
-    }
+    let rewritten = rewrite_manifest(&source, &patches, &replacements)?;
+    let mut staged = AtomicFile::new(&manifest_path)?;
+    staged.write_all(rewritten.as_bytes())?;
+    staged.persist()?;
+    staged.commit()?;
+    Ok(true)
 }
 
 fn parse_git_patches(root: &Path, document: &ImDocument<String>) -> Result<Vec<GitPatch>> {
@@ -195,7 +268,6 @@ fn parse_git_patches(root: &Path, document: &ImDocument<String>) -> Result<Vec<G
     Ok(result)
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn attach_locked_commits(root: &Path, patches: &mut [GitPatch]) -> Result<()> {
     let lock_path = root.join("Cargo.lock");
     let Ok(source) = fs::read_to_string(&lock_path) else {
@@ -244,7 +316,6 @@ fn attach_locked_commits(root: &Path, patches: &mut [GitPatch]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn rewrite_manifest(
     source: &str,
     patches: &[GitPatch],
@@ -279,7 +350,6 @@ fn rewrite_manifest(
     Ok(rewritten)
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn toml_string(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
@@ -350,9 +420,6 @@ fn validate_revision(value: &str) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(target_os = "linux")]
-mod linux;
 
 #[cfg(test)]
 mod tests {
@@ -440,6 +507,31 @@ mod tests {
             "[patch.crates-io]\nx = { git = \"https://example.com/x\", branch = \"main\", tag = \"v1\" }\n",
         ] {
             assert!(parse_git_patches(&PathBuf::from("/fixture"), &document(source)).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_cargo_git_lock_identity() {
+        let source = "git+https://example.com/repository.git?branch=feature%2Fmotor#0123456789abcdef0123456789abcdef01234567";
+        let locked = parse_locked_source(source).unwrap();
+        assert_eq!(locked.cargo_source, source);
+        assert_eq!(locked.url, "https://example.com/repository.git");
+        assert_eq!(
+            locked.selector,
+            GitSelector::Branch("feature/motor".to_owned())
+        );
+        assert_eq!(locked.commit, "0123456789abcdef0123456789abcdef01234567");
+
+        for invalid in [
+            "git+http://example.com/repository#0123456789abcdef0123456789abcdef01234567",
+            "git+https://user@example.com/repository#0123456789abcdef0123456789abcdef01234567",
+            "git+https://example.com/repository?branch=one&tag=two#0123456789abcdef0123456789abcdef01234567",
+            "git+https://example.com/repository#0123456789ABCDEF0123456789ABCDEF01234567",
+        ] {
+            assert!(
+                parse_locked_source(invalid).is_err(),
+                "accepted `{invalid}`"
+            );
         }
     }
 }

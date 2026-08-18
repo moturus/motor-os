@@ -135,7 +135,7 @@ object at the same identity is corruption.
 The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
-2. materialize a supported Linux Git patch if one is still declared;
+2. materialize supported Git patches and locked direct Git sources;
 3. load sparse index data on demand and resolve the complete/selected graphs;
 4. run policy preflight before archive acquisition;
 5. download missing archives with the bounded curl client;
@@ -146,11 +146,9 @@ The intended ordinary vendor flow is:
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
-The first step is currently unreachable for an unmaterialized Git patch:
-`vendor.rs` loads `Manifest` before calling the Git bridge, and the normal
-manifest parser rejects Git patch keys. This command-ordering defect must be
-fixed before the bridge is described as operational. It does not affect
-already materialized path patches.
+Git patch declarations are parsed before the ordinary manifest load, then
+rewritten atomically to local paths. Direct Git objects retain their immutable
+Git source identity and are installed below the project-local vendor tree.
 
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
@@ -163,31 +161,29 @@ control trailer from stderr. Lorry itself owns redirects, HTTP status policy,
 download limits, staging, hashing, and publication. The exact executable and
 stream contract is part of `spec.md`.
 
-## Deferred Git source model
+## Git source model
 
-The existing Git bridge is deliberately only a vendoring adapter for root
-crates.io patches. Once reached through the corrected vendor front end, it
-resolves and materializes each patch on Linux, rewrites that manifest entry to
-a local path, and leaves build, run, and test entirely offline. It is not a
-general Git dependency model.
+Direct Git dependencies have a first-class immutable source identity:
+canonical URL, exact locked commit, Git tree, canonical Lorry source-tree
+digest, and package path within the snapshot. Branches, tags, and `rev` values
+are update intent and provenance; they never replace the locked commit.
+Resolution, lockfile parsing/rendering, canonical review records, admission,
+logical source paths, and cache keys all retain that identity rather than
+treating Git as crates.io or as an ordinary mutable path. A single snapshot
+may contribute multiple monorepo packages.
 
-Direct Git dependencies require a first-class immutable source identity rather
-than another special-case rewrite. The intended identity is the canonical URL,
-exact locked commit, Git tree, canonical Lorry source-tree digest, and package
-path within the snapshot. Branches, tags, and `rev` values are update intent
-and provenance; they never replace the locked commit. Resolution, lockfile
-parsing/rendering, repository objects, canonical review records, admission,
-logical source paths, and cache keys must all represent that identity. This
-requires new repository and admission format versions instead of treating Git
-as crates.io or as an ordinary mutable path.
+Root crates.io Git patches remain a vendoring adapter. Lorry resolves and
+materializes each patch, rewrites that manifest entry to a local path, and
+leaves build, run, and test entirely offline.
 
-Acquisition is a separate concern. The first implementation should continue to
-use the bounded installed Git process on Linux and let Motor consume the
-verified snapshot offline. A native smart-HTTP/pack client or separate
-`git-light` executable is not justified merely to add correct Git source
-semantics. If native Motor vendoring becomes a requirement, its authenticated
-transport, object/pack limits, delta handling, and result protocol need a
-separate security review.
+Both Linux and Motor use gix for repository negotiation, pack/object
+processing, and tree traversal. A small injected blocking transport sends
+anonymous smart-HTTP requests through Lorry's bounded configured-curl client,
+so transport follows the same redirect, status, environment, and response-size
+rules as registry acquisition. No Git executable, credential helper, proxy,
+hook, filter, or ambient Git configuration is used. Checkout accepts only
+portable regular-file/directory trees and rejects links and submodules before
+atomic publication.
 
 ## Generated dependency admission
 

@@ -184,6 +184,10 @@ impl BuildCache {
         )];
         match &input.key.package.source {
             PackageSourceKey::CratesIo => digest.string("package-source", "crates.io"),
+            PackageSourceKey::Git(source) => {
+                digest.string("package-source", "git");
+                digest.string("package-source-identity", source);
+            }
             PackageSourceKey::Path(path) => {
                 digest.string("package-source", "path");
                 digest.os(
@@ -256,6 +260,7 @@ impl BuildCache {
                 PackageSourceKey::CratesIo => {
                     digest.string("package-source-identity", "immutable-crates.io")
                 }
+                PackageSourceKey::Git(source) => digest.string("package-source-identity", source),
                 PackageSourceKey::Path(_) => metadata_tree_digest(
                     &mut digest,
                     &input.manifest.root,
@@ -586,7 +591,7 @@ fn globally_cacheable(planned: &PlannedUnit) -> bool {
 
 fn globally_cacheable_source(source: &PackageSourceKey, exclusions: Exclusions) -> bool {
     match source {
-        PackageSourceKey::CratesIo => true,
+        PackageSourceKey::CratesIo | PackageSourceKey::Git(_) => true,
         PackageSourceKey::Path(_) => exclusions == Exclusions::None,
     }
 }

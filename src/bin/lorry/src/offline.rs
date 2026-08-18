@@ -44,7 +44,11 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
         .map(|package| {
             (
                 package.key.clone(),
-                matches!(&package.source, ResolvedSource::CratesIo { .. }),
+                match &package.source {
+                    ResolvedSource::CratesIo { .. } => Some(CRATES_IO_SOURCE.to_owned()),
+                    ResolvedSource::Git { cargo_source, .. } => Some(cargo_source.clone()),
+                    ResolvedSource::Path { .. } => None,
+                },
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -76,6 +80,9 @@ fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -
                     )));
                 }
                 locked
+            }
+            ResolvedSource::Git { cargo_source, .. } => {
+                find_git_package(&lock.packages, &package.key, cargo_source)?
             }
             ResolvedSource::Path { .. } => find_path_package(&lock.packages, &package.key)?,
         };
@@ -149,18 +156,45 @@ fn find_path_package<'a>(
         })
 }
 
+fn find_git_package<'a>(
+    packages: &'a [LockedPackage],
+    key: &PackageKey,
+    cargo_source: &str,
+) -> Result<&'a LockedPackage> {
+    if key.source != PackageSourceKey::Git(cargo_source.to_owned()) {
+        return Err(stale(format!(
+            "resolved package `{} {}` has inconsistent Git source identity",
+            key.name, key.version
+        )));
+    }
+    packages
+        .iter()
+        .find(|package| {
+            package.name == key.name
+                && package.source.as_deref() == Some(cargo_source)
+                && Version::parse(&package.version.original)
+                    .is_ok_and(|version| version == key.version)
+        })
+        .ok_or_else(|| {
+            stale(format!(
+                "Cargo.lock has no Git package `{} {}` from `{cargo_source}`",
+                key.name, key.version
+            ))
+        })
+}
+
 fn validate_edges(
     owner: &str,
     resolved: &[crate::resolver::ResolvedEdge],
     locked: &[String],
     packages: &[LockedPackage],
-    source_kinds: &BTreeMap<PackageKey, bool>,
+    source_kinds: &BTreeMap<PackageKey, Option<String>>,
     mode: EdgeMode,
 ) -> Result<()> {
     let expected = resolved
         .iter()
         .map(|edge| {
-            let registry = source_kinds.get(&edge.package).ok_or_else(|| {
+            let source = source_kinds.get(&edge.package).ok_or_else(|| {
                 Error::failure(format!(
                     "resolver edge references absent package `{} {}`",
                     edge.package.name, edge.package.version
@@ -169,7 +203,7 @@ fn validate_edges(
             Ok(LockKey {
                 name: edge.package.name.clone(),
                 version: edge.package.version.clone(),
-                registry: *registry,
+                source: source.clone(),
             })
         })
         .collect::<Result<BTreeSet<_>>>()?;
@@ -189,7 +223,7 @@ fn validate_edges(
                     "Cargo.lock dependency `{reference}` has an invalid version: {error}"
                 ))
             })?,
-            registry: package.source.as_deref() == Some(CRATES_IO_SOURCE),
+            source: package.source.clone(),
         });
     }
     let agrees = match mode {
@@ -281,7 +315,7 @@ pub(crate) fn resolve_lock_reference<'a>(
 struct LockKey {
     name: String,
     version: Version,
-    registry: bool,
+    source: Option<String>,
 }
 
 fn display_keys(keys: &BTreeSet<LockKey>) -> String {
@@ -291,7 +325,7 @@ fn display_keys(keys: &BTreeSet<LockKey>) -> String {
                 "{} {} ({})",
                 key.name,
                 key.version,
-                if key.registry { "crates.io" } else { "path" }
+                key.source.as_deref().unwrap_or("path")
             )
         })
         .collect::<Vec<_>>()

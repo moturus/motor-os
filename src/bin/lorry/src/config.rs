@@ -977,15 +977,14 @@ fn merge_policy_rules(
             &format!("policy.rules.{id}"),
             "source",
         )?;
-        if source
-            .as_deref()
-            .is_some_and(|value| !matches!(value, "crates.io" | "path" | "system-vendored-path"))
-        {
+        if source.as_deref().is_some_and(|value| {
+            !matches!(value, "crates.io" | "git" | "path" | "system-vendored-path")
+        }) {
             return Err(Error::at(
                 path,
                 document.line_of_table(table),
                 format!("unsupported policy source `{}`", source.as_deref().unwrap()),
-                "choose crates.io, path, or system-vendored-path",
+                "choose crates.io, git, path, or system-vendored-path",
             ));
         }
         let checksum = optional_digest(path, document, table, id, "checksum")?;
