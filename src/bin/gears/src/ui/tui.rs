@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
@@ -34,6 +35,11 @@ const INPUT_POLL: Duration = Duration::from_millis(20);
 const EVENT_BURST: usize = 64;
 const APPROVAL_PAGE_BYTES: usize = 4096;
 const KEPT: usize = 256 * 1024;
+const INPUT_BACKGROUND: Color = Color::Rgb {
+    r: 24,
+    g: 24,
+    b: 24,
+};
 
 struct Expansion {
     call: String,
@@ -43,7 +49,12 @@ struct Expansion {
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
     fn size(&self) -> io::Result<(u16, u16)>;
-    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()>;
+    fn draw(
+        &mut self,
+        lines: &[String],
+        cursor: Option<(u16, u16)>,
+        input_rows: Range<usize>,
+    ) -> io::Result<()>;
     fn leave(&mut self) -> io::Result<()>;
 }
 
@@ -71,8 +82,8 @@ impl<S: Surface> Screen<S> {
     /// for this complete frame rather than retained across terminal events.
     pub fn redraw(&mut self, state: &State) -> io::Result<()> {
         let size = self.surface.size()?;
-        let (lines, cursor) = frame(state, size);
-        self.surface.draw(&lines, cursor)
+        let (lines, cursor, input_rows) = frame(state, size);
+        self.surface.draw(&lines, cursor, input_rows)
     }
 
     pub fn close(&mut self) {
@@ -366,7 +377,12 @@ impl<W: Write> Surface for Crossterm<W> {
         crossterm::terminal::size()
     }
 
-    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()> {
+    fn draw(
+        &mut self,
+        lines: &[String],
+        cursor: Option<(u16, u16)>,
+        input_rows: Range<usize>,
+    ) -> io::Result<()> {
         queue!(
             self.out,
             SetForegroundColor(Color::White),
@@ -375,7 +391,18 @@ impl<W: Write> Surface for Crossterm<W> {
             Clear(ClearType::All)
         )?;
         for (row, line) in lines.iter().enumerate() {
-            queue!(self.out, MoveTo(0, row as u16), Print(line))?;
+            queue!(self.out, MoveTo(0, row as u16))?;
+            if input_rows.contains(&row) {
+                queue!(
+                    self.out,
+                    SetBackgroundColor(INPUT_BACKGROUND),
+                    Clear(ClearType::CurrentLine),
+                    Print(line),
+                    SetBackgroundColor(Color::Black)
+                )?;
+            } else {
+                queue!(self.out, Print(line))?;
+            }
         }
         match cursor {
             Some((col, row)) => {
@@ -405,9 +432,12 @@ impl<W: Write> Surface for Crossterm<W> {
     }
 }
 
-fn frame(state: &State, (width, height): (u16, u16)) -> (Vec<String>, Option<(u16, u16)>) {
+fn frame(
+    state: &State,
+    (width, height): (u16, u16),
+) -> (Vec<String>, Option<(u16, u16)>, Range<usize>) {
     if let Some(approval) = state.approval() {
-        return (approval_frame(approval, width, height), None);
+        return (approval_frame(approval, width, height), None, 0..0);
     }
     let mut status = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
@@ -431,14 +461,15 @@ fn frame(state: &State, (width, height): (u16, u16)) -> (Vec<String>, Option<(u1
     let height = usize::from(height);
     status.truncate(height);
     if status.len() == height {
-        return (finish(status, width), None);
+        return (finish(status, width), None, 0..0);
     }
     let below_status = height - status.len();
     if draft_lines.len() >= below_status {
         let mut shown: Vec<String> = draft_lines.into_iter().rev().take(below_status).collect();
         shown.reverse();
         let lines = finish(shown, width);
-        return (lines, None);
+        let input_rows = 0..lines.len();
+        return (lines, None, input_rows);
     }
     let room = height - status.len() - draft_lines.len();
     let transcript = transcript_lines(state.transcript(), usize::from(width).max(1));
@@ -453,7 +484,8 @@ fn frame(state: &State, (width, height): (u16, u16)) -> (Vec<String>, Option<(u1
         cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
         (draft_start_row + cursor_line) as u16,
     ));
-    (lines, cursor)
+    let input_rows = draft_start_row..lines.len();
+    (lines, cursor, input_rows)
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
@@ -1264,7 +1296,12 @@ mod tests {
             Ok(self.size)
         }
 
-        fn draw(&mut self, lines: &[String], _cursor: Option<(u16, u16)>) -> io::Result<()> {
+        fn draw(
+            &mut self,
+            lines: &[String],
+            _cursor: Option<(u16, u16)>,
+            _input_rows: Range<usize>,
+        ) -> io::Result<()> {
             if self.fail_draw {
                 return Err(io::Error::other("draw failed"));
             }
@@ -1368,12 +1405,30 @@ mod tests {
     #[test]
     fn crossterm_draws_with_an_explicit_white_on_black_palette() {
         let mut surface = Crossterm::new(Vec::new());
-        surface.draw(&["frame".to_string()], None).unwrap();
+        surface.draw(&["frame".to_string()], None, 0..0).unwrap();
 
         let output = String::from_utf8(surface.out).unwrap();
         let foreground = SetForegroundColor(Color::White).to_string();
         let background = SetBackgroundColor(Color::Black).to_string();
         assert!(output.starts_with(&format!("{foreground}{background}")));
+    }
+
+    #[test]
+    fn crossterm_draws_the_input_panel_on_a_lighter_background() {
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw(
+                &["transcript".to_string(), "gears> ".to_string()],
+                Some((7, 1)),
+                1..2,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(surface.out).unwrap();
+        let input = SetBackgroundColor(INPUT_BACKGROUND).to_string();
+        let clear = Clear(ClearType::CurrentLine).to_string();
+        let background = SetBackgroundColor(Color::Black).to_string();
+        assert!(output.contains(&format!("{input}{clear}gears> {background}")));
     }
 
     #[test]
@@ -1403,9 +1458,8 @@ mod tests {
     fn multiline_drafts_have_explicit_continuation_prompts() {
         let mut state = State::new();
         state.set_draft("first\nsecond", 0);
-        let rendered = frame(&state, (80, 24)).0;
-        assert_eq!(rendered[2], "gears> first");
-        assert_eq!(rendered[3], "  ...> second");
+        let (rendered, _, input_rows) = frame(&state, (80, 24));
+        assert_eq!(&rendered[input_rows], ["gears> first", "  ...> second"]);
     }
 
     #[test]
@@ -1413,18 +1467,18 @@ mod tests {
         let mut state = State::new();
         // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
         state.set_draft("ab", 2);
-        let (lines, cursor) = frame(&state, (80, 24));
+        let (lines, cursor, _) = frame(&state, (80, 24));
         assert_eq!(cursor, Some((9, lines.len() as u16 - 1)));
         assert!(lines.last().unwrap().starts_with("gears> ab"));
 
         // Empty draft — cursor right after the prompt at column 7.
         state.set_draft("", 0);
-        let (lines, cursor) = frame(&state, (80, 24));
+        let (lines, cursor, _) = frame(&state, (80, 24));
         assert_eq!(cursor, Some((7, lines.len() as u16 - 1)));
 
         // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
         state.set_draft("ab\ncd", 4);
-        let (lines, cursor) = frame(&state, (80, 24));
+        let (lines, cursor, _) = frame(&state, (80, 24));
         let row = lines.len() as u16 - 1;
         assert_eq!(cursor, Some((8, row)));
         assert_eq!(lines[lines.len() - 1], "  ...> cd");
@@ -1442,7 +1496,7 @@ mod tests {
                 text: format!("agent {i}"),
             });
         }
-        let (_lines, cursor) = frame(&big, (80, 3));
+        let (_lines, cursor, _) = frame(&big, (80, 3));
         assert_eq!(cursor, None);
 
         // During approval the cursor is also suppressed.
@@ -1452,7 +1506,7 @@ mod tests {
             request: PermissionRequest::new("write_file", "write_file x").with_preview("diff"),
             reply,
         });
-        let (_lines, cursor) = frame(&state, (80, 24));
+        let (_lines, cursor, _) = frame(&state, (80, 24));
         assert_eq!(cursor, None);
     }
 
@@ -1751,7 +1805,7 @@ mod tests {
         let mut state = State::new();
         let long = "x".repeat(30);
         state.set_draft(&long, long.len());
-        let (lines, cursor) = frame(&state, (20, 24));
+        let (lines, cursor, _) = frame(&state, (20, 24));
         // Prompt is 7 wide, so each row holds 13 x's. 30 x's wrap to three rows.
         assert!(lines.iter().any(|line| line == "gears> xxxxxxxxxxxxx"));
         assert!(lines.iter().any(|line| line == "       xxxxxxxxxxxxx"));
