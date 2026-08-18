@@ -31,6 +31,10 @@ fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 
+# Host-only regression for upgrading an existing IPv4-only moto-tap after the
+# IPv6 test network was introduced.
+"$WD/test-build-base-networking.sh"
+
 # The image under test: the main image by default. full-test-dev.sh overrides
 # both to run this same suite against the dev image, which adds native
 # toolchains, tests, source trees, Gears, and Lorry to the standard contents.

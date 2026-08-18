@@ -221,7 +221,9 @@ host_networking_ready() {
 	[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
 	ip -o link show dev moto-tap 2>/dev/null | grep -q '<[^>]*UP[,>]' || return 1
 	ip -o -4 addr show dev moto-tap 2>/dev/null |
-		awk '$4 == "192.168.4.1/24" { found = 1 } END { exit !found }'
+		awk '$4 == "192.168.4.1/24" { found = 1 } END { exit !found }' || return 1
+	ip -o -6 addr show dev moto-tap 2>/dev/null |
+		awk '$4 == "2001:db8::1/64" { found = 1 } END { exit !found }'
 }
 
 setup_host_networking() {
@@ -244,9 +246,21 @@ setup_host_networking() {
 			sh "$tap"
 		else
 			sudo ip tuntap add mode tap moto-tap
-			sudo ip addr add 192.168.4.1/24 dev moto-tap
-			sudo ip link set moto-tap up
 		fi
+	fi
+	if ! ip -o -4 addr show dev moto-tap 2>/dev/null |
+			awk '$4 == "192.168.4.1/24" { found = 1 } END { exit !found }'; then
+		log "adding the IPv4 address to moto-tap"
+		sudo ip addr add 192.168.4.1/24 dev moto-tap
+	fi
+	if ! ip -o -6 addr show dev moto-tap 2>/dev/null |
+			awk '$4 == "2001:db8::1/64" { found = 1 } END { exit !found }'; then
+		log "adding the IPv6 address to moto-tap"
+		sudo ip -6 addr add 2001:db8::1/64 dev moto-tap
+	fi
+	if ! ip -o link show dev moto-tap 2>/dev/null |
+			grep -q '<[^>]*UP[,>]'; then
+		sudo ip link set moto-tap up
 	fi
 
 	log "configuring nft routing"
@@ -304,4 +318,6 @@ main() {
 	fi
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	main "$@"
+fi
