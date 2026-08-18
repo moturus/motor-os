@@ -375,19 +375,43 @@ pub fn once<W: Write, R: BufRead>(
 
 /// The interactive loop.
 pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty>) -> ExitCode {
+    interact_with(harness, ui, None)
+}
+
+/// Answer a restart continuation, then return control to the user.
+pub fn continue_with<W: Write>(
+    harness: &Harness,
+    ui: &mut Terminal<W, std::io::Empty>,
+    prompt: &str,
+) -> ExitCode {
+    interact_with(harness, ui, Some(prompt))
+}
+
+fn interact_with<W: Write>(
+    harness: &Harness,
+    ui: &mut Terminal<W, std::io::Empty>,
+    initial: Option<&str>,
+) -> ExitCode {
     welcome(harness, ui);
     let _ = ui.renderer.line("- /help for commands");
+    let mut initial = initial.map(str::to_string);
 
     loop {
-        if ui.renderer.prompt("gears> ").is_err() {
-            return ExitCode::FAILURE;
-        }
-        let Some(line) = ui.read_line() else {
-            // End of input, or a ^C at the prompt: either way, this is the
-            // way out (the plan's "second ^C at idle exits").
-            let _ = ui.renderer.break_line();
-            crate::platform::take_interrupt();
-            return exit_code(ui);
+        let line = match initial.take() {
+            Some(line) => line,
+            None => {
+                if ui.renderer.prompt("gears> ").is_err() {
+                    return ExitCode::FAILURE;
+                }
+                let Some(line) = ui.read_line() else {
+                    // End of input, or a ^C at the prompt: either way, this is
+                    // the way out (the plan's "second ^C at idle exits").
+                    let _ = ui.renderer.break_line();
+                    crate::platform::take_interrupt();
+                    return exit_code(ui);
+                };
+                line
+            }
         };
         let line = line.trim();
         if line.is_empty() {

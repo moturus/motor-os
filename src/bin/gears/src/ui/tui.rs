@@ -60,6 +60,7 @@ type StyledFrame = (
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
     fn size(&self) -> io::Result<(u16, u16)>;
+    fn invalidate(&mut self) {}
     fn draw(
         &mut self,
         size: (u16, u16),
@@ -98,6 +99,11 @@ impl<S: Surface> Screen<S> {
         let (lines, highlights, cursor, input_rows) = styled_frame(state, size);
         self.surface
             .draw(size, &lines, &highlights, cursor, input_rows)
+    }
+
+    fn resize(&mut self, state: &State) -> io::Result<()> {
+        self.surface.invalidate();
+        self.redraw(state)
     }
 
     pub fn close(&mut self) {
@@ -281,7 +287,10 @@ impl<S: Surface> Controller<S, Input> {
             Some(Action::Changed | Action::Submit(_)) => self
                 .state
                 .set_draft(self.decisions.draft(), self.decisions.cursor()),
-            Some(Action::Resize) => true,
+            Some(Action::Resize) => {
+                self.screen.resize(&self.state)?;
+                false
+            }
             _ => false,
         };
         if redraw {
@@ -432,6 +441,10 @@ impl<W: Write> Surface for Crossterm<W> {
 
     fn size(&self) -> io::Result<(u16, u16)> {
         crossterm::terminal::size()
+    }
+
+    fn invalidate(&mut self) {
+        self.frame = None;
     }
 
     fn draw(
@@ -926,7 +939,7 @@ fn navigate_approval<S: Surface>(
     navigation: ApprovalNavigation,
 ) -> io::Result<()> {
     if navigation == ApprovalNavigation::Resize {
-        return screen.redraw(state);
+        return screen.resize(state);
     }
     let size = screen.surface.size()?;
     let page_rows = usize::from(size.1 / 2).max(1);
@@ -1218,7 +1231,7 @@ pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<Exit
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, None)
+    run(harness, &mut controller, restart, None, false)
 }
 
 /// Run one explicitly requested TUI prompt without asking the unattended gate
@@ -1234,7 +1247,22 @@ pub fn once(
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, Some(prompt))
+    run(harness, &mut controller, restart, Some(prompt), true)
+}
+
+/// Answer the restart tool's optional first prompt, then remain interactive.
+pub fn continue_with(
+    harness: &Harness,
+    gate: Gate,
+    restart: &Restart,
+    prompt: &str,
+) -> Result<ExitCode, String> {
+    let surface = Crossterm::new(std::io::stdout());
+    let input = Input::new(gate);
+    let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
+        .map_err(|error| format!("cannot start TUI: {error}"))?
+        .with_artifacts(harness.artifacts());
+    run(harness, &mut controller, restart, Some(prompt), false)
 }
 
 fn run<S: Surface>(
@@ -1242,8 +1270,8 @@ fn run<S: Surface>(
     controller: &mut Controller<S, Input>,
     restart: &Restart,
     initial: Option<&str>,
+    one_shot: bool,
 ) -> Result<ExitCode, String> {
-    let one_shot = initial.is_some();
     let mut active = false;
     let mut local_operation = false;
     let mut failed = false;
@@ -1873,8 +1901,9 @@ mod tests {
             .draw((80, 1), &lines, &highlights, None, 0..0)
             .unwrap();
         surface.out.clear();
+        surface.invalidate();
         surface
-            .draw((79, 1), &lines, &highlights, None, 0..0)
+            .draw((80, 1), &lines, &highlights, None, 0..0)
             .unwrap();
         let output = String::from_utf8_lossy(&surface.out);
         assert!(output.contains(&Clear(ClearType::All).to_string()));

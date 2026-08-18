@@ -536,7 +536,9 @@ Four things hold this together.
 * **Restarting is not `exec`.** The session is closed and its lock released,
   then the new gears is started on the same session with `--resume` and waited
   for, so the terminal is only ever owned by one process. What the model said
-  before the restart is in the transcript the new binary reads.
+  before the restart is in the transcript the new binary reads. If an
+  interactive restart carries a first prompt, the replacement answers it and
+  then returns to the user input prompt.
 
 If you restart into a candidate to try it, gears is then *running* from
 `.gears/candidates/`, and there is nowhere for a promotion to go: say where
