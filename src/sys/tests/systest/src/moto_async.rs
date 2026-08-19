@@ -17,6 +17,47 @@ fn test_basic() {
     println!("----- moto_async::test_basic PASS");
 }
 
+struct StableWakerFuture {
+    first_waker: Option<std::task::Waker>,
+}
+
+impl StableWakerFuture {
+    fn new() -> Self {
+        Self { first_waker: None }
+    }
+}
+
+impl core::future::Future for StableWakerFuture {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        if let Some(first_waker) = self.first_waker.as_ref() {
+            assert!(
+                first_waker.will_wake(cx.waker()),
+                "the runtime allocated a different waker for the next poll"
+            );
+            Poll::Ready(())
+        } else {
+            self.first_waker = Some(cx.waker().clone());
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+fn test_stable_wakers() {
+    let mut runtime = moto_async::LocalRuntime::new();
+    runtime.block_on(StableWakerFuture::new());
+    runtime.block_on(async {
+        moto_async::LocalRuntime::spawn(StableWakerFuture::new()).await;
+    });
+
+    println!("----- moto_async::test_stable_wakers PASS");
+}
+
 // A timeout future that returns the number of polls it got.
 struct TimeoutFuture {
     polls: u64,
@@ -979,6 +1020,7 @@ fn test_sleep_reused_across_selects() {
 
 pub fn run_all_tests() {
     test_basic();
+    test_stable_wakers();
     test_timeout();
     test_select();
     test_spawn();

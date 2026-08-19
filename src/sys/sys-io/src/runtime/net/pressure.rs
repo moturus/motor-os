@@ -29,7 +29,7 @@ pub(super) fn active() -> bool {
 }
 
 /// What a parked listening-pool replenishment needs to resume; see
-/// [`super::socket::tcp::spawn_pool_replenish`].
+/// [`super::socket::tcp::replenish_pool`].
 struct ParkedReplenish {
     listener: Weak<RefCell<TcpListener>>,
     device_idx: usize,
@@ -134,7 +134,7 @@ impl Pressure {
     fn rearm(&self, runtime: &super::NetRuntime) {
         let parked = core::mem::take(&mut *self.parked.borrow_mut());
         for (key, p) in parked {
-            super::socket::tcp::spawn_pool_replenish(
+            super::socket::tcp::replenish_pool(
                 runtime.clone(),
                 p.listener,
                 p.device_idx,

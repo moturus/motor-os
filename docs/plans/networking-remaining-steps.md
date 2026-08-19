@@ -222,23 +222,31 @@ sys-io runtime glue:
   connection limits of 128 global and 32 per listener, preserving the
   original intended 32 MiB/8 MiB budgets; do not rely on rt.vdso's
   `listen(backlog)` as the security boundary. Reset and count overflow.
-- Listener creation can still terminate sys-io instead of returning
+- [resolved] Listener creation could terminate sys-io instead of returning
   `OutOfMemory` near the admission floor. The third debug gate for the
   socket-option patch reproduced this in
   `test_aggregate_listener_exhaustion`: after two passing runs in which
   each of four children was refused cleanly at about 671--674 listeners,
   the VM exited during the same flood before any child reported. The new
-  socket-option tests had not run. `TcpListener::bind` samples the shared
-  memory-pressure bit once, then constructs four listening sockets and
-  grows several infallible heap/container allocations without reserving
-  their worst-case cost. Concurrent binds can all pass that sample; a
-  later kernel allocation refusal then aborts the critical sys-io process,
-  whose exit shuts down the VM. Investigate the exact allocation and fix
-  the ownership boundary rather than hiding the failure with retries or a
-  larger test timeout. The fix must make the aggregate flood return prompt
-  `OutOfMemory`, preserve the armed net-channel listener floor, recover its
-  memory, and pass the focused networking gate three times in both debug
-  and release builds.
+  socket-option tests had not run.
+  The initial concurrency diagnosis was wrong: sys-io's local runtime is
+  single-threaded, and listener construction does not yield. The actual gap
+  was deferred allocation. Each socket queued an outer listen future, which
+  did not allocate its connection signal and lifecycle/replenishment task
+  until its first poll; the executor also allocated a retained heap-backed
+  waker at poll time. A burst of successful bind RPCs could therefore queue
+  substantial heap work after the admission samples, and a later allocation
+  refusal aborted the critical sys-io process.
+  Recheck pressure for every listening socket, construct its signal and both
+  lifecycle tasks synchronously before returning success, and have the
+  lifecycle waiter replenish directly instead of spawning a third task.
+  Cache each runtime task's waker at spawn time (and the root waker once per
+  `block_on`) so polling does not move retained allocation past that
+  boundary. A focused runtime regression checks stable root/task waker
+  identity across polls. The aggregate listener flood remains the integration
+  regression: it must return prompt `OutOfMemory`, preserve the armed
+  net-channel listener floor, recover its memory, and pass the focused
+  networking gate three times in both debug and release builds.
 - The memory accounting/docs for half-open and spare listening sockets
   are stale: both use `RingBuild::LazyFloor` (16 KiB per direction), but
   `half_open.rs`, `backlog.rs`, and shipped `sys-net.toml` comments price

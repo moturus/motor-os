@@ -215,6 +215,7 @@ fn new_local_waker(task_id: TaskId) -> core::task::LocalWaker {
 struct Task {
     id: TaskId,
     fut: LocalFutureObj<'static, ()>,
+    waker: Waker,
     join_handle_waker: alloc::rc::Weak<RefCell<Option<Waker>>>,
 
     #[cfg(debug_assertions)]
@@ -517,6 +518,7 @@ impl LocalRuntime {
 
         let waker = Rc::new(RefCell::new(None));
         let task_id = inner.next_task_id();
+        let task_waker = inner.new_waker(task_id);
 
         // Box `f` before capturing it in the wrapper block: the wrapper's
         // generator layout stores the captured future AND its awaitee copy
@@ -527,6 +529,7 @@ impl LocalRuntime {
         let f = Box::pin(f);
         let task = Task {
             id: task_id,
+            waker: task_waker,
             fut: Box::pin(async move {
                 let _ = tx.send(f.await);
             })
@@ -585,10 +588,10 @@ impl LocalRuntime {
     pub fn block_on<F: Future>(&mut self, f: F) -> F::Output {
         futures::pin_mut!(f);
         let _guard = self.enter();
+        let runtime = LocalRuntimeInner::current();
+        let waker = runtime.new_waker(TaskId::default_root());
+        let local_waker = new_local_waker(TaskId::default_root());
         loop {
-            let runtime = LocalRuntimeInner::current();
-            let waker = runtime.new_waker(TaskId::default_root());
-            let local_waker = new_local_waker(TaskId::default_root());
             let mut cx = core::task::ContextBuilder::from_waker(&waker)
                 .local_waker(&local_waker)
                 .build();
@@ -638,12 +641,6 @@ impl LocalRuntime {
                 return Poll::Ready(());
             }
 
-            let task_waker = inner.new_waker(next_runnable);
-            let local_waker = new_local_waker(next_runnable);
-            let mut inner_cx = core::task::ContextBuilder::from_waker(&task_waker)
-                .local_waker(&local_waker)
-                .build();
-
             let mut tasks_ref = inner.tasks.borrow_mut();
             let Some(task) = tasks_ref.get_mut(&next_runnable) else {
                 // This could happen if the local waker gets cloned and woken
@@ -652,6 +649,11 @@ impl LocalRuntime {
                 log::trace!("unknown task: {}", next_runnable.0);
                 continue;
             };
+            let task_waker = task.waker.clone();
+            let local_waker = new_local_waker(next_runnable);
+            let mut inner_cx = core::task::ContextBuilder::from_waker(&task_waker)
+                .local_waker(&local_waker)
+                .build();
             let current_task_id = task.id;
             #[cfg(debug_assertions)]
             {

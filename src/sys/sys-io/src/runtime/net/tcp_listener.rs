@@ -219,7 +219,7 @@ impl TcpListener {
         Ok((l, p))
     }
 
-    async fn spawn_listening_sockets(
+    fn spawn_listening_sockets(
         listener: Rc<RefCell<Self>>,
         num_listeners: usize,
     ) -> std::io::Result<()> {
@@ -230,8 +230,11 @@ impl TcpListener {
 
         for (addr, device_idx) in listening_on {
             for _ in 0..num_listeners {
-                MotoSocket::create_tcp_listening_socket(Rc::downgrade(&listener), device_idx, addr)
-                    .await?;
+                MotoSocket::create_tcp_listening_socket(
+                    Rc::downgrade(&listener),
+                    device_idx,
+                    addr,
+                )?;
             }
         }
 
@@ -503,7 +506,7 @@ impl TcpListener {
         );
 
         // Start listening.
-        if let Err(err) = Self::spawn_listening_sockets(listener.clone(), num_listeners).await {
+        if let Err(err) = Self::spawn_listening_sockets(listener.clone(), num_listeners) {
             Self::unregister_and_drop(runtime, listener).await;
             return Err(err);
         }
