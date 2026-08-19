@@ -311,13 +311,16 @@ vdso / moto-io client side:
   moto-rt options the vdso doesn't handle, so a routine call dies
   with exit-222 and nothing on stderr instead of an `io::Error`.
   Fix: return `E_NOT_IMPLEMENTED` from those arms.
-- Option RPCs on a not-yet-connected / failed-connect
-  `TcpStream` abort the process: `handle()` asserts non-zero
-  (moto-io tcp.rs:807) but a nonblocking or refused connect leaves
-  it zero, and `set_nodelay`/`shutdown`/TTL/linger all stamp
-  `req.handle = self.handle()` with no state guard. mio's
-  connect-then-`set_nodelay` (legal on Linux) aborts. Fix: return
-  `E_NOT_CONNECTED` for the not-established states.
+- [resolved] Option RPCs on a not-yet-connected / failed-connect
+  `TcpStream` aborted the process because `handle()` asserted non-zero
+  while those states retain handle zero. All remote stream options now use
+  a fallible option-only handle accessor and return `E_NOT_CONNECTED`
+  before queueing an RPC. Local descriptor options and `SO_ERROR` remain
+  available, so callers can still configure blocking/timeouts and consume
+  the connect error. A native regression holds the local channel driver
+  unpolled to cover `Connecting`, then drives the refusal to cover `Closed`,
+  across shutdown, linger, nodelay, TTL, and both buffer-size options; the
+  public vdso nodelay path is covered after a refused nonblocking connect.
 - A read on a peer-RESET stream is laundered to clean EOF
   `Ok(0)` (moto-io tcp.rs:1324) -- the read side has no sibling to
   the just-landed write-side `dead_write_error`, so truncation-by-

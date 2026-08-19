@@ -810,6 +810,15 @@ impl TcpStream {
         handle
     }
 
+    fn option_handle(&self) -> Result<u64, ErrorCode> {
+        let handle = self.handle.load(Ordering::Acquire);
+        if handle == 0 {
+            Err(moto_rt::E_NOT_CONNECTED)
+        } else {
+            Ok(handle)
+        }
+    }
+
     pub fn weak(&self) -> Weak<Self> {
         self.me.clone()
     }
@@ -1700,7 +1709,7 @@ impl TcpStream {
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = option;
         let resp = self
             .channel()
@@ -1733,7 +1742,7 @@ impl TcpStream {
     pub async fn set_linger_async(&self, duration: Option<Duration>) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
         if let Some(duration) = duration {
             req.payload.args_32_mut()[2] = 1;
@@ -1751,7 +1760,7 @@ impl TcpStream {
     pub async fn linger_async(&self) -> Result<Option<Duration>, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
         let resp = self.channel().rpc(req).await;
         if !resp.status().is_ok() {
@@ -1768,7 +1777,7 @@ impl TcpStream {
     pub async fn set_nodelay_async(&self, nodelay: bool) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         req.payload.args_64_mut()[1] = nodelay as u64;
         let resp = self.channel().rpc(req).await;
@@ -1783,7 +1792,7 @@ impl TcpStream {
     pub async fn nodelay_async(&self) -> Result<bool, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
@@ -1797,7 +1806,7 @@ impl TcpStream {
     pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
         let resp = self.channel().rpc(req).await;
@@ -1812,7 +1821,7 @@ impl TcpStream {
     pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
@@ -1830,7 +1839,7 @@ impl TcpStream {
         buffer_size_rpc(
             self.channel(),
             api_net::NetCmd::TcpStreamSetOption,
-            self.handle(),
+            self.option_handle()?,
             rcv,
             Some(bytes),
         )
@@ -1842,7 +1851,7 @@ impl TcpStream {
         buffer_size_rpc(
             self.channel(),
             api_net::NetCmd::TcpStreamGetOption,
-            self.handle(),
+            self.option_handle()?,
             rcv,
             None,
         )

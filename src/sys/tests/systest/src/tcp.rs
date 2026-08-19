@@ -1675,6 +1675,59 @@ fn test_native_buffer_options() {
     println!("test_native_buffer_options() PASS");
 }
 
+fn assert_not_connected<T>(result: Result<T, moto_sys::ErrorCode>) {
+    assert_eq!(result.err(), Some(moto_rt::E_NOT_CONNECTED));
+}
+
+async fn assert_remote_options_not_connected(stream: &NativeTcpStream) {
+    assert_not_connected(stream.shutdown_async(NativeShutdown::Both).await);
+    assert_not_connected(stream.set_linger_async(None).await);
+    assert_not_connected(stream.linger_async().await);
+    assert_not_connected(stream.set_nodelay_async(true).await);
+    assert_not_connected(stream.nodelay_async().await);
+    assert_not_connected(stream.set_ttl_async(42).await);
+    assert_not_connected(stream.ttl_async().await);
+    assert_not_connected(stream.set_buffer_size_async(true, 64 * 1024).await);
+    assert_not_connected(stream.buffer_size_async(true).await);
+    assert_not_connected(stream.set_buffer_size_async(false, 64 * 1024).await);
+    assert_not_connected(stream.buffer_size_async(false).await);
+}
+
+fn test_unconnected_native_options_return_errors() {
+    let closed_addr = "127.0.0.1:1".parse().unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let stream = NativeTcpStream::connect_nonblocking_reserved(
+            client.try_reserve().unwrap(),
+            &closed_addr,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // The driver is another local task and has not run since connect
+        // queued its request, so this is deterministically pre-response.
+        assert_eq!(
+            stream.tcp_state(),
+            moto_sys_io::api_net::TcpState::Connecting
+        );
+        assert_remote_options_not_connected(&stream).await;
+
+        crate::net_harness::wait_until("refused native connect", || {
+            stream.tcp_state() == moto_sys_io::api_net::TcpState::Closed
+        })
+        .await;
+        assert_remote_options_not_connected(&stream).await;
+        assert_ne!(stream.take_error(), moto_rt::E_OK);
+
+        drop(stream);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    println!("test_unconnected_native_options_return_errors() PASS");
+}
+
 fn test_tcp_buffer_sizes() {
     use std::os::fd::AsRawFd;
 
@@ -3272,6 +3325,7 @@ pub fn run_all_tests() {
     test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();
     test_native_buffer_options();
+    test_unconnected_native_options_return_errors();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

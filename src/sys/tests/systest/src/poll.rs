@@ -89,6 +89,11 @@ pub fn test_refused_connect_reports_writable() {
         "refused-connect event lacks WRITABLE: 0x{:x}",
         events[0].events
     );
+    assert_eq!(
+        moto_rt::net::set_nodelay(fd, true),
+        Err(moto_rt::Error::NotConnected)
+    );
+    assert_eq!(moto_rt::net::nodelay(fd), Err(moto_rt::Error::NotConnected));
 
     moto_rt::fs::close(registry).unwrap();
     moto_rt::fs::close(fd).unwrap();
