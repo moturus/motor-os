@@ -106,7 +106,7 @@ impl RtUdpSocket {
                     Err(err) => err,
                 }
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 
@@ -143,7 +143,7 @@ impl RtUdpSocket {
                 unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
                 moto_rt::E_OK
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 }

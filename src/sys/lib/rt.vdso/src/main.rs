@@ -367,11 +367,11 @@ pub extern "C" fn motor_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.net_udp_multicast_op_v4.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_multicast_op_v4 as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_multicast_op_v6.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_multicast_op_v6 as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

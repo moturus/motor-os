@@ -1585,6 +1585,37 @@ fn test_tcp_listener_ttl() {
     println!("test_tcp_listener_ttl() PASS");
 }
 
+#[allow(deprecated)]
+fn test_unsupported_tcp_options_return_errors() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert_eq!(
+        listener.set_only_v6(true).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        listener.only_v6().unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+
+    let addr = listener.local_addr().unwrap();
+    let client = std::thread::spawn(move || std::net::TcpStream::connect(addr).unwrap());
+    let stream = listener.accept().unwrap().0;
+    let _client = client.join().unwrap();
+    let fd = stream.as_raw_fd();
+    assert_eq!(
+        moto_rt::net::set_only_v6(fd, true),
+        Err(moto_rt::Error::NotImplemented)
+    );
+    assert_eq!(
+        moto_rt::net::only_v6(fd),
+        Err(moto_rt::Error::NotImplemented)
+    );
+
+    println!("test_unsupported_tcp_options_return_errors() PASS");
+}
+
 /// Pre-SYN buffer sizes on the native API: the requested sizes ride the
 /// connect and bind requests themselves (payload bytes 18/19) and read
 /// back effective -- rounded up to the wire's power-of-two granularity.
@@ -3238,6 +3269,7 @@ pub fn run_all_tests() {
     test_write_to_dropped_peer_fails_fast();
     test_write_after_peer_graceful_close_resets();
     test_tcp_listener_ttl();
+    test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();
     test_native_buffer_options();
     test_tcp_linger();

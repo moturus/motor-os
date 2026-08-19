@@ -81,6 +81,44 @@ fn test_posix_udp_ttl() {
     println!("-- test_posix_udp_ttl() PASS");
 }
 
+fn test_unsupported_udp_options_return_errors() {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::fd::AsRawFd;
+
+    fn assert_unsupported<T: core::fmt::Debug>(result: std::io::Result<T>) {
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    assert_unsupported(socket.set_broadcast(true));
+    assert_unsupported(socket.broadcast());
+    assert_unsupported(socket.set_multicast_loop_v4(true));
+    assert_unsupported(socket.multicast_loop_v4());
+    assert_unsupported(socket.set_multicast_ttl_v4(2));
+    assert_unsupported(socket.multicast_ttl_v4());
+    assert_unsupported(socket.set_multicast_loop_v6(true));
+    assert_unsupported(socket.multicast_loop_v6());
+
+    let multicast_v4 = "239.1.2.3".parse().unwrap();
+    assert_unsupported(socket.join_multicast_v4(&multicast_v4, &Ipv4Addr::UNSPECIFIED));
+    assert_unsupported(socket.leave_multicast_v4(&multicast_v4, &Ipv4Addr::UNSPECIFIED));
+    let multicast_v6: Ipv6Addr = "ff02::1".parse().unwrap();
+    assert_unsupported(socket.join_multicast_v6(&multicast_v6, 0));
+    assert_unsupported(socket.leave_multicast_v6(&multicast_v6, 0));
+
+    let fd = socket.as_raw_fd();
+    assert_eq!(
+        moto_rt::net::set_only_v6(fd, true),
+        Err(moto_rt::Error::NotImplemented)
+    );
+    assert_eq!(
+        moto_rt::net::only_v6(fd),
+        Err(moto_rt::Error::NotImplemented)
+    );
+
+    println!("-- test_unsupported_udp_options_return_errors() PASS");
+}
+
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
@@ -664,6 +702,7 @@ pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
     test_posix_udp_ttl();
+    test_unsupported_udp_options_return_errors();
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();
