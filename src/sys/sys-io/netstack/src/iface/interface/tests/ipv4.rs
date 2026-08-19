@@ -1190,7 +1190,7 @@ fn syn_cookie_ack_restores_the_connection() {
 
     // The completing ACK: consumed without a reply, and the restoration
     // record carries everything the stateless handshake preserved.
-    device.push_rx(segment(TcpRepr {
+    let completing_ack = segment(TcpRepr {
         src_port: 1001,
         control: TcpControl::None,
         seq_number: TcpSeqNumber(20_001),
@@ -1201,10 +1201,13 @@ fn syn_cookie_ack_restores_the_connection() {
         sack_permitted: false,
         timestamp: Some(TcpTimestampRepr::new(PEER_TSVAL + 1, our_tsval)),
         ..SYN_TEMPL
-    }));
+    });
+    device.push_rx(completing_ack.clone());
+    device.push_rx(completing_ack);
     iface.poll(Instant::from_millis(700_100), &mut device, &mut sockets);
     assert!(device.tx_queue.is_empty());
     assert_eq!(iface.take_tcp_syn_cookies_rejected(), 0);
+    assert_eq!(iface.take_tcp_cookie_restores_dropped(), 0);
 
     let restores = iface.take_tcp_cookie_restores();
     assert_eq!(restores.len(), 1);
@@ -3871,6 +3874,19 @@ fn the_tuple_index_is_the_demux() {
     sockets
         .tcp_restore_from_cookie(heir, iface.context(), &restore(49_000, 3_005))
         .unwrap();
+    let duplicate = sockets.add(22, socket());
+    assert_eq!(
+        sockets.tcp_restore_from_cookie(duplicate, iface.context(), &restore(49_000, 3_005)),
+        Err(tcp::ListenError::InvalidState)
+    );
+    assert_eq!(
+        sockets.tcp_tuple(
+            IpEndpoint::new(LOCAL_ADDR.into(), 49_000),
+            IpEndpoint::new(REMOTE_ADDR.into(), 3_005)
+        ),
+        Some(heir)
+    );
+    sockets.remove(duplicate);
     device.push_rx(segment(
         49_000,
         3_005,
