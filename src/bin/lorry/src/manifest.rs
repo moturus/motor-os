@@ -1799,8 +1799,16 @@ fn parse_patches(
                 "an inline path table",
             )
         })?;
-        if allow_git && table.contains_key("git") {
-            continue;
+        if let Some(git) = table.get("git") {
+            if allow_git {
+                continue;
+            }
+            return Err(Error::at(
+                path,
+                document.line_of_value(git),
+                format!("Git patch `{alias}` is not materialized for an offline build"),
+                "run `lorry vendor` to pin the Git revision and rewrite this entry to its verified local path",
+            ));
         }
         for (key, value) in table.iter() {
             if !matches!(key, "path" | "package") {
@@ -2099,22 +2107,23 @@ fn parse_lock_document(
                 path,
                 document.line_of_item(item),
                 format!("unsupported root Cargo.lock key `{key}`"),
-                "use Cargo.lock format version 4",
+                "use Cargo.lock format version 3 or 4",
             ));
         }
     }
     let version = document.root().get("version").ok_or_else(|| {
         Error::failure(format!(
-            "lockfile `{}` is missing `version = 4`",
+            "lockfile `{}` is missing a supported format version",
             path.display()
         ))
+        .with_help("regenerate the lockfile with a current Cargo")
     })?;
-    if version.as_integer() != Some(4) {
+    if !matches!(version.as_integer(), Some(3 | 4)) {
         return Err(Error::at(
             path,
             document.line_of_item(version),
-            "unsupported Cargo.lock format; expected `version = 4`",
-            "regenerate the lockfile with a current Cargo or `lorry vendor`",
+            "unsupported Cargo.lock format; expected `version = 3` or `version = 4`",
+            "regenerate the lockfile with a current Cargo",
         ));
     }
     let package_item = document.root().get("package").ok_or_else(|| {
@@ -2143,7 +2152,7 @@ fn parse_lock_document(
                     path,
                     document.line_of_item(item),
                     format!("unsupported Cargo.lock package key `{key}`"),
-                    "use only Cargo.lock v4 package identity and dependency fields",
+                    "use only supported Cargo.lock package identity and dependency fields",
                 ));
             }
         }
@@ -2824,6 +2833,19 @@ unsafe_code = { level = "forbid", priority = 1 }
     }
 
     #[test]
+    fn reports_an_unmaterialized_git_patch_without_calling_it_unsupported() {
+        let source = RED.replace(
+            "[dependencies]",
+            "[dependencies]\n\
+             [patch.crates-io]\n\
+             tokio = { git = \"https://example.com/tokio.git\", branch = \"motor\" }",
+        );
+        let error = parsed(&source).unwrap_err().render();
+        assert!(error.contains("Git patch `tokio` is not materialized for an offline build"));
+        assert!(!error.contains("is not supported in Stage 2"));
+    }
+
+    #[test]
     fn discovers_and_overrides_multiple_binary_targets() {
         let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -3079,7 +3101,7 @@ members = ["ignored-member"]
     }
 
     #[test]
-    fn vendor_loading_accepts_a_missing_or_stale_v4_lock() {
+    fn vendor_loading_accepts_a_missing_stale_or_v3_lock() {
         let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root =
             std::env::temp_dir().join(format!("lorry-vendor-manifest-{}-{id}", std::process::id()));
@@ -3113,8 +3135,14 @@ members = ["ignored-member"]
             "0.1.0"
         );
 
-        fs::write(root.join("Cargo.lock"), "version = 3\n").unwrap();
-        assert!(Manifest::load_for_vendor(&root).is_err());
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 3\n\n\
+             [[package]]\nname = \"vendor-root\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        assert!(Manifest::load(&root).is_ok());
+        assert!(Manifest::load_for_vendor(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3308,7 +3336,7 @@ members = ["ignored-member"]
     }
 
     #[test]
-    fn validates_full_version_four_lockfile() {
+    fn validates_full_version_three_and_four_lockfiles() {
         let mut manifest =
             parsed(&RED.replace("[dependencies]", "[dependencies]\nserde = \"=1.0.228\"")).unwrap();
         manifest.name = "red".to_owned();
@@ -3328,9 +3356,22 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 "#;
         let lock = validate_lock_source(&manifest, Path::new("Cargo.lock"), valid).unwrap();
         assert_eq!(lock.packages.len(), 2);
+        let version_three = valid.replace("version = 4", "version = 3");
+        assert_eq!(
+            validate_lock_source(&manifest, Path::new("Cargo.lock"), &version_three)
+                .unwrap()
+                .packages
+                .len(),
+            2
+        );
+        let unsupported = valid.replace("version = 4", "version = 2");
+        let error = validate_lock_source(&manifest, Path::new("Cargo.lock"), &unsupported)
+            .unwrap_err()
+            .render();
+        assert!(error.contains("expected `version = 3` or `version = 4`"));
+        assert!(!error.contains("lorry vendor"));
 
         for invalid in [
-            valid.replace("version = 4", "version = 3"),
             valid.replace("name = \"red\"", "name = \"other\""),
             valid.replace(
                 "registry+https://github.com/rust-lang/crates.io-index",

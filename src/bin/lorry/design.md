@@ -86,10 +86,12 @@ them rather than silently building a different program. Dependency build
 scripts are fully planned and executed through the policy boundary described
 below.
 
-`Cargo.lock` version 4 is the interoperability format. Builds require it to be
-present and current. Vendoring may create or repair it. Lorry renders the
-complete all-target lock graph, then separately computes the union of closures
-selected for configured vendor targets.
+`Cargo.lock` version 4 is the canonical interoperability format. Builds accept
+present and current version 3 or 4 locks as read-only input. Vendoring may
+create or repair a lock and writes version 4 when it does so, but preserves an
+unchanged version 3 lock byte-for-byte. Lorry renders the complete all-target
+lock graph, then separately computes the union of closures selected for
+configured vendor targets.
 
 Cargo compatibility is an explicit family (`1.97`, `1.98`, or `1.99`), either
 inferred from a paired rustc or supplied by installation configuration. The
@@ -173,8 +175,9 @@ treating Git as crates.io or as an ordinary mutable path. A single snapshot
 may contribute multiple monorepo packages.
 
 Root crates.io Git patches remain a vendoring adapter. Lorry resolves and
-materializes each patch, rewrites that manifest entry to a local path, and
-leaves build, run, and test entirely offline.
+materializes each patch, locates its unique package manifest within the
+snapshot, rewrites that manifest entry to the package's local path, and leaves
+build, run, and test entirely offline.
 
 Both Linux and Motor use gix for repository negotiation, pack/object
 processing, and tree traversal. A small injected blocking transport sends
