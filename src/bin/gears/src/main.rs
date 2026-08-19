@@ -72,13 +72,19 @@ fn diagnostic(message: &str) {
 }
 
 fn run(args: &Args, key_from_env: Option<String>, restart_continue: bool) -> ExitCode {
-    let config = match Config::load(args.config.as_deref()) {
-        Ok(config) => config,
+    let (config, mut models) = match Config::load_user(args.config.as_deref()) {
+        Ok(loaded) => loaded,
         Err(msg) => {
             eprintln!("gears: config: {msg}");
             return ExitCode::FAILURE;
         }
     };
+    if let Some(model) = args.model.as_deref()
+        && let Err(msg) = models.remember(model)
+    {
+        eprintln!("gears: config: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
@@ -103,7 +109,7 @@ fn run(args: &Args, key_from_env: Option<String>, restart_continue: bool) -> Exi
 
     let outcome = match args.action {
         Action::Ask => ask(args, &config, key_from_env).map(|()| ExitCode::SUCCESS),
-        _ => agent(args, &config, key_from_env, restart_continue),
+        _ => agent(args, &config, &mut models, key_from_env, restart_continue),
     };
     match outcome {
         Ok(code) => code,
@@ -122,6 +128,7 @@ fn run(args: &Args, key_from_env: Option<String>, restart_continue: bool) -> Exi
 fn agent(
     args: &Args,
     config: &Config,
+    models: &mut gears::config::ModelStore,
     key_from_env: Option<String>,
     restart_continue: bool,
 ) -> Result<ExitCode, String> {
@@ -169,9 +176,9 @@ fn agent(
     let gate = Gate::load(harness.workspace(), config.permissions)?;
     let code = match selected {
         select::Selected::Tui => match (&args.prompt, restart_continue) {
-            (Some(prompt), true) => tui::continue_with(&harness, gate, &restart, prompt)?,
-            (Some(prompt), false) => tui::once(&harness, gate, &restart, prompt)?,
-            (None, _) => tui::interact(&harness, gate, &restart)?,
+            (Some(prompt), true) => tui::continue_with(&harness, gate, &restart, models, prompt)?,
+            (Some(prompt), false) => tui::once(&harness, gate, &restart, models, prompt)?,
+            (None, _) => tui::interact(&harness, gate, &restart, models)?,
         },
         select::Selected::Line => {
             let mut ui = Terminal::live(
@@ -187,9 +194,9 @@ fn agent(
                 ui = ui.editing();
             }
             match (&args.prompt, restart_continue) {
-                (Some(prompt), true) => terminal::continue_with(&harness, &mut ui, prompt),
-                (Some(prompt), false) => terminal::once(&harness, &mut ui, prompt),
-                (None, _) => terminal::interact(&harness, &mut ui),
+                (Some(prompt), true) => terminal::continue_with(&harness, &mut ui, models, prompt),
+                (Some(prompt), false) => terminal::once(&harness, &mut ui, models, prompt),
+                (None, _) => terminal::interact(&harness, &mut ui, models),
             }
         }
     };
@@ -317,7 +324,7 @@ fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(),
         .model
         .clone()
         .or_else(|| config.model.clone())
-        .ok_or("no model: pass -m MODEL or set provider.model in the config")?;
+        .ok_or("no model: pass -m MODEL or set models.last/provider.model in the config")?;
     let key = load_key(config, key_from_env)?;
     let provider = connect(config, &key, args.verbosity)?;
 

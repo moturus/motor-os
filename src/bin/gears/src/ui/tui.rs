@@ -33,6 +33,7 @@ use crate::agent::context::Window;
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command as AgentCommand, Harness};
 use crate::agent::task::{ItemState, Task};
+use crate::config::ModelStore;
 use crate::tools::selfhost::Restart;
 
 const INPUT_POLL: Duration = Duration::from_millis(20);
@@ -283,7 +284,28 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
 
 impl<S: Surface> Controller<S, Input> {
     fn poll_input(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
-        let action = self.decisions.poll(timeout, editing)?;
+        let choosing_model = self.state.model_choice().is_some();
+        let action = self.decisions.poll(timeout, editing, choosing_model)?;
+        match action.as_ref() {
+            Some(Action::ModelUp | Action::ModelDown) => {
+                let down = matches!(action.as_ref(), Some(Action::ModelDown));
+                if self.state.move_model_choice(down) {
+                    self.screen.redraw(&self.state)?;
+                }
+                return Ok(None);
+            }
+            Some(Action::ModelCancel) => {
+                if self.state.cancel_model_choice() {
+                    self.screen.redraw(&self.state)?;
+                }
+                return Ok(None);
+            }
+            Some(Action::ModelAccept) => {
+                let selected = self.state.take_model_choice();
+                return Ok(selected.map(Action::SelectModel));
+            }
+            _ => {}
+        }
         let redraw = match action {
             Some(Action::Changed | Action::Submit(_)) => self
                 .state
@@ -298,6 +320,13 @@ impl<S: Surface> Controller<S, Input> {
             self.screen.redraw(&self.state)?;
         }
         Ok(action)
+    }
+
+    fn open_model_choice(&mut self, models: Vec<String>) -> io::Result<()> {
+        if self.state.open_model_choice(models) {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
     }
 }
 
@@ -749,20 +778,32 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     // scroll transcript is visually distinct from the prompt) and one below it
     // (so the prompt is visually distinct from the status line).
     let input_separators = 2;
-    if draft_lines.len() + input_separators > body_height {
-        let mut shown: Vec<String> = draft_lines.into_iter().rev().take(body_height).collect();
+    let choosing_model = state.model_choice().is_some();
+    let panel_lines = match state.model_choice() {
+        Some(choice) => model_choice_lines(choice, body_height.saturating_sub(input_separators)),
+        None => draft_lines,
+    };
+    let panel_highlights = match choosing_model {
+        true => model_choice_highlights(&panel_lines),
+        false => input_highlights(&panel_lines),
+    };
+    if panel_lines.len() + input_separators > body_height {
+        let mut shown: Vec<String> = panel_lines.into_iter().rev().take(body_height).collect();
         shown.reverse();
         shown.push(footer);
         shown.push(String::new());
         let lines = finish(shown, width);
         let input_rows = 0..body_height;
-        let mut highlights = input_highlights(&lines[..body_height]);
+        let mut highlights = match choosing_model {
+            true => model_choice_highlights(&lines[..body_height]),
+            false => input_highlights(&lines[..body_height]),
+        };
         highlights.push(chrome(lines[body_height].len()));
         highlights.push(Vec::new());
         return (lines, highlights, None, input_rows);
     }
 
-    let room_above_draft = body_height - draft_lines.len() - input_separators;
+    let room_above_draft = body_height - panel_lines.len() - input_separators;
     header.truncate(room_above_draft);
     let transcript_room = room_above_draft - header.len();
     let (transcript, transcript_highlights) =
@@ -787,9 +828,8 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     lines.push(String::new());
     highlights.push(Vec::new());
     let draft_start_row = lines.len();
-    let draft_highlights = input_highlights(&draft_lines);
-    lines.extend(draft_lines);
-    highlights.extend(draft_highlights);
+    lines.extend(panel_lines);
+    highlights.extend(panel_highlights);
     lines.push(String::new());
     highlights.push(Vec::new());
     let input_rows = input_start_row..lines.len();
@@ -798,7 +838,7 @@ fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
     lines.push(String::new());
     highlights.push(Vec::new());
     let (lines, highlights) = finish_highlighted(lines, highlights, width);
-    let cursor = Some((
+    let cursor = (!choosing_model).then_some((
         cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
         (draft_start_row + cursor_line) as u16,
     ));
@@ -820,6 +860,35 @@ fn input_highlights(lines: &[String]) -> Vec<Vec<Highlight>> {
     lines
         .iter()
         .map(|line| chrome(line.len().min("gears> ".len())))
+        .collect()
+}
+
+fn model_choice_lines(choice: &super::state::ModelChoice, rows: usize) -> Vec<String> {
+    let shown = rows.min(choice.models().len());
+    if shown == 0 {
+        return Vec::new();
+    }
+    let start = choice
+        .selected()
+        .saturating_sub(shown - 1)
+        .min(choice.models().len() - shown);
+    choice
+        .models()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(shown)
+        .map(|(index, model)| match index == choice.selected() {
+            true => format!(">(x) {model}"),
+            false => format!(" ( ) {model}"),
+        })
+        .collect()
+}
+
+fn model_choice_highlights(lines: &[String]) -> Vec<Vec<Highlight>> {
+    lines
+        .iter()
+        .map(|line| chrome(line.len().min(">(x) ".len())))
         .collect()
 }
 
@@ -1271,13 +1340,18 @@ fn source_prefix(source: Source) -> String {
 
 /// Run the interactive TUI over the same harness and local command policy as
 /// line mode.
-pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<ExitCode, String> {
+pub fn interact(
+    harness: &Harness,
+    gate: Gate,
+    restart: &Restart,
+    models: &mut ModelStore,
+) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate);
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, None, false)
+    run(harness, &mut controller, restart, models, None, false)
 }
 
 /// Run one explicitly requested TUI prompt without asking the unattended gate
@@ -1286,6 +1360,7 @@ pub fn once(
     harness: &Harness,
     gate: Gate,
     restart: &Restart,
+    models: &mut ModelStore,
     prompt: &str,
 ) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
@@ -1293,7 +1368,14 @@ pub fn once(
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, Some(prompt), true)
+    run(
+        harness,
+        &mut controller,
+        restart,
+        models,
+        Some(prompt),
+        true,
+    )
 }
 
 /// Answer the restart tool's optional first prompt, then remain interactive.
@@ -1301,6 +1383,7 @@ pub fn continue_with(
     harness: &Harness,
     gate: Gate,
     restart: &Restart,
+    models: &mut ModelStore,
     prompt: &str,
 ) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
@@ -1308,13 +1391,21 @@ pub fn continue_with(
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, Some(prompt), false)
+    run(
+        harness,
+        &mut controller,
+        restart,
+        models,
+        Some(prompt),
+        false,
+    )
 }
 
 fn run<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
     restart: &Restart,
+    models: &mut ModelStore,
     initial: Option<&str>,
     one_shot: bool,
 ) -> Result<ExitCode, String> {
@@ -1322,7 +1413,7 @@ fn run<S: Surface>(
     let mut local_operation = false;
     let mut failed = false;
     if let Some(prompt) = initial {
-        match submit(harness, controller, prompt)? {
+        match submit(harness, controller, models, prompt)? {
             Submitted::Turn => active = true,
             Submitted::Operation => {
                 active = true;
@@ -1339,7 +1430,7 @@ fn run<S: Surface>(
         {
             match action {
                 Action::Submit(prompt) if !prompt.trim().is_empty() => {
-                    match submit(harness, controller, &prompt)? {
+                    match submit(harness, controller, models, &prompt)? {
                         Submitted::Turn => active = true,
                         Submitted::Operation => {
                             active = true;
@@ -1357,7 +1448,7 @@ fn run<S: Surface>(
                     let paused = harness.toggle_paused();
                     controller
                         .set_runtime(
-                            harness.model(),
+                            &harness.model(),
                             paused,
                             harness.context_window(),
                             harness.task(),
@@ -1368,6 +1459,20 @@ fn run<S: Surface>(
                 Action::ScrollDown => controller
                     .scroll(false)
                     .map_err(|error| error.to_string())?,
+                Action::SelectModel(model) => {
+                    let text = select_model(harness, models, &model);
+                    controller
+                        .set_runtime(
+                            &harness.model(),
+                            harness.paused(),
+                            harness.context_window(),
+                            harness.task(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    controller
+                        .notice(&text)
+                        .map_err(|error| error.to_string())?;
+                }
                 _ => {}
             }
         }
@@ -1392,7 +1497,7 @@ fn run<S: Surface>(
                             let paused = harness.toggle_paused();
                             controller
                                 .set_runtime(
-                                    harness.model(),
+                                    &harness.model(),
                                     paused,
                                     harness.context_window(),
                                     harness.task(),
@@ -1412,7 +1517,7 @@ fn run<S: Surface>(
             let done = super::repl::dispatch(event, controller);
             controller
                 .set_runtime(
-                    harness.model(),
+                    &harness.model(),
                     harness.paused(),
                     harness.context_window(),
                     harness.task(),
@@ -1455,6 +1560,7 @@ enum Submitted {
 fn submit<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
+    models: &ModelStore,
     input: &str,
 ) -> Result<Submitted, String> {
     match parse(input) {
@@ -1486,6 +1592,12 @@ fn submit<S: Surface>(
                     .map_err(|error| error.to_string())?;
                 return Ok(Submitted::Operation);
             }
+            if command == LocalCommand::Model {
+                controller
+                    .open_model_choice(models.choices(&harness.model()))
+                    .map_err(|error| error.to_string())?;
+                return Ok(Submitted::Local);
+            }
             match execute(harness, controller, command) {
                 Ok(true) => Ok(Submitted::Local),
                 Ok(false) => Ok(Submitted::Exit),
@@ -1509,6 +1621,7 @@ fn execute<S: Surface>(
         LocalCommand::Quit => return Ok(false),
         LocalCommand::Help => super::terminal::HELP.to_string(),
         LocalCommand::Status => status(harness, controller)?,
+        LocalCommand::Model => unreachable!("the model picker is opened by submit"),
         LocalCommand::Pause => {
             harness.set_paused(true);
             "- paused before the next operation".to_string()
@@ -1524,7 +1637,7 @@ fn execute<S: Surface>(
     };
     controller
         .set_runtime(
-            harness.model(),
+            &harness.model(),
             harness.paused(),
             harness.context_window(),
             harness.task(),
@@ -1534,6 +1647,21 @@ fn execute<S: Surface>(
         .notice(&text)
         .map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+fn select_model(harness: &Harness, models: &mut ModelStore, model: &str) -> String {
+    let previous = harness.model();
+    let selected = match harness.select_model(model) {
+        Ok(selected) => selected,
+        Err(error) => return format!("! {error}"),
+    };
+    match models.remember(model) {
+        Ok(()) => format!("- {selected}"),
+        Err(error) => match harness.select_model(&previous) {
+            Ok(_) => format!("! config: {error}"),
+            Err(restore) => format!("! config: {error}; could not restore {previous}: {restore}"),
+        },
+    }
 }
 
 fn status<S: Surface>(
@@ -1622,7 +1750,7 @@ fn restore_prepared<S: Surface>(
 
 fn durable_state(harness: &Harness) -> Result<State, String> {
     let mut state = State::with_transcript_limit(harness.live_render_limit());
-    let _ = state.set_runtime(harness.model(), harness.paused(), harness.context_window());
+    let _ = state.set_runtime(&harness.model(), harness.paused(), harness.context_window());
     let _ = state.set_task(harness.task());
     let transcript = durable_transcript(harness)?;
     let _ = state.set_transcript(transcript);
@@ -1683,11 +1811,25 @@ mod tests {
     use std::rc::Rc;
 
     use crate::agent::bus::question;
-    use crate::provider::Usage;
+    use crate::provider::{
+        ChatRequest, Completion, EventSink, ModelProvider, ProviderError, Usage,
+    };
 
     use super::super::repl::{Pumped, dispatch};
 
     type Asked = Rc<RefCell<Vec<(AgentId, String)>>>;
+
+    struct UnusedProvider;
+
+    impl ModelProvider for UnusedProvider {
+        fn complete(
+            &self,
+            _request: &ChatRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<Completion, ProviderError> {
+            unreachable!("model selection does not make a provider request")
+        }
+    }
 
     #[derive(Default)]
     struct Calls {
@@ -1946,6 +2088,74 @@ mod tests {
             highlights.last().unwrap(),
             &chrome(lines.last().unwrap().len())
         );
+    }
+
+    #[test]
+    fn model_picker_is_a_clipped_radio_group_that_replaces_the_draft() {
+        let mut state = State::new();
+        state.set_draft("keep this", 4);
+        state.open_model_choice(
+            ["one", "two", "three", "four", "five"]
+                .map(str::to_string)
+                .to_vec(),
+        );
+        for _ in 0..4 {
+            state.move_model_choice(true);
+        }
+
+        let (lines, highlights, cursor, input_rows) = styled_frame(&state, (80, 7));
+        assert_eq!(cursor, None);
+        assert!(
+            !lines.iter().any(|line| line.contains("keep this")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.ends_with(" one")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line == " ( ) three"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == ">(x) five"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with(">(x) "))
+                .count(),
+            1
+        );
+        let selected = lines.iter().position(|line| line == ">(x) five").unwrap();
+        assert!(input_rows.contains(&selected));
+        assert_eq!(highlights[selected], chrome(">(x) ".len()));
+
+        state.cancel_model_choice();
+        let (lines, _, cursor, _) = styled_frame(&state, (80, 7));
+        assert!(
+            lines.iter().any(|line| line == "gears> keep this"),
+            "{lines:?}"
+        );
+        assert!(cursor.is_some());
+    }
+
+    #[test]
+    fn a_picker_persistence_failure_restores_the_live_model() {
+        let dir =
+            std::env::temp_dir().join(format!("gears-picker-persistence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gears.toml");
+        let original = "version = 1\nmodels = { last = \"first\", used = [\"first\"] }\n";
+        std::fs::write(&path, original).unwrap();
+        let (_, mut models) = crate::config::Config::load_user(Some(&path)).unwrap();
+        let mut setup = crate::agent::harness::Setup::new(dir.clone());
+        setup.model = Some("first".to_string());
+        let harness = Harness::start(setup, Arc::new(UnusedProvider)).unwrap();
+
+        let notice = select_model(&harness, &mut models, "second");
+        assert!(notice.contains("standalone [models]"), "{notice}");
+        assert_eq!(harness.model(), "first");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        drop(harness);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

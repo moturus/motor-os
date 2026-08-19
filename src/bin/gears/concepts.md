@@ -71,6 +71,11 @@ identity and cumulative usage. The root agent and every sub-agent have separate
 conversations. A session contains the root conversation durably, but a
 conversation is not itself the task or the workspace.
 
+Changing the root model with the TUI `/model` command changes this conversation
+at an idle turn boundary and journals the new identity; it does not start a new
+session or discard messages. Future sub-agents inherit that model by default,
+while a sub-agent spawned with an explicit model keeps its private choice.
+
 ### Context
 
 The **context** is the bounded material sent in one provider request. It is a
@@ -213,7 +218,7 @@ reading a file, preparing an edit, running a program, updating task state, or
 reading an artifact. Tool availability is filtered by the current mode, agent
 role, platform capability, and configured policy.
 
-A **slash command** is a local user command such as `/status`, `/pause`, or
+A **slash command** is a local user command such as `/status`, `/model`, or
 `/undo`. The harness handles slash-prefixed input itself and never sends it to
 the model. Slash commands therefore are not tools, even when they affect some
 of the same runtime state.

@@ -320,6 +320,10 @@ impl Journal for Session {
         self.record("message", message_value(message)?)
     }
 
+    fn model(&mut self, model: &str) -> std::io::Result<()> {
+        self.record("model_v1", json!({"model": model}))
+    }
+
     fn usage(&mut self, usage: &Usage) -> std::io::Result<()> {
         let value = serde_json::to_value(usage).map_err(std::io::Error::other)?;
         self.record("usage", value)
@@ -357,6 +361,10 @@ impl Journal for Session {
 impl Journal for SessionJournal {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()> {
         locked(&self.0)?.message(message)
+    }
+
+    fn model(&mut self, model: &str) -> std::io::Result<()> {
+        locked(&self.0)?.model(model)
     }
 
     fn task(&mut self, task: &Task) -> std::io::Result<()> {
@@ -465,6 +473,13 @@ fn read(text: &str) -> Transcript {
             Some("meta") => {
                 transcript.model = value["model"].as_str().map(str::to_string);
             }
+            Some("model_v1") => match value["model"]
+                .as_str()
+                .and_then(|model| crate::config::validate_model_id(model).ok())
+            {
+                Some(model) => transcript.model = Some(model),
+                None => transcript.damaged += 1,
+            },
             Some("message") => match message_from_value(value) {
                 Some(message) => transcript.messages.push(message),
                 None => transcript.damaged += 1,
@@ -770,6 +785,35 @@ mod tests {
         assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
         assert_eq!(Session::list(&dir).unwrap(), [id]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_model_change_survives_resume() {
+        let dir = workspace("model-change");
+        let id = {
+            let session = Session::create(&dir, "first/model").unwrap();
+            let id = session.id().to_string();
+            let mut conversation = Conversation::new("first/model").with_journal(Box::new(session));
+            conversation
+                .select_model("second/model".to_string())
+                .unwrap();
+            id
+        };
+
+        let (_session, transcript) = Session::resume(&dir, &id).unwrap();
+        assert_eq!(transcript.model.as_deref(), Some("second/model"));
+        assert_eq!((transcript.unknown, transcript.damaged), (0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bad_model_change_is_damage_and_does_not_replace_the_model() {
+        let transcript = read(
+            "{\"record\":\"meta\",\"model\":\"first/model\"}\n\
+             {\"record\":\"model_v1\",\"model\":\" bad\"}\n",
+        );
+        assert_eq!(transcript.model.as_deref(), Some("first/model"));
+        assert_eq!(transcript.damaged, 1);
     }
 
     /// The rule that makes plan step 9 possible: a session written by a newer

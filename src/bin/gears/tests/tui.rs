@@ -330,6 +330,52 @@ fn tui_handles_slash_commands_without_a_provider_request() {
 }
 
 #[test]
+fn tui_model_picker_changes_and_remembers_the_request_model() {
+    let server = MockServer::start_one(says("selected model answered")).unwrap();
+    let (dir, workspace, config) = fixture("model-picker", server.base_url(), "ask");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[models]\nlast = \"test/model\"\nused = [\"test/model\", \"other/model\"]\n");
+    std::fs::write(&config, text).unwrap();
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(b"/model\r").unwrap();
+    output.extend(read_until(&mut master, b"other/model"));
+    drain(&mut master, &mut output);
+    master.write_all(b"\x1b[B").unwrap();
+    output.extend(read_until(&mut master, b">(x) "));
+    drain(&mut master, &mut output);
+    master.write_all(b"\r").unwrap();
+    output.extend(read_until(&mut master, b"model: other/model"));
+    master.write_all(b"which model is this?\r").unwrap();
+    output.extend(read_until(&mut master, b"completed"));
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    drain(&mut master, &mut output);
+
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["model"], "other/model");
+    let saved = gears::config::Config::load(Some(&config)).unwrap();
+    assert_eq!(saved.model.as_deref(), Some("other/model"));
+    assert_eq!(saved.models, ["other/model", "test/model"]);
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
 fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     let server = MockServer::start(vec![
         says("answer one"),

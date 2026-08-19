@@ -176,7 +176,12 @@ fn a_key_echoed_by_the_endpoint_is_redacted() {
 fn the_environment_overrides_the_key_file() {
     let dir = workdir("env");
     let payloads = completion("from the env");
-    let server = MockServer::start_one(sse_response(&as_refs(&payloads))).unwrap();
+    let remembered = completion("from the remembered model");
+    let server = MockServer::start(vec![
+        sse_response(&as_refs(&payloads)),
+        sse_response(&as_refs(&remembered)),
+    ])
+    .unwrap();
     let key_file = write_key(&dir, "sk-file-key-should-lose");
     let config = write_config(&dir, &server, Some(&key_file), false);
     let log = dir.join("gears.log");
@@ -192,6 +197,18 @@ fn the_environment_overrides_the_key_file() {
     assert_eq!(sent.header("authorization"), Some("Bearer sk-env-key-wins"));
     let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
     assert_eq!(body["model"], serde_json::json!("test/other-model"));
+
+    let saved = gears::config::Config::load(Some(&config)).unwrap();
+    assert_eq!(saved.model.as_deref(), Some("test/other-model"));
+    assert_eq!(saved.models, ["test/other-model"]);
+    let out = gears(&config, &log)
+        .arg("ask")
+        .arg("again")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let second: serde_json::Value = serde_json::from_slice(&server.requests()[1].body).unwrap();
+    assert_eq!(second["model"], "test/other-model");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

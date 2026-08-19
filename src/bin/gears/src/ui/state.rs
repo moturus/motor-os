@@ -39,6 +39,26 @@ pub struct ArtifactPage {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    models: Vec<String>,
+    selected: usize,
+}
+
+impl ModelChoice {
+    pub fn models(&self) -> &[String] {
+        &self.models
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub fn model(&self) -> &str {
+        &self.models[self.selected]
+    }
+}
+
 impl Approval {
     pub fn agent(&self) -> AgentId {
         self.agent
@@ -71,6 +91,7 @@ pub struct State {
     context: Window,
     usage: UsageMeter,
     approval: Option<Approval>,
+    model_choice: Option<ModelChoice>,
     draft: String,
     draft_cursor: usize,
     transcript: Transcript,
@@ -89,6 +110,7 @@ impl Default for State {
             context: Window::default(),
             usage: UsageMeter::new(),
             approval: None,
+            model_choice: None,
             draft: String::new(),
             draft_cursor: 0,
             transcript: Transcript::new(
@@ -134,6 +156,10 @@ impl State {
 
     pub fn approval(&self) -> Option<&Approval> {
         self.approval.as_ref()
+    }
+
+    pub fn model_choice(&self) -> Option<&ModelChoice> {
+        self.model_choice.as_ref()
     }
 
     pub fn draft(&self) -> &str {
@@ -224,6 +250,40 @@ impl State {
         draft.clone_into(&mut self.draft);
         self.draft_cursor = cursor;
         true
+    }
+
+    pub fn open_model_choice(&mut self, models: Vec<String>) -> bool {
+        if models.is_empty() {
+            return false;
+        }
+        self.model_choice = Some(ModelChoice {
+            models,
+            selected: 0,
+        });
+        true
+    }
+
+    pub fn move_model_choice(&mut self, down: bool) -> bool {
+        let Some(choice) = self.model_choice.as_mut() else {
+            return false;
+        };
+        let next = match down {
+            true => (choice.selected + 1).min(choice.models.len() - 1),
+            false => choice.selected.saturating_sub(1),
+        };
+        let changed = next != choice.selected;
+        choice.selected = next;
+        changed
+    }
+
+    pub fn take_model_choice(&mut self) -> Option<String> {
+        self.model_choice
+            .take()
+            .map(|choice| choice.model().to_string())
+    }
+
+    pub fn cancel_model_choice(&mut self) -> bool {
+        self.model_choice.take().is_some()
     }
 
     pub fn start_turn(&mut self) -> bool {
@@ -464,5 +524,31 @@ mod tests {
         };
         reply.send(crate::agent::bus::Decision::Deny);
         assert_eq!(answer.wait(), Some(crate::agent::bus::Decision::Deny));
+    }
+
+    #[test]
+    fn model_choice_is_single_selection_and_preserves_the_draft() {
+        let mut state = State::new();
+        state.set_draft("unfinished prompt", 5);
+        assert!(state.open_model_choice(vec!["one".into(), "two".into(), "three".into()]));
+        assert_eq!(state.model_choice().unwrap().model(), "one");
+        assert!(state.move_model_choice(true));
+        assert_eq!(state.model_choice().unwrap().model(), "two");
+        assert!(state.move_model_choice(true));
+        assert!(!state.move_model_choice(true));
+        assert_eq!(state.take_model_choice().as_deref(), Some("three"));
+        assert_eq!(
+            (state.draft(), state.draft_cursor()),
+            ("unfinished prompt", 5)
+        );
+
+        assert!(state.open_model_choice(vec!["one".into(), "two".into()]));
+        assert!(state.move_model_choice(true));
+        assert!(state.cancel_model_choice());
+        assert!(state.model_choice().is_none());
+        assert_eq!(
+            (state.draft(), state.draft_cursor()),
+            ("unfinished prompt", 5)
+        );
     }
 }

@@ -22,6 +22,11 @@ pub enum Action {
     Resize,
     ScrollUp,
     ScrollDown,
+    ModelUp,
+    ModelDown,
+    ModelAccept,
+    ModelCancel,
+    SelectModel(String),
 }
 
 pub struct Input {
@@ -53,13 +58,18 @@ impl Input {
     }
 
     /// Read at most one actionable terminal event.
-    pub fn poll(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
+    pub fn poll(
+        &mut self,
+        timeout: Duration,
+        editing: bool,
+        choosing_model: bool,
+    ) -> io::Result<Option<Action>> {
         let mut wait = timeout;
         loop {
             if !event::poll(wait)? {
                 return Ok(None);
             }
-            if let Some(action) = self.apply(event::read()?, editing) {
+            if let Some(action) = self.apply_mode(event::read()?, editing, choosing_model) {
                 return Ok(Some(action));
             }
             // Ignore inapplicable events already in the queue without turning
@@ -68,20 +78,34 @@ impl Input {
         }
     }
 
+    #[cfg(test)]
     fn apply(&mut self, event: Event, editing: bool) -> Option<Action> {
+        self.apply_mode(event, editing, false)
+    }
+
+    fn apply_mode(&mut self, event: Event, editing: bool, choosing_model: bool) -> Option<Action> {
         match event {
             Event::Resize(_, _) => Some(Action::Resize),
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key, editing),
-            Event::Paste(text) if editing => Self::edited(self.editor.insert_paste(&text)),
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                self.key(key, editing, choosing_model)
+            }
+            Event::Paste(text) if editing && !choosing_model => {
+                Self::edited(self.editor.insert_paste(&text))
+            }
             _ => None,
         }
     }
 
-    fn key(&mut self, key: KeyEvent, editing: bool) -> Option<Action> {
+    fn key(&mut self, key: KeyEvent, editing: bool, choosing_model: bool) -> Option<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('c') if control => Some(Action::Cancel),
             KeyCode::Char('p') if control => Some(Action::Pause),
+            KeyCode::Up if choosing_model => Some(Action::ModelUp),
+            KeyCode::Down if choosing_model => Some(Action::ModelDown),
+            KeyCode::Enter if choosing_model => Some(Action::ModelAccept),
+            KeyCode::Esc if choosing_model => Some(Action::ModelCancel),
+            _ if choosing_model => None,
             KeyCode::PageUp => Some(Action::ScrollUp),
             KeyCode::PageDown => Some(Action::ScrollDown),
             _ if !editing => None,
@@ -326,6 +350,31 @@ mod tests {
         assert_eq!(
             input.apply(key(KeyCode::Down, KeyModifiers::NONE), true),
             Some(Action::Changed)
+        );
+        assert_eq!(input.draft(), "draft");
+    }
+
+    #[test]
+    fn model_choice_keys_do_not_edit_the_prompt() {
+        let mut input = Input::new(Gate::new(Mode::Ask));
+        input.apply(Event::Paste("draft".into()), true);
+        for (code, expected) in [
+            (KeyCode::Up, Some(Action::ModelUp)),
+            (KeyCode::Down, Some(Action::ModelDown)),
+            (KeyCode::Enter, Some(Action::ModelAccept)),
+            (KeyCode::Esc, Some(Action::ModelCancel)),
+            (KeyCode::Char(' '), None),
+            (KeyCode::Char('x'), None),
+            (KeyCode::PageUp, None),
+        ] {
+            assert_eq!(
+                input.apply_mode(key(code, KeyModifiers::NONE), true, true),
+                expected
+            );
+        }
+        assert_eq!(
+            input.apply_mode(Event::Paste("ignored".into()), true, true),
+            None
         );
         assert_eq!(input.draft(), "draft");
     }

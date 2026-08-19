@@ -75,11 +75,17 @@ pub struct Kit {
     pub(crate) mutation_generation: Arc<Mutex<u64>>,
     pub provider: Provider,
     /// The model an agent gets when its parent names none.
-    pub model: String,
+    pub model: Arc<Mutex<String>>,
     pub max_steps: usize,
     /// The window every agent has to stay inside. One policy, because they
     /// are all talking to the same endpoint.
     pub context: crate::agent::context::Policy,
+}
+
+impl Kit {
+    fn selected_model(&self, explicit: Option<String>) -> String {
+        explicit.unwrap_or_else(|| self.model.lock().unwrap().clone())
+    }
 }
 
 /// What a sub-agent had to say for itself when it stopped.
@@ -245,7 +251,8 @@ impl Agents {
         let bus = Bus::with_pause(id, self.events.clone(), self.pause.clone());
         let cancel = bus.canceller();
         let tools = self.registry(depth + 1, read_only);
-        let mut conversation = Conversation::new(model.unwrap_or_else(|| self.kit.model.clone()));
+        let model = self.kit.selected_model(model);
+        let mut conversation = Conversation::new(model);
         if let Some(journal) = &self.kit.mutation_journal {
             conversation = conversation.with_journal(Box::new(journal.clone()));
         }
@@ -522,7 +529,7 @@ mod tests {
             mutation_journal: None,
             mutation_generation: Arc::new(Mutex::new(0)),
             provider: Arc::new(Parrot { delay, cost }),
-            model: "test/model".to_string(),
+            model: Arc::new(Mutex::new("test/model".to_string())),
             max_steps: 4,
             context: crate::agent::context::Policy::default(),
         };
@@ -533,6 +540,20 @@ mod tests {
 
     fn quick(limits: Limits) -> (Arc<Agents>, Receiver<Event>) {
         agents(limits, Duration::ZERO, None)
+    }
+
+    #[test]
+    fn future_sub_agents_use_the_shared_default_unless_explicit() {
+        let (agents, _events) = quick(Limits::default());
+        assert_eq!(agents.kit.selected_model(None), "test/model");
+        *agents.kit.model.lock().unwrap() = "next/model".to_string();
+        assert_eq!(agents.kit.selected_model(None), "next/model");
+        assert_eq!(
+            agents
+                .kit
+                .selected_model(Some("explicit/model".to_string())),
+            "explicit/model"
+        );
     }
 
     #[test]
