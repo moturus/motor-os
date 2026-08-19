@@ -50,7 +50,8 @@ A supported package has:
 - one selected root package, optionally in an explicit workspace;
 - at most one library and 64 binary targets;
 - optional top-level `tests/*.rs` integration tests;
-- a current Cargo.lock version 4, including for dependency-free packages; and
+- a current Cargo.lock version 3 or 4, including for dependency-free packages;
+  `lorry vendor` preserves an unchanged version 3 lock; and
 - only supported crates.io, Git, and local-path dependency declarations.
 
 The supported dependency model includes renamed and optional dependencies,
@@ -184,6 +185,10 @@ repository and create or repair Cargo.lock with:
 ```sh
 lorry vendor
 ```
+
+Vendoring accepts Cargo.lock versions 3 and 4. It preserves an unchanged
+version 3 lock byte-for-byte and writes canonical version 4 when the lockfile
+must be created or repaired.
 
 New packages are displayed with their exact version, checksum, license,
 build-script and procedural-macro status, sizes, and new dependency edges.
@@ -365,8 +370,12 @@ an existing lock entry. Vendoring resolves one exact commit, records its
 evidence, and atomically rewrites the patch to:
 
 ```text
-.lorry/vendor/<patch>/source
+.lorry/vendor/<patch>/source[/<package-subdirectory>]
 ```
+
+For a repository-root package the suffix is absent. For a monorepo or virtual
+workspace, Lorry locates the unique manifest for the patched package and
+rewrites the patch to that package directory.
 
 Both forms use a shallow fetch and record the canonical URL, requested
 selector, commit, Git tree, canonical source digest, file count, and byte

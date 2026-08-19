@@ -298,13 +298,15 @@ settings must be rejected rather than adopted or ignored.
 
 ## Locking, resolution, and source selection
 
-- Every build, run, and test requires a present, current Cargo.lock version 4,
-  including dependency-free projects. These commands treat it as read-only,
-  remain offline, and never repair it.
+- Every build, run, and test requires a present, current Cargo.lock version 3
+  or 4, including dependency-free projects. These commands treat it as
+  read-only, remain offline, and never repair it.
 - `lorry vendor` creates a missing lock or repairs a stale lock while
-  preserving compatible locked versions. When portable admission state exists,
-  an ordinary vendor operation reconciles dependency-intent or lock-graph
-  drift only after interactive review; `--accept-all` cannot approve a change.
+  preserving compatible locked versions. It preserves an unchanged version 3
+  lock byte-for-byte and writes canonical version 4 when creation or repair is
+  required. When portable admission state exists, an ordinary vendor operation
+  reconciles dependency-intent or lock-graph drift only after interactive
+  review; `--accept-all` cannot approve a change.
   If the visible inputs no longer reconstruct the committed review, it shows
   the prior commitment and complete verified candidate instead of claiming a
   semantic diff.
@@ -312,9 +314,9 @@ settings must be rejected rather than adopted or ignored.
   move by its requirements. Every other compatible locked identity remains
   preferred.
 - Before normal resolution, `lorry vendor` materializes supported root
-  crates.io Git patches and atomically rewrites them to local path patches.
-  It also materializes exact locked direct Git sources needed by the root
-  manifest.
+  crates.io Git patches, locates the unique matching package manifest in each
+  snapshot, and atomically rewrites them to local path patches. It also
+  materializes exact locked direct Git sources needed by the root manifest.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
@@ -467,6 +469,10 @@ source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
 ```
+
+`cargo-lock-format-version` names Lorry's canonical lock representation. A
+version-3 compatibility input is normalized to these version-4 semantics before
+the review is reconstructed.
 
 `resolver-version` is the supported resolver selected by the root manifest.
 The scalar keys are followed by repeated tables in the order below. Fields

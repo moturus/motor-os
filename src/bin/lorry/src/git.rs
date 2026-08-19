@@ -206,9 +206,12 @@ fn parse_git_patches(root: &Path, document: &ImDocument<String>) -> Result<Vec<G
         let Some(table) = item.as_inline_table() else {
             continue;
         };
-        let Some(url) = table.get("git").and_then(Value::as_str) else {
+        let Some(git) = table.get("git") else {
             continue;
         };
+        let url = git.as_str().ok_or_else(|| {
+            Error::failure(format!("Git patch `{alias}` git URL must be a string"))
+        })?;
         validate_alias(alias)?;
         validate_git_url(url)?;
         for (key, _) in table.iter() {
@@ -435,11 +438,12 @@ mod tests {
         let source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
                       [patch.crates-io]\n\
                       crossterm = { git = \"https://example.com/crossterm.git\", branch = \"motor\" }\n\
+                      tokio = { git = \"https://example.com/tokio.git\", branch = \"motor\" }\n\
                       renamed = { git = \"https://example.com/actual.git\", rev = \"abc123\", package = \"actual\" }\n";
         let patches = parse_git_patches(Path::new("/fixture"), &document(source)).unwrap();
-        assert_eq!(patches.len(), 2);
+        assert_eq!(patches.len(), 3);
         assert!(matches!(patches[0].selector, Selector::Branch(ref value) if value == "motor"));
-        assert!(matches!(patches[1].selector, Selector::Revision(ref value) if value == "abc123"));
+        assert!(matches!(patches[2].selector, Selector::Revision(ref value) if value == "abc123"));
         let rewritten = rewrite_manifest(
             source,
             &patches,
@@ -449,6 +453,13 @@ mod tests {
                     None,
                     Materialized {
                         path: ".lorry/vendor/crossterm/source".to_owned(),
+                    },
+                ),
+                (
+                    "tokio".to_owned(),
+                    None,
+                    Materialized {
+                        path: ".lorry/vendor/tokio/source/tokio".to_owned(),
                     },
                 ),
                 (
@@ -462,6 +473,7 @@ mod tests {
         )
         .unwrap();
         assert!(rewritten.contains("crossterm = { path = \".lorry/vendor/crossterm/source\" }"));
+        assert!(rewritten.contains("tokio = { path = \".lorry/vendor/tokio/source/tokio\" }"));
         assert!(rewritten.contains(
             "renamed = { path = \".lorry/vendor/renamed/source\", package = \"actual\" }"
         ));

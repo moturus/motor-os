@@ -9,8 +9,10 @@ use crate::config::{NetworkConfig, PolicyLimits};
 use crate::curl::Client;
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
+use crate::manifest::Manifest;
 use crate::redirect::TrustPolicy;
-use crate::source_tree::{Exclusions, Limits, Tree};
+use crate::source_tree::{EntryKind, Exclusions, Limits, Tree};
+use crate::toml::Document;
 
 use super::http::Remote;
 use super::{GitPatch, Materialized, Selector};
@@ -111,6 +113,7 @@ pub(super) fn materialize_one(
     })?;
 
     let source_tree = Tree::scan(&source, limits, Exclusions::None)?;
+    let package_path = locate_patch_package(patch, &source, &source_tree)?;
     approve(patch, &commit_id, &tree_id, &source_tree, accept_all)?;
     let provenance = format!(
         "format-version = 1\nalias = {:?}\ngit-url = {:?}\nrequested-revision = {:?}\nresolved-commit = {:?}\ngit-tree = {:?}\nsource-tree-sha256 = {:?}\n",
@@ -124,7 +127,60 @@ pub(super) fn materialize_one(
     fs::write(staging.path().join("git.toml"), provenance)
         .map_err(|error| Error::failure(format!("failed to write Git provenance: {error}")))?;
     staging.commit(&destination)?;
-    Ok(Materialized { path: relative })
+    Ok(Materialized {
+        path: if package_path.is_empty() {
+            relative
+        } else {
+            format!("{relative}/{package_path}")
+        },
+    })
+}
+
+fn locate_patch_package(patch: &GitPatch, source: &Path, tree: &Tree) -> Result<String> {
+    let package = patch.package.as_deref().unwrap_or(&patch.alias);
+    let mut matches = Vec::new();
+    for entry in &tree.entries {
+        if entry.kind != EntryKind::File
+            || (entry.path != "Cargo.toml" && !entry.path.ends_with("/Cargo.toml"))
+        {
+            continue;
+        }
+        let path = source.join(&entry.path);
+        let Ok(document) = Document::load(&path, "Git package manifest") else {
+            continue;
+        };
+        if document
+            .root()
+            .get("package")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("name"))
+            .and_then(|item| item.as_str())
+            != Some(package)
+        {
+            continue;
+        }
+        matches.push(
+            entry
+                .path
+                .strip_suffix("/Cargo.toml")
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    let [package_path] = matches.as_slice() else {
+        return Err(Error::failure(format!(
+            "Git patch `{}` contains {} manifests for package `{package}`",
+            patch.alias,
+            matches.len()
+        )));
+    };
+    let package_root = if package_path.is_empty() {
+        source.to_owned()
+    } else {
+        source.join(package_path)
+    };
+    Manifest::load_path_dependency(&package_root)?;
+    Ok(package_path.clone())
 }
 
 fn select_revision(
@@ -351,4 +407,65 @@ fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source_tree::DEFAULT_LIMITS;
+
+    #[test]
+    fn locates_a_patch_package_below_a_virtual_workspace() {
+        let source =
+            std::env::temp_dir().join(format!("lorry-git-patch-package-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&source);
+        fs::create_dir_all(source.join("tokio/src")).unwrap();
+        fs::write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"tokio\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("tokio/Cargo.toml"),
+            "[package]\nname = \"tokio\"\nversion = \"1.47.1\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(source.join("tokio/src/lib.rs"), "pub fn runtime() {}\n").unwrap();
+        let patch = GitPatch {
+            alias: "tokio".to_owned(),
+            package: None,
+            url: "https://example.com/tokio.git".to_owned(),
+            selector: Selector::Branch("motor".to_owned()),
+            locked_commit: None,
+            span: 0..0,
+        };
+        let tree = Tree::scan(&source, DEFAULT_LIMITS, Exclusions::None).unwrap();
+
+        assert_eq!(
+            locate_patch_package(&patch, &source, &tree).unwrap(),
+            "tokio"
+        );
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn locates_the_motor_tokio_patch_when_requested() {
+        let Some(source) = std::env::var_os("LORRY_TEST_TOKIO_CHECKOUT") else {
+            return;
+        };
+        let source = Path::new(&source);
+        let tree = Tree::scan(source, DEFAULT_LIMITS, Exclusions::GitAndTarget).unwrap();
+        let patch = GitPatch {
+            alias: "tokio".to_owned(),
+            package: None,
+            url: "https://github.com/moturus/tokio.git".to_owned(),
+            selector: Selector::Branch("tokio-motor-1.47.1_2025-10-07".to_owned()),
+            locked_commit: Some("f9d26ea874753c0b5126401e77daee9e6222c359".to_owned()),
+            span: 0..0,
+        };
+        assert_eq!(
+            locate_patch_package(&patch, source, &tree).unwrap(),
+            "tokio"
+        );
+    }
 }

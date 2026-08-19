@@ -195,15 +195,17 @@ in-scope crate invokes NASM or standalone `as`.
 
 ## Locks, sources, admission, and limits
 
-The in-scope build reads version-3 locks for `src/sys` and `kibim`; Lorry
-currently requires version 4. There are two valid approaches:
+The in-scope build reads version-3 locks for `src/sys` and `kibim`. Lorry
+accepts v3 as read-only compatibility input. Vendor preserves a current v3
+lock and writes v4 when dependency changes require replacing it. The
+alternatives considered were:
 
 - accept v3 as a read-only compatibility input and continue rendering v4 from
   `vendor`; or
 - regenerate and commit every repository lock as v4 before conversion.
 
-Supporting read-only v3 is the only approach that builds the checkout exactly
-as it exists today and is a small, bounded compatibility increment.
+Read-only v3 support builds the checkout exactly as it exists today and is a
+small, bounded compatibility increment.
 
 The Git source work identified by the original audit is complete. Vendor now
 materializes root Git patches before ordinary manifest loading and represents
@@ -367,8 +369,6 @@ gate required by the applicable `AGENTS.md`.
 
 ## Decisions needed before implementation
 
-- Accept Cargo.lock v3 indefinitely as read-only input, or migrate the
-  repository and keep Lorry v4-only?
 - Use fixed-prefix admission for Motor's LLVM multicall or exact image wrappers?
 - What portable canonical name should admission use for a custom JSON target?
 - Which Motor-capable file-backed block-device implementation should imager
