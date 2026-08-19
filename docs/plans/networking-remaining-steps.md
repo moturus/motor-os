@@ -35,25 +35,17 @@ retired scans live on as debug-only oracles). `rt.vdso` owns the net
 channel pool, blocking policy, and POSIX state. The review below found
 that the close/reset behavior is not yet Linux-equivalent in every path.
 
-## Next up (approved)
+## Next up (design review)
 
-Implement the first series in this security-first order, as one small
-independently gated commit per defect:
-
-1. TCP ACK upper-bound validation.
-2. Right-window-clipped TCP FIN handling.
-3. SYN-cookie restore deduplication and handle-checked demux retirement.
-4. The malformed-UDP-fragment sys-io panic.
-5. The unbounded completed accept backlog.
-6. The std-reachable vdso socket-option panics.
-7. The listener-flood memory-admission gap that can terminate sys-io.
-8. Option RPCs on unconnected/failed-connect TCP streams.
-9. Peer-reset reads laundered to clean EOF.
-
-IPv4 and IPv6 fragmentation/reassembly are also approved. This is a
-larger, security-sensitive change, so first write a dedicated design in
-`docs/plans/`, including resource bounds, overlap handling, PMTU, and
-production-feature tests, and ask for review before changing code.
+The approved nine-defect security-first series has landed. The next
+approved implementation is IPv4 and IPv6 fragmentation/reassembly plus
+the minimum PMTU handling selected below. It is a larger,
+security-sensitive change, so implementation remains blocked on review
+of the dedicated design in
+[`network-fragmentation-design.md`](network-fragmentation-design.md).
+That design records the code audit, exact resource bounds, overlap and
+expiry policy, PMTU quote validation, production feature closure, patch
+sequence, and gates.
 
 ## Found by the 2026-08-18 full review -- triaged
 
@@ -168,7 +160,8 @@ netstack infrastructure:
   IPv4 packets over the interface MTU and oversized IPv6 packets are
   logged and dropped while interface dispatch returns success. UDP then
   dequeues the datagram, so an application can successfully send up to
-  the advertised 65,507-byte API limit while every external packet above
+  the current 65,493-byte API limit (the intended IPv4 limit is 65,507)
+  while every external packet above
   the path MTU silently disappears. Implement bounded,
   overlap-safe IPv4 and IPv6 fragmentation/reassembly rather than an
   `EMSGSIZE`-only fix. This requires the dedicated design named under
@@ -590,6 +583,6 @@ reference first.
 ## Final-review status
 
 All questions from the 2026-08-18 triage are resolved and incorporated
-above. The security-first series and the fragmentation design step are
-approved, but implementation must not begin until this document passes
-the requested final review.
+above, and the approved nine-defect security-first series has landed.
+Fragmentation implementation is now awaiting review of the dedicated
+design linked under "Next up."
