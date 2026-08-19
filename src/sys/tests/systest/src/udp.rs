@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use moto_io::net::udp::UdpSocket as NativeUdpSocket;
+use moto_ipc::io_channel;
 
 fn test_udp_basic() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
@@ -530,6 +531,135 @@ fn udp_close_does_not_overtake_tx_test() {
     println!("-- udp_close_does_not_overtake_tx_test() PASS");
 }
 
+fn recv_raw(connection: &io_channel::ClientConnection) -> io_channel::Msg {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match connection.recv() {
+            Ok(msg) => return msg,
+            Err(moto_rt::Error::NotReady) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for raw sys-io response"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
+    }
+}
+
+fn send_fragment(
+    connection: &io_channel::ClientConnection,
+    socket_id: u64,
+    fragment_id: u16,
+    size: u16,
+    destination: std::net::SocketAddr,
+) {
+    let msg = if size == 0 {
+        let mut msg = moto_sys_io::api_net::udp_socket_tx_rx_empty_msg(socket_id, &destination);
+        msg.payload.args_16_mut()[9] = fragment_id;
+        msg
+    } else {
+        let page = connection.alloc_page(u64::MAX).unwrap();
+        moto_sys_io::api_net::udp_socket_tx_rx_msg(socket_id, page, fragment_id, size, &destination)
+    };
+    connection.send(msg).unwrap();
+}
+
+fn send_valid_fragment(
+    connection: &io_channel::ClientConnection,
+    socket_id: u64,
+    fragment_id: u16,
+    destination: std::net::SocketAddr,
+) {
+    send_fragment(
+        connection,
+        socket_id,
+        fragment_id,
+        io_channel::PAGE_SIZE as u16,
+        destination,
+    );
+    let ack = recv_raw(connection);
+    assert_eq!(
+        ack.command,
+        moto_sys_io::api_net::NetCmd::UdpSocketTxRxAck as u16
+    );
+}
+
+pub(crate) fn run_malformed_fragment_child(kind: &str) {
+    use std::io::Write;
+
+    let connection = io_channel::ClientConnection::connect("sys-io").unwrap();
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(moto_sys_io::api_net::bind_udp_socket_request(&bind_addr, 0))
+        .unwrap();
+    let response = recv_raw(&connection);
+    response.status().unwrap();
+    let socket_id = response.handle;
+    let destination = "127.0.0.1:9".parse().unwrap();
+    let other_destination = "127.0.0.1:10".parse().unwrap();
+    let full = io_channel::PAGE_SIZE as u16;
+
+    match kind {
+        "empty" => {}
+        "terminal" | "short" => {}
+        "skip" | "address" => send_valid_fragment(&connection, socket_id, 1, destination),
+        "too_many" | "too_long" => {
+            for fragment_id in 1..16 {
+                send_valid_fragment(&connection, socket_id, fragment_id, destination);
+            }
+        }
+        _ => panic!("unknown malformed UDP fragment kind: {kind}"),
+    }
+
+    println!("malformed_udp_fragment: armed");
+    std::io::stdout().flush().unwrap();
+    match kind {
+        "empty" => send_fragment(&connection, socket_id, 1, 0, destination),
+        "terminal" => send_fragment(&connection, socket_id, u16::MAX, 1, destination),
+        "short" => send_fragment(&connection, socket_id, 1, full - 1, destination),
+        "skip" => send_fragment(&connection, socket_id, 3, full, destination),
+        "address" => send_fragment(&connection, socket_id, u16::MAX, 1, other_destination),
+        "too_many" => send_fragment(&connection, socket_id, 16, full, destination),
+        "too_long" => {
+            let tail = moto_rt::net::MAX_UDP_PAYLOAD - 15 * io_channel::PAGE_SIZE + 1;
+            send_fragment(&connection, socket_id, u16::MAX, tail as u16, destination);
+        }
+        _ => unreachable!(),
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::process::exit(0);
+}
+
+fn malformed_udp_fragments_only_kill_the_client() {
+    for kind in [
+        "empty", "terminal", "short", "skip", "address", "too_many", "too_long",
+    ] {
+        let mut child = crate::subcommand::spawn();
+        child.malformed_udp_fragment(kind);
+        assert!(
+            !child.wait().unwrap().success(),
+            "sys-io accepted malformed UDP fragment kind {kind}"
+        );
+    }
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender
+        .send_to(b"alive", receiver.local_addr().unwrap())
+        .unwrap();
+    let mut bytes = [0; 5];
+    assert_eq!(receiver.recv(&mut bytes).unwrap(), 5);
+    assert_eq!(&bytes, b"alive");
+
+    println!("-- malformed_udp_fragments_only_kill_the_client() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
@@ -543,5 +673,6 @@ pub fn run_all_tests() {
     test_udp_tx_progresses_after_page_free();
     udp_rebind_after_close_test();
     udp_close_does_not_overtake_tx_test();
+    malformed_udp_fragments_only_kill_the_client();
     println!("UDP tests PASS");
 }

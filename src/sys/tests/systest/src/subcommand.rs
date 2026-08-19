@@ -101,6 +101,20 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn malformed_udp_fragment(&mut self, kind: &str) {
+        use std::io::{BufRead, BufReader, Write};
+
+        self.stdin
+            .write_all(format!("malformed_udp_fragment {kind}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+
+        let mut line = String::new();
+        let stdout = self.inst.stdout.as_mut().unwrap();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "malformed_udp_fragment: armed");
+    }
+
     pub fn listener_flood(&mut self, cap: usize) {
         use std::io::Write;
         self.stdin
@@ -369,6 +383,10 @@ fn do_command(cmd: String) {
             }
         }
         "xor_service" => crate::xor_server::start(),
+        "malformed_udp_fragment" => {
+            assert_eq!(2, words.len());
+            crate::udp::run_malformed_fragment_child(words[1]);
+        }
         // Bind listeners until refused (or `cap`), report, hold them until
         // the next command. The 2026-07 recording: four processes' worth of
         // aggregate listener buffers stopped the machine at phys.rs:469
