@@ -2965,6 +2965,73 @@ fn test_backlog_saturation_liveness() {
     println!("test_backlog_saturation_liveness() PASS");
 }
 
+/// Established sockets waiting for accept are independently bounded even
+/// when the listener is driven through sys-io directly, with no vDSO backlog.
+fn test_completed_accept_backlog_is_bounded() {
+    use moto_sys_io::api_net;
+
+    const PER_LISTENER_CAP: usize = 32;
+
+    let backlog_before = read_sys_io_metric("net.tcp.accept_backlog");
+    let overflow_before = read_sys_io_metric("net.tcp.accept_overflow");
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(
+            &bind_addr,
+            Some(PER_LISTENER_CAP as u8),
+        ))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
+
+    let mut held = Vec::with_capacity(PER_LISTENER_CAP);
+    for _ in 0..PER_LISTENER_CAP {
+        held.push(
+            std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2)).unwrap(),
+        );
+    }
+    wait_for_sys_io_metric("net.tcp.accept_backlog", |value| {
+        value == backlog_before + PER_LISTENER_CAP as u64
+    });
+
+    let overflow = std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2));
+    wait_for_sys_io_metric("net.tcp.accept_overflow", |value| value > overflow_before);
+    assert_eq!(
+        read_sys_io_metric("net.tcp.accept_backlog"),
+        backlog_before + PER_LISTENER_CAP as u64
+    );
+    match overflow {
+        Err(err) => assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionReset
+        )),
+        Ok(mut stream) => {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            // The connect response can cross the abort notification: Motor's
+            // first read then reports either the reset or its terminal EOF.
+            // Data or a timeout would mean the overflow socket stayed alive.
+            match stream.read(&mut [0_u8; 1]) {
+                Ok(0) => {}
+                Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset),
+                Ok(count) => panic!("overflowing connection delivered {count} unexpected byte(s)"),
+            }
+        }
+    }
+
+    drop(held);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.tcp.accept_backlog", |value| value == backlog_before);
+    println!("test_completed_accept_backlog_is_bounded() PASS");
+}
+
 // The step-3 storm (networking plan): with the vDSO recheck ticks deleted,
 // every park below is woken only by its real wake chain. Timeout storms on
 // quiet and backpressured sockets run concurrently with live TCP and UDP
@@ -3152,6 +3219,7 @@ pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
     test_channel_teardown();
+    test_completed_accept_backlog_is_bounded();
     test_backlog_saturation_liveness();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();

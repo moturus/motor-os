@@ -15,6 +15,7 @@ use crate::runtime::net::socket::MotoSocket;
 use crate::util::map_err_into_native;
 
 mod backlog;
+mod completed;
 mod config;
 mod device;
 mod half_open;
@@ -29,6 +30,7 @@ mod tcp_listener;
 #[cfg(debug_assertions)]
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     backlog::self_test::TESTS,
+    completed::self_test::TESTS,
     config::self_test::TESTS,
     device::self_test::TESTS,
     half_open::self_test::TESTS,
@@ -126,6 +128,9 @@ struct NetRuntime {
 
     // Sizes each listening pool against the bursts it actually meets.
     backlog: Rc<backlog::BacklogBudget>,
+
+    // Bounds established sockets waiting for accept().
+    completed: Rc<completed::CompletedBacklog>,
 
     // Refuses new memory-growing work while global availability is low.
     pressure: Rc<pressure::Pressure>,
@@ -754,6 +759,7 @@ pub(super) async fn init(
             config.max_backlog_global,
             config.max_backlog_per_listener,
         )),
+        completed: Rc::new(completed::CompletedBacklog::new(net_stats.clone())),
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
         fs: fs.clone(),
     };

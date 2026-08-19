@@ -89,6 +89,11 @@ mod ids {
     // `max_syn_cookie_rate` in sys-net.toml).
     pub const NET_TCP_RST_SUPPRESSED: u32 = 47;
     pub const NET_TCP_COOKIES_SUPPRESSED: u32 = 48;
+
+    // Established sockets waiting for accept(), and connections refused at
+    // that queue's hard limits.
+    pub const NET_TCP_ACCEPT_BACKLOG: u32 = 49;
+    pub const NET_TCP_ACCEPT_OVERFLOW: u32 = 50;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -229,6 +234,10 @@ pub(super) struct NetStats {
     /// engaged. Nonzero means a flood beyond both the half-open cap and the
     /// cookie rate.
     pub tcp_syn_cookies_suppressed: Cell<u64>,
+    /// Established sockets waiting for their listener's next accept.
+    pub tcp_accept_backlog: Cell<u64>,
+    /// Completed connections reset because that backlog was full.
+    pub tcp_accept_overflow: Cell<u64>,
     /// io_channel listeners currently armed and parked for a client. Zero is
     /// the state where a connect would answer `NotFound`; the accept path's
     /// floor refuses its client rather than serve from it.
@@ -346,6 +355,8 @@ impl NetStats {
                 ids::NET_TCP_COOKIES_SUPPRESSED,
                 self.tcp_syn_cookies_suppressed.get(),
             ),
+            MetricEntry::global(ids::NET_TCP_ACCEPT_BACKLOG, self.tcp_accept_backlog.get()),
+            MetricEntry::global(ids::NET_TCP_ACCEPT_OVERFLOW, self.tcp_accept_overflow.get()),
         ]);
 
         entries.extend([
@@ -431,6 +442,8 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             ids::NET_TCP_COOKIES_SUPPRESSED,
             "net.tcp.cookies_suppressed",
         ),
+        MetricDescWire::new(ids::NET_TCP_ACCEPT_BACKLOG, "net.tcp.accept_backlog"),
+        MetricDescWire::new(ids::NET_TCP_ACCEPT_OVERFLOW, "net.tcp.accept_overflow"),
     ]);
 
     descriptors.extend([
