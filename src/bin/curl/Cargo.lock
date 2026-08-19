@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "cc"
 version = "1.4.0"
+source = "git+https://github.com/moturus/cc-rs.git?branch=main#02932efc0d268db49c150a3ae31a6ad2c422f45b"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -29,8 +30,7 @@ dependencies = [
 [[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+source = "git+https://github.com/moturus/cc-rs.git?branch=main#02932efc0d268db49c150a3ae31a6ad2c422f45b"
 
 [[package]]
 name = "getrandom"
@@ -62,6 +62,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "ring"
 version = "0.17.14"
+source = "git+https://github.com/moturus/ring.git?branch=motor-os-0.17.14#b1dad2579de791d0c31ad33300187e584ba6c268"
 dependencies = [
  "cc",
  "cfg-if",

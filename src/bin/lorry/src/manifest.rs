@@ -396,8 +396,15 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let mut manifest =
-            Self::parse_document(&root, &path, &document, ManifestMode::Dependency, false)?;
+        let inherited = dependency_workspace_package(&root, &path, &document)?;
+        let mut manifest = Self::parse_document_with_inheritance(
+            &root,
+            &path,
+            &document,
+            ManifestMode::Dependency,
+            false,
+            inherited.as_ref(),
+        )?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
@@ -423,6 +430,17 @@ impl Manifest {
         mode: ManifestMode,
         allow_git_patches: bool,
     ) -> Result<Self> {
+        Self::parse_document_with_inheritance(root, path, document, mode, allow_git_patches, None)
+    }
+
+    fn parse_document_with_inheritance(
+        root: &Path,
+        path: &Path,
+        document: &Document,
+        mode: ManifestMode,
+        allow_git_patches: bool,
+        inherited: Option<&InheritedPackage>,
+    ) -> Result<Self> {
         validate_manifest_tables(path, document, mode)?;
         let package_item = document.root().get("package").ok_or_else(|| {
             Error::failure(format!(
@@ -435,13 +453,20 @@ impl Manifest {
 
         let name = required_string(path, document, package, "package", "name")?;
         validate_package_name(path, document.line_of_item(package_item), &name)?;
-        let version_text = required_string(path, document, package, "package", "version")?;
+        let version_text = required_package_string(
+            path,
+            document,
+            package,
+            "version",
+            inherited.and_then(|values| values.version.as_deref()),
+        )?;
         let version = parse_version(path, item_line(document, package, "version"), &version_text)?;
         let edition = parse_edition(
             path,
             document,
             package.get("edition"),
             document.line_of_table(package),
+            inherited.and_then(|values| values.edition.as_deref()),
         )?;
         let resolver = parse_resolver(
             path,
@@ -450,7 +475,7 @@ impl Manifest {
             edition,
             document.line_of_table(package),
         )?;
-        let mut metadata = parse_package_metadata(path, document, package)?;
+        let mut metadata = parse_package_metadata(path, document, package, inherited)?;
         if metadata.readme.is_empty() {
             for candidate in ["README.md", "README.txt", "README"] {
                 if root.join(candidate).is_file() {
@@ -612,7 +637,7 @@ impl Workspace {
             parse_resolver(path, document, Some(item), Edition::E2015, 1)?
         } else if let Some(package) = document.root().get("package") {
             let package = require_table(path, document, package, "package")?;
-            let edition = parse_edition(path, document, package.get("edition"), 1)?;
+            let edition = parse_edition(path, document, package.get("edition"), 1, None)?;
             parse_resolver(path, document, package.get("resolver"), edition, 1)?
         } else {
             Resolver::V1
@@ -784,6 +809,117 @@ enum ManifestMode {
     Dependency,
 }
 
+#[derive(Default)]
+struct InheritedPackage {
+    version: Option<String>,
+    edition: Option<String>,
+    rust_version: Option<String>,
+}
+
+fn dependency_workspace_package(
+    root: &Path,
+    path: &Path,
+    document: &Document,
+) -> Result<Option<InheritedPackage>> {
+    for ancestor in root.ancestors() {
+        let candidate_path = ancestor.join(MANIFEST_NAME);
+        let candidate_document;
+        let workspace_document = if candidate_path == path {
+            document
+        } else {
+            if !candidate_path.is_file() {
+                continue;
+            }
+            candidate_document =
+                Document::load(&candidate_path, "possible dependency workspace manifest")?;
+            &candidate_document
+        };
+        let Some(workspace_item) = workspace_document.root().get("workspace") else {
+            continue;
+        };
+        let workspace = require_table(
+            &candidate_path,
+            workspace_document,
+            workspace_item,
+            "workspace",
+        )?;
+        if ancestor != root
+            && !dependency_workspace_contains(
+                root,
+                ancestor,
+                &candidate_path,
+                workspace_document,
+                workspace,
+            )?
+        {
+            continue;
+        }
+        let Some(package_item) = workspace.get("package") else {
+            return Ok(Some(InheritedPackage::default()));
+        };
+        let package = require_table(
+            &candidate_path,
+            workspace_document,
+            package_item,
+            "workspace.package",
+        )?;
+        return Ok(Some(InheritedPackage {
+            version: optional_string(
+                &candidate_path,
+                workspace_document,
+                package,
+                "workspace.package",
+                "version",
+            )?,
+            edition: optional_string(
+                &candidate_path,
+                workspace_document,
+                package,
+                "workspace.package",
+                "edition",
+            )?,
+            rust_version: optional_string(
+                &candidate_path,
+                workspace_document,
+                package,
+                "workspace.package",
+                "rust-version",
+            )?,
+        }));
+    }
+    Ok(None)
+}
+
+fn dependency_workspace_contains(
+    root: &Path,
+    workspace_root: &Path,
+    path: &Path,
+    document: &Document,
+    workspace: &Table,
+) -> Result<bool> {
+    let Some(item) = workspace.get("members") else {
+        return Ok(false);
+    };
+    for member in string_array(path, document, item, "workspace.members")? {
+        let relative = Path::new(&member);
+        if member.is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            || member
+                .bytes()
+                .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
+        {
+            continue;
+        }
+        let candidate = workspace_root.join(relative);
+        if fs::canonicalize(candidate).is_ok_and(|candidate| candidate == root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode) -> Result<()> {
     for (key, item) in document.root().iter() {
         let supported = matches!(
@@ -818,6 +954,7 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
                     | "hints"
                     | "badges"
                     | "workspace"
+                    | "patch"
             )
         );
         if !supported {
@@ -945,6 +1082,7 @@ fn parse_package_metadata(
     path: &Path,
     document: &Document,
     package: &Table,
+    inherited: Option<&InheritedPackage>,
 ) -> Result<PackageMetadata> {
     Ok(PackageMetadata {
         authors: optional_string_array(path, document, package, "package", "authors")?
@@ -963,8 +1101,14 @@ fn parse_package_metadata(
             .unwrap_or_default(),
         readme: optional_string_or_false(path, document, package, "package", "readme")?
             .unwrap_or_default(),
-        rust_version: optional_string(path, document, package, "package", "rust-version")?
-            .unwrap_or_default(),
+        rust_version: optional_package_string(
+            path,
+            document,
+            package,
+            "rust-version",
+            inherited.and_then(|values| values.rust_version.as_deref()),
+        )?
+        .unwrap_or_default(),
     })
 }
 
@@ -973,12 +1117,14 @@ fn parse_edition(
     document: &Document,
     item: Option<&Item>,
     default_line: usize,
+    inherited: Option<&str>,
 ) -> Result<Edition> {
     let Some(item) = item else {
         return Ok(Edition::E2015);
     };
     let line = document.line_of_item(item).max(default_line);
-    match item.as_str() {
+    let value = inherited_package_value(path, document, item, "edition", inherited)?;
+    match value.as_deref() {
         Some("2015") => Ok(Edition::E2015),
         Some("2018") => Ok(Edition::E2018),
         Some("2021") => Ok(Edition::E2021),
@@ -1807,7 +1953,7 @@ fn parse_patches(
                 path,
                 document.line_of_value(git),
                 format!("Git patch `{alias}` is not materialized for an offline build"),
-                "run `lorry vendor` to pin the Git revision and rewrite this entry to its verified local path",
+                "run `lorry vendor [--accept-all]` to pin the Git revision and rewrite this entry to its verified local path",
             ));
         }
         for (key, value) in table.iter() {
@@ -1816,7 +1962,7 @@ fn parse_patches(
                     path,
                     document.line_of_value(value),
                     format!("patch key `{key}` is not supported in Stage 2"),
-                    "run `lorry vendor` to pin and materialize a Git patch, or use only `path` and optional `package`",
+                    "run `lorry vendor [--accept-all]` to pin and materialize a Git patch, or use only `path` and optional `package`",
                 ));
             }
         }
@@ -2342,6 +2488,72 @@ fn required_string(
     })
 }
 
+fn required_package_string(
+    path: &Path,
+    document: &Document,
+    package: &Table,
+    key: &str,
+    inherited: Option<&str>,
+) -> Result<String> {
+    optional_package_string(path, document, package, key, inherited)?.ok_or_else(|| {
+        Error::at(
+            path,
+            document.line_of_table(package),
+            format!("table `[package]` is missing required string `{key}`"),
+            format!("add `{key} = \"...\"` to `[package]`"),
+        )
+    })
+}
+
+fn optional_package_string(
+    path: &Path,
+    document: &Document,
+    package: &Table,
+    key: &str,
+    inherited: Option<&str>,
+) -> Result<Option<String>> {
+    package
+        .get(key)
+        .map(|item| inherited_package_value(path, document, item, key, inherited))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn inherited_package_value(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    key: &str,
+    inherited: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(value) = item.as_str() {
+        return Ok(Some(value.to_owned()));
+    }
+    let workspace = match item {
+        Item::Table(table) if table.len() == 1 => table.get("workspace").and_then(Item::as_bool),
+        Item::Value(Value::InlineTable(table)) if table.len() == 1 => {
+            table.get("workspace").and_then(Value::as_bool)
+        }
+        _ => None,
+    };
+    if workspace != Some(true) {
+        return Err(type_error(
+            path,
+            document.line_of_item(item),
+            &format!("package.{key}"),
+            "a string or `workspace = true`",
+        ));
+    }
+    inherited.map(str::to_owned).map(Some).ok_or_else(|| {
+        Error::at(
+            path,
+            document.line_of_item(item),
+            format!("package.{key} inherits a missing workspace.package.{key}"),
+            format!("define workspace.package.{key} as a string"),
+        )
+    })
+}
+
 fn optional_string(
     path: &Path,
     document: &Document,
@@ -2548,7 +2760,7 @@ fn validate_feature(path: &Path, line: usize, value: &str) -> Result<()> {
         || value.len() > 256
         || !value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+' | b'.'))
     {
         return Err(Error::at(
             path,
@@ -2768,6 +2980,7 @@ motor = "0.16"
 [features]
 default = ["serde/std", "dep:local-name"]
 "fast+mode" = []
+"embedded-io-v0.7" = []
 
 [patch.crates-io]
 ring = { path = ".lorry/vendor/ring/source" }
@@ -2790,6 +3003,7 @@ unsafe_code = { level = "forbid", priority = 1 }
         );
         assert_eq!(manifest.features["default"].len(), 2);
         assert!(manifest.features.contains_key("fast+mode"));
+        assert!(manifest.features.contains_key("embedded-io-v0.7"));
         assert_eq!(manifest.patches[0].package, "ring");
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
     }
@@ -3034,50 +3248,54 @@ members = ["ignored-member"]
     }
 
     #[test]
-    fn parses_the_seeded_ring_dependency_manifest_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let root = PathBuf::from(repository).join(
-            "objects/seeded-git/sha256/77/\
-             776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351/source",
-        );
-        let manifest = Manifest::load_path_dependency(&root).unwrap();
-        assert_eq!(manifest.name, "ring");
-        assert_eq!(manifest.version.original, "0.17.14");
-        assert_eq!(manifest.links.as_deref(), Some("ring_core_0_17_14_"));
-        assert!(manifest.build_script.is_some());
-        assert!(manifest.dependencies.iter().any(
-            |dependency| dependency.package == "cc" && dependency.kind == DependencyKind::Build
-        ));
-        assert!(
-            manifest
-                .dependencies
-                .iter()
-                .all(|dependency| dependency.kind != DependencyKind::Dev)
-        );
+    fn ignores_root_only_patch_tables_in_dependency_manifests() {
+        let source = "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\n\
+                      [patch.crates-io]\nother = { path = \"../other\" }\n";
+        let manifest = Manifest::parse_dependency(
+            Path::new("/dependency"),
+            Path::new("/dependency/Cargo.toml"),
+            source,
+        )
+        .unwrap();
+        assert!(manifest.patches.is_empty());
     }
 
     #[test]
-    fn parses_every_retained_stage_two_dependency_manifest_when_requested() {
-        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
-            return;
-        };
-        let objects = PathBuf::from(repository).join("objects/crates-io/sha256");
-        let mut parsed = 0;
-        for prefix in fs::read_dir(objects).unwrap() {
-            for object in fs::read_dir(prefix.unwrap().path()).unwrap() {
-                let root = object.unwrap().path().join("source");
-                if !root.join("Cargo.toml").is_file() {
-                    continue;
-                }
-                Manifest::load_path_dependency(&root).unwrap_or_else(|error| {
-                    panic!("failed to parse `{}`: {error}", root.display())
-                });
-                parsed += 1;
-            }
+    fn loads_inherited_dependency_workspace_package_fields() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lorry-inherited-dependency-{}-{id}",
+            std::process::id()
+        ));
+        let member = root.join("member");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(member.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion.workspace = true\n\
+             edition.workspace = true\nrust-version.workspace = true\n\
+             [workspace]\nmembers = [\"member\"]\n\
+             [workspace.package]\nversion = \"1.2.3\"\nedition = \"2021\"\n\
+             rust-version = \"1.64.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion.workspace = true\n\
+             edition.workspace = true\nrust-version.workspace = true\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(member.join("src/lib.rs"), "").unwrap();
+
+        for package in [&root, &member] {
+            let manifest = Manifest::load_path_dependency(package).unwrap();
+            assert_eq!(manifest.version.original, "1.2.3");
+            assert_eq!(manifest.edition, Edition::E2021);
+            assert_eq!(manifest.metadata.rust_version, "1.64.0");
         }
-        assert_eq!(parsed, 45);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

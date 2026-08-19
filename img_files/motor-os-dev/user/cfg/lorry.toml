@@ -1,0 +1,4 @@
+config-version = 1
+
+[repositories]
+user = "/user/cfg/lorry/vendor"

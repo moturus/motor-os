@@ -341,7 +341,7 @@ fn required_manifest_error(id: &str, rule: &RequiredPatch) -> String {
          add this exact entry:\n\
          [patch.crates-io]\n\
          {} = {{ path = \".lorry/vendor/{id}/source\" }}\n\
-         then run `lorry vendor` to populate an approved repository",
+         then run `lorry vendor [--accept-all]` to populate an approved repository",
         rule.provenance.display(),
         rule.name
     )
@@ -350,7 +350,7 @@ fn required_manifest_error(id: &str, rule: &RequiredPatch) -> String {
 fn required_source_error(id: &str, rule: &RequiredPatch, error: Error) -> String {
     format!(
         "required patch `{id}` from `{}` cannot use its verified source: {error}\n\
-         run `lorry vendor`; if this is a system seed, repair it with the host seeder",
+         run `lorry vendor [--accept-all]`; if a configured repository is corrupt, repair it",
         rule.provenance.display()
     )
 }

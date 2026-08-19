@@ -185,8 +185,8 @@ anonymous smart-HTTP requests through Lorry's bounded configured-curl client,
 so transport follows the same redirect, status, environment, and response-size
 rules as registry acquisition. No Git executable, credential helper, proxy,
 hook, filter, or ambient Git configuration is used. Checkout accepts only
-portable regular-file/directory trees and rejects links and submodules before
-atomic publication.
+portable trees, materializes only safe internal links as regular files, and
+rejects escaping or unresolved links and submodules before atomic publication.
 
 ## Generated dependency admission
 
@@ -332,7 +332,7 @@ target-native self-extracting executable containing the selected harnesses and
 required package binary. The launcher verifies its payload table and extracts
 only beneath its configured private root.
 
-## Platform boundary and bootstrap
+## Platform and image boundary
 
 Platform-specific behavior is kept narrow: installed configuration locations,
 compiler discovery, runner configuration, atomic no-replace publication,
@@ -341,18 +341,14 @@ Lorry crate otherwise uses standard Rust and `src/sys/lib` Motor APIs. It does
 not know about imager YAML, VM profiles, image staging roots, SSH transport, or
 guest-layout assertions.
 
-The production `bootstrap/` directory is outside the Lorry executable. It is a
-host-side OS-packaging utility called by the Motor toolchain build to create
-and copy a preinstalled immutable system repository and configuration. That
-seed makes the shipped development environment offline/self-hosting; it is not
-required when Lorry is given another valid configuration and repositories.
-
-The bootstrap manifest records the production Lorry/curl seed and exceptional
-patched Git provenance. Its Cargo-oracle-only entries support an explicitly
-requested disposable test view and never enter the installed repository,
-fingerprint, generated policy, or Motor image seed. Cargo comparisons and the
-single release-VM lifecycle are validation code under `tests/`, not product
-inputs.
+The Motor development image supplies an installed curl, CA bundle, native
+tools, a writable user-repository location, and explicit executable-code
+grants. It deliberately contains no dependency objects. A first `vendor`
+operation populates the writable repository and project-local Git trees over
+the network; all compilation commands remain offline. Cargo comparisons and
+the release-VM lifecycle are validation code under `tests/`, not product
+inputs. Curl remains an installed transport but is cross-built by Linux-hosted
+Cargo and is intentionally outside the Motor-native source snapshot set.
 
 ## Where to change behavior
 

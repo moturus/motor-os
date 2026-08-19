@@ -78,12 +78,26 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
 done
 
 echo "-- Developer source trees --"
-for package in red curl lorry gears moto-rt moto-sys; do
-  vm_ssh "[ -f /devtools/src/$package/Cargo.toml ]" ||
-    fail "developer image is missing /devtools/src/$package/Cargo.toml"
-  vm_ssh "[ ! -d /devtools/src/$package/target ]" ||
-    fail "developer image contains /devtools/src/$package/target"
+for package in red lorry gears; do
+  vm_ssh "[ -f /devtools/src/src/bin/$package/Cargo.toml ]" ||
+    fail "developer image is missing /devtools/src/src/bin/$package/Cargo.toml"
+  vm_ssh "[ ! -d /devtools/src/src/bin/$package/target ]" ||
+    fail "developer image contains /devtools/src/src/bin/$package/target"
+  vm_ssh "[ ! -d /devtools/src/src/bin/$package/.lorry/vendor ]" ||
+    fail "developer image contains materialized dependencies for $package"
 done
+vm_ssh "[ ! -e /devtools/src/src/bin/curl ]" ||
+  fail "developer image exposes curl as a Motor-native source project"
+for package in moto-rt moto-sys; do
+  vm_ssh "[ -f /devtools/src/src/sys/lib/$package/Cargo.toml ]" ||
+    fail "developer image is missing /devtools/src/src/sys/lib/$package/Cargo.toml"
+done
+vm_ssh "[ ! -e /devtools/lorry/vendor ]" ||
+  fail "developer image still contains a Lorry system seed"
+vm_ssh "[ -r /system/cfg/ssl/ca-certificates.crt ]" ||
+  fail "developer image is missing the public CA trust bundle"
+vm_ssh "[ -f /user/cfg/lorry.toml ]" ||
+  fail "developer image is missing the writable-repository configuration"
 
 cc_version="$(vm_ssh /devtools/bin/cc --version 2>&1)" ||
   fail "native cc --version failed: $cc_version"
@@ -131,19 +145,25 @@ vm_ssh "/devtools/bin/rustc /devtools/tmp/temp-contract.rs -o /devtools/tmp/temp
 
 # Build trees are scratch. Retaining all four at once exhausts the deliberately
 # bounded 2 GiB developer image before the second independent Gears build.
-for package in red curl; do
-  vm_ssh "cd /devtools/src/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
+for package in red; do
+  vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
+    fail "developer image cannot vendor /devtools/src/src/bin/$package"
+  vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
     fail "developer image cannot natively build /devtools/src/$package"
-  vm_ssh "/system/bin/rm -r /devtools/src/$package/target"
+  vm_ssh "/system/bin/rm -r /devtools/src/src/bin/$package/target"
 done
-vm_ssh "cd /devtools/src/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
+vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
+  fail "developer image cannot vendor /devtools/src/src/bin/lorry"
+vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
   fail "developer image cannot natively build /devtools/src/lorry"
-vm_ssh "/system/bin/cp /devtools/src/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
-vm_ssh "/system/bin/rm -r /devtools/src/lorry/target"
-vm_ssh "cd /devtools/src/gears && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
+vm_ssh "/system/bin/cp /devtools/src/src/bin/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
+vm_ssh "/system/bin/rm -r /devtools/src/src/bin/lorry/target"
+vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
+  fail "developer image cannot vendor /devtools/src/src/bin/gears"
+vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
   fail "developer image cannot natively build /devtools/src/gears"
-vm_ssh "/system/bin/rm -r /devtools/src/gears/target"
-vm_ssh "cd /devtools/src/gears && TMPDIR=/devtools/tmp /devtools/tmp/native-lorry build" ||
+vm_ssh "/system/bin/rm -r /devtools/src/src/bin/gears/target"
+vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/tmp/native-lorry build" ||
   fail "the natively built Lorry cannot rebuild Gears"
 
 stop_vm "$VMM_PID"

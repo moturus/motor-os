@@ -984,9 +984,7 @@ fn restore_fresh_profile(
     base: [u8; 32],
     validation: ValidationMode,
 ) -> Option<BuildArtifacts> {
-    let Some(record) = read_fresh_profile(profile) else {
-        return None;
-    };
+    let record = read_fresh_profile(profile)?;
     if record.base != base {
         return None;
     }
@@ -1984,6 +1982,7 @@ fn compile_root_library(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_root_binary(
     build: &Build<'_>,
     target: &BinaryTarget,
@@ -2045,6 +2044,7 @@ struct IntegrationEnvironment<'a> {
     temporary_directory: &'a Path,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_root_harness(
     build: &Build<'_>,
     target: RootTarget<'_>,
@@ -2187,6 +2187,7 @@ fn install_primary(source: &Path, destination: &Path) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rustc_arguments(
     build: &Build<'_>,
     target: RootTarget<'_>,
@@ -2400,7 +2401,7 @@ fn rustc_environment(
     value(
         &mut values,
         "CARGO_PKG_AUTHORS",
-        &manifest.metadata.authors.join(":"),
+        manifest.metadata.authors.join(":"),
     );
     value(
         &mut values,
@@ -2434,17 +2435,17 @@ fn rustc_environment(
     value(
         &mut values,
         "CARGO_PKG_VERSION_MAJOR",
-        &version.major.to_string(),
+        version.major.to_string(),
     );
     value(
         &mut values,
         "CARGO_PKG_VERSION_MINOR",
-        &version.minor.to_string(),
+        version.minor.to_string(),
     );
     value(
         &mut values,
         "CARGO_PKG_VERSION_PATCH",
-        &version.patch.to_string(),
+        version.patch.to_string(),
     );
     value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
     value(&mut values, "CARGO_PRIMARY_PACKAGE", "1");
@@ -2948,8 +2949,8 @@ mod tests {
 
         let cold = build_once();
         let cold_binary = only_binary(&cold);
-        let cold_inode = fs::metadata(&cold_binary).unwrap().ino();
-        let cold_hash = sha256_file(&cold_binary).unwrap();
+        let cold_inode = fs::metadata(cold_binary).unwrap().ino();
+        let cold_hash = sha256_file(cold_binary).unwrap();
         assert_eq!(cache_entry_count(&fixture.0), 1);
         let incremental = fixture
             .0
@@ -2972,8 +2973,8 @@ mod tests {
         let warm = build_once();
         let warm_elapsed = started.elapsed();
         let warm_binary = only_binary(&warm);
-        assert_eq!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
-        assert_eq!(sha256_file(&warm_binary).unwrap(), cold_hash);
+        assert_eq!(fs::metadata(warm_binary).unwrap().ino(), cold_inode);
+        assert_eq!(sha256_file(warm_binary).unwrap(), cold_hash);
         assert_eq!(cache_entry_count(&fixture.0), 1);
         assert!(
             warm_elapsed < Duration::from_secs(5),
@@ -2987,11 +2988,8 @@ mod tests {
         .unwrap();
         let root_changed = build_once();
         let root_changed_binary = only_binary(&root_changed);
-        assert_ne!(
-            fs::metadata(&root_changed_binary).unwrap().ino(),
-            cold_inode
-        );
-        let output = std::process::Command::new(&root_changed_binary)
+        assert_ne!(fs::metadata(root_changed_binary).unwrap().ino(), cold_inode);
+        let output = std::process::Command::new(root_changed_binary)
             .output()
             .unwrap();
         assert_eq!(output.stdout, b"root-dependency-ok");

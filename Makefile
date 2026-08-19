@@ -17,9 +17,6 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
-HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
-HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
-DEV_SOURCE_DIR := $(ROOT_DIR)/build/imager/dev-sources
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
 MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
 MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
@@ -50,13 +47,13 @@ user: user-base curl kibim httpd httpd-axum
 user-dev: user gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
-.PHONY: all images boot core sys-base sys user-base user user-dev dev-sources
+.PHONY: all images boot core sys-base sys user-base user user-dev
 .PHONY: base.img main.img dev.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd httpd httpd-axum gears gears-mock-provider
-.PHONY: host-lorry lorry curl
+.PHONY: lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -217,29 +214,18 @@ gears-mock-provider:
 	strip -o "$(BIN_DIR)/gears-mock-provider" \
 		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
 
-# curl is cross-built by a Linux-hosted lorry. This is distinct from the
-# Motor-target lorry installed in the image below.
-host-lorry:
-	cd src/bin/lorry && CARGO_TARGET_DIR="$(HOST_LORRY_TARGET_DIR)" \
-		cargo build --release --locked
-
 lorry:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/lorry && CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
-# curl is built by lorry (its Motor `cc`/`ring` trees only lorry can
-# materialize), so its recipe is a script rather than the cargo block.
-curl: host-lorry
+# ring's Git checkout generates packaged assembly on the Linux host. Curl is
+# therefore cross-built by Cargo and is not part of the native Lorry surface.
+curl:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" LORRY_HOST="$(HOST_LORRY)" \
+	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/curl" \
 		./build-motor.sh $(CARGO_RELEASE)
-
-# Red uses a Git patch in the checkout so ordinary Cargo can build it. Stage 2
-# is strictly offline, so the developer image receives the equivalent path
-# patch backed by the reviewed system repository.
-dev-sources:
-	python3 src/imager/prepare_dev_sources.py "$(ROOT_DIR)" "$(DEV_SOURCE_DIR)"
 
 # The images share imager scratch files and vm_images/$(IMG_CMD). Compilation
 # remains parallel, but the short imaging steps take a common host lock. Each
@@ -271,7 +257,7 @@ base.img: boot core sys-base user-base
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 # The dev image adds diagnostics, tests, sources, and native toolchains.
-dev.img: boot core sys user-dev dev-sources
+dev.img: boot core sys user-dev
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"
 	cd src/imager && \

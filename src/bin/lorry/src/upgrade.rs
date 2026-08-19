@@ -124,7 +124,7 @@ fn reject_direct(manifest: &Manifest, selector: &str) -> Result<()> {
         [] => Ok(()),
         [_] => Err(Error::usage(
             format!("`{selector}` is a direct dependency"),
-            "edit its version requirement in Cargo.toml, then run `lorry vendor`",
+            "edit its version requirement in Cargo.toml, then run `lorry vendor [--accept-all]`",
         )),
         _ => Err(Error::usage(
             format!("direct dependency selector `{selector}` is ambiguous"),

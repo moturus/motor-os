@@ -399,7 +399,9 @@ pub fn verify_compact_admission(
         return Err(Error::failure(
             "Lorry dependency state commitment does not match the reconstructed review document",
         )
-        .with_help("run `lorry vendor` to review and re-admit the current dependency graph"));
+        .with_help(
+            "run `lorry vendor [--accept-all]` to review and re-admit the current dependency graph",
+        ));
     }
     Ok(review)
 }
@@ -419,7 +421,7 @@ fn registry_package_evidence(
                     "locked crates.io package `{} {}` became unavailable while preparing its source",
                     package.key.name, package.key.version
                 ))
-                .with_help("run `lorry vendor` to acquire the missing package")
+                .with_help("run `lorry vendor [--accept-all]` to acquire the missing package")
             })?;
             let (source_root, extracted) = if object.retained_source {
                 (object.root.join("source"), None)

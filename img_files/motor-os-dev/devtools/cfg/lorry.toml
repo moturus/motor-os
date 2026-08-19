@@ -1,0 +1,240 @@
+config-version = 1
+cargo-compat-version = "1.99"
+
+[repositories]
+keep-artifacts = true
+keep-sources = true
+
+[network]
+curl = "/system/bin/curl"
+ca-bundle = "/system/cfg/ssl/ca-certificates.crt"
+
+[vendor]
+targets = ["x86_64-unknown-linux-musl", "x86_64-unknown-motor"]
+include-host = true
+
+[policy]
+default = "allow"
+path-roots = []
+
+[policy.limits]
+max-packages = 192
+max-depth = 16
+max-package-bytes = 16777216
+max-extracted-package-bytes = 134217728
+max-package-files = 20000
+max-transaction-bytes = 268435456
+max-extracted-transaction-bytes = 1073741824
+build-script-seconds = 300
+build-script-output-bytes = 8388608
+
+[native-tools."x86_64-unknown-motor".c-compiler]
+program = "/devtools/bin/cc"
+prefix-args = []
+flags = ["--target=x86_64-unknown-motor"]
+
+[native-tools."x86_64-unknown-motor".archiver]
+program = "/devtools/llvm/bin/llvm"
+prefix-args = ["ar"]
+flags = []
+
+[policy.rules.bisync_macros-0_2_3]
+action = "allow"
+name = "bisync_macros"
+version = "=0.2.3"
+source = "crates.io"
+checksum = "d21f40d350a700f6aa107e45fb26448cf489d34794b2ba4522181dc9f1173af6"
+allow-proc-macro = true
+
+[policy.rules.crc32fast-1_5_0]
+action = "allow"
+name = "crc32fast"
+version = "=1.5.0"
+source = "crates.io"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+allow-build-script = true
+
+[policy.rules.generic_array-0_14_7]
+action = "allow"
+name = "generic-array"
+version = "=0.14.7"
+source = "crates.io"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
+allow-build-script = true
+
+[policy.rules.getrandom-0_4_3]
+action = "allow"
+name = "getrandom"
+version = "=0.4.3"
+source = "crates.io"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+allow-build-script = true
+
+[policy.rules.heapless-0_8_0]
+action = "allow"
+name = "heapless"
+version = "=0.8.0"
+source = "crates.io"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+allow-build-script = true
+
+[policy.rules.libc-0_2_186]
+action = "allow"
+name = "libc"
+version = "=0.2.186"
+source = "crates.io"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+allow-build-script = true
+
+[policy.rules.libc-0_2_189]
+action = "allow"
+name = "libc"
+version = "=0.2.189"
+source = "crates.io"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+allow-build-script = true
+
+[policy.rules.parking_lot_core-0_9_12]
+action = "allow"
+name = "parking_lot_core"
+version = "=0.9.12"
+source = "crates.io"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+allow-build-script = true
+
+[policy.rules.proc_macro2-1_0_107]
+action = "allow"
+name = "proc-macro2"
+version = "=1.0.107"
+source = "crates.io"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+allow-build-script = true
+
+[policy.rules.quote-1_0_47]
+action = "allow"
+name = "quote"
+version = "=1.0.47"
+source = "crates.io"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+allow-build-script = true
+
+[policy.rules.rustix-1_1_4]
+action = "allow"
+name = "rustix"
+version = "=1.1.4"
+source = "crates.io"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+allow-build-script = true
+
+[policy.rules.rustls-0_23_42]
+action = "allow"
+name = "rustls"
+version = "=0.23.42"
+source = "crates.io"
+checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+allow-build-script = true
+
+[policy.rules.rustversion-1_0_23]
+action = "allow"
+name = "rustversion"
+version = "=1.0.23"
+source = "crates.io"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+allow-build-script = true
+allow-proc-macro = true
+
+[policy.rules.semver-1_0_26]
+action = "allow"
+name = "semver"
+version = "=1.0.26"
+source = "crates.io"
+checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
+allow-build-script = true
+
+[policy.rules.serde-1_0_228]
+action = "allow"
+name = "serde"
+version = "=1.0.228"
+source = "crates.io"
+checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+allow-build-script = true
+
+[policy.rules.serde-1_0_229]
+action = "allow"
+name = "serde"
+version = "=1.0.229"
+source = "crates.io"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+allow-build-script = true
+
+[policy.rules.serde_core-1_0_228]
+action = "allow"
+name = "serde_core"
+version = "=1.0.228"
+source = "crates.io"
+checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+allow-build-script = true
+
+[policy.rules.serde_core-1_0_229]
+action = "allow"
+name = "serde_core"
+version = "=1.0.229"
+source = "crates.io"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+allow-build-script = true
+
+[policy.rules.serde_derive-1_0_229]
+action = "allow"
+name = "serde_derive"
+version = "=1.0.229"
+source = "crates.io"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+allow-proc-macro = true
+
+[policy.rules.serde_json-1_0_150]
+action = "allow"
+name = "serde_json"
+version = "=1.0.150"
+source = "crates.io"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+allow-build-script = true
+
+[policy.rules.serde_json-1_0_151]
+action = "allow"
+name = "serde_json"
+version = "=1.0.151"
+source = "crates.io"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+allow-build-script = true
+
+[policy.rules.signal_hook-0_3_18]
+action = "allow"
+name = "signal-hook"
+version = "=0.3.18"
+source = "crates.io"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+allow-build-script = true
+
+[policy.rules.thiserror-2_0_20]
+action = "allow"
+name = "thiserror"
+version = "=2.0.20"
+source = "crates.io"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+allow-build-script = true
+
+[policy.rules.thiserror_impl-2_0_20]
+action = "allow"
+name = "thiserror-impl"
+version = "=2.0.20"
+source = "crates.io"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+allow-proc-macro = true
+
+[policy.rules.zmij-1_0_23]
+action = "allow"
+name = "zmij"
+version = "=1.0.23"
+source = "crates.io"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+allow-build-script = true

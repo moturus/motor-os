@@ -10,9 +10,9 @@ The milestone audited here is to run Lorry **on Motor OS** and have it build
 and Clippy-check every Motor-target crate reached from the repository-root
 `Makefile`, except every crate below `src/boot`. This includes the kernel and
 vdso commands embedded in their `build.sh` files, all ordinary `DO_BUILD` and
-`DO_CLIPPY` packages, the Motor-target Lorry, curl's existing Lorry build, and
-the imager. Native image assembly uses `lorry run` for the imager. The required
-user-facing validation command is `lorry clippy`.
+`DO_CLIPPY` packages, the Motor-target Lorry, and the imager. Curl remains a
+Linux-hosted Cargo cross-build. Native image assembly uses `lorry run` for the
+imager. The required user-facing validation command is `lorry clippy`.
 
 The following are deliberately out of scope:
 
@@ -22,11 +22,10 @@ The following are deliberately out of scope:
 
 The native VM is assumed to contain the prebuilt boot binaries and the prebuilt
 LLVM/Rust compiler binaries, trees, and sources needed as image/build inputs.
-Lorry is not expected to produce those artifacts. Motor has no Python, so the
-existing Python preparation utilities will need shell replacements before the
-complete native workflow can run. Designing or implementing those replacements
-is explicitly outside this document; their prepared outputs are inputs to the
-imager step described here.
+Lorry is not expected to produce those artifacts. The development image now
+packages the supported canonical source directories directly; it has no Python
+source-preparation layer. Those first-party snapshots are inputs to the imager
+step described here.
 
 This boundary removes every current NASM and standalone GNU `as` invocation,
 as well as the boot-only `objcopy` steps. It does not remove the kernel's
@@ -40,10 +39,10 @@ therefore needs to configure and admit those installed tools, not package
 another LLVM toolchain. The supplied Rust tree must include rust-src matching
 the native rustc. A matching Motor-native Clippy driver must also be staged.
 
-`curl` is not a Cargo build in the Makefile: it is cross-built by the host
-Lorry today, and its native Lorry build is already a Stage-2 validation case.
-It remains part of the desired native end state but is not a remaining
-compatibility gap.
+`curl` is cross-built by Linux-hosted Cargo. Its ring Git checkout performs a
+host-only source-generation step, so curl is intentionally excluded from the
+Motor-native Lorry surface. The installed curl binary remains Lorry's network
+transport on Motor.
 
 ## Short answer
 
@@ -58,8 +57,8 @@ milestone has seven real gaps:
 3. The DNS root script needs `rustc-link-arg`, controlled environment/resource
    inputs, and admission of Motor's installed Clang/LLVM tools.
 4. Several selected graphs exceed the default 64-package policy limit and all
-   projects except Lorry still need reviewed admission state and an offline
-   repository seed.
+   projects need an initial networked vendor operation plus reviewed admission
+   state before their offline builds.
 5. The kernel requires a custom JSON target and a narrow equivalent of Cargo's
    `-Z build-std` pipeline.
 6. The imager's current source/dependency graph is not Motor-buildable: it uses
@@ -109,10 +108,10 @@ for a configured package limit, not a reason to silently weaken the default.
 | `lorry` | `lorry` | 33 | already supported on Motor; Make output path differs |
 | image recipes | `imager` | at most 110 locked | native `run`; external path dependencies, proc macros, local rustflags; Motor file backend/Tokio preparation required; exact closure unavailable because cached `slab 0.4.11` is absent |
 
-The excluded boot crates and the host-only `host-lorry` build are not
+The excluded boot crates, curl, and the host-only `host-lorry` build are not
 implementation targets for this milestone. The Motor-native imager is. Curl is
-an in-scope native proof, but is omitted from the remaining-gap inventory
-because it already builds natively with Lorry.
+cross-built by Linux-hosted Cargo and installed as Lorry's Motor network
+transport.
 
 The `src/sys` virtual workspace has 29 explicit members, no member globs or
 inheritance, and therefore fits existing W1 workspace support and the
@@ -216,10 +215,10 @@ depends on the separate package-limit and admission preparation described
 below.
 
 Only `src/bin/lorry` currently has committed compact admission state. A full
-offline build therefore also needs a packaging operation that, for every root
-context, vendors/reviews the selected graph and installs the union of immutable
-objects plus member-local admission files. This is bootstrap/image input, not
-logic in `lorry build` and not a reason for Lorry to understand imager YAML.
+offline conversion therefore first needs a networked vendor campaign for each
+root context. Vendoring publishes immutable objects to the writable user
+repository and writes member-local admission files; these are developer state,
+not image inputs and not a reason for Lorry to understand imager YAML.
 
 System policy must explicitly admit each registry/Git package, every build
 script and proc macro, required patches, and native tools. Configure
@@ -296,10 +295,9 @@ the native run must be validated by creating an image from the prebuilt MBR,
 boot, kloader, LLVM, and Rust payloads supplied in the VM and comparing its
 structure with the existing host-built image contract.
 
-`prepare_dev_sources.py` is currently an input-preparation step before the
-imager runs. Its eventual shell replacement stays outside this analysis. The
-native imager consumes the prepared directory; neither `lorry build` nor
-`lorry run` should learn Python, source-staging, or image-layout policy.
+The imager copies canonical first-party source directories directly while
+excluding `.git`, `.lorry`, and build outputs. Neither `lorry build` nor
+`lorry run` learns source-staging or image-layout policy.
 
 ### Native Clippy
 
@@ -337,8 +335,9 @@ post-processing commands at that multicall installation. Packaging still needs
 the matching Motor-native Clippy driver, the complete Lorry repository and
 admission state, and all in-scope source trees. The VM-provided matching
 rust-src and prebuilt boot/LLVM/Rust payloads are explicit inputs. NASM,
-standalone `as`, and boot-source packaging are not required. Replacing Python
-input preparation is separate shell-script work outside this document.
+standalone `as`, and boot-source packaging are not required. The imager takes
+the supported canonical source directories directly, without Python input
+preparation.
 
 ## Recommended implementation order
 

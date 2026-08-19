@@ -9,9 +9,6 @@ MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
-BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
-DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
-GITOXIDE_DIR="$ROOT_DIR/../gitoxide"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
 IMAGE_NAME="motor-os-dev.img"
@@ -32,9 +29,9 @@ usage() {
 usage: test-native.sh [--reuse-running-vm] [--warm] [--keep]
 
 Runs Lorry's release Linux-to-Motor and Motor-to-Motor verification in the
-release developer image. It retains one native self-build, one compact
-build/run/test fixture, and a debug incremental-state check. --warm preserves
-host and guest targets for iteration.
+release developer image. The first native self-build vendors its dependencies
+online; all following build commands are offline. --warm preserves host and
+guest targets for iteration.
 EOF
 }
 
@@ -88,8 +85,6 @@ SSH_KEY="$WORK/test.key"
 
 # shellcheck source=timing.sh
 source "$SCRIPT_DIR/timing.sh"
-# shellcheck source=gitoxide-fixture.sh
-source "$SCRIPT_DIR/gitoxide-fixture.sh"
 
 mkdir -p "$EVIDENCE_DIR"
 : >"$NATIVE_LOG"
@@ -109,6 +104,7 @@ copy_package() {
     cp -R "$source/src" "$destination/src"
     if [ -d "$source/.lorry" ]; then
         cp -R "$source/.lorry" "$destination/.lorry"
+        rm -rf "$destination/.lorry/vendor"
     fi
 }
 
@@ -175,9 +171,6 @@ build_image() {
 
 prepare_host() {
     local cargo
-    local host_archiver
-    local host_c_compiler
-    local host_home="$WORK/host-home"
     local host_rustc
     local motor_rustc
     local motor_toolchain_sysroot
@@ -189,8 +182,6 @@ prepare_host() {
     host_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
     motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
     motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
-    host_c_compiler="$(type -P clang)"
-    host_archiver="$(type -P ar)"
     [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
@@ -199,26 +190,12 @@ prepare_host() {
         cat "$WORK/sysroot-diff" >&2
         fail "Linux and image Motor target sysroots differ"
     }
-    [ -d "$BUILD_REPOSITORY/objects" ] || fail "Stage 2 repository is absent"
-    [ -d "$DOWNLOAD_CACHE" ] || fail "Stage 2 download cache is absent"
-
     unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
     CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$host_rustc" \
         "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
         --locked --offline --release
     cp "$LORRY_DIR/target/release/lorry" "$WORK/lorry-seed"
-
-    python3 "$LORRY_DIR/bootstrap/install_stage2_seed.py" \
-        --manifest "$LORRY_DIR/bootstrap/stage2-seed.toml" \
-        --build-repository "$BUILD_REPOSITORY" \
-        --host-repository "$host_home/.config/lorry/system/vendor" \
-        --host-user-repository "$host_home/.config/lorry/vendor" \
-        --host-config "$host_home/.config/lorry/lorry.toml" \
-        --image-repository "$WORK/image/vendor" \
-        --motor-config "$WORK/image/lorry.toml" \
-        --cache "$DOWNLOAD_CACHE" --mode full --offline \
-        --host-c-compiler "$host_c_compiler" --host-archiver "$host_archiver"
 
     for tree in "$host_tree" "$guest_tree"; do
         copy_package "$LORRY_DIR" "$tree/src/bin/lorry"
@@ -229,13 +206,7 @@ prepare_host() {
         cp -R "$ROOT_DIR/src/sys/lib/moto-rt/src" \
             "$tree/src/sys/lib/moto-rt/src"
     done
-    stage_gitoxide_checkout "$GITOXIDE_DIR" "$WORK/gitoxide"
     copy_native_fixture "$WORK/native-fixture"
-    (
-        cd "$WORK/native-fixture"
-        HOME="$host_home" RUSTC="$host_rustc" "$WORK/lorry-seed" \
-            review >/dev/null
-    )
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
     rm -rf "$guest_tree/src/bin/lorry/target" \
@@ -247,10 +218,11 @@ prepare_host() {
 
     (
         cd "$source"
-        HOME="$host_home" RUSTC="$motor_rustc" "$WORK/lorry-seed" \
-            build --release --target "$MOTOR_TARGET"
+        CARGO_TARGET_DIR="$WORK/cross-target" RUSTC="$motor_rustc" \
+            "$cargo" build --release --locked \
+                --offline --target "$MOTOR_TARGET"
     )
-    CROSS_LORRY="$source/target/lorry/$MOTOR_TARGET/release/lorry"
+    CROSS_LORRY="$WORK/cross-target/$MOTOR_TARGET/release/lorry"
     [ -f "$CROSS_LORRY" ] || fail "cross-build did not produce Lorry"
     cp "$CROSS_LORRY" "$WORK/lorry-cross"
     rm -rf "$source/.cargo"
@@ -291,9 +263,6 @@ run_native() {
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
-    remote_command "[ ! -d $REMOTE_ROOT/gitoxide ] || /system/bin/rm -r $REMOTE_ROOT/gitoxide"
-    remote_command "/system/bin/mkdir $REMOTE_ROOT/gitoxide"
-    upload_tree "$WORK/gitoxide" "$REMOTE_ROOT/gitoxide"
     remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
     if [ "$WARM" -eq 1 ]; then
         remote_command "[ ! -d $destination/src/bin/lorry/src ] || /system/bin/rm -r $destination/src/bin/lorry/src"
@@ -312,6 +281,7 @@ run_native() {
     remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
 
+    remote_command "cd $first && $REMOTE_ROOT/lorry-cross vendor --accept-all"
     remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross build --release"
     remote_command "$first/target/lorry/release/lorry --version"
     remote_command "/system/bin/cp $first/target/lorry/release/lorry $REMOTE_ROOT/lorry-native"

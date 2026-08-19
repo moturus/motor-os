@@ -24,11 +24,15 @@ local Cargo archive/source cache. Lorry records its evidence on first use and
 trusts that evidence during later ordinary builds. None of these operations
 invokes Cargo.
 
-The `bootstrap/` directory is an OS-packaging utility, not part of the Lorry
-executable. Motor's toolchain build uses it to preinstall an offline system
-repository and system configuration so the shipped development environment
-can rebuild Lorry and curl. Lorry can operate with other correctly configured
-repositories; it does not create VM images or inspect image profiles/layouts.
+Motor development images install Lorry, curl, the native toolchain, supported
+first-party source snapshots, and small system and user configurations. Curl is
+cross-built by Linux-hosted Cargo because ring's Git checkout performs a
+host-only source-generation step; curl source is not included in the native
+snapshot set. The images do not preinstall a dependency repository. On a fresh
+image, run `lorry vendor` (or
+`lorry vendor --accept-all`) with network access once for each project; build,
+run, test, and review then consume the verified local state offline. Lorry does
+not create VM images or inspect image profiles/layouts.
 
 Everything called a Cargo "oracle" is validation-only: tests run supported
 Cargo versions or compare retained Cargo results to check Lorry compatibility.

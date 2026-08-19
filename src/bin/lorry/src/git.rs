@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
@@ -14,7 +15,7 @@ mod direct;
 mod http;
 mod materialize;
 
-pub(crate) use direct::{configure_direct, materialize_locked_dependencies};
+pub(crate) use direct::{DirectCatalog, configure_direct, materialize_locked_dependencies};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LockedSource {
@@ -181,10 +182,27 @@ pub fn materialize_manifest_patches(
         replacements.push((patch.alias.clone(), patch.package.clone(), materialized));
     }
     let rewritten = rewrite_manifest(&source, &patches, &replacements)?;
+    let lock_path = root.join("Cargo.lock");
+    let rewritten_lock = fs::read_to_string(&lock_path)
+        .ok()
+        .map(|source| rewrite_materialized_lock(&source, &patches))
+        .transpose()?;
     let mut staged = AtomicFile::new(&manifest_path)?;
     staged.write_all(rewritten.as_bytes())?;
     staged.persist()?;
+    let mut staged_lock = rewritten_lock
+        .as_ref()
+        .map(|rewritten| -> Result<AtomicFile> {
+            let mut staged = AtomicFile::new(&lock_path)?;
+            staged.write_all(rewritten.as_bytes())?;
+            staged.persist()?;
+            Ok(staged)
+        })
+        .transpose()?;
     staged.commit()?;
+    if let Some(staged_lock) = staged_lock.take() {
+        staged_lock.commit()?;
+    }
     Ok(true)
 }
 
@@ -342,7 +360,7 @@ fn rewrite_manifest(
             Ok((patch.span.clone(), replacement))
         })
         .collect::<Result<Vec<_>>>()?;
-    edits.sort_unstable_by(|left, right| right.0.start.cmp(&left.0.start));
+    edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0.start));
     let mut rewritten = source.to_owned();
     for (span, replacement) in edits {
         if span.end > rewritten.len() || !rewritten.is_char_boundary(span.start) {
@@ -351,6 +369,108 @@ fn rewrite_manifest(
         rewritten.replace_range(span, &replacement);
     }
     Ok(rewritten)
+}
+
+fn rewrite_materialized_lock(source: &str, patches: &[GitPatch]) -> Result<String> {
+    let document = ImDocument::parse(source.to_owned()).map_err(|error| {
+        Error::failure(format!("invalid Cargo.lock before Git vendoring: {error}"))
+    })?;
+    let Some(packages) = document.get("package").and_then(Item::as_array_of_tables) else {
+        return Ok(source.to_owned());
+    };
+    let mut sources = BTreeSet::new();
+    for package in packages.iter() {
+        let Some(value) = package.get("source").and_then(Item::as_str) else {
+            continue;
+        };
+        let Ok(locked) = parse_locked_source(value) else {
+            continue;
+        };
+        if patches.iter().any(|patch| {
+            patch.url == locked.url
+                && patch
+                    .locked_commit
+                    .as_deref()
+                    .is_none_or(|commit| commit == locked.commit)
+        }) {
+            sources.insert(value.to_owned());
+        }
+    }
+    if sources.is_empty() {
+        return Ok(source.to_owned());
+    }
+    let mut edits = Vec::new();
+    for package in packages.iter() {
+        let materialized = package
+            .get("source")
+            .and_then(Item::as_str)
+            .is_some_and(|source| sources.contains(source));
+        if materialized {
+            edits.push((
+                lock_key_line(source, package.get("source").unwrap(), "source")?,
+                String::new(),
+            ));
+            if let Some(checksum) = package.get("checksum") {
+                edits.push((lock_key_line(source, checksum, "checksum")?, String::new()));
+            }
+        }
+        let Some(dependencies) = package.get("dependencies").and_then(Item::as_array) else {
+            continue;
+        };
+        for dependency in dependencies.iter() {
+            let Some(spelling) = dependency.as_str() else {
+                continue;
+            };
+            let Some((identity, source)) = spelling
+                .strip_suffix(')')
+                .and_then(|value| value.rsplit_once(" ("))
+            else {
+                continue;
+            };
+            if sources.contains(source) {
+                let span = dependency
+                    .span()
+                    .ok_or_else(|| Error::failure("Cargo.lock dependency has no source span"))?;
+                edits.push((span, toml_string(identity)));
+            }
+        }
+    }
+    edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0.start));
+    let mut rewritten = source.to_owned();
+    let mut previous_start = source.len();
+    for (span, replacement) in edits {
+        if span.end > previous_start
+            || span.end > rewritten.len()
+            || !rewritten.is_char_boundary(span.start)
+        {
+            return Err(Error::failure(
+                "Cargo.lock rewrite spans overlap or are invalid",
+            ));
+        }
+        previous_start = span.start;
+        rewritten.replace_range(span, &replacement);
+    }
+    Ok(rewritten)
+}
+
+fn lock_key_line(source: &str, item: &Item, key: &str) -> Result<Range<usize>> {
+    let span = item
+        .span()
+        .ok_or_else(|| Error::failure(format!("Cargo.lock `{key}` has no source span")))?;
+    let start = source[..span.start]
+        .rfind('\n')
+        .map_or(0, |position| position + 1);
+    let end = source[span.end..]
+        .find('\n')
+        .map_or(source.len(), |position| span.end + position + 1);
+    let prefix = source[start..span.start].trim();
+    let suffix = source[span.end..end].trim();
+    if prefix != format!("{key} =") || (!suffix.is_empty() && !suffix.starts_with('#')) {
+        return Err(Error::failure(format!(
+            "Cargo.lock `{key}` is not on a replaceable canonical line"
+        )));
+    }
+    Ok(start..end)
 }
 
 fn toml_string(value: &str) -> String {
@@ -510,6 +630,36 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef01234567")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewrites_materialized_git_patch_lock_nodes_to_paths() {
+        let git = "git+https://example.com/patched.git?branch=main#0123456789abcdef0123456789abcdef01234567";
+        let other = "git+https://example.com/other.git#89abcdef0123456789abcdef0123456789abcdef";
+        let source = format!(
+            "version = 3\n\n\
+             [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             dependencies = [\"helper 1.0.0 ({git})\"]\n\n\
+             [[package]]\nname = \"patched\"\nversion = \"1.0.0\"\nsource = \"{git}\"\n\
+             dependencies = [\"helper\"]\n\n\
+             [[package]]\nname = \"helper\"\nversion = \"1.0.0\"\nsource = \"{git}\"\n\n\
+             [[package]]\nname = \"other\"\nversion = \"1.0.0\"\nsource = \"{other}\"\n"
+        );
+        let patches = vec![GitPatch {
+            alias: "patched".to_owned(),
+            package: None,
+            url: "https://example.com/patched.git".to_owned(),
+            selector: Selector::Branch("main".to_owned()),
+            locked_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            span: 0..0,
+        }];
+        let rewritten = rewrite_materialized_lock(&source, &patches).unwrap();
+        assert!(rewritten.starts_with("version = 3"));
+        assert!(!rewritten.contains(git));
+        assert!(rewritten.contains(other));
+        assert!(rewritten.contains("dependencies = [\"helper 1.0.0\"]"));
+        assert_eq!(rewritten.matches("source = ").count(), 1);
+        ImDocument::parse(rewritten).unwrap();
     }
 
     #[test]

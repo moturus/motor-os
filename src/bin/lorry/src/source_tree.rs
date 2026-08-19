@@ -669,9 +669,9 @@ mod tests {
     }
 
     #[test]
-    fn matches_cross_language_golden_vectors() {
+    fn matches_golden_vectors() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bootstrap/tests/source-tree-v1-vectors.json");
+            .join("tests/fixtures/source-tree-v1-vectors.json");
         let document = Value::load(&path, "source-tree golden vectors").unwrap();
         let vectors = document.get("vectors").and_then(Value::as_array).unwrap();
         for vector in vectors {

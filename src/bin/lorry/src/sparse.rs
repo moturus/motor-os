@@ -554,7 +554,7 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
         && value.len() <= maximum
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+' | b'.'))
 }
 
 fn valid_target_selector(value: &str) -> bool {
@@ -788,7 +788,7 @@ mod tests {
              \"deps\":[{{\
                \"name\":\"renamed\",\
                \"req\":\"^2\",\
-               \"features\":[\"fast+mode\"],\
+               \"features\":[\"embedded-io-v0.7\"],\
                \"optional\":true,\
                \"default_features\":false,\
                \"target\":\"cfg(target_os = \\\"motor\\\")\",\
@@ -800,7 +800,8 @@ mod tests {
              \"features\":{{\"legacy\":[\"renamed/feature+\"]}},\
              \"features2\":{{\
                \"legacy\":[\"dep:renamed\"],\
-               \"default\":[\"legacy\",\"renamed?/feature+\"]\
+               \"default\":[\"legacy\",\"renamed?/feature+\"],\
+               \"embedded-io-v0.7\":[]\
              }},\
              \"yanked\":true,\
              \"links\":\"demo-sys\",\
@@ -831,12 +832,14 @@ mod tests {
             ["renamed/feature+", "dep:renamed"]
         );
         assert_eq!(record.features["default"], ["legacy", "renamed?/feature+"]);
+        assert!(record.features.contains_key("embedded-io-v0.7"));
         assert_eq!(record.exact_bytes, source.as_bytes());
 
         let dependency = &record.dependencies[0];
         assert_eq!(dependency.alias, "renamed");
         assert_eq!(dependency.package, "actual-name");
         assert_eq!(dependency.requirement, VersionReq::parse("^2").unwrap());
+        assert_eq!(dependency.features, ["embedded-io-v0.7"]);
         assert_eq!(dependency.kind, DependencyKind::Build);
         assert!(dependency.optional);
         assert!(!dependency.default_features);
@@ -925,7 +928,7 @@ mod tests {
                 format!(
                     "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
                      \"cksum\":\"{CHECKSUM}\",\
-                     \"features\":{{\"bad.name\":[]}},\"yanked\":false}}\n"
+                     \"features\":{{\"bad/name\":[]}},\"yanked\":false}}\n"
                 ),
                 "feature name",
             ),

@@ -225,7 +225,7 @@ fn decode_json_string(document: &str, start: usize) -> Option<(String, usize)> {
                         .ok()?;
                         index = end - 1;
                         if (0xd800..=0xdbff).contains(&value) {
-                            if bytes.get(index + 1..index + 3) != Some(&[b'\\', b'u']) {
+                            if bytes.get(index + 1..index + 3) != Some(b"\\u") {
                                 return None;
                             }
                             let low_end = index + 7;

@@ -333,8 +333,9 @@ fn display_keys(keys: &BTreeSet<LockKey>) -> String {
 }
 
 fn stale(message: impl Into<String>) -> Error {
-    Error::failure(format!("Cargo.lock is stale: {}", message.into()))
-        .with_help("run `lorry vendor` to validate and transactionally update Cargo.lock")
+    Error::failure(format!("Cargo.lock is stale: {}", message.into())).with_help(
+        "run `lorry vendor [--accept-all]` to validate and transactionally update Cargo.lock",
+    )
 }
 
 #[cfg(test)]

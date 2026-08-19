@@ -19,8 +19,8 @@ rustls-pemfile = "=2.2.0"
 moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [patch.crates-io]
-cc = { path = ".lorry/vendor/cc-1_4_0/source" }
-ring = { path = ".lorry/vendor/ring-0_17_14/source" }
+cc = { git = "https://github.com/moturus/cc-rs.git", branch = "main" }
+ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
 
 [profile.release]
 panic = "abort"
