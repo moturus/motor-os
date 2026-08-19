@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{NativeTool, NativeToolRole};
 use crate::diagnostic::{Error, Result};
@@ -72,7 +72,7 @@ pub fn project(
     Ok(projection)
 }
 
-fn compiler_read_only(program: &PathBuf, flags: &[String]) -> Result<Vec<PathBuf>> {
+fn compiler_read_only(program: &Path, flags: &[String]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     if let Some(resources) = program
         .parent()

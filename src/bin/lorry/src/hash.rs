@@ -302,8 +302,7 @@ mod tests {
 
     #[test]
     fn matches_cargo_stable_hash_golden_vectors() {
-        let mut empty = StableHasher::new();
-        ().hash(&mut empty);
+        let empty = StableHasher::new();
         assert_eq!(empty.finish(), 0x1cba18e857884f2a);
 
         let mut structured = StableHasher::new();

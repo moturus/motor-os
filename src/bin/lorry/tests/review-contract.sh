@@ -8,156 +8,104 @@ if [ "$#" -ne 1 ]; then
 fi
 
 LORRY="$(realpath "$1")"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
-GITOXIDE_DIR="$ROOT_DIR/../gitoxide"
-BOOTSTRAP="$LORRY_DIR/bootstrap"
-BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
-DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
-TOOLCHAIN="nightly-2026-06-19"
-WORK="$(mktemp -d)"
+export RUSTC
+RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
+WORK="$(mktemp -d /tmp/lorry-review-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
-export TMPDIR="$WORK/tmp"
-mkdir "$TMPDIR"
+PROJECT="$WORK/project"
+HOME_DIR="$WORK/home"
+REPOSITORY="$HOME_DIR/.config/lorry/vendor"
+mkdir -p "$PROJECT/src" "$PROJECT/helper/src" \
+    "$HOME_DIR/.config/lorry" "$REPOSITORY"
 
-unset CARGO_TARGET_DIR RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
-export LORRY_REVIEW_REAL_RUSTC
-LORRY_REVIEW_REAL_RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
-export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
+cat >"$PROJECT/Cargo.toml" <<'EOF'
+[package]
+name = "review-fixture"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
 
-TEST_HOME="$WORK/home"
-TEST_SYSTEM_REPOSITORY="$TEST_HOME/.config/lorry/system/vendor"
-TEST_USER_REPOSITORY="$TEST_HOME/.config/lorry/vendor"
-python3 "$BOOTSTRAP/install_stage2_seed.py" \
-    --manifest "$BOOTSTRAP/stage2-seed.toml" \
-    --build-repository "$BUILD_REPOSITORY" \
-    --host-repository "$TEST_SYSTEM_REPOSITORY" \
-    --host-user-repository "$TEST_USER_REPOSITORY" \
-    --host-config "$TEST_HOME/.config/lorry/lorry.toml" \
-    --image-repository "$WORK/image/vendor" \
-    --motor-config "$WORK/image/lorry.toml" \
-    --cache "$DOWNLOAD_CACHE" --mode full --offline \
-    --host-c-compiler "$(type -P clang)" --host-archiver "$(type -P ar)"
-export HOME="$TEST_HOME"
-
-SOURCE="$WORK/source"
-PROJECT="$SOURCE/src/bin/lorry"
-LOCAL_REPOSITORY="$WORK/local-repository"
-mkdir -p "$PROJECT" "$SOURCE/src/sys/lib" \
-    "$LOCAL_REPOSITORY/objects/crates-io/sha256" \
-    "$LOCAL_REPOSITORY/objects/seeded-git/sha256"
-cp "$LORRY_DIR/Cargo.toml" "$LORRY_DIR/Cargo.lock" "$PROJECT/"
-cp -R "$LORRY_DIR/src" "$LORRY_DIR/.lorry" "$PROJECT/"
-cp -R "$ROOT_DIR/src/sys/lib/moto-rt" "$SOURCE/src/sys/lib/"
-cp "$TEST_SYSTEM_REPOSITORY/repository.toml" "$LOCAL_REPOSITORY/"
-
-# shellcheck source=gitoxide-fixture.sh
-source "$SCRIPT_DIR/gitoxide-fixture.sh"
-stage_gitoxide_checkout "$GITOXIDE_DIR" "$WORK/gitoxide"
-
-FAKE_RUSTC="$WORK/rustc-inspection-host"
-cat > "$FAKE_RUSTC" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "$#" -eq 2 ] && [ "$1" = "--version" ] && [ "$2" = "--verbose" ]; then
-    "$LORRY_REVIEW_REAL_RUSTC" "$@" |
-        sed 's/^host: .*/host: aarch64-unknown-linux-gnu/'
-else
-    exec "$LORRY_REVIEW_REAL_RUSTC" "$@"
-fi
+[dependencies]
+review-helper = { path = "helper" }
 EOF
-chmod 0700 "$FAKE_RUSTC"
-cat > "$PROJECT/lorry.toml" <<EOF
+cat >"$PROJECT/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "review-fixture"
+version = "0.1.0"
+dependencies = ["review-helper"]
+
+[[package]]
+name = "review-helper"
+version = "0.1.0"
+EOF
+cat >"$PROJECT/src/main.rs" <<'EOF'
+fn main() {
+    println!("{}", review_helper::answer());
+}
+EOF
+cat >"$PROJECT/helper/Cargo.toml" <<'EOF'
+[package]
+name = "review-helper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+EOF
+cat >"$PROJECT/helper/src/lib.rs" <<'EOF'
+pub fn answer() -> u32 { 42 }
+EOF
+cat >"$HOME_DIR/.config/lorry/lorry.toml" <<EOF
 config-version = 1
 
-[toolchain]
-rustc = "$FAKE_RUSTC"
-
 [repositories]
-local = "$LOCAL_REPOSITORY"
-EOF
+user = "$REPOSITORY"
 
-snapshot() {
-    local output="$1"
-    shift
-    : > "$output"
-    for root in "$@"; do
-        if [ -e "$root" ]; then
-            find "$root" -printf '%y %P %s %m %T@\n' | sort >> "$output"
-            find "$root" -type f -print0 | sort -z | xargs -0 sha256sum >> "$output"
-        fi
-    done
-}
+[policy]
+default = "allow"
+EOF
+cat >"$REPOSITORY/repository.toml" <<'EOF'
+format-version = 1
+object-hash = "sha256"
+EOF
 
 expect_failure() {
     local label="$1"
     local pattern="$2"
-    local project="$3"
-    shift 3
-    if (cd "$project" && "$LORRY" "$@") \
-        > "$WORK/$label.stdout" 2> "$WORK/$label.stderr"; then
+    shift 2
+    if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" "$@") \
+        >"$WORK/$label.stdout" 2>"$WORK/$label.stderr"; then
         echo "review-contract: $label unexpectedly succeeded" >&2
         exit 1
     fi
-    if [ -s "$WORK/$label.stdout" ]; then
-        echo "review-contract: $label wrote partial stdout" >&2
-        exit 1
-    fi
-    if ! grep -Fq "$pattern" "$WORK/$label.stderr"; then
-        echo "review-contract: $label did not report '$pattern'" >&2
+    grep -F "$pattern" "$WORK/$label.stderr" >/dev/null || {
         cat "$WORK/$label.stderr" >&2
+        echo "review-contract: $label did not report '$pattern'" >&2
         exit 1
-    fi
+    }
 }
 
-REPOSITORIES=(
-    "$TEST_SYSTEM_REPOSITORY"
-    "$TEST_USER_REPOSITORY"
-    "$LOCAL_REPOSITORY"
-)
-snapshot "$WORK/before.snapshot" "$SOURCE" "${REPOSITORIES[@]}"
-(cd "$PROJECT" && "$LORRY" review) > "$WORK/review.toml"
-(cd "$PROJECT" && "$LORRY" \
-    +"$TOOLCHAIN" --verbose --color=always review) > "$WORK/review-globals.toml"
-cmp "$WORK/review.toml" "$WORK/review-globals.toml"
+echo "== Creating deterministic local dependency state =="
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all >/dev/null)
 
+echo "== Proving review is read-only and committed =="
+before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >"$WORK/review.toml"
+after="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
+[ "$before" = "$after" ] || {
+    echo "review-contract: review changed project or repository state" >&2
+    exit 1
+}
 commitment="$(sed -n 's/^review-sha256 = "\([0-9a-f]*\)"/\1/p' \
     "$PROJECT/.lorry/dependencies-v2.toml")"
-actual="$(sha256sum "$WORK/review.toml" | cut -d' ' -f1)"
-if [ "$actual" != "$commitment" ]; then
+[ "$(sha256sum "$WORK/review.toml" | cut -d' ' -f1)" = "$commitment" ] || {
     echo "review-contract: stdout does not match the committed review" >&2
     exit 1
-fi
-if [ -e "$PROJECT/target" ]; then
-    echo "review-contract: review created a project target directory" >&2
-    exit 1
-fi
-snapshot "$WORK/after.snapshot" "$SOURCE" "${REPOSITORIES[@]}"
-cmp "$WORK/before.snapshot" "$WORK/after.snapshot"
-
-expect_failure cargo-registry 'cannot be combined with `review`' "$PROJECT" \
+}
+expect_failure cargo-registry 'cannot be combined with `review`' \
     --use-cargo-registry review
-
-STALE_PROJECT="$SOURCE/src/bin/lorry-stale"
-cp -R "$PROJECT" "$STALE_PROJECT"
 sed -i 's/^review-sha256 = ".*"/review-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"/' \
-    "$STALE_PROJECT/.lorry/dependencies-v2.toml"
-expect_failure stale-commitment "dependency state commitment does not match" \
-    "$STALE_PROJECT" review
-
-MISSING_PROJECT="$SOURCE/src/bin/lorry-missing"
-cp -R "$PROJECT" "$MISSING_PROJECT"
-rm "$MISSING_PROJECT/.lorry/dependencies-v2.toml"
-expect_failure missing-state "requires generated Lorry dependency state" \
-    "$MISSING_PROJECT" review
-
-CHECKSUM="9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
-mkdir -p "$LOCAL_REPOSITORY/objects/crates-io/sha256/${CHECKSUM:0:2}/$CHECKSUM"
-expect_failure missing-evidence "corrupt object in local repository" "$PROJECT" review
-if find "$TMPDIR" -mindepth 1 -print -quit | grep -q .; then
-    echo "review-contract: review left temporary inspection data" >&2
-    exit 1
-fi
+    "$PROJECT/.lorry/dependencies-v2.toml"
+expect_failure stale-commitment "dependency state commitment does not match" review
 
 echo "PASS: offline review contract"

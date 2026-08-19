@@ -266,7 +266,7 @@ impl Catalog {
                     return Ok(());
                 }
                 return Err(Error::failure(format!(
-                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry vendor`",
+                    "locked Git dependency `{}` from `{}` is unavailable; run `lorry vendor [--accept-all]`",
                     dependency.package, git.url
                 )));
             }
@@ -393,7 +393,7 @@ impl Catalog {
         }
         if missing.is_empty() {
             return Err(Error::failure(format!(
-                "Cargo.lock has no crates.io package `{}` matching `{}`; run `lorry vendor` to update Cargo.lock",
+                "Cargo.lock has no crates.io package `{}` matching `{}`; run `lorry vendor [--accept-all]` to update Cargo.lock",
                 dependency.package, dependency.requirement
             )));
         }
@@ -405,7 +405,7 @@ impl Catalog {
         let (location, action) = match source {
             LockedRegistrySource::Lorry(_) => (
                 "the configured Lorry repositories",
-                "; run `lorry vendor` to acquire the missing package",
+                "; run `lorry vendor [--accept-all]` to acquire the missing package",
             ),
             LockedRegistrySource::Cargo(_) => (
                 "Cargo's registry cache",
@@ -1354,12 +1354,21 @@ impl State {
 #[derive(Clone, Debug)]
 struct Failure {
     message: String,
+    fatal: bool,
 }
 
 impl Failure {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            fatal: false,
+        }
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            fatal: true,
         }
     }
 }
@@ -1382,7 +1391,7 @@ fn solve(
             &event.dependency.requirement,
             catalog,
         )
-        .map_err(|error| Failure::new(error.to_string()))?;
+        .map_err(|error| Failure::fatal(error.to_string()))?;
     }
     catalog
         .prepare(&mut event.dependency)
@@ -1427,6 +1436,7 @@ fn solve(
             )
         }) {
             Ok(state) => return Ok(state),
+            Err(failure) if failure.fatal => return Err(failure),
             Err(failure) => last_failure = Some(failure),
         }
     }
@@ -1500,6 +1510,7 @@ fn solve(
             )
         }) {
             Ok(state) => return Ok(state),
+            Err(failure) if failure.fatal => return Err(failure),
             Err(failure) => last_failure = Some(failure),
         }
     }
@@ -1674,12 +1685,11 @@ fn activate(
                         .or_default()
                         .insert(dependency_feature.to_owned());
                 }
-            } else if record.features.contains_key(reference) {
-                activation.active.insert(reference.to_owned());
-            } else if record
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.optional && dependency.alias == *reference)
+            } else if record.features.contains_key(reference)
+                || record
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.optional && dependency.alias == *reference)
             {
                 activation.active.insert(reference.to_owned());
             } else {
@@ -2257,6 +2267,37 @@ mod tests {
         assert_eq!(resolution.packages.len(), 2);
         assert_eq!(selected(&resolution, "a").len(), 1);
         assert_eq!(selected(&resolution, "b").len(), 1);
+    }
+
+    #[test]
+    fn loader_failures_are_not_retried_during_backtracking() {
+        let root = manifest("a = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        let mut loaded = Vec::new();
+        let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
+            loaded.push(name.to_owned());
+            match name {
+                "a" => {
+                    let dependencies = format!("[{}]", dependency("broken", "1"));
+                    catalog.insert(record("a", "1.1.0", &dependencies, "{}", ""))?;
+                    catalog.insert(record("a", "1.0.0", &dependencies, "{}", ""))
+                }
+                "broken" => Err(Error::failure("sparse acquisition failed")),
+                _ => panic!("resolver requested unexpected sparse record `{name}`"),
+            }
+        };
+
+        let error = resolve_dynamic(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut loader,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("sparse acquisition failed"));
+        assert_eq!(loaded, ["a", "broken"]);
     }
 
     #[test]

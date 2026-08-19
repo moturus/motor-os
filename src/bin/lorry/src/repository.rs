@@ -1912,7 +1912,7 @@ mod tests {
             header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
             tar.extend_from_slice(&header);
             tar.extend_from_slice(contents);
-            tar.resize((tar.len() + 511) / 512 * 512, 0);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
         }
 
         let root = format!("{name}-{version}");

@@ -175,11 +175,11 @@ pub fn dependency_rustc_invocation_with_build_output(
     identity_arguments(&mut arguments, &planned.identity);
     push(&mut arguments, "--out-dir");
     arguments.push(output_dir.as_os_str().to_owned());
-    if key.compile_kind == CompileKind::Target {
-        if let Some(target) = options.physical_target {
-            push(&mut arguments, "--target");
-            push(&mut arguments, target);
-        }
+    if key.compile_kind == CompileKind::Target
+        && let Some(target) = options.physical_target
+    {
+        push(&mut arguments, "--target");
+        push(&mut arguments, target);
     }
     let linker = match key.compile_kind {
         CompileKind::Host => options.host_linker,

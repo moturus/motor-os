@@ -16,7 +16,7 @@ pub enum CargoCompat {
     V1_99,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Config {
     pub cargo_compat: Option<CargoCompat>,
     pub rustc: Option<PathBuf>,
@@ -40,28 +40,6 @@ pub struct Config {
     #[allow(dead_code)]
     pub required_patches: BTreeMap<String, RequiredPatch>,
     constraints: Vec<Constraint>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            cargo_compat: None,
-            rustc: None,
-            default_target: None,
-            build_rustflags: Vec::new(),
-            incompatible_rust_versions: None,
-            targets: BTreeMap::new(),
-            cache: CacheConfig::default(),
-            repositories: Repositories::default(),
-            vendor: VendorConfig::default(),
-            network: NetworkConfig::default(),
-            test: TestConfig::default(),
-            native_tools: BTreeMap::new(),
-            policy: Policy::default(),
-            required_patches: BTreeMap::new(),
-            constraints: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2132,6 +2110,32 @@ mod tests {
             Path::new("/user/cfg/lorry/cache")
         );
         assert!(default_cache_directory(&BTreeMap::new(), false).is_err());
+    }
+
+    #[test]
+    fn motor_writable_repository_is_owned_by_the_user_layer() {
+        let temp = TempDir::new();
+        let system = temp.0.join("system.toml");
+        let user = temp.0.join("user.toml");
+        let repository = temp.0.join("vendor");
+        fs::write(
+            &system,
+            "config-version = 1\n[repositories]\nkeep-artifacts = true\nkeep-sources = true\n",
+        )
+        .unwrap();
+        fs::write(
+            &user,
+            format!(
+                "config-version = 1\n[repositories]\nuser = {:?}\n",
+                repository.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        merge_lorry_file(&system, LayerKind::MotorSystem, &mut config).unwrap();
+        merge_lorry_file(&user, LayerKind::MotorUser, &mut config).unwrap();
+        assert_eq!(config.repositories.user, Some(repository));
     }
 
     impl TempDir {

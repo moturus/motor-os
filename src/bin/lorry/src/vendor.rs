@@ -90,7 +90,7 @@ fn execute_reconcile(
         cli.verbosity == Verbosity::Verbose,
     )?;
     let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
-    crate::git::materialize_locked_dependencies(
+    let direct = crate::git::materialize_locked_dependencies(
         &initial_manifest,
         &config.network,
         &config.policy.limits,
@@ -111,7 +111,9 @@ fn execute_reconcile(
     if forced.is_some() && previous.is_none() {
         return Err(
             Error::failure("dependency upgrade requires generated Lorry dependency state")
-                .with_help("run `lorry vendor` once to create `.lorry/dependencies-v2.toml`"),
+                .with_help(
+                    "run `lorry vendor [--accept-all]` once to create `.lorry/dependencies-v2.toml`",
+                ),
         );
     }
     let changed = prepare_networked(
@@ -121,6 +123,7 @@ fn execute_reconcile(
         &contexts,
         forced.as_ref(),
         previous.as_ref(),
+        Some(&direct),
         accept_all,
     )?;
 
@@ -261,6 +264,7 @@ fn test_contexts(host: &TargetInfo, targets: &[TargetInfo]) -> Vec<VendorContext
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_networked(
     manifest: &Manifest,
     config: &Config,
@@ -268,6 +272,7 @@ fn prepare_networked(
     contexts: &[VendorContext],
     forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
+    direct: Option<&crate::git::DirectCatalog>,
     accept_all: bool,
 ) -> Result<bool> {
     let stdin = io::stdin();
@@ -278,6 +283,7 @@ fn prepare_networked(
         contexts,
         forced,
         previous,
+        direct,
         accept_all,
         stdin.is_terminal(),
         &mut stdin.lock(),
@@ -293,6 +299,7 @@ fn prepare_networked_with_approval(
     contexts: &[VendorContext],
     forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
+    direct: Option<&crate::git::DirectCatalog>,
     accept_all: bool,
     terminal: bool,
     input: &mut impl BufRead,
@@ -300,13 +307,27 @@ fn prepare_networked_with_approval(
 ) -> Result<bool> {
     let mut acquisition = Acquisition::new(config, manifest)?;
     let repositories = acquisition.repositories().clone();
-    let committed = previous
-        .map(|previous| {
-            try_reconstruct_committed_review(manifest, config, toolchain, &repositories, previous)
-        })
-        .transpose()?
-        .flatten();
+    // The committed document is needed only to display an interactive diff.
+    // Reconstructing it verifies and inventories every dependency source, so
+    // avoid that work when --accept-all would reject a changed graph anyway.
+    let committed = if accept_all {
+        None
+    } else {
+        previous
+            .map(|previous| {
+                try_reconstruct_committed_review(
+                    manifest,
+                    config,
+                    toolchain,
+                    &repositories,
+                    previous,
+                )
+            })
+            .transpose()?
+            .flatten()
+    };
     let forced = forced.map(upgrade::Selection::as_resolver_input);
+    let base_catalog = prepare_catalog(manifest, config, &repositories, forced.is_some(), direct)?;
     let mut known_proc_macros = BTreeSet::new();
     let (lock, per_context, selected, evidence, admission) = loop {
         let (lock, per_context, selected) = {
@@ -314,13 +335,13 @@ fn prepare_networked_with_approval(
                 |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
                     acquisition.load_sparse(name, requirement, catalog)
                 };
-            prepare_with_loader(
+            prepare_with_catalog(
                 manifest,
                 config,
                 toolchain,
                 contexts,
                 forced,
-                &repositories,
+                base_catalog.clone(),
                 &known_proc_macros,
                 &mut loader,
                 &|_| Ok(()),
@@ -541,6 +562,8 @@ fn add_change_review_rules(
 /// merged selection.
 type PreparedContexts = (Vec<u8>, Vec<(Context, Resolution)>, Resolution);
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn prepare_with_loader(
     manifest: &Manifest,
     config: &Config,
@@ -552,16 +575,56 @@ fn prepare_with_loader(
     loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<PreparedContexts> {
+    let catalog = prepare_catalog(manifest, config, repositories, forced.is_some(), None)?;
+    prepare_with_catalog(
+        manifest,
+        config,
+        toolchain,
+        contexts,
+        forced,
+        catalog,
+        proc_macros,
+        loader,
+        after_complete,
+    )
+}
+
+fn prepare_catalog(
+    manifest: &Manifest,
+    config: &Config,
+    repositories: &RepositorySet,
+    allow_unlocked: bool,
+    direct: Option<&crate::git::DirectCatalog>,
+) -> Result<Catalog> {
     let mut catalog = if manifest.lock.is_some() {
         Catalog::from_locked_repository(manifest, repositories)?
     } else {
         Catalog::default()
     };
-    if forced.is_some() {
+    if allow_unlocked {
         catalog.allow_unlocked_registry_candidates();
     }
     patch::configure(manifest, config, repositories, &mut catalog)?;
-    crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
+    if let Some(direct) = direct {
+        direct.configure(&mut catalog)?;
+    } else {
+        crate::git::configure_direct(manifest, &config.policy.limits, &mut catalog)?;
+    }
+    Ok(catalog)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_with_catalog(
+    manifest: &Manifest,
+    config: &Config,
+    toolchain: &Toolchain,
+    contexts: &[VendorContext],
+    forced: Option<(&str, Option<&Version>, &Version)>,
+    mut catalog: Catalog,
+    proc_macros: &BTreeSet<PackageKey>,
+    loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
+    after_complete: &dyn Fn(&Resolution) -> Result<()>,
+) -> Result<PreparedContexts> {
     for key in proc_macros {
         catalog.annotate_proc_macro(key, true)?;
     }
@@ -751,7 +814,9 @@ impl<'a> Acquisition<'a> {
             let ResolvedSource::CratesIo { checksum } = package.source else {
                 continue;
             };
-            if repositories.lookup_registry(&hex(&checksum))?.is_none() {
+            if repositories.lookup_registry(&hex(&checksum))?.is_none()
+                && !self.has_staged_registry(checksum)
+            {
                 missing += 1;
             }
         }
@@ -847,7 +912,9 @@ impl<'a> Acquisition<'a> {
             let ResolvedSource::CratesIo { checksum } = package.source else {
                 continue;
             };
-            if repositories.lookup_registry(&hex(&checksum))?.is_some() {
+            if repositories.lookup_registry(&hex(&checksum))?.is_some()
+                || self.has_staged_registry(checksum)
+            {
                 continue;
             }
             let key = (package.key.name.clone(), package.key.version.clone());
@@ -867,6 +934,16 @@ impl<'a> Acquisition<'a> {
             staged += 1;
         }
         Ok(staged)
+    }
+
+    fn has_staged_registry(&self, checksum: [u8; 32]) -> bool {
+        self.state.as_ref().is_some_and(|state| {
+            state
+                .transaction
+                .objects()
+                .iter()
+                .any(|object| object.object().checksum == checksum)
+        })
     }
 
     fn state(&mut self) -> Result<&mut AcquisitionState> {
@@ -1156,7 +1233,7 @@ mod tests {
             header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
             tar.extend_from_slice(&header);
             tar.extend_from_slice(contents);
-            tar.resize((tar.len() + 511) / 512 * 512, 0);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
         }
 
         let root = format!("{name}-{version}");
@@ -1229,6 +1306,7 @@ mod tests {
                 &contexts,
                 None,
                 None,
+                None,
                 true,
             )
             .unwrap()
@@ -1247,6 +1325,7 @@ mod tests {
                 &contexts,
                 None,
                 Some(&written),
+                None,
                 true,
             )
             .unwrap()
@@ -1287,6 +1366,7 @@ mod tests {
                 &contexts,
                 None,
                 None,
+                None,
                 true,
             )
             .unwrap()
@@ -1313,6 +1393,7 @@ mod tests {
             &contexts,
             None,
             None,
+            None,
             true,
             false,
             &mut "".as_bytes(),
@@ -1337,6 +1418,7 @@ mod tests {
             &contexts,
             None,
             Some(&previous),
+            None,
             true,
             false,
             &mut "".as_bytes(),
@@ -1366,6 +1448,7 @@ mod tests {
                 &contexts,
                 None,
                 Some(&previous),
+                None,
                 false,
                 true,
                 &mut "yes\n".as_bytes(),
@@ -1546,6 +1629,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(staged, 1);
+        assert_eq!(acquisition.missing_selected(&resolution).unwrap(), 0);
+        assert_eq!(
+            acquisition
+                .stage_selected_with(&resolution, |_, _, _| {
+                    panic!("an object staged by an earlier resolution pass must not be downloaded")
+                })
+                .unwrap(),
+            0
+        );
         assert_eq!(
             acquisition.state.as_ref().unwrap().transaction.objects()[0]
                 .object()

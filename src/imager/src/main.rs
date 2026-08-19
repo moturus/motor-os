@@ -26,7 +26,7 @@ mod util;
 
 const SECTOR_SIZE: u32 = 512;
 
-const SOURCE_TREE_EXCLUDED_DIRS: [&str; 3] = [".git", "__pycache__", "target"];
+const SOURCE_TREE_EXCLUDED_DIRS: [&str; 4] = [".git", ".lorry", "__pycache__", "target"];
 
 fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissions; 3]> {
     let executable = fs::metadata(source)?.permissions().mode() & 0o111 != 0;
@@ -665,17 +665,13 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 6);
+        assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
-            ("build/imager/dev-sources/red", "/devtools/src/red"),
-            ("build/imager/dev-sources/curl", "/devtools/src/curl"),
-            ("build/imager/dev-sources/lorry", "/devtools/src/lorry"),
-            ("build/imager/dev-sources/gears", "/devtools/src/gears"),
-            ("build/imager/dev-sources/moto-rt", "/devtools/src/moto-rt"),
-            (
-                "build/imager/dev-sources/moto-sys",
-                "/devtools/src/moto-sys",
-            ),
+            ("src/bin/red", "/devtools/src/src/bin/red"),
+            ("src/bin/lorry", "/devtools/src/src/bin/lorry"),
+            ("src/bin/gears", "/devtools/src/src/bin/gears"),
+            ("src/sys/lib/moto-rt", "/devtools/src/src/sys/lib/moto-rt"),
+            ("src/sys/lib/moto-sys", "/devtools/src/src/sys/lib/moto-sys"),
         ] {
             assert!(config
                 .source_dirs
@@ -758,11 +754,13 @@ mod tests {
         fs::create_dir_all(root.join("target/nested")).unwrap();
         fs::create_dir_all(root.join("bootstrap/__pycache__")).unwrap();
         fs::create_dir_all(root.join("nested/.git")).unwrap();
+        fs::create_dir_all(root.join("nested/.lorry/vendor")).unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
         fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(root.join("target/nested/artifact"), "generated\n").unwrap();
         fs::write(root.join("bootstrap/__pycache__/script.pyc"), "generated\n").unwrap();
         fs::write(root.join("nested/.git/config"), "generated\n").unwrap();
+        fs::write(root.join("nested/.lorry/vendor/object"), "generated\n").unwrap();
 
         let mut files = BTreeMap::new();
         add_source_dir(&mut files, root.clone(), Path::new("/devtools/src/example"));

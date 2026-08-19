@@ -408,7 +408,7 @@ mod review {
                     "Lorry dependency state does not admit build context `{host} -> {target}`"
                 ))
                 .with_help(
-                    "run `lorry vendor` on this host with the target in the configured \
+                    "run `lorry vendor [--accept-all]` on this host with the target in the configured \
                      `[vendor].targets` set",
                 ))
             }

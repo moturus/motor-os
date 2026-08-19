@@ -344,10 +344,7 @@ impl TrustPolicy {
                 self.operation_allow.insert(site.clone());
                 Ok(())
             }
-            "2" => self
-                .persistent
-                .save(site.clone(), Decision::Allow)
-                .map(|()| ()),
+            "2" => self.persistent.save(site.clone(), Decision::Allow),
             "4" => {
                 self.persistent.save(site.clone(), Decision::Deny)?;
                 Err(denied(site))

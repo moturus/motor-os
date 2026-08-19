@@ -343,8 +343,7 @@ settings must be rejected rather than adopted or ignored.
 - A validation-only host helper may prepare a disposable Cargo oracle view
   containing checksum-pinned inactive Cargo.lock entries. This is not a Lorry
   command or normal packaging input. Those entries must not enter Lorry's
-  production repository, repository fingerprint, generated admission policy,
-  or Motor image seed.
+  production repository, repository fingerprint, or admission policy.
 
 Required source rules are layered `lorry.toml` data, not hard-coded crate
 exceptions. A selected required patch must have a semantically matching root
@@ -1037,15 +1036,15 @@ tampering, invoke payloads without a shell, forward harness arguments, and
 aggregate failures. Unix platforms additionally enforce private directory,
 manifest, and executable modes.
 
-## Bootstrap, dependency, and licensing boundary
+## Image, dependency, and licensing boundary
 
-Lorry's executable does not bootstrap an OS image. The host-side files under
-`bootstrap/` are packaging utilities used by the Motor toolchain build to
-preinstall a verified system repository and system configuration. The shipped
-seed provides offline/self-hosting convenience; it is not required when Lorry
-is supplied another valid configuration and repositories. Imager inputs,
-debug/release image selection, VM launch, and layout validation remain outside
-this product boundary.
+Lorry's executable does not bootstrap an OS image. Motor's development image
+installs a user configuration for its writable repository and a system
+configuration for network and native-tool paths, limits, and exact
+executable-code grants. It installs no
+dependency repository: a fresh project must run networked `vendor` before its
+offline build. Imager inputs, debug/release image selection, VM launch, and
+layout validation remain outside this product boundary.
 
 The original dependency-free source was directly bootstrap-compilable with
 rustc. The current source pins the reviewed
@@ -1060,21 +1059,17 @@ admission evidence; first-party use grants no policy bypass.
 
 Motor curl uses Rustls with patched `ring` 0.17.14, `std`, and TLS 1.2,
 plus `rustls-pemfile` and `getrandom` 0.2.17's custom Motor entropy callback.
-The `ring` source is the exact crates.io archive plus the two reviewed Git
-replacement blobs, selected through an explicit logical path patch and
-verified as a seeded object. This bootstrap-specific construction remains
-distinct from project-local Git dependency vendoring.
+The `ring` source is the pinned Motor Git fork, selected through a root Git
+patch. Curl is cross-built by Linux-hosted Cargo because ring performs source
+generation from Git checkouts; curl is outside Lorry's Motor-native build
+surface.
 
 The pinned `ring` inputs are:
 
-- crates.io archive SHA-256
-  `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7`;
 - `https://github.com/moturus/ring.git` commit
   `b1dad2579de791d0c31ad33300187e584ba6c268`, tree
   `824d5b8e9755603070a8167e0c5529acb627d956`;
-- Git replacement blobs `build.rs` and `src/rand.rs`;
-- resulting `lorry-source-tree-v1` digest
-  `c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6`.
+- Cargo.lock pins that commit for the reproducible host cross-build.
 
 New Lorry and Motor curl code uses `MIT OR Apache-2.0`.
 
