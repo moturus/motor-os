@@ -48,6 +48,7 @@ independently gated commit per defect:
 6. The std-reachable vdso socket-option panics.
 7. The listener-flood memory-admission gap that can terminate sys-io.
 8. Option RPCs on unconnected/failed-connect TCP streams.
+9. Peer-reset reads laundered to clean EOF.
 
 IPv4 and IPv6 fragmentation/reassembly are also approved. This is a
 larger, security-sensitive change, so first write a dedicated design in
@@ -321,13 +322,16 @@ vdso / moto-io client side:
   unpolled to cover `Connecting`, then drives the refusal to cover `Closed`,
   across shutdown, linger, nodelay, TTL, and both buffer-size options; the
   public vdso nodelay path is covered after a refused nonblocking connect.
-- A read on a peer-RESET stream is laundered to clean EOF
-  `Ok(0)` (moto-io tcp.rs:1324) -- the read side has no sibling to
-  the just-landed write-side `dead_write_error`, so truncation-by-
-  EOF protocols (unframed HTTP, TLS without close-notify) silently
-  accept truncated data. Fix: return `E_CONNECTION_RESET` from the
-  EOF branches when `peer_reset` is set and no local shutdown(Read)
-  preceded it (needs a local-SHUT_RD flag).
+- [resolved] A read on a peer-RESET stream was laundered to clean EOF
+  `Ok(0)`, so truncation-by-EOF protocols could silently accept truncated
+  data. moto-io now records locally committed `shutdown(Read)` separately
+  from the combined read-closed state. After queued bytes are drained, every
+  reset EOF branch returns `E_CONNECTION_RESET`; an earlier local read
+  shutdown continues to return clean EOF. The vdso blocking adapter propagates
+  terminal fast-path errors instead of asserting that every read error is
+  `E_NOT_READY`. Full-stack regressions cover an immediate reset, data
+  ordered before a reset, and local-shutdown
+  suppression of the reset error.
 - A writer that was already parked when reset/closure arrives takes a
   different path from an immediate write: `TcpWriteFuture` returns
   `Ok(written)`, including `Ok(0)`, once the state is dead or TX is

@@ -56,7 +56,8 @@ pub fn tcp_read(
 ) -> Result<usize, ErrorCode> {
     match stream.inner().try_read(bufs, peek) {
         Ok(sz) => return Ok(sz),
-        Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
+        Err(moto_rt::E_NOT_READY) => {}
+        Err(err) => return Err(err),
     }
 
     if stream.is_nonblocking() {

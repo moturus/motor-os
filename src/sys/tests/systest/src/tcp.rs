@@ -3009,6 +3009,77 @@ fn test_write_after_peer_graceful_close_resets() {
     println!("test_write_after_peer_graceful_close_resets() PASS");
 }
 
+fn test_read_after_peer_reset_reports_error() {
+    use std::os::fd::AsRawFd;
+
+    fn connected_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        (client, peer)
+    }
+
+    fn abort(peer: std::net::TcpStream) {
+        moto_rt::net::set_linger(peer.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        drop(peer);
+    }
+
+    fn assert_reset(result: std::io::Result<usize>, context: &str) {
+        let err = result.expect_err(context);
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{context}");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(i32::from(moto_rt::E_CONNECTION_RESET)),
+            "{context}"
+        );
+    }
+
+    fn wait_for_reset(stream: &mut std::net::TcpStream) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.write(b"x") {
+                Ok(_) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "peer reset did not reach the write path"
+                ),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    assert!(std::time::Instant::now() < deadline);
+                }
+                Err(err) => {
+                    assert_reset(Err(err), "peer reset synchronization");
+                    return;
+                }
+            }
+        }
+    }
+
+    let (mut client, peer) = connected_pair();
+    abort(peer);
+    assert_reset(client.read(&mut [0_u8; 1]), "immediate peer reset");
+
+    let (mut client, mut peer) = connected_pair();
+    peer.write_all(b"x").unwrap();
+    abort(peer);
+    let mut byte = [0_u8; 1];
+    client.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"x");
+    assert_reset(client.read(&mut byte), "peer reset after queued data");
+
+    let (mut client, peer) = connected_pair();
+    client.shutdown(std::net::Shutdown::Read).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    abort(peer);
+    wait_for_reset(&mut client);
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+
+    println!("test_read_after_peer_reset_reports_error() PASS");
+}
+
 /// Backlog saturation, staying within the API's guarantees: fill the ready
 /// queue exactly to the backlog (the pump stops donating), drain part of
 /// it, and prove donations resume -- later connects complete and every
@@ -3321,6 +3392,7 @@ pub fn run_all_tests() {
     test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
     test_write_after_peer_graceful_close_resets();
+    test_read_after_peer_reset_reports_error();
     test_tcp_listener_ttl();
     test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();

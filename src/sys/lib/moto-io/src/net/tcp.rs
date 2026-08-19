@@ -486,6 +486,7 @@ impl TcpListener {
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
+            local_rx_shutdown: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             peer_reset: AtomicBool::new(false),
             subchannel_mask,
@@ -701,6 +702,10 @@ pub struct TcpStream {
     // to fail, so the _local_ state should reflect the
     // shutdown before the driver reports the new state.
     rx_closed: AtomicBool,
+    /// The application committed `shutdown(Read)`. Unlike `rx_closed`, this
+    /// is not set by a remote FIN or RST and therefore selects clean EOF over
+    /// the peer-reset error.
+    local_rx_shutdown: AtomicBool,
     tx_closed: AtomicBool,
     /// The peer reset the connection (the state-change event carried the
     /// reset cause). Sticky; selects `E_CONNECTION_RESET` over
@@ -1065,6 +1070,7 @@ impl TcpStream {
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
+            local_rx_shutdown: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             peer_reset: AtomicBool::new(false),
             subchannel_mask,
@@ -1332,11 +1338,11 @@ impl TcpStream {
             // No RX bytes; the front message, if any, is not an Rx.
             let Some(msg) = recv_q.pop_front() else {
                 if self.rx_closed.load(Ordering::Acquire) {
-                    return Ok(0);
+                    return self.dead_read_result();
                 }
                 match self.tcp_state() {
                     TcpState::Closed | TcpState::WriteOnly => {
-                        return Ok(0);
+                        return self.dead_read_result();
                     }
                     _ => return Err(moto_rt::E_NOT_READY),
                 }
@@ -1356,7 +1362,7 @@ impl TcpStream {
             self.set_tcp_state(new_state);
             match self.tcp_state() {
                 TcpState::Closed | TcpState::WriteOnly => {
-                    return Ok(0);
+                    return self.dead_read_result();
                 }
                 _ => {
                     recv_q = self.recv_queue.lock();
@@ -1496,6 +1502,14 @@ impl TcpStream {
     /// a dead stream, for native callers that want ECONNRESET fidelity.
     pub fn peer_reset(&self) -> bool {
         self.peer_reset.load(Ordering::Acquire)
+    }
+
+    fn dead_read_result(&self) -> Result<usize, ErrorCode> {
+        if self.peer_reset() && !self.local_rx_shutdown.load(Ordering::Acquire) {
+            Err(moto_rt::E_CONNECTION_RESET)
+        } else {
+            Ok(0)
+        }
     }
 
     /// The error a write on a dead write half reports: the recorded reset
@@ -1715,6 +1729,7 @@ impl TcpStream {
             .channel()
             .rpc_after_send(req, || {
                 if read {
+                    self.local_rx_shutdown.store(true, Ordering::Release);
                     self.rx_closed.store(true, Ordering::Release);
                     // SHUT_RD is local and discards already-buffered data.
                     // Complete it at the queue-ownership boundary so dropping
