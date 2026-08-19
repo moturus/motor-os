@@ -46,7 +46,8 @@ independently gated commit per defect:
 4. The malformed-UDP-fragment sys-io panic.
 5. The unbounded completed accept backlog.
 6. The std-reachable vdso socket-option panics.
-7. Option RPCs on unconnected/failed-connect TCP streams.
+7. The listener-flood memory-admission gap that can terminate sys-io.
+8. Option RPCs on unconnected/failed-connect TCP streams.
 
 IPv4 and IPv6 fragmentation/reassembly are also approved. This is a
 larger, security-sensitive change, so first write a dedicated design in
@@ -221,6 +222,23 @@ sys-io runtime glue:
   connection limits of 128 global and 32 per listener, preserving the
   original intended 32 MiB/8 MiB budgets; do not rely on rt.vdso's
   `listen(backlog)` as the security boundary. Reset and count overflow.
+- Listener creation can still terminate sys-io instead of returning
+  `OutOfMemory` near the admission floor. The third debug gate for the
+  socket-option patch reproduced this in
+  `test_aggregate_listener_exhaustion`: after two passing runs in which
+  each of four children was refused cleanly at about 671--674 listeners,
+  the VM exited during the same flood before any child reported. The new
+  socket-option tests had not run. `TcpListener::bind` samples the shared
+  memory-pressure bit once, then constructs four listening sockets and
+  grows several infallible heap/container allocations without reserving
+  their worst-case cost. Concurrent binds can all pass that sample; a
+  later kernel allocation refusal then aborts the critical sys-io process,
+  whose exit shuts down the VM. Investigate the exact allocation and fix
+  the ownership boundary rather than hiding the failure with retries or a
+  larger test timeout. The fix must make the aggregate flood return prompt
+  `OutOfMemory`, preserve the armed net-channel listener floor, recover its
+  memory, and pass the focused networking gate three times in both debug
+  and release builds.
 - The memory accounting/docs for half-open and spare listening sockets
   are stale: both use `RingBuild::LazyFloor` (16 KiB per direction), but
   `half_open.rs`, `backlog.rs`, and shipped `sys-net.toml` comments price
