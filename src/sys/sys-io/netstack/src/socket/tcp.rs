@@ -2752,13 +2752,17 @@ impl<'a> Socket<'a> {
         let mut control = repr.control;
         control = control.quash_psh();
 
-        // If a FIN is received at the end of the current segment, but
-        // we have a hole in the assembler before the current segment, disregard this FIN.
-        if control == TcpControl::Fin && window_start < segment_start {
+        // A FIN is valid only after every preceding payload octet is inside
+        // the receive window and contiguous. Defer it if there is a hole on
+        // the left or the segment's payload tail was clipped on the right.
+        if control == TcpControl::Fin && (window_start < segment_start || segment_end > window_end)
+        {
             tcp_trace!(
-                "ignoring FIN because we don't have full data yet. window_start={} segment_start={}",
+                "ignoring FIN outside contiguous receive window. window={}..{} segment={}..{}",
                 window_start,
-                segment_start
+                window_end,
+                segment_start,
+                segment_end
             );
             control = TcpControl::None;
         }
@@ -11428,6 +11432,79 @@ mod test {
                 ..RECV_TEMPL
             }]
         );
+    }
+
+    #[test]
+    fn test_fin_beyond_right_window_waits_for_retransmitted_tail() {
+        let mut s = socket_established();
+        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.assembler = Assembler::new();
+        s.ack_delay = None;
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"abcdefgh",
+                control: TcpControl::Fin,
+                ..SEND_TEMPL
+            }
+        );
+
+        // Only the six in-window bytes are accepted. The FIN follows the
+        // clipped tail, so it must not close the receive half yet.
+        assert_eq!(s.state, State::Established);
+        assert!(!s.rx_fin_received);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 0,
+                ..RECV_TEMPL
+            }]
+        );
+
+        let mut received = [0; 6];
+        assert_eq!(s.recv_slice(&mut received), Ok(6));
+        assert_eq!(&received, b"abcdef");
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 6,
+                ..RECV_TEMPL
+            }]
+        );
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 6,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"gh",
+                control: TcpControl::Fin,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::CloseWait);
+        assert!(s.rx_fin_received);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 8 + 1),
+                window_len: 4,
+                ..RECV_TEMPL
+            }]
+        );
+
+        let mut tail = [0; 2];
+        assert_eq!(s.recv_slice(&mut tail), Ok(2));
+        assert_eq!(&tail, b"gh");
+        assert_eq!(s.recv_slice(&mut tail), Err(RecvError::Finished));
     }
 
     #[test]
