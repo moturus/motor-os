@@ -603,20 +603,57 @@ fn test_writable_executable_elf_rejected() {
 }
 
 fn test_caps() {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SYS, ProcessRole};
+
+    assert_eq!(ProcessRole::None, ProcessRole::from_caps(0));
     assert_eq!(
-        0,
-        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
+        ProcessRole::Interactive,
+        ProcessRole::from_caps(CAP_INTERACTIVE)
     );
+    assert_eq!(ProcessRole::System, ProcessRole::from_caps(CAP_SYS));
+    assert_eq!(
+        ProcessRole::System,
+        ProcessRole::from_caps(CAP_SYS | CAP_INTERACTIVE)
+    );
+    assert_eq!(Ok(ProcessRole::None), ProcessRole::try_from(0));
+    assert_eq!(Ok(ProcessRole::Interactive), ProcessRole::try_from(1));
+    assert_eq!(Ok(ProcessRole::System), ProcessRole::try_from(2));
+    assert_eq!(Err(()), ProcessRole::try_from(3));
+
+    let self_caps = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(0, self_caps & CAP_SYS);
 
     assert!(
         std::process::Command::new(std::env::args().next().unwrap())
             .arg("subcommand")
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{:x}", moto_sys::caps::CAP_SYS),
+                format!("0x{CAP_SYS:x}"),
             )
             .spawn()
             .is_err()
+    );
+
+    let mut processes = vec![moto_sys::stats::ProcessInfoV1::default(); 1024];
+    let count =
+        moto_sys::stats::ProcessInfoV1::list(moto_sys::stats::PID_SYSTEM, &mut processes).unwrap();
+    processes.truncate(count);
+    let role_for = |pid| {
+        ProcessRole::try_from(
+            processes
+                .iter()
+                .find(|process| process.pid == pid)
+                .unwrap()
+                .process_role,
+        )
+        .unwrap()
+    };
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_SYSTEM));
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_KERNEL));
+    assert_eq!(ProcessRole::System, role_for(moto_sys::stats::PID_SYS_IO));
+    assert_eq!(
+        ProcessRole::from_caps(self_caps),
+        role_for(moto_sys::current_pid())
     );
 
     println!("test_caps() PASS");
@@ -858,6 +895,9 @@ fn main() {
     if spawn_wait_kill::is_pid_query_child(&args) {
         spawn_wait_kill::run_pid_query_child();
     }
+    if spawn_wait_kill::is_peer_caps_query_child(&args) {
+        spawn_wait_kill::run_peer_caps_query_child();
+    }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
     }
@@ -992,6 +1032,7 @@ fn main() {
 
     spawn_wait_kill::test_pid_invariants();
     spawn_wait_kill::test_process_pid_query();
+    spawn_wait_kill::test_peer_capabilities_query();
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();

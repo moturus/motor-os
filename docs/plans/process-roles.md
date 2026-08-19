@@ -708,3 +708,18 @@ small pure tests where noted:
   separation (§7.1).
 - **`CAP_USER` naming**: interchangeable with Interactive; Interactive matches
   the implemented `async_fs::Role` and PERMISSIONS_DESIGN.md vocabulary.
+
+---
+
+## Implementation log
+
+This section is a temporary rollout record and can be deleted after all four
+patches in §10 are complete.
+
+- **2026-08-19 — Patch 1 complete:** added `CAP_INTERACTIVE` and
+  `ProcessRole`; renamed the stable `ProcessInfoV1` byte to `process_role`;
+  added the peer `F_QUERY_CAPS` / `SysObj::get_capabilities` API and kernel
+  implementation; updated `sysbox ps` for the renamed field and role markers;
+  and added derivation, stats, and real-child peer-query coverage. Validation:
+  `cargo +nightly fmt`, `make -j20`, and three successful
+  `src/tests/full-test.sh` runs each in debug and release mode.

@@ -4,6 +4,7 @@ use crate::subcommand;
 
 const SHARED_LISTENER_CHILD: &str = "shared-listener-child";
 const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
+const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
 
 fn spawn_shared_listener() -> (
     std::process::Child,
@@ -63,6 +64,65 @@ pub fn test_shared_listener_restart() {
     assert_eq!(-1, first.wait().unwrap().code().unwrap());
     assert_eq!(-1, second.wait().unwrap().code().unwrap());
     println!("test_shared_listener_restart PASS");
+}
+
+pub fn is_peer_caps_query_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == PEER_CAPS_QUERY_CHILD
+}
+
+pub fn run_peer_caps_query_child() -> ! {
+    use std::io::Write;
+
+    println!("{}", moto_sys::ProcessStaticPage::get().capabilities);
+    std::io::stdout().flush().unwrap();
+
+    // Stay alive until the parent closes stdin, so the IPC peer remains live
+    // while it is queried.
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap();
+    std::process::exit(0)
+}
+
+pub fn test_peer_capabilities_query() {
+    use std::io::BufRead;
+    use std::os::motor::process::ChildExt;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(PEER_CAPS_QUERY_CHILD)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    assert_ne!(0, stdout.read_line(&mut line).unwrap());
+    let child_caps = line.trim().parse::<u64>().unwrap();
+
+    let process_handle = moto_sys::SysHandle::from_u64(child.sys_handle());
+    let (local, _remote) =
+        moto_sys::SysObj::create_ipc_pair(moto_sys::SysHandle::SELF, process_handle, 0).unwrap();
+
+    assert_eq!(
+        child_caps,
+        moto_sys::SysObj::get_capabilities(local).unwrap()
+    );
+    assert_eq!(
+        u64::from(child.id()),
+        moto_sys::SysObj::get_pid(local).unwrap()
+    );
+
+    // Only a live shared-object peer has peer capabilities.
+    assert!(moto_sys::SysObj::get_capabilities(process_handle).is_err());
+    assert!(moto_sys::SysObj::get_capabilities(moto_sys::SysHandle::NONE).is_err());
+
+    drop(child.stdin.take());
+    assert_eq!(0, child.wait().unwrap().code().unwrap());
+    assert!(moto_sys::SysObj::get_capabilities(local).is_err());
+    moto_sys::SysObj::put(local).unwrap();
+
+    println!("test_peer_capabilities_query PASS");
 }
 
 pub fn smoke_test() {

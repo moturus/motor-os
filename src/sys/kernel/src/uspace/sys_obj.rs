@@ -288,10 +288,11 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
 
     let handle = SysHandle::from_u64(args.args[0]);
 
-    let (return_pid, query_peer) = match args.flags {
-        0 => (false, false),
-        SysObj::F_QUERY_PID => (true, false),
-        SysObj::F_QUERY_PEER => (false, true),
+    let (return_pid, return_caps, query_peer) = match args.flags {
+        0 => (false, false, false),
+        SysObj::F_QUERY_PID => (true, false, false),
+        SysObj::F_QUERY_CAPS => (false, true, false),
+        SysObj::F_QUERY_PEER => (false, false, true),
         _ => return ResultBuilder::invalid_argument(),
     };
 
@@ -321,7 +322,7 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             }
         }
 
-        if !return_pid {
+        if !return_pid && !return_caps {
             return ResultBuilder::ok();
         }
 
@@ -329,7 +330,11 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             return ResultBuilder::result(moto_rt::E_NOT_FOUND);
         };
 
-        ResultBuilder::ok_1(proc.pid().as_u64())
+        if return_pid {
+            ResultBuilder::ok_1(proc.pid().as_u64())
+        } else {
+            ResultBuilder::ok_1(proc.capabilities())
+        }
     } else {
         log::debug!(
             "sys_query_handle: object not found in pid {} for handle {}.",
