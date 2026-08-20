@@ -56,6 +56,13 @@ impl fmt::Display for AssemblerFullError {
 
 impl std::error::Error for AssemblerFullError {}
 
+/// Assemblies reclaimed after reaching their deadline.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExpirationOutcome {
+    pub(crate) incomplete: usize,
+    pub(crate) poisoned: usize,
+}
+
 /// Holds the bounded state for one fragmented packet.
 #[derive(Debug)]
 pub struct PacketAssembler<K> {
@@ -304,7 +311,7 @@ impl<K: Eq + Copy> PacketAssemblerSet<K> {
             if slot.key.as_ref() == Some(key) {
                 return Ok(slot);
             }
-            if slot.is_free() {
+            if slot.is_free() && empty_slot.is_none() {
                 empty_slot = Some(slot)
             }
         }
@@ -315,13 +322,20 @@ impl<K: Eq + Copy> PacketAssemblerSet<K> {
         Ok(slot)
     }
 
-    /// Remove all [`PacketAssembler`]s that are expired.
-    pub fn remove_expired(&mut self, timestamp: Instant) {
+    /// Remove expired assemblers and classify the reclaimed state.
+    pub fn remove_expired(&mut self, timestamp: Instant) -> ExpirationOutcome {
+        let mut outcome = ExpirationOutcome::default();
         for frag in &mut self.assemblers {
             if !frag.is_free() && frag.expires_at < timestamp {
+                if frag.poisoned {
+                    outcome.poisoned += 1;
+                } else {
+                    outcome.incomplete += 1;
+                }
                 frag.reset();
             }
         }
+        outcome
     }
 }
 
@@ -625,6 +639,78 @@ mod tests {
         assert!(
             set.get(&Key(REASSEMBLY_BUFFER_COUNT), Instant::ZERO)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn packet_assembler_set_uses_first_free_slot() {
+        let mut set = PacketAssemblerSet::new();
+        set.get(&Key(1), Instant::ZERO).unwrap();
+        set.get(&Key(2), Instant::ZERO).unwrap();
+
+        assert_eq!(set.assemblers[0].key, Some(Key(1)));
+        assert_eq!(set.assemblers[1].key, Some(Key(2)));
+        assert!(set.assemblers[2..].iter().all(PacketAssembler::is_free));
+    }
+
+    #[test]
+    fn packet_assembler_invalid_first_fragment_retains_no_state() {
+        let mut set = PacketAssemblerSet::new();
+        for id in 0..REASSEMBLY_BUFFER_COUNT {
+            let assembler = set.get(&Key(id), Instant::from_secs(10)).unwrap();
+            assert_eq!(
+                assembler.add(&[0], REASSEMBLY_BUFFER_SIZE),
+                Err(AssemblerError::SizeLimit)
+            );
+        }
+        assert!(set.assemblers.iter().all(PacketAssembler::is_free));
+    }
+
+    #[test]
+    fn packet_assembler_expiry_classifies_incomplete_state() {
+        let expiry = Instant::from_secs(10);
+        let mut set = PacketAssemblerSet::new();
+        set.get(&Key(1), expiry).unwrap().add(b"data", 0).unwrap();
+
+        assert_eq!(set.remove_expired(expiry), ExpirationOutcome::default());
+        assert_eq!(
+            set.remove_expired(expiry + Duration::from_millis(1)),
+            ExpirationOutcome {
+                incomplete: 1,
+                poisoned: 0,
+            }
+        );
+        assert!(set.get(&Key(2), expiry).is_ok());
+    }
+
+    #[test]
+    fn packet_assembler_tombstone_expires_and_is_reusable() {
+        let key = Key(1);
+        let expiry = Instant::from_secs(10);
+        let mut set = PacketAssemblerSet::new();
+        let assembler = set.get(&key, expiry).unwrap();
+        assembler.add(b"data", 0).unwrap();
+        assert_eq!(assembler.add(b"XX", 3), Err(AssemblerError::Overlap));
+
+        assert_eq!(set.remove_expired(expiry), ExpirationOutcome::default());
+        assert_eq!(
+            set.get(&key, Instant::from_secs(20))
+                .unwrap()
+                .add(b"new", 0),
+            Err(AssemblerError::Poisoned)
+        );
+        assert_eq!(
+            set.remove_expired(expiry + Duration::from_millis(1)),
+            ExpirationOutcome {
+                incomplete: 0,
+                poisoned: 1,
+            }
+        );
+        assert_eq!(
+            set.get(&key, Instant::from_secs(20))
+                .unwrap()
+                .add(b"new", 0),
+            Ok(AssemblerOutcome::Incomplete)
         );
     }
 }
