@@ -1,7 +1,7 @@
 # Process Roles — System / Interactive / None
 
-Status: **proposed** (not implemented; codebase-reviewed 2026-08-18; review
-findings folded in 2026-08-19). Companion to
+Status: **implementation in progress** (patches 1–3 complete; codebase-reviewed
+2026-08-18; review findings folded in 2026-08-19). Companion to
 `src/sys/lib/motor-fs/PERMISSIONS_DESIGN.md`, which defines the FS-side
 consumer of the three roles and deliberately leaves their *origin*
 unspecified ("a trusted input supplied from above the FS").
@@ -734,3 +734,14 @@ patches in §10 are complete.
   three successful `src/tests/full-test.sh` runs each in debug and release
   mode. The pre-existing nondeterministic `test_cpus` prerequisite was fixed
   and committed separately as `e6e2b917`.
+- **2026-08-19 — Patch 3 complete:** sys-io now derives and fail-closed checks
+  the immutable peer role once per accepted FS connection, then applies it to
+  every external role-taking operation; public chmod narrows the caller's own
+  role byte; and rt.vdso reports permissions for the caller's role. Added
+  integration coverage for Interactive narrowing and recovery, self-widening
+  denial, and a real None child exercising file and directory read/write,
+  resize, create/delete, traversal/listing, and move permissions. Validation:
+  `cargo +nightly fmt`, focused debug `systest`, and three successful
+  `src/tests/full-test.sh` runs each in debug and release mode. The CPU
+  migration test follow-up was committed separately as `da0bb2e7`; the
+  concurrent-spawn validation blocker was resolved by `be27cbf0`.

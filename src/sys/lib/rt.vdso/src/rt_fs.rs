@@ -27,6 +27,14 @@ type IoTask = Box<
     dyn FnOnce(alloc::rc::Rc<moto_io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>> + Send,
 >;
 
+fn current_fs_role() -> Role {
+    match moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities) {
+        moto_sys::caps::ProcessRole::None => Role::None,
+        moto_sys::caps::ProcessRole::Interactive => Role::Interactive,
+        moto_sys::caps::ProcessRole::System => Role::System,
+    }
+}
+
 // Given a path str from the user, figure out the absolute path, filename, etc.
 #[derive(Clone)]
 struct CanonicalPath {
@@ -495,7 +503,7 @@ impl AsyncFsClient {
 
         let mut file_attr = moto_rt::fs::FileAttr::new();
         file_attr.size = metadata.size;
-        file_attr.perm = access_to_perm(metadata.access(Role::System)?);
+        file_attr.perm = access_to_perm(metadata.access(current_fs_role())?);
         file_attr.file_type = match metadata.kind() {
             moto_io::fs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
             moto_io::fs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,

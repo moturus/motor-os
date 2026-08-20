@@ -8,6 +8,7 @@ mod command_output;
 mod descriptor_attr;
 mod file_locking;
 mod fs;
+mod fs_permissions;
 mod icmp;
 mod io_channel;
 mod logging;
@@ -1073,6 +1074,9 @@ fn main() {
         fs::verify_pattern_file(&args[2], args[3].parse().unwrap(), &args[4]);
         return;
     }
+    if fs_permissions::is_none_child(&args) {
+        fs_permissions::run_none_child(&args);
+    }
     if command_output::is_child(&args) {
         command_output::run_child(&args);
     }
@@ -1134,6 +1138,7 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    fs_permissions::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;
