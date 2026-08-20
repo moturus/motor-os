@@ -71,6 +71,8 @@ impl Route {
 #[derive(Debug)]
 pub struct Routes {
     storage: Vec<Route>,
+    #[cfg(feature = "proto-ipv6")]
+    ipv6_eligible: bool,
 }
 
 impl Routes {
@@ -78,12 +80,32 @@ impl Routes {
     pub fn new() -> Self {
         Self {
             storage: Vec::new(),
+            #[cfg(feature = "proto-ipv6")]
+            ipv6_eligible: true,
         }
+    }
+
+    #[cfg(feature = "proto-ipv6")]
+    pub(crate) fn disable_ipv6(&mut self) {
+        self.ipv6_eligible = false;
     }
 
     /// Update the routes of this node.
     pub fn update<F: FnOnce(&mut Vec<Route>)>(&mut self, f: F) {
         f(&mut self.storage);
+        #[cfg(feature = "proto-ipv6")]
+        if !self.ipv6_eligible
+            && self.storage.iter().any(|route| {
+                matches!(route.cidr, IpCidr::Ipv6(_))
+                    || matches!(route.via_router, IpAddress::Ipv6(_))
+            })
+        {
+            self.storage.retain(|route| {
+                !matches!(route.cidr, IpCidr::Ipv6(_))
+                    && !matches!(route.via_router, IpAddress::Ipv6(_))
+            });
+            panic!("IPv6 routes require an interface MTU of at least 1280");
+        }
         self.reorder();
     }
 
@@ -110,6 +132,10 @@ impl Routes {
     /// Returns the previous default route, if any.
     #[cfg(feature = "proto-ipv6")]
     pub fn add_default_ipv6_route(&mut self, gateway: Ipv6Address) -> Option<Route> {
+        assert!(
+            self.ipv6_eligible,
+            "IPv6 routes require an interface MTU of at least 1280"
+        );
         let old = self.remove_default_ipv6_route();
         // A /0 belongs at the very end the order wants; push keeps it there.
         self.storage.push(Route::new_ipv6_gateway(gateway));
@@ -177,6 +203,11 @@ impl Routes {
 
     pub(crate) fn lookup(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
         assert!(addr.is_unicast());
+
+        #[cfg(feature = "proto-ipv6")]
+        if matches!(addr, IpAddress::Ipv6(_)) && !self.ipv6_eligible {
+            return None;
+        }
 
         // Most-specific-first order: the first live match wins, except that
         // among routes of equal prefix length the last matching one is kept,

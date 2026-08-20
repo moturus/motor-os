@@ -61,6 +61,20 @@ use crate::time::{Duration, Instant};
 
 use crate::wire::*;
 
+#[cfg(feature = "proto-ipv6")]
+fn ipv6_device_eligible(caps: &DeviceCapabilities) -> bool {
+    caps.ip_mtu() >= IPV6_MIN_MTU || {
+        #[cfg(feature = "medium-ieee802154")]
+        {
+            caps.medium == Medium::Ieee802154
+        }
+        #[cfg(not(feature = "medium-ieee802154"))]
+        {
+            false
+        }
+    }
+}
+
 macro_rules! check {
     ($e:expr) => {
         match $e {
@@ -459,6 +473,13 @@ impl Interface {
             }
         }
 
+        #[allow(unused_mut)]
+        let mut routes = Routes::new();
+        #[cfg(feature = "proto-ipv6")]
+        if !ipv6_device_eligible(&caps) {
+            routes.disable_ipv6();
+        }
+
         Interface {
             fragments: FragmentsBuffer {
                 #[cfg(feature = "proto-sixlowpan")]
@@ -478,7 +499,7 @@ impl Interface {
                 hardware_addr: config.hardware_addr,
                 ip_addrs: alloc::vec::Vec::new(),
                 any_ip: false,
-                routes: Routes::new(),
+                routes,
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_cache: NeighborCache::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -806,6 +827,19 @@ impl Interface {
     pub fn update_ip_addrs<F: FnOnce(&mut alloc::vec::Vec<IpCidr>)>(&mut self, f: F) {
         f(&mut self.inner.ip_addrs);
         InterfaceInner::flush_neighbor_cache(&mut self.inner);
+        #[cfg(feature = "proto-ipv6")]
+        if !ipv6_device_eligible(&self.inner.caps)
+            && self
+                .inner
+                .ip_addrs
+                .iter()
+                .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+        {
+            self.inner
+                .ip_addrs
+                .retain(|cidr| !matches!(cidr, IpCidr::Ipv6(_)));
+            panic!("IPv6 addresses require an interface MTU of at least 1280");
+        }
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs);
 
         #[cfg(all(
@@ -1486,7 +1520,11 @@ impl InterfaceInner {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(addr) => self.get_source_address_ipv4(addr).map(|a| a.into()),
             #[cfg(feature = "proto-ipv6")]
-            IpAddress::Ipv6(addr) => Some(self.get_source_address_ipv6(addr).into()),
+            IpAddress::Ipv6(addr) if ipv6_device_eligible(&self.caps) => {
+                Some(self.get_source_address_ipv6(addr).into())
+            }
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(_) => None,
         }
     }
 
@@ -1649,6 +1687,11 @@ impl InterfaceInner {
     }
 
     fn route(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
+        #[cfg(feature = "proto-ipv6")]
+        if matches!(addr, IpAddress::Ipv6(_)) && !ipv6_device_eligible(&self.caps) {
+            return None;
+        }
+
         // Send directly.
         // note: no need to use `self.is_broadcast()` to check for subnet-local broadcast addrs
         //       here because `in_same_network` will already return true.
