@@ -195,8 +195,9 @@ Vendoring accepts Cargo.lock versions 3 and 4. It preserves an unchanged
 version 3 lock byte-for-byte and writes canonical version 4 when the lockfile
 must be created or repaired.
 
-Normal vendoring reports each Git source, sparse-index entry, and crate archive
-when its acquisition starts. `--quiet` suppresses this progress.
+Normal vendoring reports graph resolution and source verification phases, plus
+each Git source, sparse-index entry, and crate archive when its acquisition
+starts. `--quiet` suppresses this progress.
 
 New packages are displayed with their exact version, checksum, license,
 build-script and procedural-macro status, sizes, and new dependency edges.

@@ -281,6 +281,22 @@ pub fn inspect(
 }
 
 impl PackageEvidence {
+    pub(crate) fn from_verified_git(manifest: &Manifest, tree: &Tree) -> Self {
+        Self {
+            license: manifest.metadata.license.clone(),
+            build_script: manifest.build_script.is_some(),
+            proc_macro: manifest
+                .library
+                .as_ref()
+                .is_some_and(|library| library.proc_macro),
+            newly_acquired: false,
+            archive_bytes: None,
+            extracted_bytes: tree.total_bytes,
+            file_count: tree.file_count as u64,
+            source_tree_sha256: tree.sha256,
+        }
+    }
+
     pub fn from_registry(
         package: &ResolvedPackage,
         object: &RegistryObject,
@@ -449,19 +465,7 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        Ok(Self {
-            license: manifest.metadata.license.clone(),
-            build_script: manifest.build_script.is_some(),
-            proc_macro: manifest
-                .library
-                .as_ref()
-                .is_some_and(|library| library.proc_macro),
-            newly_acquired: false,
-            archive_bytes: None,
-            extracted_bytes: tree.total_bytes,
-            file_count: tree.file_count as u64,
-            source_tree_sha256: tree.sha256,
-        })
+        Ok(Self::from_verified_git(manifest, &tree))
     }
 }
 
@@ -647,7 +651,10 @@ fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
 }
 
-fn check_evidence_identity(package: &ResolvedPackage, evidence: &PackageEvidence) -> Result<()> {
+pub(crate) fn check_evidence_identity(
+    package: &ResolvedPackage,
+    evidence: &PackageEvidence,
+) -> Result<()> {
     match &package.source {
         ResolvedSource::CratesIo { .. } if evidence.archive_bytes.is_none() => {
             Err(Error::failure(format!(

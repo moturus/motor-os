@@ -26,3 +26,6 @@ Motor OS development guidelines.
   `make -j$(nproc) BUILD=release dev.img`; VM/image selection is test
   infrastructure, not Lorry command behavior.
 - New plan docs about lorry should go not in `docs/plans/` but into `src/bin/lorry/`.
+- If a pre-existing lorry issue is found, it is in scope - diagnose it and
+  fix it as part of lorry work. Non-lorry issues should follow the workspace
+  AGENTS.md.

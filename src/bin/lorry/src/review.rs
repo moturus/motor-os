@@ -39,9 +39,12 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             toolchain: &toolchain,
             options: &options,
             staging_parent: staging.path(),
+            direct: None,
+            prepare_context: None,
         },
         &compact,
-    )?;
+    )?
+    .into_review();
     let report = review.render()?;
     io::stdout()
         .lock()

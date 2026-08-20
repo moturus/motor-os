@@ -197,10 +197,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         (None, Some(registry)) => dependency::RegistrySource::Cargo(registry),
         _ => unreachable!("exactly one registry source is constructed"),
     };
+    let direct = crate::git::load_locked_dependencies(&manifest, &config.policy.limits)?;
     crate::trace::event("opened dependency source");
-    if let Some(compact) = &compact_state {
+    let verified_resolution = if let Some(compact) = &compact_state {
         let options = dependency::resolver_options(&manifest, &config, &toolchain)?;
-        let review = dependency::verify_compact_admission(
+        let verified = dependency::verify_compact_admission(
             &dependency::ReviewInputs {
                 manifest: &manifest,
                 config: &config,
@@ -208,11 +209,20 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 toolchain: &toolchain,
                 options: &options,
                 staging_parent: admission_staging.path(),
+                direct: Some(&direct),
+                prepare_context: Some(crate::admission_state::Context {
+                    host: host_info.triple.clone(),
+                    target: target_info.triple.clone(),
+                }),
             },
             compact,
         )?;
+        let (review, resolution) = verified.into_parts();
         review.apply_to_policy(&mut config.policy, &manifest.root)?;
-    }
+        resolution
+    } else {
+        None
+    };
     crate::trace::event("verified dependency admission");
     let global_cache_root = config.cache_directory()?;
 
@@ -236,7 +246,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
-                source: Some(source),
+                source: Some((source, &direct, verified_resolution)),
                 bundle: false,
                 validation,
                 ordinary_freshness_base,
@@ -263,7 +273,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
-                source: Some(source),
+                source: Some((source, &direct, verified_resolution)),
                 bundle: false,
                 validation,
                 ordinary_freshness_base,
@@ -306,7 +316,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
-                source: Some(source),
+                source: Some((source, &direct, verified_resolution)),
                 bundle: options.bundle,
                 validation,
                 ordinary_freshness_base,
@@ -369,9 +379,13 @@ struct Build<'a> {
     color: bool,
     verbosity: Verbosity,
     use_cargo_registry: bool,
-    /// Registry source shared with admission verification so repository
-    /// objects verified there are not re-hashed during prepare.
-    source: Option<dependency::RegistrySource<'a>>,
+    /// Dependency sources shared with admission verification so verified
+    /// repository and direct-Git objects are not re-hashed during prepare.
+    source: Option<(
+        dependency::RegistrySource<'a>,
+        &'a crate::git::DirectCatalog,
+        Option<crate::resolver::Resolution>,
+    )>,
     bundle: bool,
     validation: ValidationMode,
     ordinary_freshness_base: Option<[u8; 32]>,
@@ -471,7 +485,7 @@ fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
     })
 }
 
-fn build(build: Build<'_>) -> Result<BuildArtifacts> {
+fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     if let Some(name) = build.test_name
         && !build
             .manifest
@@ -522,11 +536,15 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         host_triple: &build.host.triple,
         host_cfg: &build.host.cfg,
     };
-    let prepared = if let Some(source) = build.source {
+    let prepared = if let Some((source, direct, verified_resolution)) = build.source.take() {
         dependency::prepare_locked_source(
             build.manifest,
             build.config,
-            source,
+            dependency::LockedSource {
+                registry: source,
+                direct,
+                verified_resolution,
+            },
             &resolver_options,
             selection,
             staging.path(),

@@ -25,8 +25,8 @@ use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
-    self, Catalog, LockedPreference, PackageKey, Resolution, ResolvedPackage, ResolvedSource,
-    TargetSelection,
+    self, Catalog, LockedPreference, PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
+    ResolvedSource, TargetSelection,
 };
 use crate::source_tree::Limits as TreeLimits;
 use crate::sparse;
@@ -313,6 +313,7 @@ fn prepare_networked_with_approval(
     output: &mut impl Write,
     progress: Progress,
 ) -> Result<bool> {
+    progress.report("Checking dependency repository state")?;
     let mut acquisition = Acquisition::new(config, manifest, progress)?;
     let repositories = acquisition.repositories().clone();
     // The committed document is needed only to display an interactive diff.
@@ -329,6 +330,7 @@ fn prepare_networked_with_approval(
                     toolchain,
                     &repositories,
                     previous,
+                    direct,
                 )
             })
             .transpose()?
@@ -336,7 +338,18 @@ fn prepare_networked_with_approval(
     };
     let forced = forced.map(upgrade::Selection::as_resolver_input);
     let base_catalog = prepare_catalog(manifest, config, &repositories, forced.is_some(), direct)?;
-    let mut known_proc_macros = BTreeSet::new();
+    let mut known_proc_macros = previous
+        .map(|previous| {
+            dependency::capability_registry_proc_macros(manifest, &previous.capabilities)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    struct CachedEvidence {
+        identity: Vec<(PackageKey, ResolvedSource)>,
+        packages: BTreeMap<PackageKey, PackageEvidence>,
+    }
+    let mut evidence_cache: Option<CachedEvidence> = None;
+    progress.report("Resolving dependency graph")?;
     let (lock, per_context, selected, evidence, admission) = loop {
         let (lock, per_context, selected) = {
             let mut loader =
@@ -363,15 +376,32 @@ fn prepare_networked_with_approval(
         let missing = acquisition.missing_selected(&selected)?;
         require_approval_mode(missing, accept_all, terminal)?;
         acquisition.stage_selected(&selected)?;
-        let evidence = acquisition.evidence(&selected)?;
+        let identity = selected
+            .packages
+            .iter()
+            .map(|package| (package.key.clone(), package.source.clone()))
+            .collect::<Vec<_>>();
+        let evidence = match &evidence_cache {
+            Some(cached) if cached.identity == identity => cached.packages.clone(),
+            _ => {
+                progress.report("Verifying selected dependency sources")?;
+                let evidence = acquisition.evidence(&selected, direct)?;
+                evidence_cache = Some(CachedEvidence {
+                    identity,
+                    packages: evidence.clone(),
+                });
+                evidence
+            }
+        };
         let discovered = evidence
             .iter()
-            .filter(|(_, evidence)| evidence.proc_macro)
+            .filter(|(key, evidence)| {
+                evidence.proc_macro && key.source == PackageSourceKey::CratesIo
+            })
             .map(|(key, _)| key.clone())
             .collect::<BTreeSet<_>>();
-        let known = known_proc_macros.len();
-        known_proc_macros.extend(discovered);
-        if known_proc_macros.len() != known {
+        if known_proc_macros != discovered {
+            known_proc_macros = discovered;
             continue;
         }
         let admission = policy::inspect(&preflight, &selected, &evidence)?;
@@ -438,6 +468,7 @@ fn try_reconstruct_committed_review(
     toolchain: &Toolchain,
     repositories: &RepositorySet,
     previous: &CompactState,
+    direct: Option<&crate::git::DirectCatalog>,
 ) -> Result<Option<Review>> {
     if manifest.lock.is_none() {
         return Ok(None);
@@ -452,9 +483,12 @@ fn try_reconstruct_committed_review(
             toolchain,
             options: &options,
             staging_parent: staging.path(),
+            direct,
+            prepare_context: None,
         },
         previous,
     )
+    .map(dependency::VerifiedAdmission::into_review)
     .ok())
 }
 
@@ -708,24 +742,34 @@ impl<'a> Acquisition<'a> {
             repository_tree_limits(&config.policy.limits)?,
             config.policy.limits.max_package_bytes,
         )?;
-        let mut records = BTreeMap::new();
+        let mut locked = Vec::new();
         for package in manifest.lock.iter().flat_map(|lock| &lock.packages) {
             let (Some(_source), Some(checksum)) = (&package.source, &package.checksum) else {
                 continue;
             };
-            let Some(object) = repositories.lookup_registry(checksum)? else {
-                continue;
-            };
-            let locked_version = Version::parse(&package.version.original).map_err(|error| {
+            let version = Version::parse(&package.version.original).map_err(|error| {
                 Error::failure(format!(
                     "locked package has invalid version `{} {}`: {error}",
                     package.name, package.version.original
                 ))
             })?;
-            if object.name != package.name || object.version != locked_version {
+            locked.push((package.name.clone(), version, checksum.clone()));
+        }
+        let objects = repositories.lookup_registries(
+            &locked
+                .iter()
+                .map(|(_, _, checksum)| checksum.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        let mut records = BTreeMap::new();
+        for (name, version, checksum) in locked {
+            let Some(object) = objects[&checksum].clone() else {
+                continue;
+            };
+            if object.name != name || object.version != version {
                 return Err(Error::failure(format!(
                     "repository object `{checksum}` does not match locked package `{} {}`",
-                    package.name, package.version.original
+                    name, version
                 )));
             }
             let key = (object.name.clone(), object.version.clone());
@@ -734,7 +778,7 @@ impl<'a> Acquisition<'a> {
             {
                 return Err(Error::failure(format!(
                     "repositories disagree about locked package `{} {}`",
-                    package.name, package.version.original
+                    name, version
                 )));
             }
         }
@@ -838,13 +882,46 @@ impl<'a> Acquisition<'a> {
     fn evidence(
         &mut self,
         resolution: &Resolution,
+        direct: Option<&crate::git::DirectCatalog>,
     ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
         let repositories = self.repositories.clone();
-        let mut evidence = BTreeMap::new();
+        let mut retained = Vec::new();
+        for package in &resolution.packages {
+            let ResolvedSource::CratesIo { checksum } = package.source else {
+                continue;
+            };
+            if self.has_staged_registry(checksum) {
+                continue;
+            }
+            let object = repositories
+                .lookup_registry(&hex(&checksum))?
+                .ok_or_else(|| {
+                    Error::failure(format!(
+                        "selected crates.io package `{} {}` is absent",
+                        package.key.name, package.key.version
+                    ))
+                })?;
+            if object.retained_source {
+                retained.push(object);
+            }
+        }
+        repositories.load_registry_manifests(&retained)?;
+        let git_packages = resolution
+            .packages
+            .iter()
+            .filter(|package| matches!(package.source, ResolvedSource::Git { .. }))
+            .collect::<Vec<_>>();
+        let mut evidence = match direct {
+            Some(direct) => git_packages
+                .iter()
+                .map(|package| Ok((package.key.clone(), direct.evidence(package)?)))
+                .collect::<Result<BTreeMap<_, _>>>()?,
+            None => dependency::inspect_git_package_evidence(&git_packages)?,
+        };
         for package in &resolution.packages {
             let package_evidence = match &package.source {
                 ResolvedSource::Path { .. } => PackageEvidence::from_path(package)?,
-                ResolvedSource::Git { .. } => PackageEvidence::from_git(package)?,
+                ResolvedSource::Git { .. } => continue,
                 ResolvedSource::CratesIo { checksum } => {
                     let staged = self.state.as_ref().and_then(|state| {
                         state
@@ -892,7 +969,11 @@ impl<'a> Acquisition<'a> {
                             self.inspections.push(extracted);
                             (source, tree)
                         };
-                        let manifest = Manifest::load_path_dependency(&source)?;
+                        let manifest = if object.retained_source {
+                            repositories.load_registry_manifest(&object)?
+                        } else {
+                            Manifest::load_path_dependency(&source)?
+                        };
                         PackageEvidence::from_registry(package, &object, &manifest, &tree, false)?
                     }
                 }
@@ -1666,7 +1747,7 @@ mod tests {
                 .name,
             "demo"
         );
-        let evidence = acquisition.evidence(&resolution).unwrap();
+        let evidence = acquisition.evidence(&resolution, None).unwrap();
         let preflight = policy::preflight(&config.policy, &resolution).unwrap();
         policy::inspect(&preflight, &resolution, &evidence).unwrap();
         assert!(evidence[&resolution.packages[0].key].newly_acquired);
@@ -1702,7 +1783,7 @@ mod tests {
             0
         );
         assert!(warm.state.is_none());
-        let evidence = warm.evidence(&resolution).unwrap();
+        let evidence = warm.evidence(&resolution, None).unwrap();
         assert!(!evidence[&resolution.packages[0].key].newly_acquired);
         assert_eq!(warm.inspections.len(), 1);
         assert!(warm.inspections[0].path().is_dir());

@@ -88,6 +88,12 @@ grep -F 'Updating crates.io index for `cfg-if`' "$WORK/fresh.log" >/dev/null ||
     fail "fresh acquisition did not report its sparse-index request"
 grep -F 'Downloading cfg-if v1.0.4' "$WORK/fresh.log" >/dev/null ||
     fail "fresh acquisition did not report its archive request"
+grep -F 'Resolving dependency graph' "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not report graph resolution"
+grep -F 'Checking dependency repository state' "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not report repository verification"
+grep -F 'Verifying selected dependency sources' "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not report source verification"
 OBJECT_ROOT="$REPOSITORY/objects/crates-io/sha256"
 [ "$(find "$OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l)" -eq 1 ] ||
     fail "fresh acquisition published an unexpected object count"
