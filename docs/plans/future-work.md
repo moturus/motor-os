@@ -18,3 +18,5 @@ the ruling; nothing here should be picked up without a fresh call.
   in the same sitting: vdso panic text can be lost when the console
   buffer does not drain before teardown, which is why a vdso panic can
   present as silent exit-222.
+
+- **curl** often times out on Motor OS during TLS handlshake.
