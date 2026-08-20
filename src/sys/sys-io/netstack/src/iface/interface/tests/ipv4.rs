@@ -3171,6 +3171,40 @@ fn customize_ipv4_fragment(bytes: &mut [u8], hop_limit: u8, payload_byte: u8) {
 }
 
 #[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_two_fragment_payload(
+    protocol: IpProtocol,
+    ident: u16,
+    payload: &[u8],
+    split: usize,
+) -> [Vec<u8>; 2] {
+    assert!(split > 0 && split < payload.len() && split.is_multiple_of(8));
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+    let mut first = ipv4_fragment_bytes(Ipv4FragmentSpec {
+        dst_addr,
+        protocol,
+        ident,
+        offset: 0,
+        more_frags: true,
+        dont_frag: false,
+        reserved: false,
+        payload_len: split,
+    });
+    let mut last = ipv4_fragment_bytes(Ipv4FragmentSpec {
+        dst_addr,
+        protocol,
+        ident,
+        offset: split as u16,
+        more_frags: false,
+        dont_frag: false,
+        reserved: false,
+        payload_len: payload.len() - split,
+    });
+    first[IPV4_HEADER_LEN..].copy_from_slice(&payload[..split]);
+    last[IPV4_HEADER_LEN..].copy_from_slice(&payload[split..]);
+    [first, last]
+}
+
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
 fn assert_ipv4_fragment_reply(reply: Option<Packet<'_>>, hop_limit: u8, payload: &[u8]) {
     let reply = reply.expect("complete reassembly should produce an ICMP reply");
     match reply.payload() {
@@ -3318,6 +3352,231 @@ fn ipv4_reassembly_duplicate_preserves_first_bytes() {
             0xbb, 0xbb,
         ],
     );
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_reassembly_completes_three_fragment_permutations() {
+    const ORDERS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+
+    for order in ORDERS {
+        let (mut iface, mut sockets, _device) = setup(Medium::Ip);
+        let mut fragments = [
+            ipv4_fragment_bytes(Ipv4FragmentSpec {
+                dst_addr,
+                protocol: IpProtocol::Unknown(99),
+                ident: 1,
+                offset: 0,
+                more_frags: true,
+                dont_frag: false,
+                reserved: false,
+                payload_len: 8,
+            }),
+            ipv4_fragment_bytes(Ipv4FragmentSpec {
+                dst_addr,
+                protocol: IpProtocol::Unknown(99),
+                ident: 1,
+                offset: 8,
+                more_frags: true,
+                dont_frag: false,
+                reserved: false,
+                payload_len: 8,
+            }),
+            ipv4_fragment_bytes(Ipv4FragmentSpec {
+                dst_addr,
+                protocol: IpProtocol::Unknown(99),
+                ident: 1,
+                offset: 16,
+                more_frags: false,
+                dont_frag: false,
+                reserved: false,
+                payload_len: 8,
+            }),
+        ];
+        for (index, fragment) in fragments.iter_mut().enumerate() {
+            customize_ipv4_fragment(fragment, 64, 0xaa + index as u8);
+        }
+
+        for (position, index) in order.into_iter().enumerate() {
+            let packet = Ipv4Packet::new_checked(&fragments[index][..]).unwrap();
+            let reply = iface.inner.process_ipv4(
+                &mut sockets,
+                PacketMeta::default(),
+                HardwareAddress::Ip,
+                &packet,
+                &mut iface.fragments,
+            );
+            if position == 2 {
+                assert_ipv4_fragment_reply(
+                    reply,
+                    64,
+                    &[
+                        0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xab, 0xab, 0xab, 0xab,
+                        0xab, 0xab, 0xab, 0xab, 0xac, 0xac, 0xac, 0xac, 0xac, 0xac, 0xac, 0xac,
+                    ],
+                );
+            } else {
+                assert!(reply.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_partial_overlap_after_final_fragment_tombstones_key() {
+    let (mut iface, mut sockets, _device) = setup(Medium::Ip);
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+    let spec = |offset, more_frags, payload_len| Ipv4FragmentSpec {
+        dst_addr,
+        protocol: IpProtocol::Unknown(99),
+        ident: 1,
+        offset,
+        more_frags,
+        dont_frag: false,
+        reserved: false,
+        payload_len,
+    };
+    let final_fragment = ipv4_fragment_bytes(spec(16, false, 8));
+    let overlapping = ipv4_fragment_bytes(spec(8, true, 16));
+    let first = ipv4_fragment_bytes(spec(0, true, 8));
+    let key = FragKey::Ipv4(Ipv4Packet::new_unchecked(&final_fragment[..]).get_key());
+
+    for bytes in [&final_fragment, &overlapping, &first] {
+        let packet = Ipv4Packet::new_checked(&bytes[..]).unwrap();
+        assert!(
+            iface
+                .inner
+                .process_ipv4(
+                    &mut sockets,
+                    PacketMeta::default(),
+                    HardwareAddress::Ip,
+                    &packet,
+                    &mut iface.fragments,
+                )
+                .is_none()
+        );
+    }
+    let assembler = iface.fragments.assembler.get(&key, Instant::ZERO).unwrap();
+    assert_eq!(assembler.add(b"valid", 0), Err(AssemblerError::Poisoned));
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_conflicting_final_size_poisons_existing_state() {
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+    let cases = [
+        ((16, false, 8), (8, false, 8)),
+        ((8, false, 8), (16, true, 8)),
+    ];
+
+    for (ident, (first_spec, conflict_spec)) in cases.into_iter().enumerate() {
+        let (mut iface, mut sockets, _device) = setup(Medium::Ip);
+        let build = |(offset, more_frags, payload_len)| {
+            ipv4_fragment_bytes(Ipv4FragmentSpec {
+                dst_addr,
+                protocol: IpProtocol::Unknown(99),
+                ident: ident as u16 + 1,
+                offset,
+                more_frags,
+                dont_frag: false,
+                reserved: false,
+                payload_len,
+            })
+        };
+        let first = build(first_spec);
+        let conflict = build(conflict_spec);
+        let key = FragKey::Ipv4(Ipv4Packet::new_unchecked(&first[..]).get_key());
+
+        for bytes in [&first, &conflict] {
+            let packet = Ipv4Packet::new_checked(&bytes[..]).unwrap();
+            assert!(
+                iface
+                    .inner
+                    .process_ipv4(
+                        &mut sockets,
+                        PacketMeta::default(),
+                        HardwareAddress::Ip,
+                        &packet,
+                        &mut iface.fragments,
+                    )
+                    .is_none()
+            );
+        }
+        let assembler = iface.fragments.assembler.get(&key, Instant::ZERO).unwrap();
+        assert_eq!(assembler.add(b"valid", 0), Err(AssemblerError::Poisoned));
+    }
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv4-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv4_reassembly_verifies_vouched_udp_checksum() {
+    use crate::socket::udp;
+
+    const LOCAL_PORT: u16 = 49_504;
+    const REMOTE_PORT: u16 = 4242;
+    const PAYLOAD: [u8; 8] = [0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4];
+
+    fn fragments(corrupt: bool) -> [Vec<u8>; 2] {
+        let src_addr = Ipv4Address::new(192, 168, 1, 2);
+        let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+        let repr = UdpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+        };
+        let mut bytes = vec![0; repr.header_len() + PAYLOAD.len()];
+        let mut packet = UdpPacket::new_unchecked(&mut bytes);
+        repr.emit(
+            &mut packet,
+            &src_addr.into(),
+            &dst_addr.into(),
+            PAYLOAD.len(),
+            |buffer| buffer.copy_from_slice(&PAYLOAD),
+            &ChecksumCapabilities::default(),
+        );
+        if corrupt {
+            let checksum = packet.checksum() ^ 1;
+            assert_ne!(checksum, 0);
+            packet.set_checksum(checksum);
+        }
+        ipv4_two_fragment_payload(IpProtocol::Udp, 1, &bytes, UDP_HEADER_LEN)
+    }
+
+    fn feed(corrupt: bool) -> (Option<Vec<u8>>, u64) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(LOCAL_PORT).unwrap();
+        let handle = sockets.add(0, socket);
+
+        for fragment in fragments(corrupt) {
+            device.push_rx_vouched(fragment, true);
+        }
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let received = sockets
+            .get_mut::<udp::Socket>(handle)
+            .recv()
+            .ok()
+            .map(|(payload, _)| payload.to_vec());
+        (received, iface.take_rx_csum_failed())
+    }
+
+    assert_eq!(feed(false), (Some(PAYLOAD.to_vec()), 0));
+    assert_eq!(feed(true), (None, 1));
 }
 
 #[test]
