@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
 use crate::wire::{IpAddress, IpCidr};
 #[cfg(feature = "proto-ipv4")]
 use crate::wire::{Ipv4Address, Ipv4Cidr};
@@ -24,6 +24,128 @@ const IPV4_DEFAULT: IpCidr = IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(0, 0, 0
 #[cfg(feature = "proto-ipv6")]
 const IPV6_DEFAULT: IpCidr =
     IpCidr::Ipv6(Ipv6Cidr::new(Ipv6Address::new(0, 0, 0, 0, 0, 0, 0, 0), 0));
+
+// The following PMTU integration commits consume this component in production.
+#[cfg_attr(not(test), allow(dead_code))]
+const PMTU_CACHE_CAPACITY: usize = 64;
+#[cfg_attr(not(test), allow(dead_code))]
+const PMTU_LIFETIME: Duration = Duration::from_secs(10 * 60);
+#[cfg(feature = "proto-ipv4")]
+#[cfg_attr(not(test), allow(dead_code))]
+const IPV4_MIN_PMTU: usize = 68;
+#[cfg(feature = "proto-ipv4")]
+#[cfg_attr(not(test), allow(dead_code))]
+const IPV4_PMTU_PLATEAUS: &[usize] = &[
+    65_535, 32_000, 17_914, 8_166, 4_352, 2_002, 1_492, 1_006, 508, 296, 68,
+];
+
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct PmtuEntry {
+    destination: IpAddress,
+    mtu: usize,
+    expires_at: Instant,
+    updated_at: Instant,
+}
+
+#[derive(Debug)]
+struct PmtuCache {
+    entries: Vec<PmtuEntry>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl PmtuCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn expire(&mut self, timestamp: Instant) {
+        self.entries.retain(|entry| timestamp < entry.expires_at);
+    }
+
+    fn effective_mtu(
+        &mut self,
+        destination: IpAddress,
+        interface_mtu: usize,
+        timestamp: Instant,
+    ) -> usize {
+        self.expire(timestamp);
+        self.entries
+            .iter()
+            .find(|entry| entry.destination == destination)
+            .map_or(interface_mtu, |entry| entry.mtu)
+    }
+
+    fn update(
+        &mut self,
+        destination: IpAddress,
+        advertised_mtu: usize,
+        quoted_packet_len: usize,
+        interface_mtu: usize,
+        timestamp: Instant,
+    ) -> bool {
+        self.expire(timestamp);
+
+        let candidate = match destination {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(_) if advertised_mtu == 0 => IPV4_PMTU_PLATEAUS
+                .iter()
+                .copied()
+                .find(|mtu| *mtu < quoted_packet_len),
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(_) => Some(advertised_mtu.max(IPV4_MIN_PMTU)),
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(_) => Some(advertised_mtu.max(crate::wire::ipv6::MIN_MTU)),
+        };
+        let Some(candidate) = candidate else {
+            return false;
+        };
+
+        let current = self
+            .entries
+            .iter()
+            .find(|entry| entry.destination == destination)
+            .map_or(interface_mtu, |entry| entry.mtu);
+        if candidate >= current || candidate >= quoted_packet_len {
+            return false;
+        }
+
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.destination == destination)
+        {
+            entry.mtu = candidate;
+            entry.expires_at = timestamp + PMTU_LIFETIME;
+            entry.updated_at = timestamp;
+            return true;
+        }
+
+        if self.entries.len() == PMTU_CACHE_CAPACITY {
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.updated_at)
+                .map(|(index, _)| index)
+                .unwrap();
+            self.entries.swap_remove(oldest);
+        }
+        self.entries.push(PmtuEntry {
+            destination,
+            mtu: candidate,
+            expires_at: timestamp + PMTU_LIFETIME,
+            updated_at: timestamp,
+        });
+        true
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 
 impl Route {
     /// Returns a route to 0.0.0.0/0 via the `gateway`, with no expiry.
@@ -71,6 +193,7 @@ impl Route {
 #[derive(Debug)]
 pub struct Routes {
     storage: Vec<Route>,
+    pmtu: PmtuCache,
     #[cfg(feature = "proto-ipv6")]
     ipv6_eligible: bool,
 }
@@ -80,6 +203,7 @@ impl Routes {
     pub fn new() -> Self {
         Self {
             storage: Vec::new(),
+            pmtu: PmtuCache::new(),
             #[cfg(feature = "proto-ipv6")]
             ipv6_eligible: true,
         }
@@ -88,25 +212,67 @@ impl Routes {
     #[cfg(feature = "proto-ipv6")]
     pub(crate) fn disable_ipv6(&mut self) {
         self.ipv6_eligible = false;
+        self.pmtu.clear();
     }
 
     /// Update the routes of this node.
     pub fn update<F: FnOnce(&mut Vec<Route>)>(&mut self, f: F) {
-        f(&mut self.storage);
+        self.mutate(f);
+    }
+
+    fn mutate<R>(&mut self, f: impl FnOnce(&mut Vec<Route>) -> R) -> R {
+        let result = f(&mut self.storage);
         #[cfg(feature = "proto-ipv6")]
-        if !self.ipv6_eligible
+        let invalid_ipv6 = !self.ipv6_eligible
             && self.storage.iter().any(|route| {
                 matches!(route.cidr, IpCidr::Ipv6(_))
                     || matches!(route.via_router, IpAddress::Ipv6(_))
-            })
-        {
+            });
+        #[cfg(feature = "proto-ipv6")]
+        if invalid_ipv6 {
             self.storage.retain(|route| {
                 !matches!(route.cidr, IpCidr::Ipv6(_))
                     && !matches!(route.via_router, IpAddress::Ipv6(_))
             });
-            panic!("IPv6 routes require an interface MTU of at least 1280");
         }
         self.reorder();
+        self.pmtu.clear();
+        #[cfg(feature = "proto-ipv6")]
+        if invalid_ipv6 {
+            panic!("IPv6 routes require an interface MTU of at least 1280");
+        }
+        result
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn effective_pmtu(
+        &mut self,
+        destination: IpAddress,
+        interface_mtu: usize,
+        timestamp: Instant,
+    ) -> usize {
+        assert!(destination.is_unicast());
+        self.pmtu
+            .effective_mtu(destination, interface_mtu, timestamp)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn update_pmtu(
+        &mut self,
+        destination: IpAddress,
+        advertised_mtu: usize,
+        quoted_packet_len: usize,
+        interface_mtu: usize,
+        timestamp: Instant,
+    ) -> bool {
+        assert!(destination.is_unicast());
+        self.pmtu.update(
+            destination,
+            advertised_mtu,
+            quoted_packet_len,
+            interface_mtu,
+            timestamp,
+        )
     }
 
     /// Restore the most-specific-first order `lookup` walks. Stable, so
@@ -121,10 +287,14 @@ impl Routes {
     /// Returns the previous default route, if any.
     #[cfg(feature = "proto-ipv4")]
     pub fn add_default_ipv4_route(&mut self, gateway: Ipv4Address) -> Option<Route> {
-        let old = self.remove_default_ipv4_route();
-        // A /0 belongs at the very end the order wants; push keeps it there.
-        self.storage.push(Route::new_ipv4_gateway(gateway));
-        old
+        self.mutate(|storage| {
+            let old = storage
+                .iter()
+                .position(Route::is_ipv4_gateway)
+                .map(|index| storage.remove(index));
+            storage.push(Route::new_ipv4_gateway(gateway));
+            old
+        })
     }
 
     /// Add a default ipv6 gateway (ie. "ip -6 route add ::/0 via `gateway`").
@@ -136,10 +306,14 @@ impl Routes {
             self.ipv6_eligible,
             "IPv6 routes require an interface MTU of at least 1280"
         );
-        let old = self.remove_default_ipv6_route();
-        // A /0 belongs at the very end the order wants; push keeps it there.
-        self.storage.push(Route::new_ipv6_gateway(gateway));
-        old
+        self.mutate(|storage| {
+            let old = storage
+                .iter()
+                .position(Route::is_ipv6_gateway)
+                .map(|index| storage.remove(index));
+            storage.push(Route::new_ipv6_gateway(gateway));
+            old
+        })
     }
 
     /// Returns the ipv4 default route if there is one in the route table.
@@ -159,16 +333,12 @@ impl Routes {
     /// On success, returns the previous default route, if any.
     #[cfg(feature = "proto-ipv4")]
     pub fn remove_default_ipv4_route(&mut self) -> Option<Route> {
-        if let Some((i, _)) = self
-            .storage
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.is_ipv4_gateway())
-        {
-            Some(self.storage.remove(i))
-        } else {
-            None
-        }
+        self.mutate(|storage| {
+            storage
+                .iter()
+                .position(Route::is_ipv4_gateway)
+                .map(|index| storage.remove(index))
+        })
     }
 
     /// Remove the default ipv6 gateway
@@ -176,16 +346,12 @@ impl Routes {
     /// On success, returns the previous default route, if any.
     #[cfg(feature = "proto-ipv6")]
     pub fn remove_default_ipv6_route(&mut self) -> Option<Route> {
-        if let Some((i, _)) = self
-            .storage
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.is_ipv6_gateway())
-        {
-            Some(self.storage.remove(i))
-        } else {
-            None
-        }
+        self.mutate(|storage| {
+            storage
+                .iter()
+                .position(Route::is_ipv6_gateway)
+                .map(|index| storage.remove(index))
+        })
     }
 
     /// Whether `addr` is the router of a route that has not expired. Every
@@ -455,6 +621,119 @@ mod test {
         assert_eq!(
             routes.lookup(&ADDR_2B.into(), Instant::from_millis(10)),
             Some(ADDR_2A.into())
+        );
+    }
+
+    #[cfg(feature = "proto-ipv4")]
+    fn pmtu_v4(index: u8) -> IpAddress {
+        Ipv4Address::new(192, 0, 2, index + 1).into()
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4")]
+    fn pmtu_decreases_are_bounded_and_expire() {
+        let mut routes = Routes::new();
+        let start = Instant::from_secs(10);
+        let destination = pmtu_v4(0);
+
+        assert!(routes.update_pmtu(destination, 1_200, 1_400, 1_500, start));
+        assert_eq!(routes.effective_pmtu(destination, 1_500, start), 1_200);
+        assert!(!routes.update_pmtu(
+            destination,
+            1_300,
+            1_400,
+            1_500,
+            start + Duration::from_secs(300)
+        ));
+        assert_eq!(
+            routes.effective_pmtu(destination, 1_500, start + PMTU_LIFETIME),
+            1_500
+        );
+
+        let floored = pmtu_v4(1);
+        assert!(routes.update_pmtu(floored, 1, 1_400, 1_500, start));
+        assert_eq!(routes.effective_pmtu(floored, 1_500, start), 68);
+        assert!(!routes.update_pmtu(pmtu_v4(2), 1_400, 1_300, 1_500, start));
+        assert!(!routes.update_pmtu(pmtu_v4(3), 1_500, 1_600, 1_500, start));
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4")]
+    fn legacy_ipv4_pmtu_uses_the_next_lower_plateau() {
+        let mut routes = Routes::new();
+        let now = Instant::ZERO;
+        assert!(routes.update_pmtu(pmtu_v4(0), 0, 1_500, 2_000, now));
+        assert_eq!(routes.effective_pmtu(pmtu_v4(0), 2_000, now), 1_492);
+        assert!(routes.update_pmtu(pmtu_v4(1), 0, 1_492, 2_000, now));
+        assert_eq!(routes.effective_pmtu(pmtu_v4(1), 2_000, now), 1_006);
+        assert!(!routes.update_pmtu(pmtu_v4(2), 0, 68, 2_000, now));
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv6")]
+    fn ipv6_pmtu_is_floored_at_1280() {
+        let mut routes = Routes::new();
+        let destination = Ipv6Address::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into();
+        assert!(routes.update_pmtu(destination, 1, 1_500, 1_500, Instant::ZERO));
+        assert_eq!(
+            routes.effective_pmtu(destination, 1_500, Instant::ZERO),
+            1_280
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4")]
+    fn pmtu_capacity_evicts_the_least_recently_updated() {
+        let mut routes = Routes::new();
+        for index in 0..PMTU_CACHE_CAPACITY as u8 {
+            assert!(routes.update_pmtu(
+                pmtu_v4(index),
+                1_400,
+                1_500,
+                1_500,
+                Instant::from_secs(index)
+            ));
+        }
+        assert!(routes.update_pmtu(pmtu_v4(0), 1_300, 1_500, 1_500, Instant::from_secs(100)));
+        assert!(routes.update_pmtu(pmtu_v4(64), 1_400, 1_500, 1_500, Instant::from_secs(101)));
+
+        assert_eq!(routes.pmtu.entries.len(), PMTU_CACHE_CAPACITY);
+        assert_eq!(
+            routes.effective_pmtu(pmtu_v4(0), 1_500, Instant::from_secs(101)),
+            1_300
+        );
+        assert_eq!(
+            routes.effective_pmtu(pmtu_v4(1), 1_500, Instant::from_secs(101)),
+            1_500
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4")]
+    fn route_mutation_flushes_pmtu() {
+        let mut routes = Routes::new();
+        let destination = pmtu_v4(0);
+        let cache = |routes: &mut Routes| {
+            assert!(routes.update_pmtu(destination, 1_200, 1_400, 1_500, Instant::ZERO));
+        };
+
+        cache(&mut routes);
+        routes.update(|_| {});
+        assert_eq!(
+            routes.effective_pmtu(destination, 1_500, Instant::ZERO),
+            1_500
+        );
+        cache(&mut routes);
+        routes.add_default_ipv4_route(Ipv4Address::new(192, 0, 2, 254));
+        assert_eq!(
+            routes.effective_pmtu(destination, 1_500, Instant::ZERO),
+            1_500
+        );
+        cache(&mut routes);
+        routes.remove_default_ipv4_route();
+        assert_eq!(
+            routes.effective_pmtu(destination, 1_500, Instant::ZERO),
+            1_500
         );
     }
 }
