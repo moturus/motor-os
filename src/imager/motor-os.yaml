@@ -33,5 +33,6 @@ static_dirs:
 required_executables:
   - "img_files/generated/rg/system/bin/rg"
 filesystem: "motor-fs"
-img_name: "motor-os.img"
+img_name: "motor-os.qcow2"
+image_format: "qcow2"
 data_partition_size_mb: 256

@@ -22,4 +22,5 @@ static_dirs:
   - "img_files/motor-os-base"
 filesystem: "motor-fs"
 img_name: "motor-os-base.img"
+image_format: "raw"
 data_partition_size_mb: 64
