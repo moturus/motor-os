@@ -501,10 +501,14 @@ fn test_native_async_shutdown() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let expected = vec![0x5a_u8; 256 * 1024];
+    let (release_peer, peer_release) = std::sync::mpsc::channel();
     let peer = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut received = Vec::new();
         stream.read_to_end(&mut received).unwrap();
+        // A socket that sent no bytes closes with a reset. Keep that unrelated
+        // reset from racing the local shutdown error checked below.
+        let _ = peer_release.recv();
         received
     });
 
@@ -533,6 +537,7 @@ fn test_native_async_shutdown() {
             Err(moto_rt::E_NOT_CONNECTED)
         );
 
+        release_peer.send(()).unwrap();
         drop(stream);
         crate::net_harness::drain_host_channel(client, driver_task).await;
     });
