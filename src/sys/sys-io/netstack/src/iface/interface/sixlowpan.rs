@@ -164,7 +164,7 @@ impl InterfaceInner {
                     Some(total_size),
                     buffer,
                 )
-                .map_err(|_| AssemblerError)
+                .map_err(|_| AssemblerError::Invalid)
             }) {
                 net_debug!("fragmentation error: {:?}", e);
                 return None;
