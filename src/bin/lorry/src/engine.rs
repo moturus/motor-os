@@ -16,6 +16,7 @@ use crate::manifest::{
     BinaryTarget, Edition, IntegrationTestTarget, LibraryTarget, Manifest, Strip,
 };
 use crate::process::{self, RustcCommand};
+use crate::progress::Progress;
 use crate::repository::RepositorySet;
 use crate::resolver::{Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
@@ -165,6 +166,8 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         };
     }
 
+    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
+    progress.report("Verifying dependency state")?;
     // One registry source serves both admission verification and prepare, so
     // repository objects verified during admission are not re-hashed when the
     // build prepares its dependency graph.
@@ -510,6 +513,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     })?;
     crate::trace::event("created build staging directory");
 
+    Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
     let resolver_options =
         dependency::resolver_options(build.manifest, build.config, build.toolchain)?;
     let selection = TargetSelection {
