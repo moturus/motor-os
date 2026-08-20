@@ -35,6 +35,8 @@ use heapless::Vec;
 
 #[cfg(feature = "proto-ipv4-fragmentation")]
 use super::fragmentation::Ipv4ReassemblyContext;
+#[cfg(feature = "proto-ipv6-fragmentation")]
+use super::fragmentation::Ipv6FragKey;
 #[cfg(feature = "_proto-fragmentation")]
 use super::fragmentation::{AssemblerError, FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};
@@ -1547,7 +1549,7 @@ impl InterfaceInner {
             #[cfg(feature = "proto-ipv6")]
             Ok(IpVersion::Ipv6) => {
                 let ipv6_packet = check!(Ipv6Packet::new_checked(ip_payload));
-                self.process_ipv6(sockets, meta, HardwareAddress::Ip, &ipv6_packet)
+                self.process_ipv6(sockets, meta, HardwareAddress::Ip, &ipv6_packet, Some(frag))
             }
             // Drop all other traffic.
             _ => None,

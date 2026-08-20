@@ -95,6 +95,7 @@ impl InterfaceInner {
                 None => HardwareAddress::Ieee802154(Ieee802154Address::Absent),
             },
             &check!(Ipv6Packet::new_checked(payload)),
+            None,
         )
     }
 
