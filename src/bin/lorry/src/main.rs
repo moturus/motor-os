@@ -29,6 +29,7 @@ mod offline;
 mod patch;
 mod policy;
 mod process;
+mod progress;
 #[allow(dead_code)]
 mod redirect;
 mod repository;
