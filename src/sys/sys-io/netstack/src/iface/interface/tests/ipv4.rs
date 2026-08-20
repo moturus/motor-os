@@ -2857,6 +2857,100 @@ fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
     assert!(iface.fragmenter.is_empty());
 }
 
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv4-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv4_source_fragments_a_maximum_udp_datagram() {
+    const MAX_UDP_PAYLOAD: usize = u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN;
+
+    struct CaptureTxToken<'a>(&'a mut Vec<Vec<u8>>);
+
+    impl TxToken for CaptureTxToken<'_> {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            let mut packet = vec![0; len];
+            let result = f(&mut packet);
+            self.0.push(packet);
+            result
+        }
+    }
+
+    let (mut iface, _sockets, device) = setup(Medium::Ip);
+    let mtu = device.capabilities().ip_mtu();
+    let src_addr = Ipv4Address::new(192, 0, 2, 1);
+    let dst_addr = Ipv4Address::new(198, 51, 100, 2);
+    let udp_repr = UdpRepr {
+        src_port: 49_500,
+        dst_port: 49_501,
+    };
+    let payload: Vec<u8> = (0..MAX_UDP_PAYLOAD).map(|index| index as u8).collect();
+    let ip_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: UDP_HEADER_LEN + payload.len(),
+        hop_limit: 37,
+    };
+    let mut fragments = Vec::new();
+
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            CaptureTxToken(&mut fragments),
+            PacketMeta::default(),
+            Packet::new_ipv4(ip_repr, IpPayload::Udp(udp_repr, &payload)),
+            &mut iface.fragmenter,
+        ),
+        Ok(())
+    );
+    while !iface.fragmenter.finished() {
+        iface
+            .inner
+            .dispatch_ipv4_frag(CaptureTxToken(&mut fragments), &mut iface.fragmenter);
+    }
+
+    let fragment_payload_size = (mtu - IPV4_HEADER_LEN) / 8 * 8;
+    let mut reassembled = Vec::new();
+    let mut expected_offset = 0;
+    let mut ident = None;
+    for (index, bytes) in fragments.iter().enumerate() {
+        let packet = Ipv4Packet::new_checked(&bytes[..]).unwrap();
+        let final_fragment = index + 1 == fragments.len();
+        assert_eq!(packet.total_len() as usize, bytes.len());
+        assert!(packet.verify_checksum());
+        assert_eq!(packet.src_addr(), src_addr);
+        assert_eq!(packet.dst_addr(), dst_addr);
+        assert_eq!(packet.next_header(), IpProtocol::Udp);
+        assert_eq!(packet.hop_limit(), 37);
+        assert_eq!(packet.frag_offset() as usize, expected_offset);
+        assert_eq!(packet.more_frags(), !final_fragment);
+        assert!(!packet.dont_frag());
+        assert!(!packet.reserved());
+        assert_eq!(*ident.get_or_insert(packet.ident()), packet.ident());
+        assert_ne!(packet.ident(), 0);
+        if !final_fragment {
+            assert_eq!(packet.payload().len(), fragment_payload_size);
+        }
+        expected_offset += packet.payload().len();
+        reassembled.extend_from_slice(packet.payload());
+    }
+
+    assert_eq!(expected_offset, UDP_HEADER_LEN + MAX_UDP_PAYLOAD);
+    let udp_packet = UdpPacket::new_checked(&reassembled[..]).unwrap();
+    UdpRepr::parse(
+        &udp_packet,
+        &src_addr.into(),
+        &dst_addr.into(),
+        &ChecksumCapabilities::default(),
+    )
+    .unwrap();
+    assert_eq!(udp_packet.payload(), &payload);
+}
+
 /// Check no reply is emitted when using a raw socket
 #[cfg(feature = "socket-raw")]
 fn check_no_reply_raw_socket(medium: Medium, frame: &crate::wire::ipv4::Packet<&[u8]>) {

@@ -61,6 +61,33 @@ fn test_native_udp_ttl() {
     println!("-- test_native_udp_ttl() PASS");
 }
 
+fn test_native_udp_size_limit() {
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        {
+            let socket = NativeUdpSocket::bind_reserved(
+                client.try_reserve().unwrap(),
+                &"127.0.0.1:0".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            let destination = "127.0.0.1:9".parse().unwrap();
+            let oversized = vec![0; moto_rt::net::MAX_UDP_PAYLOAD + 1];
+            assert_eq!(
+                socket.try_send_to(&oversized, &destination),
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+            assert_eq!(
+                socket.send_to_future(&oversized, &destination).await,
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+        }
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+    println!("-- test_native_udp_size_limit() PASS");
+}
+
 /// The UDP TTL option through the POSIX ABI, which reaches the same remote
 /// RPCs as [`test_native_udp_ttl`] but through the blocking bridge.
 fn test_posix_udp_ttl() {
@@ -125,8 +152,14 @@ fn test_udp_large_packets() {
     let s1 = std::net::UdpSocket::bind(a1).unwrap();
     let s2 = std::net::UdpSocket::bind(a2).unwrap();
 
+    let oversized = vec![0; moto_rt::net::MAX_UDP_PAYLOAD + 1];
+    assert_eq!(
+        s1.send_to(&oversized, a2).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+
     let mut buf1 = vec![];
-    buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0); // 65493
+    buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0);
 
     let mut buf2 = vec![];
     buf2.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0);
@@ -701,6 +734,7 @@ fn malformed_udp_fragments_only_kill_the_client() {
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
+    test_native_udp_size_limit();
     test_posix_udp_ttl();
     test_unsupported_udp_options_return_errors();
     test_udp_large_packets();

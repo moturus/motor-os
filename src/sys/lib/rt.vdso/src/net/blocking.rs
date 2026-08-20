@@ -153,10 +153,6 @@ pub fn udp_send(socket: &RtUdpSocket, buf: &[u8], addr: &SocketAddr) -> Result<u
         return socket.inner().try_send_to(buf, addr);
     }
 
-    if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
-
     let deadline = deadline_from(socket.write_timeout());
     let fut = socket.inner().send_to_future(buf, addr);
     match block_on_deadline(fut, deadline) {

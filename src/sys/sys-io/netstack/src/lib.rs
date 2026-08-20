@@ -179,7 +179,7 @@ pub mod config {
     pub const DNS_MAX_NAME_SIZE: usize = 255;
     pub const DNS_MAX_RESULT_COUNT: usize = 1;
     pub const DNS_MAX_SERVER_COUNT: usize = 1;
-    pub const FRAGMENTATION_BUFFER_SIZE: usize = 4096;
+    pub const FRAGMENTATION_BUFFER_SIZE: usize = 65536;
     pub const IFACE_MAX_MULTICAST_GROUP_COUNT: usize = 4;
     pub const IFACE_MAX_PREFIX_COUNT: usize = 1;
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
