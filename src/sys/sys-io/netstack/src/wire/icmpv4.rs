@@ -427,6 +427,38 @@ impl<'a> Repr<'a> {
             return Err(Error);
         }
 
+        fn create_packet_from_data<'a, T>(packet: &Packet<&'a T>) -> Result<(&'a [u8], Ipv4Repr)>
+        where
+            T: AsRef<[u8]> + ?Sized,
+        {
+            let data = packet.data();
+            let ip_packet = Ipv4Packet::new_checked_header(data)?;
+            if ip_packet.version() != 4 || !ip_packet.verify_checksum() {
+                return Err(Error);
+            }
+
+            let header_len = ip_packet.header_len() as usize;
+            let declared_payload_len = ip_packet.total_len() as usize - header_len;
+            let quoted_payload_len = core::cmp::min(data.len() - header_len, declared_payload_len);
+            let payload = &data[header_len..header_len + quoted_payload_len];
+            // RFC 792 requires exactly eight bytes to be returned. We allow
+            // more, but only within the original packet's declared length.
+            if payload.len() < 8 {
+                return Err(Error);
+            }
+
+            Ok((
+                payload,
+                Ipv4Repr {
+                    src_addr: ip_packet.src_addr(),
+                    dst_addr: ip_packet.dst_addr(),
+                    next_header: ip_packet.next_header(),
+                    payload_len: declared_payload_len,
+                    hop_limit: ip_packet.hop_limit(),
+                },
+            ))
+        }
+
         match (packet.msg_type(), packet.msg_code()) {
             (Message::EchoRequest, 0) => Ok(Repr::EchoRequest {
                 ident: packet.echo_ident(),
@@ -442,49 +474,21 @@ impl<'a> Repr<'a> {
 
             (Message::DstUnreachable, code) => {
                 let reason = DstUnreachable::from(code);
-                let ip_packet = Ipv4Packet::new_checked(packet.data())?;
-
-                let payload = &packet.data()[ip_packet.header_len() as usize..];
-                // RFC 792 requires exactly eight bytes to be returned.
-                // We allow more, since there isn't a reason not to, but require at least eight.
-                if payload.len() < 8 {
-                    return Err(Error);
-                }
-
+                let (payload, header) = create_packet_from_data(packet)?;
                 Ok(Repr::DstUnreachable {
                     reason,
                     next_hop_mtu: (reason == DstUnreachable::FragRequired)
                         .then(|| packet.next_hop_mtu()),
-                    header: Ipv4Repr {
-                        src_addr: ip_packet.src_addr(),
-                        dst_addr: ip_packet.dst_addr(),
-                        next_header: ip_packet.next_header(),
-                        payload_len: payload.len(),
-                        hop_limit: ip_packet.hop_limit(),
-                    },
+                    header,
                     data: payload,
                 })
             }
 
             (Message::TimeExceeded, code) => {
-                let ip_packet = Ipv4Packet::new_checked(packet.data())?;
-
-                let payload = &packet.data()[ip_packet.header_len() as usize..];
-                // RFC 792 requires exactly eight bytes to be returned.
-                // We allow more, since there isn't a reason not to, but require at least eight.
-                if payload.len() < 8 {
-                    return Err(Error);
-                }
-
+                let (payload, header) = create_packet_from_data(packet)?;
                 Ok(Repr::TimeExceeded {
                     reason: TimeExceeded::from(code),
-                    header: Ipv4Repr {
-                        src_addr: ip_packet.src_addr(),
-                        dst_addr: ip_packet.dst_addr(),
-                        next_header: ip_packet.next_header(),
-                        payload_len: payload.len(),
-                        hop_limit: ip_packet.hop_limit(),
-                    },
+                    header,
                     data: payload,
                 })
             }
@@ -772,6 +776,69 @@ mod test {
                 Ok(repr)
             );
         }
+    }
+
+    #[test]
+    fn truncated_error_quote_preserves_declared_length_and_checks_header() {
+        use crate::wire::{IpProtocol, Ipv4Address};
+
+        let repr = Repr::DstUnreachable {
+            reason: DstUnreachable::FragRequired,
+            next_hop_mtu: Some(1_400),
+            header: Ipv4Repr {
+                src_addr: Ipv4Address::new(192, 0, 2, 1),
+                dst_addr: Ipv4Address::new(198, 51, 100, 2),
+                next_header: IpProtocol::Udp,
+                payload_len: 1_480,
+                hop_limit: 64,
+            },
+            data: &[0x12, 0x34, 0x00, 0x35, 0x05, 0xc8, 0, 0],
+        };
+        let emit = || {
+            let mut bytes = vec![0xa5; repr.buffer_len()];
+            repr.emit(
+                &mut Packet::new_unchecked(&mut bytes),
+                &ChecksumCapabilities::default(),
+            );
+            bytes
+        };
+
+        let bytes = emit();
+        assert_eq!(
+            Repr::parse(
+                &Packet::new_unchecked(&bytes),
+                &ChecksumCapabilities::default(),
+            ),
+            Ok(repr)
+        );
+
+        let mut bytes = emit();
+        let mut packet = Packet::new_unchecked(&mut bytes);
+        packet.data_mut()[8] ^= 1;
+        packet.fill_checksum();
+        assert!(
+            Repr::parse(
+                &Packet::new_unchecked(packet.as_ref()),
+                &ChecksumCapabilities::default(),
+            )
+            .is_err()
+        );
+
+        let mut bytes = emit();
+        let mut packet = Packet::new_unchecked(&mut bytes);
+        {
+            let mut quoted = Ipv4Packet::new_unchecked(packet.data_mut());
+            quoted.set_version(6);
+            quoted.fill_checksum();
+        }
+        packet.fill_checksum();
+        assert!(
+            Repr::parse(
+                &Packet::new_unchecked(packet.as_ref()),
+                &ChecksumCapabilities::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

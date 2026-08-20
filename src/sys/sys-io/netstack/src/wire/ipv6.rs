@@ -392,6 +392,25 @@ impl<T: AsRef<[u8]>> Packet<T> {
         Ok(packet)
     }
 
+    /// Create a packet whose base header is present, while permitting a
+    /// quoted payload to be shorter than the original declared payload.
+    #[inline]
+    pub fn new_checked_header(buffer: T) -> Result<Packet<T>> {
+        let packet = Self::new_unchecked(buffer);
+        packet.check_header_len()?;
+        Ok(packet)
+    }
+
+    /// Ensure that the complete base header is present.
+    #[inline]
+    pub fn check_header_len(&self) -> Result<()> {
+        if self.buffer.as_ref().len() < field::DST_ADDR.end {
+            Err(Error)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Ensure that no accessor method will panic if called.
     /// Returns `Err(Error)` if the buffer is too short.
     ///
@@ -400,8 +419,8 @@ impl<T: AsRef<[u8]>> Packet<T> {
     /// [set_payload_len]: #method.set_payload_len
     #[inline]
     pub fn check_len(&self) -> Result<()> {
-        let len = self.buffer.as_ref().len();
-        if len < field::DST_ADDR.end || len < self.total_len() {
+        self.check_header_len()?;
+        if self.buffer.as_ref().len() < self.total_len() {
             Err(Error)
         } else {
             Ok(())
@@ -1077,6 +1096,17 @@ pub(crate) mod test {
         assert_eq!(packet.src_addr(), Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
         assert_eq!(packet.dst_addr(), LINK_LOCAL_ALL_NODES);
         assert_eq!(packet.payload(), &REPR_PAYLOAD_BYTES[..]);
+    }
+
+    #[test]
+    fn checked_header_allows_a_truncated_quoted_payload() {
+        let mut bytes = REPR_PACKET_BYTES;
+        let mut packet = Packet::new_unchecked(&mut bytes);
+        packet.set_payload_len(1_460);
+
+        let quote = &packet.into_inner()[..48];
+        assert!(Packet::new_checked(quote).is_err());
+        assert!(Packet::new_checked_header(quote).is_ok());
     }
 
     #[test]

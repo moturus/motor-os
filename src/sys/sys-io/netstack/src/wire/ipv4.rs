@@ -226,6 +226,31 @@ impl<T: AsRef<[u8]>> Packet<T> {
         Ok(packet)
     }
 
+    /// Create a packet whose complete header is present, while permitting a
+    /// quoted payload to be shorter than the original declared total length.
+    pub fn new_checked_header(buffer: T) -> Result<Packet<T>> {
+        let packet = Self::new_unchecked(buffer);
+        packet.check_header_len()?;
+        Ok(packet)
+    }
+
+    /// Ensure that the complete header is present and structurally valid.
+    pub fn check_header_len(&self) -> Result<()> {
+        let len = self.buffer.as_ref().len();
+        if len < field::DST_ADDR.end {
+            return Err(Error);
+        }
+
+        let header_len = self.header_len();
+        if header_len < MINIMUM_IHL_BYTES
+            || len < header_len as usize
+            || header_len as u16 > self.total_len()
+        {
+            return Err(Error);
+        }
+        Ok(())
+    }
+
     /// Ensure that no accessor method will panic if called.
     /// Returns `Err(Error)` if the buffer is too short.
     /// Returns `Err(Error)` if the header length is greater
@@ -237,18 +262,9 @@ impl<T: AsRef<[u8]>> Packet<T> {
     ///
     /// [set_header_len]: #method.set_header_len
     /// [set_total_len]: #method.set_total_len
-    #[allow(clippy::if_same_then_else)]
     pub fn check_len(&self) -> Result<()> {
-        let len = self.buffer.as_ref().len();
-        if len < field::DST_ADDR.end {
-            Err(Error)
-        } else if len < self.header_len() as usize {
-            Err(Error)
-        } else if self.header_len() as u16 > self.total_len() {
-            Err(Error)
-        } else if len < self.total_len() as usize {
-            Err(Error)
-        } else if self.header_len() < MINIMUM_IHL_BYTES {
+        self.check_header_len()?;
+        if self.buffer.as_ref().len() < self.total_len() as usize {
             Err(Error)
         } else {
             Ok(())
@@ -801,6 +817,18 @@ pub(crate) mod test {
             Packet::new_unchecked(&mut bytes).payload_mut().len(),
             PAYLOAD_BYTES.len()
         );
+    }
+
+    #[test]
+    fn checked_header_allows_a_truncated_quoted_payload() {
+        let mut bytes = PACKET_BYTES;
+        let mut packet = Packet::new_unchecked(&mut bytes);
+        packet.set_total_len(1_500);
+        packet.fill_checksum();
+
+        let quote = &packet.into_inner()[..28];
+        assert!(Packet::new_checked(quote).is_err());
+        assert!(Packet::new_checked_header(quote).is_ok());
     }
 
     #[test]
