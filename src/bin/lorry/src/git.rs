@@ -16,7 +16,9 @@ mod direct;
 mod http;
 mod materialize;
 
-pub(crate) use direct::{DirectCatalog, configure_direct, materialize_locked_dependencies};
+pub(crate) use direct::{
+    DirectCatalog, configure_direct, load_locked_dependencies, materialize_locked_dependencies,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LockedSource {

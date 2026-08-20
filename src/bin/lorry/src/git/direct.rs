@@ -14,9 +14,10 @@ use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, decode_hex, hex};
 use crate::lockfile::write_toml_string;
 use crate::manifest::{DependencySource, GitDependency, GitSelector, LockedPackage, Manifest};
+use crate::policy::{PackageEvidence, check_evidence_identity};
 use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
-use crate::resolver::{Catalog, ResolvedSource};
+use crate::resolver::{Catalog, PackageKey, PackageSourceKey, ResolvedPackage, ResolvedSource};
 use crate::source_tree::{EntryKind, Exclusions, Tree};
 
 use super::LockedSource;
@@ -35,6 +36,7 @@ struct Object {
 #[derive(Clone, Default)]
 pub(crate) struct DirectCatalog {
     packages: Vec<(Manifest, ResolvedSource)>,
+    evidence: BTreeMap<PackageKey, PackageEvidence>,
 }
 
 impl DirectCatalog {
@@ -43,6 +45,17 @@ impl DirectCatalog {
             catalog.insert_git(manifest.clone(), source.clone())?;
         }
         Ok(())
+    }
+
+    pub(crate) fn evidence(&self, package: &ResolvedPackage) -> Result<PackageEvidence> {
+        let evidence = self.evidence.get(&package.key).ok_or_else(|| {
+            Error::failure(format!(
+                "verified direct-Git catalog has no evidence for `{} {}`",
+                package.key.name, package.key.version
+            ))
+        })?;
+        check_evidence_identity(package, evidence)?;
+        Ok(evidence.clone())
     }
 }
 
@@ -83,8 +96,15 @@ pub(crate) fn configure_direct(
     policy: &PolicyLimits,
     catalog: &mut Catalog,
 ) -> Result<()> {
+    load_locked_dependencies(manifest, policy)?.configure(catalog)
+}
+
+pub(crate) fn load_locked_dependencies(
+    manifest: &Manifest,
+    policy: &PolicyLimits,
+) -> Result<DirectCatalog> {
     if !has_git_dependency(manifest) {
-        return Ok(());
+        return Ok(DirectCatalog::default());
     }
     let mut objects = BTreeMap::new();
     let lock = manifest
@@ -105,7 +125,7 @@ pub(crate) fn configure_direct(
             );
         }
     }
-    direct_catalog(manifest, policy, &objects)?.configure(catalog)
+    direct_catalog(manifest, policy, &objects)
 }
 
 fn direct_catalog(
@@ -114,6 +134,7 @@ fn direct_catalog(
     objects: &BTreeMap<String, Object>,
 ) -> Result<DirectCatalog> {
     let mut packages = Vec::new();
+    let mut evidence = BTreeMap::new();
     let lock = manifest
         .lock
         .as_ref()
@@ -128,9 +149,30 @@ fn direct_catalog(
         let object = objects
             .get(source)
             .ok_or_else(|| Error::failure(format!("Git source `{source}` was not prepared")))?;
-        packages.push(locked_package(manifest, package, object, policy)?);
+        let (inspected, source, tree) = locked_package(manifest, package, object, policy)?;
+        let version = semver::Version::parse(&package.version.original).map_err(|error| {
+            Error::failure(format!(
+                "invalid locked Git version `{} {}`: {error}",
+                package.name, package.version.original
+            ))
+        })?;
+        let key = PackageKey {
+            name: package.name.clone(),
+            version,
+            source: PackageSourceKey::Git(object.locked.cargo_source.clone()),
+        };
+        if evidence
+            .insert(key, PackageEvidence::from_verified_git(&inspected, &tree))
+            .is_some()
+        {
+            return Err(Error::failure(format!(
+                "Git source repeats locked package `{} {}`",
+                package.name, package.version.original
+            )));
+        }
+        packages.push((inspected, source));
     }
-    Ok(DirectCatalog { packages })
+    Ok(DirectCatalog { packages, evidence })
 }
 
 fn has_git_dependency(manifest: &Manifest) -> bool {
@@ -372,7 +414,7 @@ fn locked_package(
     package: &LockedPackage,
     object: &Object,
     policy: &PolicyLimits,
-) -> Result<(Manifest, ResolvedSource)> {
+) -> Result<(Manifest, ResolvedSource, Tree)> {
     let matches = object
         .package_roots
         .get(&package.name)
@@ -388,15 +430,17 @@ fn locked_package(
             package.version.original
         )));
     };
-    let mut inspected = Manifest::load_path_dependency(root)?;
-    bind_internal_dependencies(&mut inspected, object)?;
-    let package_tree = Tree::scan(root, tree_limits(policy)?, Exclusions::None)?;
     let relative = root.strip_prefix(&object.source).map_err(|_| {
         Error::failure("Git package root escaped its materialized repository source")
     })?;
     let package_path = relative
         .to_str()
         .ok_or_else(|| Error::failure("Git package path is not valid UTF-8"))?;
+    let mut inspected = Manifest::load_path_dependency(root)?;
+    bind_internal_dependencies(&mut inspected, object)?;
+    let package_tree = object
+        .source_tree
+        .subtree(package_path, tree_limits(policy)?)?;
     let mut source_identity = Sha256::new();
     source_identity.update(object.locked.cargo_source.as_bytes());
     let mut logical_root = manifest
@@ -421,6 +465,7 @@ fn locked_package(
             physical_root: root.clone(),
             source_tree_sha256: package_tree.sha256,
         },
+        package_tree,
     ))
 }
 
@@ -596,24 +641,42 @@ mod tests {
             Exclusions::None,
         )
         .unwrap();
+        let cargo_source = object.locked.cargo_source.clone();
+        let resolved = ResolvedSource::Git {
+            cargo_source: cargo_source.clone(),
+            git_url: object.locked.url.clone(),
+            requested_revision: requested(&object.locked.selector).to_owned(),
+            resolved_commit: object.locked.commit.clone(),
+            git_tree: object.git_tree.clone(),
+            repository_tree_sha256: object.source_tree.sha256,
+            package_path: "first".to_owned(),
+            logical_root: source.join("first"),
+            physical_root: source.join("first"),
+            source_tree_sha256: package_tree.sha256,
+        };
+        let key = PackageKey {
+            name: "first".to_owned(),
+            version: semver::Version::parse("1.0.0").unwrap(),
+            source: PackageSourceKey::Git(cargo_source),
+        };
+        let recorded = PackageEvidence::from_verified_git(&manifest, &package_tree);
+        let package = ResolvedPackage {
+            key: key.clone(),
+            source: resolved.clone(),
+            local_manifest: Some(manifest.clone()),
+            feature_sets: BTreeMap::new(),
+            compile_kinds: [crate::resolver::CompileKind::Target].into(),
+            target_features: BTreeSet::new(),
+            host_features: BTreeSet::new(),
+            edges: Vec::new(),
+            lock_edges: Vec::new(),
+        };
         let direct = DirectCatalog {
-            packages: vec![(
-                manifest,
-                ResolvedSource::Git {
-                    cargo_source: object.locked.cargo_source.clone(),
-                    git_url: object.locked.url.clone(),
-                    requested_revision: requested(&object.locked.selector).to_owned(),
-                    resolved_commit: object.locked.commit.clone(),
-                    git_tree: object.git_tree.clone(),
-                    repository_tree_sha256: object.source_tree.sha256,
-                    package_path: "first".to_owned(),
-                    logical_root: source.join("first"),
-                    physical_root: source.join("first"),
-                    source_tree_sha256: package_tree.sha256,
-                },
-            )],
+            packages: vec![(manifest, resolved)],
+            evidence: BTreeMap::from([(key, recorded.clone())]),
         };
         direct.configure(&mut Catalog::default()).unwrap();
+        assert_eq!(direct.evidence(&package).unwrap(), recorded);
         fs::remove_dir_all(source).unwrap();
     }
 

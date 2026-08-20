@@ -95,7 +95,8 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn annotate_proc_macro(&mut self, key: &PackageKey, proc_macro: bool) -> Result<()> {
+    pub fn annotate_proc_macro(&mut self, key: &PackageKey, proc_macro: bool) -> Result<bool> {
+        let mut previous = self.proc_macros.contains(key);
         if proc_macro {
             self.proc_macros.insert(key.clone());
         } else {
@@ -103,10 +104,11 @@ impl Catalog {
         }
         for candidate in self.records.get_mut(&key.name).into_iter().flatten() {
             if candidate.record.version == key.version && candidate.source.key() == key.source {
+                previous = candidate.proc_macro;
                 candidate.proc_macro = proc_macro;
             }
         }
-        Ok(())
+        Ok(previous != proc_macro)
     }
 
     fn records(&self, name: &str) -> &[Candidate] {
@@ -2846,7 +2848,8 @@ mod tests {
             version: Version::parse("1.0.0").unwrap(),
             source: PackageSourceKey::CratesIo,
         };
-        catalog.annotate_proc_macro(&key, true).unwrap();
+        assert!(catalog.annotate_proc_macro(&key, true).unwrap());
+        assert!(!catalog.annotate_proc_macro(&key, true).unwrap());
         let root = manifest(
             "derive-example = \"1\"\nhelper = { version = \"1\", features = [\"target-context\"] }",
             "",

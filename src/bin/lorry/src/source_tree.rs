@@ -140,6 +140,54 @@ impl Tree {
         ]))
         .canonical_bytes()
     }
+
+    /// Derives a package tree from an already verified containing tree without
+    /// reading the same files again.
+    pub fn subtree(&self, root: &str, limits: Limits) -> Result<Self> {
+        if root.is_empty() {
+            return Ok(self.clone());
+        }
+        validate_portable_path(root, limits)?;
+        if !self
+            .entries
+            .iter()
+            .any(|entry| entry.path == root && entry.kind == EntryKind::Directory)
+        {
+            return Err(Error::failure(format!(
+                "source tree has no directory `{root}`"
+            )));
+        }
+        let prefix = format!("{root}/");
+        let entries = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry.path.strip_prefix(&prefix).map(|path| {
+                    let mut entry = entry.clone();
+                    entry.path = path.to_owned();
+                    entry
+                })
+            })
+            .collect::<Vec<_>>();
+        let file_count = entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::File)
+            .count();
+        let directory_count = entries.len() - file_count;
+        let total_bytes = entries.iter().try_fold(0_u64, |total, entry| {
+            total
+                .checked_add(entry.length)
+                .ok_or_else(|| Error::failure("source subtree byte count overflowed"))
+        })?;
+        let sha256 = digest_entries(&entries, limits)?;
+        Ok(Self {
+            entries,
+            file_count,
+            directory_count,
+            total_bytes,
+            sha256,
+        })
+    }
 }
 
 struct Scanner<'a> {
@@ -727,6 +775,23 @@ mod tests {
             manifest.get("source-tree-sha256").and_then(Value::as_str),
             Some("a0bba2df187c38aa673c7feb41af19de82915ef9ef514589bc142fbb9a5720ed")
         );
+    }
+
+    #[test]
+    fn derives_the_same_subtree_as_a_direct_scan() {
+        let root = TempDir::new("subtree");
+        fs::create_dir_all(root.0.join("package/src")).unwrap();
+        fs::create_dir(root.0.join("package/empty")).unwrap();
+        fs::write(root.0.join("outside"), "outside\n").unwrap();
+        fs::write(root.0.join("package/Cargo.toml"), "[package]\n").unwrap();
+        fs::write(root.0.join("package/src/lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let containing = Tree::scan(&root.0, DEFAULT_LIMITS, Exclusions::None).unwrap();
+        let derived = containing.subtree("package", DEFAULT_LIMITS).unwrap();
+        let scanned =
+            Tree::scan(&root.0.join("package"), DEFAULT_LIMITS, Exclusions::None).unwrap();
+
+        assert_eq!(derived, scanned);
     }
 
     #[test]

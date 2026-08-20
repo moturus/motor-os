@@ -6,6 +6,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use semver::Version;
 use toml_edit::{Item, Table};
@@ -62,6 +63,7 @@ pub struct RepositorySet {
     /// verified object stays valid; caching avoids re-hashing archives and
     /// source trees on every lookup.
     verified_registry: Arc<Mutex<BTreeMap<String, RegistryObject>>>,
+    verified_registry_manifests: Arc<Mutex<BTreeMap<String, Manifest>>>,
     verified_seeded_git: Arc<Mutex<BTreeMap<String, SeededGitObject>>>,
 }
 
@@ -172,6 +174,7 @@ impl RepositorySet {
             max_archive_bytes,
             validation,
             verified_registry: Arc::new(Mutex::new(BTreeMap::new())),
+            verified_registry_manifests: Arc::new(Mutex::new(BTreeMap::new())),
             verified_seeded_git: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -210,6 +213,137 @@ impl RepositorySet {
             return Ok(Some(object));
         }
         Ok(None)
+    }
+
+    pub fn lookup_registries(
+        &self,
+        checksums: &[String],
+    ) -> Result<BTreeMap<String, Option<RegistryObject>>> {
+        let checksums = checksums.iter().cloned().collect::<BTreeSet<_>>();
+        if checksums.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let checksums = checksums.into_iter().collect::<Vec<_>>();
+        let workers = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(checksums.len());
+        let chunk_size = checksums.len().div_ceil(workers);
+        let batches = thread::scope(|scope| {
+            let handles = checksums
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|checksum| (checksum.clone(), self.lookup_registry(checksum)))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        Error::failure("repository verification worker terminated unexpectedly")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let mut objects = BTreeMap::new();
+        for (checksum, object) in batches.into_iter().flatten() {
+            objects.insert(checksum, object?);
+        }
+        Ok(objects)
+    }
+
+    /// Best-effort parallel warming for lazy resolution. Individual failures
+    /// are deliberately left uncached so a selected object follows the normal
+    /// lookup path and returns its original diagnostic.
+    pub fn prefetch_registries(&self, checksums: &[String]) -> Result<()> {
+        let checksums = checksums.iter().cloned().collect::<BTreeSet<_>>();
+        if checksums.is_empty() {
+            return Ok(());
+        }
+        let checksums = checksums.into_iter().collect::<Vec<_>>();
+        let workers = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(checksums.len());
+        let chunk_size = checksums.len().div_ceil(workers);
+        thread::scope(|scope| {
+            let handles = checksums
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        for checksum in chunk {
+                            let _ = self.lookup_registry(checksum);
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle.join().map_err(|_| {
+                    Error::failure("repository prefetch worker terminated unexpectedly")
+                })?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn load_registry_manifest(&self, object: &RegistryObject) -> Result<Manifest> {
+        let checksum = hex(&object.checksum);
+        if let Some(manifest) = lock_cache(&self.verified_registry_manifests).get(&checksum) {
+            return Ok(manifest.clone());
+        }
+        if !object.retained_source {
+            return Err(Error::failure(format!(
+                "repository object for `{} {}` retains no source",
+                object.name, object.version
+            )));
+        }
+        let manifest = Manifest::load_path_dependency(&object.root.join("source"))?;
+        lock_cache(&self.verified_registry_manifests).insert(checksum, manifest.clone());
+        Ok(manifest)
+    }
+
+    pub fn load_registry_manifests(
+        &self,
+        objects: &[RegistryObject],
+    ) -> Result<BTreeMap<String, Manifest>> {
+        if objects.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let workers = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(objects.len());
+        let chunk_size = objects.len().div_ceil(workers);
+        let batches = thread::scope(|scope| {
+            let handles = objects
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(|| {
+                        chunk
+                            .iter()
+                            .map(|object| {
+                                (hex(&object.checksum), self.load_registry_manifest(object))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        Error::failure("registry manifest worker terminated unexpectedly")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let mut manifests = BTreeMap::new();
+        for (checksum, manifest) in batches.into_iter().flatten() {
+            manifests.insert(checksum, manifest?);
+        }
+        Ok(manifests)
     }
 
     pub fn lookup_seeded_git(&self, source_tree_sha256: &str) -> Result<Option<SeededGitObject>> {
