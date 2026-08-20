@@ -18,3 +18,13 @@ the ruling; nothing here should be picked up without a fresh call.
   in the same sitting: vdso panic text can be lost when the console
   buffer does not drain before teardown, which is why a vdso panic can
   present as silent exit-222.
+
+- **Investigate and fix the intermittent `moto_async` channel wake-elision
+  hang** (observed once during the 2026-08-20 networking debug gate).
+  `systest` stopped after `test_local_notify_notify_all_cancel`; the next
+  test, `test_wake_elision_counters`, never completed, while the VM remained
+  alive until the gate's 600-second timeout. If it recurs, capture focused
+  diagnostics around the cross-thread bounded-channel sender/receiver and
+  `LocalRuntime` polling/committing/parked transition, and fix the underlying
+  lost-progress race if the correction is clear. Do not hide it with retries
+  or a longer timeout.
