@@ -10,6 +10,7 @@ use crate::atomic::AtomicFile;
 use crate::config::{NetworkConfig, PolicyLimits};
 use crate::diagnostic::{Error, Result};
 use crate::manifest::{GitDependency, GitSelector};
+use crate::progress::Progress;
 
 mod direct;
 mod http;
@@ -154,6 +155,7 @@ pub fn materialize_manifest_patches(
     limits: &PolicyLimits,
     accept_all: bool,
     verbose: bool,
+    progress: Progress,
 ) -> Result<bool> {
     let manifest_path = root.join("Cargo.toml");
     let source = fs::read_to_string(&manifest_path).map_err(|error| {
@@ -177,6 +179,7 @@ pub fn materialize_manifest_patches(
     attach_locked_commits(root, &mut patches)?;
     let mut replacements = Vec::new();
     for patch in &patches {
+        progress.report(format_args!("Fetching Git patch `{}`", patch.alias))?;
         let materialized =
             materialize::materialize_one(root, patch, network, limits, accept_all, verbose)?;
         replacements.push((patch.alias.clone(), patch.package.clone(), materialized));

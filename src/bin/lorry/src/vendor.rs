@@ -21,6 +21,7 @@ use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::patch;
 use crate::policy::{self, PackageEvidence};
+use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
@@ -78,6 +79,7 @@ fn execute_reconcile(
     }
     let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let config = Config::load(&initial_manifest.root)?;
+    let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
     let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
@@ -88,6 +90,7 @@ fn execute_reconcile(
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
+        progress,
     )?;
     let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let direct = crate::git::materialize_locked_dependencies(
@@ -96,6 +99,7 @@ fn execute_reconcile(
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
+        progress,
     )?;
     let previous = CompactState::load(&initial_manifest.root)?;
     let config = Config::load(&initial_manifest.root)?;
@@ -125,6 +129,7 @@ fn execute_reconcile(
         previous.as_ref(),
         Some(&direct),
         accept_all,
+        progress,
     )?;
 
     if cli.verbosity != Verbosity::Quiet {
@@ -274,6 +279,7 @@ fn prepare_networked(
     previous: Option<&CompactState>,
     direct: Option<&crate::git::DirectCatalog>,
     accept_all: bool,
+    progress: Progress,
 ) -> Result<bool> {
     let stdin = io::stdin();
     prepare_networked_with_approval(
@@ -288,6 +294,7 @@ fn prepare_networked(
         stdin.is_terminal(),
         &mut stdin.lock(),
         &mut io::stderr().lock(),
+        progress,
     )
 }
 
@@ -304,8 +311,9 @@ fn prepare_networked_with_approval(
     terminal: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
+    progress: Progress,
 ) -> Result<bool> {
-    let mut acquisition = Acquisition::new(config, manifest)?;
+    let mut acquisition = Acquisition::new(config, manifest, progress)?;
     let repositories = acquisition.repositories().clone();
     // The committed document is needed only to display an interactive diff.
     // Reconstructing it verifies and inventories every dependency source, so
@@ -684,6 +692,7 @@ struct Acquisition<'a> {
     fetched: BTreeSet<String>,
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
+    progress: Progress,
 }
 
 struct AcquisitionState {
@@ -693,7 +702,7 @@ struct AcquisitionState {
 }
 
 impl<'a> Acquisition<'a> {
-    fn new(config: &'a Config, manifest: &Manifest) -> Result<Self> {
+    fn new(config: &'a Config, manifest: &Manifest, progress: Progress) -> Result<Self> {
         let repositories = RepositorySet::open(
             &config.repositories,
             repository_tree_limits(&config.policy.limits)?,
@@ -736,6 +745,7 @@ impl<'a> Acquisition<'a> {
             fetched: BTreeSet::new(),
             inspections: Vec::new(),
             state: None,
+            progress,
         })
     }
 
@@ -767,6 +777,8 @@ impl<'a> Acquisition<'a> {
             return Ok(());
         }
         let url = sparse_url(&expected)?;
+        self.progress
+            .report(format_args!("Updating crates.io index for `{expected}`"))?;
         let state = self.state()?;
         let download = state.client.download(
             &url,
@@ -930,6 +942,10 @@ impl<'a> Acquisition<'a> {
                     package.key.name, package.key.version
                 )));
             }
+            self.progress.report(format_args!(
+                "Downloading {} v{}",
+                package.key.name, package.key.version
+            ))?;
             stage(self.state()?, package, &record)?;
             staged += 1;
         }
@@ -1308,6 +1324,7 @@ mod tests {
                 None,
                 None,
                 true,
+                Progress::new(false),
             )
             .unwrap()
         );
@@ -1327,6 +1344,7 @@ mod tests {
                 Some(&written),
                 None,
                 true,
+                Progress::new(false),
             )
             .unwrap()
         );
@@ -1368,6 +1386,7 @@ mod tests {
                 None,
                 None,
                 true,
+                Progress::new(false),
             )
             .unwrap()
         );
@@ -1398,6 +1417,7 @@ mod tests {
             false,
             &mut "".as_bytes(),
             &mut initial_output,
+            Progress::new(false),
         )
         .unwrap();
         let previous = CompactState::load(&fixture.0).unwrap().unwrap();
@@ -1423,6 +1443,7 @@ mod tests {
             false,
             &mut "".as_bytes(),
             &mut Vec::new(),
+            Progress::new(false),
         )
         .unwrap_err();
         assert!(
@@ -1453,6 +1474,7 @@ mod tests {
                 true,
                 &mut "yes\n".as_bytes(),
                 &mut output,
+                Progress::new(false),
             )
             .unwrap()
         );
@@ -1605,7 +1627,7 @@ mod tests {
             }],
             packages: vec![package],
         };
-        let mut acquisition = Acquisition::new(&config, &manifest).unwrap();
+        let mut acquisition = Acquisition::new(&config, &manifest, Progress::new(false)).unwrap();
         acquisition
             .records
             .insert(("demo".to_owned(), version.clone()), record.clone());
@@ -1663,7 +1685,7 @@ mod tests {
         assert!(output.contains("Approve demo 1.2.3?"));
         acquisition.publish().unwrap();
 
-        let mut warm = Acquisition::new(&config, &manifest).unwrap();
+        let mut warm = Acquisition::new(&config, &manifest, Progress::new(false)).unwrap();
         assert_eq!(
             warm.records.get(&("demo".to_owned(), version)),
             Some(&record)

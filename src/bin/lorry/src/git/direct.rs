@@ -14,6 +14,7 @@ use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, decode_hex, hex};
 use crate::lockfile::write_toml_string;
 use crate::manifest::{DependencySource, GitDependency, GitSelector, LockedPackage, Manifest};
+use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
 use crate::resolver::{Catalog, ResolvedSource};
 use crate::source_tree::{EntryKind, Exclusions, Tree};
@@ -51,6 +52,7 @@ pub(crate) fn materialize_locked_dependencies(
     policy: &PolicyLimits,
     accept_all: bool,
     verbose: bool,
+    progress: Progress,
 ) -> Result<DirectCatalog> {
     if !has_git_dependency(manifest) {
         return Ok(DirectCatalog::default());
@@ -61,6 +63,7 @@ pub(crate) fn materialize_locked_dependencies(
         let object = if destination.exists() {
             load_object(&manifest.workspace_root, &locked, policy)?
         } else {
+            progress.report(format_args!("Fetching Git dependency `{}`", locked.url))?;
             materialize_one(
                 &manifest.workspace_root,
                 &locked,

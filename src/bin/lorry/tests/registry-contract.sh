@@ -84,6 +84,10 @@ grep -F "New crates.io packages (1):" "$WORK/fresh.log" >/dev/null || {
     cat "$WORK/fresh.log" >&2
     fail "fresh acquisition did not publish one package"
 }
+grep -F 'Updating crates.io index for `cfg-if`' "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not report its sparse-index request"
+grep -F 'Downloading cfg-if v1.0.4' "$WORK/fresh.log" >/dev/null ||
+    fail "fresh acquisition did not report its archive request"
 OBJECT_ROOT="$REPOSITORY/objects/crates-io/sha256"
 [ "$(find "$OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l)" -eq 1 ] ||
     fail "fresh acquisition published an unexpected object count"
