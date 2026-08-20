@@ -1722,6 +1722,7 @@ fn test_icmp_error_no_payload(#[case] medium: Medium) {
     // unknown protocol
     let icmp_repr = Icmpv4Repr::DstUnreachable {
         reason: Icmpv4DstUnreachable::ProtoUnreachable,
+        next_hop_mtu: None,
         header: Ipv4Repr {
             src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
             dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
@@ -1907,6 +1908,7 @@ fn test_icmp_error_port_unreachable(#[case] medium: Medium) {
     // to no sockets listening on the destination port.
     let icmp_repr = Icmpv4Repr::DstUnreachable {
         reason: Icmpv4DstUnreachable::PortUnreachable,
+        next_hop_mtu: None,
         header: Ipv4Repr {
             src_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x02),
             dst_addr: Ipv4Address::new(0x7f, 0x00, 0x00, 0x01),
@@ -3268,6 +3270,7 @@ fn test_icmp_reply_size(#[case] medium: Medium) {
 
     let expected_icmp_repr = Icmpv4Repr::DstUnreachable {
         reason: Icmpv4DstUnreachable::PortUnreachable,
+        next_hop_mtu: None,
         header: ip_repr,
         data: &payload[..MAX_PAYLOAD_LEN],
     };
