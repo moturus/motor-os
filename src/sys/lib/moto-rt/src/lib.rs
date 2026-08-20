@@ -237,6 +237,7 @@ pub struct RtVdsoVtable {
     pub num_cpus: AtomicU64,
     pub internal_helper: AtomicU64,
     pub current_exe: AtomicU64,
+    pub current_pid: AtomicU64,
     // Keep additions at the end.
 }
 

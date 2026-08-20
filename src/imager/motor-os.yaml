@@ -8,7 +8,6 @@ input_files:
   - "/user/bin/red"
   - "/user/bin/rmux"
   - "/system/services/dns-resolver"
-  - "/system/bin/curl"
   - "/user/bin/httpd"
   - "/user/bin/httpd-axum"
   - "/user/bin/kibim"
