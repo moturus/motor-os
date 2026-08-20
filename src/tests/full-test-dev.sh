@@ -17,7 +17,7 @@ ROOT_DIR="$WD/../.."
 # established default VM memory unless the caller explicitly overrides it.
 DEV_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
 
-FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.img \
+FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "$@"
 

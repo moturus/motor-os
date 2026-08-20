@@ -26,7 +26,7 @@ routing, run `sudo vm_images/release/nft-nat.sh`.
 If all of the above completed successfully, you can now do
 
 ```sh
-sudo apt install qemu-system
+sudo apt install qemu-system qemu-utils
 sudo chmod a+rw /dev/kvm
 cd $MOTORH/motor-os/vm_images/release
 ./run-qemu.sh

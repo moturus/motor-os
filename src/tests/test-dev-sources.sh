@@ -23,7 +23,7 @@ if [ "${1:-}" = "--release" ]; then
   BUILD=release
 fi
 IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-dev.img
+export MOTO_IMAGE=motor-os-dev.qcow2
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then

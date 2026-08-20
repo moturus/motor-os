@@ -12,7 +12,7 @@ complete. The main work now is growing it into a mature daily coding agent.
 
 ## Done
 
-- Linux and Motor OS builds, with gears installed in `motor-os-dev.img`.
+- Linux and Motor OS builds, with gears installed in `motor-os-dev.qcow2`.
 - OpenAI-compatible streamed completions through host curl and Motor
   `/system/bin/curl`, with key redaction, usage accounting, budgets, and egress
   policy.
@@ -86,7 +86,7 @@ These decisions bind the work below.
   `/devtools/bin/lorry` path. Gears is dev-only, and build/test behavior must
   not change when a caller narrows or unsets `PATH`. A missing packaged Lorry
   must still be reported actionably rather than as a bare spawn failure.
-- gears ships only in `motor-os-dev.img`, so its tests and gates belong to the
+- gears ships only in `motor-os-dev.qcow2`, so its tests and gates belong to the
   dev lane, `src/tests/full-test-dev.sh`, not the main-image lane.
 
 ### Dependency budget

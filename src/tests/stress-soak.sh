@@ -71,7 +71,7 @@ VM_IP=192.168.4.2
 SSH_PORT=2222
 KEY="$ROOT/src/tests/test.key"
 IMG_DIR="$ROOT/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-dev.img
+export MOTO_IMAGE=motor-os-dev.qcow2
 HOST_RNET="$ROOT/src/bin/rnetbench/target/release/rnetbench"
 # qemu monitor over TCP: a unix-socket path under a deep scratch dir exceeds the
 # 108-byte sun_path limit, and TCP is what the watchdog settled on anyway.

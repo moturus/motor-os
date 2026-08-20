@@ -13,7 +13,7 @@ BUILD_REPOSITORY="$ROOT_DIR/build/lorry/stage2/system-seed"
 DOWNLOAD_CACHE="$ROOT_DIR/build/lorry/stage2/download-cache"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
-IMAGE_NAME="motor-os-dev.img"
+IMAGE_NAME="motor-os-dev.qcow2"
 # Four vCPUs and 4 GiB are sufficient for the compact native fixture.
 VM_SMP="${LORRY_VM_SMP:-4}"
 VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"

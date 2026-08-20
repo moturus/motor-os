@@ -129,8 +129,8 @@ The final images are:
 
 ```text
 $MOTORH/motor-os/vm_images/release/motor-os-base.img
-$MOTORH/motor-os/vm_images/release/motor-os.img
-$MOTORH/motor-os/vm_images/release/motor-os-dev.img
+$MOTORH/motor-os/vm_images/release/motor-os.qcow2
+$MOTORH/motor-os/vm_images/release/motor-os-dev.qcow2
 ```
 
 ## Generated image inputs
@@ -193,7 +193,7 @@ the native toolchains:
 
 ```sh
 cd "$MOTORH/motor-os/vm_images/release"
-MOTO_IMAGE=motor-os-dev.img ./run-qemu.sh
+MOTO_IMAGE=motor-os-dev.qcow2 ./run-qemu.sh
 ```
 
 In another terminal, connect over SSH:
