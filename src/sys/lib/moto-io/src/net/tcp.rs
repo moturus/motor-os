@@ -1394,14 +1394,14 @@ impl TcpStream {
     }
 
     /// Nonblocking write: writes what fits now (`Ok(n)`, at least one byte),
-    /// `E_NOT_READY` when fully backpressured, `E_NOT_CONNECTED` on a closed
-    /// write half.
+    /// `E_NOT_READY` when fully backpressured, `dead_write_error` on a
+    /// closed write half.
     pub fn try_write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         if bufs.is_empty() {
             return Ok(0);
         }
         if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return Err(self.dead_write_error());
         }
         self.write_nonblocking(bufs)
     }
@@ -1478,22 +1478,25 @@ impl TcpStream {
 
     /// Whether the write half is still open: not closed by a state edge and
     /// not locally shut down. The veneer's spin loop bails to
-    /// `E_NOT_CONNECTED` the moment this goes false.
+    /// `dead_write_error` the moment this goes false.
     pub fn can_write_now(&self) -> bool {
         self.tcp_state().can_write() && !self.tx_closed.load(Ordering::Acquire)
     }
 
     /// Whether the peer reset this connection -- the recorded cause behind
     /// a dead stream, for native callers that want ECONNRESET fidelity.
-    ///
-    /// The std-facing write error deliberately stays `E_NOT_CONNECTED` for
-    /// now: emitting `E_CONNECTION_RESET` (22) launders to `Unknown` through
-    /// the toolchain std's older moto-rt enum bound (observed as raw code 2
-    /// at the app). Flip the dead-write error to
-    /// `moto_rt::E_CONNECTION_RESET` when the toolchain's moto-rt knows the
-    /// code.
     pub fn peer_reset(&self) -> bool {
         self.peer_reset.load(Ordering::Acquire)
+    }
+
+    /// The error a write on a dead write half reports: the recorded reset
+    /// cause wins over the generic not-connected.
+    pub fn dead_write_error(&self) -> ErrorCode {
+        if self.peer_reset() {
+            moto_rt::E_CONNECTION_RESET
+        } else {
+            moto_rt::E_NOT_CONNECTED
+        }
     }
 
     /// Copy from `src` (skipping its first `offset` bytes) into `dst`;

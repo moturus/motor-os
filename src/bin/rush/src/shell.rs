@@ -41,8 +41,8 @@ pub enum Flow {
     Continue(u32),
     /// `return n`: leave the current function (or sourced script) with status `n`.
     Return(i32),
-    /// `exit n` inside an emulated subshell: unwind to the subshell's boundary,
-    /// which is standing in for the process a `fork` would have given it.
+    /// `exit n` inside an emulated process: unwind to the subshell or in-process
+    /// script boundary that is standing in for a real child process.
     ///
     /// Unlike [`Flow::Return`], nothing *inside* the subshell absorbs this — not
     /// a function call, not a loop — because on a real shell it would be a dead
@@ -108,6 +108,9 @@ pub struct Shell {
     /// so `trap 'x' 2` and `trap 'x' SIGINT` are the same entry. An empty action
     /// means "ignore". [`crate::signal`] dispatches them.
     traps: HashMap<String, String>,
+    /// Conditions whose process-wide dispositions this shell changed. An
+    /// in-process script uses this to restore its hosting shell's dispositions.
+    changed_traps: HashSet<String>,
     /// The subshell depth at which the `EXIT` trap was set — see
     /// [`Shell::exit_trap_set_here`].
     exit_trap_depth: u32,
@@ -129,6 +132,10 @@ pub struct Shell {
     /// executing. A fatal error inside one must not take down the whole shell
     /// (there is no `fork`), so the fatal-exit is suppressed when this is > 0.
     subshell_depth: u32,
+    /// Nesting of rush/`sh` scripts executed without spawning another shell.
+    /// A non-zero value is an exit boundary: `exit`, `exec`, and fatal errors
+    /// unwind to the caller instead of terminating the hosting rush process.
+    inproc_script_depth: u32,
     /// Depth of nested word expansions currently in flight — see
     /// [`Shell::enter_expansion`].
     expansion_depth: u32,
@@ -152,12 +159,14 @@ impl Shell {
             getopts_char: 0,
             umask: 0o022,
             traps: HashMap::new(),
+            changed_traps: HashSet::new(),
             exit_trap_depth: 0,
             jobs: Jobs::new(),
             interactive: false,
             fatal: None,
             cmdsub_status: None,
             subshell_depth: 0,
+            inproc_script_depth: 0,
             expansion_depth: 0,
         }
     }
@@ -468,6 +477,18 @@ impl Shell {
         self.subshell_depth > 0
     }
 
+    pub fn set_inproc_script_depth(&mut self, depth: u32) {
+        self.inproc_script_depth = depth;
+    }
+
+    pub fn inproc_script_depth(&self) -> u32 {
+        self.inproc_script_depth
+    }
+
+    pub fn at_emulated_exit_boundary(&self) -> bool {
+        self.in_subshell() || self.inproc_script_depth > 0
+    }
+
     // ---- traps -------------------------------------------------------------
 
     pub fn set_trap(&mut self, cond: &str, action: String) {
@@ -476,11 +497,17 @@ impl Shell {
             // `EXIT` trap from the parent's — see [`Shell::exit_trap_set_here`].
             self.exit_trap_depth = self.subshell_depth;
         }
+        self.changed_traps.insert(cond.to_string());
         self.traps.insert(cond.to_string(), action);
     }
 
     pub fn clear_trap(&mut self, cond: &str) {
+        self.changed_traps.insert(cond.to_string());
         self.traps.remove(cond);
+    }
+
+    pub fn changed_traps(&self) -> &HashSet<String> {
+        &self.changed_traps
     }
 
     /// Whether the current `EXIT` trap was set at the current subshell depth,

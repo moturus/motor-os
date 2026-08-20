@@ -507,6 +507,14 @@ impl RawChannel {
     fn set_server_page_wait(&self, subchannel_mask: u64) {
         self.server_page_waits
             .fetch_or(subchannel_mask, Ordering::AcqRel);
+        // Pair remote page-wait publication with the allocation retry, just
+        // like set_server_waiting() does for queue progress.
+        fence(Ordering::SeqCst);
+    }
+
+    fn is_server_page_waiting(&self, page_mask: u64) -> bool {
+        fence(Ordering::SeqCst);
+        self.server_page_waits.load(Ordering::Acquire) & page_mask != 0
     }
 
     fn clear_server_page_wait(&self, subchannel_mask: u64) {
@@ -535,6 +543,13 @@ impl RawChannel {
     fn set_client_page_wait(&self, subchannel_mask: u64) {
         self.client_page_waits
             .fetch_or(subchannel_mask, Ordering::AcqRel);
+        // See set_server_page_wait().
+        fence(Ordering::SeqCst);
+    }
+
+    fn is_client_page_waiting(&self, page_mask: u64) -> bool {
+        fence(Ordering::SeqCst);
+        self.client_page_waits.load(Ordering::Acquire) & page_mask != 0
     }
 
     fn clear_client_page_wait(&self, subchannel_mask: u64) {
@@ -784,18 +799,12 @@ impl Drop for IoPage {
 
                     match self.raw_page.s_type {
                         EndpointType::Client => {
-                            if self.raw_channel.client_page_waits.load(Ordering::Acquire)
-                                & page_mask
-                                != 0
-                            {
+                            if self.raw_channel.is_client_page_waiting(page_mask) {
                                 let _ = moto_sys::SysCpu::wake(*remote_handle);
                             }
                         }
                         EndpointType::Server => {
-                            if self.raw_channel.server_page_waits.load(Ordering::Acquire)
-                                & page_mask
-                                != 0
-                            {
+                            if self.raw_channel.is_server_page_waiting(page_mask) {
                                 let _ = moto_sys::SysCpu::wake(*remote_handle);
                             }
                         }
@@ -1363,6 +1372,7 @@ struct IoChannelImpl {
     remote_handle: SysHandle,
     endpoint_type: EndpointType,
     page_waiters: Arc<PageWaiters>,
+    remote_page_waiters: Mutex<[u32; CHANNEL_PAGE_COUNT]>,
 }
 
 impl Drop for IoChannelImpl {
@@ -1388,6 +1398,27 @@ pub struct Sender {
     inner: Arc<IoChannelImpl>,
 }
 
+struct PageWaitRegistration<'a> {
+    sender: &'a Sender,
+    subchannel_mask: u64,
+}
+
+impl<'a> PageWaitRegistration<'a> {
+    fn new(sender: &'a Sender, subchannel_mask: u64) -> Self {
+        sender.register_page_wait(subchannel_mask);
+        Self {
+            sender,
+            subchannel_mask,
+        }
+    }
+}
+
+impl Drop for PageWaitRegistration<'_> {
+    fn drop(&mut self) {
+        self.sender.unregister_page_wait(self.subchannel_mask);
+    }
+}
+
 // Note: having multiple senders in different threads is fishy: not
 // tested and maybe suboptimal (they will have to wait on the same remote handle).
 impl !Sync for Sender {}
@@ -1409,6 +1440,43 @@ impl Sender {
         match self.inner.endpoint_type {
             EndpointType::Client => self.raw_channel().clear_client_page_wait(subchannel_mask),
             EndpointType::Server => self.raw_channel().clear_server_page_wait(subchannel_mask),
+        }
+    }
+
+    fn register_page_wait(&self, subchannel_mask: u64) {
+        let mut counts = self.inner.remote_page_waiters.lock();
+        let mut publish_mask = 0;
+        for (page_idx, count) in counts.iter_mut().enumerate() {
+            let page_mask = 1_u64 << page_idx;
+            if subchannel_mask & page_mask == 0 {
+                continue;
+            }
+            if *count == 0 {
+                publish_mask |= page_mask;
+            }
+            *count = count.checked_add(1).expect("too many page waiters");
+        }
+        if publish_mask != 0 {
+            self.set_page_wait(publish_mask);
+        }
+    }
+
+    fn unregister_page_wait(&self, subchannel_mask: u64) {
+        let mut counts = self.inner.remote_page_waiters.lock();
+        let mut clear_mask = 0;
+        for (page_idx, count) in counts.iter_mut().enumerate() {
+            let page_mask = 1_u64 << page_idx;
+            if subchannel_mask & page_mask == 0 {
+                continue;
+            }
+            assert_ne!(*count, 0, "unregistered page waiter");
+            *count -= 1;
+            if *count == 0 {
+                clear_mask |= page_mask;
+            }
+        }
+        if clear_mask != 0 {
+            self.clear_page_wait(clear_mask);
         }
     }
 
@@ -1547,32 +1615,23 @@ impl Sender {
     }
 
     pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
-        self.clear_page_wait(subchannel_mask);
-        let mut wait_flag_set = false;
+        match self.try_alloc_page(subchannel_mask) {
+            Err(moto_rt::Error::NotReady) => {}
+            result => return result,
+        }
+
+        let _registration = PageWaitRegistration::new(self, subchannel_mask);
         loop {
             let generation = self.inner.page_waiters.generation();
             match self.try_alloc_page(subchannel_mask) {
                 Err(moto_rt::Error::NotReady) => {
-                    if !wait_flag_set {
-                        self.set_page_wait(subchannel_mask);
-                        wait_flag_set = true;
-                        continue; // Try one more alloc() before waiting.
-                    } else {
-                        self.inner
-                            .page_waiters
-                            .wait(generation, self.inner.remote_handle)
-                            .await?;
-                        self.clear_page_wait(subchannel_mask);
-                        wait_flag_set = false;
-                    }
+                    self.inner
+                        .page_waiters
+                        .wait(generation, self.inner.remote_handle)
+                        .await?
                 }
                 Err(err) => return Err(err),
-                Ok(page) => {
-                    if wait_flag_set {
-                        self.clear_page_wait(subchannel_mask);
-                    }
-                    return Ok(page);
-                }
+                Ok(page) => return Ok(page),
             }
         }
     }
@@ -1583,38 +1642,37 @@ impl Sender {
             EndpointType::Client => SubChannel::Client(subchannel_mask),
             EndpointType::Server => SubChannel::Server(subchannel_mask),
         };
-        let mut wait_flag_set = false;
+        match self.raw_channel().alloc_pages(subchannel, count) {
+            Err(moto_rt::Error::NotReady) => {}
+            Err(err) => return Err(err),
+            Ok(raw_pages) => return Ok(self.wrap_pages(raw_pages)),
+        }
+
+        let _registration = PageWaitRegistration::new(self, subchannel_mask);
         loop {
             let generation = self.inner.page_waiters.generation();
             match self.raw_channel().alloc_pages(subchannel, count) {
-                Err(moto_rt::Error::NotReady) if !wait_flag_set => {
-                    self.set_page_wait(subchannel_mask);
-                    wait_flag_set = true;
-                }
                 Err(moto_rt::Error::NotReady) => {
                     self.inner
                         .page_waiters
                         .wait(generation, self.inner.remote_handle)
-                        .await?;
-                    self.clear_page_wait(subchannel_mask);
-                    wait_flag_set = false;
+                        .await?
                 }
                 Err(err) => return Err(err),
-                Ok(raw_pages) => {
-                    if wait_flag_set {
-                        self.clear_page_wait(subchannel_mask);
-                    }
-                    return Ok(raw_pages
-                        .into_iter()
-                        .map(|raw_page| IoPage {
-                            raw_page,
-                            raw_channel: self.raw_channel(),
-                            wake: PageWake::Local(self.inner.page_waiters.clone()),
-                        })
-                        .collect());
-                }
+                Ok(raw_pages) => return Ok(self.wrap_pages(raw_pages)),
             }
         }
+    }
+
+    fn wrap_pages(&self, raw_pages: Vec<RawIoPage>) -> Vec<IoPage> {
+        raw_pages
+            .into_iter()
+            .map(|raw_page| IoPage {
+                raw_page,
+                raw_channel: self.raw_channel(),
+                wake: PageWake::Local(self.inner.page_waiters.clone()),
+            })
+            .collect()
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
@@ -1823,6 +1881,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
             remote_handle,
             endpoint_type: EndpointType::Client,
             page_waiters: Arc::new(PageWaiters::new()),
+            remote_page_waiters: Mutex::new([0; CHANNEL_PAGE_COUNT]),
         }),
     };
     let receiver = Receiver {
@@ -1891,6 +1950,7 @@ pub fn listen(url: &str) -> impl Future<Output = Result<(Sender, Receiver)>> {
                 remote_handle,
                 endpoint_type: EndpointType::Server,
                 page_waiters: Arc::new(PageWaiters::new()),
+                remote_page_waiters: Mutex::new([0; CHANNEL_PAGE_COUNT]),
             }),
         };
         let receiver = Receiver {

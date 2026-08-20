@@ -95,7 +95,7 @@ pub fn tcp_write(stream: &RtTcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCod
             moto_sys::SysCpu::sched_yield();
         }
         if !stream.inner().can_write_now() {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return Err(stream.inner().dead_write_error());
         }
         if stream.inner().have_write_buffer_space() {
             match stream.inner().try_write(bufs) {

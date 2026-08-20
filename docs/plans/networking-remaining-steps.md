@@ -12,7 +12,8 @@ Orientation: sys-io owns the Motor OS networking stack
 (`moto-netstack`, `src/sys/sys-io/netstack`; grown out of smoltcp, no
 longer a fork). TCP has Cubic + IW10 congestion control, RACK-TLP loss
 recovery with SACK/DSACK, RFC 7323 timestamps with PAWS, per-socket
-buffer sizing up to 8 MiB, Linux-parity close-path behavior, SYN
+buffer sizing up to 8 MiB, Linux-parity close-path behavior (a write
+on a peer-reset connection fails with `ECONNRESET`), SYN
 cookies at the half-open caps, token-bucket egress limits on the
 socketless replies (no-listener resets and cookie SYN|ACKs;
 `max_rst_rate`/`max_syn_cookie_rate` in `sys-net.toml`, loopback
@@ -40,19 +41,17 @@ is parked below under "measure, then decide".
 
 ## Waiting
 
-On the toolchain (not on a decision):
-
-- **ECONNRESET flip.** The plumbing is landed end to end (moto-rt
-  `E_CONNECTION_RESET = 22`, the netstack reset cause, the cause bit
-  in `EvtTcpStreamStateChanged`, moto-io's sticky
-  `TcpStream::peer_reset()`), but the std-visible write error must
-  stay `E_NOT_CONNECTED` until the toolchain's vendored moto-rt knows
-  code 22 -- an unknown code launders to `Unknown` (raw 2) through its
-  `Error::from(u16)`. After the toolchain refresh, flip: the
-  dead-write error selection in moto-io `try_write` and vdso
-  `blocking.rs` (see the comment at `TcpStream::peer_reset`), the std
-  ErrorKind mapping, and the close-path systest assertion (marked
-  "Tighten this to raw code 22").
+Nothing is waiting on the toolchain. The ECONNRESET flip is done
+(2026-08-18): a write on a peer-reset connection fails with
+`ECONNRESET` end to end -- moto-io's `TcpStream::dead_write_error`
+selects `E_CONNECTION_RESET` over `E_NOT_CONNECTED` via the sticky
+reset cause (used by `try_write` and the vdso blocking-write bail),
+the toolchain's std maps code 22 to `ErrorKind::ConnectionReset`, and
+the close-path systest asserts raw code 22 exactly. moto-rt 0.17.3 is
+published; the toolchain (`motor-os-rustc`, rebased onto
+`motor-os-rt-v17`) builds std against the published crate, no local
+patches. Gate on the final toolchain: 3 debug + 3 release full-test
+runs green.
 
 Standing calls, revisit later:
 

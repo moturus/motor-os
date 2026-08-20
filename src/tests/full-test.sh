@@ -74,6 +74,16 @@ for crate in red rmux rush russhd; do
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
 
+# sys-init's dependency-free config parser is host-tested separately from its
+# Motor-only process-management binary.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
+fi
+
 # Platform wire helpers are no_std in the image and unit-tested on the host.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
@@ -327,6 +337,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
 fi
 [ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
+[ "$(vm_ssh /system/bin/pwd)" = "/user" ] ||
+  fail "russhd did not start the SSH command in /user"
+[ "$(vm_ssh /system/bin/printenv HOME)" = "HOME=/user" ] ||
+  fail "russhd did not set HOME to /user"
 rush_path="$(printf 'printenv PATH\nexit\n' |
   vm_ssh "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
@@ -359,13 +373,14 @@ udp_sockets="$(read_udp_socket_count)"
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
 resolver_pid="$(vm_ssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
 vm_ssh /system/bin/kill "$resolver_pid"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" /system/services/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
+"${SSH[@]}" MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+  >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
 resolver_restarted=0
@@ -402,12 +417,12 @@ systest_output="$(cat "$SYSTEST_LOG")"
   fail "systest did not finish with PASS"
 
 # The SSH login shell consumes russhd's one-time capability environment.
-# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED from that shell to
-# the focused lifetime coordinator so it can create the detached child this
-# test requires. Do not interpose another rush: it deliberately would not pass
-# this capability to a program absent from rush.toml's trusted list.
+# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE
+# from that shell to the focused lifetime coordinator so it can create the
+# detached Interactive child this test requires. Do not interpose another rush:
+# it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x2c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x6c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
@@ -465,7 +480,8 @@ bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
   fail "kill by \$! failed: '$out'"
-printf '%s\n' "$out" | awk -v pid="$bang" '$1 == pid { found = 1 } END { exit !found }' ||
+printf '%s\n' "$out" |
+  awk -v pid="$bang" '{ gsub(/[+*?]/, "", $1); if ($1 == pid) found = 1 } END { exit !found }' ||
   fail "\$! ($bang) is not a pid in the process list: '$out'"
 
 # rmux: a pane is a terminal to the program in it, without a pty (rmux/details.md

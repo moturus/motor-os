@@ -44,6 +44,9 @@ pub const SHELL: &str = "/system/bin/rush";
 #[cfg(not(target_os = "motor"))]
 pub const SHELL: &str = "/bin/bash";
 
+#[cfg(target_os = "motor")]
+const USER_HOME: &str = "/user";
+
 /// The latest valid dimensions supplied for an SSH pseudo-terminal.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PtyGeometry {
@@ -195,15 +198,16 @@ pub async fn spawn(
     if !cfg.path().is_empty() {
         cmd.env("PATH", cfg.path());
     }
+    #[cfg(target_os = "motor")]
+    {
+        cmd.current_dir(USER_HOME);
+        cmd.env("HOME", USER_HOME);
+    }
     let terminal = configure_terminal(&mut cmd, pty);
 
-    // Pass CAP_SPAWN_DETACHED down to the shell (on top of the usual defaults), so
-    // a program the shell trusts can start a server that outlives this ssh
-    // session. The system daemon holds the bit via its service capabilities
-    // (sys-init.cfg); a user-launched instance does not, and requesting caps
-    // the parent lacks is E_NOT_ALLOWED -- it failed every exec through a
-    // user-mode daemon ("closed by remote host") while in-process SFTP kept
-    // working. Request the intersection with what this instance holds.
+    // Keep a system russhd's shell Interactive and pass CAP_SPAWN_DETACHED so a
+    // trusted program can outlive this session. A user-launched daemon receives
+    // only the intersection with its own capabilities.
     #[cfg(target_os = "motor")]
     cmd.env(
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
@@ -212,7 +216,8 @@ pub async fn spawn(
             moto_sys::ProcessStaticPage::get().capabilities
                 & (moto_sys::caps::CAP_SPAWN
                     | moto_sys::caps::CAP_LOG
-                    | moto_sys::caps::CAP_SPAWN_DETACHED)
+                    | moto_sys::caps::CAP_SPAWN_DETACHED
+                    | moto_sys::caps::CAP_INTERACTIVE)
         ),
     );
 

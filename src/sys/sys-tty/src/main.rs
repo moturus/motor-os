@@ -14,6 +14,8 @@ use crate::serial::write_serial_raw;
 
 mod serial;
 
+const USER_HOME: &str = "/user";
+
 fn _putc(c: u8) {
     serial::write_serial_raw(std::slice::from_ref(&c));
 }
@@ -86,10 +88,10 @@ fn main() {
 
     let mut command = std::process::Command::new(fname);
     command.env_clear();
+    command.env("HOME", USER_HOME);
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
-    // The shell gets CAP_SPAWN_DETACHED on top of the usual defaults, so it
-    // (and, transitively, programs it is configured to trust) can start daemons
-    // that outlive the console session. See moto_sys::caps.
+    // This explicit replacement mask keeps the console shell Interactive and
+    // lets programs it trusts start daemons that outlive the session.
     command.env(
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!(
@@ -97,6 +99,7 @@ fn main() {
             moto_sys::caps::CAP_SPAWN
                 | moto_sys::caps::CAP_LOG
                 | moto_sys::caps::CAP_SPAWN_DETACHED
+                | moto_sys::caps::CAP_INTERACTIVE
         ),
     );
     for assignment in &assignments {
@@ -107,7 +110,7 @@ fn main() {
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    command.current_dir("/");
+    command.current_dir(USER_HOME);
 
     for arg in &words[1..] {
         command.arg(*arg);

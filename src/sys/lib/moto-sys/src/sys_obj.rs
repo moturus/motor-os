@@ -17,6 +17,7 @@ impl SysObj {
 
     pub const F_QUERY_PEER: u32 = 2;
     pub const F_QUERY_PID: u32 = 4;
+    pub const F_QUERY_CAPS: u32 = 8;
 
     // When connecting to ("getting") a shared URL, wake the counterpart.
     pub const F_WAKE_PEER: u32 = 1;
@@ -222,11 +223,32 @@ impl SysObj {
         }
     }
 
-    /// Returns the PID of the handle owner.
+    /// Returns the PID of the process owning the peer endpoint of `handle`.
     #[cfg(feature = "userspace")]
     pub fn get_pid(handle: SysHandle) -> Result<u64, ErrorCode> {
         let result = do_syscall(
             pack_nr_ver(SYS_OBJ, Self::OP_QUERY_HANDLE, Self::F_QUERY_PID, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(result.data[0])
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Returns the capabilities of the process owning the peer endpoint of
+    /// `handle`.
+    #[cfg(feature = "userspace")]
+    pub fn get_capabilities(handle: SysHandle) -> Result<u64, ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_OBJ, Self::OP_QUERY_HANDLE, Self::F_QUERY_CAPS, 0),
             handle.as_u64(),
             0,
             0,

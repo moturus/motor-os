@@ -1,10 +1,11 @@
 use moto_stats::{Collector, MetricEntry, ProviderInfo};
+use moto_sys::caps::ProcessRole;
 use moto_sys::stats::{ProcessInfoV1, PID_KERNEL, PID_SYSTEM};
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Report some process stats.");
     eprintln!("Note 1: PPID = parent pid.");
-    eprintln!("Note 2: System processes are marked with '*'.");
+    eprintln!("Note 2: System processes are marked with '*'; Interactive with '+'.");
     eprintln!("Note 3: Memory usage here is virtual memory used per process.");
     eprintln!("        Kernel memory usage is a bit underreported, as some bootup memory is not captured.");
     eprintln!("        Process memory usage captures shared memory, meaning that total/cumulative");
@@ -204,7 +205,12 @@ fn print_line(row: &ProcRow, col_width: usize, cpu_width: usize, name_offset: us
     println!(
         "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>cpu_width$.3} {} {:off$} {}",
         proc.pid,
-        if proc.system_process != 0 { "*" } else { " " },
+        match ProcessRole::try_from(proc.process_role) {
+            Ok(ProcessRole::System) => "*",
+            Ok(ProcessRole::Interactive) => "+",
+            Ok(ProcessRole::None) => " ",
+            Err(()) => "?",
+        },
         proc.parent_pid,
         row.active_threads,
         row.threads_created,

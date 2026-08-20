@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
