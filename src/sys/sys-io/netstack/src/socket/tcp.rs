@@ -1175,6 +1175,15 @@ impl<'a> Socket<'a> {
         Some(self.tuple?.remote)
     }
 
+    /// Whether an ICMP quote names sequence space that was transmitted,
+    /// remains outstanding, and has not been reported through SACK.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn has_outstanding_unsacked(&self, seq: TcpSeqNumber) -> bool {
+        self.local_seq_no <= seq
+            && seq < self.local_seq_max
+            && self.tx_scoreboard.contains_unsacked(seq)
+    }
+
     /// Return the connection state, in terms of the TCP state machine.
     #[inline]
     pub fn state(&self) -> State {
@@ -9625,6 +9634,33 @@ mod test {
             ..SEND_TEMPL
         });
         assert!(s.tx_scoreboard.is_empty());
+    }
+
+    #[test]
+    fn pmtu_quote_requires_sent_outstanding_unsacked_sequence() {
+        let mut s = socket_established();
+        let una = s.local_seq_no;
+        s.local_seq_max = una + 18;
+        s.tx_scoreboard
+            .on_transmit(una, una + 18, Instant::from_millis(1));
+
+        assert!(!s.has_outstanding_unsacked(una - 1));
+        assert!(s.has_outstanding_unsacked(una));
+        assert!(s.has_outstanding_unsacked(una + 17));
+        assert!(!s.has_outstanding_unsacked(una + 18));
+
+        s.tx_scoreboard.mark_sacked(una + 6, una + 12);
+        assert!(!s.has_outstanding_unsacked(una + 6));
+        assert!(s.has_outstanding_unsacked(una + 12));
+
+        // Both socket bounds are checked even if a stale scoreboard run
+        // were to remain beyond them.
+        s.local_seq_no = una + 3;
+        s.local_seq_max = una + 15;
+        assert!(!s.has_outstanding_unsacked(una + 2));
+        assert!(s.has_outstanding_unsacked(una + 3));
+        assert!(s.has_outstanding_unsacked(una + 14));
+        assert!(!s.has_outstanding_unsacked(una + 15));
     }
 
     #[test]

@@ -160,6 +160,14 @@ impl Scoreboard {
         self.runs[..self.len].iter().any(|r| r.lost)
     }
 
+    /// Whether `seq` is covered by an outstanding run that the peer has
+    /// not reported through SACK.
+    pub fn contains_unsacked(&self, seq: TcpSeqNumber) -> bool {
+        self.runs[..self.len]
+            .iter()
+            .any(|run| run.start <= seq && seq < run.end && !run.sacked)
+    }
+
     /// The first (lowest-sequence) run marked lost.
     pub fn first_lost_run(&self) -> Option<(TcpSeqNumber, TcpSeqNumber)> {
         self.runs[..self.len]
@@ -411,6 +419,39 @@ mod test {
         assert!(!runs[0].sacked);
         assert!(runs[1].sacked);
         assert_eq!((runs[1].start, runs[1].end), (S(200), S(400)));
+    }
+
+    #[test]
+    fn unsacked_lookup_observes_bounds_ack_and_sack() {
+        let mut b = Scoreboard::new();
+        b.on_transmit(S(100), S(400), T(1));
+        assert!(!b.contains_unsacked(S(99)));
+        assert!(b.contains_unsacked(S(100)));
+        assert!(b.contains_unsacked(S(399)));
+        assert!(!b.contains_unsacked(S(400)));
+
+        b.mark_sacked(S(200), S(300));
+        assert!(b.contains_unsacked(S(199)));
+        assert!(!b.contains_unsacked(S(200)));
+        assert!(!b.contains_unsacked(S(299)));
+        assert!(b.contains_unsacked(S(300)));
+
+        b.on_cumulative_ack(S(150));
+        assert!(!b.contains_unsacked(S(149)));
+        assert!(b.contains_unsacked(S(150)));
+    }
+
+    #[test]
+    fn unsacked_lookup_wraps_with_sequence_space() {
+        let mut b = Scoreboard::new();
+        let start = S(i32::MAX - 2);
+        let end = start + 6;
+        b.on_transmit(start, end, T(1));
+
+        assert!(b.contains_unsacked(start));
+        assert!(b.contains_unsacked(start + 5));
+        assert!(!b.contains_unsacked(start - 1));
+        assert!(!b.contains_unsacked(end));
     }
 
     #[test]
