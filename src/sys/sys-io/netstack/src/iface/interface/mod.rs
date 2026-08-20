@@ -1001,17 +1001,39 @@ impl Interface {
         // Free inside `poll()`'s own loop, where the edge already drained.
         self.refresh_stale_poll_at(sockets);
 
-        match self.inner.caps.medium {
+        #[cfg(feature = "_proto-fragmentation")]
+        let fragment_emitted = match self.inner.caps.medium {
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => {
                 #[cfg(feature = "proto-sixlowpan-fragmentation")]
-                self.sixlowpan_egress(device);
+                {
+                    self.sixlowpan_egress(device)
+                }
+                #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
+                {
+                    false
+                }
             }
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ip"))]
             _ => {
                 #[cfg(feature = "proto-ipv4-fragmentation")]
-                self.ipv4_egress(device);
+                {
+                    self.ipv4_egress(device)
+                }
+                #[cfg(not(feature = "proto-ipv4-fragmentation"))]
+                {
+                    false
+                }
             }
+        };
+
+        #[cfg(feature = "_proto-fragmentation")]
+        if !self.fragmenter.is_empty() {
+            return if fragment_emitted {
+                PollResult::SocketStateChanged
+            } else {
+                PollResult::None
+            };
         }
 
         #[cfg(feature = "proto-ipv6-slaac")]
@@ -1855,6 +1877,14 @@ impl InterfaceInner {
         packet: Packet,
         frag: &mut Fragmenter,
     ) -> Result<(), DispatchError> {
+        #[cfg(feature = "_proto-fragmentation")]
+        if !frag.is_empty() && frag.finished() {
+            frag.reset();
+        }
+        #[cfg(feature = "_proto-fragmentation")]
+        if !frag.is_empty() {
+            return Err(DispatchError::FragmenterBusy);
+        }
         let mut ip_repr = packet.ip_repr();
         assert!(!ip_repr.dst_addr().is_unspecified());
 
@@ -1949,10 +1979,10 @@ impl InterfaceInner {
                             tx_len += EthernetFrame::<&[u8]>::header_len();
                         }
 
-                        if frag.buffer.len() < total_ip_len {
+                        if frag.buffer.len() < _repr.payload_len {
                             net_debug!(
                                 "Fragmentation buffer is too small, at least {} needed. Dropping",
-                                total_ip_len
+                                _repr.payload_len
                             );
                             return Ok(());
                         }
@@ -1962,47 +1992,42 @@ impl InterfaceInner {
                             frag.ipv4.dst_hardware_addr = dst_hardware_addr;
                         }
 
-                        // Save the total packet len (without the Ethernet header, but with the first
-                        // IP header).
-                        frag.packet_len = total_ip_len;
-
-                        // Save the IP header for other fragments.
+                        // Stage only the fragmentable payload; each fragment
+                        // receives a freshly emitted IP header.
+                        frag.packet_len = _repr.payload_len;
                         frag.ipv4.repr = *_repr;
+                        packet.emit_payload(
+                            &IpRepr::Ipv4(*_repr),
+                            &mut frag.buffer[.._repr.payload_len],
+                            &caps,
+                        );
 
-                        // Modify the IP header
                         _repr.payload_len = first_frag_data_len;
-
-                        // Save the number of bytes we will send now.
-                        frag.sent_bytes = first_frag_ip_len;
-
-                        // Emit the IP header to the buffer.
-                        emit_ip(&ip_repr, &mut frag.buffer);
-
-                        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut frag.buffer[..]);
+                        let first_repr = *_repr;
+                        frag.sent_bytes = first_frag_data_len;
                         frag.ipv4.ident = ipv4_id;
-                        ipv4_packet.set_ident(ipv4_id);
-                        ipv4_packet.set_more_frags(true);
-                        ipv4_packet.set_dont_frag(false);
-                        ipv4_packet.set_frag_offset(0);
-
-                        if caps.checksum.ipv4.tx() {
-                            ipv4_packet.fill_checksum();
-                        }
 
                         // Transmit the first packet.
                         tx_token.consume(tx_len, |mut tx_buffer| {
                             #[cfg(feature = "medium-ethernet")]
                             if matches!(self.caps.medium, Medium::Ethernet) {
-                                emit_ethernet(&ip_repr, tx_buffer);
+                                emit_ethernet(&IpRepr::Ipv4(first_repr), tx_buffer);
                                 tx_buffer = &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..];
                             }
 
-                            // Change the offset for the next packet.
-                            frag.ipv4.frag_offset = (first_frag_ip_len - ip_header_len) as u16;
-
-                            // Copy the IP header and the payload.
-                            tx_buffer[..first_frag_ip_len]
-                                .copy_from_slice(&frag.buffer[..first_frag_ip_len]);
+                            let mut ipv4_packet =
+                                Ipv4Packet::new_unchecked(&mut tx_buffer[..ip_header_len]);
+                            first_repr.emit(&mut ipv4_packet, &caps.checksum);
+                            ipv4_packet.set_ident(ipv4_id);
+                            ipv4_packet.set_more_frags(true);
+                            ipv4_packet.set_dont_frag(false);
+                            ipv4_packet.set_frag_offset(0);
+                            if caps.checksum.ipv4.tx() {
+                                ipv4_packet.fill_checksum();
+                            }
+                            tx_buffer[ip_header_len..first_frag_ip_len]
+                                .copy_from_slice(&frag.buffer[..first_frag_data_len]);
+                            frag.ipv4.frag_offset = first_frag_data_len as u16;
                         });
 
                         Ok(())
@@ -2062,6 +2087,9 @@ impl InterfaceInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum DispatchError {
+    #[cfg(feature = "_proto-fragmentation")]
+    /// Another fragmented datagram owns the single bounded staging slot.
+    FragmenterBusy,
     /// No route to dispatch this packet. Retrying won't help unless
     /// configuration is changed.
     NoRoute,

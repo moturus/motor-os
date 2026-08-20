@@ -45,14 +45,14 @@ impl Interface {
     /// processed or emitted, and thus, whether the readiness of any socket might
     /// have changed.
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn ipv4_egress(&mut self, device: &mut (impl Device + ?Sized)) {
+    pub(super) fn ipv4_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
         // Reset the buffer when we transmitted everything.
         if self.fragmenter.finished() {
             self.fragmenter.reset();
         }
 
         if self.fragmenter.is_empty() {
-            return;
+            return false;
         }
 
         let pkt = &self.fragmenter;
@@ -61,7 +61,13 @@ impl Interface {
         {
             self.inner
                 .dispatch_ipv4_frag(tx_token, &mut self.fragmenter);
+            if self.fragmenter.finished() {
+                self.fragmenter.reset();
+            }
+            return true;
         }
+
+        false
     }
 }
 
@@ -584,10 +590,8 @@ impl InterfaceInner {
                 packet.fill_checksum();
             }
 
-            tx_buffer[frag.ipv4.repr.buffer_len()..][..payload_len].copy_from_slice(
-                &frag.buffer[frag.ipv4.frag_offset as usize + frag.ipv4.repr.buffer_len()..]
-                    [..payload_len],
-            );
+            tx_buffer[frag.ipv4.repr.buffer_len()..][..payload_len]
+                .copy_from_slice(&frag.buffer[frag.ipv4.frag_offset as usize..][..payload_len]);
 
             // Update the frag offset for the next fragment.
             frag.ipv4.frag_offset += payload_len as u16;

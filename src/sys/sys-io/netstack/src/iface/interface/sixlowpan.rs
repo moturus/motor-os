@@ -8,14 +8,14 @@ pub(crate) const MAX_DECOMPRESSED_LEN: usize = 1500;
 impl Interface {
     /// Process fragments that still need to be sent for 6LoWPAN packets.
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    pub(super) fn sixlowpan_egress(&mut self, device: &mut (impl Device + ?Sized)) {
+    pub(super) fn sixlowpan_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
         // Reset the buffer when we transmitted everything.
         if self.fragmenter.finished() {
             self.fragmenter.reset();
         }
 
         if self.fragmenter.is_empty() {
-            return;
+            return false;
         }
 
         let pkt = &self.fragmenter;
@@ -24,7 +24,13 @@ impl Interface {
         {
             self.inner
                 .dispatch_ieee802154_frag(tx_token, &mut self.fragmenter);
+            if self.fragmenter.finished() {
+                self.fragmenter.reset();
+            }
+            return true;
         }
+
+        false
     }
 
     /// Get the 6LoWPAN address contexts.

@@ -511,7 +511,8 @@ impl Fragmenter {
 
 #[cfg(feature = "_proto-fragmentation")]
 pub(crate) struct Fragmenter {
-    /// The buffer that holds the unfragmented 6LoWPAN packet.
+    /// The bounded staging buffer. IP fragmentation stores payload only;
+    /// 6LoWPAN retains its compressed packet representation.
     pub buffer: [u8; FRAGMENTATION_BUFFER_SIZE],
     /// The size of the packet without the IEEE802.15.4 header and the fragmentation headers.
     pub packet_len: usize,

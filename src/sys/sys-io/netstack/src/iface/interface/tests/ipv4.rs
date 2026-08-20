@@ -2749,7 +2749,93 @@ fn test_packet_len(#[case] medium: Medium) {
             ),
             Ok(())
         );
+        iface.fragmenter.reset();
     }
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv4-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let mtu = device.capabilities().max_transmission_unit;
+    let src_addr = Ipv4Address::new(192, 168, 1, 2);
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+    let udp_repr = UdpRepr {
+        src_port: 42_424,
+        dst_port: 49_506,
+    };
+    let payload = vec![0x5a; mtu * 2];
+    let ip_repr = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: udp_repr.header_len() + payload.len(),
+        hop_limit: 64,
+    };
+
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            MockTxToken,
+            PacketMeta::default(),
+            Packet::new_ipv4(ip_repr, IpPayload::Udp(udp_repr, &payload)),
+            &mut iface.fragmenter,
+        ),
+        Ok(())
+    );
+
+    assert_eq!(iface.fragmenter.packet_len, ip_repr.payload_len);
+    let staged = UdpPacket::new_checked(&iface.fragmenter.buffer[..ip_repr.payload_len]).unwrap();
+    assert_eq!(staged.payload(), &payload[..]);
+    UdpRepr::parse(
+        &staged,
+        &src_addr.into(),
+        &dst_addr.into(),
+        &ChecksumCapabilities::default(),
+    )
+    .unwrap();
+
+    let staged_packet = iface.fragmenter.buffer[..ip_repr.payload_len].to_vec();
+    let staged_ident = iface.fragmenter.ipv4.ident;
+    let staged_offset = iface.fragmenter.ipv4.frag_offset;
+    let second_payload = vec![0xa5; mtu * 2];
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            MockTxToken,
+            PacketMeta::default(),
+            Packet::new_ipv4(ip_repr, IpPayload::Udp(udp_repr, &second_payload)),
+            &mut iface.fragmenter,
+        ),
+        Err(DispatchError::FragmenterBusy)
+    );
+    assert_eq!(
+        &iface.fragmenter.buffer[..ip_repr.payload_len],
+        &staged_packet
+    );
+    assert_eq!(iface.fragmenter.ipv4.ident, staged_ident);
+    assert_eq!(iface.fragmenter.ipv4.frag_offset, staged_offset);
+
+    device.tx_capacity = Some(0);
+    assert_eq!(
+        iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
+        PollResult::None
+    );
+    assert_eq!(iface.fragmenter.ipv4.frag_offset, staged_offset);
+
+    device.tx_capacity = None;
+    assert_eq!(
+        iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
+        PollResult::SocketStateChanged
+    );
+    assert!(!iface.fragmenter.is_empty());
+    assert_eq!(
+        iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
+        PollResult::None
+    );
+    assert!(iface.fragmenter.is_empty());
 }
 
 /// Check no reply is emitted when using a raw socket
