@@ -30,8 +30,9 @@
 //! isolation but not concurrency (there is no `fork` — see
 //! [`exec_background`]).
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -331,8 +332,13 @@ fn exec_operand(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv, is_last: boo
 /// surfaces in the parent, whose own check then fires — so `(false)` and
 /// `x=$(false)` still exit, while `echo $(false)` correctly does not.
 fn check_errexit(status: i32, shell: &mut Shell) {
-    if status != 0 && shell.errexit_applies() && !shell.in_subshell() {
-        shell.set_status(status);
+    if status == 0 || !shell.errexit_applies() || shell.in_subshell() {
+        return;
+    }
+    shell.set_status(status);
+    if shell.inproc_script_depth() > 0 {
+        shell.set_flow(Flow::Exit(status));
+    } else {
         signal::fire_exit_trap(shell);
         crate::exit(status);
     }
@@ -548,8 +554,13 @@ fn maybe_die_fatal(shell: &mut Shell) {
         && !shell.is_interactive()
         && !shell.in_subshell()
     {
-        signal::fire_exit_trap(shell);
-        crate::exit(code);
+        shell.set_status(code);
+        if shell.inproc_script_depth() > 0 {
+            shell.set_flow(Flow::Exit(code));
+        } else {
+            signal::fire_exit_trap(shell);
+            crate::exit(code);
+        }
     }
 }
 
@@ -624,7 +635,7 @@ fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Sh
             // The EXIT trap fires for the shell this ends — which, inside an
             // emulated subshell, is that subshell (its boundary fires the trap
             // it set for itself; see `fire_subshell_exit_trap`).
-            if !shell.in_subshell() {
+            if !shell.at_emulated_exit_boundary() {
                 signal::fire_exit_trap(shell);
             }
             builtin_exit(args, shell)
@@ -716,26 +727,26 @@ fn builtin_eval(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 
 /// `execve`, so this spawns the command with the current fds and exits with its
 /// status (a documented emulation). With only redirections, the fds were already
 /// opened by `build_fds`; persistent redirection of the shell is not supported.
-fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> ! {
-    if args.is_empty() {
+fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+    let status = if args.is_empty() {
         // Redirection-only exec: no persistent effect (no dup2). The file
         // side-effects already happened when the redirects were built.
-        crate::exit(shell.status());
-    }
-    match resolve_program(&args[0], shell) {
-        Some(program) => crate::exit(spawn_external(
-            &program,
-            &args[1..],
-            &[],
-            fds,
-            &NO_SOLE_USE,
-            shell,
-        )),
-        None => {
-            let mut err = fds[2].err_writer();
-            let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
-            crate::exit(127);
+        shell.status()
+    } else {
+        match resolve_program(&args[0], shell) {
+            Some(program) => spawn_external(&program, &args[1..], &[], fds, &NO_SOLE_USE, shell),
+            None => {
+                let mut err = fds[2].err_writer();
+                let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
+                127
+            }
         }
+    };
+    if shell.at_emulated_exit_boundary() {
+        shell.set_flow(Flow::Exit(status));
+        status
+    } else {
+        crate::exit(status)
     }
 }
 
@@ -811,11 +822,13 @@ fn source_string(src: &str, shell: &mut Shell, io: &IoEnv) -> i32 {
         Parsed::Complete(list) => exec_list(&list, shell, io),
         Parsed::Empty => 0,
         Parsed::Incomplete => {
-            eprintln!("rush: syntax error: unexpected end of input");
+            let mut err = io.fds[2].err_writer();
+            let _ = writeln!(err, "rush: syntax error: unexpected end of input");
             2
         }
         Parsed::Error(msg) => {
-            eprintln!("rush: {msg}");
+            let mut err = io.fds[2].err_writer();
+            let _ = writeln!(err, "rush: {msg}");
             2
         }
     }
@@ -923,7 +936,7 @@ fn builtin_exit(args: &[String], shell: &mut Shell) -> i32 {
         eprintln!("rush: exit: {}: numeric argument required", args[0]);
         2
     };
-    if shell.in_subshell() {
+    if shell.at_emulated_exit_boundary() {
         shell.set_flow(Flow::Exit(code));
         return code;
     }
@@ -995,8 +1008,129 @@ fn loop_count(args: &[String], name: &str) -> Option<u32> {
 
 // ---- external commands ------------------------------------------------------
 
-/// Spawn an external command with the given fd sources, wait for it, and return
-/// its status. Pending traps run if a signal interrupts the wait.
+const MAX_INPROC_SCRIPT_DEPTH: u32 = 32;
+
+/// Process-wide state that an ordinary child could not change in its parent.
+/// In-process scripts share both with rush, so restore them at their boundary.
+struct ProcessState {
+    cwd: Option<PathBuf>,
+    env: Vec<(OsString, OsString)>,
+}
+
+impl ProcessState {
+    fn capture() -> Self {
+        Self {
+            cwd: std::env::current_dir().ok(),
+            env: std::env::vars_os().collect(),
+        }
+    }
+}
+
+impl Drop for ProcessState {
+    fn drop(&mut self) {
+        if let Some(cwd) = self.cwd.take() {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        let current: Vec<OsString> = std::env::vars_os().map(|(key, _)| key).collect();
+        // SAFETY: rush's control flow is single-threaded. Its pump threads only
+        // move bytes through pipes and never inspect the process environment.
+        unsafe {
+            for key in current {
+                std::env::remove_var(key);
+            }
+            for (key, value) in self.env.drain(..) {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    builtins::is_executable_file(path)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    moto_rt::fs::stat(path).is_ok_and(|attr| {
+        attr.file_type == moto_rt::fs::FILETYPE_FILE && attr.perm & moto_rt::fs::PERM_EXEC != 0
+    })
+}
+
+/// Read an executable whose shebang names `rush` or `sh`. The 256-byte probe
+/// matches rt.vdso's bounded interpreter-line read without pulling an ELF file
+/// into memory merely to discover that it is not a script.
+fn read_shell_script(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    if !is_executable_file(path) {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    let mut header = [0_u8; 256];
+    let len = file.read(&mut header).ok()?;
+    let bytes = &header[..len];
+    if bytes.len() < 4 || !bytes.starts_with(b"#!/") {
+        return None;
+    }
+    let line_end = bytes.iter().position(|byte| *byte == b'\n').unwrap_or(len);
+    let interpreter = std::str::from_utf8(&bytes[2..line_end]).ok()?.trim();
+    let basename = Path::new(interpreter).file_name()?.to_str()?;
+    if !matches!(basename, "rush" | "sh") || !is_executable_file(Path::new(interpreter)) {
+        return None;
+    }
+    file.rewind().ok()?;
+    let mut source = String::new();
+    file.read_to_string(&mut source).ok()?;
+    Some(source)
+}
+
+/// Execute a rush-compatible script over a fresh shell state while retaining
+/// this process. `None` means normal spawning should handle the program.
+fn run_shell_script(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    fds: &[FdSource; 3],
+    parent: &Shell,
+) -> Option<i32> {
+    if parent.inproc_script_depth() >= MAX_INPROC_SCRIPT_DEPTH {
+        return None;
+    }
+    let source = read_shell_script(program)?;
+    let _process_state = ProcessState::capture();
+    // These are child-environment assignments in the spawn path. Install them
+    // before constructing the fresh shell so they are exported there, then the
+    // process-state guard removes them from the parent on return.
+    unsafe {
+        for (key, value) in env {
+            std::env::set_var(key, value);
+        }
+    }
+
+    let mut child = Shell::new();
+    child.set_name(program.to_string());
+    child.set_params(args.to_vec());
+    child.set_inproc_script_depth(parent.inproc_script_depth() + 1);
+    child.init_environment();
+
+    crate::verbose_echo(&source, &child);
+    let io = IoEnv { fds: fds.clone() };
+    let mut status = source_string(&source, &mut child, &io);
+    if let Flow::Exit(code) = child.flow() {
+        status = code;
+    }
+    child.set_status(status);
+    fire_subshell_exit_trap(&mut child, &io);
+    signal::restore_dispositions(parent, child.changed_traps());
+    Some(status)
+}
+
+/// Run a rush-compatible script in-process when possible; otherwise spawn the
+/// external command with the given fd sources, wait for it, and return its
+/// status. Pending traps run if a signal interrupts the wait.
 ///
 /// The spawning itself — and the stdio pumping Motor OS forces — lives in
 /// [`crate::jobs`], which a background job shares.
@@ -1008,6 +1142,9 @@ fn spawn_external(
     sole_use: &[bool; 3],
     shell: &mut Shell,
 ) -> i32 {
+    if let Some(status) = run_shell_script(program, args, env, fds, shell) {
+        return status;
+    }
     let mut child = match jobs::spawn(
         program,
         args,

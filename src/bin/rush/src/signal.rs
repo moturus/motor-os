@@ -142,6 +142,16 @@ pub fn apply_disposition(cond: Condition, action: Option<&str>) -> bool {
     sys::set_disposition(signo, disp)
 }
 
+/// Restore the process-wide dispositions an in-process child shell touched to
+/// the actions recorded by its host shell.
+pub fn restore_dispositions(shell: &Shell, conditions: &std::collections::HashSet<String>) {
+    for (name, signo) in SIGNALS {
+        if conditions.contains(*name) {
+            apply_disposition(Condition::Signal(*signo), shell.get_trap(name));
+        }
+    }
+}
+
 /// Run the trap actions for any signals delivered since the last check, and
 /// report the last signal whose trap ran (`None` if none did).
 ///
