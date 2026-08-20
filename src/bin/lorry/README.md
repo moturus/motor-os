@@ -125,9 +125,10 @@ binary, and integration-test harnesses, then run them in order and stop at the
 first failure. `--test NAME` selects one integration test. `--no-run` prints
 the built harness paths.
 
-Normal builds report each dependency unit, build script, and root target when
-that work starts. `--quiet` suppresses this progress, while `--verbose` also
-prints commands, configuration, and timings.
+Normal builds report dependency verification and preparation, then each
+dependency unit, build script, and root target when that work starts. `--quiet`
+suppresses this progress, while `--verbose` also prints commands,
+configuration, and timings.
 
 Ordinary builds trust previously published per-user dependency and
 project-local artifact state, matching Cargo's local-cache model. An unchanged

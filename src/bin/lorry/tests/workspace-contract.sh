@@ -72,6 +72,8 @@ printf 'pub const VALUE: &str = "tool";\n' >"$WORK/project/shared/src/lib.rs"
     "$LORRY" test -p app -- --quiet
     "$LORRY" build -p app
     "$LORRY" build -p tool 2>"$WORK/tool-build.stderr"
+    grep -F 'Verifying dependency state' "$WORK/tool-build.stderr" >/dev/null
+    grep -F 'Preparing dependency graph' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Compiling shared v0.1.0' "$WORK/tool-build.stderr" >/dev/null
     grep -F '[library]' "$WORK/tool-build.stderr" >/dev/null
     grep -F 'Compiling tool v0.1.0' "$WORK/tool-build.stderr" >/dev/null
