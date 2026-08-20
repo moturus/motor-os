@@ -2,12 +2,15 @@ use core::cmp::min;
 #[cfg(feature = "async")]
 use core::task::Waker;
 
+use heapless::Vec as HVec;
+
 use crate::iface::Context;
 use crate::phy::PacketMeta;
 use crate::socket::PollAt;
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::storage::Empty;
+use crate::time::{Duration, Instant};
 use crate::wire::{IpAddress, IpEndpoint, IpListenEndpoint, IpProtocol, IpRepr, UdpRepr};
 
 /// Metadata for a sent or received UDP packet.
@@ -51,6 +54,16 @@ pub type PacketMetadata = crate::storage::PacketMetadata<UdpMetadata>;
 
 /// A UDP packet ring buffer.
 pub type PacketBuffer<'a> = crate::storage::PacketBuffer<'a, UdpMetadata>;
+
+const RECENT_SEND_CAPACITY: usize = 8;
+const RECENT_SEND_LIFETIME: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy)]
+struct RecentSend {
+    local: IpEndpoint,
+    remote: IpEndpoint,
+    expires_at: Instant,
+}
 
 /// Error returned by [`Socket::bind`]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -118,6 +131,7 @@ pub struct Socket<'a> {
     endpoint: IpListenEndpoint,
     rx_buffer: PacketBuffer<'a>,
     tx_buffer: PacketBuffer<'a>,
+    recent_sends: HVec<RecentSend, RECENT_SEND_CAPACITY>,
     /// The time-to-live (IPv4) or hop limit (IPv6) value used in outgoing packets.
     hop_limit: Option<u8>,
     #[cfg(feature = "async")]
@@ -133,6 +147,7 @@ impl<'a> Socket<'a> {
             endpoint: IpListenEndpoint::default(),
             rx_buffer,
             tx_buffer,
+            recent_sends: HVec::new(),
             hop_limit: None,
             #[cfg(feature = "async")]
             rx_waker: WakerRegistration::new(),
@@ -259,6 +274,7 @@ impl<'a> Socket<'a> {
         // Reset the RX and TX buffers of the socket.
         self.tx_buffer.reset();
         self.rx_buffer.reset();
+        self.recent_sends.clear();
 
         #[cfg(feature = "async")]
         {
@@ -554,6 +570,7 @@ impl<'a> Socket<'a> {
     {
         let endpoint = self.endpoint;
         let hop_limit = self.hop_limit.unwrap_or(64);
+        let mut emitted_flow = None;
 
         let res = self.tx_buffer.dequeue_with(|packet_meta, payload_buf| {
             let src_addr = if let Some(s) = packet_meta.local_address {
@@ -594,17 +611,64 @@ impl<'a> Socket<'a> {
                 hop_limit,
             );
 
-            emit(cx, packet_meta.meta, (ip_repr, repr, payload_buf))
+            let result = emit(cx, packet_meta.meta, (ip_repr, repr, payload_buf));
+            if result.is_ok() {
+                emitted_flow = Some((
+                    IpEndpoint::new(src_addr, endpoint.port),
+                    packet_meta.endpoint,
+                ));
+            }
+            result
         });
         match res {
             Err(Empty) => Ok(()),
             Ok(Err(e)) => Err(e),
             Ok(Ok(())) => {
+                if let Some((local, remote)) = emitted_flow {
+                    self.record_recent_send(local, remote, cx.now());
+                }
                 #[cfg(feature = "async")]
                 self.tx_waker.wake();
                 Ok(())
             }
         }
+    }
+
+    fn expire_recent_sends(&mut self, timestamp: Instant) {
+        self.recent_sends.retain(|send| timestamp < send.expires_at);
+    }
+
+    fn record_recent_send(&mut self, local: IpEndpoint, remote: IpEndpoint, timestamp: Instant) {
+        self.expire_recent_sends(timestamp);
+        if let Some(index) = self
+            .recent_sends
+            .iter()
+            .position(|send| send.local == local && send.remote == remote)
+        {
+            self.recent_sends.remove(index);
+        } else if self.recent_sends.is_full() {
+            self.recent_sends.remove(0);
+        }
+        self.recent_sends
+            .push(RecentSend {
+                local,
+                remote,
+                expires_at: timestamp + RECENT_SEND_LIFETIME,
+            })
+            .unwrap();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn has_recent_send(
+        &mut self,
+        local: IpEndpoint,
+        remote: IpEndpoint,
+        timestamp: Instant,
+    ) -> bool {
+        self.expire_recent_sends(timestamp);
+        self.recent_sends
+            .iter()
+            .any(|send| send.local == local && send.remote == remote)
     }
 
     pub(crate) fn poll_at(&self, _cx: &mut Context) -> PollAt {
@@ -823,6 +887,7 @@ mod test {
             Err(())
         );
         assert!(!socket.can_send());
+        assert!(!socket.has_recent_send(LOCAL_END, REMOTE_END, cx.now()));
 
         assert_eq!(
             socket.dispatch(cx, |_, _, (ip_repr, udp_repr, payload)| {
@@ -834,6 +899,32 @@ mod test {
             Ok(())
         );
         assert!(socket.can_send());
+        assert!(socket.has_recent_send(LOCAL_END, REMOTE_END, cx.now()));
+    }
+
+    #[test]
+    fn recent_sends_expire_refresh_and_evict_by_send_recency() {
+        let mut socket = socket(buffer(0), buffer(0));
+        let remote = |index| IpEndpoint::new(REMOTE_END.addr, REMOTE_PORT + index);
+
+        socket.record_recent_send(LOCAL_END, remote(0), Instant::ZERO);
+        socket.record_recent_send(LOCAL_END, remote(0), Instant::from_secs(30));
+        assert!(socket.has_recent_send(LOCAL_END, remote(0), Instant::from_secs(89)));
+        assert!(!socket.has_recent_send(LOCAL_END, remote(0), Instant::from_secs(90)));
+
+        for index in 0..RECENT_SEND_CAPACITY as u16 {
+            socket.record_recent_send(LOCAL_END, remote(index), Instant::from_secs(index));
+        }
+        socket.record_recent_send(LOCAL_END, remote(0), Instant::from_secs(8));
+        socket.record_recent_send(LOCAL_END, remote(8), Instant::from_secs(9));
+
+        assert_eq!(socket.recent_sends.len(), RECENT_SEND_CAPACITY);
+        assert!(socket.has_recent_send(LOCAL_END, remote(0), Instant::from_secs(9)));
+        assert!(!socket.has_recent_send(LOCAL_END, remote(1), Instant::from_secs(9)));
+        assert!(socket.has_recent_send(LOCAL_END, remote(8), Instant::from_secs(9)));
+
+        socket.close();
+        assert!(socket.recent_sends.is_empty());
     }
 
     #[rstest]
