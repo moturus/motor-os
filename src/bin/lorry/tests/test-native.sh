@@ -23,6 +23,7 @@ JOBS_PREFIX=""
 KEEP=0
 REUSE_VM=0
 WARM=0
+CROSS_CHANGED=1
 
 usage() {
     cat <<'EOF'
@@ -30,8 +31,8 @@ usage: test-native.sh [--reuse-running-vm] [--warm] [--keep]
 
 Runs Lorry's release Linux-to-Motor and Motor-to-Motor verification in the
 release developer image. The first native self-build vendors its dependencies
-online; all following build commands are offline. --warm preserves host and
-guest targets for iteration.
+online; the host cross-build also vendors online, and all following build
+commands are offline. --warm preserves host and guest targets for iteration.
 EOF
 }
 
@@ -120,6 +121,45 @@ copy_native_fixture() {
         "$source/fixture-motor-target-dependency" "$destination/"
 }
 
+write_host_config() {
+    local host_home="$1"
+    local host_curl="$2"
+    local host_ca_bundle="$3"
+    mkdir -p "$host_home/.config/lorry"
+    printf '%s\n' \
+        'config-version = 1' \
+        'cargo-compat-version = "1.99"' \
+        '' \
+        '[repositories]' \
+        "user = \"$host_home/.config/lorry/vendor\"" \
+        'keep-artifacts = true' \
+        'keep-sources = true' \
+        '' \
+        '[network]' \
+        "curl = \"$host_curl\"" \
+        "ca-bundle = \"$host_ca_bundle\"" \
+        '' \
+        '[vendor]' \
+        'targets = ["x86_64-unknown-linux-musl", "x86_64-unknown-motor"]' \
+        'include-host = true' \
+        '' \
+        '[policy]' \
+        'default = "allow"' \
+        'path-roots = []' \
+        '' \
+        '[policy.limits]' \
+        'max-packages = 192' \
+        'max-depth = 16' \
+        'max-package-bytes = 16777216' \
+        'max-extracted-package-bytes = 134217728' \
+        'max-package-files = 20000' \
+        'max-transaction-bytes = 268435456' \
+        'max-extracted-transaction-bytes = 1073741824' \
+        'build-script-seconds = 300' \
+        'build-script-output-bytes = 8388608' \
+        >"$host_home/.config/lorry/lorry.toml"
+}
+
 remote_command() {
     local remaining=$((PHASE_DEADLINE_MS - $(timing_now_ms)))
     [ "$remaining" -gt 0 ] || fail "native self phase exceeded ${PHASE_BUDGET}s"
@@ -171,6 +211,9 @@ build_image() {
 
 prepare_host() {
     local cargo
+    local host_ca_bundle="${LORRY_HOST_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+    local host_curl
+    local host_home="$WORK/host-home"
     local host_rustc
     local motor_rustc
     local motor_toolchain_sysroot
@@ -179,10 +222,13 @@ prepare_host() {
     local source="$host_tree/src/bin/lorry"
 
     cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
+    host_curl="$(type -P curl)"
     host_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
     motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
     motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
     [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
+    [ -x "$host_curl" ] || fail "host curl is absent"
+    [ -f "$host_ca_bundle" ] || fail "host CA bundle '$host_ca_bundle' is absent"
     [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
         fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
     diff -qr "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
@@ -196,6 +242,7 @@ prepare_host() {
         "$cargo" build --manifest-path "$LORRY_DIR/Cargo.toml" \
         --locked --offline --release
     cp "$LORRY_DIR/target/release/lorry" "$WORK/lorry-seed"
+    write_host_config "$host_home" "$host_curl" "$host_ca_bundle"
 
     for tree in "$host_tree" "$guest_tree"; do
         copy_package "$LORRY_DIR" "$tree/src/bin/lorry"
@@ -218,12 +265,17 @@ prepare_host() {
 
     (
         cd "$source"
-        CARGO_TARGET_DIR="$WORK/cross-target" RUSTC="$motor_rustc" \
-            "$cargo" build --release --locked \
-                --offline --target "$MOTOR_TARGET"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" vendor --accept-all
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" build --release --target "$MOTOR_TARGET"
     )
-    CROSS_LORRY="$WORK/cross-target/$MOTOR_TARGET/release/lorry"
+    CROSS_LORRY="$source/target/lorry/$MOTOR_TARGET/release/lorry"
     [ -f "$CROSS_LORRY" ] || fail "cross-build did not produce Lorry"
+    if [ "$WARM" -eq 1 ] && [ -f "$WORK/lorry-verified" ] &&
+        cmp -s "$CROSS_LORRY" "$WORK/lorry-verified"; then
+        CROSS_CHANGED=0
+    fi
     cp "$CROSS_LORRY" "$WORK/lorry-cross"
     rm -rf "$source/.cargo"
 }
@@ -281,6 +333,10 @@ run_native() {
     remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
 
+    if [ "$WARM" -eq 1 ] && [ "$CROSS_CHANGED" -eq 1 ]; then
+        remote_command "$REMOTE_ROOT/lorry-cross cache clean"
+        remote_command "cd $first && $REMOTE_ROOT/lorry-cross clean --release"
+    fi
     remote_command "cd $first && $REMOTE_ROOT/lorry-cross vendor --accept-all"
     remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross build --release"
     remote_command "$first/target/lorry/release/lorry --version"
@@ -347,6 +403,8 @@ cleanup() {
             [ ! -f "$WORK/$artifact" ] ||
                 cp "$WORK/$artifact" "$EVIDENCE_DIR/$artifact"
         done
+    elif [ "$WARM" -eq 1 ]; then
+        cp "$WORK/lorry-cross" "$WORK/lorry-verified"
     fi
     if [ "$WARM" -eq 0 ]; then
         rm -rf "$WORK"
