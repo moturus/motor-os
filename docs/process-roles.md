@@ -1,19 +1,19 @@
 # Process Roles — System / Interactive / None
 
-Status: **implemented and validated** (patches 1–4 complete; codebase-reviewed
-2026-08-18; review findings folded in 2026-08-19; implementation completed
-2026-08-19). Companion to
+Status: **implemented**. Companion to
 `src/sys/lib/motor-fs/PERMISSIONS_DESIGN.md`, which defines the FS-side
 consumer of the three roles and deliberately leaves their *origin*
 unspecified ("a trusted input supplied from above the FS").
-Audience: an engineer (human or LLM) implementing or reviewing this feature.
+Audience: an engineer maintaining or extending this feature.
 
-This document specifies how the kernel, `moto-sys`, `rt.vdso`, and sys-io
+This document describes how the kernel, `moto-sys`, `rt.vdso`, and sys-io
 represent and consume three process privilege roles, how a role is assigned at
 spawn, and how it is queried by the process itself and by a connected server.
-It also closes the exec-time `x`-permission gap deliberately left to a consumer
-above motor-fs by `PERMISSIONS_DESIGN.md`. Code references include current line
-numbers, which may drift — treat the named items as the stable anchors.
+It also describes the exec-time `x`-permission check deliberately left to a
+consumer above motor-fs by `PERMISSIONS_DESIGN.md`. Section 1 records the
+motivation, and §2 records the pre-implementation constraints. Code references
+include current line numbers, which may drift — treat the named items as the
+stable anchors.
 
 ---
 
@@ -21,26 +21,27 @@ numbers, which may drift — treat the named items as the stable anchors.
 
 Motor FS permissions are per-role: `async_fs::Role { None = 0, Interactive = 1,
 System = 2 }` (`src/sys/lib/async-fs/src/filesystem.rs:52`), with one
-permission byte per role persisted in every entry's `Metadata`. But the OS
-itself only distinguishes two classes of process: "system" (`CAP_SYS` set) and
-everything else. Consequences today:
+permission byte per role persisted in every entry's `Metadata`. Before this
+design, the OS itself distinguished only two classes of process: "system"
+(`CAP_SYS` set) and everything else. The consequences were:
 
-- sys-io passes `Role::System` unconditionally at **every role-taking** FS call
+- sys-io passed `Role::System` unconditionally at **every role-taking** FS call
   site
   (`src/sys/sys-io/src/runtime/fs.rs:620–1165`, `util.rs`, `net/config.rs`),
   so the Interactive and None permission bytes are stored and cascaded but
   never consulted.
-- `sysbox ps` can only render a binary `*` marker from the current
-  `ProcessInfoV1.system_process` byte. This design replaces that byte with a
+- `sysbox ps` could only render a binary `*` marker from the
+  `ProcessInfoV1.system_process` byte. This design replaced that byte with a
   three-valued `process_role` byte (§4.2).
-- There is no kernel notion of "logged-in user authority" vs "least
+- There was no kernel notion of "logged-in user authority" vs "least
   privilege"; the interactive session is an informal capability bundle
   (`CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED`) re-spelled ad hoc by sys-tty,
   russhd, and rush.
-- File `x` is persisted and reported but never enforced. `rt.vdso`'s ELF/script
-  loader opens and reads a program without checking `FileAttr.perm & PERM_EXEC`.
+- File `x` was persisted and reported but never enforced. `rt.vdso`'s
+  ELF/script loader opened and read a program without checking
+  `FileAttr.perm & PERM_EXEC`.
 
-Required properties of the fix:
+Required properties of the design:
 
 1. **Unforgeable** — a process cannot claim a role; only its parent (bounded by
    the kernel) assigns it, and only the kernel reports it.
@@ -58,12 +59,12 @@ Required properties of the fix:
    latter cooperative, not a security boundary — §5.3).
 7. **No compatibility machinery** — new code ships only as part of a complete
    new image (kernel, userspace, and FS image built and deployed together);
-   new code never runs against old images. So the design must not *need*
-   migration logic or format/ABI versioning — simplicity over staging (§10).
+   new code never runs against old images. The design therefore needs no
+   migration logic or format/ABI versioning.
 
 ---
 
-## 2. Current state (facts the design builds on)
+## 2. Pre-implementation state (facts the design builds on)
 
 - Privilege is a single immutable `u64` capability word per process:
   `Process::capabilities` (`kernel/src/uspace/process.rs:149`), set once at
@@ -75,43 +76,43 @@ Required properties of the fix:
 - Defined bits (`moto-sys/src/caps.rs`): `CAP_SYS = 1<<0`,
   `CAP_IO_MANAGER = 1<<1`, `CAP_SPAWN = 1<<2`, `CAP_LOG = 1<<3`,
   `CAP_SHUTDOWN = 1<<4`, `CAP_SPAWN_DETACHED = 1<<5`. Bits 6..63 are free.
-- Spawn path: rt.vdso builds a URL
-  `process:entry_point=..;capabilities=<caps>;detached=..` and calls
-  `SysObj::create` (`rt.vdso/src/rt_process.rs:637–679`). The default grant is
-  `CAP_SPAWN | CAP_LOG`; a `MOTOR_OS_CAPS` env var (hex) **replaces** the
-  default outright and is stripped from the child's env. **There is no
-  inheritance** — an unadorned spawn always yields `CAP_SPAWN | CAP_LOG`
-  regardless of the parent. Consequently a non-System parent that has
-  `CAP_SPAWN` but not `CAP_LOG` currently asks for a non-subset default and its
-  unadorned spawn is rejected by the kernel.
+- Before this design, rt.vdso's spawn path built a URL
+  `process:entry_point=..;capabilities=<caps>;detached=..` and called
+  `SysObj::create` (`rt.vdso/src/rt_process.rs:637–679`). The default grant was
+  `CAP_SPAWN | CAP_LOG`; a `MOTOR_OS_CAPS` env var (hex) replaced the default
+  outright and was stripped from the child's env. **There was no inheritance**
+  — an unadorned spawn always yielded `CAP_SPAWN | CAP_LOG` regardless of the
+  parent. Consequently a non-System parent that had `CAP_SPAWN` but not
+  `CAP_LOG` asked for a non-subset default and its unadorned spawn was rejected
+  by the kernel.
 - Kernel escalation gate (`kernel/src/uspace/process.rs:310–320`): a `CAP_SYS`
   parent may grant anything; a non-`CAP_SYS` parent may grant only a **subset
   of its own caps** and never `CAP_SYS`/`CAP_IO_MANAGER`.
-- `ProcessInfoV1.system_process` is a derived view of `CAP_SYS`, computed in
+- `ProcessInfoV1.system_process` was a derived view of `CAP_SYS`, computed in
   exactly one place (`kernel/src/xray/stats.rs:579–584`).
 - Self-query: `ProcessStaticPage::get().capabilities` (zero syscalls). A URL
-  query also returns self caps, but `SysObj::get(h, 0, "capabilities")` is
+  query also returned self caps, but `SysObj::get(h, 0, "capabilities")` was
   **unimplemented for non-`SELF` handles**
   (`kernel/src/uspace/sys_obj.rs:184–192`). `OP_QUERY_HANDLE/F_QUERY_PID`
   already resolves the process owning the sibling endpoint of a shared object;
   this is the correct peer-query precedent.
-- Who holds what today: the kernel gives sys-io all-ones caps; sys-io does the
-  same for sys-init, and sys-init does the same for sys-tty. The console shell
-  gets `CAP_SPAWN|CAP_LOG|CAP_SPAWN_DETACHED`
-  (`sys-tty/src/main.rs:94–101`). Both shipped sys-init configs use decimal
-  masks and give russhd `60`, while the main image gives dns-resolver `8` and
-  sys-init gives strobe `CAP_LOG`. Ordinary commands get the vdso default. The
-  target policy changes sys-tty, russhd, and their shells to Interactive (§7).
-- `sys-init::spawn_service` sets `MOTOR_OS_CAPS` only when the parsed mask is
-  nonzero. Thus an explicit `svc:0:...` currently receives the vdso default
+- Initial grant topology: the kernel gave sys-io all-ones caps; sys-io did the
+  same for sys-init, and sys-init did the same for sys-tty. The console shell
+  got `CAP_SPAWN|CAP_LOG|CAP_SPAWN_DETACHED`
+  (`sys-tty/src/main.rs:94–101`). Both shipped sys-init configs used decimal
+  masks and gave russhd `60`, while the main image gave dns-resolver `8` and
+  sys-init gave strobe `CAP_LOG`. Ordinary commands got the vdso default. The
+  design makes sys-tty, russhd, and their shells Interactive (§7).
+- `sys-init::spawn_service` set `MOTOR_OS_CAPS` only when the parsed mask was
+  nonzero. Thus an explicit `svc:0:...` received the vdso default
   (`CAP_SPAWN|CAP_LOG`) rather than zero caps, despite the logged/configured
-  value. No shipped service uses zero today, but this is a pre-existing policy
+  value. No shipped service used zero at the time, but this was a policy
   bug in the role-assignment path.
-- Explicit replacement masks exist beyond those entry points. In particular,
-  rush's trusted detached-spawn path constructs `CAP_SPAWN|CAP_LOG|
-  CAP_SPAWN_DETACHED`, and the focused lifetime test in `full-test.sh` uses
-  `MOTOR_OS_CAPS=0x2c`. Every such mask must be audited when adding a role bit;
-  the vdso default does not repair an explicit mask.
+- Explicit replacement masks existed beyond those entry points. In particular,
+  rush's trusted detached-spawn path constructed `CAP_SPAWN|CAP_LOG|
+  CAP_SPAWN_DETACHED`, and the focused lifetime test in `full-test.sh` used
+  `MOTOR_OS_CAPS=0x2c`. Every such mask needed an explicit role choice; the
+  vdso default could not repair an explicit mask.
 
 ---
 
@@ -124,7 +125,7 @@ of the existing caps word.
 // moto-sys/src/caps.rs
 
 /// Interactive ("user") process: acts with the authority of the logged-in
-/// user. See docs/plans/process-roles.md. CAP_SYS takes precedence for role
+/// user. See docs/process-roles.md. CAP_SYS takes precedence for role
 /// derivation when both bits are present; CAP_SYS does not imply this bit.
 pub const CAP_INTERACTIVE: u64 = 1 << 6;
 
@@ -214,26 +215,25 @@ const _: () = {
 
 ---
 
-## 4. Kernel changes
+## 4. Kernel implementation
 
 ### 4.1 Spawn gate: no change required
 
 `Process::new_child` (`process.rs:294–362`) already implements exactly the
-needed rule (§3). Add a comment at the subset check referencing this document
-so the invariant is discoverable. Also fix the stale `CAP_SPAWN` doc comment
-("not used"): `sys_handle_create` currently checks it before creating an
-address space (`kernel/src/uspace/sys_obj.rs:35–41`).
+needed rule (§3). The comment at the subset check references this document so
+the invariant is discoverable. The `CAP_SPAWN` documentation also reflects
+that `sys_handle_create` checks it before creating an address space
+(`kernel/src/uspace/sys_obj.rs:35–41`).
 
 The unrestricted `CAP_SYS` branch is intentional: a System parent may
 explicitly mint any role. The safer *default* for a System parent is addressed
 in rt.vdso (§5.1), not by weakening this kernel authority.
 
-### 4.2 Stats: replace the binary flag with the role
+### 4.2 Stats role encoding
 
-Rename and reinterpret the existing `ProcessInfoV1.system_process: u8` field
-as `process_role: u8`. Do not retain a second compatibility flag: this work has
-no backward-compatibility requirement, and two fields would be redundant views
-of the same immutable capability word.
+`ProcessInfoV1` uses `process_role: u8` in the former
+`system_process: u8` slot. There is no second compatibility flag: it would be
+a redundant view of the same immutable capability word.
 
 ```rust
 pub struct ProcessInfoV1 {
@@ -252,8 +252,8 @@ to 56, so **no other field offset and no `size_of` change** — the kernel's
 is unaffected. The byte values are exactly the `ProcessRole` discriminants:
 None = 0, Interactive = 1, System = 2. No `OP_QUERY_PROCESS` version bump or
 parallel `ProcessInfoV2` is needed under this work's explicit no-compatibility
-rule. Add the missing `size_of::<ProcessInfoV1>() == 56` const assert while
-touching the struct. Keep the field raw `u8`; enum-invalid bytes must never be
+rule. A `size_of::<ProcessInfoV1>() == 56` const assertion pins the layout. The
+field remains a raw `u8`; enum-invalid bytes must never be
 materialized as a Rust enum, and consumers decode through a small
 `ProcessRole::try_from`/`from_u8` helper.
 
@@ -266,29 +266,29 @@ if let Some(proc) = self.owner.upgrade() {
 }
 ```
 
-`sysbox ps` is the only in-tree reader of `system_process`, so it changes to
-decode `process_role`; the other `ProcessInfoV1` consumers do not need source
-changes. `KProcessStats` holds only a weak process owner. Therefore zombies,
-the `(total)` aggregate, and the kernel pseudo-process have no live owner and
-report `process_role == None`; this field is observational only and must never
-authorize access. Live peer authorization uses §4.3 instead.
+Before the rename, `sysbox ps` was the only in-tree reader of `system_process`;
+it now decodes `process_role`. The other `ProcessInfoV1` consumers needed no
+source changes. `KProcessStats` holds only a weak process owner. Therefore
+zombies, the `(total)` aggregate, and the kernel pseudo-process have no live
+owner and report `process_role == None`; this field is observational only and
+must never authorize access. Live peer authorization uses §4.3 instead.
 
 ### 4.3 Peer capability query
 
 Servers need the caps of the process at the other end of an IPC connection.
-Extend the existing handle-query mechanism used for peer pid lookup. Two
-touchpoints, one rule:
+The implementation extends the handle-query mechanism used for peer pid
+lookup. It has two touchpoints and one rule:
 
 - Kernel: in `OP_QUERY_HANDLE` (`kernel/src/uspace/sys_obj.rs:284–339`, where
-  `F_QUERY_PID` lives), add `F_QUERY_CAPS`: resolve the peer owner of a shared
-  object the caller owns (`shared::peer_owner`, same as `get_pid`) and return
-  `proc.capabilities()` in result slot 0. Do not extend the old
+  `F_QUERY_PID` lives), `F_QUERY_CAPS` resolves the peer owner of a shared
+  object the caller owns (`shared::peer_owner`, same as `get_pid`) and returns
+  `proc.capabilities()` in result slot 0. It does not extend the old
   `SysObj::get(..., "capabilities")` URL: it encodes an integer as a
   `SysHandle`, whereas `OP_QUERY_HANDLE` is already the typed precedent.
-- moto-sys: `SysObj::get_capabilities(handle: SysHandle) -> Result<u64, ErrorCode>`
-  next to `SysObj::get_pid` (`moto-sys/src/sys_obj.rs:225–241`). Correct the
-  latter's stale doc comment at the same time: it returns the owner of the
-  *peer/sibling endpoint*, not the owner of the caller's local handle.
+- moto-sys: `SysObj::get_capabilities(handle: SysHandle) -> Result<u64,
+  ErrorCode>` sits next to `SysObj::get_pid`
+  (`moto-sys/src/sys_obj.rs:225–241`). Both return information about the owner
+  of the *peer/sibling endpoint*, not the owner of the caller's local handle.
 
 Authorization: identical to `get_pid` — the caller must already own the
 local handle and it must resolve to a live shared-object peer; there is no
@@ -307,28 +307,26 @@ fails loudly.
 
 ---
 
-## 5. rt.vdso changes
+## 5. rt.vdso implementation
 
 ### 5.1 Default spawn caps inherit only an Interactive parent
 
-`rt_process.rs:637–638` currently hardcodes `CAP_SPAWN | CAP_LOG`, which would
-make every unadorned child of a shell role-None — wrong: a command the user
-runs must act as the user. Change only the no-`MOTOR_OS_CAPS` default. A System
-parent stays an explicit policy/grant point; it must not accidentally create a
-logged-in session:
+An unadorned command spawned by an Interactive shell must act as the user, but
+a System parent stays an explicit policy/grant point and must not accidentally
+create a logged-in session. `default_child_capabilities`, used when
+`MOTOR_OS_CAPS` is absent, implements that rule:
 
 ```rust
-let self_caps = moto_sys::ProcessStaticPage::get().capabilities;
-// TODO: remove CAP_LOG when the runtime is stabilized.
-let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
-let self_role = moto_sys::caps::ProcessRole::from_caps(self_caps);
-if self_role == moto_sys::caps::ProcessRole::Interactive {
-    caps |= moto_sys::caps::CAP_INTERACTIVE;
-}
-// A non-System default must always satisfy the kernel's subset rule, including
-// the existing CAP_LOG corner case.
-if self_role != moto_sys::caps::ProcessRole::System {
-    caps &= self_caps;
+pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
+    let role = ProcessRole::from_caps(parent_caps);
+    let mut child_caps = CAP_SPAWN | CAP_LOG;
+    if matches!(role, ProcessRole::Interactive) {
+        child_caps |= CAP_INTERACTIVE;
+    }
+    if !matches!(role, ProcessRole::System) {
+        child_caps &= parent_caps;
+    }
+    child_caps
 }
 ```
 
@@ -337,8 +335,8 @@ Semantics:
 - Interactive parent → Interactive child (shell → command, command → helper).
 - System parent → None child by default; either Interactive or System requires
   an explicit `MOTOR_OS_CAPS` grant. This matters for sys-init services with a
-  zero/omitted mask and for existing all-ones System processes, whose raw word
-  will contain the new bit even though their derived role is System.
+  zero/omitted mask and for all-ones System processes, whose raw word contains
+  the Interactive bit even though their derived role is System.
 - None parent → None child. Intersecting the base default with its caps also
   avoids requesting `CAP_LOG` from a `CAP_SPAWN`-only parent.
 
@@ -357,29 +355,24 @@ that are not produced by the default rule are therefore straightforward:
 
 Role None does not mean “has no capabilities”; it means that neither role bit
 is set. Conversely, an explicit mask that is intended only to add
-`CAP_SPAWN_DETACHED` must now preserve `CAP_INTERACTIVE` explicitly (§7). This
-is the vdso's first read of its own `ProcessStaticPage`; the page is mapped in
-every process, so there is no ordering concern.
+`CAP_SPAWN_DETACHED` must preserve `CAP_INTERACTIVE` explicitly (§7). The
+default-capability calculation reads the vdso's own `ProcessStaticPage`; the
+page is mapped in every process, so there is no ordering concern.
 
-One correction must ride along: a present-but-unparsable `MOTOR_OS_CAPS`
-value currently logs and falls through to the default
-(`rt_process.rs:652–656`). Today that default is a fixed low mask; with
-inheritance it can be Interactive, so a corrupted explicit mask — including
-one intended as a demotion — would silently yield an Interactive child. An
-explicit mask is a policy statement: fail the spawn with `E_INVALID_ARGUMENT`
-instead of falling back. The demotion path must not fail open.
+A present-but-unparsable `MOTOR_OS_CAPS` value fails the spawn with
+`E_INVALID_ARGUMENT` instead of falling back to the default. An explicit mask
+is a policy statement, so the demotion path must not fail open.
 
 ### 5.2 Client-side permission reporting uses the caller's own role
 
-`rt_fs.rs:498` reports `metadata.access(Role::System)` to `std` regardless of
-who is asking. Change to the process's own role:
+`rt_fs.rs` reports permissions to `std` using the process's own role:
 
 ```rust
 let role = /* async_fs::Role from ProcessRole::from_caps(ProcessStaticPage::get().capabilities) */;
 file_attr.perm = access_to_perm(metadata.access(role)?);
 ```
 
-so `std::fs` permission views agree with what enforcement will actually do.
+so `std::fs` permission views agree with enforcement.
 (rt.vdso links moto-sys directly; no ABI involved.)
 
 ### 5.3 Enforce file execute permission in the loader
@@ -388,12 +381,13 @@ Motor-fs cannot enforce file `x` because it never executes a file; its design
 assigns that check to the exec-time consumer above the FS. That consumer is
 `rt.vdso/src/rt_process.rs`:
 
-- In `spawn_impl`, retain the `FileAttr` already fetched for the requested ELF
-  or script and reject with `E_NOT_ALLOWED` unless `perm & PERM_EXEC != 0`.
-- `run_script` opens the shebang interpreter and calls `run_elf`; check the
-  interpreter's own `FileAttr.perm` in `run_elf` (or a shared helper) as well.
+- In `spawn_impl`, the `FileAttr` fetched for the requested ELF or script is
+  retained and rejected with `E_NOT_ALLOWED` unless
+  `perm & PERM_EXEC != 0`.
+- `run_script` opens the shebang interpreter and calls `run_elf`, which checks
+  the interpreter's own `FileAttr.perm` as well.
   Both the script and interpreter must be executable.
-- Do the check before allocating/loading the image. The subsequent server-side
+- The check happens before allocating/loading the image. Subsequent server-side
   reads still enforce `r`; the permission lattice guarantees that `x` is never
   granted without `r`.
 
@@ -425,52 +419,48 @@ append-at-end vtable addition.
 
 ---
 
-## 7. Policy and explicit-grant audit
+## 7. Role grant policy
 
 The bit's meaning comes from where it is granted. The default spawn rule covers
 ordinary descendants of an Interactive process, but every explicit
-`MOTOR_OS_CAPS` replacement mask must make its role choice deliberately:
+`MOTOR_OS_CAPS` replacement mask makes its role choice deliberately:
 
-1. **sys-init → sys-tty** (`sys-init/src/main.rs`, the tty spawn): replace the
-   all-ones mask with the explicit
+1. **sys-init → sys-tty** (`sys-init/src/main.rs`, the tty spawn): uses the
+   explicit
    `CAP_IO_MANAGER | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED |
    CAP_INTERACTIVE` mask. `CAP_IO_MANAGER` is required for sys-tty's kernel
    serial-console handle; the other non-role bits let it start rush and pass
    rush its intended session capabilities. Omitting `CAP_SYS` makes sys-tty
    Interactive rather than System.
-2. **sys-tty → console rush** (`sys-tty/src/main.rs:94–101`): add
-   `CAP_INTERACTIVE` to the existing
+2. **sys-tty → console rush** (`sys-tty/src/main.rs:94–101`): includes
+   `CAP_INTERACTIVE` in its
    `CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED` grant. The console manager and
    the shell it starts are both Interactive.
-3. **russhd → ssh session shell** (`russhd/src/local_session.rs:200–217`): add
-   `CAP_INTERACTIVE` to the intersection mask
+3. **russhd → ssh session shell** (`russhd/src/local_session.rs:200–217`):
+   includes `CAP_INTERACTIVE` in the intersection mask
    (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE}` ∩ own caps).
    Because russhd is not `CAP_SYS`, the subset rule means **russhd itself must
    hold the bit** to pass it on:
 4. **Both shipped sys-init configs**:
    `img_files/motor-os/system/cfg/sys-init.cfg` and
-   `img_files/motor-os-base/system/cfg/sys-init.cfg` each change
-   `svc:60:...russhd` to `svc:124:...russhd` (caps are parsed as **decimal**;
-   124 = 60 | 64). Update both comments enumerating the bits. dns-resolver
+   `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
+   `124` (`60 | 64`). dns-resolver
    (`svc:8`) and strobe (`CAP_LOG`) stay role None.
 5. **sys-init zero-mask semantics** (`sys-init/src/main.rs`, `spawn_service`):
-   because the documented `svc:<caps>:<cmd>` grammar requires a mask, always
-   set `MOTOR_OS_CAPS` for a parsed service, including `0`; reject a missing or
-   malformed mask rather than silently selecting the vdso default. Add a parser
-   test for `svc:0`. This corrects the pre-existing mismatch noted in §2.
+   because the documented `svc:<caps>:<cmd>` grammar requires a mask, sys-init
+   always sets `MOTOR_OS_CAPS` for a parsed service, including `0`, and rejects
+   a missing or malformed mask rather than silently selecting the vdso default.
+   This corrects the pre-implementation mismatch noted in §2.
 6. **rush trusted detached spawn** (`rush/src/sys/motor.rs`,
    `detach_cap_grant`): this path sets `MOTOR_OS_CAPS`, so it does *not* receive
-   the vdso default. Include `CAP_INTERACTIVE` when the shell's derived role is
-   Interactive (or equivalently intersect the full intended mask with the
-   shell's caps). Otherwise a trusted detached user daemon is silently demoted
-   to None.
-7. **Tests and scripts with literal masks**: update the focused lifetime path
-   in `src/tests/full-test.sh` (`0x2c` → `0x6c`) when it is meant to retain the
-   ssh session role. Audit the explicit mask in
-   `systest/src/stdio_file_input.rs` similarly: preserve the caller's
-   Interactive bit when testing inheritance, or omit it with a comment when
-   deliberate demotion is part of the test. The existing `CAP_SYS` escalation
-   test deliberately remains unchanged.
+   the vdso default. It includes `CAP_INTERACTIVE` when the shell's derived role
+   is Interactive. Otherwise a trusted detached user daemon would be silently
+   demoted to None.
+7. **Tests and scripts with literal masks**: the focused lifetime path in
+   `src/tests/full-test.sh` uses `0x6c` to retain the ssh session role. Explicit
+   test masks preserve the caller's Interactive bit when testing inheritance,
+   or omit it with a comment when deliberate demotion is part of the test. The
+   existing `CAP_SYS` escalation test deliberately remains unchanged.
 8. **Unadorned spawns**: no call-site edit; §5.1 carries Interactive only from
    an Interactive parent. The kernel's all-ones sys-io grant and sys-io's
    all-ones sys-init grant remain System because `CAP_SYS` wins. The chain
@@ -490,12 +480,12 @@ implementation. This is not equivalent to granting only an authenticated shell
 child, and it conflicts with the general preference that network-facing
 services run as None. It is nevertheless the only small change compatible with
 the current architecture: a non-System parent cannot pass a capability it does
-not hold, and SFTP currently performs filesystem operations inside russhd.
+not hold, and SFTP performs filesystem operations inside russhd.
 
-For this implementation, grant russhd `CAP_INTERACTIVE`, accept that its
-authentication boundary protects Interactive FS authority, and test that
-unauthenticated requests cannot reach FS operations. This is an explicit
-interim policy choice, not an accidental consequence of shell inheritance.
+Current policy grants russhd `CAP_INTERACTIVE` and accepts that its
+authentication boundary protects Interactive FS authority. Unauthenticated
+requests must not reach FS operations. This is an explicit interim policy
+choice, not an accidental consequence of shell inheritance.
 
 A future hardening change may keep the network/auth front-end at None and move
 each authenticated shell/SFTP session into an Interactive worker. That would
@@ -507,37 +497,37 @@ Interactive helper.
 
 ---
 
-## 8. sys-io: deriving `async_fs::Role` per FS connection
+## 8. sys-io role attribution per FS connection
 
-This is the consumer that motivated the design; sketch level (the FS-side
-details belong to PERMISSIONS_DESIGN.md's world):
+This is the consumer that motivated the design; the FS-side permission details
+belong to `PERMISSIONS_DESIGN.md`:
 
 - Each accepted FS io_channel has one peer process, and caps are immutable per
-  process ⇒ **role per connection is a constant**. Compute it once after the
-  existing accept/memory-pressure refusal and before dispatch in `fs_listener`
+  process ⇒ **role per connection is a constant**. sys-io computes it once
+  after the existing accept/memory-pressure refusal and before dispatch in
+  `fs_listener`
   (`sys-io/src/runtime/fs.rs:367–445`):
   `SysObj::get_capabilities(sender.remote_handle())` →
   `ProcessRole::from_caps` → `async_fs::Role`.
-- Keep the `Copy` role as a local owned by that `fs_listener`, capture it in
-  each per-message task, and pass it through `on_msg` to the command handler.
+- The `Copy` role is a local owned by that `fs_listener`, captured in each
+  per-message task and passed through `on_msg` to the command handler.
   There is no need for a global map, lookup, or disconnect eviction: the
   listener task already defines exactly the connection lifetime. The existing
   lock manager still uses the handle-derived `ConnectionId` for lock ownership.
-- **Fail closed at accept**: if the peer query errors, drop that connection
-  before dispatching any message; never default a role. Precedent:
+- **Fail closed at accept**: if the peer query errors, sys-io drops that
+  connection before dispatching any message; it never defaults a role. The
+  precedent is
   `check_same_process`.
-- Replace the hardcoded `Role::System` at the `on_cmd_*` call sites
-  (`runtime/fs.rs:620–1165`) with the connection's role. sys-io's *internal*
+- The `on_cmd_*` call sites use the connection's role. sys-io's *internal*
   FS calls (`util.rs`, `net/config.rs`) and the host-side imager legitimately
   remain `Role::System`.
-- The existing `set_permissions` request carries `(entry_id, access)`. Keep that
-  wire format and interpret it as **target = caller role**. Thus ordinary
+- The existing `set_permissions` request carries `(entry_id, access)` and is
+  interpreted as **target = caller role**. Thus ordinary
   `std::fs::set_permissions` narrows the caller's own byte; motor-fs cascades a
-  narrowing to lower roles and rejects an attempted self-widen. Update the
-  stale `moto_io::FsClient::set_permissions` comment, which currently says it
-  changes the System byte. A future administrative API that explicitly edits
-  a lower role can add a distinct command/target field when it has a real
-  consumer; it is not required to make chmod work correctly.
+  narrowing to lower roles and rejects an attempted self-widen. A future
+  administrative API that explicitly edits a lower role can add a distinct
+  command/target field when it has a real consumer; it is not required to make
+  chmod work correctly.
 
   Be explicit about what that deferral means: with target = caller and
   `may_set` allowing only narrowing of one's own byte, **no client of sys-io —
@@ -549,7 +539,7 @@ details belong to PERMISSIONS_DESIGN.md's world):
   sealing real (PERMISSIONS_DESIGN.md §4a) — but it must be called out in
   user-facing docs, and the runtime recovery idiom — copy, delete, rename;
   delete needs only parent-directory `w` — documented and tested alongside it
-  (§11.7).
+  (§10.7).
 - Client create requests still use `[Rwx; 3]`. That array is monotonic and is
   legal for every caller role under `PERMISSIONS_DESIGN.md` §6.2. Initial
   restricted creation would require a separate protocol addition; do not mix
@@ -559,59 +549,20 @@ details belong to PERMISSIONS_DESIGN.md's world):
 
 ## 9. Observability
 
-`sysbox ps` (`src/sys/tools/sysbox/src/commands/ps.rs`): the `*` marker column
-becomes a role marker driven by `ProcessInfoV1.process_role` — `*` System
-(unchanged), `+` Interactive, blank None; update the `--help` note. `ps` is the
+`sysbox ps` (`src/sys/tools/sysbox/src/commands/ps.rs`) uses a role marker driven
+by `ProcessInfoV1.process_role`: `*` System, `+` Interactive, and blank None;
+the `--help` note documents the symbols. `ps` is the
 only in-tree reader of the renamed `system_process` field; other
 `ProcessInfoV1` consumers (`top`, `mdbg`, `gears`, `rush`) do not inspect that
-byte and need no source changes. The layout remains unchanged. The `(total)`
-and kernel pseudo-rows have no process owner and therefore display a blank role
-marker; document or special-case their labels in `ps` if that would otherwise
-look surprising. Unknown raw role values should render `?`, not be treated as
-System or Interactive.
+byte. The layout remains unchanged. The `(total)` and kernel pseudo-rows have
+no process owner and therefore display a blank role marker. Unknown raw role
+values render `?`, not System or Interactive.
 
 ---
 
-## 10. Rollout sequencing
+## 10. Regression requirements
 
-There are **no compatibility requirements**: new code ships only as part of a
-complete new image (kernel, userspace, and FS image are built and deployed
-together), and new code is never run against old images. Nothing here needs
-migration logic, staged enablement, or version negotiation.
-
-The interim russhd policy is fixed in §7.1. The sequencing below is for small
-reviewable patches and bisection. Do not flip sys-io to client roles until the
-query, inheritance, and all explicit grant sites are present in the same final
-image:
-
-1. **moto-sys + kernel**: `CAP_INTERACTIVE`, `ProcessRole`,
-   `ProcessInfoV1.process_role`, `F_QUERY_CAPS` +
-   `SysObj::get_capabilities`, plus pure derivation/query tests.
-2. **rt.vdso default inheritance + explicit-mask audit** (§5.1, §7), including
-   Interactive sys-tty, console rush, russhd, and ssh sessions. Add focused
-   spawn tests in the same patch.
-3. **sys-io derivation flip + own-role chmod + client-side reporting** (§5.2,
-   §8). This is the point at which motor-fs enforcement becomes effective for
-   real clients.
-4. **Program `x` enforcement + observability** (§5.3, §9), with ELF and shebang
-   tests.
-
-The only external surface, moto-rt, is untouched (§6).
-
-These changes touch core OS components under `src/sys`. Each implementation
-patch must therefore be formatted with `cargo +nightly fmt`, introduce no new
-compiler/clippy warnings, remain covered transitively by `src/tests/full-test.sh`,
-and pass that script consistently at least three times each in debug and
-release before commit, as required by the repository guidelines. Role lookup
-adds one syscall per accepted FS connection, not per request and not as a new
-eager boot scan.
-
----
-
-## 11. Test plan
-
-systest additions (alongside `test_caps`, `systest/src/main.rs:605–623`) plus
-small pure tests where noted:
+Required coverage spans systest (alongside `test_caps`) and small pure tests:
 
 1. **Derivation**: `ProcessRole::from_caps` for all four bit combinations of
    `{CAP_SYS, CAP_INTERACTIVE}` (System wins when both set), and safe raw-`u8`
@@ -622,8 +573,7 @@ small pure tests where noted:
    yields a None child (demotion). A present-but-unparsable `MOTOR_OS_CAPS`
    fails the spawn with `E_INVALID_ARGUMENT` (§5.1) rather than falling back
    to the default. Exercise the default-cap helper with a
-   System/all-ones parent and assert the default child is None, not Interactive;
-   a System integration case may require a small boot-launched test helper.
+   System/all-ones parent and assert the default child is None, not Interactive.
 3. **Default subset correctness**: a `CAP_SPAWN`-only parent can spawn an
    unadorned None child (the default must not over-request `CAP_LOG`). A None
    child requesting `CAP_INTERACTIVE` explicitly gets `E_NOT_ALLOWED`; the
@@ -662,7 +612,7 @@ small pure tests where noted:
 
 ---
 
-## 12. Alternatives rejected
+## 11. Alternatives rejected
 
 - **Keeping `system_process` beside a new role byte:** redundant state derived
   from the same capability word. With no backward-compatibility requirement,
@@ -709,48 +659,3 @@ small pure tests where noted:
   separation (§7.1).
 - **`CAP_USER` naming**: interchangeable with Interactive; Interactive matches
   the implemented `async_fs::Role` and PERMISSIONS_DESIGN.md vocabulary.
-
----
-
-## Implementation log
-
-This section is a temporary rollout record and can be deleted after all four
-patches in §10 are complete.
-
-- **2026-08-19 — Patch 1 complete:** added `CAP_INTERACTIVE` and
-  `ProcessRole`; renamed the stable `ProcessInfoV1` byte to `process_role`;
-  added the peer `F_QUERY_CAPS` / `SysObj::get_capabilities` API and kernel
-  implementation; updated `sysbox ps` for the renamed field and role markers;
-  and added derivation, stats, and real-child peer-query coverage. Validation:
-  `cargo +nightly fmt`, `make -j20`, and three successful
-  `src/tests/full-test.sh` runs each in debug and release mode.
-- **2026-08-19 — Patch 2 complete:** added role-aware default child
-  capabilities and fail-closed `MOTOR_OS_CAPS` parsing; made sys-init require
-  and apply every configured capability mask, including zero; granted
-  Interactive explicitly to sys-tty, console rush, russhd, authenticated ssh
-  sessions, and trusted detached rush children; and added focused inheritance,
-  demotion, grant-denial, config-parser, and live-role coverage. Updated test
-  scripts for role markers and explicit None-role service restarts. Validation:
-  `cargo +nightly fmt`, the debug build, focused unit/doctest/clippy checks, and
-  three successful `src/tests/full-test.sh` runs each in debug and release
-  mode. The pre-existing nondeterministic `test_cpus` prerequisite was fixed
-  and committed separately as `e6e2b917`.
-- **2026-08-19 — Patch 3 complete:** sys-io now derives and fail-closed checks
-  the immutable peer role once per accepted FS connection, then applies it to
-  every external role-taking operation; public chmod narrows the caller's own
-  role byte; and rt.vdso reports permissions for the caller's role. Added
-  integration coverage for Interactive narrowing and recovery, self-widening
-  denial, and a real None child exercising file and directory read/write,
-  resize, create/delete, traversal/listing, and move permissions. Validation:
-  `cargo +nightly fmt`, focused debug `systest`, and three successful
-  `src/tests/full-test.sh` runs each in debug and release mode. The CPU
-  migration test follow-up was committed separately as `da0bb2e7`; the
-  concurrent-spawn validation blocker was resolved by `be27cbf0`.
-- **2026-08-19 — Patch 4 complete:** rt.vdso's standard loader now requires
-  the caller-visible `x` bit on the requested ELF or script before inspecting
-  its contents, and independently requires `x` on a shebang interpreter before
-  allocating or loading its image. Added systest controls for an executable ELF
-  and script plus exact `E_NOT_ALLOWED` coverage after removing `x` from the ELF
-  and copied interpreter. Process-role observability was already completed in
-  Patch 1. Validation: `cargo +nightly fmt`, focused debug builds, and three
-  successful `src/tests/full-test.sh` runs each in debug and release mode.

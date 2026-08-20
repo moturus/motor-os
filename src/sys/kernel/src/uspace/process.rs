@@ -309,7 +309,7 @@ impl Process {
         let parent = parent_thread.owner();
         let parent_caps = parent.capabilities();
         // This subset rule also makes ProcessRole monotone below CAP_SYS; see
-        // docs/plans/process-roles.md.
+        // docs/process-roles.md.
         if parent_caps & moto_sys::caps::CAP_SYS == 0 {
             if capabilities & (moto_sys::caps::CAP_IO_MANAGER | moto_sys::caps::CAP_SYS) != 0 {
                 return Err(moto_rt::E_NOT_ALLOWED);
