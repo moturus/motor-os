@@ -1238,3 +1238,7 @@ pub extern "C" fn current_exe(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCo
 
     moto_rt::E_OK
 }
+
+pub extern "C" fn current_pid() -> u64 {
+    moto_sys::ProcessStaticPage::get().pid
+}
