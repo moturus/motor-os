@@ -11,10 +11,10 @@ MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
-IMAGE_NAME="motor-os-dev.qcow2"
-# Four vCPUs and 4 GiB are sufficient for the compact native fixture.
-VM_SMP="${LORRY_VM_SMP:-4}"
-VM_MEMORY="${LORRY_VM_MEMORY:-4096M}"
+IMAGE_NAME="motor-os-dev.img"
+# Native rustc builds need enough parallel memory for the VM's vCPU count.
+VM_SMP="${LORRY_VM_SMP:-8}"
+VM_MEMORY="${LORRY_VM_MEMORY:-8192M}"
 # Lorry's unit concurrency inside the guest. ssh carries no environment, so
 # the only way to set it there is an explicit prefix on the remote command.
 # Empty means the guest chooses its own default (its available parallelism).
