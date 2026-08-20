@@ -195,6 +195,9 @@ impl InterfaceInner {
         source_hardware_addr: HardwareAddress,
         ipv6_packet: &Ipv6Packet<&'frame [u8]>,
     ) -> Option<Packet<'frame>> {
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        let mut ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
+        #[cfg(not(feature = "proto-ipv6-fragmentation"))]
         let ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
 
         if !ipv6_repr.src_addr.x_is_unicast() {
@@ -210,6 +213,28 @@ impl InterfaceInner {
             }
         } else {
             (ipv6_repr.next_header, ipv6_packet.payload())
+        };
+
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        let (next_header, ip_payload, meta) = if next_header == IpProtocol::Ipv6Frag {
+            let header = check!(Ipv6FragmentHeader::new_checked(ip_payload));
+            let repr = check!(Ipv6FragmentRepr::parse(&header));
+            if repr.next_header == IpProtocol::Ipv6Frag {
+                net_debug!("nested IPv6 Fragment header");
+                return None;
+            }
+            if repr.frag_offset != 0 || repr.more_frags {
+                return None;
+            }
+
+            ipv6_repr.payload_len = ipv6_repr.payload_len.checked_sub(repr.buffer_len())?;
+            (
+                repr.next_header,
+                &ip_payload[repr.buffer_len()..],
+                meta.with_l4_csum_vouched(false),
+            )
+        } else {
+            (next_header, ip_payload, meta)
         };
 
         if !self.has_ip_addr(ipv6_repr.dst_addr)
