@@ -511,6 +511,20 @@ reference first.
 
 ## Watch list -- act on recurrence
 
+- DNS negative-lookup gate, observed once on 2026-08-20: the single-shot
+  `AddressFamily::Any` lookup for `does-not-exist.motor.invalid` returned
+  `NotReady` instead of `NotFound`. The C bridge asks v4 and v6 separately;
+  if one family returns `EAI_NONAME` and the other `EAI_AGAIN`, its failure
+  merge correctly preserves the transient result because `getaddrinfo()`
+  does not expose whether `EAI_NONAME` meant name-wide NXDOMAIN or only no
+  data for that family. The resolver self-test did not catch this exact path:
+  its repeated negative lookups are v4-only and explicitly tolerate transient
+  external failures. Deal with this later by making the end-to-end negative
+  fixture deterministic without weakening the mixed-family failure semantics
+  or adding a check-side retry; candidates are standards-compliant local
+  handling of the reserved `.invalid` suffix or a test-controlled negative
+  resolver source. Cover `NotFound` plus transient mixed-family outcomes when
+  doing that work.
 - External DNS/ping legs, after the 2026-08-16 resolver fix (rule-1
   destination ordering + one in-resolver v4 re-ask; the user chose it
   over pinning the checks to IPv4, check-side retries, a host-side
