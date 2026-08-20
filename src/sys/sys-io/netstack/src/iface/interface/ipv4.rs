@@ -197,21 +197,43 @@ impl InterfaceInner {
                     }
                 };
 
-                if !ipv4_packet.more_frags() {
-                    // This is the last fragment, so we know the total size
-                    check!(f.set_total_size(
-                        ipv4_packet.total_len() as usize - ipv4_packet.header_len() as usize
-                            + ipv4_packet.frag_offset() as usize,
-                    ));
+                let offset = ipv4_packet.frag_offset() as usize;
+                let incoming_end = offset + ipv4_packet.payload().len();
+                if offset == 0 {
+                    f.set_ipv4_context(Ipv4ReassemblyContext {
+                        repr: ipv4_repr,
+                        header_len: ipv4_packet.header_len() as usize,
+                    });
                 }
-
-                if let Err(e) = f.add(ipv4_packet.payload(), ipv4_packet.frag_offset() as usize) {
-                    net_debug!("fragmentation error: {:?}", e);
+                let header_len = f
+                    .ipv4_context()
+                    .map_or(IPV4_HEADER_LEN, |context| context.header_len);
+                if let Err(error) = f.enforce_max_size(u16::MAX as usize - header_len, incoming_end)
+                {
+                    net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
 
+                if !ipv4_packet.more_frags() {
+                    check!(f.set_total_size(incoming_end));
+                }
+
+                if let Err(error) = f.add(ipv4_packet.payload(), offset) {
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
+                if !f.is_complete() {
+                    return None;
+                }
+                let context = match f.ipv4_context() {
+                    Some(context) => context,
+                    None => {
+                        f.reset();
+                        return None;
+                    }
+                };
                 let payload = f.assemble()?;
-                // Update the payload length, so that the raw sockets get the correct value.
+                ipv4_repr = context.repr;
                 ipv4_repr.payload_len = payload.len();
                 // A reassembled datagram is not one frame, so no single frame's
                 // header vouches for its L4 checksum.

@@ -33,6 +33,8 @@ use super::packet::*;
 use core::result::Result;
 use heapless::Vec;
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
+use super::fragmentation::Ipv4ReassemblyContext;
 #[cfg(feature = "_proto-fragmentation")]
 use super::fragmentation::{AssemblerError, FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};

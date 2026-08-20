@@ -63,6 +63,13 @@ pub(crate) struct ExpirationOutcome {
     pub(crate) poisoned: usize,
 }
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ipv4ReassemblyContext {
+    pub(crate) repr: Ipv4Repr,
+    pub(crate) header_len: usize,
+}
+
 /// Holds the bounded state for one fragmented packet.
 #[derive(Debug)]
 pub struct PacketAssembler<K> {
@@ -72,6 +79,8 @@ pub struct PacketAssembler<K> {
     total_size: Option<usize>,
     expires_at: Instant,
     poisoned: bool,
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    ipv4_context: Option<Ipv4ReassemblyContext>,
 }
 
 impl<K> PacketAssembler<K> {
@@ -84,6 +93,8 @@ impl<K> PacketAssembler<K> {
             total_size: None,
             expires_at: Instant::ZERO,
             poisoned: false,
+            #[cfg(feature = "proto-ipv4-fragmentation")]
+            ipv4_context: None,
         }
     }
 
@@ -93,6 +104,10 @@ impl<K> PacketAssembler<K> {
         self.total_size = None;
         self.expires_at = Instant::ZERO;
         self.poisoned = false;
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        {
+            self.ipv4_context = None;
+        }
     }
 
     fn outcome(&self) -> AssemblerOutcome {
@@ -111,6 +126,10 @@ impl<K> PacketAssembler<K> {
             self.buffer.clear();
             self.total_size = None;
             self.poisoned = true;
+            #[cfg(feature = "proto-ipv4-fragmentation")]
+            {
+                self.ipv4_context = None;
+            }
         }
         error
     }
@@ -121,6 +140,36 @@ impl<K> PacketAssembler<K> {
         } else {
             self.reject(error)
         }
+    }
+
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    pub(crate) fn set_ipv4_context(&mut self, context: Ipv4ReassemblyContext) {
+        if self.ipv4_context.is_none() {
+            self.ipv4_context = Some(context);
+        }
+    }
+
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    pub(crate) fn ipv4_context(&self) -> Option<Ipv4ReassemblyContext> {
+        self.ipv4_context
+    }
+
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    pub(crate) fn enforce_max_size(
+        &mut self,
+        max_size: usize,
+        incoming_end: usize,
+    ) -> Result<(), AssemblerError> {
+        if self.poisoned {
+            return Err(AssemblerError::Poisoned);
+        }
+        if incoming_end > max_size
+            || self.total_size.is_some_and(|size| size > max_size)
+            || self.assembler.iter_data().any(|(_, end)| end > max_size)
+        {
+            return Err(self.reject(AssemblerError::SizeLimit));
+        }
+        Ok(())
     }
 
     fn ensure_len(&mut self, len: usize) -> Result<(), AssemblerError> {
@@ -623,6 +672,21 @@ mod tests {
             assembler.add(&[1], usize::MAX),
             Err(AssemblerError::SizeLimit)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    fn packet_assembler_enforces_a_late_protocol_size_limit() {
+        let mut assembler = PacketAssembler::<Key>::new();
+        assembler.add(b"data", 8).unwrap();
+        assembler.set_total_size(12).unwrap();
+
+        assert_eq!(
+            assembler.enforce_max_size(10, 8),
+            Err(AssemblerError::SizeLimit)
+        );
+        assert!(assembler.poisoned);
+        assert!(assembler.buffer.is_empty());
     }
 
     #[test]
