@@ -3580,6 +3580,144 @@ fn ipv4_reassembly_verifies_vouched_udp_checksum() {
 }
 
 #[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv4-fragmentation",
+    feature = "socket-tcp"
+))]
+fn ipv4_reassembly_verifies_vouched_tcp_checksum() {
+    use crate::socket::tcp;
+
+    const LOCAL_PORT: u16 = 49_505;
+    const REMOTE_PORT: u16 = 80;
+    const PAYLOAD: [u8; 8] = [0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4];
+
+    fn fragments(corrupt: bool) -> [Vec<u8>; 2] {
+        let src_addr = Ipv4Address::new(192, 168, 1, 2);
+        let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+        let repr = TcpRepr {
+            src_port: REMOTE_PORT,
+            dst_port: LOCAL_PORT,
+            control: TcpControl::Syn,
+            seq_number: TcpSeqNumber(20_000),
+            ack_number: None,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &PAYLOAD,
+        };
+        let mut bytes = vec![0; repr.buffer_len()];
+        let mut packet = TcpPacket::new_unchecked(&mut bytes);
+        repr.emit(
+            &mut packet,
+            &src_addr.into(),
+            &dst_addr.into(),
+            &ChecksumCapabilities::default(),
+        );
+        if corrupt {
+            packet.set_checksum(packet.checksum() ^ 1);
+        }
+        ipv4_two_fragment_payload(IpProtocol::Tcp, 1, &bytes, 24)
+    }
+
+    fn feed(corrupt: bool) -> (tcp::State, u64, usize) {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(LOCAL_PORT).unwrap();
+        let handle = sockets.add(0, socket);
+
+        for fragment in fragments(corrupt) {
+            device.push_rx_vouched(fragment, true);
+        }
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        (
+            sockets.get::<tcp::Socket>(handle).state(),
+            iface.take_rx_csum_failed(),
+            device.tx_queue.len(),
+        )
+    }
+
+    assert_eq!(feed(false), (tcp::State::SynReceived, 0, 1));
+    assert_eq!(feed(true), (tcp::State::Listen, 1, 0));
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_reassembly_keys_do_not_mix() {
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+
+    for changed_field in 0..4 {
+        let (mut iface, mut sockets, _device) = setup(Medium::Ip);
+        let spec = |offset, more_frags| Ipv4FragmentSpec {
+            dst_addr,
+            protocol: IpProtocol::Unknown(99),
+            ident: 1,
+            offset,
+            more_frags,
+            dont_frag: false,
+            reserved: false,
+            payload_len: 8,
+        };
+        let mut first = ipv4_fragment_bytes(spec(0, true));
+        let mut foreign_last = ipv4_fragment_bytes(spec(8, false));
+        let mut matching_last = foreign_last.clone();
+        customize_ipv4_fragment(&mut first, 64, 0xaa);
+        customize_ipv4_fragment(&mut foreign_last, 64, 0xcc);
+        customize_ipv4_fragment(&mut matching_last, 64, 0xbb);
+
+        {
+            let mut packet = Ipv4Packet::new_unchecked(&mut foreign_last);
+            match changed_field {
+                0 => packet.set_src_addr(Ipv4Address::new(192, 168, 1, 3)),
+                1 => packet.set_dst_addr(Ipv4Address::BROADCAST),
+                2 => packet.set_next_header(IpProtocol::Unknown(98)),
+                3 => packet.set_ident(2),
+                _ => unreachable!(),
+            }
+            packet.fill_checksum();
+        }
+
+        for bytes in [&first, &foreign_last] {
+            let packet = Ipv4Packet::new_checked(&bytes[..]).unwrap();
+            assert!(
+                iface
+                    .inner
+                    .process_ipv4(
+                        &mut sockets,
+                        PacketMeta::default(),
+                        HardwareAddress::Ip,
+                        &packet,
+                        &mut iface.fragments,
+                    )
+                    .is_none()
+            );
+        }
+        let matching_last = Ipv4Packet::new_checked(&matching_last[..]).unwrap();
+        let reply = iface.inner.process_ipv4(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::Ip,
+            &matching_last,
+            &mut iface.fragments,
+        );
+        assert_ipv4_fragment_reply(
+            reply,
+            64,
+            &[
+                0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+                0xbb, 0xbb,
+            ],
+        );
+    }
+}
+
+#[test]
 #[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
 fn ipv4_invalid_first_fragments_allocate_no_state() {
     let (mut iface, mut sockets, _device) = setup(Medium::Ip);
