@@ -5,8 +5,12 @@ use super::*;
     feature = "proto-ipv6-fragmentation",
     feature = "socket-udp"
 ))]
-fn ipv6_atomic_udp(corrupt: bool, hop_by_hop: bool, next_header: IpProtocol) -> Vec<u8> {
-    const PAYLOAD: &[u8] = b"atomic";
+fn ipv6_atomic_udp_payload(
+    payload: &[u8],
+    corrupt: bool,
+    hop_by_hop: bool,
+    next_header: IpProtocol,
+) -> Vec<u8> {
     let src_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
     let dst_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
     let udp_repr = UdpRepr {
@@ -22,7 +26,7 @@ fn ipv6_atomic_udp(corrupt: bool, hop_by_hop: bool, next_header: IpProtocol) -> 
         } else {
             IpProtocol::Ipv6Frag
         },
-        payload_len: hbh_len + 8 + udp_repr.header_len() + PAYLOAD.len(),
+        payload_len: hbh_len + 8 + udp_repr.header_len() + payload.len(),
         hop_limit: 64,
     };
     let mut bytes = vec![0; ipv6_repr.buffer_len() + ipv6_repr.payload_len];
@@ -49,14 +53,23 @@ fn ipv6_atomic_udp(corrupt: bool, hop_by_hop: bool, next_header: IpProtocol) -> 
         &mut packet,
         &src_addr.into(),
         &dst_addr.into(),
-        PAYLOAD.len(),
-        |buffer| buffer.copy_from_slice(PAYLOAD),
+        payload.len(),
+        |buffer| buffer.copy_from_slice(payload),
         &ChecksumCapabilities::default(),
     );
     if corrupt {
         packet.set_checksum(packet.checksum() ^ 1);
     }
     bytes
+}
+
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv6_atomic_udp(corrupt: bool, hop_by_hop: bool, next_header: IpProtocol) -> Vec<u8> {
+    ipv6_atomic_udp_payload(b"atomic", corrupt, hop_by_hop, next_header)
 }
 
 #[cfg(all(
@@ -111,12 +124,22 @@ fn ipv6_fragment(
     feature = "proto-ipv6-fragmentation",
     feature = "socket-udp"
 ))]
-fn feed_ipv6_frames(frames: impl IntoIterator<Item = Vec<u8>>) -> (Option<Vec<u8>>, u64) {
+fn ipv6_fragment_header_mut(frame: &mut [u8], hop_by_hop: bool) -> Ipv6FragmentHeader<&mut [u8]> {
+    let offset = IPV6_HEADER_LEN + if hop_by_hop { 8 } else { 0 };
+    Ipv6FragmentHeader::new_unchecked(&mut frame[offset..offset + 8])
+}
+
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn feed_ipv6_frames_all(frames: impl IntoIterator<Item = Vec<u8>>) -> (Vec<Vec<u8>>, u64) {
     use crate::socket::udp;
 
     let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
     let mut socket = udp::Socket::new(
-        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 256]),
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
     );
     socket.bind(49_506).unwrap();
@@ -125,12 +148,22 @@ fn feed_ipv6_frames(frames: impl IntoIterator<Item = Vec<u8>>) -> (Option<Vec<u8
         device.push_rx_vouched(frame, true);
     }
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
-    let received = sockets
-        .get_mut::<udp::Socket>(handle)
-        .recv()
-        .ok()
-        .map(|(payload, _)| payload.to_vec());
+    let socket = sockets.get_mut::<udp::Socket>(handle);
+    let mut received = Vec::new();
+    while let Ok((payload, _)) = socket.recv() {
+        received.push(payload.to_vec());
+    }
     (received, iface.take_rx_csum_failed())
+}
+
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn feed_ipv6_frames(frames: impl IntoIterator<Item = Vec<u8>>) -> (Option<Vec<u8>>, u64) {
+    let (received, checksum_failures) = feed_ipv6_frames_all(frames);
+    (received.into_iter().next(), checksum_failures)
 }
 
 #[test]
@@ -187,6 +220,128 @@ fn ipv6_reassembly_completes_in_both_orders_and_header_positions() {
             (Some(b"atomic".to_vec()), 0)
         );
     }
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv6_reassembly_verifies_checksum_and_preserves_duplicate_bytes() {
+    const LARGE: &[u8] = b"abcdefghijklmnopqrstuvwx";
+    let corrupt = ipv6_atomic_udp_payload(LARGE, true, false, IpProtocol::Udp);
+    let fragmentable = &corrupt[IPV6_HEADER_LEN + 8..];
+    assert_eq!(
+        feed_ipv6_frames([
+            ipv6_fragment(fragmentable, 0..16, true, false),
+            ipv6_fragment(fragmentable, 16..fragmentable.len(), false, false),
+        ]),
+        (None, 1)
+    );
+
+    let correct = ipv6_atomic_udp(false, false, IpProtocol::Udp);
+    let fragmentable = &correct[IPV6_HEADER_LEN + 8..];
+    let mut changed = fragmentable.to_vec();
+    changed[0] ^= 1;
+    assert_eq!(
+        feed_ipv6_frames([
+            ipv6_fragment(fragmentable, 0..8, true, false),
+            ipv6_fragment(&changed, 0..8, true, false),
+            ipv6_fragment(fragmentable, 8..fragmentable.len(), false, false),
+        ]),
+        (Some(b"atomic".to_vec()), 0)
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv6_overlap_tombstones_but_atomic_fragment_bypasses_state() {
+    const LARGE: &[u8] = b"abcdefghijklmnopqrstuvwx";
+    let packet = ipv6_atomic_udp_payload(LARGE, false, false, IpProtocol::Udp);
+    let fragmentable = &packet[IPV6_HEADER_LEN + 8..];
+    assert_eq!(
+        feed_ipv6_frames([
+            ipv6_fragment(fragmentable, 0..16, true, false),
+            ipv6_fragment(fragmentable, 8..24, true, false),
+            ipv6_fragment(fragmentable, 16..fragmentable.len(), false, false),
+        ]),
+        (None, 0)
+    );
+
+    let first = ipv6_fragment(fragmentable, 0..16, true, false);
+    let last = ipv6_fragment(fragmentable, 16..fragmentable.len(), false, false);
+    let mut atomic = ipv6_atomic_udp(false, false, IpProtocol::Udp);
+    ipv6_fragment_header_mut(&mut atomic, false).set_ident(7);
+    assert_eq!(
+        feed_ipv6_frames_all([first, atomic, last]),
+        (vec![b"atomic".to_vec(), LARGE.to_vec()], 0)
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn invalid_ipv6_first_fragments_retain_no_state() {
+    let packet = ipv6_atomic_udp(false, false, IpProtocol::Udp);
+    let fragmentable = &packet[IPV6_HEADER_LEN + 8..];
+    let first = ipv6_fragment(fragmentable, 0..8, true, false);
+    let last = ipv6_fragment(fragmentable, 8..fragmentable.len(), false, false);
+
+    let mut reserved = first.clone();
+    reserved[IPV6_HEADER_LEN + 1] = 1;
+    let mut nested = first.clone();
+    ipv6_fragment_header_mut(&mut nested, false).set_next_header(IpProtocol::Ipv6Frag);
+    let mut tiny_tcp = first.clone();
+    ipv6_fragment_header_mut(&mut tiny_tcp, false).set_next_header(IpProtocol::Tcp);
+    let mut too_large = first.clone();
+    let mut header = ipv6_fragment_header_mut(&mut too_large, false);
+    header.set_frag_offset(65_528);
+    header.set_more_frags(false);
+
+    for invalid in [
+        ipv6_fragment(fragmentable, 0..0, true, false),
+        ipv6_fragment(fragmentable, 0..9, true, false),
+        reserved,
+        nested,
+        tiny_tcp,
+        too_large,
+    ] {
+        assert_eq!(
+            feed_ipv6_frames([invalid, first.clone(), last.clone()]),
+            (Some(b"atomic".to_vec()), 0)
+        );
+    }
+}
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv6_reassembly_context_mismatch_poisons_the_key() {
+    let packet = ipv6_atomic_udp(false, false, IpProtocol::Udp);
+    let fragmentable = &packet[IPV6_HEADER_LEN + 8..];
+    let first = ipv6_fragment(fragmentable, 0..8, true, false);
+    let last = ipv6_fragment(fragmentable, 8..fragmentable.len(), false, false);
+
+    let hbh_last = ipv6_fragment(fragmentable, 8..fragmentable.len(), false, true);
+    assert_eq!(
+        feed_ipv6_frames([first.clone(), hbh_last, last.clone()]),
+        (None, 0)
+    );
+
+    let mut tcp_last = last.clone();
+    ipv6_fragment_header_mut(&mut tcp_last, false).set_next_header(IpProtocol::Tcp);
+    assert_eq!(feed_ipv6_frames([first, tcp_last, last]), (None, 0));
 }
 
 #[test]
