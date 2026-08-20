@@ -2376,3 +2376,124 @@ fn test_solicited_node_multicast_autojoin(#[case] medium: Medium) {
     assert!(!iface.has_multicast_group(addr1.solicited_node()));
     assert!(!iface.has_multicast_group(addr2.solicited_node()));
 }
+
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "proto-ipv6-fragmentation",
+    feature = "socket-udp"
+))]
+fn ipv6_source_fragments_a_maximum_udp_datagram() {
+    const MAX_UDP_PAYLOAD: usize = 65_507;
+
+    struct CaptureTxToken<'a>(&'a mut Vec<Vec<u8>>);
+
+    impl TxToken for CaptureTxToken<'_> {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            let mut packet = vec![0; len];
+            let result = f(&mut packet);
+            self.0.push(packet);
+            result
+        }
+    }
+
+    let (mut iface, _sockets, device) = setup(Medium::Ip);
+    let mtu = device.capabilities().ip_mtu();
+    let src_addr = Ipv6Address::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1);
+    let dst_addr = Ipv6Address::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 1);
+    let udp_repr = UdpRepr {
+        src_port: 49_500,
+        dst_port: 49_501,
+    };
+    let payload: Vec<u8> = (0..MAX_UDP_PAYLOAD).map(|index| index as u8).collect();
+    let ip_repr = Ipv6Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Udp,
+        payload_len: UDP_HEADER_LEN + payload.len(),
+        hop_limit: 37,
+    };
+    let mut fragments = Vec::new();
+
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            CaptureTxToken(&mut fragments),
+            PacketMeta::default(),
+            Packet::new_ipv6(ip_repr, IpPayload::Udp(udp_repr, &payload)),
+            &mut iface.fragmenter,
+        ),
+        Ok(())
+    );
+    while !iface.fragmenter.finished() {
+        iface
+            .inner
+            .dispatch_ipv6_frag(CaptureTxToken(&mut fragments), &mut iface.fragmenter);
+    }
+
+    let fragment_header_len = 8;
+    let fragment_payload_size = (mtu - IPV6_HEADER_LEN - fragment_header_len) / 8 * 8;
+    let mut reassembled = Vec::new();
+    let mut expected_offset = 0;
+    let mut ident = None;
+    for (index, bytes) in fragments.iter().enumerate() {
+        let packet = Ipv6Packet::new_checked(&bytes[..]).unwrap();
+        let final_fragment = index + 1 == fragments.len();
+        assert!(bytes.len() <= mtu);
+        assert_eq!(packet.payload_len() as usize, bytes.len() - IPV6_HEADER_LEN);
+        assert_eq!(packet.src_addr(), src_addr);
+        assert_eq!(packet.dst_addr(), dst_addr);
+        assert_eq!(packet.next_header(), IpProtocol::Ipv6Frag);
+        assert_eq!(packet.hop_limit(), 37);
+
+        let header = Ipv6FragmentHeader::new_checked(packet.payload()).unwrap();
+        let repr = Ipv6FragmentRepr::parse(&header).unwrap();
+        let fragment_payload = &packet.payload()[repr.buffer_len()..];
+        assert_eq!(repr.next_header, IpProtocol::Udp);
+        assert_eq!(repr.frag_offset as usize, expected_offset);
+        assert_eq!(repr.more_frags, !final_fragment);
+        assert_eq!(*ident.get_or_insert(repr.ident), repr.ident);
+        assert_ne!(repr.ident, 0);
+        if !final_fragment {
+            assert_eq!(fragment_payload.len(), fragment_payload_size);
+        }
+        expected_offset += fragment_payload.len();
+        reassembled.extend_from_slice(fragment_payload);
+    }
+
+    assert_eq!(expected_offset, UDP_HEADER_LEN + MAX_UDP_PAYLOAD);
+    let udp_packet = UdpPacket::new_checked(&reassembled[..]).unwrap();
+    UdpRepr::parse(
+        &udp_packet,
+        &src_addr.into(),
+        &dst_addr.into(),
+        &ChecksumCapabilities::default(),
+    )
+    .unwrap();
+    assert_eq!(udp_packet.payload(), &payload);
+
+    iface.fragmenter.reset();
+    let next_payload = vec![0xa5; mtu];
+    let next_repr = Ipv6Repr {
+        payload_len: UDP_HEADER_LEN + next_payload.len(),
+        ..ip_repr
+    };
+    let mut next_fragments = Vec::new();
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            CaptureTxToken(&mut next_fragments),
+            PacketMeta::default(),
+            Packet::new_ipv6(next_repr, IpPayload::Udp(udp_repr, &next_payload)),
+            &mut iface.fragmenter,
+        ),
+        Ok(())
+    );
+    let packet = Ipv6Packet::new_checked(&next_fragments[0][..]).unwrap();
+    let header = Ipv6FragmentHeader::new_checked(packet.payload()).unwrap();
+    assert_ne!(
+        Ipv6FragmentRepr::parse(&header).unwrap().ident,
+        ident.unwrap()
+    );
+}

@@ -37,6 +37,83 @@ fn validate_ipv6_fragment(
     Ok(())
 }
 
+#[cfg(feature = "proto-ipv6-fragmentation")]
+impl Interface {
+    pub(super) fn ipv6_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
+        if self.fragmenter.finished() {
+            self.fragmenter.reset();
+        }
+        if self.fragmenter.is_empty() {
+            return false;
+        }
+
+        if let Some(tx_token) = device.transmit(self.inner.now) {
+            self.inner
+                .dispatch_ipv6_frag(tx_token, &mut self.fragmenter);
+            if self.fragmenter.finished() {
+                self.fragmenter.reset();
+            }
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(feature = "proto-ipv6-fragmentation")]
+impl InterfaceInner {
+    pub(super) fn dispatch_ipv6_frag<Tx: TxToken>(&mut self, tx_token: Tx, frag: &mut Fragmenter) {
+        const ALIGNMENT: usize = 8;
+
+        let caps = self.caps.clone();
+        let ip_header_len = frag.ipv6.repr.buffer_len();
+        let mut fragment_repr = Ipv6FragmentRepr {
+            next_header: frag.ipv6.repr.next_header,
+            frag_offset: frag.sent_bytes as u16,
+            more_frags: false,
+            ident: frag.ipv6.ident,
+        };
+        let fragment_header_len = fragment_repr.buffer_len();
+        let payload_mtu = caps
+            .ip_mtu()
+            .checked_sub(ip_header_len + fragment_header_len)
+            .expect("IPv6 fragmentation requires an eligible interface");
+        let max_fragment_size = payload_mtu - payload_mtu % ALIGNMENT;
+        assert_ne!(max_fragment_size, 0, "IPv6 fragment payload is empty");
+        let payload_len = (frag.packet_len - frag.sent_bytes).min(max_fragment_size);
+        fragment_repr.more_frags = frag.packet_len - frag.sent_bytes != payload_len;
+
+        let mut ip_repr = frag.ipv6.repr;
+        ip_repr.next_header = IpProtocol::Ipv6Frag;
+        ip_repr.payload_len = fragment_header_len + payload_len;
+        let mut tx_len = ip_header_len + ip_repr.payload_len;
+        #[cfg(feature = "medium-ethernet")]
+        if matches!(caps.medium, Medium::Ethernet) {
+            tx_len += EthernetFrame::<&[u8]>::header_len();
+        }
+
+        tx_token.consume(tx_len, |mut tx_buffer| {
+            #[cfg(feature = "medium-ethernet")]
+            if matches!(caps.medium, Medium::Ethernet) {
+                let mut frame = EthernetFrame::new_unchecked(&mut *tx_buffer);
+                frame.set_src_addr(self.hardware_addr.ethernet_or_panic());
+                frame.set_dst_addr(frag.ipv6.dst_hardware_addr);
+                frame.set_ethertype(EthernetProtocol::Ipv6);
+                tx_buffer = &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..];
+            }
+
+            ip_repr.emit(&mut Ipv6Packet::new_unchecked(
+                &mut tx_buffer[..ip_header_len],
+            ));
+            fragment_repr.emit(&mut Ipv6FragmentHeader::new_unchecked(
+                &mut tx_buffer[ip_header_len..][..fragment_header_len],
+            ));
+            tx_buffer[ip_header_len + fragment_header_len..][..payload_len]
+                .copy_from_slice(&frag.buffer[frag.sent_bytes..][..payload_len]);
+        });
+        frag.sent_bytes += payload_len;
+    }
+}
+
 /// Enum used for the process_hopbyhop function. In some cases, when discarding a packet, an ICMP
 /// parameter problem message needs to be transmitted to the source of the address. In other cases,
 /// the processing of the IP packet can continue.

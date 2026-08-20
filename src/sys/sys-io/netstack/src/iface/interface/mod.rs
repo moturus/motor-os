@@ -1015,6 +1015,22 @@ impl Interface {
         }
     }
 
+    #[cfg(any(
+        feature = "proto-ipv4-fragmentation",
+        feature = "proto-ipv6-fragmentation"
+    ))]
+    fn ip_fragment_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv4) {
+            return self.ipv4_egress(device);
+        }
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv6) {
+            return self.ipv6_egress(device);
+        }
+        false
+    }
+
     /// Transmit packets queued in the sockets.
     ///
     /// This function returns a value indicating whether the state of any socket
@@ -1049,11 +1065,17 @@ impl Interface {
             }
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ip"))]
             _ => {
-                #[cfg(feature = "proto-ipv4-fragmentation")]
+                #[cfg(any(
+                    feature = "proto-ipv4-fragmentation",
+                    feature = "proto-ipv6-fragmentation"
+                ))]
                 {
-                    self.ipv4_egress(device)
+                    self.ip_fragment_egress(device)
                 }
-                #[cfg(not(feature = "proto-ipv4-fragmentation"))]
+                #[cfg(not(any(
+                    feature = "proto-ipv4-fragmentation",
+                    feature = "proto-ipv6-fragmentation"
+                )))]
                 {
                     false
                 }
@@ -2040,6 +2062,7 @@ impl InterfaceInner {
                         // Stage only the fragmentable payload; each fragment
                         // receives a freshly emitted IP header.
                         frag.packet_len = _repr.payload_len;
+                        frag.ip_version = Some(IpVersion::Ipv4);
                         frag.ipv4.repr = *_repr;
                         packet.emit_payload(
                             &IpRepr::Ipv4(*_repr),
@@ -2102,14 +2125,45 @@ impl InterfaceInner {
                     Ok(())
                 }
             }
-            // We don't support IPv6 fragmentation yet.
             #[cfg(feature = "proto-ipv6")]
-            IpRepr::Ipv6(_) => {
-                // Check if we need to fragment it (TSO super-segments are
-                // exempt — the device segments them; see the IPv4 arm).
+            IpRepr::Ipv6(_repr) => {
+                // TSO super-segments are segmented by the device, never here.
                 if meta.tso_seg_size == 0 && total_ip_len > self.caps.ip_mtu() {
-                    net_debug!("IPv6 fragmentation support is unimplemented. Dropping.");
-                    Ok(())
+                    #[cfg(feature = "proto-ipv6-fragmentation")]
+                    {
+                        if _repr.next_header != IpProtocol::Udp {
+                            net_debug!("IPv6 source fragmentation is supported only for UDP.");
+                            return Ok(());
+                        }
+                        if frag.buffer.len() < _repr.payload_len {
+                            return Ok(());
+                        }
+
+                        packet.emit_payload(
+                            &IpRepr::Ipv6(*_repr),
+                            &mut frag.buffer[.._repr.payload_len],
+                            &caps,
+                        );
+                        frag.ipv6.repr = *_repr;
+                        #[cfg(feature = "medium-ethernet")]
+                        {
+                            frag.ipv6.dst_hardware_addr = dst_hardware_addr;
+                        }
+                        let ident = self.rand.rand_u32();
+                        frag.ipv6.ident = if ident == 0 { 1 } else { ident };
+                        frag.sent_bytes = 0;
+                        frag.ip_version = Some(IpVersion::Ipv6);
+                        frag.packet_len = _repr.payload_len;
+                        self.dispatch_ipv6_frag(tx_token, frag);
+                        Ok(())
+                    }
+                    #[cfg(not(feature = "proto-ipv6-fragmentation"))]
+                    {
+                        net_debug!(
+                            "Enable the proto-ipv6-fragmentation feature for fragmentation support."
+                        );
+                        Ok(())
+                    }
                 } else {
                     tx_token.set_meta(meta);
 

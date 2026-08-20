@@ -518,9 +518,16 @@ pub(crate) struct Fragmenter {
     pub packet_len: usize,
     /// The amount of bytes that already have been transmitted.
     pub sent_bytes: usize,
+    #[cfg(any(
+        feature = "proto-ipv4-fragmentation",
+        feature = "proto-ipv6-fragmentation"
+    ))]
+    pub ip_version: Option<IpVersion>,
 
     #[cfg(feature = "proto-ipv4-fragmentation")]
     pub ipv4: Ipv4Fragmenter,
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    pub ipv6: Ipv6Fragmenter,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     pub sixlowpan: SixlowpanFragmenter,
 }
@@ -536,6 +543,14 @@ pub(crate) struct Ipv4Fragmenter {
     pub frag_offset: u16,
     /// The identifier of the stream.
     pub ident: u16,
+}
+
+#[cfg(feature = "proto-ipv6-fragmentation")]
+pub(crate) struct Ipv6Fragmenter {
+    pub repr: Ipv6Repr,
+    #[cfg(feature = "medium-ethernet")]
+    pub dst_hardware_addr: EthernetAddress,
+    pub ident: u32,
 }
 
 #[cfg(feature = "proto-sixlowpan-fragmentation")]
@@ -562,6 +577,11 @@ impl Fragmenter {
             buffer: [0u8; FRAGMENTATION_BUFFER_SIZE],
             packet_len: 0,
             sent_bytes: 0,
+            #[cfg(any(
+                feature = "proto-ipv4-fragmentation",
+                feature = "proto-ipv6-fragmentation"
+            ))]
+            ip_version: None,
 
             #[cfg(feature = "proto-ipv4-fragmentation")]
             ipv4: Ipv4Fragmenter {
@@ -575,6 +595,19 @@ impl Fragmenter {
                 #[cfg(feature = "medium-ethernet")]
                 dst_hardware_addr: EthernetAddress::default(),
                 frag_offset: 0,
+                ident: 0,
+            },
+            #[cfg(feature = "proto-ipv6-fragmentation")]
+            ipv6: Ipv6Fragmenter {
+                repr: Ipv6Repr {
+                    src_addr: Ipv6Address::UNSPECIFIED,
+                    dst_addr: Ipv6Address::UNSPECIFIED,
+                    next_header: IpProtocol::Unknown(0),
+                    payload_len: 0,
+                    hop_limit: 0,
+                },
+                #[cfg(feature = "medium-ethernet")]
+                dst_hardware_addr: EthernetAddress::default(),
                 ident: 0,
             },
 
@@ -606,6 +639,13 @@ impl Fragmenter {
     pub(crate) fn reset(&mut self) {
         self.packet_len = 0;
         self.sent_bytes = 0;
+        #[cfg(any(
+            feature = "proto-ipv4-fragmentation",
+            feature = "proto-ipv6-fragmentation"
+        ))]
+        {
+            self.ip_version = None;
+        }
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
         {
