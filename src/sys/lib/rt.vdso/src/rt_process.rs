@@ -634,8 +634,9 @@ fn run_elf(
         env.push((raw_env[idx], raw_env[num_keys + idx]));
     }
 
-    // TODO: remove CAP_LOG when the runtime is stabilized.
-    let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
+    // TODO: remove CAP_LOG from the default when the runtime is stabilized.
+    let mut caps =
+        moto_sys::caps::default_child_capabilities(moto_sys::ProcessStaticPage::get().capabilities);
     // Whether to spawn the child detached (owner = kernel, survives our exit).
     // Requested by an env var and consumed here, the same way caps are; the
     // kernel enforces that we actually hold CAP_SPAWN_DETACHED.
@@ -649,11 +650,10 @@ fn run_elf(
         if *k == moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY.as_bytes() {
             *k = "".as_bytes(); // Clear the key: see env::create_remote_env().
             let v = core::str::from_utf8(v).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
-            if let Ok(env_caps) = u64::from_str_radix(v.trim_start_matches("0x"), 16) {
-                caps = env_caps;
-            } else {
+            caps = u64::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|_| {
                 crate::moto_log!("could not parse caps {v}");
-            }
+                moto_rt::E_INVALID_ARGUMENT
+            })?;
         } else if *k == moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY.as_bytes() {
             *k = "".as_bytes(); // Clear the key so the child never sees it.
             if let Ok(s) = core::str::from_utf8(v) {

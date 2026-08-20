@@ -655,6 +655,7 @@ fn test_caps() {
 
     let self_caps = moto_sys::ProcessStaticPage::get().capabilities;
     assert_eq!(0, self_caps & CAP_SYS);
+    assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(self_caps));
 
     assert!(
         std::process::Command::new(std::env::args().next().unwrap())
@@ -688,6 +689,41 @@ fn test_caps() {
         ProcessRole::from_caps(self_caps),
         role_for(moto_sys::current_pid())
     );
+
+    let active_named = |prefix: &str| {
+        processes
+            .iter()
+            .find(|process| process.active != 0 && process.debug_name().starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing active process '{prefix}'"))
+    };
+    let sys_tty = active_named("/system/services/sys-tty");
+    let russhd = active_named("/system/services/russhd");
+    assert_eq!(ProcessRole::Interactive, role_for(sys_tty.pid));
+    assert_eq!(ProcessRole::Interactive, role_for(russhd.pid));
+
+    let console_shell = processes
+        .iter()
+        .find(|process| {
+            process.active != 0
+                && process.parent_pid == sys_tty.pid
+                && process.debug_name().starts_with("/system/bin/rush")
+        })
+        .expect("missing console rush");
+    assert_eq!(ProcessRole::Interactive, role_for(console_shell.pid));
+
+    let this_process = processes
+        .iter()
+        .find(|process| process.pid == moto_sys::current_pid())
+        .unwrap();
+    let ssh_shell = processes
+        .iter()
+        .find(|process| process.pid == this_process.parent_pid)
+        .expect("missing ssh shell");
+    assert!(ssh_shell.debug_name().starts_with("/system/bin/rush"));
+    assert_eq!(russhd.pid, ssh_shell.parent_pid);
+    assert_eq!(ProcessRole::Interactive, role_for(ssh_shell.pid));
+
+    spawn_wait_kill::test_default_capability_policy();
 
     println!("test_caps() PASS");
 }
@@ -930,6 +966,9 @@ fn main() {
     }
     if spawn_wait_kill::is_peer_caps_query_child(&args) {
         spawn_wait_kill::run_peer_caps_query_child();
+    }
+    if spawn_wait_kill::is_caps_policy_child(&args) {
+        spawn_wait_kill::run_caps_policy_child();
     }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();

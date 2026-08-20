@@ -221,6 +221,10 @@ fn nested_reader() -> ! {
 }
 
 fn delayed_writer(args: &[String]) -> ! {
+    assert_eq!(
+        moto_sys::caps::ProcessRole::Interactive,
+        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
+    );
     std::thread::sleep(std::time::Duration::from_millis(100));
     let result = moto_rt::fs::write(moto_rt::FD_STDOUT, b"survived");
     if args[2] == "direct" {
@@ -455,13 +459,20 @@ fn lifetime_and_pipe_counter_tests() {
 }
 
 fn privileged_lifetime_tests() {
+    assert_eq!(
+        moto_sys::caps::ProcessRole::Interactive,
+        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
+    );
     assert_ne!(
         moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SPAWN_DETACHED,
         0
     );
     let caps = format!(
         "0x{:x}",
-        moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_SPAWN_DETACHED
+        moto_sys::caps::CAP_SPAWN
+            | moto_sys::caps::CAP_LOG
+            | moto_sys::caps::CAP_SPAWN_DETACHED
+            | moto_sys::caps::CAP_INTERACTIVE
     );
     for route in ["direct", "relay"] {
         let output_path = crate::temp_path(&format!("stdio-lifetime-{route}"));

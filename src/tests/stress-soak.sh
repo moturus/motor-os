@@ -154,7 +154,7 @@ capture_forensics() {
     echo "--- ssh: stats get 2 (net), pass 2 ---";    VSSH_TMO=25 vssh /system/bin/stats get 2 2>&1
     echo "--- mdbg print-stacks for every listed pid ---"
     local pids
-    pids="$(VSSH_TMO=25 vssh /system/bin/ps 2>/dev/null | awk 'NR>1{gsub(/\*/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
+    pids="$(VSSH_TMO=25 vssh /system/bin/ps 2>/dev/null | awk 'NR>1{gsub(/[+*?]/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
     for p in $pids; do
       echo "### print-stacks pid $p ###"
       VSSH_TMO=30 vssh /devtools/bin/mdbg print-stacks "$p" 2>&1
@@ -356,12 +356,13 @@ gate_udp_socket_count
   gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
 
 resolver_pid="$(vssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || gate_fail "could not find dns-resolver"
 gate_ssh 30 "stop DNS resolver" /system/bin/kill "$resolver_pid"
 gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
-ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" /system/services/dns-resolver \
+ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
+  MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
   >>"$GATE_LOG" 2>&1 &
 DNS_RESOLVER_SSH_PID=$!
 resolver_restarted=0

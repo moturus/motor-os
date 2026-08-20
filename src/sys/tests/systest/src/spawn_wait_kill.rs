@@ -5,6 +5,7 @@ use crate::subcommand;
 const SHARED_LISTENER_CHILD: &str = "shared-listener-child";
 const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
 const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
+const CAPS_POLICY_CHILD: &str = "caps-policy-child";
 
 fn spawn_shared_listener() -> (
     std::process::Child,
@@ -81,6 +82,72 @@ pub fn run_peer_caps_query_child() -> ! {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).unwrap();
     std::process::exit(0)
+}
+
+fn probe_child_capabilities(mask: Option<&str>) -> Result<u64, std::io::Error> {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.arg(PEER_CAPS_QUERY_CHILD);
+    if let Some(mask) = mask {
+        command.env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, mask);
+    }
+    let output = command.output()?;
+    assert_eq!(Some(0), output.status.code());
+    Ok(std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap())
+}
+
+pub fn is_caps_policy_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == CAPS_POLICY_CHILD
+}
+
+pub fn run_caps_policy_child() -> ! {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SPAWN};
+
+    assert_eq!(CAP_SPAWN, moto_sys::ProcessStaticPage::get().capabilities);
+    assert_eq!(CAP_SPAWN, probe_child_capabilities(None).unwrap());
+
+    let error = probe_child_capabilities(Some(&format!("0x{CAP_INTERACTIVE:x}"))).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
+    std::process::exit(0)
+}
+
+pub fn test_default_capability_policy() {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, ProcessRole};
+
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
+    assert_eq!(
+        moto_sys::caps::default_child_capabilities(own),
+        probe_child_capabilities(None).unwrap()
+    );
+
+    let none_mask = CAP_SPAWN | CAP_LOG;
+    let demoted = probe_child_capabilities(Some(&format!("0x{none_mask:x}"))).unwrap();
+    assert_eq!(ProcessRole::None, ProcessRole::from_caps(demoted));
+
+    let error = probe_child_capabilities(Some("not-hex")).unwrap_err();
+    assert_eq!(
+        error.raw_os_error(),
+        Some(moto_rt::E_INVALID_ARGUMENT.into())
+    );
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(CAPS_POLICY_CHILD)
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{CAP_SPAWN:x}"),
+        )
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
+
+    // Keep the role bit named here: this test's restricted child explicitly
+    // proves that a None process cannot grant it.
+    assert_ne!(0, own & CAP_INTERACTIVE);
+    println!("test_default_capability_policy PASS");
 }
 
 pub fn test_peer_capabilities_query() {

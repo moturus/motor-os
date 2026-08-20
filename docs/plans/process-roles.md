@@ -723,3 +723,14 @@ patches in §10 are complete.
   and added derivation, stats, and real-child peer-query coverage. Validation:
   `cargo +nightly fmt`, `make -j20`, and three successful
   `src/tests/full-test.sh` runs each in debug and release mode.
+- **2026-08-19 — Patch 2 complete:** added role-aware default child
+  capabilities and fail-closed `MOTOR_OS_CAPS` parsing; made sys-init require
+  and apply every configured capability mask, including zero; granted
+  Interactive explicitly to sys-tty, console rush, russhd, authenticated ssh
+  sessions, and trusted detached rush children; and added focused inheritance,
+  demotion, grant-denial, config-parser, and live-role coverage. Updated test
+  scripts for role markers and explicit None-role service restarts. Validation:
+  `cargo +nightly fmt`, the debug build, focused unit/doctest/clippy checks, and
+  three successful `src/tests/full-test.sh` runs each in debug and release
+  mode. The pre-existing nondeterministic `test_cpus` prerequisite was fixed
+  and committed separately as `e6e2b917`.

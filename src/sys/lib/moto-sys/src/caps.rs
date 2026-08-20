@@ -59,6 +59,23 @@ impl ProcessRole {
     }
 }
 
+/// Returns the capabilities used for a spawn with no explicit capability mask.
+///
+/// Interactive authority follows an Interactive parent. System authority never
+/// follows implicitly, and defaults from non-System parents are restricted to
+/// capabilities the parent actually holds.
+pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
+    let role = ProcessRole::from_caps(parent_caps);
+    let mut child_caps = CAP_SPAWN | CAP_LOG;
+    if matches!(role, ProcessRole::Interactive) {
+        child_caps |= CAP_INTERACTIVE;
+    }
+    if !matches!(role, ProcessRole::System) {
+        child_caps &= parent_caps;
+    }
+    child_caps
+}
+
 impl TryFrom<u8> for ProcessRole {
     type Error = ();
 
@@ -82,3 +99,20 @@ pub const MOTOR_OS_CAPS_ENV_KEY: &str = "MOTOR_OS_CAPS";
 /// runtime (like [`MOTOR_OS_CAPS_ENV_KEY`]) and never seen by the child. The
 /// spawner must hold `CAP_SPAWN_DETACHED` or the spawn fails with `E_NOT_ALLOWED`.
 pub const MOTOR_OS_DETACHED_ENV_KEY: &str = "MOTOR_OS_DETACHED";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_child_caps_follow_only_interactive_authority() {
+        let ordinary = CAP_SPAWN | CAP_LOG;
+        assert_eq!(ordinary, default_child_capabilities(u64::MAX));
+        assert_eq!(
+            ordinary | CAP_INTERACTIVE,
+            default_child_capabilities(ordinary | CAP_INTERACTIVE)
+        );
+        assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN));
+        assert_eq!(0, default_child_capabilities(0));
+    }
+}
