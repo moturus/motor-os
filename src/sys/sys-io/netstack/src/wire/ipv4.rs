@@ -300,6 +300,13 @@ impl<T: AsRef<[u8]>> Packet<T> {
         NetworkEndian::read_u16(&data[field::IDENT])
     }
 
+    /// Return the reserved fragmentation flag.
+    #[inline]
+    pub fn reserved(&self) -> bool {
+        let data = self.buffer.as_ref();
+        NetworkEndian::read_u16(&data[field::FLG_OFF]) & 0x8000 != 0
+    }
+
     /// Return the "don't fragment" flag.
     #[inline]
     pub fn dont_frag(&self) -> bool {
@@ -737,6 +744,7 @@ pub(crate) mod test {
         assert_eq!(packet.ecn(), 0);
         assert_eq!(packet.total_len(), 30);
         assert_eq!(packet.ident(), 0x102);
+        assert!(!packet.reserved());
         assert!(packet.more_frags());
         assert!(packet.dont_frag());
         assert_eq!(packet.frag_offset(), 0x203 * 8);
@@ -747,6 +755,13 @@ pub(crate) mod test {
         assert_eq!(packet.dst_addr(), Address::new(0x21, 0x22, 0x23, 0x24));
         assert!(packet.verify_checksum());
         assert_eq!(packet.payload(), &PAYLOAD_BYTES[..]);
+    }
+
+    #[test]
+    fn test_reserved_flag() {
+        let mut bytes = PACKET_BYTES;
+        bytes[field::FLG_OFF.start] |= 0x80;
+        assert!(Packet::new_unchecked(&bytes[..]).reserved());
     }
 
     #[test]

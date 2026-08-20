@@ -1,5 +1,43 @@
 use super::*;
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
+fn validate_ipv4_fragment(packet: &Ipv4Packet<&[u8]>) -> Result<(), AssemblerError> {
+    let payload = packet.payload();
+    let offset = packet.frag_offset() as usize;
+
+    if packet.reserved() || packet.dont_frag() {
+        return Err(AssemblerError::Invalid);
+    }
+    if packet.more_frags() && (payload.is_empty() || !payload.len().is_multiple_of(8)) {
+        return Err(AssemblerError::Invalid);
+    }
+
+    let end = offset
+        .checked_add(payload.len())
+        .ok_or(AssemblerError::SizeLimit)?;
+    let header_len = if offset == 0 {
+        packet.header_len() as usize
+    } else {
+        IPV4_HEADER_LEN
+    };
+    if end > u16::MAX as usize - header_len {
+        return Err(AssemblerError::SizeLimit);
+    }
+
+    if offset == 0 && packet.more_frags() {
+        let header_complete = match packet.next_header() {
+            IpProtocol::Tcp => TcpPacket::new_checked(payload).is_ok(),
+            IpProtocol::Udp | IpProtocol::Icmp => payload.len() >= UDP_HEADER_LEN,
+            _ => true,
+        };
+        if !header_complete {
+            return Err(AssemblerError::Invalid);
+        }
+    }
+
+    Ok(())
+}
+
 impl Interface {
     /// Process fragments that still need to be sent for IPv4 packets.
     ///
@@ -83,6 +121,18 @@ impl InterfaceInner {
         address.x_is_unicast() && !self.is_broadcast_v4(address)
     }
 
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    fn accepts_ipv4_fragment_destination(&self, address: Ipv4Address) -> bool {
+        self.has_ip_addr(address)
+            || self.has_multicast_group(address)
+            || self.is_broadcast_v4(address)
+            || (address.x_is_unicast()
+                && self
+                    .routes
+                    .lookup(&IpAddress::Ipv4(address), self.now)
+                    .is_some_and(|router_addr| self.has_ip_addr(router_addr)))
+    }
+
     /// Get the first IPv4 address of the interface.
     pub fn ipv4_addr(&self) -> Option<Ipv4Address> {
         self.ip_addrs.iter().find_map(|addr| match *addr {
@@ -126,8 +176,18 @@ impl InterfaceInner {
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
         let (ip_payload, meta) = {
-            if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 {
+            if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 || ipv4_packet.reserved()
+            {
                 let key = FragKey::Ipv4(ipv4_packet.get_key());
+
+                if !self.accepts_ipv4_fragment_destination(ipv4_repr.dst_addr) {
+                    return None;
+                }
+                if let Err(error) = validate_ipv4_fragment(ipv4_packet) {
+                    let error = frag.assembler.reject_existing(&key, error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
 
                 let f = match frag.assembler.get(&key, self.now + frag.reassembly_timeout) {
                     Ok(f) => f,

@@ -115,6 +115,14 @@ impl<K> PacketAssembler<K> {
         error
     }
 
+    fn reject_existing(&mut self, error: AssemblerError) -> AssemblerError {
+        if self.poisoned {
+            AssemblerError::Poisoned
+        } else {
+            self.reject(error)
+        }
+    }
+
     fn ensure_len(&mut self, len: usize) -> Result<(), AssemblerError> {
         if len > REASSEMBLY_BUFFER_SIZE {
             return Err(self.reject(AssemblerError::SizeLimit));
@@ -320,6 +328,21 @@ impl<K: Eq + Copy> PacketAssemblerSet<K> {
         slot.key = Some(*key);
         slot.expires_at = expires_at;
         Ok(slot)
+    }
+
+    /// Reject a fragment without allocating state for a new key.
+    pub(crate) fn reject_existing(&mut self, key: &K, error: AssemblerError) -> AssemblerError {
+        self.assemblers
+            .iter_mut()
+            .find(|slot| slot.key.as_ref() == Some(key))
+            .map_or(error, |slot| slot.reject_existing(error))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.assemblers
+            .iter()
+            .any(|slot| slot.key.as_ref() == Some(key))
     }
 
     /// Remove expired assemblers and classify the reclaimed state.

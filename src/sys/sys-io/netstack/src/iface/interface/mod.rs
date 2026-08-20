@@ -34,7 +34,7 @@ use core::result::Result;
 use heapless::Vec;
 
 #[cfg(feature = "_proto-fragmentation")]
-use super::fragmentation::{FragKey, PacketAssemblerSet};
+use super::fragmentation::{AssemblerError, FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
