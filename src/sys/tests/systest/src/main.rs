@@ -140,38 +140,71 @@ fn test_reentrant_mutex() {
 }
 
 fn test_cpus() {
-    // Spin-loop until all CPUs have been "live".
-    let mut cpus: Arc<Vec<AtomicBool>> = Arc::new(vec![]);
-    for _i in 0..moto_sys::num_cpus() {
-        Arc::get_mut(&mut cpus)
-            .unwrap()
-            .push(AtomicBool::new(false));
-    }
+    let num_cpus = moto_sys::num_cpus();
+    assert_ne!(num_cpus, 0);
 
-    let num_threads: u16 = moto_sys::num_cpus() as u16;
+    let target = Arc::new(AtomicU32::new(u32::MAX));
+    let stop = Arc::new(AtomicBool::new(false));
+    let ready: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
 
-    let mut threads = vec![];
-    for _idx in 0..num_threads {
-        let cpus_clone = cpus.clone();
+    // Keep every CPU busy. CPU 0 cannot be an affinity target for this
+    // process, so its spinner is the only unpinned one; the other spinners
+    // leave CPU 0 as its natural placement.
+    let mut threads = Vec::with_capacity(num_cpus as usize);
+    for cpu in 0..num_cpus {
+        let target = target.clone();
+        let stop = stop.clone();
+        let ready = ready.clone();
         threads.push(std::thread::spawn(move || {
-            loop {
-                let cpu = moto_sys::current_cpu() as usize;
-                cpus_clone[cpu].store(true, Ordering::Relaxed);
+            if cpu != 0 {
+                moto_sys::SysCpu::affine_to_cpu(Some(cpu)).unwrap();
+            }
+            while moto_sys::current_cpu() != cpu {
+                std::hint::spin_loop();
+            }
+            ready[cpu as usize].store(true, Ordering::Release);
 
-                let mut count = 0;
-                for idx in 0..cpus_clone.len() {
-                    let cpu = &cpus_clone[idx];
-                    if cpu.load(Ordering::Relaxed) {
-                        count += 1;
-                    }
-                }
-
-                if count == moto_sys::num_cpus() {
-                    return;
+            while !stop.load(Ordering::Acquire) {
+                if target.load(Ordering::Acquire) == cpu {
+                    std::thread::park();
+                } else {
+                    std::hint::spin_loop();
                 }
             }
         }));
     }
+
+    while ready.iter().any(|ready| !ready.load(Ordering::Acquire)) {
+        std::hint::spin_loop();
+    }
+
+    let spinner_threads: Vec<_> = threads
+        .iter()
+        .map(|thread| thread.thread().clone())
+        .collect();
+    let probe_target = target.clone();
+    let probe_stop = stop.clone();
+    std::thread::spawn(move || {
+        for cpu in 0..num_cpus {
+            probe_target.store(cpu, Ordering::Release);
+            if cpu != 0 {
+                spinner_threads[(cpu - 1) as usize].unpark();
+            }
+
+            while moto_sys::current_cpu() != cpu {
+                std::hint::spin_loop();
+            }
+        }
+
+        probe_stop.store(true, Ordering::Release);
+        probe_target.store(u32::MAX, Ordering::Release);
+        for thread in spinner_threads {
+            thread.unpark();
+        }
+    })
+    .join()
+    .unwrap();
 
     for thread in threads {
         thread.join().unwrap();
