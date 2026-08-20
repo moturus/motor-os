@@ -14,6 +14,8 @@ use crate::serial::write_serial_raw;
 
 mod serial;
 
+const USER_HOME: &str = "/user";
+
 fn _putc(c: u8) {
     serial::write_serial_raw(std::slice::from_ref(&c));
 }
@@ -86,6 +88,7 @@ fn main() {
 
     let mut command = std::process::Command::new(fname);
     command.env_clear();
+    command.env("HOME", USER_HOME);
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
     // This explicit replacement mask keeps the console shell Interactive and
     // lets programs it trusts start daemons that outlive the session.
@@ -107,7 +110,7 @@ fn main() {
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    command.current_dir("/");
+    command.current_dir(USER_HOME);
 
     for arg in &words[1..] {
         command.arg(*arg);

@@ -44,6 +44,9 @@ pub const SHELL: &str = "/system/bin/rush";
 #[cfg(not(target_os = "motor"))]
 pub const SHELL: &str = "/bin/bash";
 
+#[cfg(target_os = "motor")]
+const USER_HOME: &str = "/user";
+
 /// The latest valid dimensions supplied for an SSH pseudo-terminal.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PtyGeometry {
@@ -194,6 +197,11 @@ pub async fn spawn(
     cmd.args(args);
     if !cfg.path().is_empty() {
         cmd.env("PATH", cfg.path());
+    }
+    #[cfg(target_os = "motor")]
+    {
+        cmd.current_dir(USER_HOME);
+        cmd.env("HOME", USER_HOME);
     }
     let terminal = configure_terminal(&mut cmd, pty);
 

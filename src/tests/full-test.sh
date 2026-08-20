@@ -337,6 +337,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
 fi
 [ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
+[ "$(vm_ssh /system/bin/pwd)" = "/user" ] ||
+  fail "russhd did not start the SSH command in /user"
+[ "$(vm_ssh /system/bin/printenv HOME)" = "HOME=/user" ] ||
+  fail "russhd did not set HOME to /user"
 rush_path="$(printf 'printenv PATH\nexit\n' |
   vm_ssh "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
