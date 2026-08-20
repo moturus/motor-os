@@ -2776,6 +2776,24 @@ fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
         payload_len: udp_repr.header_len() + payload.len(),
         hop_limit: 64,
     };
+    let mut expected_ids = super::super::ipv4::Ipv4FragmentIds::new([0; 16]);
+    let expected_ident = expected_ids.next(src_addr, dst_addr, IpProtocol::Udp);
+
+    let small_payload = [0x11];
+    let small_ip_repr = Ipv4Repr {
+        payload_len: udp_repr.header_len() + small_payload.len(),
+        ..ip_repr
+    };
+    assert_eq!(
+        iface.inner.dispatch_ip(
+            MockTxToken,
+            PacketMeta::default(),
+            Packet::new_ipv4(small_ip_repr, IpPayload::Udp(udp_repr, &small_payload),),
+            &mut iface.fragmenter,
+        ),
+        Ok(())
+    );
+    assert!(iface.fragmenter.is_empty());
 
     assert_eq!(
         iface.inner.dispatch_ip(
@@ -2800,6 +2818,7 @@ fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
 
     let staged_packet = iface.fragmenter.buffer[..ip_repr.payload_len].to_vec();
     let staged_ident = iface.fragmenter.ipv4.ident;
+    assert_eq!(staged_ident, expected_ident);
     let staged_offset = iface.fragmenter.ipv4.frag_offset;
     let second_payload = vec![0xa5; mtu * 2];
     assert_eq!(

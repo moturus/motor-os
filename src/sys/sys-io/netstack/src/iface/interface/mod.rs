@@ -54,7 +54,7 @@ use crate::iface::Slaac;
 use crate::phy::PacketMeta;
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
-#[cfg(feature = "socket-tcp")]
+#[cfg(any(feature = "socket-tcp", feature = "proto-ipv4-fragmentation"))]
 use crate::siphash::SipHasher24;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
@@ -155,7 +155,7 @@ pub struct InterfaceInner {
     #[cfg(feature = "medium-ieee802154")]
     pan_id: Option<Ieee802154Pan>,
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    ipv4_id: u16,
+    ipv4_fragment_ids: ipv4::Ipv4FragmentIds,
     #[cfg(feature = "proto-sixlowpan")]
     sixlowpan_address_context:
         Vec<SixlowpanAddressContext, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT>,
@@ -318,6 +318,13 @@ pub struct Config {
     /// The seed doesn't have to be cryptographically secure.
     pub random_seed: u64,
 
+    /// Key for assigning IPv4 fragment identifiers to tuple buckets.
+    ///
+    /// Draw this independently from the platform entropy source for every
+    /// interface. Tests may use a fixed value for deterministic identifiers.
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    pub ipv4_fragment_id_key: [u8; 16],
+
     /// Key for the TCP initial sequence number hash (RFC 6528).
     ///
     /// Unlike [`Config::random_seed`], this one does have to be unpredictable
@@ -391,6 +398,8 @@ impl Config {
     pub fn new(hardware_addr: HardwareAddress) -> Self {
         Config {
             random_seed: 0,
+            #[cfg(feature = "proto-ipv4-fragmentation")]
+            ipv4_fragment_id_key: [0; 16],
             #[cfg(feature = "socket-tcp")]
             tcp_isn_key: [0; 16],
             #[cfg(feature = "socket-tcp")]
@@ -426,6 +435,7 @@ impl Interface {
             "The hardware address does not match the medium of the interface."
         );
 
+        #[allow(unused_mut)]
         let mut rand = Rand::new(config.random_seed);
 
         #[cfg(feature = "medium-ieee802154")]
@@ -445,17 +455,6 @@ impl Interface {
         loop {
             tag = rand.rand_u16();
             if tag != 0 {
-                break;
-            }
-        }
-
-        #[cfg(feature = "proto-ipv4")]
-        let mut ipv4_id;
-
-        #[cfg(feature = "proto-ipv4")]
-        loop {
-            ipv4_id = rand.rand_u16();
-            if ipv4_id != 0 {
                 break;
             }
         }
@@ -493,7 +492,7 @@ impl Interface {
                 #[cfg(feature = "proto-sixlowpan-fragmentation")]
                 tag,
                 #[cfg(feature = "proto-ipv4-fragmentation")]
-                ipv4_id,
+                ipv4_fragment_ids: ipv4::Ipv4FragmentIds::new(config.ipv4_fragment_id_key),
                 #[cfg(feature = "proto-sixlowpan")]
                 sixlowpan_address_context: Vec::new(),
                 #[cfg(feature = "proto-ipv6-slaac")]
@@ -1904,9 +1903,6 @@ impl InterfaceInner {
 
         let caps = self.caps.clone();
 
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        let ipv4_id = self.next_ipv4_frag_ident();
-
         // First we calculate the total length that we will have to emit.
         let mut total_len = ip_repr.buffer_len();
 
@@ -1986,6 +1982,12 @@ impl InterfaceInner {
                             );
                             return Ok(());
                         }
+
+                        let ipv4_id = self.ipv4_fragment_ids.next(
+                            _repr.src_addr,
+                            _repr.dst_addr,
+                            _repr.next_header,
+                        );
 
                         #[cfg(feature = "medium-ethernet")]
                         {

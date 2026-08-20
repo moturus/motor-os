@@ -145,7 +145,7 @@ compile_error!("You must enable at most one of the following features: defmt, lo
 mod macros;
 mod parsers;
 mod rand;
-#[cfg(feature = "socket-tcp")]
+#[cfg(any(feature = "socket-tcp", feature = "proto-ipv4-fragmentation"))]
 mod siphash;
 
 #[cfg(test)]

@@ -1,6 +1,111 @@
 use super::*;
 
 #[cfg(feature = "proto-ipv4-fragmentation")]
+const IPV4_FRAGMENT_ID_BUCKETS: usize = 256;
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+pub(super) struct Ipv4FragmentIds {
+    key: SipHasher24,
+    counters: [u16; IPV4_FRAGMENT_ID_BUCKETS],
+    initialized: [u64; IPV4_FRAGMENT_ID_BUCKETS / u64::BITS as usize],
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+impl Ipv4FragmentIds {
+    pub(super) const fn new(key: [u8; 16]) -> Self {
+        Self {
+            key: SipHasher24::new(key),
+            counters: [0; IPV4_FRAGMENT_ID_BUCKETS],
+            initialized: [0; IPV4_FRAGMENT_ID_BUCKETS / u64::BITS as usize],
+        }
+    }
+
+    pub(super) fn next(
+        &mut self,
+        src_addr: Ipv4Address,
+        dst_addr: Ipv4Address,
+        protocol: IpProtocol,
+    ) -> u16 {
+        let mut tuple = [0_u8; 10];
+        tuple[1..5].copy_from_slice(&src_addr.octets());
+        tuple[5..9].copy_from_slice(&dst_addr.octets());
+        tuple[9] = protocol.into();
+        let bucket = self.key.hash(&tuple) as u8 as usize;
+        let word = bucket / u64::BITS as usize;
+        let bit = 1_u64 << (bucket % u64::BITS as usize);
+
+        if self.initialized[word] & bit == 0 {
+            let initial = self.key.hash(&[1, bucket as u8]) as u16;
+            self.counters[bucket] = if initial == 0 { 1 } else { initial };
+            self.initialized[word] |= bit;
+        }
+
+        let ident = self.counters[bucket];
+        self.counters[bucket] = ident.wrapping_add(1);
+        ident
+    }
+}
+
+#[cfg(all(test, feature = "proto-ipv4-fragmentation"))]
+mod fragment_id_tests {
+    use super::*;
+
+    const KEY: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+
+    fn bucket(
+        ids: &Ipv4FragmentIds,
+        src_addr: Ipv4Address,
+        dst_addr: Ipv4Address,
+        protocol: IpProtocol,
+    ) -> usize {
+        let mut tuple = [0_u8; 10];
+        tuple[1..5].copy_from_slice(&src_addr.octets());
+        tuple[5..9].copy_from_slice(&dst_addr.octets());
+        tuple[9] = protocol.into();
+        ids.key.hash(&tuple) as u8 as usize
+    }
+
+    #[test]
+    fn fragment_ids_follow_the_keyed_lazy_bucket_contract() {
+        let src_addr = Ipv4Address::new(192, 0, 2, 1);
+        let dst_addr = Ipv4Address::new(198, 51, 100, 9);
+        let mut ids = Ipv4FragmentIds::new(KEY);
+
+        let bucket_index = ids.key.hash(&[0, 192, 0, 2, 1, 198, 51, 100, 9, 17]) as u8 as usize;
+        let raw_initial = ids.key.hash(&[1, bucket_index as u8]) as u16;
+        let initial = if raw_initial == 0 { 1 } else { raw_initial };
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), initial);
+        assert_eq!(
+            ids.next(src_addr, dst_addr, IpProtocol::Udp),
+            initial.wrapping_add(1)
+        );
+        assert_eq!(
+            ids.initialized
+                .iter()
+                .map(|word| word.count_ones())
+                .sum::<u32>(),
+            1
+        );
+
+        let collision = (0..=u16::MAX)
+            .map(|tail| Ipv4Address::new(203, 0, (tail >> 8) as u8, tail as u8))
+            .find(|candidate| bucket(&ids, src_addr, *candidate, IpProtocol::Udp) == bucket_index)
+            .expect("the exhaustive candidate set has no bucket collision");
+        assert_eq!(
+            ids.next(src_addr, collision, IpProtocol::Udp),
+            initial.wrapping_add(2)
+        );
+
+        ids.counters[bucket_index] = u16::MAX;
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), u16::MAX);
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), 0);
+    }
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
 fn validate_ipv4_fragment(packet: &Ipv4Packet<&[u8]>) -> Result<(), AssemblerError> {
     let payload = packet.payload();
     let offset = packet.frag_offset() as usize;
@@ -72,14 +177,6 @@ impl Interface {
 }
 
 impl InterfaceInner {
-    /// Get the next IPv4 fragment identifier.
-    #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn next_ipv4_frag_ident(&mut self) -> u16 {
-        let ipv4_id = self.ipv4_id;
-        self.ipv4_id = self.ipv4_id.wrapping_add(1);
-        ipv4_id
-    }
-
     /// Get an IPv4 source address based on a destination address.
     ///
     /// This function tries to find the first IPv4 address from the interface
