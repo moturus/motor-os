@@ -832,6 +832,10 @@ fn main() {
         poll::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "test-moto-async" {
+        moto_async::run_all_tests();
+        return;
+    }
     if (args.len() == 2 || args.len() == 3) && args[1] == "listener-exhaustion-probe" {
         let cap = args.get(2).map_or(512, |arg| arg.parse().unwrap());
         admission::run_listener_exhaustion_probe(cap);

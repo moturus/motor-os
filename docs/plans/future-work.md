@@ -19,12 +19,15 @@ the ruling; nothing here should be picked up without a fresh call.
   buffer does not drain before teardown, which is why a vdso panic can
   present as silent exit-222.
 
-- **Investigate and fix the intermittent `moto_async` channel wake-elision
-  hang** (observed once during the 2026-08-20 networking debug gate).
-  `systest` stopped after `test_local_notify_notify_all_cancel`; the next
-  test, `test_wake_elision_counters`, never completed, while the VM remained
-  alive until the gate's 600-second timeout. If it recurs, capture focused
-  diagnostics around the cross-thread bounded-channel sender/receiver and
-  `LocalRuntime` polling/committing/parked transition, and fix the underlying
-  lost-progress race if the correction is clear. Do not hide it with retries
-  or a longer timeout.
+- **Resolved 2026-08-20: intermittent `moto_async` channel hang.**
+  It recurred in `test_moto_channel_multithreaded`; a focused unchanged
+  reproduction stalled on round 26. Two `mdbg` snapshots showed both sender
+  threads had exited while the receiver alone remained parked. The last
+  `Sender` used to wake the receiver from its `Drop` body before Rust
+  dropped the underlying MPMC sender field, allowing the receiver to register
+  after the early wake, still observe a connected empty channel, and sleep
+  forever. Sender teardown now drops the underlying endpoint before the
+  last-sender notifier. A deterministic regression holds teardown inside the
+  old gap while the receiver re-registers; the fixed focused suite then
+  passed 100 consecutive runs under the same stall detector. No retry or
+  timeout workaround was added.

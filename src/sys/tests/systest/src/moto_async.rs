@@ -392,6 +392,46 @@ fn test_channel_basic() {
     println!("----- moto_async::test_channel_basic PASS");
 }
 
+struct BlockingWake {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl std::task::Wake for BlockingWake {
+    fn wake(self: Arc<Self>) {
+        self.entered.wait();
+        self.release.wait();
+    }
+}
+
+fn test_channel_last_sender_drop_registration_race() {
+    let (sender, mut receiver) = moto_async::channel::<u8>(1);
+    let mut recv = core::pin::pin!(receiver.recv());
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let waker = std::task::Waker::from(Arc::new(BlockingWake {
+        entered: entered.clone(),
+        release: release.clone(),
+    }));
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(core::future::Future::poll(recv.as_mut(), &mut cx).is_pending());
+
+    let dropper = std::thread::spawn(move || drop(sender));
+    // Sender::drop has published a zero sender count and consumed our
+    // waiter, but its underlying MPMC sender field is deliberately alive
+    // until this blocking wake returns.
+    entered.wait();
+
+    let noop = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&noop);
+    let result = core::future::Future::poll(recv.as_mut(), &mut cx);
+
+    release.wait();
+    dropper.join().unwrap();
+    assert_eq!(result, Poll::Ready(None));
+    println!("----- moto_async::test_channel_last_sender_drop_registration_race PASS");
+}
+
 const SENDERS: u32 = 2;
 const CHANNEL_CAPACITY: usize = 16;
 
@@ -1032,6 +1072,7 @@ pub fn run_all_tests() {
     test_mutex_cancel_safety();
     test_oneshot();
     test_channel_basic();
+    test_channel_last_sender_drop_registration_race();
     test_moto_channel_multithreaded();
     test_futures_channel_multithreaded();
     test_sync_waiter_signal_coalescing();
