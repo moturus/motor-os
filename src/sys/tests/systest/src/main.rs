@@ -145,67 +145,129 @@ fn test_cpus() {
 
     let target = Arc::new(AtomicU32::new(u32::MAX));
     let stop = Arc::new(AtomicBool::new(false));
+    let spinning: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(true)).collect());
     let ready: Arc<Vec<AtomicBool>> =
         Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let stopped: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let running: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let touched: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let controller = std::thread::current();
 
     // Keep every CPU busy. CPU 0 cannot be an affinity target for this
     // process, so its spinner is the only unpinned one; the other spinners
-    // leave CPU 0 as its natural placement.
+    // leave CPU 0 as its natural placement. When resumed, spinner 0 yields
+    // anywhere else until it is back on CPU 0.
     let mut threads = Vec::with_capacity(num_cpus as usize);
     for cpu in 0..num_cpus {
-        let target = target.clone();
         let stop = stop.clone();
+        let spinning = spinning.clone();
         let ready = ready.clone();
+        let stopped = stopped.clone();
+        let running = running.clone();
+        let controller = controller.clone();
         threads.push(std::thread::spawn(move || {
             if cpu != 0 {
                 moto_sys::SysCpu::affine_to_cpu(Some(cpu)).unwrap();
             }
-            while moto_sys::current_cpu() != cpu {
-                std::hint::spin_loop();
-            }
-            ready[cpu as usize].store(true, Ordering::Release);
 
             while !stop.load(Ordering::Acquire) {
-                if target.load(Ordering::Acquire) == cpu {
-                    std::thread::park();
-                } else {
-                    std::hint::spin_loop();
+                if !spinning[cpu as usize].load(Ordering::Acquire) {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    stopped[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                    while !spinning[cpu as usize].load(Ordering::Acquire)
+                        && !stop.load(Ordering::Acquire)
+                    {
+                        std::thread::park();
+                    }
+                    stopped[cpu as usize].store(false, Ordering::Release);
+                    continue;
                 }
+
+                if moto_sys::current_cpu() != cpu {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    if ready[cpu as usize].load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                    continue;
+                }
+
+                if !running[cpu as usize].swap(true, Ordering::AcqRel) {
+                    ready[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                }
+                std::hint::spin_loop();
             }
         }));
     }
 
     while ready.iter().any(|ready| !ready.load(Ordering::Acquire)) {
-        std::hint::spin_loop();
+        std::thread::park();
     }
 
-    let spinner_threads: Vec<_> = threads
-        .iter()
-        .map(|thread| thread.thread().clone())
-        .collect();
     let probe_target = target.clone();
     let probe_stop = stop.clone();
-    std::thread::spawn(move || {
-        for cpu in 0..num_cpus {
-            probe_target.store(cpu, Ordering::Release);
-            if cpu != 0 {
-                spinner_threads[(cpu - 1) as usize].unpark();
+    let probe_touched = touched.clone();
+    let probe_ready = Arc::new(AtomicBool::new(false));
+    let child_ready = probe_ready.clone();
+    let probe_controller = controller.clone();
+    let probe = std::thread::spawn(move || {
+        child_ready.store(true, Ordering::Release);
+        probe_controller.unpark();
+        while !probe_stop.load(Ordering::Acquire) {
+            let cpu = probe_target.load(Ordering::Acquire);
+            if cpu < num_cpus && moto_sys::current_cpu() == cpu {
+                if !probe_touched[cpu as usize].swap(true, Ordering::AcqRel) {
+                    probe_controller.unpark();
+                }
             }
-
-            while moto_sys::current_cpu() != cpu {
-                std::hint::spin_loop();
-            }
+            std::hint::spin_loop();
         }
+    });
 
-        probe_stop.store(true, Ordering::Release);
-        probe_target.store(u32::MAX, Ordering::Release);
-        for thread in spinner_threads {
-            thread.unpark();
+    while !probe_ready.load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    spinning[0].store(false, Ordering::Release);
+    while !stopped[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+    target.store(0, Ordering::Release);
+    while !touched[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    for cpu in 1..num_cpus {
+        spinning[cpu as usize].store(false, Ordering::Release);
+        while !stopped[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
         }
-    })
-    .join()
-    .unwrap();
+        target.store(cpu, Ordering::Release);
 
+        let previous = (cpu - 1) as usize;
+        spinning[previous].store(true, Ordering::Release);
+        threads[previous].thread().unpark();
+        while !running[previous].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        while !touched[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+
+    stop.store(true, Ordering::Release);
+    for (cpu, thread) in threads.iter().enumerate() {
+        spinning[cpu].store(true, Ordering::Release);
+        thread.thread().unpark();
+    }
+    probe.join().unwrap();
     for thread in threads {
         thread.join().unwrap();
     }
