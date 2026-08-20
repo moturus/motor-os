@@ -262,9 +262,10 @@ fn load_object(workspace: &Path, locked: &LockedSource, policy: &PolicyLimits) -
     let root = object_root(workspace, &locked.cargo_source);
     let metadata = fs::symlink_metadata(&root).map_err(|error| {
         Error::failure(format!(
-            "Git source `{}` is not materialized: {error}",
+            "Git source is not materialized\n  source: `{}`\n  reason: {error}",
             locked.cargo_source
         ))
+        .with_help("run `lorry vendor [--accept-all]` to materialize the locked Git source")
     })?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(Error::failure(format!(
@@ -646,6 +647,23 @@ mod tests {
             .err()
             .expect("tampered object must fail");
         assert!(error.to_string().contains("changed after approval"));
+        fs::remove_dir_all(workspace).expect("test root is removed");
+    }
+
+    #[test]
+    fn missing_object_diagnostic_is_structured_and_actionable() {
+        let workspace = root("missing-object");
+        let locked = locked();
+
+        let error = load_object(&workspace, &locked, &PolicyLimits::default())
+            .err()
+            .expect("missing object must fail")
+            .render();
+
+        assert!(error.starts_with("error: Git source is not materialized\n"));
+        assert!(error.contains(&format!("  source: `{}`\n", locked.cargo_source)));
+        assert!(error.contains("  reason: "));
+        assert!(error.contains("\nhelp: run `lorry vendor [--accept-all]`"));
         fs::remove_dir_all(workspace).expect("test root is removed");
     }
 }
