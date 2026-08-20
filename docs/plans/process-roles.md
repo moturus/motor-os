@@ -1,7 +1,8 @@
 # Process Roles — System / Interactive / None
 
-Status: **implementation in progress** (patches 1–3 complete; codebase-reviewed
-2026-08-18; review findings folded in 2026-08-19). Companion to
+Status: **implemented and validated** (patches 1–4 complete; codebase-reviewed
+2026-08-18; review findings folded in 2026-08-19; implementation completed
+2026-08-19). Companion to
 `src/sys/lib/motor-fs/PERMISSIONS_DESIGN.md`, which defines the FS-side
 consumer of the three roles and deliberately leaves their *origin*
 unspecified ("a trusted input supplied from above the FS").
@@ -745,3 +746,11 @@ patches in §10 are complete.
   `src/tests/full-test.sh` runs each in debug and release mode. The CPU
   migration test follow-up was committed separately as `da0bb2e7`; the
   concurrent-spawn validation blocker was resolved by `be27cbf0`.
+- **2026-08-19 — Patch 4 complete:** rt.vdso's standard loader now requires
+  the caller-visible `x` bit on the requested ELF or script before inspecting
+  its contents, and independently requires `x` on a shebang interpreter before
+  allocating or loading its image. Added systest controls for an executable ELF
+  and script plus exact `E_NOT_ALLOWED` coverage after removing `x` from the ELF
+  and copied interpreter. Process-role observability was already completed in
+  Patch 1. Validation: `cargo +nightly fmt`, focused debug builds, and three
+  successful `src/tests/full-test.sh` runs each in debug and release mode.

@@ -6,6 +6,7 @@ mod admission;
 // mod channel_test;
 mod command_output;
 mod descriptor_attr;
+mod execute_permissions;
 mod file_locking;
 mod fs;
 mod fs_permissions;
@@ -1139,6 +1140,7 @@ fn main() {
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
     fs_permissions::run_all_tests();
+    execute_permissions::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;

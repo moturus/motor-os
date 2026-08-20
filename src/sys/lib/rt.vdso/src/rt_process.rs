@@ -182,6 +182,17 @@ fn is_script(buf: &[u8]) -> bool {
     buf[0..3] == SCRIPT_MAGIC
 }
 
+fn executable_file_size(fd: moto_rt::RtFd) -> Result<u64, ErrorCode> {
+    let attr = moto_rt::fs::get_file_attr(fd)?;
+    if attr.perm & moto_rt::fs::PERM_EXEC == 0 {
+        return Err(moto_rt::E_NOT_ALLOWED);
+    }
+    if attr.size < 4 {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    Ok(attr.size)
+}
+
 fn run_script(
     script: String,
     script_fd: moto_rt::RtFd, // Note: the caller closes fd.
@@ -208,7 +219,8 @@ fn run_script(
 
     let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
 
-    let res = run_elf(exe, fd, Some(script), args, stdio, result_rt);
+    let res = executable_file_size(fd)
+        .and_then(|file_sz| run_elf(exe, fd, file_sz, Some(script), args, stdio, result_rt));
     moto_rt::fs::close(fd).unwrap();
     res
 }
@@ -554,6 +566,7 @@ fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
 fn run_elf(
     exe: String,
     fd: moto_rt::RtFd, // Note: the caller closes fd.
+    file_sz: u64,
     prepend_arg: Option<String>,
     args_rt: &moto_rt::process::SpawnArgsRt,
     stdio: &mut crate::stdio::PreparedChildStdio,
@@ -565,16 +578,11 @@ fn run_elf(
     //       i.e. don't load anything from storage until it is actually
     //       needed (this is what Linux does, I believe).
 
-    // First, load the binary info RAM.
-    let file_sz = moto_rt::fs::get_file_attr(fd)?.size;
-    if file_sz < 4 {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
-
+    // First, load the binary into RAM.
     let (page_size, num_pages) = {
         (
             moto_sys::sys_mem::PAGE_SIZE_SMALL,
-            moto_sys::align_up(file_sz as u64, moto_sys::sys_mem::PAGE_SIZE_SMALL)
+            moto_sys::align_up(file_sz, moto_sys::sys_mem::PAGE_SIZE_SMALL)
                 >> moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2,
         )
     };
@@ -761,15 +769,9 @@ unsafe fn spawn_impl(
     let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
 
     // Check if this is an elf file or a script.
-    let file_sz = moto_rt::fs::get_file_attr(fd)
-        .inspect_err(|_| {
-            moto_rt::fs::close(fd).unwrap();
-        })?
-        .size;
-    if file_sz < 4 {
+    let file_sz = executable_file_size(fd).inspect_err(|_| {
         moto_rt::fs::close(fd).unwrap();
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
+    })?;
     let mut buf: [u8; 4] = [0; 4];
 
     let sz = moto_rt::fs::read(fd, &mut buf).inspect_err(|_| {
@@ -784,7 +786,7 @@ unsafe fn spawn_impl(
         moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
         })?;
-        let res = run_elf(exe, fd, None, args_rt, &mut stdio, result_rt);
+        let res = run_elf(exe, fd, file_sz, None, args_rt, &mut stdio, result_rt);
         moto_rt::fs::close(fd).unwrap();
         return res;
     }
