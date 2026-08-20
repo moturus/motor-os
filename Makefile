@@ -243,13 +243,9 @@ dev-sources:
 
 # The images share imager scratch files and vm_images/$(IMG_CMD). Compilation
 # remains parallel, but the short imaging steps take a common host lock. Each
-# recipe removes only its own image; test.key is read-only, hence cp -f. Remove
-# retired helpers because copying into an existing output directory cannot.
+# recipe removes only its own image; test.key is read-only, hence cp -f.
 define INSTALL_VM_SCRIPTS
-	flock "$(IMAGER_LOCK)" sh -c 'rm -f \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/run-puff.sh" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/puff-vm.toml" && \
-		cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
+	flock "$(IMAGER_LOCK)" sh -c 'cp -f "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/" && \
 		chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"'
 endef
