@@ -70,6 +70,22 @@ pub(crate) struct Ipv4ReassemblyContext {
     pub(crate) header_len: usize,
 }
 
+#[cfg(feature = "proto-ipv6-fragmentation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Ipv6FragKey {
+    pub(crate) src_addr: Ipv6Address,
+    pub(crate) dst_addr: Ipv6Address,
+    pub(crate) ident: u32,
+}
+
+#[cfg(feature = "proto-ipv6-fragmentation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ipv6ReassemblyContext {
+    pub(crate) repr: Option<Ipv6Repr>,
+    pub(crate) next_header: IpProtocol,
+    pub(crate) unfragmentable_len: usize,
+}
+
 /// Holds the bounded state for one fragmented packet.
 #[derive(Debug)]
 pub struct PacketAssembler<K> {
@@ -81,6 +97,8 @@ pub struct PacketAssembler<K> {
     poisoned: bool,
     #[cfg(feature = "proto-ipv4-fragmentation")]
     ipv4_context: Option<Ipv4ReassemblyContext>,
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    ipv6_context: Option<Ipv6ReassemblyContext>,
 }
 
 impl<K> PacketAssembler<K> {
@@ -95,6 +113,8 @@ impl<K> PacketAssembler<K> {
             poisoned: false,
             #[cfg(feature = "proto-ipv4-fragmentation")]
             ipv4_context: None,
+            #[cfg(feature = "proto-ipv6-fragmentation")]
+            ipv6_context: None,
         }
     }
 
@@ -107,6 +127,10 @@ impl<K> PacketAssembler<K> {
         #[cfg(feature = "proto-ipv4-fragmentation")]
         {
             self.ipv4_context = None;
+        }
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        {
+            self.ipv6_context = None;
         }
     }
 
@@ -129,6 +153,10 @@ impl<K> PacketAssembler<K> {
             #[cfg(feature = "proto-ipv4-fragmentation")]
             {
                 self.ipv4_context = None;
+            }
+            #[cfg(feature = "proto-ipv6-fragmentation")]
+            {
+                self.ipv6_context = None;
             }
         }
         error
@@ -154,7 +182,40 @@ impl<K> PacketAssembler<K> {
         self.ipv4_context
     }
 
-    #[cfg(feature = "proto-ipv4-fragmentation")]
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    pub(crate) fn observe_ipv6_context(
+        &mut self,
+        repr: Ipv6Repr,
+        next_header: IpProtocol,
+        unfragmentable_len: usize,
+        is_first: bool,
+    ) -> Result<(), AssemblerError> {
+        if self.poisoned {
+            return Err(AssemblerError::Poisoned);
+        }
+
+        if self.ipv6_context.is_some_and(|context| {
+            context.next_header != next_header || context.unfragmentable_len != unfragmentable_len
+        }) {
+            return Err(self.reject(AssemblerError::Invalid));
+        }
+
+        let context = self.ipv6_context.get_or_insert(Ipv6ReassemblyContext {
+            repr: None,
+            next_header,
+            unfragmentable_len,
+        });
+        if is_first && context.repr.is_none() {
+            context.repr = Some(repr);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    pub(crate) fn ipv6_context(&self) -> Option<Ipv6ReassemblyContext> {
+        self.ipv6_context
+    }
+
     pub(crate) fn enforce_max_size(
         &mut self,
         max_size: usize,
@@ -421,6 +482,8 @@ pub(crate) const MAX_DECOMPRESSED_LEN: usize = 1500;
 pub(crate) enum FragKey {
     #[cfg(feature = "proto-ipv4-fragmentation")]
     Ipv4(Ipv4FragKey),
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    Ipv6(Ipv6FragKey),
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     Sixlowpan(SixlowpanFragKey),
 }
@@ -675,7 +738,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "proto-ipv4-fragmentation")]
     fn packet_assembler_enforces_a_late_protocol_size_limit() {
         let mut assembler = PacketAssembler::<Key>::new();
         assembler.add(b"data", 8).unwrap();
@@ -687,6 +749,64 @@ mod tests {
         );
         assert!(assembler.poisoned);
         assert!(assembler.buffer.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    fn packet_assembler_retains_ipv6_offset_zero_context() {
+        let mut assembler = PacketAssembler::<Key>::new();
+        let mut repr = Ipv6Repr {
+            src_addr: Ipv6Address::LOCALHOST,
+            dst_addr: Ipv6Address::UNSPECIFIED,
+            next_header: IpProtocol::Ipv6Frag,
+            payload_len: 16,
+            hop_limit: 64,
+        };
+
+        assembler
+            .observe_ipv6_context(repr, IpProtocol::Udp, 0, false)
+            .unwrap();
+        assert_eq!(assembler.ipv6_context().unwrap().repr, None);
+
+        repr.hop_limit = 63;
+        assembler
+            .observe_ipv6_context(repr, IpProtocol::Udp, 0, true)
+            .unwrap();
+        assert_eq!(assembler.ipv6_context().unwrap().repr, Some(repr));
+
+        let retained = repr;
+        repr.hop_limit = 62;
+        assembler
+            .observe_ipv6_context(repr, IpProtocol::Udp, 0, true)
+            .unwrap();
+        assert_eq!(assembler.ipv6_context().unwrap().repr, Some(retained));
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    fn packet_assembler_poisoned_by_ipv6_context_mismatch() {
+        let mut assembler = PacketAssembler::<Key>::new();
+        let repr = Ipv6Repr {
+            src_addr: Ipv6Address::LOCALHOST,
+            dst_addr: Ipv6Address::UNSPECIFIED,
+            next_header: IpProtocol::Ipv6Frag,
+            payload_len: 16,
+            hop_limit: 64,
+        };
+        assembler
+            .observe_ipv6_context(repr, IpProtocol::Udp, 0, false)
+            .unwrap();
+        assembler.add(b"fragment", 8).unwrap();
+
+        assert_eq!(
+            assembler.observe_ipv6_context(repr, IpProtocol::Tcp, 0, true),
+            Err(AssemblerError::Invalid)
+        );
+        assert!(assembler.poisoned);
+        assert_eq!(
+            assembler.observe_ipv6_context(repr, IpProtocol::Udp, 0, true),
+            Err(AssemblerError::Poisoned)
+        );
     }
 
     #[test]
