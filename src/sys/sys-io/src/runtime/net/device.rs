@@ -893,6 +893,8 @@ impl<'a> NetDev<'a> {
 
         // One poll drains the whole receive queue, so a batch of dropped
         // frames costs one counter update here rather than one per frame.
+        stats.add_ip_packet_stats(iface.take_ip_packet_stats());
+
         let csum_failed = iface.take_rx_csum_failed();
         if csum_failed != 0 {
             log::warn!("{name}: dropped {csum_failed} frames with a bad TCP/UDP checksum.");

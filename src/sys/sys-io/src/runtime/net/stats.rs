@@ -94,6 +94,22 @@ mod ids {
     // that queue's hard limits.
     pub const NET_TCP_ACCEPT_BACKLOG: u32 = 49;
     pub const NET_TCP_ACCEPT_OVERFLOW: u32 = 50;
+
+    // IP fragmentation, reassembly, and path-MTU discovery.
+    pub const NET_IPV4_FRAGMENTS_RX: u32 = 51;
+    pub const NET_IPV6_FRAGMENTS_RX: u32 = 52;
+    pub const NET_IPV4_FRAGMENTS_TX: u32 = 53;
+    pub const NET_IPV6_FRAGMENTS_TX: u32 = 54;
+    pub const NET_REASSEMBLIES_COMPLETED: u32 = 55;
+    pub const NET_REASSEMBLY_MALFORMED_DROPS: u32 = 56;
+    pub const NET_REASSEMBLY_NO_SLOT_DROPS: u32 = 57;
+    pub const NET_REASSEMBLY_ALLOCATION_DROPS: u32 = 58;
+    pub const NET_REASSEMBLY_EXPIRY_DROPS: u32 = 59;
+    pub const NET_REASSEMBLY_DUPLICATES: u32 = 60;
+    pub const NET_REASSEMBLY_RANGE_LIMIT_DROPS: u32 = 61;
+    pub const NET_EGRESS_FRAGMENT_STAGE_BUSY_DROPS: u32 = 62;
+    pub const NET_PMTU_UPDATES_ACCEPTED: u32 = 63;
+    pub const NET_ICMP_PMTU_MESSAGES_REJECTED: u32 = 64;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -263,6 +279,23 @@ pub(super) struct NetStats {
     /// ACKs with MTU-framed data, and only the second leaves room to coalesce.
     pub rx_size: [Cell<u64>; RX_SIZE_BUCKETS.len() + 1],
 
+    // IP fragmentation, reassembly, and path-MTU discovery. These accumulate
+    // the drain-on-read per-interface counters in moto-netstack.
+    pub ipv4_fragments_rx: Cell<u64>,
+    pub ipv6_fragments_rx: Cell<u64>,
+    pub ipv4_fragments_tx: Cell<u64>,
+    pub ipv6_fragments_tx: Cell<u64>,
+    pub reassemblies_completed: Cell<u64>,
+    pub reassembly_malformed_drops: Cell<u64>,
+    pub reassembly_no_slot_drops: Cell<u64>,
+    pub reassembly_allocation_drops: Cell<u64>,
+    pub reassembly_expiry_drops: Cell<u64>,
+    pub reassembly_duplicates: Cell<u64>,
+    pub reassembly_range_limit_drops: Cell<u64>,
+    pub egress_fragment_stage_busy_drops: Cell<u64>,
+    pub pmtu_updates_accepted: Cell<u64>,
+    pub icmp_pmtu_messages_rejected: Cell<u64>,
+
     // Memory pressure mode; see [`super::pressure`]. The active gauge has no
     // field: it is the kernel's shared-page flag, read at snapshot time.
     /// Episodes sys-io noticed: counted on the first refusal or deferral of
@@ -283,6 +316,32 @@ pub(super) struct NetStats {
 }
 
 impl NetStats {
+    pub(super) fn add_ip_packet_stats(&self, sample: moto_netstack::iface::IpPacketStats) {
+        macro_rules! accumulate {
+            ($field:ident) => {
+                if sample.$field != 0 {
+                    self.$field
+                        .set(self.$field.get().wrapping_add(sample.$field));
+                }
+            };
+        }
+
+        accumulate!(ipv4_fragments_rx);
+        accumulate!(ipv6_fragments_rx);
+        accumulate!(ipv4_fragments_tx);
+        accumulate!(ipv6_fragments_tx);
+        accumulate!(reassemblies_completed);
+        accumulate!(reassembly_malformed_drops);
+        accumulate!(reassembly_no_slot_drops);
+        accumulate!(reassembly_allocation_drops);
+        accumulate!(reassembly_expiry_drops);
+        accumulate!(reassembly_duplicates);
+        accumulate!(reassembly_range_limit_drops);
+        accumulate!(egress_fragment_stage_busy_drops);
+        accumulate!(pmtu_updates_accepted);
+        accumulate!(icmp_pmtu_messages_rejected);
+    }
+
     /// Build a snapshot of the metrics in moto-stats wire form. Mirrors
     /// [`descriptors`].
     fn entries(&self) -> Vec<MetricEntry> {
@@ -357,6 +416,53 @@ impl NetStats {
             ),
             MetricEntry::global(ids::NET_TCP_ACCEPT_BACKLOG, self.tcp_accept_backlog.get()),
             MetricEntry::global(ids::NET_TCP_ACCEPT_OVERFLOW, self.tcp_accept_overflow.get()),
+        ]);
+
+        entries.extend([
+            MetricEntry::global(ids::NET_IPV4_FRAGMENTS_RX, self.ipv4_fragments_rx.get()),
+            MetricEntry::global(ids::NET_IPV6_FRAGMENTS_RX, self.ipv6_fragments_rx.get()),
+            MetricEntry::global(ids::NET_IPV4_FRAGMENTS_TX, self.ipv4_fragments_tx.get()),
+            MetricEntry::global(ids::NET_IPV6_FRAGMENTS_TX, self.ipv6_fragments_tx.get()),
+            MetricEntry::global(
+                ids::NET_REASSEMBLIES_COMPLETED,
+                self.reassemblies_completed.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_MALFORMED_DROPS,
+                self.reassembly_malformed_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_NO_SLOT_DROPS,
+                self.reassembly_no_slot_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_ALLOCATION_DROPS,
+                self.reassembly_allocation_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_EXPIRY_DROPS,
+                self.reassembly_expiry_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_DUPLICATES,
+                self.reassembly_duplicates.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_REASSEMBLY_RANGE_LIMIT_DROPS,
+                self.reassembly_range_limit_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_EGRESS_FRAGMENT_STAGE_BUSY_DROPS,
+                self.egress_fragment_stage_busy_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_PMTU_UPDATES_ACCEPTED,
+                self.pmtu_updates_accepted.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_ICMP_PMTU_MESSAGES_REJECTED,
+                self.icmp_pmtu_messages_rejected.get(),
+            ),
         ]);
 
         entries.extend([
@@ -444,6 +550,44 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         ),
         MetricDescWire::new(ids::NET_TCP_ACCEPT_BACKLOG, "net.tcp.accept_backlog"),
         MetricDescWire::new(ids::NET_TCP_ACCEPT_OVERFLOW, "net.tcp.accept_overflow"),
+    ]);
+
+    descriptors.extend([
+        MetricDescWire::new(ids::NET_IPV4_FRAGMENTS_RX, "net.ipv4.fragments_rx"),
+        MetricDescWire::new(ids::NET_IPV6_FRAGMENTS_RX, "net.ipv6.fragments_rx"),
+        MetricDescWire::new(ids::NET_IPV4_FRAGMENTS_TX, "net.ipv4.fragments_tx"),
+        MetricDescWire::new(ids::NET_IPV6_FRAGMENTS_TX, "net.ipv6.fragments_tx"),
+        MetricDescWire::new(ids::NET_REASSEMBLIES_COMPLETED, "net.reassembly.completed"),
+        MetricDescWire::new(
+            ids::NET_REASSEMBLY_MALFORMED_DROPS,
+            "net.reassembly.malformed_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_REASSEMBLY_NO_SLOT_DROPS,
+            "net.reassembly.no_slot_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_REASSEMBLY_ALLOCATION_DROPS,
+            "net.reassembly.allocation_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_REASSEMBLY_EXPIRY_DROPS,
+            "net.reassembly.expiry_drops",
+        ),
+        MetricDescWire::new(ids::NET_REASSEMBLY_DUPLICATES, "net.reassembly.duplicates"),
+        MetricDescWire::new(
+            ids::NET_REASSEMBLY_RANGE_LIMIT_DROPS,
+            "net.reassembly.range_limit_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_EGRESS_FRAGMENT_STAGE_BUSY_DROPS,
+            "net.fragment.stage_busy_drops",
+        ),
+        MetricDescWire::new(ids::NET_PMTU_UPDATES_ACCEPTED, "net.pmtu.updates_accepted"),
+        MetricDescWire::new(
+            ids::NET_ICMP_PMTU_MESSAGES_REJECTED,
+            "net.pmtu.icmp_messages_rejected",
+        ),
     ]);
 
     descriptors.extend([
@@ -685,6 +829,10 @@ pub(crate) mod self_test {
             "net::stats::every_metric_is_described",
             every_metric_is_described,
         ),
+        (
+            "net::stats::ip_packet_counters_accumulate_and_wrap",
+            ip_packet_counters_accumulate_and_wrap,
+        ),
     ];
 
     /// Each bound is the last length its own bucket takes.
@@ -703,6 +851,23 @@ pub(crate) mod self_test {
         st_assert_eq!(rx_size_bucket(0), 0);
         st_assert_eq!(rx_size_bucket(usize::MAX), RX_SIZE_BUCKETS.len());
         st_assert!(RX_SIZE_BUCKETS.is_sorted());
+        Ok(())
+    }
+
+    fn ip_packet_counters_accumulate_and_wrap() -> Result<(), String> {
+        let stats = NetStats::default();
+        stats.ipv4_fragments_rx.set(u64::MAX);
+        stats.add_ip_packet_stats(moto_netstack::iface::IpPacketStats {
+            ipv4_fragments_rx: 2,
+            reassembly_range_limit_drops: 3,
+            pmtu_updates_accepted: 5,
+            ..Default::default()
+        });
+
+        st_assert_eq!(stats.ipv4_fragments_rx.get(), 1);
+        st_assert_eq!(stats.reassembly_range_limit_drops.get(), 3);
+        st_assert_eq!(stats.pmtu_updates_accepted.get(), 5);
+        st_assert_eq!(stats.ipv6_fragments_rx.get(), 0);
         Ok(())
     }
 
