@@ -359,6 +359,83 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
+    fn tcp_dispatch_sizes(max_tso_size: usize) -> (usize, u16) {
+        let (mut iface, _, _) = setup(Medium::Ip);
+        iface.inner.caps.max_tso_size = max_tso_size;
+        let local = IpEndpoint::new(IpAddress::v4(192, 168, 1, 1), SRC_PORT);
+        let remote = IpEndpoint::new(IpAddress::v4(192, 168, 1, 2), DST_PORT);
+        let interface_mtu = iface.inner.ip_mtu();
+        assert!(iface.inner.routes.update_pmtu(
+            remote.addr,
+            1_200,
+            1_400,
+            interface_mtu,
+            Instant::ZERO,
+        ));
+
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 8_192]),
+            tcp::SocketBuffer::new(vec![0; 8_192]),
+        );
+        socket
+            .restore_from_cookie(
+                iface.context(),
+                &tcp::TcpCookieRestore {
+                    local,
+                    remote,
+                    rcv_nxt: TcpSeqNumber(20_000),
+                    snd_nxt: TcpSeqNumber(10_000),
+                    remote_mss: 1_460,
+                    remote_window: 8_192,
+                    peer_wscale: None,
+                    peer_sack: true,
+                    peer_tsval: None,
+                },
+            )
+            .unwrap();
+        socket.send_slice(&vec![0xa5; 3_000]).unwrap();
+
+        let mut observed = None;
+        socket
+            .dispatch(iface.context(), |_, meta, (_, tcp)| {
+                observed = Some((tcp.payload.len(), meta.tso_seg_size));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        observed.unwrap()
+    }
+
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
+    #[test]
+    fn cached_pmtu_limits_tcp_segments_and_tso_but_not_syn_mss() {
+        assert_eq!(tcp_dispatch_sizes(0), (1_160, 0));
+        assert_eq!(tcp_dispatch_sizes(4_096), (3_000, 1_160));
+
+        let (mut iface, _, _) = setup(Medium::Ip);
+        let local = IpEndpoint::new(IpAddress::v4(192, 168, 1, 1), SRC_PORT);
+        let remote = IpEndpoint::new(IpAddress::v4(192, 168, 1, 2), DST_PORT);
+        let interface_mtu = iface.inner.ip_mtu();
+        assert!(iface.inner.routes.update_pmtu(
+            remote.addr,
+            1_200,
+            1_400,
+            interface_mtu,
+            Instant::ZERO,
+        ));
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.connect(iface.context(), remote, local).unwrap();
+        socket
+            .dispatch(iface.context(), |_, _, (_, tcp)| {
+                assert_eq!(tcp.max_seg_size, Some(1_460));
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+    }
+
     #[cfg(feature = "proto-ipv6")]
     fn ipv6_quote(next_header: IpProtocol, payload_len: usize, payload: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0; 40 + payload.len()];

@@ -3387,15 +3387,16 @@ impl<'a> Socket<'a> {
     }
 
     fn seq_to_transmit(&self, cx: &mut Context) -> bool {
-        let ip_header_len = match self.tuple.unwrap().local.addr {
+        let tuple = self.tuple.unwrap();
+        let ip_header_len = match tuple.local.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
             #[cfg(feature = "proto-ipv6")]
             IpAddress::Ipv6(_) => crate::wire::IPV6_HEADER_LEN,
         };
 
-        // Max segment size we're able to send due to MTU limitations.
-        let local_mss = cx.ip_mtu() - ip_header_len - TCP_HEADER_LEN;
+        // Max segment size we're able to send due to path MTU limitations.
+        let local_mss = cx.ip_mtu_for(tuple.remote.addr) - ip_header_len - TCP_HEADER_LEN;
 
         // The effective max segment size, taking into account our and remote's limits.
         let effective_mss = local_mss.min(self.remote_mss);
@@ -3842,9 +3843,10 @@ impl<'a> Socket<'a> {
                 // not -- an MSS bounds payload alone (RFC 6691), so the peer's
                 // number is already the right bound on ours.
                 let tcp_header_len = repr.header_len();
+                let path_mtu = cx.ip_mtu_for(tuple.remote.addr);
                 let effective_mss = self
                     .remote_mss
-                    .min(cx.ip_mtu() - ip_repr.header_len() - tcp_header_len);
+                    .min(path_mtu - ip_repr.header_len() - tcp_header_len);
 
                 // With TCP segmentation offload, a single emitted packet may
                 // carry many effective-MSS units of payload — the device
@@ -3950,9 +3952,10 @@ impl<'a> Socket<'a> {
             // has to happen here -- otherwise each of them is over the MTU by
             // the length of the options, which is the whole super-segment's
             // worth of oversized frames rather than one.
+            let path_mtu = cx.ip_mtu_for(tuple.remote.addr);
             let effective_mss = self
                 .remote_mss
-                .min(cx.ip_mtu() - ip_repr.header_len() - repr.header_len());
+                .min(path_mtu - ip_repr.header_len() - repr.header_len());
             if repr.payload.len() > effective_mss {
                 meta.tso_seg_size = effective_mss as u16;
             }

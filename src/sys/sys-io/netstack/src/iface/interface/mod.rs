@@ -1526,6 +1526,13 @@ impl InterfaceInner {
         self.caps.ip_mtu()
     }
 
+    #[allow(unused)] // unused depending on which sockets are enabled
+    pub(crate) fn ip_mtu_for(&mut self, destination: IpAddress) -> usize {
+        let interface_mtu = self.caps.ip_mtu();
+        self.routes
+            .effective_pmtu(destination, interface_mtu, self.now)
+    }
+
     /// See [`DeviceCapabilities::max_tso_size`]. 0 = the device does not
     /// support TCP segmentation offload.
     #[allow(unused)]
