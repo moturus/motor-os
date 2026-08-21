@@ -1177,7 +1177,6 @@ impl<'a> Socket<'a> {
 
     /// Whether an ICMP quote names sequence space that was transmitted,
     /// remains outstanding, and has not been reported through SACK.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn has_outstanding_unsacked(&self, seq: TcpSeqNumber) -> bool {
         self.local_seq_no <= seq
             && seq < self.local_seq_max

@@ -536,7 +536,7 @@ impl InterfaceInner {
 
     pub(super) fn process_icmpv4<'frame>(
         &mut self,
-        _sockets: &mut SocketSet,
+        sockets: &mut SocketSet,
         ip_repr: Ipv4Repr,
         ip_payload: &'frame [u8],
     ) -> Option<Packet<'frame>> {
@@ -547,7 +547,7 @@ impl InterfaceInner {
         let mut handled_by_icmp_socket = false;
 
         #[cfg(all(feature = "socket-icmp", feature = "proto-ipv4"))]
-        for icmp_socket in _sockets
+        for icmp_socket in sockets
             .items_mut()
             .filter_map(|i| icmp::Socket::downcast_mut(&mut i.socket))
         {
@@ -574,6 +574,17 @@ impl InterfaceInner {
 
             // Ignore any echo replies.
             Icmpv4Repr::EchoReply { .. } => None,
+
+            Icmpv4Repr::DstUnreachable {
+                reason: Icmpv4DstUnreachable::FragRequired,
+                next_hop_mtu: Some(mtu),
+                ..
+            } => {
+                if let Some(quote) = super::pmtu::parse_ipv4(icmp_packet.data()) {
+                    self.update_pmtu_from_quote(sockets, quote, usize::from(mtu));
+                }
+                None
+            }
 
             // Don't report an error if a packet with unknown type
             // has been handled by an ICMP socket

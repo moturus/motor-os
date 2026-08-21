@@ -658,7 +658,6 @@ impl<'a> Socket<'a> {
             .unwrap();
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn has_recent_send(
         &mut self,
         local: IpEndpoint,

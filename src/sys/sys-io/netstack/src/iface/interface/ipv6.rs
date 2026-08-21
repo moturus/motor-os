@@ -600,7 +600,7 @@ impl InterfaceInner {
 
     pub(super) fn process_icmpv6<'frame>(
         &mut self,
-        _sockets: &mut SocketSet,
+        sockets: &mut SocketSet,
         ip_repr: Ipv6Repr,
         ip_payload: &'frame [u8],
     ) -> Option<Packet<'frame>> {
@@ -618,7 +618,7 @@ impl InterfaceInner {
         #[cfg(feature = "socket-icmp")]
         {
             use crate::socket::icmp::Socket as IcmpSocket;
-            for icmp_socket in _sockets
+            for icmp_socket in sockets
                 .items_mut()
                 .filter_map(|i| IcmpSocket::downcast_mut(&mut i.socket))
             {
@@ -646,6 +646,13 @@ impl InterfaceInner {
 
             // Ignore any echo replies.
             Icmpv6Repr::EchoReply { .. } => None,
+
+            Icmpv6Repr::PktTooBig { mtu, .. } => {
+                if let Some(quote) = super::pmtu::parse_ipv6(icmp_packet.payload()) {
+                    self.update_pmtu_from_quote(sockets, quote, mtu as usize);
+                }
+                None
+            }
 
             // Forward any NDISC packets to the ndisc packet handler
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]

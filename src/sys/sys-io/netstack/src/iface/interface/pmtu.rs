@@ -4,14 +4,12 @@ use crate::wire::{IpEndpoint, IpProtocol, TcpPacket, TcpSeqNumber, UdpPacket};
 #[cfg(feature = "proto-ipv6")]
 use crate::wire::{Ipv6ExtHeader, Ipv6FragmentHeader, Ipv6FragmentRepr, Ipv6Packet};
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Transport {
     Udp,
     Tcp { seq: TcpSeqNumber },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Quote {
     pub local: IpEndpoint,
@@ -50,7 +48,6 @@ fn parse_transport(
 }
 
 #[cfg(feature = "proto-ipv4")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn parse_ipv4(data: &[u8]) -> Option<Quote> {
     let packet = Ipv4Packet::new_checked_header(data).ok()?;
     if packet.version() != 4 || !packet.verify_checksum() || packet.reserved() {
@@ -87,7 +84,6 @@ pub(super) fn parse_ipv4(data: &[u8]) -> Option<Quote> {
 }
 
 #[cfg(feature = "proto-ipv6")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn parse_ipv6(data: &[u8]) -> Option<Quote> {
     let packet = Ipv6Packet::new_checked_header(data).ok()?;
     if packet.version() != 6 {
@@ -132,10 +128,75 @@ pub(super) fn parse_ipv6(data: &[u8]) -> Option<Quote> {
     })
 }
 
+impl super::InterfaceInner {
+    pub(super) fn update_pmtu_from_quote(
+        &mut self,
+        _sockets: &mut crate::iface::SocketSet,
+        quote: Quote,
+        advertised_mtu: usize,
+    ) -> bool {
+        if !self.has_ip_addr(quote.local.addr) {
+            return false;
+        }
+
+        let associated = match quote.transport {
+            Transport::Udp => {
+                #[cfg(feature = "socket-udp")]
+                {
+                    let Some(handle) = _sockets.udp_socket(quote.local, false) else {
+                        return false;
+                    };
+                    _sockets
+                        .get_mut::<crate::socket::udp::Socket>(handle)
+                        .has_recent_send(quote.local, quote.remote, self.now)
+                }
+                #[cfg(not(feature = "socket-udp"))]
+                {
+                    false
+                }
+            }
+            Transport::Tcp { seq: _seq } => {
+                #[cfg(feature = "socket-tcp")]
+                {
+                    let Some(handle) = _sockets.tcp_tuple(quote.local, quote.remote) else {
+                        return false;
+                    };
+                    _sockets
+                        .get::<crate::socket::tcp::Socket>(handle)
+                        .has_outstanding_unsacked(_seq)
+                }
+                #[cfg(not(feature = "socket-tcp"))]
+                {
+                    false
+                }
+            }
+        };
+        if !associated {
+            return false;
+        }
+
+        let interface_mtu = self.caps.ip_mtu();
+        self.routes.update_pmtu(
+            quote.remote.addr,
+            advertised_mtu,
+            quote.packet_len,
+            interface_mtu,
+            self.now,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phy::ChecksumCapabilities;
+    use crate::phy::{ChecksumCapabilities, Medium};
+    #[cfg(feature = "socket-tcp")]
+    use crate::socket::tcp;
+    #[cfg(feature = "socket-udp")]
+    use crate::socket::udp;
+    use crate::tests::setup;
+    use crate::time::Instant;
+    use crate::wire::IpAddress;
     #[cfg(feature = "proto-ipv4")]
     use crate::wire::{Ipv4Address, Ipv4Repr};
     #[cfg(feature = "proto-ipv6")]
@@ -226,6 +287,78 @@ mod tests {
         assert!(parse_ipv4(packet.as_ref()).is_none());
     }
 
+    #[cfg(feature = "socket-udp")]
+    fn udp_with_recent_send(
+        iface: &mut crate::iface::Interface,
+        local: IpEndpoint,
+        remote: IpEndpoint,
+    ) -> udp::Socket<'static> {
+        let mut socket = udp::Socket::new(
+            udp::PacketBuffer::new(vec![], vec![]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 64]),
+        );
+        socket.bind(local).unwrap();
+        socket.send_slice(b"sent", remote).unwrap();
+        socket
+            .dispatch(iface.context(), |_, _, _| Ok::<_, ()>(()))
+            .unwrap();
+        socket
+    }
+
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-udp"))]
+    #[test]
+    fn icmpv4_decrease_requires_a_recent_live_udp_flow() {
+        let (mut iface, mut sockets, _) = setup(Medium::Ip);
+        let local_addr = Ipv4Address::new(192, 168, 1, 1);
+        let remote_addr = Ipv4Address::new(192, 168, 1, 2);
+        let local = IpEndpoint::new(local_addr.into(), SRC_PORT);
+        let remote = IpEndpoint::new(remote_addr.into(), DST_PORT);
+        let quote_header = Ipv4Repr {
+            src_addr: local_addr,
+            dst_addr: remote_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: 1_400,
+            hop_limit: 64,
+        };
+        let icmp = crate::wire::Icmpv4Repr::DstUnreachable {
+            reason: crate::wire::Icmpv4DstUnreachable::FragRequired,
+            next_hop_mtu: Some(1_400),
+            header: quote_header,
+            data: &udp_prefix(),
+        };
+        let mut bytes = vec![0; icmp.buffer_len()];
+        icmp.emit(
+            &mut crate::wire::Icmpv4Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let outer = Ipv4Repr {
+            src_addr: Ipv4Address::new(192, 168, 1, 254),
+            dst_addr: local_addr,
+            next_header: IpProtocol::Icmp,
+            payload_len: bytes.len(),
+            hop_limit: 64,
+        };
+
+        iface.inner.process_icmpv4(&mut sockets, outer, &bytes);
+        assert_eq!(
+            iface
+                .inner
+                .routes
+                .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
+            1_500
+        );
+
+        sockets.add(1, udp_with_recent_send(&mut iface, local, remote));
+        iface.inner.process_icmpv4(&mut sockets, outer, &bytes);
+        assert_eq!(
+            iface
+                .inner
+                .routes
+                .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
+            1_400
+        );
+    }
+
     #[cfg(feature = "proto-ipv6")]
     fn ipv6_quote(next_header: IpProtocol, payload_len: usize, payload: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0; 40 + payload.len()];
@@ -239,6 +372,131 @@ mod tests {
         .emit(&mut Ipv6Packet::new_unchecked(&mut bytes));
         bytes[40..].copy_from_slice(payload);
         bytes
+    }
+
+    #[cfg(all(feature = "proto-ipv6", feature = "socket-udp"))]
+    #[test]
+    fn icmpv6_decrease_requires_a_recent_exact_udp_flow() {
+        let (mut iface, mut sockets, _) = setup(Medium::Ip);
+        let local_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
+        let remote_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
+        let local = IpEndpoint::new(local_addr.into(), SRC_PORT);
+        let remote = IpEndpoint::new(remote_addr.into(), DST_PORT);
+        sockets.add(1, udp_with_recent_send(&mut iface, local, remote));
+
+        let quote_header = Ipv6Repr {
+            src_addr: local_addr,
+            dst_addr: remote_addr,
+            next_header: IpProtocol::Udp,
+            payload_len: 1_400,
+            hop_limit: 64,
+        };
+        let icmp = crate::wire::Icmpv6Repr::PktTooBig {
+            mtu: 1_300,
+            header: quote_header,
+            data: &udp_prefix(),
+        };
+        let outer_src = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0xff);
+        let outer_dst = local_addr;
+        let mut bytes = vec![0; icmp.buffer_len()];
+        icmp.emit(
+            &outer_src,
+            &outer_dst,
+            &mut crate::wire::Icmpv6Packet::new_unchecked(&mut bytes),
+            &ChecksumCapabilities::default(),
+        );
+        let outer = Ipv6Repr {
+            src_addr: outer_src,
+            dst_addr: outer_dst,
+            next_header: IpProtocol::Icmpv6,
+            payload_len: bytes.len(),
+            hop_limit: 64,
+        };
+
+        iface.inner.process_icmpv6(&mut sockets, outer, &bytes);
+        assert_eq!(
+            iface
+                .inner
+                .routes
+                .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
+            1_300
+        );
+    }
+
+    #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
+    #[test]
+    fn tcp_decrease_requires_exact_tuple_and_outstanding_sequence() {
+        let (mut iface, mut sockets, _) = setup(Medium::Ip);
+        let local = IpEndpoint::new(IpAddress::v4(192, 168, 1, 1), SRC_PORT);
+        let remote = IpEndpoint::new(IpAddress::v4(192, 168, 1, 2), DST_PORT);
+        let snd_nxt = TcpSeqNumber(10_000);
+        let handle = sockets.add(
+            1,
+            tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0; 64]),
+                tcp::SocketBuffer::new(vec![0; 64]),
+            ),
+        );
+        sockets
+            .tcp_restore_from_cookie(
+                handle,
+                iface.context(),
+                &tcp::TcpCookieRestore {
+                    local,
+                    remote,
+                    rcv_nxt: TcpSeqNumber(20_000),
+                    snd_nxt,
+                    remote_mss: 1_460,
+                    remote_window: 64,
+                    peer_wscale: None,
+                    peer_sack: true,
+                    peer_tsval: None,
+                },
+            )
+            .unwrap();
+        sockets
+            .get_mut::<tcp::Socket>(handle)
+            .send_slice(b"outbound")
+            .unwrap();
+        sockets
+            .get_mut::<tcp::Socket>(handle)
+            .dispatch(iface.context(), |_, _, _| Ok::<_, ()>(()))
+            .unwrap();
+
+        let quote = Quote {
+            local,
+            remote,
+            packet_len: 1_420,
+            transport: Transport::Tcp { seq: snd_nxt + 8 },
+        };
+        assert!(
+            !iface
+                .inner
+                .update_pmtu_from_quote(&mut sockets, quote, 1_400)
+        );
+        assert_eq!(
+            iface
+                .inner
+                .routes
+                .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
+            1_500
+        );
+
+        assert!(iface.inner.update_pmtu_from_quote(
+            &mut sockets,
+            Quote {
+                transport: Transport::Tcp { seq: snd_nxt },
+                ..quote
+            },
+            1_400,
+        ));
+        assert_eq!(
+            iface
+                .inner
+                .routes
+                .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
+            1_400
+        );
     }
 
     #[cfg(feature = "proto-ipv6")]
