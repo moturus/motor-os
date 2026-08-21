@@ -89,11 +89,21 @@ pub fn tcp_write(stream: &RtTcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCod
         Err(_) => {}
     }
 
+    // The deadline covers the spin/yield phase too. In particular, yielding
+    // may deschedule us until after the peer frees room; accepting that room
+    // before checking the deadline would let a short SO_SNDTIMEO wait for an
+    // arbitrarily slower peer.
+    let deadline = deadline_from(stream.write_timeout());
     for i in 0..(TX_WRITE_SPINS + TX_WRITE_YIELDS) {
         if i < TX_WRITE_SPINS {
             core::hint::spin_loop();
         } else {
             moto_sys::SysCpu::sched_yield();
+        }
+        if let Some(d) = deadline
+            && Instant::now() >= d
+        {
+            return Err(moto_rt::E_TIMED_OUT);
         }
         if !stream.inner().can_write_now() {
             return Err(stream.inner().dead_write_error());
@@ -107,7 +117,6 @@ pub fn tcp_write(stream: &RtTcpStream, bufs: &[&[u8]]) -> Result<usize, ErrorCod
         }
     }
 
-    let deadline = deadline_from(stream.write_timeout());
     let fut = stream.inner().write_future(bufs);
     match block_on_deadline(fut, deadline) {
         Ok(res) => res,

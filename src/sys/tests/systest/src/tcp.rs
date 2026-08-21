@@ -2000,11 +2000,11 @@ pub(crate) fn test_ipv6() {
 
 // A blocking write with SO_SNDTIMEO against a peer that never reads makes
 // partial progress while the pipeline has room, then returns Err(TimedOut)
-// once every buffer fills -- a deterministic zero-progress stall. (A peer
-// that reads even slowly keeps freeing room, so a real write never times
-// out; that is the correct SO_SNDTIMEO contract, exercised separately by
-// the backpressure test below.) The peer stays silent until released, then
-// drains to EOF so the scope join can never strand on it.
+// once every buffer fills -- a deterministic zero-progress stall. A peer
+// that frees room before the deadline may instead keep writes progressing;
+// the stop-and-go case below exercises stalls longer than SO_SNDTIMEO. The
+// peer stays silent until released, then drains to EOF so the scope join can
+// never strand on it.
 fn test_write_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:3335").unwrap();
     let release = Arc::new(AtomicBool::new(false));
