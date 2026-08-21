@@ -459,3 +459,13 @@ pub fn current_exe() -> Result<alloc::string::String> {
     into_result(vdso_current_exe(bytes.as_mut_ptr(), &mut len))?;
     Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned())
 }
+
+pub fn current_pid() -> u64 {
+    let vdso_current_pid: extern "C" fn() -> u64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().current_pid.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_current_pid()
+}

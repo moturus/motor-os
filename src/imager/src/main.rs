@@ -569,6 +569,10 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path.contains("/tests/")));
+        assert!(!config
+            .input_files
+            .iter()
+            .any(|path| path == "/system/bin/curl"));
     }
 
     #[test]
@@ -583,6 +587,10 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/devtools/bin/gears"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/system/bin/curl"));
         assert_eq!(
             config.static_dirs,
             [

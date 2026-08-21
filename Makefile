@@ -36,15 +36,15 @@ DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $
 
 DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-all: main.img
+all: base.img main.img
 images: base.img main.img dev.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base curl kibim httpd httpd-axum
-user-dev: user gears gears-mock-provider lorry mdbg rnetbench crossbench \
+user: user-base kibim httpd httpd-axum
+user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
