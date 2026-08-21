@@ -35,17 +35,14 @@ retired scans live on as debug-only oracles). `rt.vdso` owns the net
 channel pool, blocking policy, and POSIX state. The review below found
 that the close/reset behavior is not yet Linux-equivalent in every path.
 
-## Next up (design review)
+## Next up (selection required)
 
-The approved nine-defect security-first series has landed. The next
-approved implementation is IPv4 and IPv6 fragmentation/reassembly plus
-the minimum PMTU handling selected below. It is a larger,
-security-sensitive change, so implementation remains blocked on review
-of the dedicated design in
-[`network-fragmentation-design.md`](network-fragmentation-design.md).
-That design records the code audit, exact resource bounds, overlap and
-expiry policy, PMTU quote validation, production feature closure, patch
-sequence, and gates.
+The approved nine-defect security-first series and the subsequent IPv4/IPv6
+fragmentation, reassembly, and minimum-PMTU series have landed. The completed
+fragmentation design remains in
+[`network-fragmentation-design.md`](network-fragmentation-design.md) until the
+next plan-pruning pass. No further implementation series is selected; choose
+from the triaged items below without changing their recorded pickup order.
 
 ## Found by the 2026-08-18 full review -- triaged
 
@@ -124,22 +121,14 @@ netstack infrastructure:
   close open via ICMP. Approved fix: add a separate
   `max_icmp_error_rate` bucket/config key and keep loopback exempt. The
   default is 200 replies/second, matching `max_rst_rate`.
-- [resolved] Incoming ICMP errors are delivered only to raw ICMP
-  sockets; they are never associated with the TCP/UDP flow quoted by
-  the error. In particular, connected UDP never observes
-  port-unreachable, packet-too-big/PMTU, or another asynchronous
-  error, and rt.vdso's UDP `SO_ERROR` always reports success. This is
-  a scope call first. Doing nothing leaves connected UDP failures as
-  timeouts with `SO_ERROR == 0`, and TCP/UDP cannot react to a smaller
-  downstream MTU. The latter permanently black-holes oversized IPv6
-  traffic because routers cannot fragment IPv6. If in scope, validate
-  the quoted flow before updating PMTU or stored error/readiness; forged
-  ICMP must not be allowed to tear down an unrelated connection. As the
-  minimum scope in the fragmentation series, validate and associate
-  quoted flows, handle IPv4 Fragmentation Needed and IPv6 Packet Too
-  Big, keep bounded PMTU state, and let TCP/UDP resegment or refragment.
-  Defer other destination-unreachable delivery and `SO_ERROR`/ERROR
-  readiness to later work.
+- [resolved] Incoming ICMP errors other than IPv4 Fragmentation Needed
+  and IPv6 Packet Too Big are delivered only to raw ICMP sockets; they are not
+  associated with the quoted TCP/UDP flow. In particular, connected UDP never
+  observes port-unreachable or another asynchronous error, and rt.vdso's UDP
+  `SO_ERROR` always reports success. The minimum PMTU scope has landed:
+  validated quotes update bounded PMTU state associated with live flows, and
+  TCP/UDP resegment or refragment. Other destination-unreachable delivery and
+  `SO_ERROR`/ERROR readiness remain deferred.
 - Neighbor-cache admission is weaker than the earlier diagnosis stated.
   NDISC NeighborAdvert ignores SOLICITED and keys the cache by the IPv6
   source rather than the advertised target (ipv6.rs:462-479); proxy NAs
@@ -154,18 +143,14 @@ netstack infrastructure:
   target coincide for every non-proxy NA, so the mis-keying bites only
   proxy-NA and crafted setups; the eviction-DoS angle needs an on-link
   attacker.
-- [resolved] IPv4/IPv6 fragmentation and reassembly are compiled out of
-  sys-io.
-  Ingress IPv4 fragments and IPv6 Fragment headers are rejected; egress
-  IPv4 packets over the interface MTU and oversized IPv6 packets are
-  logged and dropped while interface dispatch returns success. UDP then
-  dequeues the datagram, so an application can successfully send up to
-  the current 65,493-byte API limit (the intended IPv4 limit is 65,507)
-  while every external packet above
-  the path MTU silently disappears. Implement bounded,
-  overlap-safe IPv4 and IPv6 fragmentation/reassembly rather than an
-  `EMSGSIZE`-only fix. This requires the dedicated design named under
-  "Next up"; successful silent drop must disappear in the same series.
+- [resolved] IPv4/IPv6 fragmentation and reassembly are production-enabled
+  in sys-io. The landed implementation is bounded and overlap-safe, raises and
+  enforces the shared UDP payload limit at 65,507 bytes, associates validated
+  PMTU feedback with live flows, and removes the successful silent drop of
+  oversized UDP datagrams.
+  Packet tests cover malformed input, bounds, PMTU, and exact wire behavior;
+  both gate scripts use the production feature closure, and the focused gate
+  exercises IPv4 and IPv6 fragmentation in both directions through the tap.
 
 sys-io runtime glue:
 
@@ -469,14 +454,12 @@ the outcome measure.
   becomes testable with a packet-injection seam or a boot-time low-cap
   config (declined for now -- revisit only if something concretely
   needs it).
-- Test-debt correction: `REASSEMBLY_BUFFER_COUNT` and
-  `FRAGMENTATION_BUFFER_SIZE` do not merely differ from deployment.
-  The deployed sys-io feature closure and both full-test scripts omit
-  IPv4/IPv6 fragmentation, so those tests are not compiled at all and
-  there are no deployed values to compare. The approved fragmentation
-  implementation must enable and test exactly its production features,
-  including external-MTU boundaries, overlap rejection, resource caps,
-  expiry, and IPv6 Packet Too Big handling.
+- [resolved] The fragmentation test closure now matches deployment:
+  sys-io and both full-test scripts select IPv4/IPv6 fragmentation and the same
+  range/count/byte bounds, with production const assertions preventing drift.
+  Packet tests cover external-MTU boundaries, overlap rejection, resource caps,
+  expiry, and IPv6 Packet Too Big handling; the focused gate adds the real tap
+  path.
 - Test debt found by this review: no direct regression coverage was
   located for the unbounded completed accept backlog, malformed/overlong
   UDP channel fragment sequences, UDP close with parked waiters, reset
@@ -596,7 +579,7 @@ reference first.
 
 ## Final-review status
 
-All questions from the 2026-08-18 triage are resolved and incorporated
-above, and the approved nine-defect security-first series has landed.
-Fragmentation implementation is now awaiting review of the dedicated
-design linked under "Next up."
+All questions from the 2026-08-18 triage are resolved and incorporated above.
+The approved nine-defect security-first series and the fragmentation/PMTU
+series have landed and passed their required gates. The next implementation
+series requires selection from the remaining triaged backlog.
