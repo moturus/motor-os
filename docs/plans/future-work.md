@@ -18,3 +18,9 @@ the ruling; nothing here should be picked up without a fresh call.
   in the same sitting: vdso panic text can be lost when the console
   buffer does not drain before teardown, which is why a vdso panic can
   present as silent exit-222.
+
+- **kernel `wait-set`** - a kernel-side wait-set/aggregation primitive
+  (the structural fix). Beyond the cap, the current shape is O(n) per park: every SysCpu::wait
+  re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
+  epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
+  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.

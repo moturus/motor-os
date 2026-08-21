@@ -422,6 +422,9 @@ impl LocalRuntimeInner {
                     }
                 }
             }
+            Err(moto_rt::E_STORAGE_FULL) => {
+                panic!("SysCpu::wait(): too many handles: {}", wait_handles.len());
+            }
             Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
         }
     }
