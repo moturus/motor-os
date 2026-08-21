@@ -39,8 +39,13 @@ use heapless::Vec;
 use super::fragmentation::Ipv4ReassemblyContext;
 #[cfg(feature = "proto-ipv6-fragmentation")]
 use super::fragmentation::Ipv6FragKey;
+#[cfg(any(
+    feature = "proto-ipv4-fragmentation",
+    feature = "proto-ipv6-fragmentation"
+))]
+use super::fragmentation::{AssemblerError, AssemblerOutcome};
 #[cfg(feature = "_proto-fragmentation")]
-use super::fragmentation::{AssemblerError, FragKey, PacketAssemblerSet};
+use super::fragmentation::{FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -106,6 +111,25 @@ pub enum PollResult {
     None,
     /// You should check the state of sockets again for received data or completion of operations.
     SocketStateChanged,
+}
+
+/// Drain-on-read IP fragmentation, reassembly, and PMTU counters.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IpPacketStats {
+    pub ipv4_fragments_rx: u64,
+    pub ipv6_fragments_rx: u64,
+    pub ipv4_fragments_tx: u64,
+    pub ipv6_fragments_tx: u64,
+    pub reassemblies_completed: u64,
+    pub reassembly_malformed_drops: u64,
+    pub reassembly_no_slot_drops: u64,
+    pub reassembly_allocation_drops: u64,
+    pub reassembly_expiry_drops: u64,
+    pub reassembly_duplicates: u64,
+    pub reassembly_range_limit_drops: u64,
+    pub egress_fragment_stage_busy_drops: u64,
+    pub pmtu_updates_accepted: u64,
+    pub icmp_pmtu_messages_rejected: u64,
 }
 
 /// Result returned by [`Interface::poll_ingress_single`].
@@ -200,6 +224,9 @@ pub struct InterfaceInner {
     /// verify, since the last [`Interface::take_rx_csum_failed`]. Frames the
     /// device vouched for are not verified, so they cannot land here.
     rx_csum_failed: u64,
+
+    /// Fragmentation, reassembly, and PMTU events since the last stats drain.
+    ip_packet_stats: IpPacketStats,
 
     /// Neighbor mappings an unsolicited packet offered while the cache was
     /// full, since the last [`Interface::take_neighbor_admission_refused`].
@@ -530,6 +557,7 @@ impl Interface {
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
+                ip_packet_stats: IpPacketStats::default(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_admission_refused: 0,
                 #[cfg(feature = "socket-tcp")]
@@ -574,6 +602,11 @@ impl Interface {
     /// verify. Reading the count clears it, so the caller accumulates.
     pub fn take_rx_csum_failed(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_csum_failed)
+    }
+
+    /// Fragmentation, reassembly, and PMTU events. Reading clears the counters.
+    pub fn take_ip_packet_stats(&mut self) -> IpPacketStats {
+        core::mem::take(&mut self.inner.ip_packet_stats)
     }
 
     /// Frames dropped because a loopback address arrived on an interface that
@@ -1122,7 +1155,7 @@ impl Interface {
         self.inner.now = timestamp;
 
         #[cfg(feature = "_proto-fragmentation")]
-        self.fragments.assembler.remove_expired(timestamp);
+        self.remove_expired_fragments(timestamp);
 
         self.socket_ingress(device, sockets)
     }
@@ -1134,7 +1167,7 @@ impl Interface {
         self.inner.now = timestamp;
 
         #[cfg(feature = "_proto-fragmentation")]
-        self.fragments.assembler.remove_expired(timestamp);
+        self.remove_expired_fragments(timestamp);
 
         #[cfg(feature = "proto-ipv6-slaac")]
         if self.inner.slaac.sync_required(timestamp) {
@@ -1239,6 +1272,28 @@ impl Interface {
         }
     }
 
+    #[cfg(feature = "_proto-fragmentation")]
+    fn remove_expired_fragments(&mut self, timestamp: Instant) {
+        let expired = self.fragments.assembler.remove_expired(timestamp);
+        self.inner.ip_packet_stats.reassembly_expiry_drops = self
+            .inner
+            .ip_packet_stats
+            .reassembly_expiry_drops
+            .wrapping_add(expired.incomplete as u64);
+    }
+
+    fn record_socketless_dispatch_error(&mut self, error: DispatchError) {
+        #[cfg(any(
+            feature = "proto-ipv4-fragmentation",
+            feature = "proto-ipv6-fragmentation"
+        ))]
+        if error == DispatchError::FragmenterBusy {
+            let counter = &mut self.inner.ip_packet_stats.egress_fragment_stage_busy_drops;
+            *counter = counter.wrapping_add(1);
+        }
+        net_debug!("Failed to send response: {:?}", error);
+    }
+
     fn socket_ingress(
         &mut self,
         device: &mut (impl Device + ?Sized),
@@ -1263,7 +1318,7 @@ impl Interface {
                         && let Err(err) =
                             self.inner.dispatch(tx_token, packet, &mut self.fragmenter)
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
                 #[cfg(feature = "medium-ip")]
@@ -1278,7 +1333,7 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
                 #[cfg(feature = "medium-ieee802154")]
@@ -1293,7 +1348,7 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
             }
@@ -1947,6 +2002,32 @@ impl InterfaceInner {
         self.neighbor_learned = true;
     }
 
+    #[cfg(any(
+        feature = "proto-ipv4-fragmentation",
+        feature = "proto-ipv6-fragmentation"
+    ))]
+    fn count_reassembly_error(&mut self, error: AssemblerError) {
+        let counter = match error {
+            AssemblerError::Invalid
+            | AssemblerError::SizeLimit
+            | AssemblerError::FinalSize
+            | AssemblerError::Overlap => &mut self.ip_packet_stats.reassembly_malformed_drops,
+            AssemblerError::RangeLimit => &mut self.ip_packet_stats.reassembly_range_limit_drops,
+            AssemblerError::Allocation => &mut self.ip_packet_stats.reassembly_allocation_drops,
+            AssemblerError::Poisoned => return,
+        };
+        *counter = counter.wrapping_add(1);
+    }
+
+    fn count_pmtu_message(&mut self, accepted: bool) {
+        let counter = if accepted {
+            &mut self.ip_packet_stats.pmtu_updates_accepted
+        } else {
+            &mut self.ip_packet_stats.icmp_pmtu_messages_rejected
+        };
+        *counter = counter.wrapping_add(1);
+    }
+
     fn dispatch_ip<Tx: TxToken>(
         &mut self,
         // NOTE(unused_mut): tx_token isn't always mutated, depending on
@@ -2115,6 +2196,8 @@ impl InterfaceInner {
                                 .copy_from_slice(&frag.buffer[..first_frag_data_len]);
                             frag.ipv4.frag_offset = first_frag_data_len as u16;
                         });
+                        self.ip_packet_stats.ipv4_fragments_tx =
+                            self.ip_packet_stats.ipv4_fragments_tx.wrapping_add(1);
 
                         Ok(())
                     }

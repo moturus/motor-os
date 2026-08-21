@@ -2837,6 +2837,36 @@ fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
     assert_eq!(iface.fragmenter.ipv4.ident, staged_ident);
     assert_eq!(iface.fragmenter.ipv4.frag_offset, staged_offset);
 
+    let echo = Icmpv4Repr::EchoRequest {
+        ident: 1,
+        seq_no: 2,
+        data: &[],
+    };
+    let echo_ip = Ipv4Repr {
+        src_addr,
+        dst_addr,
+        next_header: IpProtocol::Icmp,
+        payload_len: echo.buffer_len(),
+        hop_limit: 64,
+    };
+    let mut echo_bytes = vec![0; echo_ip.buffer_len() + echo.buffer_len()];
+    echo_ip.emit(
+        &mut Ipv4Packet::new_unchecked(&mut echo_bytes),
+        &ChecksumCapabilities::default(),
+    );
+    echo.emit(
+        &mut Icmpv4Packet::new_unchecked(&mut echo_bytes[IPV4_HEADER_LEN..]),
+        &ChecksumCapabilities::default(),
+    );
+    device.push_rx(echo_bytes);
+    assert_eq!(
+        iface.poll_ingress_single(Instant::ZERO, &mut device, &mut sockets),
+        PollIngressSingleResult::SocketStateChanged
+    );
+    let stats = iface.take_ip_packet_stats();
+    assert_eq!(stats.ipv4_fragments_tx, 1);
+    assert_eq!(stats.egress_fragment_stage_busy_drops, 1);
+
     device.tx_capacity = Some(0);
     assert_eq!(
         iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
@@ -2977,6 +3007,10 @@ fn ipv4_source_fragments_a_maximum_udp_datagram() {
     )
     .unwrap();
     assert_eq!(udp_packet.payload(), &payload);
+    assert_eq!(
+        iface.take_ip_packet_stats().ipv4_fragments_tx,
+        fragments.len() as u64
+    );
 }
 
 /// Check no reply is emitted when using a raw socket
@@ -3579,6 +3613,11 @@ fn ipv4_reassembly_duplicate_preserves_first_bytes() {
             0xbb, 0xbb,
         ],
     );
+    let stats = iface.take_ip_packet_stats();
+    assert_eq!(stats.ipv4_fragments_rx, 3);
+    assert_eq!(stats.reassembly_duplicates, 1);
+    assert_eq!(stats.reassemblies_completed, 1);
+    assert_eq!(iface.take_ip_packet_stats(), IpPacketStats::default());
 }
 
 #[test]
@@ -3694,6 +3733,57 @@ fn ipv4_partial_overlap_after_final_fragment_tombstones_key() {
     }
     let assembler = iface.fragments.assembler.get(&key, Instant::ZERO).unwrap();
     assert_eq!(assembler.add(b"valid", 0), Err(AssemblerError::Poisoned));
+    let stats = iface.take_ip_packet_stats();
+    assert_eq!(stats.ipv4_fragments_rx, 3);
+    assert_eq!(stats.reassembly_malformed_drops, 1);
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4-fragmentation"))]
+fn ipv4_range_limit_and_capacity_expiry_have_distinct_counters() {
+    let dst_addr = Ipv4Address::new(192, 168, 1, 1);
+    let feed = |iface: &mut Interface, sockets: &mut SocketSet, ident, offset| {
+        let bytes = ipv4_fragment_bytes(Ipv4FragmentSpec {
+            dst_addr,
+            protocol: IpProtocol::Unknown(99),
+            ident,
+            offset,
+            more_frags: true,
+            dont_frag: false,
+            reserved: false,
+            payload_len: 8,
+        });
+        let packet = Ipv4Packet::new_checked(&bytes[..]).unwrap();
+        assert!(
+            iface
+                .inner
+                .process_ipv4(
+                    sockets,
+                    PacketMeta::default(),
+                    HardwareAddress::Ip,
+                    &packet,
+                    &mut iface.fragments,
+                )
+                .is_none()
+        );
+    };
+
+    let (mut iface, mut sockets, device) = setup(Medium::Ip);
+    for range in 0..=crate::config::ASSEMBLER_MAX_SEGMENT_COUNT {
+        feed(&mut iface, &mut sockets, 1, (range * 16) as u16);
+    }
+    feed(&mut iface, &mut sockets, 1, 0);
+    let stats = iface.take_ip_packet_stats();
+    assert_eq!(stats.reassembly_range_limit_drops, 1);
+    assert_eq!(stats.reassembly_malformed_drops, 0);
+
+    for ident in 2..=6 {
+        feed(&mut iface, &mut sockets, ident, 0);
+    }
+    assert_eq!(iface.take_ip_packet_stats().reassembly_no_slot_drops, 2);
+    iface.poll_maintenance(Instant::from_secs(61));
+    assert_eq!(iface.take_ip_packet_stats().reassembly_expiry_drops, 3);
+    assert_eq!(device.tx_queue.len(), 0);
 }
 
 #[test]

@@ -376,6 +376,9 @@ mod tests {
                 .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
             1_400
         );
+        let stats = iface.take_ip_packet_stats();
+        assert_eq!(stats.icmp_pmtu_messages_rejected, 1);
+        assert_eq!(stats.pmtu_updates_accepted, 1);
     }
 
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]
@@ -517,6 +520,7 @@ mod tests {
                 .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
             1_300
         );
+        assert_eq!(iface.take_ip_packet_stats().pmtu_updates_accepted, 1);
     }
 
     #[cfg(all(feature = "proto-ipv4", feature = "socket-tcp"))]

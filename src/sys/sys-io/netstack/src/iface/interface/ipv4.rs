@@ -293,6 +293,8 @@ impl InterfaceInner {
         let (ip_payload, meta) = {
             if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 || ipv4_packet.reserved()
             {
+                self.ip_packet_stats.ipv4_fragments_rx =
+                    self.ip_packet_stats.ipv4_fragments_rx.wrapping_add(1);
                 let key = FragKey::Ipv4(ipv4_packet.get_key());
 
                 if !self.accepts_ipv4_fragment_destination(ipv4_repr.dst_addr) {
@@ -300,6 +302,7 @@ impl InterfaceInner {
                 }
                 if let Err(error) = validate_ipv4_fragment(ipv4_packet) {
                     let error = frag.assembler.reject_existing(&key, error);
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
@@ -307,6 +310,8 @@ impl InterfaceInner {
                 let f = match frag.assembler.get(&key, self.now + frag.reassembly_timeout) {
                     Ok(f) => f,
                     Err(_) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_no_slot_drops;
+                        *counter = counter.wrapping_add(1);
                         net_debug!("No available packet assembler for fragmented packet");
                         return None;
                     }
@@ -325,17 +330,30 @@ impl InterfaceInner {
                     .map_or(IPV4_HEADER_LEN, |context| context.header_len);
                 if let Err(error) = f.enforce_max_size(u16::MAX as usize - header_len, incoming_end)
                 {
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
 
-                if !ipv4_packet.more_frags() {
-                    check!(f.set_total_size(incoming_end));
-                }
-
-                if let Err(error) = f.add(ipv4_packet.payload(), offset) {
+                if !ipv4_packet.more_frags()
+                    && let Err(error) = f.set_total_size(incoming_end)
+                {
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
+                }
+
+                match f.add(ipv4_packet.payload(), offset) {
+                    Ok(AssemblerOutcome::Duplicate) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_duplicates;
+                        *counter = counter.wrapping_add(1);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.count_reassembly_error(error);
+                        net_debug!("fragmentation error: {:?}", error);
+                        return None;
+                    }
                 }
                 if !f.is_complete() {
                     return None;
@@ -348,6 +366,8 @@ impl InterfaceInner {
                     }
                 };
                 let payload = f.assemble()?;
+                self.ip_packet_stats.reassemblies_completed =
+                    self.ip_packet_stats.reassemblies_completed.wrapping_add(1);
                 ipv4_repr = context.repr;
                 ipv4_repr.payload_len = payload.len();
                 // A reassembled datagram is not one frame, so no single frame's
@@ -592,9 +612,10 @@ impl InterfaceInner {
                 next_hop_mtu: Some(mtu),
                 ..
             } => {
-                if let Some(quote) = super::pmtu::parse_ipv4(icmp_packet.data()) {
-                    self.update_pmtu_from_quote(sockets, quote, usize::from(mtu));
-                }
+                let accepted = super::pmtu::parse_ipv4(icmp_packet.data()).is_some_and(|quote| {
+                    self.update_pmtu_from_quote(sockets, quote, usize::from(mtu))
+                });
+                self.count_pmtu_message(accepted);
                 None
             }
 
@@ -716,6 +737,8 @@ impl InterfaceInner {
 
             // Update the frag offset for the next fragment.
             frag.ipv4.frag_offset += payload_len as u16;
-        })
+        });
+        self.ip_packet_stats.ipv4_fragments_tx =
+            self.ip_packet_stats.ipv4_fragments_tx.wrapping_add(1);
     }
 }

@@ -122,6 +122,8 @@ impl InterfaceInner {
                 .copy_from_slice(&frag.buffer[frag.sent_bytes..][..payload_len]);
         });
         frag.sent_bytes += payload_len;
+        self.ip_packet_stats.ipv6_fragments_tx =
+            self.ip_packet_stats.ipv6_fragments_tx.wrapping_add(1);
     }
 }
 
@@ -356,7 +358,15 @@ impl InterfaceInner {
 
         #[cfg(feature = "proto-ipv6-fragmentation")]
         let (next_header, ip_payload, meta) = if next_header == IpProtocol::Ipv6Frag {
-            let header = check!(Ipv6FragmentHeader::new_checked(ip_payload));
+            self.ip_packet_stats.ipv6_fragments_rx =
+                self.ip_packet_stats.ipv6_fragments_rx.wrapping_add(1);
+            let header = match Ipv6FragmentHeader::new_checked(ip_payload) {
+                Ok(header) => header,
+                Err(_) => {
+                    self.count_reassembly_error(AssemblerError::Invalid);
+                    return None;
+                }
+            };
             let key = FragKey::Ipv6(Ipv6FragKey {
                 src_addr: ipv6_repr.src_addr,
                 dst_addr: ipv6_repr.dst_addr,
@@ -365,20 +375,25 @@ impl InterfaceInner {
             let repr = match Ipv6FragmentRepr::parse(&header) {
                 Ok(repr) => repr,
                 Err(_) => {
-                    if let Some(fragments) = fragments.as_deref_mut() {
+                    let error =
                         fragments
-                            .assembler
-                            .reject_existing(&key, AssemblerError::Invalid);
-                    }
+                            .as_deref_mut()
+                            .map_or(AssemblerError::Invalid, |fragments| {
+                                fragments
+                                    .assembler
+                                    .reject_existing(&key, AssemblerError::Invalid)
+                            });
+                    self.count_reassembly_error(error);
                     return None;
                 }
             };
             let fragment_payload = &ip_payload[repr.buffer_len()..];
             let unfragmentable_len = ipv6_packet.payload().len() - ip_payload.len();
             if let Err(error) = validate_ipv6_fragment(repr, fragment_payload, unfragmentable_len) {
-                if let Some(fragments) = fragments.as_deref_mut() {
-                    fragments.assembler.reject_existing(&key, error);
-                }
+                let error = fragments.as_deref_mut().map_or(error, |fragments| {
+                    fragments.assembler.reject_existing(&key, error)
+                });
+                self.count_reassembly_error(error);
                 return None;
             }
 
@@ -400,6 +415,8 @@ impl InterfaceInner {
                 {
                     Ok(f) => f,
                     Err(_) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_no_slot_drops;
+                        *counter = counter.wrapping_add(1);
                         net_debug!("No available packet assembler for fragmented packet");
                         return None;
                     }
@@ -410,6 +427,7 @@ impl InterfaceInner {
                     unfragmentable_len,
                     repr.frag_offset == 0,
                 ) {
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
@@ -417,15 +435,28 @@ impl InterfaceInner {
                 if let Err(error) =
                     f.enforce_max_size(u16::MAX as usize - unfragmentable_len, incoming_end)
                 {
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
-                if !repr.more_frags {
-                    check!(f.set_total_size(incoming_end));
-                }
-                if let Err(error) = f.add(fragment_payload, repr.frag_offset as usize) {
+                if !repr.more_frags
+                    && let Err(error) = f.set_total_size(incoming_end)
+                {
+                    self.count_reassembly_error(error);
                     net_debug!("fragmentation error: {:?}", error);
                     return None;
+                }
+                match f.add(fragment_payload, repr.frag_offset as usize) {
+                    Ok(AssemblerOutcome::Duplicate) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_duplicates;
+                        *counter = counter.wrapping_add(1);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.count_reassembly_error(error);
+                        net_debug!("fragmentation error: {:?}", error);
+                        return None;
+                    }
                 }
                 if !f.is_complete() {
                     return None;
@@ -438,6 +469,8 @@ impl InterfaceInner {
                     }
                 };
                 let payload = f.assemble()?;
+                self.ip_packet_stats.reassemblies_completed =
+                    self.ip_packet_stats.reassemblies_completed.wrapping_add(1);
                 ipv6_repr = context.repr.unwrap();
                 ipv6_repr.payload_len = context.unfragmentable_len + payload.len();
                 (
@@ -659,9 +692,9 @@ impl InterfaceInner {
             Icmpv6Repr::EchoReply { .. } => None,
 
             Icmpv6Repr::PktTooBig { mtu, .. } => {
-                if let Some(quote) = super::pmtu::parse_ipv6(icmp_packet.payload()) {
-                    self.update_pmtu_from_quote(sockets, quote, mtu as usize);
-                }
+                let accepted = super::pmtu::parse_ipv6(icmp_packet.payload())
+                    .is_some_and(|quote| self.update_pmtu_from_quote(sockets, quote, mtu as usize));
+                self.count_pmtu_message(accepted);
                 None
             }
 

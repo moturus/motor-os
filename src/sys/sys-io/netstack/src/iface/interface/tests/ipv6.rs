@@ -2473,6 +2473,10 @@ fn ipv6_source_fragments_a_maximum_udp_datagram() {
     )
     .unwrap();
     assert_eq!(udp_packet.payload(), &payload);
+    assert_eq!(
+        iface.take_ip_packet_stats().ipv6_fragments_tx,
+        fragments.len() as u64
+    );
 
     iface.fragmenter.reset();
     let next_payload = vec![0xa5; mtu];
