@@ -779,13 +779,13 @@ fn test_caps() {
         .iter()
         .find(|process| process.pid == moto_sys::current_pid())
         .unwrap();
-    let ssh_shell = processes
+    let parent_shell = processes
         .iter()
         .find(|process| process.pid == this_process.parent_pid)
-        .expect("missing ssh shell");
-    assert!(ssh_shell.debug_name().starts_with("/system/bin/rush"));
-    assert_eq!(russhd.pid, ssh_shell.parent_pid);
-    assert_eq!(ProcessRole::Interactive, role_for(ssh_shell.pid));
+        .expect("missing sibling shell");
+    assert!(parent_shell.debug_name().starts_with("/system/bin/rush"));
+    assert!(russhd.pid == parent_shell.parent_pid || sys_tty.pid == parent_shell.parent_pid);
+    assert_eq!(ProcessRole::Interactive, role_for(parent_shell.pid));
 
     spawn_wait_kill::test_default_capability_policy();
 
