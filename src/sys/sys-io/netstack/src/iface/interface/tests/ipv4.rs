@@ -2844,17 +2844,45 @@ fn ipv4_fragment_staging_is_payload_only_and_exclusive() {
     );
     assert_eq!(iface.fragmenter.ipv4.frag_offset, staged_offset);
 
+    let interface_mtu = iface.inner.ip_mtu();
+    assert!(iface.inner.routes.update_pmtu(
+        Ipv4Address::new(192, 168, 1, 99).into(),
+        1_200,
+        ip_repr.buffer_len() + ip_repr.payload_len,
+        interface_mtu,
+        Instant::ZERO,
+    ));
     device.tx_capacity = None;
     assert_eq!(
         iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
         PollResult::SocketStateChanged
     );
-    assert!(!iface.fragmenter.is_empty());
+    let unaffected = Ipv4Packet::new_checked(device.tx_queue.back().unwrap()).unwrap();
+    assert_eq!(unaffected.ident(), staged_ident);
+    assert_eq!(unaffected.frag_offset(), staged_offset);
+
+    assert!(iface.inner.routes.update_pmtu(
+        dst_addr.into(),
+        1_200,
+        ip_repr.buffer_len() + ip_repr.payload_len,
+        interface_mtu,
+        Instant::ZERO,
+    ));
     assert_eq!(
         iface.poll_egress(Instant::ZERO, &mut device, &mut sockets),
-        PollResult::None
+        PollResult::SocketStateChanged
     );
-    assert!(iface.fragmenter.is_empty());
+    let restarted = Ipv4Packet::new_checked(device.tx_queue.back().unwrap()).unwrap();
+    assert!(restarted.total_len() as usize <= 1_200);
+    assert_eq!(restarted.frag_offset(), 0);
+    assert_ne!(restarted.ident(), staged_ident);
+    assert_eq!(iface.fragmenter.ipv4.frag_offset, 1_176);
+
+    while !iface.fragmenter.is_empty() {
+        let frames_before = device.tx_queue.len();
+        iface.poll_egress(Instant::ZERO, &mut device, &mut sockets);
+        assert_eq!(device.tx_queue.len(), frames_before + 1);
+    }
 }
 
 #[test]

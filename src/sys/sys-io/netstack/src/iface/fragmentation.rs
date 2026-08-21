@@ -543,6 +543,8 @@ pub(crate) struct Ipv4Fragmenter {
     pub frag_offset: u16,
     /// The identifier of the stream.
     pub ident: u16,
+    /// The path MTU used for every fragment of this staged datagram.
+    pub path_mtu: usize,
 }
 
 #[cfg(feature = "proto-ipv6-fragmentation")]
@@ -551,6 +553,8 @@ pub(crate) struct Ipv6Fragmenter {
     #[cfg(feature = "medium-ethernet")]
     pub dst_hardware_addr: EthernetAddress,
     pub ident: u32,
+    /// The path MTU used for every fragment of this staged datagram.
+    pub path_mtu: usize,
 }
 
 #[cfg(feature = "proto-sixlowpan-fragmentation")]
@@ -596,6 +600,7 @@ impl Fragmenter {
                 dst_hardware_addr: EthernetAddress::default(),
                 frag_offset: 0,
                 ident: 0,
+                path_mtu: 0,
             },
             #[cfg(feature = "proto-ipv6-fragmentation")]
             ipv6: Ipv6Fragmenter {
@@ -609,6 +614,7 @@ impl Fragmenter {
                 #[cfg(feature = "medium-ethernet")]
                 dst_hardware_addr: EthernetAddress::default(),
                 ident: 0,
+                path_mtu: 0,
             },
 
             #[cfg(feature = "proto-sixlowpan-fragmentation")]

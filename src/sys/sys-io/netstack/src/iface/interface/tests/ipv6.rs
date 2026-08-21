@@ -2400,7 +2400,7 @@ fn ipv6_source_fragments_a_maximum_udp_datagram() {
         }
     }
 
-    let (mut iface, _sockets, device) = setup(Medium::Ip);
+    let (mut iface, _sockets, mut device) = setup(Medium::Ip);
     let mtu = device.capabilities().ip_mtu();
     let src_addr = Ipv6Address::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1);
     let dst_addr = Ipv6Address::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 1);
@@ -2492,8 +2492,22 @@ fn ipv6_source_fragments_a_maximum_udp_datagram() {
     );
     let packet = Ipv6Packet::new_checked(&next_fragments[0][..]).unwrap();
     let header = Ipv6FragmentHeader::new_checked(packet.payload()).unwrap();
-    assert_ne!(
-        Ipv6FragmentRepr::parse(&header).unwrap().ident,
-        ident.unwrap()
-    );
+    let staged_ident = Ipv6FragmentRepr::parse(&header).unwrap().ident;
+    assert_ne!(staged_ident, ident.unwrap());
+
+    let interface_mtu = iface.inner.ip_mtu();
+    assert!(iface.inner.routes.update_pmtu(
+        dst_addr.into(),
+        1_200,
+        next_repr.buffer_len() + next_repr.payload_len,
+        interface_mtu,
+        Instant::ZERO,
+    ));
+    assert!(iface.ipv6_egress(&mut device));
+    let restarted = Ipv6Packet::new_checked(device.tx_queue.back().unwrap()).unwrap();
+    assert!(restarted.total_len() <= 1_280);
+    let header = Ipv6FragmentHeader::new_checked(restarted.payload()).unwrap();
+    let repr = Ipv6FragmentRepr::parse(&header).unwrap();
+    assert_eq!(repr.frag_offset, 0);
+    assert_ne!(repr.ident, staged_ident);
 }

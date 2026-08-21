@@ -160,6 +160,18 @@ impl Interface {
             return false;
         }
 
+        let repr = self.fragmenter.ipv4.repr;
+        let path_mtu = self.inner.ip_mtu_for(repr.dst_addr.into());
+        if path_mtu < self.fragmenter.ipv4.path_mtu {
+            self.fragmenter.sent_bytes = 0;
+            self.fragmenter.ipv4.frag_offset = 0;
+            self.fragmenter.ipv4.path_mtu = path_mtu;
+            self.fragmenter.ipv4.ident =
+                self.inner
+                    .ipv4_fragment_ids
+                    .next(repr.src_addr, repr.dst_addr, repr.next_header);
+        }
+
         let pkt = &self.fragmenter;
         if pkt.packet_len > pkt.sent_bytes
             && let Some(tx_token) = device.transmit(self.inner.now)
@@ -648,7 +660,8 @@ impl InterfaceInner {
     pub(super) fn dispatch_ipv4_frag<Tx: TxToken>(&mut self, tx_token: Tx, frag: &mut Fragmenter) {
         let caps = self.caps.clone();
 
-        let max_fragment_size = caps.max_ipv4_fragment_size(frag.ipv4.repr.buffer_len());
+        let payload_mtu = frag.ipv4.path_mtu - frag.ipv4.repr.buffer_len();
+        let max_fragment_size = payload_mtu - payload_mtu % IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
         let payload_len = (frag.packet_len - frag.sent_bytes).min(max_fragment_size);
         let ip_len = payload_len + frag.ipv4.repr.buffer_len();
 

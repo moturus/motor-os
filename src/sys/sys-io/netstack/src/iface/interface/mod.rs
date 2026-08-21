@@ -53,6 +53,8 @@ use crate::config::IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT;
 use crate::iface::Routes;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::iface::Slaac;
+#[cfg(feature = "proto-ipv4-fragmentation")]
+use crate::phy::IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
 use crate::phy::PacketMeta;
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
@@ -1529,8 +1531,12 @@ impl InterfaceInner {
     #[allow(unused)] // unused depending on which sockets are enabled
     pub(crate) fn ip_mtu_for(&mut self, destination: IpAddress) -> usize {
         let interface_mtu = self.caps.ip_mtu();
-        self.routes
-            .effective_pmtu(destination, interface_mtu, self.now)
+        if destination.is_unicast() {
+            self.routes
+                .effective_pmtu(destination, interface_mtu, self.now)
+        } else {
+            interface_mtu
+        }
     }
 
     /// See [`DeviceCapabilities::max_tso_size`]. 0 = the device does not
@@ -1960,6 +1966,7 @@ impl InterfaceInner {
         }
         let mut ip_repr = packet.ip_repr();
         assert!(!ip_repr.dst_addr().is_unspecified());
+        let path_mtu = self.ip_mtu_for(ip_repr.dst_addr());
 
         // Dispatch IEEE802.15.4:
 
@@ -2032,7 +2039,7 @@ impl InterfaceInner {
                 // TSO super-segments (meta.tso_seg_size != 0) exceed the wire
                 // MTU by design — the device segments them — so they always
                 // take the direct-emit path below.
-                if meta.tso_seg_size == 0 && total_ip_len > self.caps.ip_mtu() {
+                if meta.tso_seg_size == 0 && total_ip_len > path_mtu {
                     #[cfg(feature = "proto-ipv4-fragmentation")]
                     {
                         net_debug!("start fragmentation");
@@ -2040,8 +2047,9 @@ impl InterfaceInner {
                         // Calculate how much we will send now (including the Ethernet header).
 
                         let ip_header_len = _repr.buffer_len();
+                        let payload_mtu = path_mtu - ip_header_len;
                         let first_frag_data_len =
-                            self.caps.max_ipv4_fragment_size(_repr.buffer_len());
+                            payload_mtu - payload_mtu % IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
                         let first_frag_ip_len = first_frag_data_len + ip_header_len;
                         let mut tx_len = first_frag_ip_len;
                         #[cfg(feature = "medium-ethernet")]
@@ -2073,6 +2081,7 @@ impl InterfaceInner {
                         frag.packet_len = _repr.payload_len;
                         frag.ip_version = Some(IpVersion::Ipv4);
                         frag.ipv4.repr = *_repr;
+                        frag.ipv4.path_mtu = path_mtu;
                         packet.emit_payload(
                             &IpRepr::Ipv4(*_repr),
                             &mut frag.buffer[.._repr.payload_len],
@@ -2137,7 +2146,7 @@ impl InterfaceInner {
             #[cfg(feature = "proto-ipv6")]
             IpRepr::Ipv6(_repr) => {
                 // TSO super-segments are segmented by the device, never here.
-                if meta.tso_seg_size == 0 && total_ip_len > self.caps.ip_mtu() {
+                if meta.tso_seg_size == 0 && total_ip_len > path_mtu {
                     #[cfg(feature = "proto-ipv6-fragmentation")]
                     {
                         if _repr.next_header != IpProtocol::Udp {
@@ -2154,6 +2163,7 @@ impl InterfaceInner {
                             &caps,
                         );
                         frag.ipv6.repr = *_repr;
+                        frag.ipv6.path_mtu = path_mtu;
                         #[cfg(feature = "medium-ethernet")]
                         {
                             frag.ipv6.dst_hardware_addr = dst_hardware_addr;

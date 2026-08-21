@@ -47,6 +47,16 @@ impl Interface {
             return false;
         }
 
+        let path_mtu = self
+            .inner
+            .ip_mtu_for(self.fragmenter.ipv6.repr.dst_addr.into());
+        if path_mtu < self.fragmenter.ipv6.path_mtu {
+            self.fragmenter.sent_bytes = 0;
+            self.fragmenter.ipv6.path_mtu = path_mtu;
+            let ident = self.inner.rand.rand_u32();
+            self.fragmenter.ipv6.ident = if ident == 0 { 1 } else { ident };
+        }
+
         if let Some(tx_token) = device.transmit(self.inner.now) {
             self.inner
                 .dispatch_ipv6_frag(tx_token, &mut self.fragmenter);
@@ -73,8 +83,9 @@ impl InterfaceInner {
             ident: frag.ipv6.ident,
         };
         let fragment_header_len = fragment_repr.buffer_len();
-        let payload_mtu = caps
-            .ip_mtu()
+        let payload_mtu = frag
+            .ipv6
+            .path_mtu
             .checked_sub(ip_header_len + fragment_header_len)
             .expect("IPv6 fragmentation requires an eligible interface");
         let max_fragment_size = payload_mtu - payload_mtu % ALIGNMENT;
