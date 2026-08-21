@@ -139,6 +139,10 @@ impl super::InterfaceInner {
             return false;
         }
 
+        let interface_mtu = self.caps.ip_mtu();
+        #[cfg(feature = "socket-tcp")]
+        let mut tcp_loss = None;
+
         let associated = match quote.transport {
             Transport::Udp => {
                 #[cfg(feature = "socket-udp")]
@@ -161,9 +165,15 @@ impl super::InterfaceInner {
                     let Some(handle) = _sockets.tcp_tuple(quote.local, quote.remote) else {
                         return false;
                     };
-                    _sockets
-                        .get::<crate::socket::tcp::Socket>(handle)
-                        .has_outstanding_unsacked(_seq)
+                    let socket = _sockets.get::<crate::socket::tcp::Socket>(handle);
+                    if !socket.has_outstanding_unsacked(_seq) {
+                        return false;
+                    }
+                    let old_path_mtu =
+                        self.routes
+                            .effective_pmtu(quote.remote.addr, interface_mtu, self.now);
+                    tcp_loss = Some((handle, _seq, socket.effective_mss_for_pmtu(old_path_mtu)));
+                    true
                 }
                 #[cfg(not(feature = "socket-tcp"))]
                 {
@@ -175,14 +185,23 @@ impl super::InterfaceInner {
             return false;
         }
 
-        let interface_mtu = self.caps.ip_mtu();
-        self.routes.update_pmtu(
+        if !self.routes.update_pmtu(
             quote.remote.addr,
             advertised_mtu,
             quote.packet_len,
             interface_mtu,
             self.now,
-        )
+        ) {
+            return false;
+        }
+
+        #[cfg(feature = "socket-tcp")]
+        if let Some((handle, seq, old_mss)) = tcp_loss {
+            _sockets
+                .get_mut::<crate::socket::tcp::Socket>(handle)
+                .mark_pmtu_loss(seq, old_mss);
+        }
+        true
     }
 }
 
@@ -510,8 +529,8 @@ mod tests {
         let handle = sockets.add(
             1,
             tcp::Socket::new(
-                tcp::SocketBuffer::new(vec![0; 64]),
-                tcp::SocketBuffer::new(vec![0; 64]),
+                tcp::SocketBuffer::new(vec![0; 4_096]),
+                tcp::SocketBuffer::new(vec![0; 4_096]),
             ),
         );
         sockets
@@ -524,7 +543,7 @@ mod tests {
                     rcv_nxt: TcpSeqNumber(20_000),
                     snd_nxt,
                     remote_mss: 1_460,
-                    remote_window: 64,
+                    remote_window: 4_096,
                     peer_wscale: None,
                     peer_sack: true,
                     peer_tsval: None,
@@ -533,7 +552,7 @@ mod tests {
             .unwrap();
         sockets
             .get_mut::<tcp::Socket>(handle)
-            .send_slice(b"outbound")
+            .send_slice(&vec![0xa5; 3_000])
             .unwrap();
         sockets
             .get_mut::<tcp::Socket>(handle)
@@ -544,7 +563,9 @@ mod tests {
             local,
             remote,
             packet_len: 1_420,
-            transport: Transport::Tcp { seq: snd_nxt + 8 },
+            transport: Transport::Tcp {
+                seq: snd_nxt + 1_460,
+            },
         };
         assert!(
             !iface
@@ -565,15 +586,25 @@ mod tests {
                 transport: Transport::Tcp { seq: snd_nxt },
                 ..quote
             },
-            1_400,
+            1_200,
         ));
         assert_eq!(
             iface
                 .inner
                 .routes
                 .effective_pmtu(remote.addr, 1_500, Instant::ZERO),
-            1_400
+            1_200
         );
+
+        sockets
+            .get_mut::<tcp::Socket>(handle)
+            .dispatch(iface.context(), |_, meta, (_, tcp)| {
+                assert_eq!(tcp.seq_number, snd_nxt);
+                assert_eq!(tcp.payload.len(), 1_160);
+                assert_eq!(meta.tso_seg_size, 0);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
     }
 
     #[cfg(feature = "proto-ipv6")]

@@ -1183,6 +1183,33 @@ impl<'a> Socket<'a> {
             && self.tx_scoreboard.contains_unsacked(seq)
     }
 
+    /// The payload MSS used on this path before a PMTU decrease.
+    pub(crate) fn effective_mss_for_pmtu(&self, path_mtu: usize) -> usize {
+        let ip_header_len = match self.tuple.unwrap().local.addr {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(_) => crate::wire::IPV6_HEADER_LEN,
+        };
+        // A timestamp option occupies ten bytes plus two bytes of padding.
+        let tcp_header_len = TCP_HEADER_LEN
+            + if self.tsval_generator.is_some() {
+                12
+            } else {
+                0
+            };
+        self.remote_mss
+            .min(path_mtu - ip_header_len - tcp_header_len)
+    }
+
+    /// Mark no more than one pre-decrease wire segment for retransmission.
+    pub(crate) fn mark_pmtu_loss(&mut self, seq: TcpSeqNumber, old_mss: usize) {
+        debug_assert!(self.has_outstanding_unsacked(seq));
+        let end = (seq + old_mss).min(self.local_seq_max);
+        self.tx_scoreboard.mark_lost(seq, end);
+        self.tlp_pto = None;
+    }
+
     /// Return the connection state, in terms of the TCP state machine.
     #[inline]
     pub fn state(&self) -> State {
@@ -9663,6 +9690,53 @@ mod test {
         assert!(s.has_outstanding_unsacked(una + 3));
         assert!(s.has_outstanding_unsacked(una + 14));
         assert!(!s.has_outstanding_unsacked(una + 15));
+    }
+
+    #[test]
+    fn pmtu_loss_mark_splits_a_tso_run_skips_sack_and_clamps_the_tail() {
+        let mut s = socket_established();
+        let una = s.local_seq_no;
+        s.remote_mss = 1_460;
+        assert_eq!(s.effective_mss_for_pmtu(1_500), 1_460);
+        s.set_tsval_generator(Some(|| 1));
+        assert_eq!(s.effective_mss_for_pmtu(1_500), 1_448);
+        s.set_tsval_generator(None);
+        s.local_seq_max = una + 4_380;
+        s.tx_scoreboard
+            .on_transmit(una, una + 4_380, Instant::from_millis(1));
+        s.tx_scoreboard.mark_sacked(una + 1_800, una + 2_000);
+        s.tlp_pto = Some(Instant::from_secs(10));
+        let cwnd = s.congestion_controller.inner().window();
+
+        // A quote for the second wire segment of a 4,380-byte TSO run.
+        s.mark_pmtu_loss(una + 1_460, 1_460);
+        let runs: Vec<_> = s
+            .tx_scoreboard
+            .runs()
+            .iter()
+            .map(|run| (run.start - una, run.end - una, run.sacked, run.lost))
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                (0, 1_460, false, false),
+                (1_460, 1_800, false, true),
+                (1_800, 2_000, true, false),
+                (2_000, 2_920, false, true),
+                (2_920, 4_380, false, false),
+            ]
+        );
+
+        s.mark_pmtu_loss(una + 4_000, 1_460);
+        assert!(
+            s.tx_scoreboard
+                .runs()
+                .iter()
+                .any(|run| run.start == una + 4_000 && run.end == una + 4_380 && run.lost)
+        );
+        assert_eq!(s.congestion_controller.inner().window(), cwnd);
+        assert_eq!(s.recovery_point, None);
+        assert_eq!(s.tlp_pto, None);
     }
 
     #[test]
