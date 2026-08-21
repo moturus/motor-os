@@ -14,6 +14,8 @@ mod ieee802154;
 mod ipv4;
 #[cfg(feature = "proto-ipv6")]
 mod ipv6;
+#[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
+mod pmtu;
 #[cfg(feature = "proto-sixlowpan")]
 mod sixlowpan;
 
