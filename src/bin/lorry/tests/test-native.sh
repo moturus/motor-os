@@ -11,7 +11,7 @@ MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor
 MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
-IMAGE_NAME="motor-os-dev.img"
+IMAGE_NAME="motor-os-dev.qcow2"
 # Native rustc builds need enough parallel memory for the VM's vCPU count.
 VM_SMP="${LORRY_VM_SMP:-8}"
 VM_MEMORY="${LORRY_VM_MEMORY:-8192M}"

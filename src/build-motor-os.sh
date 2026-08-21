@@ -1186,9 +1186,9 @@ main() {
 		"$RG_IMG/system/bin/rg"
 		"$LIBC_IMG/system/cfg/libc/shells"
 		"$MOTOR/build/bin/release/dns-resolver"
-		"$MOTOR/vm_images/release/motor-os.img"
+		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-base.img"
-		"$MOTOR/vm_images/release/motor-os-dev.img"
+		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
@@ -1196,7 +1196,7 @@ main() {
 	done
 
 	log "base, standard, and dev release images built successfully"
-	log "image: $MOTOR/vm_images/release/motor-os.img"
+	log "image: $MOTOR/vm_images/release/motor-os.qcow2"
 	log "run:   cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
 	log "then, at the Motor OS prompt:"
 	log "  cc /devtools/src/hello.c -o /user/tmp/hello && /user/tmp/hello"

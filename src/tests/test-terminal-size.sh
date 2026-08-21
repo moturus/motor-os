@@ -59,7 +59,7 @@ RMUX_TMPDIR=/devtools/tmp/test-terminal-size-rmux
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = "release" ]; then

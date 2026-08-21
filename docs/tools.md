@@ -7,14 +7,15 @@ After successfully [building Motor OS image](./build.md),
 and several useful scripts:
 
 - `motor-os-base.img` contains the minimal bootable system and user shell tools;
-- `motor-os.img` is the standard production image, adding networking, DNS, and
+- `motor-os.qcow2` is the standard production image, adding networking, DNS, and
   regular user programs;
-- `motor-os-dev.img` adds native toolchains, sources, diagnostics, tests, and
+- `motor-os-dev.qcow2` adds native toolchains, sources, diagnostics, tests, and
   the bundled sample website;
 - `create-tap.sh` is a script to create a local ipvtap device that will be used
   by the VM for networking;
 - `run-qemu.sh` and `run-chv.sh` run the image selected by `MOTO_IMAGE`; it
-  defaults to `motor-os.img`.
+  defaults to `motor-os.qcow2`. QEMU and Cloud Hypervisor also accept the raw
+  base image; Firecracker supports only that raw image.
 
 ## Tools available inside the Motor OS VM
 

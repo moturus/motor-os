@@ -36,12 +36,15 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
 "$WD/test-vm-console-filter.sh"
+"$WD/test-vm-image-format.sh"
+# Keep a local runtime version bump from breaking only the dev-image suite.
+python3 "$WD/test-dev-path-locks.py"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
 # both to run this same suite against the dev image, which adds native
 # toolchains, tests, source trees, Gears, and Lorry to the standard contents.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then

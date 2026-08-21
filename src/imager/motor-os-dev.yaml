@@ -89,5 +89,6 @@ source_dirs:
   - source: "src/sys/lib/moto-sys"
     destination: "/devtools/src/src/sys/lib/moto-sys"
 filesystem: "motor-fs"
-img_name: "motor-os-dev.img"
+img_name: "motor-os-dev.qcow2"
+image_format: "qcow2"
 data_partition_size_mb: 2048
