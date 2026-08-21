@@ -39,15 +39,15 @@ DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $
 
 DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-all: main.img
+all: base.img main.img
 images: base.img main.img dev.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base curl kibim httpd httpd-axum
-user-dev: user gears gears-mock-provider lorry mdbg rnetbench crossbench \
+user: user-base kibim httpd httpd-axum
+user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev dev-sources
@@ -253,12 +253,13 @@ endef
 # The standard image adds production networking and user programs to base.
 main.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" \
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
 	cd src/imager && \
 		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	$(INSTALL_VM_SCRIPTS)
-	@echo "built the standard Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
 
 # The base image alone; what src/build-base.sh produces.
 base.img: boot core sys-base user-base
@@ -273,12 +274,13 @@ base.img: boot core sys-base user-base
 # The dev image adds diagnostics, tests, sources, and native toolchains.
 dev.img: boot core sys user-dev dev-sources
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 	cd src/imager && \
 		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
 	$(INSTALL_VM_SCRIPTS)
-	@echo "built the Motor OS dev image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)

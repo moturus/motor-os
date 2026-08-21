@@ -6,8 +6,10 @@ mod admission;
 // mod channel_test;
 mod command_output;
 mod descriptor_attr;
+mod execute_permissions;
 mod file_locking;
 mod fs;
+mod fs_permissions;
 mod icmp;
 mod io_channel;
 mod logging;
@@ -140,39 +142,134 @@ fn test_reentrant_mutex() {
 }
 
 fn test_cpus() {
-    // Spin-loop until all CPUs have been "live".
-    let mut cpus: Arc<Vec<AtomicBool>> = Arc::new(vec![]);
-    for _i in 0..moto_sys::num_cpus() {
-        Arc::get_mut(&mut cpus)
-            .unwrap()
-            .push(AtomicBool::new(false));
-    }
+    let num_cpus = moto_sys::num_cpus();
+    assert_ne!(num_cpus, 0);
 
-    let num_threads: u16 = moto_sys::num_cpus() as u16;
+    let target = Arc::new(AtomicU32::new(u32::MAX));
+    let stop = Arc::new(AtomicBool::new(false));
+    let spinning: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(true)).collect());
+    let ready: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let stopped: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let running: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let touched: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let controller = std::thread::current();
 
-    let mut threads = vec![];
-    for _idx in 0..num_threads {
-        let cpus_clone = cpus.clone();
+    // Keep every CPU busy. CPU 0 cannot be an affinity target for this
+    // process, so its spinner is the only unpinned one; the other spinners
+    // leave CPU 0 as its natural placement. When resumed, spinner 0 yields
+    // anywhere else until it is back on CPU 0.
+    let mut threads = Vec::with_capacity(num_cpus as usize);
+    for cpu in 0..num_cpus {
+        let stop = stop.clone();
+        let spinning = spinning.clone();
+        let ready = ready.clone();
+        let stopped = stopped.clone();
+        let running = running.clone();
+        let controller = controller.clone();
         threads.push(std::thread::spawn(move || {
-            loop {
-                let cpu = moto_sys::current_cpu() as usize;
-                cpus_clone[cpu].store(true, Ordering::Relaxed);
+            if cpu != 0 {
+                moto_sys::SysCpu::affine_to_cpu(Some(cpu)).unwrap();
+            }
 
-                let mut count = 0;
-                for idx in 0..cpus_clone.len() {
-                    let cpu = &cpus_clone[idx];
-                    if cpu.load(Ordering::Relaxed) {
-                        count += 1;
+            while !stop.load(Ordering::Acquire) {
+                if !spinning[cpu as usize].load(Ordering::Acquire) {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    stopped[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                    while !spinning[cpu as usize].load(Ordering::Acquire)
+                        && !stop.load(Ordering::Acquire)
+                    {
+                        std::thread::park();
                     }
+                    stopped[cpu as usize].store(false, Ordering::Release);
+                    continue;
                 }
 
-                if count == moto_sys::num_cpus() {
-                    return;
+                if moto_sys::current_cpu() != cpu {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    if ready[cpu as usize].load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                    continue;
                 }
+
+                if !running[cpu as usize].swap(true, Ordering::AcqRel) {
+                    ready[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                }
+                std::hint::spin_loop();
             }
         }));
     }
 
+    while ready.iter().any(|ready| !ready.load(Ordering::Acquire)) {
+        std::thread::park();
+    }
+
+    let probe_target = target.clone();
+    let probe_stop = stop.clone();
+    let probe_touched = touched.clone();
+    let probe_ready = Arc::new(AtomicBool::new(false));
+    let child_ready = probe_ready.clone();
+    let probe_controller = controller.clone();
+    let probe = std::thread::spawn(move || {
+        child_ready.store(true, Ordering::Release);
+        probe_controller.unpark();
+        while !probe_stop.load(Ordering::Acquire) {
+            let cpu = probe_target.load(Ordering::Acquire);
+            if cpu < num_cpus && moto_sys::current_cpu() == cpu {
+                if !probe_touched[cpu as usize].swap(true, Ordering::AcqRel) {
+                    probe_controller.unpark();
+                }
+            }
+            std::hint::spin_loop();
+        }
+    });
+
+    while !probe_ready.load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    spinning[0].store(false, Ordering::Release);
+    while !stopped[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+    target.store(0, Ordering::Release);
+    while !touched[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    for cpu in 1..num_cpus {
+        spinning[cpu as usize].store(false, Ordering::Release);
+        while !stopped[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        target.store(cpu, Ordering::Release);
+
+        let previous = (cpu - 1) as usize;
+        spinning[previous].store(true, Ordering::Release);
+        threads[previous].thread().unpark();
+        while !running[previous].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        while !touched[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+
+    stop.store(true, Ordering::Release);
+    for (cpu, thread) in threads.iter().enumerate() {
+        spinning[cpu].store(true, Ordering::Release);
+        thread.thread().unpark();
+    }
+    probe.join().unwrap();
     for thread in threads {
         thread.join().unwrap();
     }
@@ -603,21 +700,94 @@ fn test_writable_executable_elf_rejected() {
 }
 
 fn test_caps() {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SYS, ProcessRole};
+
+    assert_eq!(ProcessRole::None, ProcessRole::from_caps(0));
     assert_eq!(
-        0,
-        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
+        ProcessRole::Interactive,
+        ProcessRole::from_caps(CAP_INTERACTIVE)
     );
+    assert_eq!(ProcessRole::System, ProcessRole::from_caps(CAP_SYS));
+    assert_eq!(
+        ProcessRole::System,
+        ProcessRole::from_caps(CAP_SYS | CAP_INTERACTIVE)
+    );
+    assert_eq!(Ok(ProcessRole::None), ProcessRole::try_from(0));
+    assert_eq!(Ok(ProcessRole::Interactive), ProcessRole::try_from(1));
+    assert_eq!(Ok(ProcessRole::System), ProcessRole::try_from(2));
+    assert_eq!(Err(()), ProcessRole::try_from(3));
+
+    let self_caps = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(0, self_caps & CAP_SYS);
+    assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(self_caps));
 
     assert!(
         std::process::Command::new(std::env::args().next().unwrap())
             .arg("subcommand")
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{:x}", moto_sys::caps::CAP_SYS),
+                format!("0x{CAP_SYS:x}"),
             )
             .spawn()
             .is_err()
     );
+
+    let mut processes = vec![moto_sys::stats::ProcessInfoV1::default(); 1024];
+    let count =
+        moto_sys::stats::ProcessInfoV1::list(moto_sys::stats::PID_SYSTEM, &mut processes).unwrap();
+    processes.truncate(count);
+    let role_for = |pid| {
+        ProcessRole::try_from(
+            processes
+                .iter()
+                .find(|process| process.pid == pid)
+                .unwrap()
+                .process_role,
+        )
+        .unwrap()
+    };
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_SYSTEM));
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_KERNEL));
+    assert_eq!(ProcessRole::System, role_for(moto_sys::stats::PID_SYS_IO));
+    assert_eq!(
+        ProcessRole::from_caps(self_caps),
+        role_for(moto_sys::current_pid())
+    );
+
+    let active_named = |prefix: &str| {
+        processes
+            .iter()
+            .find(|process| process.active != 0 && process.debug_name().starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing active process '{prefix}'"))
+    };
+    let sys_tty = active_named("/system/services/sys-tty");
+    let russhd = active_named("/system/services/russhd");
+    assert_eq!(ProcessRole::Interactive, role_for(sys_tty.pid));
+    assert_eq!(ProcessRole::Interactive, role_for(russhd.pid));
+
+    let console_shell = processes
+        .iter()
+        .find(|process| {
+            process.active != 0
+                && process.parent_pid == sys_tty.pid
+                && process.debug_name().starts_with("/system/bin/rush")
+        })
+        .expect("missing console rush");
+    assert_eq!(ProcessRole::Interactive, role_for(console_shell.pid));
+
+    let this_process = processes
+        .iter()
+        .find(|process| process.pid == moto_sys::current_pid())
+        .unwrap();
+    let parent_shell = processes
+        .iter()
+        .find(|process| process.pid == this_process.parent_pid)
+        .expect("missing sibling shell");
+    assert!(parent_shell.debug_name().starts_with("/system/bin/rush"));
+    assert!(russhd.pid == parent_shell.parent_pid || sys_tty.pid == parent_shell.parent_pid);
+    assert_eq!(ProcessRole::Interactive, role_for(parent_shell.pid));
+
+    spawn_wait_kill::test_default_capability_policy();
 
     println!("test_caps() PASS");
 }
@@ -866,6 +1036,12 @@ fn main() {
     if spawn_wait_kill::is_pid_query_child(&args) {
         spawn_wait_kill::run_pid_query_child();
     }
+    if spawn_wait_kill::is_peer_caps_query_child(&args) {
+        spawn_wait_kill::run_peer_caps_query_child();
+    }
+    if spawn_wait_kill::is_caps_policy_child(&args) {
+        spawn_wait_kill::run_caps_policy_child();
+    }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
     }
@@ -906,6 +1082,9 @@ fn main() {
     if args.len() == 5 && args[1] == "concurrent-read-child" {
         fs::verify_pattern_file(&args[2], args[3].parse().unwrap(), &args[4]);
         return;
+    }
+    if fs_permissions::is_none_child(&args) {
+        fs_permissions::run_none_child(&args);
     }
     if command_output::is_child(&args) {
         command_output::run_child(&args);
@@ -968,6 +1147,8 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    fs_permissions::run_all_tests();
+    execute_permissions::run_all_tests();
     descriptor_attr::run_all_tests();
     file_locking::run_tests();
     // return;
@@ -1000,6 +1181,7 @@ fn main() {
 
     spawn_wait_kill::test_pid_invariants();
     spawn_wait_kill::test_process_pid_query();
+    spawn_wait_kill::test_peer_capabilities_query();
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();

@@ -81,7 +81,7 @@ fi
 
 chmod 600 "$WD/test.key"
 IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-dev.img
+export MOTO_IMAGE=motor-os-dev.qcow2
 SSH_OPTIONS=(
   -F /dev/null
   -p 2222

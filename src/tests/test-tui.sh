@@ -51,7 +51,7 @@ RMUX_TMPDIR=/devtools/tmp/test-tui-rmux
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = "release" ]; then
@@ -216,6 +216,11 @@ wait_console() {
 # ordering: input typed earlier would reach the shell's line editor instead.
 echo "-- sys-tty console child --"
 wait_console "motor-os"
+printf 'if [ "$PWD" = /user ] && [ "$HOME" = /user ]; then echo CONSOLE_"HOME_OK"; else echo CONSOLE_"HOME_BAD"; fi\n' >&3
+wait_console "CONSOLE_HOME_"
+if grep -aq "CONSOLE_HOME_BAD" "$CONSOLE_LOG"; then
+  fail "sys-tty did not start the console shell with HOME and PWD set to /user"
+fi
 printf 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child\n' >&3
 wait_console "dupnew="
 printf 'exit\n' >&3

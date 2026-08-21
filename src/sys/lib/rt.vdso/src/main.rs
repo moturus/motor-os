@@ -420,6 +420,10 @@ pub extern "C" fn motor_start(version: u64) {
         rt_process::current_exe as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.current_pid.store(
+        rt_process::current_pid as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     vtable
         .num_cpus

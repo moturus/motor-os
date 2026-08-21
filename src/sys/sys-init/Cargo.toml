@@ -5,7 +5,12 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[[bin]]
+name = "sys-init"
+path = "src/main.rs"
+test = false
+
+[target.'cfg(target_os = "motor")'.dependencies]
 moto-sys     = { path = "../lib/moto-sys"    }
 moto-log     = { path = "../lib/moto-log"    }
 

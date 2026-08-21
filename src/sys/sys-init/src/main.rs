@@ -1,6 +1,7 @@
 use std::process::Stdio;
 
 use moto_sys::*;
+use sys_init::process_service_line;
 
 #[derive(Debug)]
 struct Config {
@@ -28,7 +29,9 @@ fn process_config() -> Result<Config, String> {
         }
 
         if let Some(cap_cmd) = line.strip_prefix("svc:") {
-            services.push(process_service_line(cap_cmd));
+            services.push(process_service_line(cap_cmd).map_err(|reason| {
+                format!("'/system/cfg/sys-init.cfg': bad service at line {curr_line}: {reason}")
+            })?);
         } else if let Some(file) = line.strip_prefix("tty:") {
             tty = Some(file.to_owned());
         } else if let Some(file) = line.strip_prefix("strobe:") {
@@ -114,8 +117,16 @@ fn main() {
         });
     }
 
+    let tty_caps = moto_sys::caps::CAP_IO_MANAGER
+        | moto_sys::caps::CAP_SPAWN
+        | moto_sys::caps::CAP_LOG
+        | moto_sys::caps::CAP_SPAWN_DETACHED
+        | moto_sys::caps::CAP_INTERACTIVE;
     let mut tty = std::process::Command::new(config.tty.as_str())
-        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0xffffffffffffffff")
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{tty_caps:x}"),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -129,31 +140,6 @@ fn main() {
     let _ = moto_sys::SysRay::log("tty stopped. Shutting down.");
 }
 
-fn process_service_line(cap_cmd: &str) -> (u64, String) {
-    let Some(pos) = cap_cmd.find(':') else {
-        return (0, cap_cmd.to_owned());
-    };
-
-    let (caps, cmd) = cap_cmd.split_at(pos);
-    if cmd.is_empty() {
-        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
-        std::process::exit(1);
-    }
-
-    let cmd = cmd[1..].trim();
-    if cmd.is_empty() {
-        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
-        std::process::exit(1);
-    }
-
-    let Ok(caps) = caps.parse() else {
-        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
-        std::process::exit(1);
-    };
-
-    (caps, cmd.to_owned())
-}
-
 fn spawn_service(caps: u64, cmd: &str) {
     log::info!("Starting service '{cmd}'.");
 
@@ -165,9 +151,7 @@ fn spawn_service(caps: u64, cmd: &str) {
     let mut command = std::process::Command::new(&words[0]);
     command.args(&words[1..]);
 
-    if caps != 0 {
-        command.env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"));
-    }
+    command.env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"));
 
     let _child = command
         .stdin(Stdio::piped())

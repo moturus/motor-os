@@ -61,7 +61,8 @@ HOST_TRIPLE="x86_64-unknown-linux-gnu"
 RUST_REPO="https://github.com/moturus/rust.git"
 RUST_BASE_BRANCH="motor-os-rt-v17"
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run
-# the VM (this script still stops short of actually running it).
+# the VM and qemu-utils so the complete build can create qcow2 images (this
+# script still stops short of actually running a VM).
 #
 # zlib1g-dev, not the libz-dev that docs/build.md names: libz-dev is a pure
 # virtual package (zlib1g-dev "Provides: libz-dev"), and dpkg-query never
@@ -71,7 +72,7 @@ RUST_BASE_BRANCH="motor-os-rt-v17"
 # and defeating this script's own "skipped if already present" promise (and any
 # unattended re-run). Naming the real package makes the probe work.
 PACKAGES=(git build-essential nasm clang cmake ninja-build \
-          zlib1g-dev libssl-dev pkg-config curl qemu-system)
+          zlib1g-dev libssl-dev pkg-config curl qemu-system qemu-utils)
 
 # --- 1. host packages -------------------------------------------------------
 install_packages() {

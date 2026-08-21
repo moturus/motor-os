@@ -269,13 +269,14 @@ udp_sockets="$(read_udp_socket_count)"
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
 resolver_pid="$(vm_ssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
 vm_ssh /system/bin/kill "$resolver_pid"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" /system/services/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
+"${SSH[@]}" MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+  >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
 resolver_restarted=0

@@ -14,7 +14,7 @@ pub const PID_SYS_IO: u64 = 2;
 pub const MAX_DEBUG_NAME_BYTES: usize = 32;
 
 // Per-process identity. Only the descriptive, ABI-stable fields live here: pid,
-// parent_pid, the debug name, and the active/system flags. Counters and
+// parent_pid, the debug name, and the active/role fields. Counters and
 // measurements are intentionally NOT part of this struct — they are produced by
 // the kernel's metric catalog (the `MetricType` enum, which lives in the kernel)
 // and fetched per process via the federated stats query
@@ -29,9 +29,11 @@ pub struct ProcessInfoV1 {
     pub parent_pid: u64,
     pub debug_name_bytes: [u8; MAX_DEBUG_NAME_BYTES],
     pub debug_name_len: u8,
-    pub active: u8,         // 0 => zombie; 1 => active.
-    pub system_process: u8, // 1 => system; 0 => normal.
+    pub active: u8,       // 0 => zombie; 1 => active.
+    pub process_role: u8, // ProcessRole as u8.
 }
+
+const _: () = assert!(core::mem::size_of::<ProcessInfoV1>() == 56);
 
 #[cfg(feature = "userspace")]
 impl ProcessInfoV1 {
