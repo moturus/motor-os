@@ -828,6 +828,10 @@ fn main() {
         tcp::test_ipv6();
         return;
     }
+    if args.len() == 3 && args[1] == "test-tap-udp-fragmentation" {
+        udp::test_tap_udp_fragmentation(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-poll" {
         poll::run_all_tests();
         return;

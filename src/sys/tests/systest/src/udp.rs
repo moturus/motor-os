@@ -146,6 +146,38 @@ fn test_unsupported_udp_options_return_errors() {
     println!("-- test_unsupported_udp_options_return_errors() PASS");
 }
 
+/// Exercise source fragmentation and reassembly through the real tap device.
+pub fn test_tap_udp_fragmentation(destination: &str) {
+    // Above every supported Ethernet IP MTU, but small enough to keep failures
+    // easy to diagnose and independent of the maximum-datagram boundary tests.
+    const PAYLOAD_LEN: usize = 4096;
+
+    let destination: std::net::SocketAddr = destination.parse().unwrap();
+    let local = match destination {
+        std::net::SocketAddr::V4(_) => "192.168.4.2:0",
+        std::net::SocketAddr::V6(_) => "[2001:db8::2]:0",
+    };
+    let socket = std::net::UdpSocket::bind(local).unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+
+    let payload: Vec<u8> = (0..PAYLOAD_LEN)
+        .map(|offset| (offset.wrapping_mul(37).wrapping_add(11) & 0xff) as u8)
+        .collect();
+    assert_eq!(
+        socket.send_to(&payload, destination).unwrap(),
+        payload.len()
+    );
+
+    let mut echoed = vec![0_u8; PAYLOAD_LEN + 1];
+    let (len, source) = socket.recv_from(&mut echoed).unwrap();
+    assert_eq!(source, destination);
+    assert_eq!(len, payload.len());
+    assert_eq!(&echoed[..len], payload);
+    println!("-- tap UDP fragmentation via {destination} PASS");
+}
+
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();

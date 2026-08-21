@@ -81,6 +81,7 @@ vm_ssh() {
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
+. "$WD/test-udp-fragmentation.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -187,6 +188,7 @@ VMM_PID=""
 # cleanup routine
 stop_vmm() {
   set +e
+  stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
@@ -252,6 +254,8 @@ vm_ssh /system/bin/ping -c 1 192.168.4.1
 vm_ssh /system/bin/ping -c 1 2001:db8::1
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
+
+test_udp_fragmentation
 
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test
