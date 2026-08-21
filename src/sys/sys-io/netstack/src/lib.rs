@@ -157,9 +157,9 @@ pub mod config {
     // test. Anything here that differs from what sys-io deploys is a capacity
     // the test suite does not cover.
     //
-    // The two sys-io actually chooses are pinned by `const` assertions in
-    // `sys-io/src/runtime/net/socket/tcp.rs`, which is the only place that can
-    // see both numbers. `ASSEMBLER_MAX_SEGMENT_COUNT` is kept equal here.
+    // The production values relevant to these tests are pinned by `const`
+    // assertions in sys-io, which is the only crate that can see the deployed
+    // feature result. The assembler and fragmentation settings stay equal here.
     // (The interface's address and route tables grow on demand and no longer
     // appear in this module at all.)
     //
@@ -185,7 +185,7 @@ pub mod config {
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
     pub const IFACE_NEIGHBOR_CACHE_COUNT: usize = 3;
     pub const REASSEMBLY_BUFFER_COUNT: usize = 4;
-    pub const REASSEMBLY_BUFFER_SIZE: usize = 1500;
+    pub const REASSEMBLY_BUFFER_SIZE: usize = 65536;
     pub const RPL_RELATIONS_BUFFER_COUNT: usize = 16;
     pub const RPL_PARENTS_BUFFER_COUNT: usize = 8;
     pub const IPV6_HBH_MAX_OPTIONS: usize = 4;

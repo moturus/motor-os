@@ -513,7 +513,7 @@ impl Fragmenter {
 pub(crate) struct Fragmenter {
     /// The bounded staging buffer. IP fragmentation stores payload only;
     /// 6LoWPAN retains its compressed packet representation.
-    pub buffer: [u8; FRAGMENTATION_BUFFER_SIZE],
+    pub buffer: alloc::boxed::Box<[u8; FRAGMENTATION_BUFFER_SIZE]>,
     /// The size of the packet without the IEEE802.15.4 header and the fragmentation headers.
     pub packet_len: usize,
     /// The amount of bytes that already have been transmitted.
@@ -578,7 +578,12 @@ pub(crate) struct SixlowpanFragmenter {
 impl Fragmenter {
     pub(crate) fn new() -> Self {
         Self {
-            buffer: [0u8; FRAGMENTATION_BUFFER_SIZE],
+            // Build the array allocation from a boxed slice so its 64 KiB do
+            // not exist as a temporary on the caller's stack.
+            buffer: alloc::vec![0u8; FRAGMENTATION_BUFFER_SIZE]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
             packet_len: 0,
             sent_bytes: 0,
             #[cfg(any(
@@ -686,6 +691,15 @@ mod tests {
 
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
     struct Key(usize);
+
+    #[cfg(feature = "_proto-fragmentation")]
+    #[test]
+    fn fragmenter_staging_buffer_is_fixed_zeroed_and_off_stack() {
+        let fragmenter = Fragmenter::new();
+        assert_eq!(fragmenter.buffer.len(), FRAGMENTATION_BUFFER_SIZE);
+        assert!(fragmenter.buffer.iter().all(|byte| *byte == 0));
+        assert!(core::mem::size_of::<Fragmenter>() < FRAGMENTATION_BUFFER_SIZE / 2);
+    }
 
     #[test]
     fn packet_assembler_reports_progress_and_assembles_out_of_order() {

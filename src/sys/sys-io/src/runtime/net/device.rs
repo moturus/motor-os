@@ -107,6 +107,19 @@ const MAX_IP_MTU: u16 = (SMALL_BUF_SIZE - moto_netstack::wire::ETHERNET_HEADER_L
 /// under it is a broken device rather than a small link.
 const MIN_IP_MTU: u16 = 576;
 
+const _: () = assert!(
+    moto_netstack::config::FRAGMENTATION_BUFFER_SIZE == 65_536,
+    "sys-io source fragmentation requires a 65536-byte staging buffer"
+);
+const _: () = assert!(
+    moto_netstack::config::REASSEMBLY_BUFFER_SIZE == 65_536,
+    "sys-io reassembly requires a 65536-byte per-datagram bound"
+);
+const _: () = assert!(
+    moto_netstack::config::REASSEMBLY_BUFFER_COUNT == 4,
+    "sys-io reassembly requires four bounded per-interface slots"
+);
+
 /// The `max_transmission_unit` moto-netstack wants -- a whole Ethernet frame --
 /// from the IP MTU virtio reports, or from nothing when it reports nothing.
 ///

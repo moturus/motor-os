@@ -147,10 +147,12 @@ small keys/range metadata. Ingress buffers remain lazy `Vec`s. Growth
 uses a checked protocol end offset and a fallible exact reserve before
 resize; allocation failure poisons that assembly. Buffers retain their
 bounded capacity for reuse, avoiding allocator churn under repeated
-traffic. The egress slot is fixed storage so a UDP datagram already
+traffic. The egress slot is heap-backed fixed storage so a UDP datagram already
 accepted into sys-io cannot become a silent allocation-failure drop on
-its way to the device. This adds 64 KiB of zeroed interface state at
-construction, but no task, timer, or continuing boot work.
+its way to the device. Its allocation is an interface-construction
+requirement; the bytes never occupy an interface-construction stack frame.
+This adds 64 KiB of zeroed interface state at construction, but no task,
+timer, or continuing boot work.
 
 Slots are first-free and non-evicting. Once all four are live, a new key
 is dropped and counted until a slot completes or expires. This protects
