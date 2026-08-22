@@ -1071,6 +1071,71 @@ fn test_stale_cross_connection_accept_is_requeued() {
     println!("test_stale_cross_connection_accept_is_requeued() PASS");
 }
 
+fn test_pending_accept_queue_is_bounded_and_canceled() {
+    use moto_sys_io::api_net;
+
+    const CAP: usize = 1024;
+    const BATCH: usize = 32;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let accept_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(&bind_addr, Some(1)))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_id = bind_resp.handle;
+
+    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    for batch in 0..CAP / BATCH {
+        for offset in 0..BATCH {
+            let id = (batch * BATCH + offset + 1) as u64;
+            let mut accept = api_net::accept_tcp_listener_request(listener_id, 0);
+            accept.id = id;
+            accept_connection.send(accept).unwrap();
+        }
+
+        // The response is a FIFO control-task barrier: this batch reached
+        // admission, and the 64-entry raw channel never has to absorb 1,024
+        // requests at once.
+        let mut barrier = api_net::bind_udp_socket_request(&invalid_addr, 0);
+        barrier.id = (CAP + batch + 1) as u64;
+        accept_connection.send(barrier).unwrap();
+        let response = recv_raw_net_response(&accept_connection);
+        assert_eq!(response.id, barrier.id);
+        response.status().unwrap_err();
+    }
+
+    let mut overflow = api_net::accept_tcp_listener_request(listener_id, 0);
+    overflow.id = (CAP + CAP / BATCH + 1) as u64;
+    accept_connection.send(overflow).unwrap();
+    assert_eq!(
+        recv_raw_net_response(&accept_connection).status(),
+        Err(moto_rt::Error::OutOfMemory)
+    );
+
+    let mut drop_req = moto_ipc::io_channel::Msg::new();
+    drop_req.command = api_net::NetCmd::TcpListenerDrop as u16;
+    drop_req.handle = listener_id;
+    listener_connection.send(drop_req).unwrap();
+
+    for _ in 0..CAP {
+        assert_eq!(
+            recv_raw_net_response(&accept_connection).status(),
+            Err(moto_rt::Error::NotConnected)
+        );
+    }
+
+    drop(accept_connection);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    println!("test_pending_accept_queue_is_bounded_and_canceled() PASS");
+}
+
 /// A positive SO_LINGER close is an RPC even though the ordinary moto-io drop
 /// path uses an id-zero, fire-and-forget close. Keep the peer's write half open
 /// until the FIN arrives to prove sys-io retains and eventually answers the
@@ -1260,6 +1325,7 @@ pub fn test_native_net_cancellation() {
     test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
     test_stale_cross_connection_accept_is_requeued();
+    test_pending_accept_queue_is_bounded_and_canceled();
     test_failed_tcp_setup_rolls_back_socket();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();

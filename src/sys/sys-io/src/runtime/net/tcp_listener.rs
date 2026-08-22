@@ -11,8 +11,10 @@ use std::{
 
 const DEFAULT_NUM_LISTENING_SOCKETS: usize = 4;
 const MAX_NUM_LISTENING_SOCKETS: usize = 32;
+const MAX_PENDING_ACCEPTS: usize = 1024;
 
 type PendingSocket = (u64, SocketAddr, moto_async::oneshot::Sender<()>);
+type PendingAccept = (moto_ipc::io_channel::Msg, ClientSender);
 
 pub(super) struct TcpListener {
     listener_id: u64,
@@ -27,7 +29,7 @@ pub(super) struct TcpListener {
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, ClientSender)>,
+    pending_accepts: VecDeque<PendingAccept>,
 
     // Connected sockets that did not yet emit the accept QE.
     // When the socket is accepted, the oneshot should be fired.
@@ -87,11 +89,24 @@ impl TcpListener {
     }
 
     // Called on conn drop.
-    pub(super) fn hard_reset(&mut self) {
-        self.close_pools();
-        self.pending_accepts.clear();
-        while self.pop_pending_socket().is_some() {}
-        self.listening_sockets.clear();
+    pub(super) async fn hard_reset(this: Rc<RefCell<Self>>) {
+        let pending_accepts = {
+            let mut listener = this.borrow_mut();
+            listener.close_pools();
+            let pending_accepts = std::mem::take(&mut listener.pending_accepts);
+            while listener.pop_pending_socket().is_some() {}
+            listener.listening_sockets.clear();
+            pending_accepts
+        };
+        drop(this);
+        Self::cancel_pending_accepts(pending_accepts).await;
+    }
+
+    async fn cancel_pending_accepts(mut pending: VecDeque<PendingAccept>) {
+        while let Some((mut msg, client)) = pending.pop_front() {
+            msg.status = moto_rt::E_NOT_CONNECTED;
+            let _ = client.send(msg).await;
+        }
     }
 
     fn queue_pending_socket(
@@ -261,11 +276,11 @@ impl TcpListener {
             }
         }
 
-        let socket_ids = {
+        let (socket_ids, pending_accepts) = {
             let mut listener = tcp_listener.borrow_mut();
 
             listener.close_pools();
-            listener.pending_accepts.clear();
+            let pending_accepts = std::mem::take(&mut listener.pending_accepts);
             let mut socket_ids = Vec::with_capacity(
                 listener.pending_sockets.len() + listener.listening_sockets.len(),
             );
@@ -274,11 +289,12 @@ impl TcpListener {
                 socket_ids.push(entry.0);
             }
             socket_ids.extend(listener.listening_sockets.drain());
-            socket_ids
+            (socket_ids, pending_accepts)
         };
 
         // Prevent replenish tasks from upgrading their weak listener refs.
         drop(tcp_listener);
+        Self::cancel_pending_accepts(pending_accepts).await;
 
         for socket_id in socket_ids {
             // Socket teardown is asynchronous and can cascade-remove another
@@ -592,10 +608,11 @@ impl TcpListener {
             .await;
         } else {
             log::debug!("Pending accept request for TCP listener 0x{listener_id:x}.");
-            tcp_listener
-                .borrow_mut()
-                .pending_accepts
-                .push_back((msg, sender.clone()));
+            let mut listener = tcp_listener.borrow_mut();
+            if listener.pending_accepts.len() >= MAX_PENDING_ACCEPTS {
+                return Err(ErrorKind::OutOfMemory.into());
+            }
+            listener.pending_accepts.push_back((msg, sender.clone()));
         }
 
         Ok(())

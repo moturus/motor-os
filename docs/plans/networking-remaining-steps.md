@@ -94,7 +94,7 @@ cleanup.
 - COMPLETED: Replace `drop_tcp_socket`'s fixed 1 ms delay with an explicit
   transmit-completion/state condition so an abort is not removed before its RST
   reaches the device.
-- Bound each listener's queued native `pending_accepts` RPCs at 1,024 and reply
+- COMPLETED: Bound each listener's queued native `pending_accepts` RPCs at 1,024 and reply
   to every queued request with a closed/canceled error during teardown.
 - Bound the per-socket UDP TX queue by bytes and datagrams before channel
   fragments are copied out of their pages. On admission overflow or netstack

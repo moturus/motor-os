@@ -487,7 +487,7 @@ impl NetRuntime {
 
     async fn on_connection_done(&self, conn_id: SysHandle) {
         // First remove listeners, otherwise dropped listening sockets will spawn new ones.
-        let mut tcp_listeners = {
+        let tcp_listeners = {
             let mut inner = self.inner.borrow_mut();
             let client = inner.clients.get_mut(&conn_id).unwrap();
             if client.shutting_down {
@@ -506,8 +506,8 @@ impl NetRuntime {
         };
 
         let listener_cnt = tcp_listeners.len();
-        for mut tcp_listener in tcp_listeners {
-            tcp_listener.borrow_mut().hard_reset();
+        for tcp_listener in tcp_listeners {
+            tcp_listener::TcpListener::hard_reset(tcp_listener).await;
         }
         // All listeners should be dropped by now.
 
