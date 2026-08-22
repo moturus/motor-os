@@ -97,7 +97,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
+NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
@@ -165,6 +165,7 @@ vm_rmux() {
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
+. "$WD/test-udp-fragmentation.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -271,6 +272,7 @@ VMM_PID=""
 # cleanup routine
 stop_vmm() {
   set +e
+  stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
@@ -364,6 +366,8 @@ vm_ssh /system/bin/ping -c 1 2001:db8::1
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
+test_udp_fragmentation
+
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
@@ -416,8 +420,8 @@ set +o pipefail
 
 # $(...) drops trailing newlines, so this is the last non-empty line.
 systest_output="$(cat "$SYSTEST_LOG")"
-[ "${systest_output##*$'\n'}" = "PASS" ] ||
-  fail "systest did not finish with PASS"
+[ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
+  fail "systest did not finish with 'systest: ALL PASS'"
 
 # The SSH login shell consumes russhd's one-time capability environment.
 # Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE

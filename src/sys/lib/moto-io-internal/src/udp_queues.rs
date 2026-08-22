@@ -107,10 +107,85 @@ impl UdpFragmentingQueue {
     }
 }
 
+const MAX_UDP_FRAGMENTS: usize = moto_rt::net::MAX_UDP_PAYLOAD.div_ceil(io_channel::PAGE_SIZE);
+
+#[derive(Clone, Copy)]
+struct FragmentSequence {
+    addr: SocketAddr,
+    next_id: u16,
+    fragments: usize,
+    bytes: usize,
+}
+
+impl FragmentSequence {
+    fn after_fragment(
+        pending: Option<Self>,
+        fragment_id: u16,
+        sz: u16,
+        addr: SocketAddr,
+    ) -> Result<Option<Self>, ErrorCode> {
+        let sz = sz as usize;
+        if sz > io_channel::PAGE_SIZE {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        if fragment_id == 0 {
+            return if pending.is_none() {
+                Ok(None)
+            } else {
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            };
+        }
+
+        if fragment_id == u16::MAX {
+            let Some(sequence) = pending else {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            };
+            if sz == 0 || sequence.addr != addr {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            if sequence.fragments + 1 > MAX_UDP_FRAGMENTS
+                || sequence.bytes + sz > moto_rt::net::MAX_UDP_PAYLOAD
+            {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            return Ok(None);
+        }
+
+        if sz != io_channel::PAGE_SIZE {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let sequence = match pending {
+            None if fragment_id == 1 => Self {
+                addr,
+                next_id: 2,
+                fragments: 1,
+                bytes: sz,
+            },
+            Some(sequence) if sequence.next_id == fragment_id && sequence.addr == addr => Self {
+                next_id: fragment_id + 1,
+                fragments: sequence.fragments + 1,
+                bytes: sequence.bytes + sz,
+                ..sequence
+            },
+            _ => return Err(moto_rt::E_INVALID_ARGUMENT),
+        };
+
+        if sequence.fragments >= MAX_UDP_FRAGMENTS
+            || sequence.bytes >= moto_rt::net::MAX_UDP_PAYLOAD
+        {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Ok(Some(sequence))
+    }
+}
+
 #[allow(clippy::new_without_default)]
 pub struct UdpDefragmentingQueue {
     queue: VecDeque<UdpFragment>,
     datagram: Option<UdpDatagram>,
+    fragment_sequence: Option<FragmentSequence>,
 }
 
 impl UdpDefragmentingQueue {
@@ -119,6 +194,7 @@ impl UdpDefragmentingQueue {
         Self {
             queue: VecDeque::new(),
             datagram: None,
+            fragment_sequence: None,
         }
     }
 
@@ -134,20 +210,28 @@ impl UdpDefragmentingQueue {
         let sz = msg.payload.args_16()[10];
         let fragment_id = msg.payload.args_16()[9];
 
+        let next_sequence =
+            match FragmentSequence::after_fragment(self.fragment_sequence, fragment_id, sz, addr) {
+                Ok(sequence) => sequence,
+                Err(err) => {
+                    if sz != 0 {
+                        let page_idx = msg.payload.shared_pages()[11];
+                        let _ = page_getter(page_idx);
+                    }
+                    return Err(err);
+                }
+            };
+
         let fragment = if sz == 0 {
-            assert_eq!(0, fragment_id);
             UdpFragment::empty(addr)
         } else {
             let page_idx = msg.payload.shared_pages()[11];
             let page = page_getter(page_idx)?;
-            if (sz as usize) > io_channel::PAGE_SIZE {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-
             UdpFragment::from(page, fragment_id, sz, addr)
         };
 
         self.queue.push_back(fragment);
+        self.fragment_sequence = next_sequence;
         Ok(())
     }
 

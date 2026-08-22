@@ -19,4 +19,21 @@ the ruling; nothing here should be picked up without a fresh call.
   buffer does not drain before teardown, which is why a vdso panic can
   present as silent exit-222.
 
-- **curl** often times out on Motor OS during TLS handlshake.
+- **Resolved 2026-08-20: intermittent `moto_async` channel hang.**
+  It recurred in `test_moto_channel_multithreaded`; a focused unchanged
+  reproduction stalled on round 26. Two `mdbg` snapshots showed both sender
+  threads had exited while the receiver alone remained parked. The last
+  `Sender` used to wake the receiver from its `Drop` body before Rust
+  dropped the underlying MPMC sender field, allowing the receiver to register
+  after the early wake, still observe a connected empty channel, and sleep
+  forever. Sender teardown now drops the underlying endpoint before the
+  last-sender notifier. A deterministic regression holds teardown inside the
+  old gap while the receiver re-registers; the fixed focused suite then
+  passed 100 consecutive runs under the same stall detector. No retry or
+  timeout workaround was added.
+
+- **kernel `wait-set`** - a kernel-side wait-set/aggregation primitive
+  (the structural fix). Beyond the cap, the current shape is O(n) per park: every SysCpu::wait
+  re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
+  epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
+  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.

@@ -14,6 +14,7 @@ use moto_ipc::io_channel;
 use moto_sys::SysHandle;
 use std::io::Result as IoResult;
 
+pub(crate) mod channel_budget;
 pub mod fs;
 pub(crate) mod net;
 
@@ -146,6 +147,7 @@ pub fn spawn_async() {
 
 async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
     log::debug!("async runtime starting");
+    let channel_budget = Rc::new(channel_budget::ChannelBudget::default());
 
     let Ok(devices) = virtio_async::discover_virtio_devices(&MAPPER) else {
         panic!("VirtIO initialization failed.");
@@ -177,11 +179,11 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
         panic!("No block devices found")
     };
 
-    let Ok(fs) = fs::init(block_device).await else {
+    let Ok(fs) = fs::init(block_device, channel_budget.clone()).await else {
         panic!("Cannot proceed without a filesystem.");
     };
 
-    if let Err(err) = net::init(net_devices, fs).await {
+    if let Err(err) = net::init(net_devices, fs, channel_budget).await {
         log::error!("Network initialization failed: {err:?}.");
     }
 

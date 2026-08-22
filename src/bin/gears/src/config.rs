@@ -3,6 +3,9 @@
 //! the [`Config`] the rest of the program sees. Unknown fields are tolerated
 //! so newer configs still load in older binaries (the self-restart story).
 
+use std::collections::HashSet;
+use std::io::Write;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -21,6 +24,12 @@ struct ProviderV1 {
     model: Option<String>,
     key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ModelsV1 {
+    last: Option<String>,
+    used: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -95,6 +104,8 @@ struct ConfigV1 {
     net: NetV1,
     #[serde(default)]
     provider: ProviderV1,
+    #[serde(default)]
+    models: ModelsV1,
     #[serde(default)]
     trace: TraceV1,
     #[serde(default)]
@@ -184,6 +195,8 @@ pub struct Config {
     /// is the user's decision, and guessing one that does not exist at their
     /// endpoint helps nobody.
     pub model: Option<String>,
+    /// Models previously selected by the user, most recently used first.
+    pub models: Vec<String>,
     /// Key file, when it is not at the default path.
     pub key_file: Option<PathBuf>,
     /// Optional provider-only CA bundle, passed to either curl backend.
@@ -223,6 +236,7 @@ impl Default for Config {
             allow_plain_http_loopback: false,
             base_url: crate::provider::openai_compat::OPENROUTER_BASE_URL.to_string(),
             model: None,
+            models: Vec::new(),
             key_file: None,
             ca_cert: None,
             log_file: None,
@@ -266,20 +280,40 @@ impl Config {
     /// Load the config: from `explicit` if given (missing then being an
     /// error), else from the default path (missing then meaning defaults).
     pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
+        Self::load_user(explicit).map(|(config, _models)| config)
+    }
+
+    /// Load configuration together with the user-level model preference store.
+    pub fn load_user(explicit: Option<&Path>) -> Result<(Config, ModelStore), String> {
         let (path, required) = match explicit {
             Some(path) => (path.to_path_buf(), true),
             None => match Self::default_path() {
                 Some(path) => (path, false),
-                None => return Ok(Config::default()),
+                None => {
+                    return Ok((
+                        Config::default(),
+                        ModelStore {
+                            path: None,
+                            required: false,
+                            models: Vec::new(),
+                        },
+                    ));
+                }
             },
         };
-        match std::fs::read_to_string(&path) {
+        let config = match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => {
                 Ok(Config::default())
             }
             Err(e) => Err(format!("{}: {e}", path.display())),
-        }
+        }?;
+        let store = ModelStore {
+            path: Some(path),
+            required,
+            models: config.models.clone(),
+        };
+        Ok((config, store))
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
@@ -330,11 +364,39 @@ impl Config {
                 )
             })?,
         };
+        let provider_model = raw
+            .provider
+            .model
+            .map(|model| validate_model_id(&model))
+            .transpose()?;
+        let last = raw
+            .models
+            .last
+            .map(|model| validate_model_id(&model))
+            .transpose()?;
+        let mut models = raw
+            .models
+            .used
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| validate_model_id(&model))
+            .collect::<Result<Vec<_>, _>>()?;
+        deduplicate(&mut models);
+        let model = last.or_else(|| provider_model.clone());
+        if let Some(model) = &model {
+            remember_in(&mut models, model);
+        }
+        if let Some(provider_model) = provider_model
+            && !models.contains(&provider_model)
+        {
+            models.push(provider_model);
+        }
         Ok(Config {
             egress_allowlist,
             allow_plain_http_loopback: raw.net.allow_plain_http_loopback.unwrap_or(false),
             base_url,
-            model: raw.provider.model,
+            model,
+            models,
             key_file: raw.provider.key_file,
             ca_cert: raw.provider.ca_cert,
             log_file: raw.trace.file,
@@ -361,6 +423,190 @@ impl Config {
             },
         })
     }
+}
+
+const MAX_MODEL_ID_BYTES: usize = 1024;
+
+pub(crate) fn validate_model_id(model: &str) -> Result<String, String> {
+    if model.is_empty() || model.trim() != model {
+        return Err("bad model id: expected non-empty text without surrounding whitespace".into());
+    }
+    if model.len() > MAX_MODEL_ID_BYTES {
+        return Err(format!(
+            "bad model id: {} bytes exceeds the {MAX_MODEL_ID_BYTES}-byte limit",
+            model.len()
+        ));
+    }
+    if model.chars().any(char::is_control) {
+        return Err("bad model id: control characters are not allowed".into());
+    }
+    Ok(model.to_string())
+}
+
+fn deduplicate(models: &mut Vec<String>) {
+    let mut seen = HashSet::with_capacity(models.len());
+    let mut unique = Vec::with_capacity(models.len());
+    for model in std::mem::take(models) {
+        if seen.insert(model.clone()) {
+            unique.push(model);
+        }
+    }
+    *models = unique;
+}
+
+fn remember_in(models: &mut Vec<String>, model: &str) {
+    models.retain(|used| used != model);
+    models.insert(0, model.to_string());
+}
+
+/// The small, user-level part of configuration that Gears updates itself.
+pub struct ModelStore {
+    path: Option<PathBuf>,
+    required: bool,
+    models: Vec<String>,
+}
+
+impl ModelStore {
+    pub fn choices(&self, current: &str) -> Vec<String> {
+        let mut models = self.models.clone();
+        remember_in(&mut models, current);
+        models
+    }
+
+    /// Make `model` the remembered default without changing unrelated TOML.
+    pub fn remember(&mut self, model: &str) -> Result<(), String> {
+        let model = validate_model_id(model)?;
+        let path = self
+            .path
+            .as_deref()
+            .ok_or("cannot remember a model: this platform has no user config path")?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !self.required => {
+                "version = 1\n".to_string()
+            }
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        let config =
+            Config::parse(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut models = config.models;
+        remember_in(&mut models, &model);
+
+        let mut document: toml::Value =
+            toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        let root = document
+            .as_table_mut()
+            .ok_or_else(|| format!("{}: config root is not a table", path.display()))?;
+        let mut table = match root.get("models") {
+            Some(value) => value
+                .as_table()
+                .cloned()
+                .ok_or_else(|| format!("{}: models is not a table", path.display()))?,
+            None => toml::Table::new(),
+        };
+        table.insert("last".into(), toml::Value::String(model));
+        table.insert(
+            "used".into(),
+            toml::Value::Array(models.iter().cloned().map(toml::Value::String).collect()),
+        );
+        let updated = replace_models_table(&text, table, root.contains_key("models"))?;
+        Config::parse(&updated).map_err(|error| format!("{}: {error}", path.display()))?;
+        atomic_write(path, updated.as_bytes())?;
+        self.models = models;
+        Ok(())
+    }
+}
+
+fn replace_models_table(text: &str, table: toml::Table, existed: bool) -> Result<String, String> {
+    let body = toml::to_string(&table).map_err(|error| error.to_string())?;
+    let rendered = format!("[models]\n{body}");
+    match table_range(text, "[models]") {
+        Some(range) => {
+            let mut updated = String::with_capacity(text.len() + rendered.len());
+            updated.push_str(&text[..range.start]);
+            updated.push_str(&rendered);
+            if range.end < text.len() && !rendered.ends_with("\n\n") {
+                updated.push('\n');
+            }
+            updated.push_str(&text[range.end..]);
+            Ok(updated)
+        }
+        None if existed => Err(
+            "the models table must use a standalone [models] header for Gears to update it".into(),
+        ),
+        None => {
+            let mut updated = text.to_string();
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            if !updated.ends_with("\n\n") {
+                updated.push('\n');
+            }
+            updated.push_str(&rendered);
+            Ok(updated)
+        }
+    }
+}
+
+fn table_range(text: &str, wanted: &str) -> Option<Range<usize>> {
+    let mut offset = 0;
+    let mut start = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let header = trimmed.starts_with('[') && trimmed.ends_with(']');
+        if let Some(start) = start
+            && header
+        {
+            return Some(start..offset);
+        }
+        if trimmed == wanted {
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    start.map(|start| start..text.len())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("gears.toml");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let staging = path.with_file_name(format!(".{name}.{}.{nonce}.new", std::process::id()));
+    let permissions = std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .map_err(|error| format!("{}: {error}", staging.display()))?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)
+                .map_err(|error| format!("{}: {error}", staging.display()))?;
+        }
+        file.write_all(bytes)
+            .and_then(|()| file.flush())
+            .map_err(|error| format!("{}: {error}", staging.display()))?;
+        drop(file);
+        std::fs::rename(&staging, path).map_err(|error| format!("{}: {error}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result
 }
 
 fn quality(raw: &QualityV1) -> Result<Quality, String> {
@@ -600,6 +846,19 @@ fn validate_host(host: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn model_store_path(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        std::env::temp_dir()
+            .join(format!(
+                "gears-model-store-{}-{}-{name}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
+            .join("gears.toml")
+    }
+
     #[test]
     fn full_file_parses() {
         let config = Config::parse(
@@ -669,6 +928,105 @@ mod tests {
         let config = Config::parse("version = 1").unwrap();
         assert_eq!(config.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(config.model, None);
+    }
+
+    #[test]
+    fn remembered_model_has_precedence_and_history_is_deduplicated() {
+        let config = Config::parse(
+            r#"
+            version = 1
+            [provider]
+            model = "legacy"
+            [models]
+            last = "current"
+            used = ["older", "current", "older"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.model.as_deref(), Some("current"));
+        assert_eq!(config.models, ["current", "older", "legacy"]);
+
+        for bad in ["", " leading", "trailing ", "line\nbreak"] {
+            let text = format!("version = 1\n[models]\nlast = {bad:?}");
+            assert!(Config::parse(&text).is_err(), "accepted {bad:?}");
+        }
+        let long = "m".repeat(MAX_MODEL_ID_BYTES + 1);
+        let text = format!("version = 1\n[models]\nlast = {long:?}");
+        assert!(Config::parse(&text).is_err());
+    }
+
+    #[test]
+    fn remembering_models_preserves_unmanaged_configuration() {
+        let path = model_store_path("preserve");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# keep this comment\nversion = 1\nfuture = true\n\
+             [provider]\nmodel = \"legacy\"\n\
+             [models]\nlast = \"older\"\nused = [\"older\", \"legacy\"]\nextra = 7\n\
+             [future_table]\nname = \"untouched\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let (_, mut store) = Config::load_user(Some(&path)).unwrap();
+        store.remember("new/model").unwrap();
+        store.remember("legacy").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"), "{text}");
+        assert!(
+            text.contains("[future_table]\nname = \"untouched\""),
+            "{text}"
+        );
+        assert_eq!(text.matches("[models]").count(), 1, "{text}");
+        assert!(text.contains("extra = 7"), "{text}");
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.model.as_deref(), Some("legacy"));
+        assert_eq!(config.models, ["legacy", "new/model", "older"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn remembering_first_model_creates_the_user_config() {
+        let path = model_store_path("create");
+        let mut store = ModelStore {
+            path: Some(path.clone()),
+            required: false,
+            models: Vec::new(),
+        };
+        store.remember("first").unwrap();
+
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.model.as_deref(), Some("first"));
+        assert_eq!(config.models, ["first"]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_inline_models_table_is_not_destructively_reformatted() {
+        let path = model_store_path("inline");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "version = 1\nmodels = { last = \"old\", used = [\"old\"] }\n";
+        std::fs::write(&path, original).unwrap();
+        let (_, mut store) = Config::load_user(Some(&path)).unwrap();
+        let error = store.remember("new").unwrap_err();
+        assert!(error.contains("standalone [models]"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

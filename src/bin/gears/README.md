@@ -59,7 +59,7 @@ gears ask [-m MODEL] PROMPT     one prompt straight to the model
   --mode MODE       start the next task in ask, plan, code, or review mode
   --ui UI           use auto, tui, or line (default: auto)
   -p, --prompt TEXT answer one prompt and exit
-  -m, --model ID    model id (default: provider.model in the config)
+  -m, --model ID    model id (default: last remembered/configured model)
 ```
 
 `--ui auto` opens the full-screen TUI when both input and output are terminals.
@@ -80,7 +80,11 @@ In the TUI, Enter submits; Alt+Enter or Ctrl+J inserts a newline; Up and Down
 traverse session-local prompt history. Bracketed paste preserves newlines and
 filters terminal controls. Ctrl+C exits while idle and cancels an active turn;
 Ctrl+P toggles pause. PageUp and PageDown browse the bounded transcript and
-tool output. A draft is limited to 1 MiB, and history keeps at most 100 entries
+concise tool summaries; complete tool output stays folded and is available
+through `/+`. `/model` temporarily replaces the input panel with the remembered
+models: Up and Down move the `(x)` radio selection, Enter applies it, Escape
+cancels it, and Space deliberately has no effect. A draft is limited to 1 MiB,
+and history keeps at most 100 entries
 and 1 MiB for the current process. The status area reports the model, mode,
 task progress, exact provider-counted context use, cumulative usage and cost,
 pause state, current activity and active sub-agents. Permission questions use a
@@ -114,6 +118,10 @@ exit status 0
 gears> /status
 session 1785595957-4023629 | anthropic/claude-sonnet-4.5 | /home/you/project
 2 completions, 6114 + 288 tokens, $0.0231 | 1 files changed
+gears> /model
+current model: anthropic/claude-sonnet-4.5
+(x) anthropic/claude-sonnet-4.5
+( ) openai/gpt-5
 gears> /quit
 ```
 
@@ -121,10 +129,14 @@ Use `--mode plan` for a one-shot planning task, or `/mode plan` before the next
 interactive task. An active task changes modes through its durable workflow;
 `/mode` does not override it.
 
-Commands: `/status`, `/mode`, `/pause`, `/resume`, `/+`, `/undo`,
+Commands: `/status`, `/model`, `/mode`, `/pause`, `/resume`, `/+`, `/undo`,
 `/compact [instructions]`, `/help`, `/quit`. Every slash-prefixed
 input is handled or rejected by gears; none is sent to the model. A `^C`
 during a turn cancels it; a `^C` at the prompt leaves.
+
+The full-screen `/model` command is interactive. The line interface prints the
+same current model and catalog, but does not interpret arrow-key escape
+sequences; use `-m MODEL` to select at line-mode startup.
 
 A finished call gets one line, and a result too big for one — a file, a build
 log, a page of search hits — is reported by size. **`[+]` means the model got
@@ -137,6 +149,26 @@ going to look.
 `ask` is the spot check underneath all of it: one prompt to the configured
 endpoint, the answer as it streams, no tools and no session. Use it to prove
 an endpoint, a key and a model work before blaming anything else.
+
+The agent system prompt is assembled from built-in contracts, current mode and
+task state, tool schemas, and project `AGENTS.md` or `CLAUDE.md` files. See
+[Customizing the Gears system prompt](prompt-customization.md) for the runtime
+customization rules and a source-level map of every prompt layer.
+
+## Concepts
+
+Gears gives specific meanings to terms such as *task*, *turn*, *run*, and
+*session*. In particular, a task is durable workflow state rather than a
+synonym for one prompt, and a session can contain multiple tasks and span
+multiple process runs. The root agent owns that state; sub-agents have private
+conversations and receive delegated instructions, but do not own independent
+durable tasks.
+
+[Gears concepts](concepts.md) defines the complete model: workspaces, runs,
+sessions, conversations, tasks and task items, modes, agents, turns, provider
+rounds, tools, permissions, mutations, checkpoints, verification evidence,
+completion, and artifacts. Read it first when interpreting the status display,
+session journal, limits, or agent behavior described below.
 
 ## Configuration
 
@@ -155,6 +187,12 @@ base_url = "https://openrouter.ai/api/v1"
 model = "anthropic/claude-sonnet-4.5"   # no default: name one, or pass -m
 key_file = "/home/you/.config/gears/openrouter.key"   # optional; see below
 # ca_cert = "/absolute/path/to/provider-ca.pem"       # optional custom CA
+
+[models]
+# Managed by gears. The current default and the unbounded, de-duplicated
+# most-recently-used catalog are updated by -m and the TUI /model picker.
+last = "openai/gpt-5"
+used = ["openai/gpt-5", "anthropic/claude-sonnet-4.5"]
 
 [net]
 # The hosts gears may talk to, matched exactly — a subdomain is not implied by
@@ -225,6 +263,22 @@ install = "/home/you/.cargo/bin/gears"
 file = "/tmp/gears.log"
 level = "info"   # error, warn, info, debug
 ```
+
+Model preferences are user configuration, never workspace state. Gears updates
+the active `--config` file, or the default `~/.config/gears.toml` on Unix and
+`/user/cfg/gears.toml` on Motor OS. If the default file does not exist, the
+first `-m` selection creates it. An explicitly named missing `--config` remains
+an error. Only `[models]` is rewritten, with a same-directory atomic rename;
+unrelated settings, comments, formatting, and unknown tables are preserved.
+
+Startup precedence is `-m`, then `models.last`, then the legacy
+`provider.model`, then the model recorded in a resumed session. Supplying `-m`
+remembers it before either an agent run or `gears ask`; choosing in the TUI
+updates the same catalog and the idle root conversation. A live choice is
+journaled in the session and becomes the default for future sub-agents, while
+an explicit model on `spawn_agent` still wins. Existing running sub-agents are
+not changed. A configuration write failure is reported and leaves the current
+live model selected.
 
 There is one more `[net]` field, `allow_plain_http_loopback`, which lets gears
 speak plain HTTP to `127.0.0.1`. **It exists for gears' own test suite**, whose
@@ -515,7 +569,9 @@ Four things hold this together.
 * **Restarting is not `exec`.** The session is closed and its lock released,
   then the new gears is started on the same session with `--resume` and waited
   for, so the terminal is only ever owned by one process. What the model said
-  before the restart is in the transcript the new binary reads.
+  before the restart is in the transcript the new binary reads. If an
+  interactive restart carries a first prompt, the replacement answers it and
+  then returns to the user input prompt.
 
 If you restart into a candidate to try it, gears is then *running* from
 `.gears/candidates/`, and there is nowhere for a promotion to go: say where
@@ -641,6 +697,7 @@ tools and cannot recursively spawn agents.
 | Gears command | Local behavior | Pi core counterpart |
 | --- | --- | --- |
 | `/status` | Show session, model, workspace, usage, changed-file count, pause state, and durable task. | Partial: Pi's `/session` shows session and usage information. |
+| `/model` | In the TUI, choose one remembered model with a radio list; in line mode, show the current model and catalog. | No exact core counterpart. |
 | `/mode MODE` | Select ask, plan, code, or review mode for the next new task. | No; Pi has no core task modes. |
 | `/pause` | Pause before the next model or tool operation. | No; Pi supports abort and queued steering, not this pause boundary. |
 | `/resume` | Continue work paused in this Gears process. | No semantic match: Pi's same-spelled `/resume` selects an earlier session. |

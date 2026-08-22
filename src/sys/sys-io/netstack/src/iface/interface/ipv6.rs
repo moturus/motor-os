@@ -3,6 +3,130 @@ use super::*;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::iface::Route;
 
+#[cfg(feature = "proto-ipv6-fragmentation")]
+fn validate_ipv6_fragment(
+    repr: Ipv6FragmentRepr,
+    payload: &[u8],
+    unfragmentable_len: usize,
+) -> Result<(), AssemblerError> {
+    if repr.next_header == IpProtocol::Ipv6Frag {
+        return Err(AssemblerError::Invalid);
+    }
+    if repr.more_frags && (payload.is_empty() || !payload.len().is_multiple_of(8)) {
+        return Err(AssemblerError::Invalid);
+    }
+
+    let end = (repr.frag_offset as usize)
+        .checked_add(payload.len())
+        .ok_or(AssemblerError::SizeLimit)?;
+    if end > u16::MAX as usize - unfragmentable_len {
+        return Err(AssemblerError::SizeLimit);
+    }
+
+    if repr.frag_offset == 0 && repr.more_frags {
+        let header_complete = match repr.next_header {
+            IpProtocol::Tcp => TcpPacket::new_checked(payload).is_ok(),
+            IpProtocol::Udp | IpProtocol::Icmpv6 => payload.len() >= UDP_HEADER_LEN,
+            _ => true,
+        };
+        if !header_complete {
+            return Err(AssemblerError::Invalid);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "proto-ipv6-fragmentation")]
+impl Interface {
+    pub(super) fn ipv6_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
+        if self.fragmenter.finished() {
+            self.fragmenter.reset();
+        }
+        if self.fragmenter.is_empty() {
+            return false;
+        }
+
+        let path_mtu = self
+            .inner
+            .ip_mtu_for(self.fragmenter.ipv6.repr.dst_addr.into());
+        if path_mtu < self.fragmenter.ipv6.path_mtu {
+            self.fragmenter.sent_bytes = 0;
+            self.fragmenter.ipv6.path_mtu = path_mtu;
+            let ident = self.inner.rand.rand_u32();
+            self.fragmenter.ipv6.ident = if ident == 0 { 1 } else { ident };
+        }
+
+        if let Some(tx_token) = device.transmit(self.inner.now) {
+            self.inner
+                .dispatch_ipv6_frag(tx_token, &mut self.fragmenter);
+            if self.fragmenter.finished() {
+                self.fragmenter.reset();
+            }
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(feature = "proto-ipv6-fragmentation")]
+impl InterfaceInner {
+    pub(super) fn dispatch_ipv6_frag<Tx: TxToken>(&mut self, tx_token: Tx, frag: &mut Fragmenter) {
+        const ALIGNMENT: usize = 8;
+
+        let caps = self.caps.clone();
+        let ip_header_len = frag.ipv6.repr.buffer_len();
+        let mut fragment_repr = Ipv6FragmentRepr {
+            next_header: frag.ipv6.repr.next_header,
+            frag_offset: frag.sent_bytes as u16,
+            more_frags: false,
+            ident: frag.ipv6.ident,
+        };
+        let fragment_header_len = fragment_repr.buffer_len();
+        let payload_mtu = frag
+            .ipv6
+            .path_mtu
+            .checked_sub(ip_header_len + fragment_header_len)
+            .expect("IPv6 fragmentation requires an eligible interface");
+        let max_fragment_size = payload_mtu - payload_mtu % ALIGNMENT;
+        assert_ne!(max_fragment_size, 0, "IPv6 fragment payload is empty");
+        let payload_len = (frag.packet_len - frag.sent_bytes).min(max_fragment_size);
+        fragment_repr.more_frags = frag.packet_len - frag.sent_bytes != payload_len;
+
+        let mut ip_repr = frag.ipv6.repr;
+        ip_repr.next_header = IpProtocol::Ipv6Frag;
+        ip_repr.payload_len = fragment_header_len + payload_len;
+        let mut tx_len = ip_header_len + ip_repr.payload_len;
+        #[cfg(feature = "medium-ethernet")]
+        if matches!(caps.medium, Medium::Ethernet) {
+            tx_len += EthernetFrame::<&[u8]>::header_len();
+        }
+
+        tx_token.consume(tx_len, |mut tx_buffer| {
+            #[cfg(feature = "medium-ethernet")]
+            if matches!(caps.medium, Medium::Ethernet) {
+                let mut frame = EthernetFrame::new_unchecked(&mut *tx_buffer);
+                frame.set_src_addr(self.hardware_addr.ethernet_or_panic());
+                frame.set_dst_addr(frag.ipv6.dst_hardware_addr);
+                frame.set_ethertype(EthernetProtocol::Ipv6);
+                tx_buffer = &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..];
+            }
+
+            ip_repr.emit(&mut Ipv6Packet::new_unchecked(
+                &mut tx_buffer[..ip_header_len],
+            ));
+            fragment_repr.emit(&mut Ipv6FragmentHeader::new_unchecked(
+                &mut tx_buffer[ip_header_len..][..fragment_header_len],
+            ));
+            tx_buffer[ip_header_len + fragment_header_len..][..payload_len]
+                .copy_from_slice(&frag.buffer[frag.sent_bytes..][..payload_len]);
+        });
+        frag.sent_bytes += payload_len;
+        self.ip_packet_stats.ipv6_fragments_tx =
+            self.ip_packet_stats.ipv6_fragments_tx.wrapping_add(1);
+    }
+}
+
 /// Enum used for the process_hopbyhop function. In some cases, when discarding a packet, an ICMP
 /// parameter problem message needs to be transmitted to the source of the address. In other cases,
 /// the processing of the IP packet can continue.
@@ -170,6 +294,18 @@ impl InterfaceInner {
         })
     }
 
+    #[cfg(feature = "proto-ipv6-fragmentation")]
+    fn accepts_ipv6_fragment_destination(&self, address: Ipv6Address) -> bool {
+        self.has_ip_addr(address)
+            || self.has_multicast_group(address)
+            || address.is_loopback()
+            || (address.x_is_unicast()
+                && self
+                    .routes
+                    .lookup(&IpAddress::Ipv6(address), self.now)
+                    .is_some_and(|router_addr| self.has_ip_addr(router_addr)))
+    }
+
     /// Get the first link-local IPv6 address of the interface, if present.
     #[cfg(any(feature = "multicast", feature = "proto-ipv6-slaac"))]
     fn link_local_ipv6_address(&self) -> Option<Ipv6Address> {
@@ -194,7 +330,15 @@ impl InterfaceInner {
         meta: PacketMeta,
         source_hardware_addr: HardwareAddress,
         ipv6_packet: &Ipv6Packet<&'frame [u8]>,
+        fragments: Option<&'frame mut FragmentsBuffer>,
     ) -> Option<Packet<'frame>> {
+        #[cfg(not(feature = "proto-ipv6-fragmentation"))]
+        let _ = fragments;
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        let mut fragments = fragments;
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        let mut ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
+        #[cfg(not(feature = "proto-ipv6-fragmentation"))]
         let ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
 
         if !ipv6_repr.src_addr.x_is_unicast() {
@@ -210,6 +354,133 @@ impl InterfaceInner {
             }
         } else {
             (ipv6_repr.next_header, ipv6_packet.payload())
+        };
+
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        let (next_header, ip_payload, meta) = if next_header == IpProtocol::Ipv6Frag {
+            self.ip_packet_stats.ipv6_fragments_rx =
+                self.ip_packet_stats.ipv6_fragments_rx.wrapping_add(1);
+            let header = match Ipv6FragmentHeader::new_checked(ip_payload) {
+                Ok(header) => header,
+                Err(_) => {
+                    self.count_reassembly_error(AssemblerError::Invalid);
+                    return None;
+                }
+            };
+            let key = FragKey::Ipv6(Ipv6FragKey {
+                src_addr: ipv6_repr.src_addr,
+                dst_addr: ipv6_repr.dst_addr,
+                ident: header.ident(),
+            });
+            let repr = match Ipv6FragmentRepr::parse(&header) {
+                Ok(repr) => repr,
+                Err(_) => {
+                    let error =
+                        fragments
+                            .as_deref_mut()
+                            .map_or(AssemblerError::Invalid, |fragments| {
+                                fragments
+                                    .assembler
+                                    .reject_existing(&key, AssemblerError::Invalid)
+                            });
+                    self.count_reassembly_error(error);
+                    return None;
+                }
+            };
+            let fragment_payload = &ip_payload[repr.buffer_len()..];
+            let unfragmentable_len = ipv6_packet.payload().len() - ip_payload.len();
+            if let Err(error) = validate_ipv6_fragment(repr, fragment_payload, unfragmentable_len) {
+                let error = fragments.as_deref_mut().map_or(error, |fragments| {
+                    fragments.assembler.reject_existing(&key, error)
+                });
+                self.count_reassembly_error(error);
+                return None;
+            }
+
+            if repr.frag_offset == 0 && !repr.more_frags {
+                ipv6_repr.payload_len = ipv6_repr.payload_len.checked_sub(repr.buffer_len())?;
+                (
+                    repr.next_header,
+                    fragment_payload,
+                    meta.with_l4_csum_vouched(false),
+                )
+            } else {
+                if !self.accepts_ipv6_fragment_destination(ipv6_repr.dst_addr) {
+                    return None;
+                }
+                let fragments = fragments?;
+                let f = match fragments
+                    .assembler
+                    .get(&key, self.now + fragments.reassembly_timeout)
+                {
+                    Ok(f) => f,
+                    Err(_) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_no_slot_drops;
+                        *counter = counter.wrapping_add(1);
+                        net_debug!("No available packet assembler for fragmented packet");
+                        return None;
+                    }
+                };
+                if let Err(error) = f.observe_ipv6_context(
+                    ipv6_repr,
+                    repr.next_header,
+                    unfragmentable_len,
+                    repr.frag_offset == 0,
+                ) {
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
+                let incoming_end = repr.frag_offset as usize + fragment_payload.len();
+                if let Err(error) =
+                    f.enforce_max_size(u16::MAX as usize - unfragmentable_len, incoming_end)
+                {
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
+                if !repr.more_frags
+                    && let Err(error) = f.set_total_size(incoming_end)
+                {
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
+                match f.add(fragment_payload, repr.frag_offset as usize) {
+                    Ok(AssemblerOutcome::Duplicate) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_duplicates;
+                        *counter = counter.wrapping_add(1);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.count_reassembly_error(error);
+                        net_debug!("fragmentation error: {:?}", error);
+                        return None;
+                    }
+                }
+                if !f.is_complete() {
+                    return None;
+                }
+                let context = match f.ipv6_context() {
+                    Some(context) if context.repr.is_some() => context,
+                    _ => {
+                        f.reset();
+                        return None;
+                    }
+                };
+                let payload = f.assemble()?;
+                self.ip_packet_stats.reassemblies_completed =
+                    self.ip_packet_stats.reassemblies_completed.wrapping_add(1);
+                ipv6_repr = context.repr.unwrap();
+                ipv6_repr.payload_len = context.unfragmentable_len + payload.len();
+                (
+                    context.next_header,
+                    payload,
+                    meta.with_l4_csum_vouched(false),
+                )
+            }
+        } else {
+            (next_header, ip_payload, meta)
         };
 
         if !self.has_ip_addr(ipv6_repr.dst_addr)
@@ -373,7 +644,7 @@ impl InterfaceInner {
 
     pub(super) fn process_icmpv6<'frame>(
         &mut self,
-        _sockets: &mut SocketSet,
+        sockets: &mut SocketSet,
         ip_repr: Ipv6Repr,
         ip_payload: &'frame [u8],
     ) -> Option<Packet<'frame>> {
@@ -391,7 +662,7 @@ impl InterfaceInner {
         #[cfg(feature = "socket-icmp")]
         {
             use crate::socket::icmp::Socket as IcmpSocket;
-            for icmp_socket in _sockets
+            for icmp_socket in sockets
                 .items_mut()
                 .filter_map(|i| IcmpSocket::downcast_mut(&mut i.socket))
             {
@@ -419,6 +690,13 @@ impl InterfaceInner {
 
             // Ignore any echo replies.
             Icmpv6Repr::EchoReply { .. } => None,
+
+            Icmpv6Repr::PktTooBig { mtu, .. } => {
+                let accepted = super::pmtu::parse_ipv6(icmp_packet.payload())
+                    .is_some_and(|quote| self.update_pmtu_from_quote(sockets, quote, mtu as usize));
+                self.count_pmtu_message(accepted);
+                None
+            }
 
             // Forward any NDISC packets to the ndisc packet handler
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]

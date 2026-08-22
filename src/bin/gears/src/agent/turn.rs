@@ -57,6 +57,10 @@ pub struct MutationEvent {
 pub trait Journal: Send {
     fn message(&mut self, message: &ChatMessage) -> std::io::Result<()>;
 
+    fn model(&mut self, _model: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
     fn task(&mut self, _task: &crate::agent::task::Task) -> std::io::Result<()> {
         Ok(())
     }
@@ -271,6 +275,21 @@ impl Conversation {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Change the endpoint model at a turn boundary and make that choice part
+    /// of the resumable conversation before using it.
+    pub fn select_model(&mut self, model: String) -> Result<(), String> {
+        if self.model == model {
+            return Ok(());
+        }
+        let failure = self
+            .journal
+            .as_mut()
+            .and_then(|journal| journal.model(&model).err());
+        self.complain(failure)?;
+        self.model = model;
+        Ok(())
     }
 
     pub fn messages(&self) -> &[ChatMessage] {
@@ -532,6 +551,10 @@ impl<P: ModelProvider> Agent<P> {
             "next task mode: {}",
             crate::agent::mode::profile(mode).name
         ))
+    }
+
+    pub(crate) fn select_model(&mut self, model: String) -> Result<(), String> {
+        self.conversation.select_model(model)
     }
 
     /// Explicitly replace complete older turns with one model-written note.

@@ -1,208 +1,186 @@
 # Networking: remaining steps
 
-What remains to do on Motor OS networking, roughly in pickup order.
-Records of finished work -- designs, diagnoses, patch lists, gate
-transcripts, measurements -- live in git history, not here: see
-`git log --follow -- docs/plans/networking-remaining-steps.md` and the
-histories of the retired design docs (`socket-buffer-sizing-design.md`,
-`sack-loss-recovery-design.md`, `tcp-close-path-design.md`,
-`syn-cookies-design.md`, `netstack-scalability-design.md`).
+This file tracks only unfinished Motor OS networking work, roughly in pickup
+order within each section. Historical designs, diagnoses, patch sequences,
+gate transcripts, and measurements remain available in git history.
 
-Orientation: sys-io owns the Motor OS networking stack
-(`moto-netstack`, `src/sys/sys-io/netstack`; grown out of smoltcp, no
-longer a fork). TCP has Cubic + IW10 congestion control, RACK-TLP loss
-recovery with SACK/DSACK, RFC 7323 timestamps with PAWS, per-socket
-buffer sizing up to 8 MiB, Linux-parity close-path behavior (a write
-on a peer-reset connection fails with `ECONNRESET`), SYN
-cookies at the half-open caps, token-bucket egress limits on the
-socketless replies (no-listener resets and cookie SYN|ACKs;
-`max_rst_rate`/`max_syn_cookie_rate` in `sys-net.toml`, loopback
-exempt), per-interface address/route tables that grow to the
-configuration (SLAAC's network-driven inflow stays bounded on its own
-side), and the safety-hardening set, all under deterministic
-packet-level tests. Since 2026-08-16: the netstack is unconditionally
-std; a socket has one identity, the u64 sys-io allocates, on the
-wire, in the stores, and in every log line; and ingress demux is
-authoritative maps end to end -- exact 4-tuple, then listener
-endpoint (specific address over wildcard), then the socketless
-paths, with UDP by port -- the per-packet linear scans are deleted,
-identity-changing socket operations exist only on the SocketSet, and
-debug builds re-verify index completeness against every segment (the
-retired scans live on as debug-only oracles). `rt.vdso` owns the net
-channel pool, blocking policy, and POSIX state.
+No implementation series is currently selected. Select and review a bounded
+series before changing code; larger work needs a dedicated design round.
 
-## Next up (approved)
+## Security and correctness backlog
 
-Empty. The architectural scalability series landed in full 2026-08-16
-(five gated commits; the design doc is retired, its record in git
-history); the user's benchmark verdict on it is the outcome measure,
-the fairness spread the number to watch. What remains architectural
-is parked below under "measure, then decide".
+### TCP protocol machine
 
-## Waiting
+- Seed TS.Recent in the Listen and SynSent SYN paths. The general update's
+  window base is uninitialized during the handshake, so some connections emit
+  TSecr=0 until Established, lose the handshake RTT sample, and begin with PAWS
+  disarmed. The cookie-restore path already has the required behavior.
+- Include RFC 8985's delayed-ACK allowance (WCDelAckT, approximately 200 ms) in
+  the TLP timeout for single-segment flights. The current 10 ms floor can cause
+  a spurious probe on request/response traffic and make DSACK widen RACK's
+  reordering window.
+- Ignore an old ACK field while still processing in-window payload. The current
+  path drops the whole segment, contrary to RFC 9293.
+- Add SND.WL1/SND.WL2 guards to window updates so reordered ACKs cannot regress
+  the send window.
+- Clamp an advertised peer MSS to a safe minimum. Accepting MSS=1 permits a
+  crafted SYN to turn the send path into one-byte packets.
+- Apply Karn's rule when RACK/TLP staging retransmits the segment used for the
+  RTT sample; today only the RTO branch invalidates that sample.
+- Remove the selectable Reno controller and its cargo feature. Its congestion
+  avoidance grows by a full MSS per ACK and overwrites ssthresh; deployed
+  sys-io uses Cubic.
 
-Nothing is waiting on the toolchain. The ECONNRESET flip is done
-(2026-08-18): a write on a peer-reset connection fails with
-`ECONNRESET` end to end -- moto-io's `TcpStream::dead_write_error`
-selects `E_CONNECTION_RESET` over `E_NOT_CONNECTED` via the sticky
-reset cause (used by `try_write` and the vdso blocking-write bail),
-the toolchain's std maps code 22 to `ErrorKind::ConnectionReset`, and
-the close-path systest asserts raw code 22 exactly. moto-rt 0.17.3 is
-published; the toolchain (`motor-os-rustc`, rebased onto
-`motor-os-rt-v17`) builds std against the published crate, no local
-patches. Gate on the final toolchain: 3 debug + 3 release full-test
-runs green.
+### Netstack infrastructure
 
-Standing calls, revisit later:
+- Rate-limit ICMP error replies (UDP port unreachable, protocol unreachable,
+  and IPv6 parameter problem) with a dedicated `max_icmp_error_rate` token
+  bucket. Keep loopback exempt; the approved default is 200 replies per second.
+- Associate remaining incoming ICMP destination-unreachable errors with their
+  validated TCP/UDP flows. Connected UDP should expose asynchronous errors via
+  `SO_ERROR` and ERROR readiness without allowing forged ICMP to affect an
+  unrelated flow.
+- Harden neighbor-cache admission. Correlate ARP replies and NDISC Neighbor
+  Advertisements with recorded probes, enforce Neighbor Advertisement
+  destination/flag rules, key entries by the advertised target, and make
+  uncorrelated advertisements non-evicting. This limits admission/eviction
+  attacks but does not authenticate on-link peers.
 
-- **Fixed buffer default.** 128 KiB per direction stands (a 128 KiB
-  window caps a 100 ms path at ~10 Mbit/s; WAN workloads size per
-  socket via `SO_RCVBUF`/`SO_SNDBUF`). The close-path prerequisite has
-  landed, so raising it is purely a call, informed by the user's
-  regular benchmarking.
-- **russh fork end-state.** The diagnostic stamps in `../russh` stay
-  through development; the fork must end holding only the upstream-PR
-  candidate commit. Revisit when the steps above are done.
+### sys-io runtime glue
 
-## Architectural netstack work (measure, then decide)
+- Complete `SO_LINGER(secs > 0)` close RPCs. Pass the close request to the
+  linger task and reply when linger resolves instead of leaving an awaiting
+  client parked forever.
+- Bound the per-socket UDP TX queue by bytes and datagrams before channel
+  fragments are copied out of their pages. On admission overflow or netstack
+  `BufferFull`, drop the complete newest datagram immediately and increment a
+  reason-specific counter; do not retain partial datagrams or park a datagram
+  without a send-waker.
+- Correct memory accounting and operator comments for half-open and spare
+  listening sockets. They use the 16 KiB-per-direction lazy ring floor, not the
+  128 KiB full rings. Measure object/ring costs before retuning the limits and
+  account for established sockets separately.
+- Restore RX ring depth after transient buffer-allocation failures. Track the
+  deficit caused by a failed `pop_buf` and refill it on a later successful
+  poll.
+- Make an invalid `sys-net.toml` abort sys-io startup loudly. Do not continue
+  without loopback and the net-channel listener after a parse failure. Preserve
+  the supported, intentional no-listener outcome for a valid configuration
+  containing zero devices, and log/test the two cases distinctly.
+- Reject virtio-net devices with fewer than 18 raw TX descriptors during
+  initialization. The TX headroom loop otherwise unwraps an empty completion
+  deque for legal 8- or 16-descriptor queues.
+- Give ephemeral allocation and explicit TCP/UDP binds one authoritative port
+  reservation view. Check all live bindings, retry occupied candidates, and
+  preserve loopback simultaneous-open behavior.
+- Bound each listener's queued native `pending_accepts` RPCs at 1,024 and reply
+  to every queued request with a closed/canceled error during teardown.
+- Replace `drop_tcp_socket`'s fixed 1 ms delay with an explicit
+  transmit-completion/state condition so an abort is not removed before its RST
+  reaches the device.
 
-The netstack scalability series landed in full 2026-08-16 (design
-doc retired, record in its git history): the egress fairness cursor, the poll index (egress visits
-only ready/due sockets, `poll_at` answers in O(log N), the retired
-scans living on as debug oracles), the keyed neighbor cache and
-ordered route table, and the ring-sized assembler. Parked candidates,
-measure before picking up: merging or formally projecting the two TCP
-state enums (7-variant client ABI vs 11-variant protocol enum; needs
-an ABI compatibility story -- a user decision); zero-copy token work
-(deferred until a profile shows the copies dominating); and one
-recorded fallback -- sys-io's per-page store access is a BTreeMap
-walk (depth <= 4 at realistic socket counts); if the user's
-benchmarking ever shows that line, the swap is a packed
-generation+slot slab behind the same SocketSet API. The old profiling
-signal for reference: 64 parallel streams held ~660 MiB/s aggregate
-each way with a 5x per-stream fairness spread (tiers near
-6 / 13 / 30 MiB/s).
+### rt.vdso and moto-io client side
 
-## Smaller items, fix or decline
+- Make a TCP writer that was already parked when reset/closure arrived return
+  the stored reset or broken-pipe error when it committed zero bytes. Preserve
+  partial-write semantics when it committed data.
+- When nonblocking connect cannot use the transient channel staging queue, fall
+  back to the guaranteed driver FIFO instead of reporting `WouldBlock` as a
+  hard connect failure.
+- Align TCP shutdown, reset, and failed-connect readiness with immediate I/O
+  and stored errors. Raise the write-closed edge after local
+  `shutdown(Write)`, synthesize it at registration, report `POLL_ERROR` for a
+  failed connect and peer reset, and retain the reset in TCP `SO_ERROR`.
+- Accept wildcard ephemeral binds such as `0.0.0.0:0` and let sys-io choose the
+  concrete address and port.
+- Remove canceled native `TcpListener` accept waiters immediately instead of
+  retaining their oneshot senders until a connection arrives or the listener
+  closes.
+- On `UdpSocket::close`, wake RX and TX waiters and reject every later send or
+  receive consistently; a closed socket must not report success for a datagram
+  it cannot transmit.
+- Bound the client UDP RX defragmenter by bytes and datagrams from the existing
+  channel-page budget. Apply the same bound to partial reassembly and drop the
+  complete newest datagram on overflow with a reason-specific counter.
 
-- The 127/8 external-ingress drop is IPv4-only; revisit the day an
-  external device gets an IPv6 address.
-- Perf micro-items, measure before fixing: TSO super-segments truncate
-  at the TX ring wrap (likely halves effective TSO size); the checksum
-  loop is u16-at-a-time; `DeviceCapabilities` is cloned per
-  transmitted packet; per-packet `net_trace!` logging has no
-  `enabled()` filter in sys-io's logger.
-- Platform: cloud-hypervisor host->VM delivery caps at ~240-340k pkt/s
-  where qemu sustains ~720k with the same MTU-sized frames, capping
-  chv client->server at ~250-325 MiB/s vs qemu ~950. The netstack
-  sustains the qemu rate, so this is the chv net-backend interaction,
-  not a netstack limit. Neither hypervisor negotiates GSO into the
-  guest, so RX is per-MTU-frame everywhere; guest-offload support
-  would lift both.
-- Test debt: the SYN-cookie engage/restore glue in sys-io has no in-VM
-  test -- engaging the half-open cap needs withheld-ACK packet
-  injection, which neither the VM nor the unprivileged host tap can
-  produce (the half-open stall test records the same constraint). The
-  protocol machine is covered by netstack packet tests; the glue
-  becomes testable with a packet-injection seam or a boot-time low-cap
-  config (declined for now -- revisit only if something concretely
-  needs it).
-- Test debt: `REASSEMBLY_BUFFER_COUNT` and `FRAGMENTATION_BUFFER_SIZE`
-  are tested at values that differ from deployment; the RDRAND retry
-  path and the external-device checksum arm are untestable without
-  seams; the `58622c82` listener-abort fix has no in-suite regression
-  (gap accepted -- revisit only if sys-io grows fault-injection
-  seams).
-- Follow-ups riding on landed work: unify ephemeral-port randomization
-  (the loopback exemption can go once a connect can pin its source
-  port); receive autotuning stays deferred until fixed-plus-per-socket
-  sizing is shown insufficient on a real workload.
+### Cross-cutting cleanup
 
-## Shelved: receive coalescing
+- Remove the always-on PDIAG/RXSTALL/TXSTALL watchdog and its data-path
+  counters from moto-io. The RXSTALL heuristic can report ordinary read-side
+  backpressure as a stall.
+- Replace or guard the TCP Listen-state `unreachable!()` at
+  `netstack/src/socket/tcp.rs` with a defensive drop/debug assertion local to
+  the socket, so demux or cookie-restore regressions cannot turn network input
+  into a release panic.
+- Add a `docs/` reference for `sys-net.toml`. Document every key and deployed
+  feature limit, correct half-open/listener memory figures, and cover
+  `auto_icmp_echo_reply`, `loopback`, and completed-connection backlog
+  semantics.
+- Remove `src/sys/sys-io/Cargo.lock`; Cargo uses the workspace lock at
+  `src/sys/Cargo.lock`.
 
-The ~164 MiB/s default-RX packet-rate ceiling is accepted for now.
-The record to resume from: Option A (ack `GUEST_TSO4/6`, post 64K RX
-buffers) is the only universally portable scheme -- QEMU, Cloud
-Hypervisor, and Firecracker all offer the bits -- and costs RX ring
-depth 128 -> 14 (Firecracker has no queue-size control, so it binds),
-262 KB -> 918 KB posted receive memory per device, 28-42 usec refill
-budget per ring turnover, and must land as one atomic patch (acking
-guest TSO while posting 2048-byte buffers is a spec violation).
-Success criterion is already instrumented: the `net.device.rx_size`
-histogram's over-1514 bucket must carry most bulk traffic. Option B
-(`MRG_RXBUF` + gather) is a per-VMM optimization only; Cloud
-Hypervisor lacks the bit. Re-open triggers: a workload needing more
-than ~164 MiB/s single-stream RX without jumbo frames, or RX-bound
-regressions the gate cannot see. On re-open, re-record the performance
-reference first.
+## Protocol and feature work
 
-## Watch list -- act on recurrence
+These need scope/design decisions before implementation:
 
-- External DNS/ping legs, after the 2026-08-16 resolver fix (rule-1
-  destination ordering + one in-resolver v4 re-ask; the user chose it
-  over pinning the checks to IPv4, check-side retries, a host-side
-  preflight, and host NAT66, all declined): a remaining failure means
-  the upstream A query was lost twice in a row, or the host NAT broke
-  (it resets on reboot). Revisit the declined remedies if the rate
-  stays visible.
-- `moto_async::test_event_stream` assumes strictly alternating wakes;
-  one legal spurious wake broke it once in ~40 runs. Fix on
-  recurrence: a tolerant resync loop.
-- `udp_rebind_after_close_test` failed about half of full-suite runs
-  on 2026-07-28, then not once in 50+ gate runs since.
-  Fixed-in-passing, unconfirmed; reopen if it returns.
-- `test_stdio_pipe_async_fd` hung twice (2026-08-07, 2026-08-11; logs
-  in `~/motor-dev/gate-anomalies/`). Real but not networking -- both
-  runs' tcp suites had passed. A capture watchdog in full-test would
-  make the next occurrence diagnosable; build it only if flake rates
-  become an issue (~20% of runs), not to chase one-offs.
-- Debug-VM ssh OUTPUT freeze after the moto_async suite while the VM
-  stays busy -- an output-path (sshd/stdio) freeze, not a systest
-  hang; three occurrences in 40+ debug gate runs, latest 2026-08-16
-  (logs in `~/motor-dev/gate-anomalies/`). A bounded
-  capture-on-freeze hunt ran clean; it has not reproduced outside the
-  full-test harness. Same rule as above: harness capture work only if
-  the flake rate becomes an issue.
-- `test-terminal-size.sh` flaked twice in debug gate runs, differently
-  each time: once hanging at its 600 s timeout, once (2026-08-15,
-  logs in `~/motor-dev/gate-anomalies/`) reporting console prompt
-  widths `100 60 60` with the first `80` missing. Both point at the
-  serial-console resize section; each gate's other runs passed.
-- rmux's host-side pty test threw one EPERM in ~26 runs
-  (non-networking, unowned; TUI-deferrable).
+- Design and enable DHCPv4 in deployed sys-io, including ownership of lease
+  lifecycle, addresses, routes, and DNS configuration.
+- Design and enable IPv6 SLAAC. The netstack feature is not in the deployed
+  sys-io closure, so router advertisements currently do not configure
+  addresses.
+- Add multicast support through the netstack, sys-io, moto-io, rt.vdso, and std
+  entry points.
+- Decide whether and how to expose raw sockets securely, then enable them if
+  approved.
+- Extend the production IPv6 parser beyond the base header and its current
+  single Hop-by-Hop case with a reviewed, bounded extension-header policy.
+- Complete RFC 6724 IPv6 source-address selection rules 3 through 7. Rules 1,
+  2, and 8 exist; deprecation, temporary-address, label, and outgoing-interface
+  selection remain.
 
-## Method (carried forward)
+## Conditional architecture and performance work
 
-- Patches stay near 100-300 lines including tests. Gate per commit:
-  `cargo +nightly fmt`, zero new warnings, and three debug plus three
-  release runs of `src/tests/full-test.sh` (or
-  `full-test-networking.sh`, identical minus the host rmux/tmux
-  tests). No retries, pass percentages, or timeout raises that can
-  conceal a defect; stop for guidance on decision gates and newly
-  found preexisting defects. Nothing edits the tree while a gate
-  runs.
-- Performance is user-owned: the user benchmarks regularly and owns
-  the verdicts; the standing expectation is that performance only
-  goes up. Measure only when a change gives reason to suspect a
-  regression. A measurement, when warranted, takes paired same-host
-  readings in ONE sitting; never gate on a figure recorded on another
-  day. Pin the launcher: run-qemu.sh vs run-chv.sh differ ~3x on
-  client->server RX with IDENTICAL RR and TX, so the RR gauge cannot
-  detect a hypervisor swap -- record which script booted the VM next
-  to every number. RR remains the host-steal gauge: distrust any run
-  whose RR is out of band. The host is bimodal on all axes at once
-  (default RX ~164 / RR ~58 / bulk TX ~1356 vs default RX ~450-570 /
-  RR ~112-126 / bulk TX ~735); an out-of-band reading stops the
-  sitting. A/B/A/B confounds tree with block position -- drop the
-  first block or counterbalance, record per-block medians. Reference
-  builds of old commits need their era's toolchain/sysroot (moto-rt
-  version skew makes mixed images unbootable). Reference record for
-  comparisons: `ab81c861` (RR 58.8/57.4 usec, default RX/TX
-  163.6/328.3 MiB/s, bulk RX/TX 678.9/1356.4 MiB/s, run-qemu.sh).
-- Benchmark manifest, required before architectural-work
-  measurements: commit and dirty-tree exclusions; build profile; VMM
-  binary, version, and full command line; host kernel, CPU model,
-  governor, turbo state, affinity; tap addresses, qdisc and offload
-  state; client/server command lines and binary identities.
-- Hangs: `/devtools/bin/mdbg print-stacks <pid>` plus addr2line on unstripped
-  binaries first, before any speculation.
+- Decide whether to merge or formally project the 7-state client TCP ABI and
+  the 11-state protocol enum. Any merge needs an ABI compatibility plan.
+- Profile before attempting zero-copy token work. Similarly, replace sys-io's
+  per-page `BTreeMap` lookup with a generation-and-slot slab only if profiling
+  shows the lookup matters.
+- Measure before addressing the smaller hot-path candidates: TSO truncation at
+  TX-ring wrap, the u16-at-a-time checksum loop, per-packet cloning of
+  `DeviceCapabilities`, and unfiltered `net_trace!` formatting.
+- Investigate the Cloud Hypervisor host-to-VM packet-rate cap and guest-offload
+  support if that backend's receive throughput becomes a target.
+- Revisit receive coalescing only for a workload that needs more than the
+  current single-stream RX ceiling without jumbo frames. The portable design
+  candidate is `GUEST_TSO4/6` with 64 KiB posted RX buffers; acknowledge those
+  features and enlarge buffers atomically.
+- Add receive autotuning only after a real workload shows fixed defaults plus
+  per-socket sizing are insufficient.
+- Unify ephemeral-port randomization once connect can pin its source port and
+  the loopback exemption can be removed.
+- Extend the external-ingress loopback-source filter beyond IPv4 127/8 if an
+  external device is assigned an IPv6 address.
+
+## Test debt
+
+- Add an in-VM SYN-cookie engage/restore test when a safe packet-injection seam
+  or reviewed low-cap test configuration exists.
+- Add direct regressions with their corresponding fixes for UDP close with
+  parked waiters, reset arriving at an already parked TCP writer, abort/RST
+  transmit completion, and valid zero-device configuration.
+- Add a regression for the listener-abort fix identified by commit `58622c82`.
+- Add test seams for the RDRAND retry path and external-device checksum arm if
+  those paths are changed.
+- Make the end-to-end negative DNS fixture deterministic without adding a
+  check-side retry or weakening mixed-family error semantics. Cover name-wide
+  `NotFound` and transient mixed-family outcomes.
+
+## Watch list
+
+- If external DNS or ping failures remain visible, determine whether both A
+  queries were lost or host NAT failed, then revisit resolver/NAT remedies.
+- If `moto_async::test_event_stream` again fails on a legal spurious wake, make
+  its expectation resynchronize instead of requiring strict alternation.
+- If `udp_rebind_after_close_test` recurs, reopen the close/rebind diagnosis.
+- If the debug-VM ssh output freeze recurs often enough to investigate, capture
+  stacks and output-path state before changing the harness.

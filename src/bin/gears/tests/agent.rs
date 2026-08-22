@@ -1405,11 +1405,15 @@ fn the_repl_takes_prompts_and_slash_commands() {
 fn slash_commands_never_reach_the_provider() {
     let fixture = Fixture::new("local-commands", "ask", Vec::new());
     let out = fixture.type_at(
-        "/help\n/status\n/pause\n/resume\n/mode ask\n/+\n/checkpoint list\n/undo\n/compact\n/unknown\n/quit\n",
+        "/help\n/status\n/model\n/pause\n/resume\n/mode ask\n/+\n/checkpoint list\n/undo\n/compact\n/unknown\n/quit\n",
     );
     let shown = stdout(&out);
 
     assert!(out.status.success(), "{shown}");
+    assert!(
+        shown.contains("current model: test/model\n(x) test/model"),
+        "{shown}"
+    );
     assert!(shown.contains("no such command '/checkpoint'"), "{shown}");
     assert!(shown.contains("no such command '/unknown'"), "{shown}");
     assert!(fixture.server.requests().is_empty());

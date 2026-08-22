@@ -13,12 +13,14 @@ use std::time::Duration;
 use crate::agent::bus::{AgentId, Decision, Event, PermissionRequest, ROOT};
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command as AgentCommand, Harness};
+use crate::config::ModelStore;
 use crate::ui::command::{Command, Input, parse};
 use crate::ui::input::{Action, Owner};
 use crate::ui::repl::{Pumped, Renderer, Ui, dispatch, pump};
 
 pub const HELP: &str = "\
   /status   what this session has cost and changed
+  /model    show the current and previously used models
   /mode M   start the next new task in ask, plan, code, or review mode
   /pause    stop before the next model or tool operation
   /resume   continue paused work
@@ -330,6 +332,7 @@ impl<W: Write, R: BufRead> Ui for Terminal<W, R> {
 pub fn once<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
+    models: &ModelStore,
     prompt: &str,
 ) -> ExitCode {
     welcome(harness, ui);
@@ -346,7 +349,7 @@ pub fn once<W: Write, R: BufRead>(
             };
         }
         Ok(Input::Command(command)) => {
-            return match execute(harness, ui, command) {
+            return match execute(harness, ui, models, command) {
                 Ok(_) => exit_code(ui),
                 Err(error) => {
                     let _ = ui.renderer.line(&format!("! {error}"));
@@ -374,20 +377,50 @@ pub fn once<W: Write, R: BufRead>(
 }
 
 /// The interactive loop.
-pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty>) -> ExitCode {
+pub fn interact<W: Write>(
+    harness: &Harness,
+    ui: &mut Terminal<W, std::io::Empty>,
+    models: &ModelStore,
+) -> ExitCode {
+    interact_with(harness, ui, models, None)
+}
+
+/// Answer a restart continuation, then return control to the user.
+pub fn continue_with<W: Write>(
+    harness: &Harness,
+    ui: &mut Terminal<W, std::io::Empty>,
+    models: &ModelStore,
+    prompt: &str,
+) -> ExitCode {
+    interact_with(harness, ui, models, Some(prompt))
+}
+
+fn interact_with<W: Write>(
+    harness: &Harness,
+    ui: &mut Terminal<W, std::io::Empty>,
+    models: &ModelStore,
+    initial: Option<&str>,
+) -> ExitCode {
     welcome(harness, ui);
     let _ = ui.renderer.line("- /help for commands");
+    let mut initial = initial.map(str::to_string);
 
     loop {
-        if ui.renderer.prompt("gears> ").is_err() {
-            return ExitCode::FAILURE;
-        }
-        let Some(line) = ui.read_line() else {
-            // End of input, or a ^C at the prompt: either way, this is the
-            // way out (the plan's "second ^C at idle exits").
-            let _ = ui.renderer.break_line();
-            crate::platform::take_interrupt();
-            return exit_code(ui);
+        let line = match initial.take() {
+            Some(line) => line,
+            None => {
+                if ui.renderer.prompt("gears> ").is_err() {
+                    return ExitCode::FAILURE;
+                }
+                let Some(line) = ui.read_line() else {
+                    // End of input, or a ^C at the prompt: either way, this is
+                    // the way out (the plan's "second ^C at idle exits").
+                    let _ = ui.renderer.break_line();
+                    crate::platform::take_interrupt();
+                    return exit_code(ui);
+                };
+                line
+            }
         };
         let line = line.trim();
         if line.is_empty() {
@@ -408,7 +441,7 @@ pub fn interact<W: Write>(harness: &Harness, ui: &mut Terminal<W, std::io::Empty
                     }
                 }
             }
-            Ok(Input::Command(command)) => match execute(harness, ui, command) {
+            Ok(Input::Command(command)) => match execute(harness, ui, models, command) {
                 Ok(true) => continue,
                 Ok(false) => return exit_code(ui),
                 Err(e) => {
@@ -500,6 +533,7 @@ fn exit_code<W: Write, R: BufRead>(ui: &Terminal<W, R>) -> ExitCode {
 fn execute<W: Write, R: BufRead>(
     harness: &Harness,
     ui: &mut Terminal<W, R>,
+    models: &ModelStore,
     command: Command,
 ) -> Result<bool, String> {
     match command {
@@ -527,6 +561,11 @@ fn execute<W: Write, R: BufRead>(
                 None => paused,
             };
             ui.renderer.line(&status).map_err(|e| e.to_string())?;
+        }
+        Command::Model => {
+            ui.renderer
+                .line(&model_catalog(harness, models))
+                .map_err(|error| error.to_string())?;
         }
         Command::Pause => {
             harness.set_paused(true);
@@ -560,6 +599,21 @@ fn execute<W: Write, R: BufRead>(
         Command::Compact(_) => unreachable!("compaction is pumped by the interactive loop"),
     }
     Ok(true)
+}
+
+fn model_catalog(harness: &Harness, models: &ModelStore) -> String {
+    let current = harness.model();
+    let mut lines = vec![format!("current model: {current}")];
+    lines.extend(
+        models
+            .choices(&current)
+            .into_iter()
+            .map(|model| match model == current {
+                true => format!("(x) {model}"),
+                false => format!("( ) {model}"),
+            }),
+    );
+    lines.join("\n")
 }
 
 fn restore_checkpoint<W: Write, R: BufRead>(

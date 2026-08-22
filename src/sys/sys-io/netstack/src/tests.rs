@@ -87,6 +87,11 @@ impl TestingDevice {
         }
     }
 
+    #[cfg(all(feature = "medium-ip", feature = "proto-ipv6"))]
+    pub(crate) fn set_mtu(&mut self, mtu: usize) {
+        self.max_transmission_unit = mtu;
+    }
+
     /// Queues a frame for reception, with no device vouching for its L4
     /// checksum. This is what an ordinary peer's frame looks like.
     pub(crate) fn push_rx(&mut self, buffer: Vec<u8>) {

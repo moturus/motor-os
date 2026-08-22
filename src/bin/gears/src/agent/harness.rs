@@ -37,6 +37,10 @@ pub enum Command {
         mode: crate::agent::task::Mode,
         reply: Sender<Result<String, String>>,
     },
+    SelectModel {
+        model: String,
+        reply: Sender<Result<String, String>>,
+    },
     CheckpointRestore {
         prepared: crate::tools::mutation::Prepared,
         decision: Decision,
@@ -103,7 +107,7 @@ pub struct Harness {
     thread: Option<JoinHandle<()>>,
     workspace: PathBuf,
     checkpoint_workspace: Arc<Workspace>,
-    model: String,
+    model: Arc<std::sync::Mutex<String>>,
     session_id: String,
     undo: Arc<UndoLog>,
     task: TaskView,
@@ -134,7 +138,9 @@ impl Harness {
         let session_id = opened.session.id().to_string();
         let session_journal = SessionJournal::new(opened.session);
         let mutation_generation = Arc::new(std::sync::Mutex::new(opened.mutation_generation));
-        let model = opened.conversation.model().to_string();
+        let model = Arc::new(std::sync::Mutex::new(
+            opened.conversation.model().to_string(),
+        ));
         let artifacts = Arc::new(LazyStore::new(
             root.clone(),
             session_id.clone(),
@@ -257,6 +263,7 @@ impl Harness {
 
         let attachment_workspace = workspace.clone();
         let attachment_artifacts = artifacts.clone();
+        let selected_model = model.clone();
         let resources = setup.resources;
         let thread = std::thread::spawn(move || {
             while let Ok(command) = command_rx.recv() {
@@ -316,6 +323,13 @@ impl Harness {
                     Command::SelectMode { mode, reply } => {
                         let _ = reply.send(agent.select_mode(mode));
                     }
+                    Command::SelectModel { model, reply } => {
+                        let result = agent.select_model(model.clone()).map(|()| {
+                            *selected_model.lock().unwrap() = model.clone();
+                            format!("model: {model}")
+                        });
+                        let _ = reply.send(result);
+                    }
                     Command::CheckpointRestore {
                         prepared,
                         decision,
@@ -374,8 +388,8 @@ impl Harness {
         &self.workspace
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    pub fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -477,6 +491,15 @@ impl Harness {
             .recv()
             .map_err(|_| "the agent stopped before selecting a mode".to_string())?
     }
+
+    pub fn select_model(&self, model: &str) -> Result<String, String> {
+        let model = crate::config::validate_model_id(model)?;
+        let (reply, answer) = channel();
+        self.send(Command::SelectModel { model, reply })?;
+        answer
+            .recv()
+            .map_err(|_| "the agent stopped before selecting a model".to_string())?
+    }
 }
 
 impl Drop for Harness {
@@ -559,7 +582,7 @@ fn open(root: &Path, setup: &Setup) -> Result<Opened, String> {
     })
 }
 
-const NO_MODEL: &str = "no model: pass -m MODEL or set provider.model in the config";
+const NO_MODEL: &str = "no model: pass -m MODEL or set models.last/provider.model in the config";
 
 fn left_running(stopped: usize) -> String {
     match stopped {
@@ -968,6 +991,32 @@ mod tests {
         );
 
         drop(harness);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_user_selects_the_model_for_the_next_request_and_resume() {
+        let dir = workspace("selected-model");
+        let provider = Arc::new(Seen::default());
+        let mut setup = Setup::new(dir.clone());
+        setup.model = Some("first/model".to_string());
+        let harness = Harness::start(setup, provider.clone()).unwrap();
+        let id = harness.session_id().to_string();
+
+        assert_eq!(
+            harness.select_model("second/model").unwrap(),
+            "model: second/model"
+        );
+        assert_eq!(harness.model(), "second/model");
+        assert_eq!(said(&ask(&harness, "use it")), "done");
+        assert_eq!(provider.0.lock().unwrap()[0].model, "second/model");
+        drop(harness);
+
+        let mut setup = Setup::new(dir.clone());
+        setup.resume = Some(id);
+        let resumed = Harness::start(setup, Arc::new(Seen::default())).unwrap();
+        assert_eq!(resumed.model(), "second/model");
+        drop(resumed);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

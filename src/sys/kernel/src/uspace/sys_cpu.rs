@@ -41,8 +41,8 @@ fn process_wait_handles(
                 .load(Ordering::Relaxed) as u64)
             || (h_sz == 0)
         {
-            log::info!("too many wait handles: {h_sz}");
-            return ResultBuilder::invalid_argument();
+            log::warn!("too many wait handles: {h_sz}");
+            return ResultBuilder::result(moto_rt::E_STORAGE_FULL);
         }
 
         let dst: &mut [u64] = if (h_sz as usize) <= INLINE_WAIT_HANDLES {

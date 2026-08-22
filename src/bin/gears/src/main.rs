@@ -20,6 +20,8 @@ use gears::provider::{
 use gears::ui::terminal::{self, Terminal};
 use gears::ui::{select, tui};
 
+const RESTART_CONTINUE_ENV: &str = "GEARS_RESTART_CONTINUE";
+
 fn main() -> ExitCode {
     // Before anything else, and while this process is still single-threaded:
     // a key in gears' own environment would be inherited by every tool it
@@ -29,6 +31,11 @@ fn main() -> ExitCode {
         // SAFETY: no other thread exists yet, so nothing can be reading the
         // environment concurrently.
         unsafe { std::env::remove_var(KEY_ENV) };
+    }
+    let restart_continue = std::env::var_os(RESTART_CONTINUE_ENV).is_some();
+    if restart_continue {
+        // SAFETY: as above, this is still the single-threaded process startup.
+        unsafe { std::env::remove_var(RESTART_CONTINUE_ENV) };
     }
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -50,7 +57,7 @@ fn main() -> ExitCode {
             print!("{}", gears::cli::USAGE);
             ExitCode::SUCCESS
         }
-        Action::Run | Action::Ask => run(&args, key_from_env),
+        Action::Run | Action::Ask => run(&args, key_from_env, restart_continue),
     }
 }
 
@@ -64,14 +71,20 @@ fn diagnostic(message: &str) {
     let _ = stderr.flush();
 }
 
-fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
-    let config = match Config::load(args.config.as_deref()) {
-        Ok(config) => config,
+fn run(args: &Args, key_from_env: Option<String>, restart_continue: bool) -> ExitCode {
+    let (config, mut models) = match Config::load_user(args.config.as_deref()) {
+        Ok(loaded) => loaded,
         Err(msg) => {
             eprintln!("gears: config: {msg}");
             return ExitCode::FAILURE;
         }
     };
+    if let Some(model) = args.model.as_deref()
+        && let Err(msg) = models.remember(model)
+    {
+        eprintln!("gears: config: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
@@ -96,7 +109,7 @@ fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
 
     let outcome = match args.action {
         Action::Ask => ask(args, &config, key_from_env).map(|()| ExitCode::SUCCESS),
-        _ => agent(args, &config, key_from_env),
+        _ => agent(args, &config, &mut models, key_from_env, restart_continue),
     };
     match outcome {
         Ok(code) => code,
@@ -112,12 +125,20 @@ fn run(args: &Args, key_from_env: Option<String>) -> ExitCode {
 
 /// The agent: a workspace, a session, and either one prompt or a terminal
 /// full of them.
-fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<ExitCode, String> {
+fn agent(
+    args: &Args,
+    config: &Config,
+    models: &mut gears::config::ModelStore,
+    key_from_env: Option<String>,
+    restart_continue: bool,
+) -> Result<ExitCode, String> {
     let workspace = match &args.workspace {
         Some(dir) => dir.clone(),
         None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
     };
-    let selected = select::choose(args.ui, args.prompt.is_some(), || {
+    let restart_continue = restart_continue && args.resume.is_some() && args.prompt.is_some();
+    let one_shot = args.prompt.is_some() && !restart_continue;
+    let selected = select::choose(args.ui, one_shot, || {
         (
             std::io::stdin().is_terminal(),
             std::io::stdout().is_terminal(),
@@ -154,9 +175,10 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
 
     let gate = Gate::load(harness.workspace(), config.permissions)?;
     let code = match selected {
-        select::Selected::Tui => match &args.prompt {
-            Some(prompt) => tui::once(&harness, gate, &restart, prompt)?,
-            None => tui::interact(&harness, gate, &restart)?,
+        select::Selected::Tui => match (&args.prompt, restart_continue) {
+            (Some(prompt), true) => tui::continue_with(&harness, gate, &restart, models, prompt)?,
+            (Some(prompt), false) => tui::once(&harness, gate, &restart, models, prompt)?,
+            (None, _) => tui::interact(&harness, gate, &restart, models)?,
         },
         select::Selected::Line => {
             let mut ui = Terminal::live(
@@ -164,16 +186,17 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
                 gate,
                 // A one-shot run has nobody at the keyboard to answer a
                 // permission question: it is scripted, or it is a pipe.
-                args.prompt.is_none(),
+                !one_shot,
             )?
             .watching(restart.clone());
             if gears::platform::raw_console() {
                 // Motor OS console: nothing echoes or edits unless gears does.
                 ui = ui.editing();
             }
-            match &args.prompt {
-                Some(prompt) => terminal::once(&harness, &mut ui, prompt),
-                None => terminal::interact(&harness, &mut ui),
+            match (&args.prompt, restart_continue) {
+                (Some(prompt), true) => terminal::continue_with(&harness, &mut ui, models, prompt),
+                (Some(prompt), false) => terminal::once(&harness, &mut ui, models, prompt),
+                (None, _) => terminal::interact(&harness, &mut ui, models),
             }
         }
     };
@@ -182,7 +205,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<E
     // lock, and the new gears cannot open the session until that has happened.
     drop(harness);
     match restart.take() {
-        Some(plan) => restart_into(&plan, args, key_from_env),
+        Some(plan) => restart_into(&plan, args, key_from_env, !one_shot),
         None => Ok(code),
     }
 }
@@ -199,6 +222,7 @@ fn restart_into(
     plan: &gears::tools::selfhost::Plan,
     args: &Args,
     key_from_env: Option<String>,
+    continue_interactive: bool,
 ) -> Result<ExitCode, String> {
     let mut command = std::process::Command::new(&plan.program);
     for (flag, value) in [
@@ -217,6 +241,9 @@ fn restart_into(
     }
     if let Some(prompt) = &plan.prompt {
         command.arg("-p").arg(prompt);
+        if continue_interactive {
+            command.env(RESTART_CONTINUE_ENV, "1");
+        }
     }
     if let Some(key) = key_from_env {
         command.env(KEY_ENV, key);
@@ -297,7 +324,7 @@ fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(),
         .model
         .clone()
         .or_else(|| config.model.clone())
-        .ok_or("no model: pass -m MODEL or set provider.model in the config")?;
+        .ok_or("no model: pass -m MODEL or set models.last/provider.model in the config")?;
     let key = load_key(config, key_from_env)?;
     let provider = connect(config, &key, args.verbosity)?;
 

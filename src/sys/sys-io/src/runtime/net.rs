@@ -11,10 +11,12 @@ use std::{
     rc::Rc,
 };
 
+use crate::runtime::channel_budget;
 use crate::runtime::net::socket::MotoSocket;
 use crate::util::map_err_into_native;
 
 mod backlog;
+mod completed;
 mod config;
 mod device;
 mod half_open;
@@ -29,6 +31,7 @@ mod tcp_listener;
 #[cfg(debug_assertions)]
 pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     backlog::self_test::TESTS,
+    completed::self_test::TESTS,
     config::self_test::TESTS,
     device::self_test::TESTS,
     half_open::self_test::TESTS,
@@ -41,7 +44,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
 type HalfOpenBudget = half_open::HalfOpenBudget<moto_async::oneshot::Sender<()>>;
 
 struct ClientConnection {
-    sender: moto_ipc::io_channel::Sender,
+    sender: channel_budget::ClientSender,
     sockets: HashSet<u64>,
     tcp_listeners: HashSet<u64>,
     shutting_down: bool,
@@ -56,7 +59,7 @@ impl Drop for ClientConnection {
 }
 
 impl ClientConnection {
-    fn new(sender: moto_ipc::io_channel::Sender) -> Self {
+    fn new(sender: channel_budget::ClientSender) -> Self {
         Self {
             sender,
             sockets: HashSet::new(),
@@ -127,11 +130,16 @@ struct NetRuntime {
     // Sizes each listening pool against the bursts it actually meets.
     backlog: Rc<backlog::BacklogBudget>,
 
+    // Bounds established sockets waiting for accept().
+    completed: Rc<completed::CompletedBacklog>,
+
     // Refuses new memory-growing work while global availability is low.
     pressure: Rc<pressure::Pressure>,
 
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+
+    channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
 impl NetRuntime {
@@ -358,6 +366,20 @@ impl NetRuntime {
             Self::refuse_client(sender, receiver).await;
             return Err(ErrorKind::OutOfMemory.into());
         }
+
+        // The wait-handle budget: past it, serving this channel would
+        // eventually make the runtime thread's SysCpu::wait exceed the
+        // kernel's handle cap, which is fatal (see channel_budget).
+        let sender = match self.channel_budget.admit_net(sender) {
+            Ok(sender) => sender,
+            Err(sender) => {
+                self.stats
+                    .clients_refused
+                    .set(self.stats.clients_refused.get() + 1);
+                Self::refuse_client(sender, receiver).await;
+                return Err(ErrorKind::OutOfMemory.into());
+            }
+        };
 
         self.inner.borrow_mut().clients.insert(
             sender.remote_handle(),
@@ -589,7 +611,7 @@ impl NetRuntime {
         }))
     }
 
-    async fn on_msg(&self, msg: moto_ipc::io_channel::Msg, sender: moto_ipc::io_channel::Sender) {
+    async fn on_msg(&self, msg: moto_ipc::io_channel::Msg, sender: channel_budget::ClientSender) {
         let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
             let remote_handle = sender.remote_handle();
 
@@ -674,6 +696,7 @@ impl NetRuntime {
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+    channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<()> {
     let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
@@ -754,8 +777,10 @@ pub(super) async fn init(
             config.max_backlog_global,
             config.max_backlog_per_listener,
         )),
+        completed: Rc::new(completed::CompletedBacklog::new(net_stats.clone())),
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
         fs: fs.clone(),
+        channel_budget,
     };
 
     runtime.stats.num_devices.set(device_idx as u64);

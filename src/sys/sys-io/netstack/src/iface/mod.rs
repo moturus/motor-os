@@ -21,7 +21,8 @@ mod packet;
 #[cfg(feature = "multicast")]
 pub use self::interface::multicast::MulticastError;
 pub use self::interface::{
-    Config, Interface, InterfaceInner as Context, PollIngressSingleResult, PollResult,
+    Config, Interface, InterfaceInner as Context, IpPacketStats, PollIngressSingleResult,
+    PollResult,
 };
 #[cfg(feature = "socket-tcp")]
 pub use self::interface::{MAX_COOKIE_RESTORES, MAX_SYN_COOKIE_LISTENERS, TcpSynCookieConfig};

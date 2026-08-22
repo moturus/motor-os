@@ -779,13 +779,13 @@ fn test_caps() {
         .iter()
         .find(|process| process.pid == moto_sys::current_pid())
         .unwrap();
-    let ssh_shell = processes
+    let parent_shell = processes
         .iter()
         .find(|process| process.pid == this_process.parent_pid)
-        .expect("missing ssh shell");
-    assert!(ssh_shell.debug_name().starts_with("/system/bin/rush"));
-    assert_eq!(russhd.pid, ssh_shell.parent_pid);
-    assert_eq!(ProcessRole::Interactive, role_for(ssh_shell.pid));
+        .expect("missing sibling shell");
+    assert!(parent_shell.debug_name().starts_with("/system/bin/rush"));
+    assert!(russhd.pid == parent_shell.parent_pid || sys_tty.pid == parent_shell.parent_pid);
+    assert_eq!(ProcessRole::Interactive, role_for(parent_shell.pid));
 
     spawn_wait_kill::test_default_capability_policy();
 
@@ -998,8 +998,16 @@ fn main() {
         tcp::test_ipv6();
         return;
     }
+    if args.len() == 3 && args[1] == "test-tap-udp-fragmentation" {
+        udp::test_tap_udp_fragmentation(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-poll" {
         poll::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-moto-async" {
+        moto_async::run_all_tests();
         return;
     }
     if (args.len() == 2 || args.len() == 3) && args[1] == "listener-exhaustion-probe" {
@@ -1215,7 +1223,7 @@ fn main() {
     stdio_file_relay::run_tests();
     // fs::run_tests();
 
-    println!("PASS");
+    println!("systest: ALL PASS");
 
     std::thread::sleep(Duration::new(0, 10_000_000));
 }

@@ -944,6 +944,7 @@ mod test_ipv4 {
 
         let icmp_repr = Icmpv4Repr::DstUnreachable {
             reason: Icmpv4DstUnreachable::PortUnreachable,
+            next_hop_mtu: None,
             header: Ipv4Repr {
                 src_addr: LOCAL_IPV4,
                 dst_addr: REMOTE_IPV4,

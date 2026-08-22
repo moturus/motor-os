@@ -60,6 +60,40 @@ fn test_new_panic() {
     Interface::new(config, &mut device, Instant::ZERO);
 }
 
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv6"))]
+fn sub_minimum_mtu_rejects_ipv6_configuration_and_selection() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    device.set_mtu(IPV6_MIN_MTU - 1);
+    let mut iface = Interface::new(Config::new(HardwareAddress::Ip), &mut device, Instant::ZERO);
+    let address = Ipv6Address::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let destination = IpAddress::Ipv6(Ipv6Address::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1));
+
+    #[cfg(feature = "proto-ipv4")]
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(Ipv4Address::new(192, 0, 2, 1).into(), 24));
+    });
+
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            iface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(address.into(), 64)));
+        }))
+        .is_err()
+    );
+    assert!(!iface.has_ip_addr(address));
+
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            iface.routes_mut().add_default_ipv6_route(address);
+        }))
+        .is_err()
+    );
+    assert_eq!(iface.inner.get_source_address(&destination), None);
+    assert_eq!(iface.inner.route(&destination, Instant::ZERO), None);
+}
+
 #[cfg(feature = "socket-udp")]
 #[rstest]
 #[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]

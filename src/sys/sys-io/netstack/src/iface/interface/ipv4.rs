@@ -1,5 +1,148 @@
 use super::*;
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
+const IPV4_FRAGMENT_ID_BUCKETS: usize = 256;
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+pub(super) struct Ipv4FragmentIds {
+    key: SipHasher24,
+    counters: [u16; IPV4_FRAGMENT_ID_BUCKETS],
+    initialized: [u64; IPV4_FRAGMENT_ID_BUCKETS / u64::BITS as usize],
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+impl Ipv4FragmentIds {
+    pub(super) const fn new(key: [u8; 16]) -> Self {
+        Self {
+            key: SipHasher24::new(key),
+            counters: [0; IPV4_FRAGMENT_ID_BUCKETS],
+            initialized: [0; IPV4_FRAGMENT_ID_BUCKETS / u64::BITS as usize],
+        }
+    }
+
+    pub(super) fn next(
+        &mut self,
+        src_addr: Ipv4Address,
+        dst_addr: Ipv4Address,
+        protocol: IpProtocol,
+    ) -> u16 {
+        let mut tuple = [0_u8; 10];
+        tuple[1..5].copy_from_slice(&src_addr.octets());
+        tuple[5..9].copy_from_slice(&dst_addr.octets());
+        tuple[9] = protocol.into();
+        let bucket = self.key.hash(&tuple) as u8 as usize;
+        let word = bucket / u64::BITS as usize;
+        let bit = 1_u64 << (bucket % u64::BITS as usize);
+
+        if self.initialized[word] & bit == 0 {
+            let initial = self.key.hash(&[1, bucket as u8]) as u16;
+            self.counters[bucket] = if initial == 0 { 1 } else { initial };
+            self.initialized[word] |= bit;
+        }
+
+        let ident = self.counters[bucket];
+        self.counters[bucket] = ident.wrapping_add(1);
+        ident
+    }
+}
+
+#[cfg(all(test, feature = "proto-ipv4-fragmentation"))]
+mod fragment_id_tests {
+    use super::*;
+
+    const KEY: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+
+    fn bucket(
+        ids: &Ipv4FragmentIds,
+        src_addr: Ipv4Address,
+        dst_addr: Ipv4Address,
+        protocol: IpProtocol,
+    ) -> usize {
+        let mut tuple = [0_u8; 10];
+        tuple[1..5].copy_from_slice(&src_addr.octets());
+        tuple[5..9].copy_from_slice(&dst_addr.octets());
+        tuple[9] = protocol.into();
+        ids.key.hash(&tuple) as u8 as usize
+    }
+
+    #[test]
+    fn fragment_ids_follow_the_keyed_lazy_bucket_contract() {
+        let src_addr = Ipv4Address::new(192, 0, 2, 1);
+        let dst_addr = Ipv4Address::new(198, 51, 100, 9);
+        let mut ids = Ipv4FragmentIds::new(KEY);
+
+        let bucket_index = ids.key.hash(&[0, 192, 0, 2, 1, 198, 51, 100, 9, 17]) as u8 as usize;
+        let raw_initial = ids.key.hash(&[1, bucket_index as u8]) as u16;
+        let initial = if raw_initial == 0 { 1 } else { raw_initial };
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), initial);
+        assert_eq!(
+            ids.next(src_addr, dst_addr, IpProtocol::Udp),
+            initial.wrapping_add(1)
+        );
+        assert_eq!(
+            ids.initialized
+                .iter()
+                .map(|word| word.count_ones())
+                .sum::<u32>(),
+            1
+        );
+
+        let collision = (0..=u16::MAX)
+            .map(|tail| Ipv4Address::new(203, 0, (tail >> 8) as u8, tail as u8))
+            .find(|candidate| bucket(&ids, src_addr, *candidate, IpProtocol::Udp) == bucket_index)
+            .expect("the exhaustive candidate set has no bucket collision");
+        assert_eq!(
+            ids.next(src_addr, collision, IpProtocol::Udp),
+            initial.wrapping_add(2)
+        );
+
+        ids.counters[bucket_index] = u16::MAX;
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), u16::MAX);
+        assert_eq!(ids.next(src_addr, dst_addr, IpProtocol::Udp), 0);
+    }
+}
+
+#[cfg(feature = "proto-ipv4-fragmentation")]
+fn validate_ipv4_fragment(packet: &Ipv4Packet<&[u8]>) -> Result<(), AssemblerError> {
+    let payload = packet.payload();
+    let offset = packet.frag_offset() as usize;
+
+    if packet.reserved() || packet.dont_frag() {
+        return Err(AssemblerError::Invalid);
+    }
+    if packet.more_frags() && (payload.is_empty() || !payload.len().is_multiple_of(8)) {
+        return Err(AssemblerError::Invalid);
+    }
+
+    let end = offset
+        .checked_add(payload.len())
+        .ok_or(AssemblerError::SizeLimit)?;
+    let header_len = if offset == 0 {
+        packet.header_len() as usize
+    } else {
+        IPV4_HEADER_LEN
+    };
+    if end > u16::MAX as usize - header_len {
+        return Err(AssemblerError::SizeLimit);
+    }
+
+    if offset == 0 && packet.more_frags() {
+        let header_complete = match packet.next_header() {
+            IpProtocol::Tcp => TcpPacket::new_checked(payload).is_ok(),
+            IpProtocol::Udp | IpProtocol::Icmp => payload.len() >= UDP_HEADER_LEN,
+            _ => true,
+        };
+        if !header_complete {
+            return Err(AssemblerError::Invalid);
+        }
+    }
+
+    Ok(())
+}
+
 impl Interface {
     /// Process fragments that still need to be sent for IPv4 packets.
     ///
@@ -7,14 +150,26 @@ impl Interface {
     /// processed or emitted, and thus, whether the readiness of any socket might
     /// have changed.
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn ipv4_egress(&mut self, device: &mut (impl Device + ?Sized)) {
+    pub(super) fn ipv4_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
         // Reset the buffer when we transmitted everything.
         if self.fragmenter.finished() {
             self.fragmenter.reset();
         }
 
         if self.fragmenter.is_empty() {
-            return;
+            return false;
+        }
+
+        let repr = self.fragmenter.ipv4.repr;
+        let path_mtu = self.inner.ip_mtu_for(repr.dst_addr.into());
+        if path_mtu < self.fragmenter.ipv4.path_mtu {
+            self.fragmenter.sent_bytes = 0;
+            self.fragmenter.ipv4.frag_offset = 0;
+            self.fragmenter.ipv4.path_mtu = path_mtu;
+            self.fragmenter.ipv4.ident =
+                self.inner
+                    .ipv4_fragment_ids
+                    .next(repr.src_addr, repr.dst_addr, repr.next_header);
         }
 
         let pkt = &self.fragmenter;
@@ -23,19 +178,17 @@ impl Interface {
         {
             self.inner
                 .dispatch_ipv4_frag(tx_token, &mut self.fragmenter);
+            if self.fragmenter.finished() {
+                self.fragmenter.reset();
+            }
+            return true;
         }
+
+        false
     }
 }
 
 impl InterfaceInner {
-    /// Get the next IPv4 fragment identifier.
-    #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn next_ipv4_frag_ident(&mut self) -> u16 {
-        let ipv4_id = self.ipv4_id;
-        self.ipv4_id = self.ipv4_id.wrapping_add(1);
-        ipv4_id
-    }
-
     /// Get an IPv4 source address based on a destination address.
     ///
     /// This function tries to find the first IPv4 address from the interface
@@ -83,6 +236,18 @@ impl InterfaceInner {
         address.x_is_unicast() && !self.is_broadcast_v4(address)
     }
 
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    fn accepts_ipv4_fragment_destination(&self, address: Ipv4Address) -> bool {
+        self.has_ip_addr(address)
+            || self.has_multicast_group(address)
+            || self.is_broadcast_v4(address)
+            || (address.x_is_unicast()
+                && self
+                    .routes
+                    .lookup(&IpAddress::Ipv4(address), self.now)
+                    .is_some_and(|router_addr| self.has_ip_addr(router_addr)))
+    }
+
     /// Get the first IPv4 address of the interface.
     pub fn ipv4_addr(&self) -> Option<Ipv4Address> {
         self.ip_addrs.iter().find_map(|addr| match *addr {
@@ -126,32 +291,84 @@ impl InterfaceInner {
 
         #[cfg(feature = "proto-ipv4-fragmentation")]
         let (ip_payload, meta) = {
-            if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 {
+            if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 || ipv4_packet.reserved()
+            {
+                self.ip_packet_stats.ipv4_fragments_rx =
+                    self.ip_packet_stats.ipv4_fragments_rx.wrapping_add(1);
                 let key = FragKey::Ipv4(ipv4_packet.get_key());
+
+                if !self.accepts_ipv4_fragment_destination(ipv4_repr.dst_addr) {
+                    return None;
+                }
+                if let Err(error) = validate_ipv4_fragment(ipv4_packet) {
+                    let error = frag.assembler.reject_existing(&key, error);
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
 
                 let f = match frag.assembler.get(&key, self.now + frag.reassembly_timeout) {
                     Ok(f) => f,
                     Err(_) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_no_slot_drops;
+                        *counter = counter.wrapping_add(1);
                         net_debug!("No available packet assembler for fragmented packet");
                         return None;
                     }
                 };
 
-                if !ipv4_packet.more_frags() {
-                    // This is the last fragment, so we know the total size
-                    check!(f.set_total_size(
-                        ipv4_packet.total_len() as usize - ipv4_packet.header_len() as usize
-                            + ipv4_packet.frag_offset() as usize,
-                    ));
+                let offset = ipv4_packet.frag_offset() as usize;
+                let incoming_end = offset + ipv4_packet.payload().len();
+                if offset == 0 {
+                    f.set_ipv4_context(Ipv4ReassemblyContext {
+                        repr: ipv4_repr,
+                        header_len: ipv4_packet.header_len() as usize,
+                    });
                 }
-
-                if let Err(e) = f.add(ipv4_packet.payload(), ipv4_packet.frag_offset() as usize) {
-                    net_debug!("fragmentation error: {:?}", e);
+                let header_len = f
+                    .ipv4_context()
+                    .map_or(IPV4_HEADER_LEN, |context| context.header_len);
+                if let Err(error) = f.enforce_max_size(u16::MAX as usize - header_len, incoming_end)
+                {
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
                     return None;
                 }
 
+                if !ipv4_packet.more_frags()
+                    && let Err(error) = f.set_total_size(incoming_end)
+                {
+                    self.count_reassembly_error(error);
+                    net_debug!("fragmentation error: {:?}", error);
+                    return None;
+                }
+
+                match f.add(ipv4_packet.payload(), offset) {
+                    Ok(AssemblerOutcome::Duplicate) => {
+                        let counter = &mut self.ip_packet_stats.reassembly_duplicates;
+                        *counter = counter.wrapping_add(1);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.count_reassembly_error(error);
+                        net_debug!("fragmentation error: {:?}", error);
+                        return None;
+                    }
+                }
+                if !f.is_complete() {
+                    return None;
+                }
+                let context = match f.ipv4_context() {
+                    Some(context) => context,
+                    None => {
+                        f.reset();
+                        return None;
+                    }
+                };
                 let payload = f.assemble()?;
-                // Update the payload length, so that the raw sockets get the correct value.
+                self.ip_packet_stats.reassemblies_completed =
+                    self.ip_packet_stats.reassemblies_completed.wrapping_add(1);
+                ipv4_repr = context.repr;
                 ipv4_repr.payload_len = payload.len();
                 // A reassembled datagram is not one frame, so no single frame's
                 // header vouches for its L4 checksum.
@@ -262,6 +479,7 @@ impl InterfaceInner {
                     icmp_reply_payload_len(ip_payload.len(), IPV4_MIN_MTU, ipv4_repr.buffer_len());
                 let icmp_reply_repr = Icmpv4Repr::DstUnreachable {
                     reason: Icmpv4DstUnreachable::ProtoUnreachable,
+                    next_hop_mtu: None,
                     header: ipv4_repr,
                     data: &ip_payload[0..payload_len],
                 };
@@ -350,7 +568,7 @@ impl InterfaceInner {
 
     pub(super) fn process_icmpv4<'frame>(
         &mut self,
-        _sockets: &mut SocketSet,
+        sockets: &mut SocketSet,
         ip_repr: Ipv4Repr,
         ip_payload: &'frame [u8],
     ) -> Option<Packet<'frame>> {
@@ -361,7 +579,7 @@ impl InterfaceInner {
         let mut handled_by_icmp_socket = false;
 
         #[cfg(all(feature = "socket-icmp", feature = "proto-ipv4"))]
-        for icmp_socket in _sockets
+        for icmp_socket in sockets
             .items_mut()
             .filter_map(|i| icmp::Socket::downcast_mut(&mut i.socket))
         {
@@ -388,6 +606,18 @@ impl InterfaceInner {
 
             // Ignore any echo replies.
             Icmpv4Repr::EchoReply { .. } => None,
+
+            Icmpv4Repr::DstUnreachable {
+                reason: Icmpv4DstUnreachable::FragRequired,
+                next_hop_mtu: Some(mtu),
+                ..
+            } => {
+                let accepted = super::pmtu::parse_ipv4(icmp_packet.data()).is_some_and(|quote| {
+                    self.update_pmtu_from_quote(sockets, quote, usize::from(mtu))
+                });
+                self.count_pmtu_message(accepted);
+                None
+            }
 
             // Don't report an error if a packet with unknown type
             // has been handled by an ICMP socket
@@ -451,7 +681,8 @@ impl InterfaceInner {
     pub(super) fn dispatch_ipv4_frag<Tx: TxToken>(&mut self, tx_token: Tx, frag: &mut Fragmenter) {
         let caps = self.caps.clone();
 
-        let max_fragment_size = caps.max_ipv4_fragment_size(frag.ipv4.repr.buffer_len());
+        let payload_mtu = frag.ipv4.path_mtu - frag.ipv4.repr.buffer_len();
+        let max_fragment_size = payload_mtu - payload_mtu % IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
         let payload_len = (frag.packet_len - frag.sent_bytes).min(max_fragment_size);
         let ip_len = payload_len + frag.ipv4.repr.buffer_len();
 
@@ -501,13 +732,13 @@ impl InterfaceInner {
                 packet.fill_checksum();
             }
 
-            tx_buffer[frag.ipv4.repr.buffer_len()..][..payload_len].copy_from_slice(
-                &frag.buffer[frag.ipv4.frag_offset as usize + frag.ipv4.repr.buffer_len()..]
-                    [..payload_len],
-            );
+            tx_buffer[frag.ipv4.repr.buffer_len()..][..payload_len]
+                .copy_from_slice(&frag.buffer[frag.ipv4.frag_offset as usize..][..payload_len]);
 
             // Update the frag offset for the next fragment.
             frag.ipv4.frag_offset += payload_len as u16;
-        })
+        });
+        self.ip_packet_stats.ipv4_fragments_tx =
+            self.ip_packet_stats.ipv4_fragments_tx.wrapping_add(1);
     }
 }

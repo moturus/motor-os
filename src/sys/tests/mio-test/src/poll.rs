@@ -137,7 +137,12 @@ fn test_drop_cancels_interest_and_shuts_down() {
             Ok(0) => (),
             Ok(n) => panic!("unexpected read of {n} bytes"),
             Err(err) => {
-                if err.kind() != io::ErrorKind::UnexpectedEof {
+                // Motor deliberately resets a connection whose client drops
+                // without ever writing; the peer now observes that cause
+                // instead of having it laundered to EOF.
+                let expected_motor_reset =
+                    cfg!(target_os = "motor") && err.kind() == io::ErrorKind::ConnectionReset;
+                if err.kind() != io::ErrorKind::UnexpectedEof && !expected_motor_reset {
                     panic!("{}", err);
                 }
             }

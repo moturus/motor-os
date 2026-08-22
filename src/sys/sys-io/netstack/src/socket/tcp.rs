@@ -642,6 +642,9 @@ pub struct Socket<'a> {
     /// The last sequence number sent.
     /// I.e. in an idle socket, local_seq_no+tx_buffer.len().
     remote_last_seq: TcpSeqNumber,
+    /// The highest sequence-space edge successfully transmitted (SND.MAX).
+    /// Unlike `remote_last_seq`, retransmission staging never rewinds it.
+    local_seq_max: TcpSeqNumber,
     /// The last acknowledgement number sent.
     /// I.e. in an idle socket, remote_seq_no+rx_buffer.len().
     remote_last_ack: Option<TcpSeqNumber>,
@@ -812,6 +815,7 @@ impl<'a> Socket<'a> {
             local_seq_no: TcpSeqNumber::default(),
             remote_seq_no: TcpSeqNumber::default(),
             remote_last_seq: TcpSeqNumber::default(),
+            local_seq_max: TcpSeqNumber::default(),
             remote_last_ack: None,
             remote_last_win: 0,
             remote_win_len: 0,
@@ -1171,6 +1175,41 @@ impl<'a> Socket<'a> {
         Some(self.tuple?.remote)
     }
 
+    /// Whether an ICMP quote names sequence space that was transmitted,
+    /// remains outstanding, and has not been reported through SACK.
+    pub(crate) fn has_outstanding_unsacked(&self, seq: TcpSeqNumber) -> bool {
+        self.local_seq_no <= seq
+            && seq < self.local_seq_max
+            && self.tx_scoreboard.contains_unsacked(seq)
+    }
+
+    /// The payload MSS used on this path before a PMTU decrease.
+    pub(crate) fn effective_mss_for_pmtu(&self, path_mtu: usize) -> usize {
+        let ip_header_len = match self.tuple.unwrap().local.addr {
+            #[cfg(feature = "proto-ipv4")]
+            IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(_) => crate::wire::IPV6_HEADER_LEN,
+        };
+        // A timestamp option occupies ten bytes plus two bytes of padding.
+        let tcp_header_len = TCP_HEADER_LEN
+            + if self.tsval_generator.is_some() {
+                12
+            } else {
+                0
+            };
+        self.remote_mss
+            .min(path_mtu - ip_header_len - tcp_header_len)
+    }
+
+    /// Mark no more than one pre-decrease wire segment for retransmission.
+    pub(crate) fn mark_pmtu_loss(&mut self, seq: TcpSeqNumber, old_mss: usize) {
+        debug_assert!(self.has_outstanding_unsacked(seq));
+        let end = (seq + old_mss).min(self.local_seq_max);
+        self.tx_scoreboard.mark_lost(seq, end);
+        self.tlp_pto = None;
+    }
+
     /// Return the connection state, in terms of the TCP state machine.
     #[inline]
     pub fn state(&self) -> State {
@@ -1202,6 +1241,7 @@ impl<'a> Socket<'a> {
         self.local_seq_no = TcpSeqNumber::default();
         self.remote_seq_no = TcpSeqNumber::default();
         self.remote_last_seq = TcpSeqNumber::default();
+        self.local_seq_max = TcpSeqNumber::default();
         self.remote_last_ack = None;
         self.remote_last_win = 0;
         self.remote_win_len = 0;
@@ -1308,6 +1348,7 @@ impl<'a> Socket<'a> {
 
         self.local_seq_no = restore.snd_nxt;
         self.remote_last_seq = restore.snd_nxt;
+        self.local_seq_max = restore.snd_nxt;
         self.remote_seq_no = restore.rcv_nxt;
         self.remote_last_ack = Some(restore.rcv_nxt);
         // What the SYN|ACK advertised: the fresh ring, unscaled (RFC 7323:
@@ -1441,6 +1482,7 @@ impl<'a> Socket<'a> {
         let seq = Self::initial_seq_no(cx, local_endpoint, remote_endpoint);
         self.local_seq_no = seq;
         self.remote_last_seq = seq;
+        self.local_seq_max = seq;
         Ok(())
     }
 
@@ -2370,8 +2412,6 @@ impl<'a> Socket<'a> {
             // all of the control flags we sent.
             _ => (false, false),
         };
-        let control_len = (sent_syn as usize) + (sent_fin as usize);
-
         // RFC 9293 3.10.7.4, from RFC 5961 section 4: once the connection is
         // synchronized a SYN earns a rate-limited challenge ACK and nothing
         // else, irrespective of its sequence number -- hence ahead of both the
@@ -2465,11 +2505,9 @@ impl<'a> Socket<'a> {
             }
             // Every acknowledgement must be for transmitted but unacknowledged data.
             (_, _, Some(ack_number)) => {
-                let unacknowledged = self.tx_buffer.len() + control_len;
-
                 // Acceptable ACK range (both inclusive)
                 let mut ack_min = self.local_seq_no;
-                let ack_max = self.local_seq_no + unacknowledged;
+                let ack_max = self.local_seq_max;
 
                 // If we have sent a SYN, it MUST be acknowledged.
                 if sent_syn {
@@ -2749,13 +2787,17 @@ impl<'a> Socket<'a> {
         let mut control = repr.control;
         control = control.quash_psh();
 
-        // If a FIN is received at the end of the current segment, but
-        // we have a hole in the assembler before the current segment, disregard this FIN.
-        if control == TcpControl::Fin && window_start < segment_start {
+        // A FIN is valid only after every preceding payload octet is inside
+        // the receive window and contiguous. Defer it if there is a hole on
+        // the left or the segment's payload tail was clipped on the right.
+        if control == TcpControl::Fin && (window_start < segment_start || segment_end > window_end)
+        {
             tcp_trace!(
-                "ignoring FIN because we don't have full data yet. window_start={} segment_start={}",
+                "ignoring FIN outside contiguous receive window. window={}..{} segment={}..{}",
                 window_start,
-                segment_start
+                window_end,
+                segment_start,
+                segment_end
             );
             control = TcpControl::None;
         }
@@ -2805,6 +2847,7 @@ impl<'a> Socket<'a> {
                 self.local_seq_no = Self::initial_seq_no(cx, local, remote);
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no;
+                self.local_seq_max = self.local_seq_no;
                 self.remote_has_sack = repr.sack_permitted;
                 self.remote_win_scale = repr.window_scale;
                 // Remote doesn't support window scaling, don't do it.
@@ -2854,6 +2897,7 @@ impl<'a> Socket<'a> {
 
                 self.remote_seq_no = repr.seq_number + 1;
                 self.remote_last_seq = self.local_seq_no + 1;
+                self.local_seq_max = self.local_seq_max.max(self.remote_last_seq);
                 self.remote_last_ack = Some(repr.seq_number);
                 self.remote_has_sack = repr.sack_permitted;
                 self.remote_win_scale = repr.window_scale;
@@ -3370,15 +3414,16 @@ impl<'a> Socket<'a> {
     }
 
     fn seq_to_transmit(&self, cx: &mut Context) -> bool {
-        let ip_header_len = match self.tuple.unwrap().local.addr {
+        let tuple = self.tuple.unwrap();
+        let ip_header_len = match tuple.local.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
             #[cfg(feature = "proto-ipv6")]
             IpAddress::Ipv6(_) => crate::wire::IPV6_HEADER_LEN,
         };
 
-        // Max segment size we're able to send due to MTU limitations.
-        let local_mss = cx.ip_mtu() - ip_header_len - TCP_HEADER_LEN;
+        // Max segment size we're able to send due to path MTU limitations.
+        let local_mss = cx.ip_mtu_for(tuple.remote.addr) - ip_header_len - TCP_HEADER_LEN;
 
         // The effective max segment size, taking into account our and remote's limits.
         let effective_mss = local_mss.min(self.remote_mss);
@@ -3825,9 +3870,10 @@ impl<'a> Socket<'a> {
                 // not -- an MSS bounds payload alone (RFC 6691), so the peer's
                 // number is already the right bound on ours.
                 let tcp_header_len = repr.header_len();
+                let path_mtu = cx.ip_mtu_for(tuple.remote.addr);
                 let effective_mss = self
                     .remote_mss
-                    .min(cx.ip_mtu() - ip_repr.header_len() - tcp_header_len);
+                    .min(path_mtu - ip_repr.header_len() - tcp_header_len);
 
                 // With TCP segmentation offload, a single emitted packet may
                 // carry many effective-MSS units of payload — the device
@@ -3933,14 +3979,21 @@ impl<'a> Socket<'a> {
             // has to happen here -- otherwise each of them is over the MTU by
             // the length of the options, which is the whole super-segment's
             // worth of oversized frames rather than one.
+            let path_mtu = cx.ip_mtu_for(tuple.remote.addr);
             let effective_mss = self
                 .remote_mss
-                .min(cx.ip_mtu() - ip_repr.header_len() - repr.header_len());
+                .min(path_mtu - ip_repr.header_len() - repr.header_len());
             if repr.payload.len() > effective_mss {
                 meta.tso_seg_size = effective_mss as u16;
             }
         }
         emit(cx, meta, (ip_repr, repr))?;
+
+        // SND.MAX advances on every successful transmission, including a
+        // zero-window probe whose byte may be acknowledged even though the
+        // normal send cursor deliberately stays put.
+        let sent_edge = repr.seq_number + repr.segment_len();
+        self.local_seq_max = self.local_seq_max.max(sent_edge);
 
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.
@@ -3971,7 +4024,7 @@ impl<'a> Socket<'a> {
         }
 
         // We've sent a packet successfully, so we can update the internal state now.
-        self.remote_last_seq = repr.seq_number + repr.segment_len();
+        self.remote_last_seq = sent_edge;
         // The staged retransmission is out; the send edge returns to the
         // flight's end so the rest is not resent go-back-N style. Guarded on
         // a real (re)transmission: a pure ACK slipping out first (say, under
@@ -4365,6 +4418,7 @@ mod test {
             assert_eq!(s1.local_seq_no, s2.local_seq_no, "local_seq_no");
             assert_eq!(s1.remote_seq_no, s2.remote_seq_no, "remote_seq_no");
             assert_eq!(s1.remote_last_seq, s2.remote_last_seq, "remote_last_seq");
+            assert_eq!(s1.local_seq_max, s2.local_seq_max, "local_seq_max");
             assert_eq!(s1.remote_last_ack, s2.remote_last_ack, "remote_last_ack");
             assert_eq!(s1.remote_last_win, s2.remote_last_win, "remote_last_win");
             assert_eq!(s1.remote_win_len, s2.remote_win_len, "remote_win_len");
@@ -4409,6 +4463,7 @@ mod test {
         s.local_seq_no = LOCAL_SEQ;
         s.remote_seq_no = REMOTE_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ;
+        s.local_seq_max = LOCAL_SEQ;
         s.remote_win_len = 256;
         s
     }
@@ -4423,6 +4478,7 @@ mod test {
         s.tuple = Some(TUPLE);
         s.local_seq_no = LOCAL_SEQ;
         s.remote_last_seq = LOCAL_SEQ;
+        s.local_seq_max = LOCAL_SEQ;
         s
     }
 
@@ -4435,6 +4491,7 @@ mod test {
         s.state = State::Established;
         s.local_seq_no = LOCAL_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ + 1;
+        s.local_seq_max = LOCAL_SEQ + 1;
         s.remote_last_ack = Some(REMOTE_SEQ + 1);
         s.remote_last_win = (s.scaled_window() as u32) << s.remote_win_shift;
         s
@@ -4455,6 +4512,7 @@ mod test {
         s.state = State::FinWait2;
         s.local_seq_no = LOCAL_SEQ + 1 + 1;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
+        s.local_seq_max = LOCAL_SEQ + 1 + 1;
         s
     }
 
@@ -4462,6 +4520,7 @@ mod test {
         let mut s = socket_fin_wait_1();
         s.state = State::Closing;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
+        s.local_seq_max = LOCAL_SEQ + 1 + 1;
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
         s.timer = Timer::Retransmit {
             expires_at: Instant::from_millis_const(1000),
@@ -7134,6 +7193,43 @@ mod test {
     }
 
     #[test]
+    fn test_established_ack_cannot_ack_unsent_buffered_data() {
+        let mut s = socket_established();
+        s.remote_win_len = 4;
+        s.send_slice(b"abcdefgh").unwrap();
+
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: &b"abcd"[..],
+                ..RECV_TEMPL
+            }]
+        );
+        assert_eq!(s.local_seq_max, LOCAL_SEQ + 1 + 4);
+        assert_eq!(s.tx_buffer.len(), 8);
+
+        // The peer cannot acknowledge the four bytes still queued behind its
+        // window. The invalid ACK earns a challenge and dequeues nothing.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 8),
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 4,
+                ack_number: Some(REMOTE_SEQ + 1),
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.local_seq_no, LOCAL_SEQ + 1);
+        assert_eq!(s.tx_buffer.len(), 8);
+    }
+
+    #[test]
     fn test_established_bad_seq() {
         let mut s = socket_established();
         // Data outside of receive window.
@@ -8459,6 +8555,7 @@ mod test {
         let _ = s.tx_buffer.enqueue_slice(b"x");
         // Mark it as already sent (remote_last_seq is past the data byte and the FIN).
         s.remote_last_seq = LOCAL_SEQ + 1 + 1 + 1; // data(1) + FIN(1)
+        s.local_seq_max = s.remote_last_seq;
 
         // Remote ACKs just the data byte, not the FIN (partial ACK).
         // ack_number = local_seq_no + 1  =>  ack_len = 1, ack_of_fin = false.
@@ -9566,6 +9663,80 @@ mod test {
             ..SEND_TEMPL
         });
         assert!(s.tx_scoreboard.is_empty());
+    }
+
+    #[test]
+    fn pmtu_quote_requires_sent_outstanding_unsacked_sequence() {
+        let mut s = socket_established();
+        let una = s.local_seq_no;
+        s.local_seq_max = una + 18;
+        s.tx_scoreboard
+            .on_transmit(una, una + 18, Instant::from_millis(1));
+
+        assert!(!s.has_outstanding_unsacked(una - 1));
+        assert!(s.has_outstanding_unsacked(una));
+        assert!(s.has_outstanding_unsacked(una + 17));
+        assert!(!s.has_outstanding_unsacked(una + 18));
+
+        s.tx_scoreboard.mark_sacked(una + 6, una + 12);
+        assert!(!s.has_outstanding_unsacked(una + 6));
+        assert!(s.has_outstanding_unsacked(una + 12));
+
+        // Both socket bounds are checked even if a stale scoreboard run
+        // were to remain beyond them.
+        s.local_seq_no = una + 3;
+        s.local_seq_max = una + 15;
+        assert!(!s.has_outstanding_unsacked(una + 2));
+        assert!(s.has_outstanding_unsacked(una + 3));
+        assert!(s.has_outstanding_unsacked(una + 14));
+        assert!(!s.has_outstanding_unsacked(una + 15));
+    }
+
+    #[test]
+    fn pmtu_loss_mark_splits_a_tso_run_skips_sack_and_clamps_the_tail() {
+        let mut s = socket_established();
+        let una = s.local_seq_no;
+        s.remote_mss = 1_460;
+        assert_eq!(s.effective_mss_for_pmtu(1_500), 1_460);
+        s.set_tsval_generator(Some(|| 1));
+        assert_eq!(s.effective_mss_for_pmtu(1_500), 1_448);
+        s.set_tsval_generator(None);
+        s.local_seq_max = una + 4_380;
+        s.tx_scoreboard
+            .on_transmit(una, una + 4_380, Instant::from_millis(1));
+        s.tx_scoreboard.mark_sacked(una + 1_800, una + 2_000);
+        s.tlp_pto = Some(Instant::from_secs(10));
+        let cwnd = s.congestion_controller.inner().window();
+
+        // A quote for the second wire segment of a 4,380-byte TSO run.
+        s.mark_pmtu_loss(una + 1_460, 1_460);
+        let runs: Vec<_> = s
+            .tx_scoreboard
+            .runs()
+            .iter()
+            .map(|run| (run.start - una, run.end - una, run.sacked, run.lost))
+            .collect();
+        assert_eq!(
+            runs,
+            vec![
+                (0, 1_460, false, false),
+                (1_460, 1_800, false, true),
+                (1_800, 2_000, true, false),
+                (2_000, 2_920, false, true),
+                (2_920, 4_380, false, false),
+            ]
+        );
+
+        s.mark_pmtu_loss(una + 4_000, 1_460);
+        assert!(
+            s.tx_scoreboard
+                .runs()
+                .iter()
+                .any(|run| run.start == una + 4_000 && run.end == una + 4_380 && run.lost)
+        );
+        assert_eq!(s.congestion_controller.inner().window(), cwnd);
+        assert_eq!(s.recovery_point, None);
+        assert_eq!(s.tlp_pto, None);
     }
 
     #[test]
@@ -11373,6 +11544,79 @@ mod test {
                 ..RECV_TEMPL
             }]
         );
+    }
+
+    #[test]
+    fn test_fin_beyond_right_window_waits_for_retransmitted_tail() {
+        let mut s = socket_established();
+        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.assembler = Assembler::new();
+        s.ack_delay = None;
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"abcdefgh",
+                control: TcpControl::Fin,
+                ..SEND_TEMPL
+            }
+        );
+
+        // Only the six in-window bytes are accepted. The FIN follows the
+        // clipped tail, so it must not close the receive half yet.
+        assert_eq!(s.state, State::Established);
+        assert!(!s.rx_fin_received);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 0,
+                ..RECV_TEMPL
+            }]
+        );
+
+        let mut received = [0; 6];
+        assert_eq!(s.recv_slice(&mut received), Ok(6));
+        assert_eq!(&received, b"abcdef");
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 6),
+                window_len: 6,
+                ..RECV_TEMPL
+            }]
+        );
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1 + 6,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: b"gh",
+                control: TcpControl::Fin,
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::CloseWait);
+        assert!(s.rx_fin_received);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 8 + 1),
+                window_len: 4,
+                ..RECV_TEMPL
+            }]
+        );
+
+        let mut tail = [0; 2];
+        assert_eq!(s.recv_slice(&mut tail), Ok(2));
+        assert_eq!(&tail, b"gh");
+        assert_eq!(s.recv_slice(&mut tail), Err(RecvError::Finished));
     }
 
     #[test]

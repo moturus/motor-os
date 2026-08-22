@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use moto_io::net::udp::UdpSocket as NativeUdpSocket;
+use moto_ipc::io_channel;
 
 fn test_udp_basic() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
@@ -60,6 +61,33 @@ fn test_native_udp_ttl() {
     println!("-- test_native_udp_ttl() PASS");
 }
 
+fn test_native_udp_size_limit() {
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        {
+            let socket = NativeUdpSocket::bind_reserved(
+                client.try_reserve().unwrap(),
+                &"127.0.0.1:0".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            let destination = "127.0.0.1:9".parse().unwrap();
+            let oversized = vec![0; moto_rt::net::MAX_UDP_PAYLOAD + 1];
+            assert_eq!(
+                socket.try_send_to(&oversized, &destination),
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+            assert_eq!(
+                socket.send_to_future(&oversized, &destination).await,
+                Err(moto_rt::E_INVALID_ARGUMENT)
+            );
+        }
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+    println!("-- test_native_udp_size_limit() PASS");
+}
+
 /// The UDP TTL option through the POSIX ABI, which reaches the same remote
 /// RPCs as [`test_native_udp_ttl`] but through the blocking bridge.
 fn test_posix_udp_ttl() {
@@ -80,14 +108,90 @@ fn test_posix_udp_ttl() {
     println!("-- test_posix_udp_ttl() PASS");
 }
 
+fn test_unsupported_udp_options_return_errors() {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::fd::AsRawFd;
+
+    fn assert_unsupported<T: core::fmt::Debug>(result: std::io::Result<T>) {
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    assert_unsupported(socket.set_broadcast(true));
+    assert_unsupported(socket.broadcast());
+    assert_unsupported(socket.set_multicast_loop_v4(true));
+    assert_unsupported(socket.multicast_loop_v4());
+    assert_unsupported(socket.set_multicast_ttl_v4(2));
+    assert_unsupported(socket.multicast_ttl_v4());
+    assert_unsupported(socket.set_multicast_loop_v6(true));
+    assert_unsupported(socket.multicast_loop_v6());
+
+    let multicast_v4 = "239.1.2.3".parse().unwrap();
+    assert_unsupported(socket.join_multicast_v4(&multicast_v4, &Ipv4Addr::UNSPECIFIED));
+    assert_unsupported(socket.leave_multicast_v4(&multicast_v4, &Ipv4Addr::UNSPECIFIED));
+    let multicast_v6: Ipv6Addr = "ff02::1".parse().unwrap();
+    assert_unsupported(socket.join_multicast_v6(&multicast_v6, 0));
+    assert_unsupported(socket.leave_multicast_v6(&multicast_v6, 0));
+
+    let fd = socket.as_raw_fd();
+    assert_eq!(
+        moto_rt::net::set_only_v6(fd, true),
+        Err(moto_rt::Error::NotImplemented)
+    );
+    assert_eq!(
+        moto_rt::net::only_v6(fd),
+        Err(moto_rt::Error::NotImplemented)
+    );
+
+    println!("-- test_unsupported_udp_options_return_errors() PASS");
+}
+
+/// Exercise source fragmentation and reassembly through the real tap device.
+pub fn test_tap_udp_fragmentation(destination: &str) {
+    // Above every supported Ethernet IP MTU, but small enough to keep failures
+    // easy to diagnose and independent of the maximum-datagram boundary tests.
+    const PAYLOAD_LEN: usize = 4096;
+
+    let destination: std::net::SocketAddr = destination.parse().unwrap();
+    let local = match destination {
+        std::net::SocketAddr::V4(_) => "192.168.4.2:0",
+        std::net::SocketAddr::V6(_) => "[2001:db8::2]:0",
+    };
+    let socket = std::net::UdpSocket::bind(local).unwrap();
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+
+    let payload: Vec<u8> = (0..PAYLOAD_LEN)
+        .map(|offset| (offset.wrapping_mul(37).wrapping_add(11) & 0xff) as u8)
+        .collect();
+    assert_eq!(
+        socket.send_to(&payload, destination).unwrap(),
+        payload.len()
+    );
+
+    let mut echoed = vec![0_u8; PAYLOAD_LEN + 1];
+    let (len, source) = socket.recv_from(&mut echoed).unwrap();
+    assert_eq!(source, destination);
+    assert_eq!(len, payload.len());
+    assert_eq!(&echoed[..len], payload);
+    println!("-- tap UDP fragmentation via {destination} PASS");
+}
+
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
     let s1 = std::net::UdpSocket::bind(a1).unwrap();
     let s2 = std::net::UdpSocket::bind(a2).unwrap();
 
+    let oversized = vec![0; moto_rt::net::MAX_UDP_PAYLOAD + 1];
+    assert_eq!(
+        s1.send_to(&oversized, a2).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+
     let mut buf1 = vec![];
-    buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0); // 65493
+    buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0);
 
     let mut buf2 = vec![];
     buf2.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0);
@@ -530,10 +634,141 @@ fn udp_close_does_not_overtake_tx_test() {
     println!("-- udp_close_does_not_overtake_tx_test() PASS");
 }
 
+fn recv_raw(connection: &io_channel::ClientConnection) -> io_channel::Msg {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match connection.recv() {
+            Ok(msg) => return msg,
+            Err(moto_rt::Error::NotReady) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for raw sys-io response"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
+    }
+}
+
+fn send_fragment(
+    connection: &io_channel::ClientConnection,
+    socket_id: u64,
+    fragment_id: u16,
+    size: u16,
+    destination: std::net::SocketAddr,
+) {
+    let msg = if size == 0 {
+        let mut msg = moto_sys_io::api_net::udp_socket_tx_rx_empty_msg(socket_id, &destination);
+        msg.payload.args_16_mut()[9] = fragment_id;
+        msg
+    } else {
+        let page = connection.alloc_page(u64::MAX).unwrap();
+        moto_sys_io::api_net::udp_socket_tx_rx_msg(socket_id, page, fragment_id, size, &destination)
+    };
+    connection.send(msg).unwrap();
+}
+
+fn send_valid_fragment(
+    connection: &io_channel::ClientConnection,
+    socket_id: u64,
+    fragment_id: u16,
+    destination: std::net::SocketAddr,
+) {
+    send_fragment(
+        connection,
+        socket_id,
+        fragment_id,
+        io_channel::PAGE_SIZE as u16,
+        destination,
+    );
+    let ack = recv_raw(connection);
+    assert_eq!(
+        ack.command,
+        moto_sys_io::api_net::NetCmd::UdpSocketTxRxAck as u16
+    );
+}
+
+pub(crate) fn run_malformed_fragment_child(kind: &str) {
+    use std::io::Write;
+
+    let connection = io_channel::ClientConnection::connect("sys-io").unwrap();
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    connection
+        .send(moto_sys_io::api_net::bind_udp_socket_request(&bind_addr, 0))
+        .unwrap();
+    let response = recv_raw(&connection);
+    response.status().unwrap();
+    let socket_id = response.handle;
+    let destination = "127.0.0.1:9".parse().unwrap();
+    let other_destination = "127.0.0.1:10".parse().unwrap();
+    let full = io_channel::PAGE_SIZE as u16;
+
+    match kind {
+        "empty" => {}
+        "terminal" | "short" => {}
+        "skip" | "address" => send_valid_fragment(&connection, socket_id, 1, destination),
+        "too_many" | "too_long" => {
+            for fragment_id in 1..16 {
+                send_valid_fragment(&connection, socket_id, fragment_id, destination);
+            }
+        }
+        _ => panic!("unknown malformed UDP fragment kind: {kind}"),
+    }
+
+    println!("malformed_udp_fragment: armed");
+    std::io::stdout().flush().unwrap();
+    match kind {
+        "empty" => send_fragment(&connection, socket_id, 1, 0, destination),
+        "terminal" => send_fragment(&connection, socket_id, u16::MAX, 1, destination),
+        "short" => send_fragment(&connection, socket_id, 1, full - 1, destination),
+        "skip" => send_fragment(&connection, socket_id, 3, full, destination),
+        "address" => send_fragment(&connection, socket_id, u16::MAX, 1, other_destination),
+        "too_many" => send_fragment(&connection, socket_id, 16, full, destination),
+        "too_long" => {
+            let tail = moto_rt::net::MAX_UDP_PAYLOAD - 15 * io_channel::PAGE_SIZE + 1;
+            send_fragment(&connection, socket_id, u16::MAX, tail as u16, destination);
+        }
+        _ => unreachable!(),
+    }
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::process::exit(0);
+}
+
+fn malformed_udp_fragments_only_kill_the_client() {
+    for kind in [
+        "empty", "terminal", "short", "skip", "address", "too_many", "too_long",
+    ] {
+        let mut child = crate::subcommand::spawn();
+        child.malformed_udp_fragment(kind);
+        assert!(
+            !child.wait().unwrap().success(),
+            "sys-io accepted malformed UDP fragment kind {kind}"
+        );
+    }
+
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    receiver
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .unwrap();
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender
+        .send_to(b"alive", receiver.local_addr().unwrap())
+        .unwrap();
+    let mut bytes = [0; 5];
+    assert_eq!(receiver.recv(&mut bytes).unwrap(), 5);
+    assert_eq!(&bytes, b"alive");
+
+    println!("-- malformed_udp_fragments_only_kill_the_client() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
+    test_native_udp_size_limit();
     test_posix_udp_ttl();
+    test_unsupported_udp_options_return_errors();
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();
@@ -543,5 +778,6 @@ pub fn run_all_tests() {
     test_udp_tx_progresses_after_page_free();
     udp_rebind_after_close_test();
     udp_close_does_not_overtake_tx_test();
+    malformed_udp_fragments_only_kill_the_client();
     println!("UDP tests PASS");
 }

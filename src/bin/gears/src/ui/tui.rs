@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::ops::Range;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
@@ -9,13 +10,17 @@ use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
-use crossterm::style::Print;
-use crossterm::terminal::{
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+use crossterm::style::{
+    Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor, force_color_output,
 };
-use crossterm::{execute, queue};
+use crossterm::terminal::{
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, ScrollUp as TerminalScrollUp,
+    disable_raw_mode, enable_raw_mode,
+};
+use crossterm::{SynchronizedUpdate, execute, queue};
 
 use super::command::{Command as LocalCommand, Input as ParsedInput, parse};
+use super::highlight::{Kind as HighlightKind, Markdown, Span as Highlight};
 use super::repl::Ui;
 use super::state::{Activity, ArtifactPage, State};
 use super::transcript::{Source, Transcript};
@@ -28,22 +33,44 @@ use crate::agent::context::Window;
 use crate::agent::gate::Gate;
 use crate::agent::harness::{Command as AgentCommand, Harness};
 use crate::agent::task::{ItemState, Task};
+use crate::config::ModelStore;
 use crate::tools::selfhost::Restart;
 
 const INPUT_POLL: Duration = Duration::from_millis(20);
 const EVENT_BURST: usize = 64;
 const APPROVAL_PAGE_BYTES: usize = 4096;
 const KEPT: usize = 256 * 1024;
+const CHROME_FOREGROUND: Color = Color::DarkGrey;
+const INPUT_BACKGROUND: Color = Color::Rgb {
+    r: 24,
+    g: 24,
+    b: 24,
+};
 
 struct Expansion {
     call: String,
     text: String,
 }
 
+type StyledFrame = (
+    Vec<String>,
+    Vec<Vec<Highlight>>,
+    Option<(u16, u16)>,
+    Range<usize>,
+);
+
 pub trait Surface {
     fn enter(&mut self) -> io::Result<()>;
     fn size(&self) -> io::Result<(u16, u16)>;
-    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()>;
+    fn invalidate(&mut self) {}
+    fn draw(
+        &mut self,
+        size: (u16, u16),
+        lines: &[String],
+        highlights: &[Vec<Highlight>],
+        cursor: Option<(u16, u16)>,
+        input_rows: Range<usize>,
+    ) -> io::Result<()>;
     fn leave(&mut self) -> io::Result<()>;
 }
 
@@ -71,8 +98,14 @@ impl<S: Surface> Screen<S> {
     /// for this complete frame rather than retained across terminal events.
     pub fn redraw(&mut self, state: &State) -> io::Result<()> {
         let size = self.surface.size()?;
-        let (lines, cursor) = frame(state, size);
-        self.surface.draw(&lines, cursor)
+        let (lines, highlights, cursor, input_rows) = styled_frame(state, size);
+        self.surface
+            .draw(size, &lines, &highlights, cursor, input_rows)
+    }
+
+    fn resize(&mut self, state: &State) -> io::Result<()> {
+        self.surface.invalidate();
+        self.redraw(state)
     }
 
     pub fn close(&mut self) {
@@ -251,18 +284,49 @@ impl<S: Surface, D: Decisions> Controller<S, D> {
 
 impl<S: Surface> Controller<S, Input> {
     fn poll_input(&mut self, timeout: Duration, editing: bool) -> io::Result<Option<Action>> {
-        let action = self.decisions.poll(timeout, editing)?;
+        let choosing_model = self.state.model_choice().is_some();
+        let action = self.decisions.poll(timeout, editing, choosing_model)?;
+        match action.as_ref() {
+            Some(Action::ModelUp | Action::ModelDown) => {
+                let down = matches!(action.as_ref(), Some(Action::ModelDown));
+                if self.state.move_model_choice(down) {
+                    self.screen.redraw(&self.state)?;
+                }
+                return Ok(None);
+            }
+            Some(Action::ModelCancel) => {
+                if self.state.cancel_model_choice() {
+                    self.screen.redraw(&self.state)?;
+                }
+                return Ok(None);
+            }
+            Some(Action::ModelAccept) => {
+                let selected = self.state.take_model_choice();
+                return Ok(selected.map(Action::SelectModel));
+            }
+            _ => {}
+        }
         let redraw = match action {
             Some(Action::Changed | Action::Submit(_)) => self
                 .state
                 .set_draft(self.decisions.draft(), self.decisions.cursor()),
-            Some(Action::Resize) => true,
+            Some(Action::Resize) => {
+                self.screen.resize(&self.state)?;
+                false
+            }
             _ => false,
         };
         if redraw {
             self.screen.redraw(&self.state)?;
         }
         Ok(action)
+    }
+
+    fn open_model_choice(&mut self, models: Vec<String>) -> io::Result<()> {
+        if self.state.open_model_choice(models) {
+            self.screen.redraw(&self.state)?;
+        }
+        Ok(())
     }
 }
 
@@ -323,16 +387,59 @@ impl<S: Surface, D: Decisions> Ui for Controller<S, D> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct TerminalLine {
+    text: String,
+    highlights: Vec<Highlight>,
+    input: bool,
+}
+
+#[derive(Clone)]
+struct TerminalFrame {
+    size: (u16, u16),
+    lines: Vec<TerminalLine>,
+}
+
+impl TerminalFrame {
+    fn new(
+        size: (u16, u16),
+        lines: &[String],
+        highlights: &[Vec<Highlight>],
+        input_rows: Range<usize>,
+    ) -> TerminalFrame {
+        let lines = lines
+            .iter()
+            .enumerate()
+            .map(|(row, text)| TerminalLine {
+                text: text.clone(),
+                highlights: highlights.get(row).cloned().unwrap_or_default(),
+                input: input_rows.contains(&row),
+            })
+            .collect();
+        TerminalFrame { size, lines }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpwardShift {
+    top: usize,
+    bottom: usize,
+    amount: usize,
+}
+
 pub struct Crossterm<W: Write> {
     out: W,
     entered: bool,
+    frame: Option<TerminalFrame>,
 }
 
 impl<W: Write> Crossterm<W> {
     pub fn new(out: W) -> Crossterm<W> {
+        force_color_output(true);
         Crossterm {
             out,
             entered: false,
+            frame: None,
         }
     }
 }
@@ -340,8 +447,21 @@ impl<W: Write> Crossterm<W> {
 impl<W: Write> Surface for Crossterm<W> {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(self.out, EnterAlternateScreen, EnableBracketedPaste, Hide) {
-            let _ = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+        if let Err(error) = execute!(
+            self.out,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::Black)
+        ) {
+            let _ = execute!(
+                self.out,
+                ResetColor,
+                Show,
+                DisableBracketedPaste,
+                LeaveAlternateScreen
+            );
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -353,20 +473,38 @@ impl<W: Write> Surface for Crossterm<W> {
         crossterm::terminal::size()
     }
 
-    fn draw(&mut self, lines: &[String], cursor: Option<(u16, u16)>) -> io::Result<()> {
-        queue!(self.out, MoveTo(0, 0), Clear(ClearType::All))?;
-        for (row, line) in lines.iter().enumerate() {
-            queue!(self.out, MoveTo(0, row as u16), Print(line))?;
-        }
-        match cursor {
-            Some((col, row)) => {
-                queue!(self.out, Show, MoveTo(col, row))?;
+    fn invalidate(&mut self) {
+        self.frame = None;
+    }
+
+    fn draw(
+        &mut self,
+        size: (u16, u16),
+        lines: &[String],
+        highlights: &[Vec<Highlight>],
+        cursor: Option<(u16, u16)>,
+        input_rows: Range<usize>,
+    ) -> io::Result<()> {
+        let next = TerminalFrame::new(size, lines, highlights, input_rows);
+        let previous = self.frame.as_ref();
+        self.out.sync_update(|out| -> io::Result<()> {
+            queue!(out, Hide)?;
+            match previous {
+                Some(previous)
+                    if previous.size == next.size && previous.lines.len() == next.lines.len() =>
+                {
+                    paint_update(out, previous, &next)?;
+                }
+                _ => paint_full(out, &next)?,
             }
-            None => {
-                queue!(self.out, Hide)?;
+            match cursor {
+                Some((col, row)) => queue!(out, MoveTo(col, row), Show)?,
+                None => queue!(out, Hide)?,
             }
-        }
-        self.out.flush()
+            Ok(())
+        })??;
+        self.frame = Some(next);
+        Ok(())
     }
 
     fn leave(&mut self) -> io::Result<()> {
@@ -374,61 +512,384 @@ impl<W: Write> Surface for Crossterm<W> {
             return Ok(());
         }
         self.entered = false;
-        let terminal = execute!(self.out, Show, DisableBracketedPaste, LeaveAlternateScreen);
+        self.frame = None;
+        let margins = self.out.write_all(b"\x1b[r");
+        let terminal = execute!(
+            self.out,
+            ResetColor,
+            Show,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let raw = disable_raw_mode();
-        terminal.and(raw)
+        margins.and(terminal).and(raw)
     }
 }
 
-fn frame(state: &State, (width, height): (u16, u16)) -> (Vec<String>, Option<(u16, u16)>) {
-    if let Some(approval) = state.approval() {
-        return (approval_frame(approval, width, height), None);
+fn paint_full<W: Write>(out: &mut W, frame: &TerminalFrame) -> io::Result<()> {
+    queue!(
+        out,
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(Color::Black),
+        MoveTo(0, 0),
+        Clear(ClearType::All)
+    )?;
+    for (row, line) in frame.lines.iter().enumerate() {
+        if !line.text.is_empty() || line.input {
+            paint_line(out, row, line, 0, false)?;
+        }
     }
-    let mut status = vec!["Motor OS Gears".to_string()];
+    Ok(())
+}
+
+fn paint_update<W: Write>(
+    out: &mut W,
+    previous: &TerminalFrame,
+    next: &TerminalFrame,
+) -> io::Result<()> {
+    if let Some(shift) = upward_shift(previous, next) {
+        scroll_up(out, shift)?;
+        for row in shift.bottom - shift.amount..shift.bottom {
+            paint_line(out, row, &next.lines[row], 0, false)?;
+        }
+        return Ok(());
+    }
+    for (row, (old, new)) in previous.lines.iter().zip(&next.lines).enumerate() {
+        if old != new {
+            let erase_tail = old.text.chars().count() > new.text.chars().count();
+            paint_line(out, row, new, unchanged_prefix(old, new), erase_tail)?;
+        }
+    }
+    Ok(())
+}
+
+fn upward_shift(previous: &TerminalFrame, next: &TerminalFrame) -> Option<UpwardShift> {
+    let len = previous.lines.len();
+    let top = previous
+        .lines
+        .iter()
+        .zip(&next.lines)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = previous.lines[top..]
+        .iter()
+        .rev()
+        .zip(next.lines[top..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let bottom = len - suffix;
+    let height = bottom - top;
+    (1..height).find_map(|amount| {
+        (previous.lines[top + amount..bottom] == next.lines[top..bottom - amount]).then_some(
+            UpwardShift {
+                top,
+                bottom,
+                amount,
+            },
+        )
+    })
+}
+
+fn scroll_up<W: Write>(out: &mut W, shift: UpwardShift) -> io::Result<()> {
+    queue!(
+        out,
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(Color::Black)
+    )?;
+    write!(out, "\x1b[{};{}r", shift.top + 1, shift.bottom)?;
+    let scroll = queue!(
+        out,
+        MoveTo(0, shift.top as u16),
+        TerminalScrollUp(shift.amount as u16)
+    );
+    let margins = out.write_all(b"\x1b[r");
+    scroll.and(margins)
+}
+
+fn paint_line<W: Write>(
+    out: &mut W,
+    row: usize,
+    line: &TerminalLine,
+    from: usize,
+    erase_tail: bool,
+) -> io::Result<()> {
+    let column = line.text[..from].chars().count() as u16;
+    let background = if line.input {
+        INPUT_BACKGROUND
+    } else {
+        Color::Black
+    };
+    queue!(
+        out,
+        MoveTo(column, row as u16),
+        SetForegroundColor(Color::White),
+        SetBackgroundColor(background)
+    )?;
+    if from == 0 {
+        queue!(out, Clear(ClearType::CurrentLine))?;
+    }
+    print_highlighted(out, &line.text, &line.highlights, from)?;
+    if erase_tail {
+        queue!(out, Clear(ClearType::UntilNewLine))?;
+    }
+    queue!(out, SetBackgroundColor(Color::Black))
+}
+
+fn unchanged_prefix(old: &TerminalLine, new: &TerminalLine) -> usize {
+    if old.input != new.input {
+        return 0;
+    }
+    let mut prefix = 0;
+    for ((old_at, old_char), (new_at, new_char)) in
+        old.text.char_indices().zip(new.text.char_indices())
+    {
+        if old_char != new_char
+            || highlight_at(&old.highlights, old_at) != highlight_at(&new.highlights, new_at)
+        {
+            break;
+        }
+        prefix = old_at + old_char.len_utf8();
+    }
+    prefix
+}
+
+fn highlight_at(highlights: &[Highlight], at: usize) -> Option<HighlightKind> {
+    highlights
+        .iter()
+        .find(|highlight| highlight.start <= at && at < highlight.end)
+        .map(|highlight| highlight.kind)
+}
+
+fn print_highlighted<W: Write>(
+    out: &mut W,
+    line: &str,
+    highlights: &[Highlight],
+    from: usize,
+) -> io::Result<()> {
+    let mut at = from;
+    for highlight in highlights {
+        if highlight.start > highlight.end
+            || highlight.end > line.len()
+            || !line.is_char_boundary(highlight.start)
+            || !line.is_char_boundary(highlight.end)
+            || highlight.end <= from
+        {
+            continue;
+        }
+        let start = highlight.start.max(from);
+        if start < at {
+            continue;
+        }
+        queue!(
+            out,
+            Print(&line[at..start]),
+            SetForegroundColor(highlight_color(highlight.kind)),
+            Print(&line[start..highlight.end]),
+            SetForegroundColor(Color::White)
+        )?;
+        at = highlight.end;
+    }
+    queue!(out, Print(&line[at..]))
+}
+
+fn highlight_color(kind: HighlightKind) -> Color {
+    match kind {
+        HighlightKind::Chrome => CHROME_FOREGROUND,
+        HighlightKind::Keyword => Color::Magenta,
+        HighlightKind::Type => Color::Cyan,
+        HighlightKind::String => Color::Green,
+        HighlightKind::Number => Color::Yellow,
+        HighlightKind::Comment => Color::DarkGrey,
+        HighlightKind::Macro => Color::Blue,
+        HighlightKind::Lifetime => Color::DarkYellow,
+        HighlightKind::Heading => Color::Cyan,
+        HighlightKind::Quote => Color::DarkGrey,
+        HighlightKind::ListMarker => Color::Yellow,
+        HighlightKind::InlineCode => Color::Green,
+        HighlightKind::Strong => Color::Yellow,
+        HighlightKind::Emphasis => Color::Magenta,
+        HighlightKind::Link => Color::Blue,
+        HighlightKind::Strikethrough => Color::DarkGrey,
+        HighlightKind::Fence => Color::DarkGrey,
+        HighlightKind::CodeBlock => Color::Green,
+    }
+}
+
+#[cfg(test)]
+fn frame(
+    state: &State,
+    (width, height): (u16, u16),
+) -> (Vec<String>, Option<(u16, u16)>, Range<usize>) {
+    let (lines, _highlights, cursor, input_rows) = styled_frame(state, (width, height));
+    (lines, cursor, input_rows)
+}
+
+fn styled_frame(state: &State, (width, height): (u16, u16)) -> StyledFrame {
+    if let Some(approval) = state.approval() {
+        let lines = approval_frame(approval, width, height);
+        let last = lines.len().saturating_sub(1);
+        let highlights = lines
+            .iter()
+            .enumerate()
+            .map(|(row, line)| {
+                if row == 0 || row == last {
+                    chrome(line.len())
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        return (lines, highlights, None, 0..0);
+    }
+    let height = usize::from(height);
+    if height == 0 {
+        return (Vec::new(), Vec::new(), None, 0..0);
+    }
+    let footer = runtime_status(state, state.model().unwrap_or("none"));
+    if height == 1 {
+        let lines = finish(vec![footer], width);
+        let highlights = lines.iter().map(|line| chrome(line.len())).collect();
+        return (lines, highlights, None, 0..0);
+    }
+
+    let mut header = vec!["Motor OS Gears".to_string()];
     for (agent, activity) in state.agents() {
         let activity = activity_line(activity);
-        status.push(match *agent {
+        header.push(match *agent {
             ROOT => activity,
             id => format!("[{id}] {activity}"),
         });
     }
-    if let Some(model) = state.model() {
-        status.extend(status_lines(state, model));
+    if state.model().is_some() {
+        header.extend(status_lines(state));
     } else if let Some(task) = state.task() {
-        status.push(task.compact());
+        header.push(task.compact());
     }
     if state.scroll() > 0 {
-        status.push(format!("scroll: {} lines from latest", state.scroll()));
+        header.push(format!("scroll: {} lines from latest", state.scroll()));
     }
     let draft = state.draft();
     let draft_cursor = state.draft_cursor();
     let (draft_lines, cursor_line, cursor_col) = wrap_draft(draft, draft_cursor, width);
-    let height = usize::from(height);
-    status.truncate(height);
-    if status.len() == height {
-        return (finish(status, width), None);
-    }
-    let below_status = height - status.len();
-    if draft_lines.len() >= below_status {
-        let mut shown: Vec<String> = draft_lines.into_iter().rev().take(below_status).collect();
+    // Keep the final terminal row black below the footer. This visually
+    // separates the status line from the edge of the terminal.
+    let body_height = height - 2;
+    // Two blank separator rows flank the input window: one above it (so the
+    // scroll transcript is visually distinct from the prompt) and one below it
+    // (so the prompt is visually distinct from the status line).
+    let input_separators = 2;
+    let choosing_model = state.model_choice().is_some();
+    let panel_lines = match state.model_choice() {
+        Some(choice) => model_choice_lines(choice, body_height.saturating_sub(input_separators)),
+        None => draft_lines,
+    };
+    let panel_highlights = match choosing_model {
+        true => model_choice_highlights(&panel_lines),
+        false => input_highlights(&panel_lines),
+    };
+    if panel_lines.len() + input_separators > body_height {
+        let mut shown: Vec<String> = panel_lines.into_iter().rev().take(body_height).collect();
         shown.reverse();
+        shown.push(footer);
+        shown.push(String::new());
         let lines = finish(shown, width);
-        return (lines, None);
+        let input_rows = 0..body_height;
+        let mut highlights = match choosing_model {
+            true => model_choice_highlights(&lines[..body_height]),
+            false => input_highlights(&lines[..body_height]),
+        };
+        highlights.push(chrome(lines[body_height].len()));
+        highlights.push(Vec::new());
+        return (lines, highlights, None, input_rows);
     }
-    let room = height - status.len() - draft_lines.len();
-    let transcript = transcript_lines(state.transcript(), usize::from(width).max(1));
+
+    let room_above_draft = body_height - panel_lines.len() - input_separators;
+    header.truncate(room_above_draft);
+    let transcript_room = room_above_draft - header.len();
+    let (transcript, transcript_highlights) =
+        transcript_lines(state.transcript(), usize::from(width).max(1));
     let end = transcript.len().saturating_sub(state.scroll());
-    let start = end.saturating_sub(room);
-    let mut lines = status;
+    let start = end.saturating_sub(transcript_room);
+    let transcript_rows = end - start;
+    let gap = transcript_room - transcript_rows;
+    let mut lines = header;
+    let mut highlights: Vec<_> = lines.iter().map(|line| chrome(line.len())).collect();
+    lines.resize(lines.len() + gap, String::new());
+    highlights.resize(lines.len(), Vec::new());
     lines.extend(transcript.into_iter().skip(start).take(end - start));
+    highlights.extend(
+        transcript_highlights
+            .into_iter()
+            .skip(start)
+            .take(end - start),
+    );
+    // The blank rows flanking the prompt are part of the input panel.
+    let input_start_row = lines.len();
+    lines.push(String::new());
+    highlights.push(Vec::new());
     let draft_start_row = lines.len();
-    lines.extend(draft_lines);
-    let lines = finish(lines, width);
-    let cursor = Some((
+    lines.extend(panel_lines);
+    highlights.extend(panel_highlights);
+    lines.push(String::new());
+    highlights.push(Vec::new());
+    let input_rows = input_start_row..lines.len();
+    lines.push(footer);
+    highlights.push(chrome(lines.last().map_or(0, String::len)));
+    lines.push(String::new());
+    highlights.push(Vec::new());
+    let (lines, highlights) = finish_highlighted(lines, highlights, width);
+    let cursor = (!choosing_model).then_some((
         cursor_col.min(usize::from(width).saturating_sub(1)) as u16,
         (draft_start_row + cursor_line) as u16,
     ));
-    (lines, cursor)
+    (lines, highlights, cursor, input_rows)
+}
+
+fn chrome(end: usize) -> Vec<Highlight> {
+    (end > 0)
+        .then_some(Highlight {
+            start: 0,
+            end,
+            kind: HighlightKind::Chrome,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn input_highlights(lines: &[String]) -> Vec<Vec<Highlight>> {
+    lines
+        .iter()
+        .map(|line| chrome(line.len().min("gears> ".len())))
+        .collect()
+}
+
+fn model_choice_lines(choice: &super::state::ModelChoice, rows: usize) -> Vec<String> {
+    let shown = rows.min(choice.models().len());
+    if shown == 0 {
+        return Vec::new();
+    }
+    let start = choice
+        .selected()
+        .saturating_sub(shown - 1)
+        .min(choice.models().len() - shown);
+    choice
+        .models()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(shown)
+        .map(|(index, model)| match index == choice.selected() {
+            true => format!(">(x) {model}"),
+            false => format!(" ( ) {model}"),
+        })
+        .collect()
+}
+
+fn model_choice_highlights(lines: &[String]) -> Vec<Vec<Highlight>> {
+    lines
+        .iter()
+        .map(|line| chrome(line.len().min(">(x) ".len())))
+        .collect()
 }
 
 fn approval_frame(approval: &super::state::Approval, width: u16, height: u16) -> Vec<String> {
@@ -587,7 +1048,7 @@ fn navigate_approval<S: Surface>(
     navigation: ApprovalNavigation,
 ) -> io::Result<()> {
     if navigation == ApprovalNavigation::Resize {
-        return screen.redraw(state);
+        return screen.resize(state);
     }
     let size = screen.surface.size()?;
     let page_rows = usize::from(size.1 / 2).max(1);
@@ -675,7 +1136,7 @@ fn read_artifact_page(store: &LazyStore, id: u64, start: u64) -> Result<Artifact
     })
 }
 
-fn status_lines(state: &State, model: &str) -> Vec<String> {
+fn runtime_status(state: &State, model: &str) -> String {
     let mode = state
         .task()
         .map(|task| crate::agent::mode::profile(task.mode()).name)
@@ -690,8 +1151,11 @@ fn status_lines(state: &State, model: &str) -> Vec<String> {
         .iter()
         .filter(|(agent, activity)| **agent != ROOT && activity_is_active(activity))
         .count();
+    format!("state: {run} | mode: {mode} | sub-agents: {active_subagents} | model: {model}")
+}
+
+fn status_lines(state: &State) -> Vec<String> {
     vec![
-        format!("state: {run} | mode: {mode} | sub-agents: {active_subagents} | model: {model}"),
         task_progress(state.task()),
         context_status(state.context()),
         format!("usage: {}", state.usage().summary()),
@@ -767,30 +1231,93 @@ fn finish(lines: Vec<String>, width: u16) -> Vec<String> {
         .collect()
 }
 
-fn transcript_lines(transcript: &Transcript, width: usize) -> Vec<String> {
+fn finish_highlighted(
+    lines: Vec<String>,
+    highlights: Vec<Vec<Highlight>>,
+    width: u16,
+) -> (Vec<String>, Vec<Vec<Highlight>>) {
+    let mut finished = Vec::with_capacity(lines.len());
+    let mut kept = Vec::with_capacity(lines.len());
+    for (line, mut highlights) in lines.into_iter().zip(highlights) {
+        let line = safe_width(&line, usize::from(width));
+        highlights.retain_mut(|highlight| {
+            highlight.end = highlight.end.min(line.len());
+            highlight.start < highlight.end && line.is_char_boundary(highlight.start)
+        });
+        finished.push(line);
+        kept.push(highlights);
+    }
+    (finished, kept)
+}
+
+fn transcript_lines(transcript: &Transcript, width: usize) -> (Vec<String>, Vec<Vec<Highlight>>) {
     let mut lines = Vec::new();
+    let mut highlighted = Vec::new();
     for entry in transcript.entries() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+            highlighted.push(Vec::new());
+        }
+        let model_markdown = matches!(entry.source, Source::Model(_) | Source::Reasoning(_));
         let prefix = source_prefix(entry.source);
         let prefix_len = prefix.chars().count();
         let continuation = " ".repeat(prefix_len);
         let inner = width.saturating_sub(prefix_len).max(1);
-        for (index, line) in entry.text.split('\n').enumerate() {
+        let mut markdown = Markdown::default();
+        for (index, line) in entry.text.split_terminator('\n').enumerate() {
             let first_lead = if index == 0 {
                 prefix.clone()
             } else {
                 continuation.clone()
             };
-            for (wrap_row, segment) in wrap_segment(line, inner).iter().enumerate() {
+            let mut syntax = markdown.line(line);
+            if !model_markdown {
+                syntax.retain(|span| !span.kind.is_markdown());
+            }
+            let mut segment_start = 0;
+            for (wrap_row, segment) in wrap_segment(line, inner).into_iter().enumerate() {
                 let lead = if wrap_row == 0 {
                     first_lead.clone()
                 } else {
                     continuation.clone()
                 };
+                let segment_end = segment_start + segment.len();
+                let mut spans = if lead.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    chrome(lead.len())
+                };
+                spans.extend(rebase_highlights(
+                    &syntax,
+                    segment_start..segment_end,
+                    lead.len(),
+                ));
+                highlighted.push(spans);
                 lines.push(format!("{lead}{segment}"));
+                segment_start = segment_end;
             }
         }
     }
-    lines
+    (lines, highlighted)
+}
+
+fn rebase_highlights(
+    highlights: &[Highlight],
+    segment: Range<usize>,
+    prefix_bytes: usize,
+) -> Vec<Highlight> {
+    highlights
+        .iter()
+        .filter_map(|highlight| {
+            let start = highlight.start.max(segment.start);
+            let end = highlight.end.min(segment.end);
+            (start < end).then(|| Highlight {
+                start: prefix_bytes + start - segment.start,
+                end: prefix_bytes + end - segment.start,
+                kind: highlight.kind,
+            })
+        })
+        .collect()
 }
 
 fn source_prefix(source: Source) -> String {
@@ -813,13 +1340,18 @@ fn source_prefix(source: Source) -> String {
 
 /// Run the interactive TUI over the same harness and local command policy as
 /// line mode.
-pub fn interact(harness: &Harness, gate: Gate, restart: &Restart) -> Result<ExitCode, String> {
+pub fn interact(
+    harness: &Harness,
+    gate: Gate,
+    restart: &Restart,
+    models: &mut ModelStore,
+) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
     let input = Input::new(gate);
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, None)
+    run(harness, &mut controller, restart, models, None, false)
 }
 
 /// Run one explicitly requested TUI prompt without asking the unattended gate
@@ -828,6 +1360,7 @@ pub fn once(
     harness: &Harness,
     gate: Gate,
     restart: &Restart,
+    models: &mut ModelStore,
     prompt: &str,
 ) -> Result<ExitCode, String> {
     let surface = Crossterm::new(std::io::stdout());
@@ -835,21 +1368,52 @@ pub fn once(
     let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
         .map_err(|error| format!("cannot start TUI: {error}"))?
         .with_artifacts(harness.artifacts());
-    run(harness, &mut controller, restart, Some(prompt))
+    run(
+        harness,
+        &mut controller,
+        restart,
+        models,
+        Some(prompt),
+        true,
+    )
+}
+
+/// Answer the restart tool's optional first prompt, then remain interactive.
+pub fn continue_with(
+    harness: &Harness,
+    gate: Gate,
+    restart: &Restart,
+    models: &mut ModelStore,
+    prompt: &str,
+) -> Result<ExitCode, String> {
+    let surface = Crossterm::new(std::io::stdout());
+    let input = Input::new(gate);
+    let mut controller = Controller::open_state(surface, input, durable_state(harness)?)
+        .map_err(|error| format!("cannot start TUI: {error}"))?
+        .with_artifacts(harness.artifacts());
+    run(
+        harness,
+        &mut controller,
+        restart,
+        models,
+        Some(prompt),
+        false,
+    )
 }
 
 fn run<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
     restart: &Restart,
+    models: &mut ModelStore,
     initial: Option<&str>,
+    one_shot: bool,
 ) -> Result<ExitCode, String> {
-    let one_shot = initial.is_some();
     let mut active = false;
     let mut local_operation = false;
     let mut failed = false;
     if let Some(prompt) = initial {
-        match submit(harness, controller, prompt)? {
+        match submit(harness, controller, models, prompt)? {
             Submitted::Turn => active = true,
             Submitted::Operation => {
                 active = true;
@@ -866,7 +1430,7 @@ fn run<S: Surface>(
         {
             match action {
                 Action::Submit(prompt) if !prompt.trim().is_empty() => {
-                    match submit(harness, controller, &prompt)? {
+                    match submit(harness, controller, models, &prompt)? {
                         Submitted::Turn => active = true,
                         Submitted::Operation => {
                             active = true;
@@ -884,7 +1448,7 @@ fn run<S: Surface>(
                     let paused = harness.toggle_paused();
                     controller
                         .set_runtime(
-                            harness.model(),
+                            &harness.model(),
                             paused,
                             harness.context_window(),
                             harness.task(),
@@ -895,6 +1459,20 @@ fn run<S: Surface>(
                 Action::ScrollDown => controller
                     .scroll(false)
                     .map_err(|error| error.to_string())?,
+                Action::SelectModel(model) => {
+                    let text = select_model(harness, models, &model);
+                    controller
+                        .set_runtime(
+                            &harness.model(),
+                            harness.paused(),
+                            harness.context_window(),
+                            harness.task(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    controller
+                        .notice(&text)
+                        .map_err(|error| error.to_string())?;
+                }
                 _ => {}
             }
         }
@@ -919,7 +1497,7 @@ fn run<S: Surface>(
                             let paused = harness.toggle_paused();
                             controller
                                 .set_runtime(
-                                    harness.model(),
+                                    &harness.model(),
                                     paused,
                                     harness.context_window(),
                                     harness.task(),
@@ -939,15 +1517,19 @@ fn run<S: Surface>(
             let done = super::repl::dispatch(event, controller);
             controller
                 .set_runtime(
-                    harness.model(),
+                    &harness.model(),
                     harness.paused(),
                     harness.context_window(),
                     harness.task(),
                 )
                 .map_err(|error| error.to_string())?;
             match done {
-                Some(super::repl::Pumped::Turn { .. }) => {
-                    if !local_operation {
+                Some(super::repl::Pumped::Turn { ok, .. }) => {
+                    // A cancelled or failed turn has no durable assistant
+                    // message to replace its partial live output. Keep that
+                    // projection on screen; replay would discard reasoning
+                    // and replace folded calls with full tool records.
+                    if !local_operation && ok {
                         controller
                             .set_transcript(durable_transcript(harness)?)
                             .map_err(|error| error.to_string())?;
@@ -978,6 +1560,7 @@ enum Submitted {
 fn submit<S: Surface>(
     harness: &Harness,
     controller: &mut Controller<S, Input>,
+    models: &ModelStore,
     input: &str,
 ) -> Result<Submitted, String> {
     match parse(input) {
@@ -1009,6 +1592,12 @@ fn submit<S: Surface>(
                     .map_err(|error| error.to_string())?;
                 return Ok(Submitted::Operation);
             }
+            if command == LocalCommand::Model {
+                controller
+                    .open_model_choice(models.choices(&harness.model()))
+                    .map_err(|error| error.to_string())?;
+                return Ok(Submitted::Local);
+            }
             match execute(harness, controller, command) {
                 Ok(true) => Ok(Submitted::Local),
                 Ok(false) => Ok(Submitted::Exit),
@@ -1032,6 +1621,7 @@ fn execute<S: Surface>(
         LocalCommand::Quit => return Ok(false),
         LocalCommand::Help => super::terminal::HELP.to_string(),
         LocalCommand::Status => status(harness, controller)?,
+        LocalCommand::Model => unreachable!("the model picker is opened by submit"),
         LocalCommand::Pause => {
             harness.set_paused(true);
             "- paused before the next operation".to_string()
@@ -1047,7 +1637,7 @@ fn execute<S: Surface>(
     };
     controller
         .set_runtime(
-            harness.model(),
+            &harness.model(),
             harness.paused(),
             harness.context_window(),
             harness.task(),
@@ -1057,6 +1647,21 @@ fn execute<S: Surface>(
         .notice(&text)
         .map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+fn select_model(harness: &Harness, models: &mut ModelStore, model: &str) -> String {
+    let previous = harness.model();
+    let selected = match harness.select_model(model) {
+        Ok(selected) => selected,
+        Err(error) => return format!("! {error}"),
+    };
+    match models.remember(model) {
+        Ok(()) => format!("- {selected}"),
+        Err(error) => match harness.select_model(&previous) {
+            Ok(_) => format!("! config: {error}"),
+            Err(restore) => format!("! config: {error}; could not restore {previous}: {restore}"),
+        },
+    }
 }
 
 fn status<S: Surface>(
@@ -1145,7 +1750,7 @@ fn restore_prepared<S: Surface>(
 
 fn durable_state(harness: &Harness) -> Result<State, String> {
     let mut state = State::with_transcript_limit(harness.live_render_limit());
-    let _ = state.set_runtime(harness.model(), harness.paused(), harness.context_window());
+    let _ = state.set_runtime(&harness.model(), harness.paused(), harness.context_window());
     let _ = state.set_task(harness.task());
     let transcript = durable_transcript(harness)?;
     let _ = state.set_transcript(transcript);
@@ -1206,11 +1811,25 @@ mod tests {
     use std::rc::Rc;
 
     use crate::agent::bus::question;
-    use crate::provider::Usage;
+    use crate::provider::{
+        ChatRequest, Completion, EventSink, ModelProvider, ProviderError, Usage,
+    };
 
     use super::super::repl::{Pumped, dispatch};
 
     type Asked = Rc<RefCell<Vec<(AgentId, String)>>>;
+
+    struct UnusedProvider;
+
+    impl ModelProvider for UnusedProvider {
+        fn complete(
+            &self,
+            _request: &ChatRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<Completion, ProviderError> {
+            unreachable!("model selection does not make a provider request")
+        }
+    }
 
     #[derive(Default)]
     struct Calls {
@@ -1239,7 +1858,14 @@ mod tests {
             Ok(self.size)
         }
 
-        fn draw(&mut self, lines: &[String], _cursor: Option<(u16, u16)>) -> io::Result<()> {
+        fn draw(
+            &mut self,
+            _size: (u16, u16),
+            lines: &[String],
+            _highlights: &[Vec<Highlight>],
+            _cursor: Option<(u16, u16)>,
+            _input_rows: Range<usize>,
+        ) -> io::Result<()> {
             if self.fail_draw {
                 return Err(io::Error::other("draw failed"));
             }
@@ -1323,7 +1949,7 @@ mod tests {
         drop(screen);
         let calls = calls.borrow();
         assert_eq!((calls.entered, calls.left, calls.frames.len()), (1, 1, 2));
-        assert_eq!(calls.frames[1], ["Motor"]);
+        assert_eq!(calls.frames[1], ["state"]);
     }
 
     #[test]
@@ -1338,6 +1964,425 @@ mod tests {
         output.fail_draw = true;
         assert!(Screen::open(output, &State::new()).is_err());
         assert_eq!(calls.borrow().left, 1);
+    }
+
+    #[test]
+    fn crossterm_draws_with_an_explicit_white_on_black_palette() {
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw((80, 1), &["frame".to_string()], &[Vec::new()], None, 0..0)
+            .unwrap();
+
+        let mut palette = Vec::new();
+        queue!(
+            &mut palette,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::Black)
+        )
+        .unwrap();
+        assert!(!palette.is_empty());
+        assert!(
+            surface
+                .out
+                .windows(palette.len())
+                .any(|bytes| bytes == palette)
+        );
+    }
+
+    #[test]
+    fn crossterm_draws_the_input_panel_and_its_padding_on_a_lighter_background() {
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw(
+                (80, 5),
+                &[
+                    String::new(),
+                    "gears> ".to_string(),
+                    String::new(),
+                    "status".to_string(),
+                    String::new(),
+                ],
+                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+                Some((7, 1)),
+                0..3,
+            )
+            .unwrap();
+
+        let mut blank_panel_row = Vec::new();
+        queue!(
+            &mut blank_panel_row,
+            SetBackgroundColor(INPUT_BACKGROUND),
+            Clear(ClearType::CurrentLine),
+            SetBackgroundColor(Color::Black)
+        )
+        .unwrap();
+        assert!(!blank_panel_row.is_empty());
+        assert!(
+            surface
+                .out
+                .windows(blank_panel_row.len())
+                .filter(|bytes| *bytes == blank_panel_row)
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn screen_chrome_and_prompts_are_dark_gray() {
+        let mut state = State::new();
+        state.apply(&Event::ToolStart {
+            agent: ROOT,
+            detail: "build".into(),
+        });
+        state.apply(&Event::Token {
+            agent: ROOT,
+            text: "answer".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+
+        for (text, end) in [
+            ("Motor OS Gears", "Motor OS Gears".len()),
+            ("tool> running build", "tool> ".len()),
+            ("agent> answer", "agent> ".len()),
+            ("gears> ", "gears> ".len()),
+        ] {
+            let row = lines
+                .iter()
+                .position(|line| line == text)
+                .unwrap_or_else(|| panic!("missing {text:?} in {lines:?}"));
+            assert_eq!(
+                highlights[row].first(),
+                Some(&Highlight {
+                    start: 0,
+                    end,
+                    kind: HighlightKind::Chrome,
+                })
+            );
+        }
+        let footer = lines.len() - 2;
+        assert_eq!(highlights[footer], chrome(lines[footer].len()));
+        assert!(highlights.last().unwrap().is_empty());
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw((80, 24), &lines, &highlights, None, 0..0)
+            .unwrap();
+        let mut dark_gray = Vec::new();
+        queue!(&mut dark_gray, SetForegroundColor(Color::DarkGrey)).unwrap();
+        assert!(
+            surface
+                .out
+                .windows(dark_gray.len())
+                .any(|bytes| bytes == dark_gray)
+        );
+
+        let (reply, _answer) = question();
+        state.apply(&Event::Permission {
+            agent: ROOT,
+            request: PermissionRequest::new("run", "run cargo test"),
+            reply,
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+        assert_eq!(highlights[0], chrome(lines[0].len()));
+        assert_eq!(
+            highlights.last().unwrap(),
+            &chrome(lines.last().unwrap().len())
+        );
+    }
+
+    #[test]
+    fn model_picker_is_a_clipped_radio_group_that_replaces_the_draft() {
+        let mut state = State::new();
+        state.set_draft("keep this", 4);
+        state.open_model_choice(
+            ["one", "two", "three", "four", "five"]
+                .map(str::to_string)
+                .to_vec(),
+        );
+        for _ in 0..4 {
+            state.move_model_choice(true);
+        }
+
+        let (lines, highlights, cursor, input_rows) = styled_frame(&state, (80, 7));
+        assert_eq!(cursor, None);
+        assert!(
+            !lines.iter().any(|line| line.contains("keep this")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.ends_with(" one")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line == " ( ) three"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == ">(x) five"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with(">(x) "))
+                .count(),
+            1
+        );
+        let selected = lines.iter().position(|line| line == ">(x) five").unwrap();
+        assert!(input_rows.contains(&selected));
+        assert_eq!(highlights[selected], chrome(">(x) ".len()));
+
+        state.cancel_model_choice();
+        let (lines, _, cursor, _) = styled_frame(&state, (80, 7));
+        assert!(
+            lines.iter().any(|line| line == "gears> keep this"),
+            "{lines:?}"
+        );
+        assert!(cursor.is_some());
+    }
+
+    #[test]
+    fn a_picker_persistence_failure_restores_the_live_model() {
+        let dir =
+            std::env::temp_dir().join(format!("gears-picker-persistence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gears.toml");
+        let original = "version = 1\nmodels = { last = \"first\", used = [\"first\"] }\n";
+        std::fs::write(&path, original).unwrap();
+        let (_, mut models) = crate::config::Config::load_user(Some(&path)).unwrap();
+        let mut setup = crate::agent::harness::Setup::new(dir.clone());
+        setup.model = Some("first".to_string());
+        let harness = Harness::start(setup, Arc::new(UnusedProvider)).unwrap();
+
+        let notice = select_model(&harness, &mut models, "second");
+        assert!(notice.contains("standalone [models]"), "{notice}");
+        assert_eq!(harness.model(), "first");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        drop(harness);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn streaming_appends_only_the_new_suffix_and_restores_the_cursor_last() {
+        let mut surface = Crossterm::new(Vec::new());
+        let old = ["header", "thinking> abc", "gears> ", "status"].map(str::to_string);
+        let highlights = vec![Vec::new(); old.len()];
+        surface
+            .draw((80, 4), &old, &highlights, Some((7, 2)), 2..3)
+            .unwrap();
+        surface.out.clear();
+
+        let new = ["header", "thinking> abcdef", "gears> ", "status"].map(str::to_string);
+        surface
+            .draw((80, 4), &new, &highlights, Some((7, 2)), 2..3)
+            .unwrap();
+
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(output.contains("def"), "{output:?}");
+        for unchanged in ["header", "thinking> abc", "gears> ", "status"] {
+            assert!(
+                !output.contains(unchanged),
+                "repainted {unchanged:?}: {output:?}"
+            );
+        }
+        assert!(!output.contains(&Clear(ClearType::All).to_string()));
+        let move_cursor = MoveTo(7, 2).to_string();
+        let show = Show.to_string();
+        let move_at = output.rfind(&move_cursor).expect("final input cursor move");
+        let show_at = output.rfind(&show).expect("final cursor show");
+        assert!(
+            move_at < show_at,
+            "cursor shown before it was moved: {output:?}"
+        );
+    }
+
+    #[test]
+    fn viewport_scrolling_is_one_terminal_operation() {
+        let mut surface = Crossterm::new(Vec::new());
+        let old = ["header", "line a", "line b", "line c", "gears> ", "status"].map(str::to_string);
+        let highlights = vec![Vec::new(); old.len()];
+        surface
+            .draw((80, 6), &old, &highlights, Some((7, 4)), 4..5)
+            .unwrap();
+        surface.out.clear();
+
+        let new = ["header", "line b", "line c", "line d", "gears> ", "status"].map(str::to_string);
+        surface
+            .draw((80, 6), &new, &highlights, Some((7, 4)), 4..5)
+            .unwrap();
+
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(
+            output.contains("\x1b[2;4r\x1b[2;1H\x1b[1S\x1b[r"),
+            "{output:?}"
+        );
+        assert!(output.contains("line d"), "{output:?}");
+        for moved in ["header", "line b", "line c", "gears> ", "status"] {
+            assert!(!output.contains(moved), "repainted {moved:?}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn a_resize_invalidates_the_retained_frame() {
+        let mut surface = Crossterm::new(Vec::new());
+        let lines = ["frame".to_string()];
+        let highlights = [Vec::new()];
+        surface
+            .draw((80, 1), &lines, &highlights, None, 0..0)
+            .unwrap();
+        surface.out.clear();
+        surface.invalidate();
+        surface
+            .draw((80, 1), &lines, &highlights, None, 0..0)
+            .unwrap();
+        let output = String::from_utf8_lossy(&surface.out);
+        assert!(output.contains(&Clear(ClearType::All).to_string()));
+        assert!(output.contains("frame"));
+    }
+
+    #[test]
+    fn fenced_rust_in_expanded_tool_output_reaches_the_terminal_as_semantic_colors() {
+        let mut state = State::new();
+        state.apply(&Event::Notice {
+            agent: ROOT,
+            text: "--- read_file (72 bytes) ---\n```rust\npub fn main() { println!(\"hello\", 42); } // done\n```".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (100, 24));
+        let row = lines
+            .iter()
+            .position(|line| line.contains("pub fn main"))
+            .expect("rendered Rust line");
+        let kinds: Vec<_> = highlights[row]
+            .iter()
+            .map(|highlight| highlight.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                HighlightKind::Keyword,
+                HighlightKind::Keyword,
+                HighlightKind::Macro,
+                HighlightKind::String,
+                HighlightKind::Number,
+                HighlightKind::Comment,
+            ]
+        );
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw((100, 24), &lines, &highlights, None, 0..0)
+            .expect("draw highlighted frame");
+        for color in [
+            Color::Magenta,
+            Color::Blue,
+            Color::Green,
+            Color::Yellow,
+            Color::DarkGrey,
+        ] {
+            let mut command = Vec::new();
+            queue!(&mut command, SetForegroundColor(color)).unwrap();
+            assert!(!command.is_empty());
+            assert!(
+                surface
+                    .out
+                    .windows(command.len())
+                    .any(|bytes| bytes == command),
+                "missing {color:?} in {:?}",
+                surface.out
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_rust_in_reasoning_produces_highlights() {
+        let mut state = State::new();
+        state.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "```rust\nlet value: usize = 42;\n```".into(),
+        });
+        let (lines, highlights, _, _) = styled_frame(&state, (80, 24));
+        let row = lines
+            .iter()
+            .position(|line| line.contains("let value"))
+            .expect("rendered reasoning code");
+        assert!(!highlights[row].is_empty(), "missing spans: {lines:?}");
+    }
+
+    #[test]
+    fn rust_highlights_survive_transcript_wrapping() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::assistant(
+            "```rust\nlet value: usize = 123456789;\n```",
+        ));
+        let (lines, highlights) = transcript_lines(&transcript, 14);
+        assert!(lines.iter().all(|line| line.chars().count() <= 14));
+        let kinds: Vec<_> = highlights
+            .iter()
+            .flatten()
+            .map(|highlight| highlight.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                HighlightKind::Chrome,
+                HighlightKind::Fence,
+                HighlightKind::Keyword,
+                HighlightKind::Type,
+                HighlightKind::Type,
+                HighlightKind::Number,
+                HighlightKind::Number,
+                HighlightKind::Fence,
+            ]
+        );
+    }
+
+    #[test]
+    fn model_markdown_is_colored_while_user_markers_stay_literal() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::user("- `literal`"));
+        transcript.record(&crate::provider::ChatMessage::assistant(
+            "- `transcript.record(...)` and **important**",
+        ));
+        let (lines, highlights) = transcript_lines(&transcript, 100);
+        let user = lines
+            .iter()
+            .position(|line| line.contains("literal"))
+            .expect("rendered user line");
+        let model = lines
+            .iter()
+            .position(|line| line.contains("transcript.record"))
+            .expect("rendered model line");
+        assert_eq!(
+            highlights[user]
+                .iter()
+                .map(|highlight| highlight.kind)
+                .collect::<Vec<_>>(),
+            [HighlightKind::Chrome]
+        );
+        assert_eq!(
+            highlights[model]
+                .iter()
+                .map(|highlight| highlight.kind)
+                .collect::<Vec<_>>(),
+            [
+                HighlightKind::Chrome,
+                HighlightKind::ListMarker,
+                HighlightKind::InlineCode,
+                HighlightKind::Strong,
+            ]
+        );
+
+        let mut surface = Crossterm::new(Vec::new());
+        surface
+            .draw((100, 24), &lines, &highlights, None, 0..0)
+            .unwrap();
+        for color in [Color::Green, Color::Yellow] {
+            let mut command = Vec::new();
+            queue!(&mut command, SetForegroundColor(color)).unwrap();
+            assert!(
+                surface
+                    .out
+                    .windows(command.len())
+                    .any(|bytes| bytes == command),
+                "missing Markdown color {color:?}"
+            );
+        }
     }
 
     #[test]
@@ -1367,46 +2412,52 @@ mod tests {
     fn multiline_drafts_have_explicit_continuation_prompts() {
         let mut state = State::new();
         state.set_draft("first\nsecond", 0);
-        let rendered = frame(&state, (80, 24)).0;
-        assert_eq!(rendered[2], "gears> first");
-        assert_eq!(rendered[3], "  ...> second");
+        let (rendered, _, input_rows) = frame(&state, (80, 24));
+        assert_eq!(
+            &rendered[input_rows.start + 1..input_rows.end - 1],
+            ["gears> first", "  ...> second"]
+        );
+        assert_eq!(&rendered[input_rows.start], "");
+        assert_eq!(&rendered[input_rows.end - 1], "");
+        assert_eq!(
+            &rendered[rendered.len() - 2],
+            "state: idle | mode: none | sub-agents: 0 | model: none"
+        );
+        assert_eq!(rendered.last().unwrap(), "");
     }
 
     #[test]
     fn cursor_appears_at_the_right_column_and_row() {
         let mut state = State::new();
         // "gears> ab" — cursor after "ab" at column 9 (prompt is 7 chars).
+        // The final rows are the draft, its lower padding, the footer and the
+        // black row below the footer.
         state.set_draft("ab", 2);
-        let (lines, cursor) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((9, lines.len() as u16 - 1)));
-        assert!(lines.last().unwrap().starts_with("gears> ab"));
+        let (lines, cursor, _) = frame(&state, (80, 24));
+        assert_eq!(cursor, Some((9, lines.len() as u16 - 4)));
+        assert!(lines[lines.len() - 4].starts_with("gears> ab"));
 
         // Empty draft — cursor right after the prompt at column 7.
         state.set_draft("", 0);
-        let (lines, cursor) = frame(&state, (80, 24));
-        assert_eq!(cursor, Some((7, lines.len() as u16 - 1)));
+        let (lines, cursor, _) = frame(&state, (80, 24));
+        assert_eq!(cursor, Some((7, lines.len() as u16 - 4)));
 
         // Multiline: cursor on the second line, between 'c' and 'd' at col 8.
         state.set_draft("ab\ncd", 4);
-        let (lines, cursor) = frame(&state, (80, 24));
-        let row = lines.len() as u16 - 1;
+        let (lines, cursor, _) = frame(&state, (80, 24));
+        let row = lines.len() as u16 - 4;
         assert_eq!(cursor, Some((8, row)));
-        assert_eq!(lines[lines.len() - 1], "  ...> cd");
+        assert_eq!(lines[lines.len() - 4], "  ...> cd");
     }
 
     #[test]
     fn no_cursor_during_approval_or_when_draft_is_truncated() {
         let mut state = State::new();
-        // When status fills the whole screen, there is no visible draft, so
-        // the cursor is suppressed.
+        // When the draft itself cannot fit above the footer, its cursor is
+        // suppressed rather than pointed at a row that is no longer visible.
         let mut big = State::new();
-        for i in 0..30 {
-            big.apply(&Event::Token {
-                agent: i,
-                text: format!("agent {i}"),
-            });
-        }
-        let (_lines, cursor) = frame(&big, (80, 3));
+        big.set_draft("one\ntwo\nthree", 13);
+        let (_lines, cursor, _) = frame(&big, (80, 3));
         assert_eq!(cursor, None);
 
         // During approval the cursor is also suppressed.
@@ -1416,7 +2467,7 @@ mod tests {
             request: PermissionRequest::new("write_file", "write_file x").with_preview("diff"),
             reply,
         });
-        let (_lines, cursor) = frame(&state, (80, 24));
+        let (_lines, cursor, _) = frame(&state, (80, 24));
         assert_eq!(cursor, None);
     }
 
@@ -1429,10 +2480,72 @@ mod tests {
             text: "working".into(),
         });
 
-        let rendered = frame(&state, (80, 6)).0;
-        assert_eq!(rendered[3], "     this");
-        assert_eq!(rendered[4], "[3] agent> working");
+        let rendered = frame(&state, (80, 9)).0;
+        assert_eq!(rendered[0], "Motor OS Gears");
+        assert_eq!(rendered[1], "idle");
+        assert_eq!(rendered[2], "[3] model");
+        assert_eq!(rendered[3], "[3] agent> working");
+        assert_eq!(rendered[4], "");
         assert_eq!(rendered[5], "gears> ");
+        assert_eq!(rendered[6], "");
+        assert!(rendered[7].starts_with("state: idle"));
+        assert_eq!(rendered[8], "");
+    }
+
+    #[test]
+    fn transcript_blocks_have_a_single_blank_row_between_them() {
+        let mut transcript = Transcript::new(1024);
+        transcript.record(&crate::provider::ChatMessage::user("first\ncontinued\n"));
+        transcript.record(&crate::provider::ChatMessage::assistant("second"));
+        transcript.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "third".into(),
+        });
+
+        assert_eq!(
+            transcript_lines(&transcript, 80).0,
+            [
+                "you> first",
+                "     continued",
+                "",
+                "agent> second",
+                "",
+                "thinking> third",
+            ]
+        );
+        assert_eq!(transcript.lines(), 6);
+    }
+
+    #[test]
+    fn page_up_cannot_reveal_folded_tool_output() {
+        let mut state = State::new();
+        state.apply(&Event::ToolStart {
+            agent: ROOT,
+            detail: "build".into(),
+        });
+        state.apply(&Event::ToolOutput {
+            agent: ROOT,
+            stream: ToolStream::Stdout,
+            text: "private compiler detail\n".repeat(100),
+        });
+        state.apply(&Event::ToolEnd {
+            agent: ROOT,
+            outcome: crate::tools::ToolOutcome::Completed,
+            detail: "2400 bytes".into(),
+            full: Some("private compiler detail\n".repeat(100)),
+        });
+        state.apply(&Event::Reasoning {
+            agent: ROOT,
+            text: "reviewing the result".into(),
+        });
+
+        assert!(state.scroll_up(usize::MAX));
+        assert_eq!(state.scroll(), 4);
+        for scroll in (0..=state.scroll()).rev() {
+            state.scroll_down(state.scroll() - scroll);
+            let rendered = frame(&state, (80, 10)).0.join("\n");
+            assert!(!rendered.contains("private compiler detail"), "{rendered}");
+        }
     }
 
     #[test]
@@ -1441,8 +2554,8 @@ mod tests {
         for line in ["one", "two", "three", "four"] {
             state.record_message(&crate::provider::ChatMessage::user(line));
         }
-        assert!(state.scroll_up(2));
-        let rendered = frame(&state, (80, 6)).0;
+        assert!(state.scroll_up(4));
+        let rendered = frame(&state, (80, 10)).0;
         assert!(
             rendered.iter().any(|line| line == "you> two"),
             "{rendered:?}"
@@ -1450,7 +2563,7 @@ mod tests {
         assert!(!rendered.iter().any(|line| line == "you> four"));
 
         assert!(state.scroll_down(usize::MAX));
-        let rendered = frame(&state, (80, 6)).0;
+        let rendered = frame(&state, (80, 10)).0;
         assert!(
             rendered.iter().any(|line| line == "you> four"),
             "{rendered:?}"
@@ -1518,9 +2631,11 @@ mod tests {
         });
 
         let rendered = frame(&state, (120, 24)).0;
-        assert!(rendered.iter().any(|line| {
-            line == "state: paused | mode: code | sub-agents: 1 | model: test/model"
-        }));
+        assert_eq!(
+            &rendered[rendered.len() - 2],
+            "state: paused | mode: code | sub-agents: 1 | model: test/model"
+        );
+        assert_eq!(rendered.last().unwrap(), "");
         assert!(
             rendered
                 .iter()
@@ -1715,14 +2830,14 @@ mod tests {
         let mut state = State::new();
         let long = "x".repeat(30);
         state.set_draft(&long, long.len());
-        let (lines, cursor) = frame(&state, (20, 24));
+        let (lines, cursor, _) = frame(&state, (20, 24));
         // Prompt is 7 wide, so each row holds 13 x's. 30 x's wrap to three rows.
         assert!(lines.iter().any(|line| line == "gears> xxxxxxxxxxxxx"));
         assert!(lines.iter().any(|line| line == "       xxxxxxxxxxxxx"));
         assert!(lines.iter().any(|line| line == "       xxxx"));
         let (col, row) = cursor.unwrap();
         // Cursor lands right after the last 'x' on the final draft row.
-        assert_eq!(row as usize, lines.len() - 1);
+        assert_eq!(row as usize, lines.len() - 4);
         assert_eq!(col as usize, 7 + 4);
     }
 

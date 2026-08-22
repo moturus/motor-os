@@ -18,7 +18,7 @@ Options:
   --mode MODE       Start the next task in ask, plan, code, or review mode
   --ui UI           Use auto, tui, or line (default: auto)
   -p, --prompt TEXT Answer one prompt and exit, without the interactive loop
-  -m, --model ID    Model id (default: provider.model in the config)
+  -m, --model ID    Model id (default: last remembered/configured model)
   -v, -vv, -vvv     Print increasing diagnostic detail to stdout
   --version         Print the version and exit
   --help            Print this help and exit

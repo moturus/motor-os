@@ -16,6 +16,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 use core::future::Future;
+use core::ops::Deref;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -50,9 +51,40 @@ impl SharedChannelData {
     }
 }
 
+struct SenderShared(Arc<SharedChannelData>);
+
+impl Deref for SenderShared {
+    type Target = SharedChannelData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Clone for SenderShared {
+    fn clone(&self) -> Self {
+        self.sender_count.fetch_add(1, Ordering::AcqRel);
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for SenderShared {
+    fn drop(&mut self) {
+        let senders = self.sender_count.fetch_sub(1, Ordering::AcqRel) - 1;
+        if senders == 0 {
+            // Notify receiver that no more data is coming.
+            if let Ok(waker) = self.receiver_rx.try_recv() {
+                waker.wake();
+            }
+        }
+    }
+}
+
 pub struct Sender<T> {
+    // Field order is significant: disconnect the underlying endpoint
+    // before SenderShared sends the last-sender notification.
     inner: Arc<moto_mpmc::Sender<T>>,
-    shared: Arc<SharedChannelData>,
+    shared: SenderShared,
 }
 
 pub struct Receiver<T> {
@@ -74,7 +106,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     (
         Sender {
             inner: Arc::new(sender),
-            shared: shared.clone(),
+            shared: SenderShared(shared.clone()),
         },
         Receiver {
             inner: Arc::new(receiver),
@@ -109,22 +141,9 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.shared.sender_count.fetch_add(1, Ordering::AcqRel);
         Sender {
             inner: Arc::new(self.inner.as_ref().clone()),
             shared: self.shared.clone(),
-        }
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let senders = self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) - 1;
-        if senders == 0 {
-            // Notify receiver that no more data is coming.
-            if let Ok(waker) = self.shared.receiver_rx.try_recv() {
-                waker.wake();
-            }
         }
     }
 }
@@ -328,7 +347,10 @@ impl<'a, T> Future for RecvFuture<'_, T> {
                         receiver.shared.wake_one_sender();
                         Poll::Ready(Some(val))
                     }
-                    Err(moto_mpmc::TryRecvError::Disconnected) => Poll::Ready(None),
+                    Err(moto_mpmc::TryRecvError::Disconnected) => {
+                        let _ = receiver.shared.receiver_rx.try_recv(); // Clear the waiter.
+                        Poll::Ready(None)
+                    }
                     Err(moto_mpmc::TryRecvError::Empty) => Poll::Pending,
                 }
             }

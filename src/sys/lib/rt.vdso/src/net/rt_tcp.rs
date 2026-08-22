@@ -162,7 +162,7 @@ impl RtTcpStream {
                     Err(err) => err,
                 }
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 
@@ -232,7 +232,7 @@ impl RtTcpStream {
                     Err(err) => err,
                 }
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 
@@ -528,7 +528,7 @@ impl RtTcpListener {
                     self.inner.set_buffer_size_async(rcv, bytes),
                 ))
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 
@@ -566,7 +566,7 @@ impl RtTcpListener {
                     Err(err) => err,
                 }
             }
-            _ => panic!("unrecognized option {option}"),
+            _ => moto_rt::E_NOT_IMPLEMENTED,
         }
     }
 

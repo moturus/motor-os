@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crossterm::style::{Color, SetForegroundColor, force_color_output};
 use gears::mock::{MockServer, Script, provider_scenario, sse_response};
 
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -83,6 +84,18 @@ fn termios(file: &File) -> libc::termios {
     let status = unsafe { libc::tcgetattr(file.as_raw_fd(), &mut value) };
     assert_eq!(status, 0, "tcgetattr: {}", std::io::Error::last_os_error());
     value
+}
+
+fn resize(file: &File, columns: u16, rows: u16) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: the descriptor is an open PTY and the winsize pointer is valid.
+    let status = unsafe { libc::ioctl(file.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+    assert_eq!(status, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
 }
 
 fn assert_same_mode(before: &libc::termios, after: &libc::termios) {
@@ -165,6 +178,15 @@ fn position(output: &[u8], marker: &[u8]) -> usize {
         .unwrap_or_else(|| panic!("missing {marker:?} in {output:?}"))
 }
 
+fn last_frame(output: &[u8]) -> &[u8] {
+    let clear = b"\x1b[2J";
+    let start = output
+        .windows(clear.len())
+        .rposition(|bytes| bytes == clear)
+        .unwrap_or_else(|| panic!("missing final screen clear in {output:?}"));
+    &output[start..]
+}
+
 #[test]
 fn tui_borrows_and_restores_a_linux_terminal() {
     let (dir, workspace, config) = fixture("restore", "http://127.0.0.1:9", "ask");
@@ -186,7 +208,9 @@ fn tui_borrows_and_restores_a_linux_terminal() {
     master
         .write_all(b"\x1b[200~one\ninvalid:\xff\x1b[201~")
         .unwrap();
-    output.extend(read_until(&mut master, b"...> invalid:"));
+    // The prompt and pasted content can have distinct foreground colors, so
+    // terminal styling may appear between them in the raw PTY stream.
+    output.extend(read_until(&mut master, b"invalid:"));
     master.write_all(&[3]).unwrap();
     let status = wait_child(&mut child);
     drain(&mut master, &mut output);
@@ -226,15 +250,15 @@ fn tui_drives_an_attended_tool_round_on_linux() {
 
     let mut output = read_until(&mut master, b"Motor OS Gears");
     master.write_all(&[16]).unwrap();
-    output.extend(read_until(&mut master, b"state: paused"));
+    output.extend(read_until(&mut master, b"paused"));
     master.write_all(&[16]).unwrap();
-    output.extend(read_until(&mut master, b"state: idle"));
+    output.extend(read_until(&mut master, b"idle"));
     master
         .write_all(b"write the file using @context.txt\r")
         .unwrap();
     output.extend(read_until(&mut master, b"digest:"));
     master.write_all(b"\x1b[6~y").unwrap();
-    output.extend(read_until(&mut master, b"state: completed"));
+    output.extend(read_until(&mut master, b"completed"));
     master.write_all(&[3]).unwrap();
     let status = wait_child(&mut child);
     drain(&mut master, &mut output);
@@ -306,6 +330,52 @@ fn tui_handles_slash_commands_without_a_provider_request() {
 }
 
 #[test]
+fn tui_model_picker_changes_and_remembers_the_request_model() {
+    let server = MockServer::start_one(says("selected model answered")).unwrap();
+    let (dir, workspace, config) = fixture("model-picker", server.base_url(), "ask");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[models]\nlast = \"test/model\"\nused = [\"test/model\", \"other/model\"]\n");
+    std::fs::write(&config, text).unwrap();
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(b"/model\r").unwrap();
+    output.extend(read_until(&mut master, b"other/model"));
+    drain(&mut master, &mut output);
+    master.write_all(b"\x1b[B").unwrap();
+    output.extend(read_until(&mut master, b">(x) "));
+    drain(&mut master, &mut output);
+    master.write_all(b"\r").unwrap();
+    output.extend(read_until(&mut master, b"model: other/model"));
+    master.write_all(b"which model is this?\r").unwrap();
+    output.extend(read_until(&mut master, b"completed"));
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    drain(&mut master, &mut output);
+
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(request["model"], "other/model");
+    let saved = gears::config::Config::load(Some(&config)).unwrap();
+    assert_eq!(saved.model.as_deref(), Some("other/model"));
+    assert_eq!(saved.models, ["other/model", "test/model"]);
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
 fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     let server = MockServer::start(vec![
         says("answer one"),
@@ -332,14 +402,14 @@ fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     let mut output = read_until(&mut master, b"Motor OS Gears");
     for prompt in ["question one", "question two", "question three"] {
         master.write_all(format!("{prompt}\r").as_bytes()).unwrap();
-        output.extend(read_until(&mut master, b"state: completed"));
+        output.extend(read_until(&mut master, b"completed"));
         drain(&mut master, &mut output);
     }
     master.write_all(b"/compact focus on decisions\r").unwrap();
-    output.extend(read_until(&mut master, b"context: compacted 4 messages"));
+    output.extend(read_until(&mut master, b"compacted 4 messages"));
     drain(&mut master, &mut output);
     master.write_all(b"question four\r").unwrap();
-    output.extend(read_until(&mut master, b"state: completed"));
+    output.extend(read_until(&mut master, b"completed"));
     drain(&mut master, &mut output);
     master.write_all(b"/quit\r").unwrap();
     let status = wait_child(&mut child);
@@ -372,5 +442,78 @@ fn tui_compacts_locally_and_uses_the_summary_on_the_next_turn() {
     assert!(messages.contains("question four"), "{messages}");
     assert!(!messages.contains("question one"), "{messages}");
     assert!(!messages.contains("question two"), "{messages}");
+    std::fs::remove_dir_all(Path::new(&dir)).unwrap();
+}
+
+#[test]
+fn cancelling_keeps_the_live_highlighted_transcript_on_screen() {
+    force_color_output(true);
+    let reasoning = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {"reasoning": "```rust\nlet value: usize = 42;\n```"}
+        }]
+    });
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+         data: {reasoning}\n\n"
+    );
+    let server = MockServer::start_one(
+        Script::new()
+            .write(response)
+            .pause(Duration::from_secs(2))
+            .write("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"more\"}}]}\n\n"),
+    )
+    .unwrap();
+    let (dir, workspace, config) = fixture("cancel-transcript", server.base_url(), "ask");
+    let (mut master, slave) = pty();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gears"));
+    child
+        .args(["--ui", "tui", "--config"])
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    let mut child = child.spawn().unwrap();
+
+    let mut output = read_until(&mut master, b"Motor OS Gears");
+    master.write_all(b"review this\r").unwrap();
+    output.extend(read_until(&mut master, b"```rust"));
+    master.write_all(&[3]).unwrap();
+    output.extend(read_until(&mut master, b"cancelled"));
+    drain(&mut master, &mut output);
+    resize(&master, 79, 24);
+    // SAFETY: child is live and SIGWINCH only asks it to re-read the PTY size.
+    let signalled = unsafe { libc::kill(child.id() as i32, libc::SIGWINCH) };
+    assert_eq!(
+        signalled,
+        0,
+        "SIGWINCH: {}",
+        std::io::Error::last_os_error()
+    );
+    output.extend(read_until(&mut master, b"```rust"));
+    drain(&mut master, &mut output);
+
+    let frame = last_frame(&output);
+    assert!(
+        frame
+            .windows(b"```rust".len())
+            .any(|bytes| bytes == b"```rust"),
+        "cancelled frame lost reasoning: {frame:?}"
+    );
+    let mut keyword = Vec::new();
+    crossterm::queue!(&mut keyword, SetForegroundColor(Color::Magenta)).unwrap();
+    assert!(!keyword.is_empty());
+    assert!(
+        frame.windows(keyword.len()).any(|bytes| bytes == keyword),
+        "cancelled frame lost syntax color: {frame:?}"
+    );
+
+    master.write_all(b"/quit\r").unwrap();
+    let status = wait_child(&mut child);
+    assert!(status.success(), "TUI exited with {status}: {output:?}");
     std::fs::remove_dir_all(Path::new(&dir)).unwrap();
 }

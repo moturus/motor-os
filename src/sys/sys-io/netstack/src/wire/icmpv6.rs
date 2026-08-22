@@ -631,13 +631,18 @@ impl<'a> Repr<'a> {
             // The packet must be truncated to fit the min MTU. Since we don't know the offset of
             // the ICMPv6 header in the L2 frame, we should only check whether the payload's IPv6
             // header is present, the rest is allowed to be truncated.
-            let ip_packet = if packet.payload().len() >= IPV6_HEADER_LEN {
-                Ipv6Packet::new_unchecked(packet.payload())
-            } else {
+            let quoted_packet = packet.payload();
+            let ip_packet = Ipv6Packet::new_checked_header(quoted_packet)?;
+            if ip_packet.version() != 6 {
                 return Err(Error);
-            };
+            }
 
-            let payload = &packet.payload()[ip_packet.header_len()..];
+            let quoted_payload_len = core::cmp::min(
+                quoted_packet.len() - ip_packet.header_len(),
+                ip_packet.payload_len() as usize,
+            );
+            let payload =
+                &quoted_packet[ip_packet.header_len()..ip_packet.header_len() + quoted_payload_len];
             let repr = Ipv6Repr {
                 src_addr: ip_packet.src_addr(),
                 dst_addr: ip_packet.dst_addr(),
@@ -988,6 +993,24 @@ mod test {
         )
         .unwrap();
         assert_eq!(repr, too_big_packet_repr());
+    }
+
+    #[test]
+    fn test_too_big_rejects_wrong_quoted_ip_version() {
+        let mut bytes = PKT_TOO_BIG_BYTES;
+        bytes[field::HEADER_END] = 0x40;
+        let mut packet = Packet::new_unchecked(&mut bytes);
+        packet.fill_checksum(&MOCK_IP_ADDR_1, &MOCK_IP_ADDR_2);
+
+        assert!(
+            Repr::parse(
+                &MOCK_IP_ADDR_1,
+                &MOCK_IP_ADDR_2,
+                &Packet::new_unchecked(packet.as_ref()),
+                &ChecksumCapabilities::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

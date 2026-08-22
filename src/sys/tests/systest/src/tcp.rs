@@ -501,10 +501,14 @@ fn test_native_async_shutdown() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let expected = vec![0x5a_u8; 256 * 1024];
+    let (release_peer, peer_release) = std::sync::mpsc::channel();
     let peer = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut received = Vec::new();
         stream.read_to_end(&mut received).unwrap();
+        // A socket that sent no bytes closes with a reset. Keep that unrelated
+        // reset from racing the local shutdown error checked below.
+        let _ = peer_release.recv();
         received
     });
 
@@ -533,6 +537,7 @@ fn test_native_async_shutdown() {
             Err(moto_rt::E_NOT_CONNECTED)
         );
 
+        release_peer.send(()).unwrap();
         drop(stream);
         crate::net_harness::drain_host_channel(client, driver_task).await;
     });
@@ -1585,6 +1590,37 @@ fn test_tcp_listener_ttl() {
     println!("test_tcp_listener_ttl() PASS");
 }
 
+#[allow(deprecated)]
+fn test_unsupported_tcp_options_return_errors() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert_eq!(
+        listener.set_only_v6(true).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        listener.only_v6().unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+
+    let addr = listener.local_addr().unwrap();
+    let client = std::thread::spawn(move || std::net::TcpStream::connect(addr).unwrap());
+    let stream = listener.accept().unwrap().0;
+    let _client = client.join().unwrap();
+    let fd = stream.as_raw_fd();
+    assert_eq!(
+        moto_rt::net::set_only_v6(fd, true),
+        Err(moto_rt::Error::NotImplemented)
+    );
+    assert_eq!(
+        moto_rt::net::only_v6(fd),
+        Err(moto_rt::Error::NotImplemented)
+    );
+
+    println!("test_unsupported_tcp_options_return_errors() PASS");
+}
+
 /// Pre-SYN buffer sizes on the native API: the requested sizes ride the
 /// connect and bind requests themselves (payload bytes 18/19) and read
 /// back effective -- rounded up to the wire's power-of-two granularity.
@@ -1642,6 +1678,59 @@ fn test_native_buffer_options() {
 
     let _peer = accept_thread.join().unwrap();
     println!("test_native_buffer_options() PASS");
+}
+
+fn assert_not_connected<T>(result: Result<T, moto_sys::ErrorCode>) {
+    assert_eq!(result.err(), Some(moto_rt::E_NOT_CONNECTED));
+}
+
+async fn assert_remote_options_not_connected(stream: &NativeTcpStream) {
+    assert_not_connected(stream.shutdown_async(NativeShutdown::Both).await);
+    assert_not_connected(stream.set_linger_async(None).await);
+    assert_not_connected(stream.linger_async().await);
+    assert_not_connected(stream.set_nodelay_async(true).await);
+    assert_not_connected(stream.nodelay_async().await);
+    assert_not_connected(stream.set_ttl_async(42).await);
+    assert_not_connected(stream.ttl_async().await);
+    assert_not_connected(stream.set_buffer_size_async(true, 64 * 1024).await);
+    assert_not_connected(stream.buffer_size_async(true).await);
+    assert_not_connected(stream.set_buffer_size_async(false, 64 * 1024).await);
+    assert_not_connected(stream.buffer_size_async(false).await);
+}
+
+fn test_unconnected_native_options_return_errors() {
+    let closed_addr = "127.0.0.1:1".parse().unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let stream = NativeTcpStream::connect_nonblocking_reserved(
+            client.try_reserve().unwrap(),
+            &closed_addr,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // The driver is another local task and has not run since connect
+        // queued its request, so this is deterministically pre-response.
+        assert_eq!(
+            stream.tcp_state(),
+            moto_sys_io::api_net::TcpState::Connecting
+        );
+        assert_remote_options_not_connected(&stream).await;
+
+        crate::net_harness::wait_until("refused native connect", || {
+            stream.tcp_state() == moto_sys_io::api_net::TcpState::Closed
+        })
+        .await;
+        assert_remote_options_not_connected(&stream).await;
+        assert_ne!(stream.take_error(), moto_rt::E_OK);
+
+        drop(stream);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    println!("test_unconnected_native_options_return_errors() PASS");
 }
 
 fn test_tcp_buffer_sizes() {
@@ -1911,11 +2000,11 @@ pub(crate) fn test_ipv6() {
 
 // A blocking write with SO_SNDTIMEO against a peer that never reads makes
 // partial progress while the pipeline has room, then returns Err(TimedOut)
-// once every buffer fills -- a deterministic zero-progress stall. (A peer
-// that reads even slowly keeps freeing room, so a real write never times
-// out; that is the correct SO_SNDTIMEO contract, exercised separately by
-// the backpressure test below.) The peer stays silent until released, then
-// drains to EOF so the scope join can never strand on it.
+// once every buffer fills -- a deterministic zero-progress stall. A peer
+// that frees room before the deadline may instead keep writes progressing;
+// the stop-and-go case below exercises stalls longer than SO_SNDTIMEO. The
+// peer stays silent until released, then drains to EOF so the scope join can
+// never strand on it.
 fn test_write_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:3335").unwrap();
     let release = Arc::new(AtomicBool::new(false));
@@ -2925,6 +3014,77 @@ fn test_write_after_peer_graceful_close_resets() {
     println!("test_write_after_peer_graceful_close_resets() PASS");
 }
 
+fn test_read_after_peer_reset_reports_error() {
+    use std::os::fd::AsRawFd;
+
+    fn connected_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        (client, peer)
+    }
+
+    fn abort(peer: std::net::TcpStream) {
+        moto_rt::net::set_linger(peer.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        drop(peer);
+    }
+
+    fn assert_reset(result: std::io::Result<usize>, context: &str) {
+        let err = result.expect_err(context);
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset, "{context}");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(i32::from(moto_rt::E_CONNECTION_RESET)),
+            "{context}"
+        );
+    }
+
+    fn wait_for_reset(stream: &mut std::net::TcpStream) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.write(b"x") {
+                Ok(_) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "peer reset did not reach the write path"
+                ),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    assert!(std::time::Instant::now() < deadline);
+                }
+                Err(err) => {
+                    assert_reset(Err(err), "peer reset synchronization");
+                    return;
+                }
+            }
+        }
+    }
+
+    let (mut client, peer) = connected_pair();
+    abort(peer);
+    assert_reset(client.read(&mut [0_u8; 1]), "immediate peer reset");
+
+    let (mut client, mut peer) = connected_pair();
+    peer.write_all(b"x").unwrap();
+    abort(peer);
+    let mut byte = [0_u8; 1];
+    client.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"x");
+    assert_reset(client.read(&mut byte), "peer reset after queued data");
+
+    let (mut client, peer) = connected_pair();
+    client.shutdown(std::net::Shutdown::Read).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    abort(peer);
+    wait_for_reset(&mut client);
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+
+    println!("test_read_after_peer_reset_reports_error() PASS");
+}
+
 /// Backlog saturation, staying within the API's guarantees: fill the ready
 /// queue exactly to the backlog (the pump stops donating), drain part of
 /// it, and prove donations resume -- later connects complete and every
@@ -2963,6 +3123,73 @@ fn test_backlog_saturation_liveness() {
     assert_eq!(accepted.len(), BACKLOG + 2);
     drop((accepted, clients, listener));
     println!("test_backlog_saturation_liveness() PASS");
+}
+
+/// Established sockets waiting for accept are independently bounded even
+/// when the listener is driven through sys-io directly, with no vDSO backlog.
+fn test_completed_accept_backlog_is_bounded() {
+    use moto_sys_io::api_net;
+
+    const PER_LISTENER_CAP: usize = 32;
+
+    let backlog_before = read_sys_io_metric("net.tcp.accept_backlog");
+    let overflow_before = read_sys_io_metric("net.tcp.accept_overflow");
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(
+            &bind_addr,
+            Some(PER_LISTENER_CAP as u8),
+        ))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
+
+    let mut held = Vec::with_capacity(PER_LISTENER_CAP);
+    for _ in 0..PER_LISTENER_CAP {
+        held.push(
+            std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2)).unwrap(),
+        );
+    }
+    wait_for_sys_io_metric("net.tcp.accept_backlog", |value| {
+        value == backlog_before + PER_LISTENER_CAP as u64
+    });
+
+    let overflow = std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2));
+    wait_for_sys_io_metric("net.tcp.accept_overflow", |value| value > overflow_before);
+    assert_eq!(
+        read_sys_io_metric("net.tcp.accept_backlog"),
+        backlog_before + PER_LISTENER_CAP as u64
+    );
+    match overflow {
+        Err(err) => assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionReset
+        )),
+        Ok(mut stream) => {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            // The connect response can cross the abort notification: Motor's
+            // first read then reports either the reset or its terminal EOF.
+            // Data or a timeout would mean the overflow socket stayed alive.
+            match stream.read(&mut [0_u8; 1]) {
+                Ok(0) => {}
+                Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset),
+                Ok(count) => panic!("overflowing connection delivered {count} unexpected byte(s)"),
+            }
+        }
+    }
+
+    drop(held);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.tcp.accept_backlog", |value| value == backlog_before);
+    println!("test_completed_accept_backlog_is_bounded() PASS");
 }
 
 // The step-3 storm (networking plan): with the vDSO recheck ticks deleted,
@@ -3152,6 +3379,7 @@ pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
     test_channel_teardown();
+    test_completed_accept_backlog_is_bounded();
     test_backlog_saturation_liveness();
     // Runs while teardown leaves the ephemeral port space quiet.
     test_simultaneous_open();
@@ -3169,9 +3397,12 @@ pub fn run_all_tests() {
     test_blocking_accept_is_not_starved();
     test_write_to_dropped_peer_fails_fast();
     test_write_after_peer_graceful_close_resets();
+    test_read_after_peer_reset_reports_error();
     test_tcp_listener_ttl();
+    test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();
     test_native_buffer_options();
+    test_unconnected_native_options_return_errors();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

@@ -59,6 +59,13 @@ impl TestHandler {
                 let mut buf = [0; 1024];
                 match self.cli.read(&mut buf) {
                     Ok(0) => self.shutdown = true,
+                    Err(err)
+                        if cfg!(target_os = "motor")
+                            && err.kind() == std::io::ErrorKind::ConnectionReset =>
+                    {
+                        // Motor resets a never-used connection when its peer drops.
+                        self.shutdown = true;
+                    }
                     Ok(_) => panic!("the client socket should not be readable"),
                     Err(e) => panic!("Unexpected error {e:?}"),
                 }

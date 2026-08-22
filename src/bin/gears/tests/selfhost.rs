@@ -7,7 +7,7 @@
 //! endpoint is a mock. Everything else is real — real cargo, real binaries, a
 //! real session file carried across a real process boundary.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -173,24 +173,6 @@ impl SelfHost {
         self.gears().args(["-p", prompt]).output().unwrap()
     }
 
-    /// Drive the interactive loop by typing at it.
-    fn type_at(&self, input: &str) -> Output {
-        let mut child = self
-            .gears()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        child.wait_with_output().unwrap()
-    }
-
     /// A candidate that is a gears, put there without building one: some of
     /// this is about the restart rather than about what it restarts into.
     fn candidate(&self) -> PathBuf {
@@ -235,6 +217,17 @@ fn copy_tree(from: &Path, to: &Path) {
             }
         }
     }
+}
+
+fn read_through(reader: &mut impl Read, marker: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    while !output.windows(marker.len()).any(|bytes| bytes == marker) {
+        let mut byte = [0];
+        let read = reader.read(&mut byte).unwrap();
+        assert!(read > 0, "process exited before {marker:?}: {output:?}");
+        output.push(byte[0]);
+    }
+    output
 }
 
 /// **The step-9 gate.** Edit, build, validate, keep, restart — and the binary
@@ -347,19 +340,42 @@ fn an_interactive_restart_gives_up_the_prompt() {
     );
     fixture.candidate();
 
-    // The second line would be answered by a loop that carried on reading.
-    let out = fixture.type_at("start again\n/status\n");
-    let shown = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut child = fixture
+        .gears()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    input.write_all(b"start again\n").unwrap();
+    let mut stdout = read_through(&mut output, b"Carried on.");
+
+    // Only the replacement may read this: it is sent after that replacement
+    // has answered its continuation prompt.
+    input.write_all(b"/status\n/quit\n").unwrap();
+    drop(input);
+    output.read_to_end(&mut stdout).unwrap();
+    let status = child.wait().unwrap();
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut stderr)
+        .unwrap();
+    let shown = String::from_utf8_lossy(&stdout).into_owned();
     assert!(
-        out.status.success(),
+        status.success(),
         "{shown}\n{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stderr)
     );
 
     assert!(shown.contains("Carried on."), "{shown}");
     assert!(
-        !shown.contains("files changed"),
-        "the loop went back to the prompt: {shown}"
+        shown.contains("files changed"),
+        "the replacement did not remain interactive: {shown}"
     );
 
     // One session, and the new process carried straight on in it.
