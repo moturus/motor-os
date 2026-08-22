@@ -384,8 +384,8 @@ timeout 900 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
   "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
-[ "$(tail -n 1 "$OUT/gate-systest.log")" = PASS ] ||
-  gate_fail "systest did not finish with PASS"
+[ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||
+  gate_fail "systest did not finish with 'systest: ALL PASS'"
 
 out="$(printf 'relay-smoke\n' |
   vssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
