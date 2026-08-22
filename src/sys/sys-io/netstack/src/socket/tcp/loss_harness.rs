@@ -453,7 +453,7 @@ fn heavy_loss_with_reordering_still_completes() {
 
 /// The RTO-floor measurement matrix: not a regression test but the
 /// instrument of the step 3 tuning round. Run it explicitly:
-/// `cargo test --features socket-tcp-cubic -- --ignored rto_floor --nocapture`
+/// `cargo test -- --ignored rto_floor --nocapture`
 #[test]
 #[ignore = "measurement instrument; run explicitly with --ignored"]
 fn rto_floor_matrix() {

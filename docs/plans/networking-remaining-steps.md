@@ -15,7 +15,7 @@ deletions that shrink active hot paths or remove misleading configuration
 surface. If either uncovers non-obvious coupling or grows beyond straightforward
 deletion and rewiring, stop it rather than delaying the highest-priority items.
 
-- Make Cubic the only TCP congestion controller. Deployed sys-io and both full
+- COMPLETED: Make Cubic the only TCP congestion controller. Deployed sys-io and both full
   test scripts select only Cubic; the only other controller-selection callers
   are netstack tests. Remove Reno, `NoControl`, their feature/fallback paths,
   and the public `CongestionControl` selector API; compile Cubic whenever TCP
