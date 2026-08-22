@@ -82,7 +82,7 @@ cleanup.
   client parked forever. The ordinary moto-io drop path is fire-and-forget, so
   this does not make every positive-linger close hang, but the RPC contract is
   incomplete.
-- Make a TCP writer that was already parked when reset/closure arrived return
+- COMPLETED: Make a TCP writer that was already parked when reset/closure arrived return
   the stored reset or broken-pipe error when it committed zero bytes. Preserve
   partial-write semantics when it committed data.
 - On `UdpSocket::close`, wake RX and TX waiters and reject every later send or
