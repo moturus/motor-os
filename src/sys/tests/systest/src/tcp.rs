@@ -388,6 +388,107 @@ fn test_cancelled_native_io_waiters_are_removed() {
     println!("test_cancelled_native_io_waiters_are_removed() PASS");
 }
 
+/// A write already parked for channel pages must report the close that wakes
+/// it when it committed nothing. A committed prefix remains a successful
+/// partial write, and an empty write remains successful on a dead stream.
+fn test_parked_native_writer_reports_close_error() {
+    use std::future::Future;
+
+    struct WakeFlag(AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    fn check(cause: u32, expected: moto_rt::ErrorCode) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let release_peer = Arc::new(AtomicBool::new(false));
+        let peer_release = release_peer.clone();
+        let peer = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            while !peer_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+
+        moto_async::LocalRuntime::new().block_on(async {
+            let (client, driver_task) = crate::net_harness::host_channel().await;
+            let stream = NativeTcpStream::connect_reserved(
+                client.try_reserve().unwrap(),
+                &listener_addr,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+            let bufs: [&[u8]; 1] = [b"parked"];
+            let mut write = Box::pin(stream.write_future(&bufs));
+            let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = std::task::Waker::from(wake_flag.clone());
+            let mut context = Context::from_waker(&waker);
+
+            stream.with_tx_pages_exhausted_for_test(|| {
+                assert!(matches!(write.as_mut().poll(&mut context), Poll::Pending));
+                assert_eq!(stream.tx_waiter_count(), 1);
+
+                let mut state_change = moto_ipc::io_channel::Msg::new();
+                state_change.command =
+                    moto_sys_io::api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+                state_change.handle = stream.handle();
+                state_change.payload.args_32_mut()[0] =
+                    moto_sys_io::api_net::TcpState::Closed as u32;
+                state_change.payload.args_32_mut()[1] = cause;
+                stream.process_incoming_msg(state_change);
+
+                assert!(wake_flag.0.load(Ordering::Acquire));
+                assert_eq!(
+                    write.as_mut().poll(&mut context),
+                    Poll::Ready(Err(expected))
+                );
+                assert_eq!(stream.tx_waiter_count(), 0);
+            });
+
+            let partial_bufs: [&[u8]; 1] = [b"partial"];
+            let mut partial = stream.write_future(&partial_bufs);
+            partial.written = 1;
+            assert_eq!(
+                Box::pin(partial).as_mut().poll(&mut context),
+                Poll::Ready(Ok(1))
+            );
+
+            let empty: [&[u8]; 0] = [];
+            assert_eq!(
+                Box::pin(stream.write_future(&empty))
+                    .as_mut()
+                    .poll(&mut context),
+                Poll::Ready(Ok(0))
+            );
+
+            drop(write);
+            drop(stream);
+            release_peer.store(true, Ordering::Release);
+            crate::net_harness::drain_host_channel(client, driver_task).await;
+        });
+        peer.join().unwrap();
+    }
+
+    check(
+        moto_sys_io::api_net::TCP_STATE_CHANGE_CAUSE_RESET,
+        moto_rt::E_CONNECTION_RESET,
+    );
+    check(0, moto_rt::E_NOT_CONNECTED);
+    println!("test_parked_native_writer_reports_close_error() PASS");
+}
+
 fn test_cancelled_native_rpc_response_is_tolerated() {
     use std::future::Future;
 
@@ -1162,6 +1263,7 @@ pub fn test_native_net_cancellation() {
     test_failed_tcp_setup_rolls_back_socket();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
+    test_parked_native_writer_reports_close_error();
     test_cancelled_native_rpc_response_is_tolerated();
     test_native_async_shutdown();
     test_native_stream_drop_under_backpressure();

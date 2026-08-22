@@ -1901,9 +1901,10 @@ impl core::future::Future for TcpReadFuture<'_, '_, '_> {
 /// (design rule 7, the rt_tcp SO_SNDTIMEO contract: Ok(written)).
 ///
 /// Wait/return policy mirrors the old blocking loop exactly: a closed
-/// write half ends the write with Ok(written); a missing io_page parks
-/// only while written == 0 (a partial write returns instead); a full
-/// send queue parks unconditionally (the marker must land).
+/// write half returns its error when nothing was written, or the committed
+/// prefix otherwise; a missing io_page parks only while written == 0 (a
+/// partial write returns instead); a full send queue parks unconditionally
+/// (the marker must land).
 pub struct TcpWriteFuture<'a, 'b, 'c> {
     pub stream: &'a TcpStream,
     pub bufs: &'b [&'c [u8]],
@@ -1930,9 +1931,19 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
         let this = self.get_mut();
         let stream = this.stream;
         loop {
-            if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+            // A zero-length write succeeds even after closure, matching
+            // try_write and the ordinary write contract.
+            if this.written == this.total {
                 stream.channel().remove_tx_waker(&mut this.waiter_id);
                 return Poll::Ready(Ok(this.written));
+            }
+            if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
+                return Poll::Ready(if this.written == 0 {
+                    Err(stream.dead_write_error())
+                } else {
+                    Ok(this.written)
+                });
             }
 
             // Top up the unclaimed pending back page: no alloc, no
