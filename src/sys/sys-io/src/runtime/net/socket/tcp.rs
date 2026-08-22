@@ -1446,28 +1446,32 @@ impl MotoSocket {
     // Drop the socket fully.
     pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         // Abort all ops.
-        let socket_id =
+        let (socket_id, aborted) =
             Self::with_tcp_socket_set(&moto_socket, |socket_id, sockets, handle, state| {
                 // Reset only what is still a connection. A socket that finished
                 // its close handshake has nothing left to abort, and aborting it
                 // would put an RST on the wire *after* a clean FIN exchange:
                 // moto-netstack sends one for any CLOSED socket that still knows
                 // its peer, which is what TIME-WAIT is.
-                if sockets
+                let aborted = sockets
                     .get::<moto_netstack::socket::tcp::Socket>(handle)
-                    .is_open()
-                {
+                    .is_open();
+                if aborted {
                     sockets.tcp_abort(handle);
                 }
                 state.rx_closed = true;
                 state.tx_closed = true;
-                socket_id
+                (socket_id, aborted)
             });
         log::debug!("Dropping TCP socket 0x{socket_id:x}.");
-        moto_socket.borrow().base.device_notify().notify_one();
-
-        // Let the device process the abort above (send RST out).
-        moto_async::sleep(std::time::Duration::from_millis(1)).await;
+        if aborted {
+            let completion = {
+                let socket_ref = moto_socket.borrow();
+                let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
+                runtime_ref.devices[socket_ref.base.device_idx].transmit_completion()
+            };
+            let _ = completion.await;
+        }
 
         let runtime = moto_socket.borrow().base.runtime.clone();
 

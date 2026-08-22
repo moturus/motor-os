@@ -91,7 +91,7 @@ cleanup.
 - COMPLETED: Restore RX ring depth after transient buffer-allocation failures. Track the
   deficit caused by a failed `pop_buf` and refill it on a later successful
   poll.
-- Replace `drop_tcp_socket`'s fixed 1 ms delay with an explicit
+- COMPLETED: Replace `drop_tcp_socket`'s fixed 1 ms delay with an explicit
   transmit-completion/state condition so an abort is not removed before its RST
   reaches the device.
 - Bound each listener's queued native `pending_accepts` RPCs at 1,024 and reply
