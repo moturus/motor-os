@@ -41,7 +41,7 @@ network exposure or a release that treats networking as robust.
 - COMPLETED: Clamp an advertised peer MSS to a safe minimum. Accepting MSS=1 permits a
   crafted SYN to turn the send path into one-byte packets. This is reachable
   before application authentication on externally listening services.
-- Rate-limit ICMP error replies (UDP port unreachable, protocol unreachable,
+- COMPLETED: Rate-limit ICMP error replies (UDP port unreachable, protocol unreachable,
   and IPv6 parameter problem) with a dedicated `max_icmp_error_rate` token
   bucket. Keep loopback exempt; the approved default is 200 replies per second.
   Without a bound, spoofed-source traffic can use an external interface as a

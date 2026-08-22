@@ -85,8 +85,7 @@ mod ids {
     pub const NET_LISTENERS_ARMED: u32 = 45;
     pub const NET_CLIENTS_REFUSED: u32 = 46;
 
-    // Egress rate limits on socketless replies (`max_rst_rate` /
-    // `max_syn_cookie_rate` in sys-net.toml).
+    // Egress rate limits on automatically generated replies.
     pub const NET_TCP_RST_SUPPRESSED: u32 = 47;
     pub const NET_TCP_COOKIES_SUPPRESSED: u32 = 48;
 
@@ -112,6 +111,7 @@ mod ids {
     pub const NET_ICMP_PMTU_MESSAGES_REJECTED: u32 = 64;
 
     pub const NET_CHANNELS: u32 = 65;
+    pub const NET_ICMP_ERRORS_SUPPRESSED: u32 = 66;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -242,6 +242,10 @@ pub(super) struct NetStats {
     /// enrollment (listener torn down, memory pressure); each cost the peer
     /// a retransmission.
     pub tcp_cookie_restores_dropped: Cell<u64>,
+    /// Automatic ICMP errors `max_icmp_error_rate` suppressed. A rising count
+    /// is a packet flood or scan being prevented from turning this interface
+    /// into a reflector; loopback is exempt.
+    pub icmp_errors_suppressed: Cell<u64>,
     /// No-listener resets `max_rst_rate`'s bucket suppressed: the offending
     /// segment was dropped unanswered. A rising count is a scan or reflection
     /// attempt being ridden out; loopback is exempt, so nothing local lands
@@ -412,6 +416,10 @@ impl NetStats {
             MetricEntry::global(ids::NET_LISTENERS_ARMED, self.net_listeners_armed.get()),
             MetricEntry::global(ids::NET_CLIENTS_REFUSED, self.clients_refused.get()),
             MetricEntry::global(ids::NET_CHANNELS, channels),
+            MetricEntry::global(
+                ids::NET_ICMP_ERRORS_SUPPRESSED,
+                self.icmp_errors_suppressed.get(),
+            ),
             MetricEntry::global(ids::NET_TCP_RST_SUPPRESSED, self.tcp_rst_suppressed.get()),
             MetricEntry::global(
                 ids::NET_TCP_COOKIES_SUPPRESSED,
@@ -547,6 +555,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_LISTENERS_ARMED, "net.listeners_armed"),
         MetricDescWire::new(ids::NET_CLIENTS_REFUSED, "net.clients_refused"),
         MetricDescWire::new(ids::NET_CHANNELS, "net.channels"),
+        MetricDescWire::new(
+            ids::NET_ICMP_ERRORS_SUPPRESSED,
+            "net.icmp.errors_suppressed",
+        ),
         MetricDescWire::new(ids::NET_TCP_RST_SUPPRESSED, "net.tcp.rst_suppressed"),
         MetricDescWire::new(
             ids::NET_TCP_COOKIES_SUPPRESSED,

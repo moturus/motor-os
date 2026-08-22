@@ -12,7 +12,9 @@ use std::{
 };
 
 use super::backlog::{DEFAULT_MAX_BACKLOG_GLOBAL, DEFAULT_MAX_BACKLOG_PER_LISTENER};
-use super::device::{DEFAULT_MAX_RST_RATE, DEFAULT_MAX_SYN_COOKIE_RATE};
+use super::device::{
+    DEFAULT_MAX_ICMP_ERROR_RATE, DEFAULT_MAX_RST_RATE, DEFAULT_MAX_SYN_COOKIE_RATE,
+};
 use super::half_open::{DEFAULT_MAX_HALF_OPEN_GLOBAL, DEFAULT_MAX_HALF_OPEN_PER_LISTENER};
 use std::num::NonZeroU32;
 
@@ -137,6 +139,8 @@ pub(super) struct NetConfig {
     /// refused because it is ambiguous -- "unlimited" to one reader, "never
     /// respond" to the other -- and either intent is better written out: omit
     /// the key for the default, or set an absurdly large rate for unlimited.
+    #[serde(default = "default_max_icmp_error_rate")]
+    pub max_icmp_error_rate: NonZeroU32,
     #[serde(default = "default_max_rst_rate")]
     pub max_rst_rate: NonZeroU32,
     #[serde(default = "default_max_syn_cookie_rate")]
@@ -159,6 +163,10 @@ fn default_max_backlog_global() -> NonZeroUsize {
 
 fn default_max_backlog_per_listener() -> NonZeroUsize {
     DEFAULT_MAX_BACKLOG_PER_LISTENER
+}
+
+fn default_max_icmp_error_rate() -> NonZeroU32 {
+    DEFAULT_MAX_ICMP_ERROR_RATE
 }
 
 fn default_max_rst_rate() -> NonZeroU32 {
@@ -606,6 +614,7 @@ pub(crate) mod self_test {
 
     fn defaults_the_egress_rate_limits() -> Result<(), String> {
         let config = parse(MINIMAL)?;
+        st_assert_eq!(config.max_icmp_error_rate, DEFAULT_MAX_ICMP_ERROR_RATE);
         st_assert_eq!(config.max_rst_rate, DEFAULT_MAX_RST_RATE);
         st_assert_eq!(config.max_syn_cookie_rate, DEFAULT_MAX_SYN_COOKIE_RATE);
         Ok(())
@@ -613,13 +622,15 @@ pub(crate) mod self_test {
 
     fn parses_the_egress_rate_limits() -> Result<(), String> {
         let config = parse(&format!(
-            "{MINIMAL}max_rst_rate = 50\nmax_syn_cookie_rate = 4000\n"
+            "{MINIMAL}max_icmp_error_rate = 75\nmax_rst_rate = 50\nmax_syn_cookie_rate = 4000\n"
         ))?;
+        st_assert_eq!(config.max_icmp_error_rate.get(), 75);
         st_assert_eq!(config.max_rst_rate.get(), 50);
         st_assert_eq!(config.max_syn_cookie_rate.get(), 4000);
 
         // Zero is refused at the parse: "unlimited" and "never respond" are
         // different intents and neither should reach a device as a limit.
+        st_assert!(parse(&format!("{MINIMAL}max_icmp_error_rate = 0\n")).is_err());
         st_assert!(parse(&format!("{MINIMAL}max_rst_rate = 0\n")).is_err());
         st_assert!(parse(&format!("{MINIMAL}max_syn_cookie_rate = 0\n")).is_err());
         Ok(())

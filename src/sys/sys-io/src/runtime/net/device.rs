@@ -565,6 +565,12 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
+/// How many automatic ICMP error replies one external device may send per
+/// second. Legitimate errors are rare, while each triggering packet may carry
+/// a forged source address and turn the reply into reflected traffic.
+/// `max_icmp_error_rate` in `/system/cfg/sys-net.toml` overrides it.
+pub(super) const DEFAULT_MAX_ICMP_ERROR_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap();
+
 /// How many no-listener resets one external device may send per second:
 /// FreeBSD has shipped this figure for its closed-port response limit for
 /// decades. Legitimate traffic rarely draws these at all -- a real client
@@ -617,6 +623,7 @@ fn iface_config(
     // randomization exemption above, so loopback keeps the netstack's
     // unlimited default.
     if external {
+        config.icmp_error_rate_limit = net_cfg.max_icmp_error_rate.get();
         config.tcp_rst_rate_limit = net_cfg.max_rst_rate.get();
         config.tcp_cookie_rate_limit = net_cfg.max_syn_cookie_rate.get();
     }
@@ -948,6 +955,12 @@ impl<'a> NetDev<'a> {
         // Suppressions are the limits working as configured under a flood, so
         // they count without logging -- a warn per poll would let the flood
         // write the log.
+        let icmp_suppressed = iface.take_icmp_error_suppressed();
+        if icmp_suppressed != 0 {
+            stats
+                .icmp_errors_suppressed
+                .set(stats.icmp_errors_suppressed.get() + icmp_suppressed);
+        }
         let rst_suppressed = iface.take_tcp_rst_suppressed();
         if rst_suppressed != 0 {
             stats
@@ -1171,6 +1184,10 @@ pub(crate) mod self_test {
         let cfg = net_cfg();
 
         let external = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, true);
+        st_assert_eq!(
+            external.icmp_error_rate_limit,
+            DEFAULT_MAX_ICMP_ERROR_RATE.get()
+        );
         st_assert_eq!(external.tcp_rst_rate_limit, DEFAULT_MAX_RST_RATE.get());
         st_assert_eq!(
             external.tcp_cookie_rate_limit,
@@ -1178,6 +1195,7 @@ pub(crate) mod self_test {
         );
 
         let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
+        st_assert_eq!(loopback.icmp_error_rate_limit, 0);
         st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
         st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
         Ok(())
