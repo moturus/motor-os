@@ -2328,8 +2328,30 @@ fn test_arp_request_never_evicts(#[case] medium: Medium) {
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
-fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
+fn test_arp_reply_requires_probe_to_evict(#[case] medium: Medium) {
     use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
+
+    fn reply_frame(
+        local_ip: Ipv4Address,
+        local_hw: EthernetAddress,
+        remote_ip: Ipv4Address,
+        remote_hw: EthernetAddress,
+    ) -> Vec<u8> {
+        let repr = ArpRepr::EthernetIpv4 {
+            operation: ArpOperation::Reply,
+            source_hardware_addr: remote_hw,
+            source_protocol_addr: remote_ip,
+            target_hardware_addr: local_hw,
+            target_protocol_addr: local_ip,
+        };
+        let mut bytes = vec![0; 42];
+        let mut frame = EthernetFrame::new_unchecked(&mut bytes);
+        frame.set_dst_addr(local_hw);
+        frame.set_src_addr(remote_hw);
+        frame.set_ethertype(EthernetProtocol::Arp);
+        repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
+        bytes
+    }
 
     let (mut iface, mut sockets, _device) = setup(medium);
 
@@ -2355,38 +2377,73 @@ fn test_arp_reply_never_evicts_gateway(#[case] medium: Medium) {
         );
     }
 
-    // A stream of forged replies, each from an address of its own.
-    for n in 0..IFACE_NEIGHBOR_CACHE_COUNT as u8 + 2 {
-        let other_ip_addr = Ipv4Address::new(192, 168, 1, 20 + n);
-        let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 20 + n]);
+    let remote_ip_addr = Ipv4Address::new(192, 168, 1, 99);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 99]);
 
-        let repr = ArpRepr::EthernetIpv4 {
-            operation: ArpOperation::Reply,
-            source_hardware_addr: other_hw_addr,
-            source_protocol_addr: other_ip_addr,
-            target_hardware_addr: local_hw_addr,
-            target_protocol_addr: local_ip_addr,
-        };
+    // With no record that we asked, the reply may not evict the entry that is
+    // next in line after the protected gateway.
+    let frame = reply_frame(local_ip_addr, local_hw_addr, remote_ip_addr, remote_hw_addr);
+    assert!(
+        iface
+            .inner
+            .process_ethernet(
+                &mut sockets,
+                PacketMeta::default(),
+                &frame,
+                &mut iface.fragments
+            )
+            .is_none()
+    );
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(remote_ip_addr), iface.inner.now),
+        NeighborAnswer::NotFound
+    );
+    assert_eq!(
+        iface.inner.neighbor_cache.lookup(
+            &IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 11)),
+            iface.inner.now
+        ),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(EthernetAddress([
+            0x52, 0x54, 0, 0, 0, 11
+        ])))
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
 
-        let mut eth_bytes = vec![0u8; 42];
-        let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
-        frame.set_dst_addr(local_hw_addr);
-        frame.set_src_addr(other_hw_addr);
-        frame.set_ethertype(EthernetProtocol::Arp);
-        repr.emit(&mut ArpPacket::new_unchecked(frame.payload_mut()));
-
-        assert!(
-            iface
-                .inner
-                .process_ethernet(
-                    &mut sockets,
-                    PacketMeta::default(),
-                    frame.into_inner(),
-                    &mut iface.fragments
-                )
-                .is_none()
-        );
-    }
+    // A live request record admits the same reply and may evict.
+    iface.inner.neighbor_cache.limit_rate(
+        IpAddress::Ipv4(remote_ip_addr),
+        iface.inner.now,
+        Duration::from_millis(1000),
+    );
+    let frame = reply_frame(local_ip_addr, local_hw_addr, remote_ip_addr, remote_hw_addr);
+    assert!(
+        iface
+            .inner
+            .process_ethernet(
+                &mut sockets,
+                PacketMeta::default(),
+                &frame,
+                &mut iface.fragments
+            )
+            .is_none()
+    );
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv4(remote_ip_addr), iface.inner.now),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(remote_hw_addr))
+    );
+    assert_eq!(
+        iface.inner.neighbor_cache.lookup(
+            &IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 11)),
+            iface.inner.now
+        ),
+        NeighborAnswer::NotFound
+    );
 
     // The gateway is still cached, so egress through it still resolves.
     assert_eq!(

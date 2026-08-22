@@ -257,6 +257,15 @@ impl Cache {
         self.silent.insert(protocol_addr, silent_until);
     }
 
+    /// Consume a live record that a discovery request went out for this
+    /// address. A reply may use the record once; duplicates and replies that
+    /// arrive after the discovery silence expires are unsolicited.
+    pub(crate) fn take_probe(&mut self, protocol_addr: &IpAddress, timestamp: Instant) -> bool {
+        self.silent
+            .remove(protocol_addr)
+            .is_some_and(|silent_until| timestamp < silent_until)
+    }
+
     pub(crate) fn flush(&mut self) {
         self.storage.clear();
         // Whatever made us forget the mappings -- an address change, say --
@@ -539,6 +548,23 @@ mod test {
         );
         assert_eq!(
             cache.lookup(&MOCK_IP_ADDR_1.into(), Instant::from_millis(2000)),
+            Answer::NotFound
+        );
+    }
+
+    #[test]
+    fn test_probe_is_live_once() {
+        let mut cache = Cache::new();
+        let addr = IpAddress::from(MOCK_IP_ADDR_1);
+
+        cache.limit_rate(addr, Instant::from_millis(0), Duration::from_millis(1000));
+        assert!(cache.take_probe(&addr, Instant::from_millis(100)));
+        assert!(!cache.take_probe(&addr, Instant::from_millis(100)));
+
+        cache.limit_rate(addr, Instant::from_millis(200), Duration::from_millis(1000));
+        assert!(!cache.take_probe(&addr, Instant::from_millis(1200)));
+        assert_eq!(
+            cache.lookup(&addr, Instant::from_millis(1200)),
             Answer::NotFound
         );
     }

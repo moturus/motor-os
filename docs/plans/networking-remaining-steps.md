@@ -61,7 +61,7 @@ segment. A host-private TAP used for development does not count. The MSS clamp
 and ICMP error rate limit above are also prerequisites; they remain in the
 highest-priority section because they matter before L2 deployment.
 
-- Harden neighbor-cache admission. Correlate ARP replies and NDISC Neighbor
+- COMPLETED: Harden neighbor-cache admission. Correlate ARP replies and NDISC Neighbor
   Advertisements with recorded probes, enforce Neighbor Advertisement
   destination/flag rules, key entries by the advertised target, and make
   uncorrelated advertisements non-evicting. This limits admission/eviction
