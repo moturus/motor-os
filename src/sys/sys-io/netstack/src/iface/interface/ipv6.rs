@@ -347,6 +347,15 @@ impl InterfaceInner {
             return None;
         }
 
+        // ::1 names this machine, so it cannot legitimately arrive from an
+        // external peer or name one.
+        if !self.loopback && (ipv6_repr.src_addr.is_loopback() || ipv6_repr.dst_addr.is_loopback())
+        {
+            net_debug!("loopback address on a non-loopback interface");
+            self.rx_loopback_dropped = self.rx_loopback_dropped.wrapping_add(1);
+            return None;
+        }
+
         let (next_header, ip_payload) = if ipv6_repr.next_header == IpProtocol::HopByHop {
             match self.process_hopbyhop(ipv6_repr, ipv6_packet.payload()) {
                 HopByHopResponse::Discard(e) => return e,

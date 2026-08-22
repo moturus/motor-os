@@ -479,10 +479,11 @@ impl NetstackDevice {
     /// Whether this device can carry traffic from off this machine.
     ///
     /// The two things that turn on this answer -- randomized ephemeral ports
-    /// and the 127/8 ingress drop -- are one decision seen from either end:
-    /// ports are randomized where an off-path attacker can exist, and loopback
-    /// addresses are refused everywhere one can. The match is exhaustive so a
-    /// third kind of device cannot be added without answering for it.
+    /// and the loopback-address ingress drop -- are one decision seen from
+    /// either end: ports are randomized where an off-path attacker can exist,
+    /// and loopback addresses are refused everywhere one can. The match is
+    /// exhaustive so a third kind of device cannot be added without answering
+    /// for it.
     fn is_external(&self) -> bool {
         match self {
             NetstackDevice::VirtIo(_) => true,
@@ -926,8 +927,8 @@ impl<'a> NetDev<'a> {
         let loopback_dropped = iface.take_rx_loopback_dropped();
         if loopback_dropped != 0 {
             log::warn!(
-                "{name}: dropped {loopback_dropped} frames carrying a 127/8 address: only \
-                 loopback may."
+                "{name}: dropped {loopback_dropped} frames carrying a loopback address: \
+                 only loopback may."
             );
             stats
                 .rx_loopback_dropped
@@ -1366,8 +1367,8 @@ pub(crate) mod self_test {
 
     /// Only the loopback device is configured as a loopback interface.
     ///
-    /// Everything the netstack decides from that bit -- today, refusing 127/8
-    /// on ingress -- turns on this one call, and a bit set the wrong way is
+    /// Everything the netstack decides from that bit -- today, refusing
+    /// loopback addresses on ingress -- turns on this one call, and a wrong bit is
     /// silent: the machine keeps working and merely stops refusing. Both
     /// directions, since either one alone is satisfied by a constant.
     fn only_the_loopback_device_is_a_loopback_iface() -> Result<(), String> {
