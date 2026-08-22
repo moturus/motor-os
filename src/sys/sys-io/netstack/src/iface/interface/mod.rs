@@ -328,13 +328,13 @@ pub struct InterfaceInner {
     tcp_cookie_restores_dropped: u64,
 
     /// From [`Config::loopback`].
-    #[cfg(feature = "proto-ipv4")]
+    #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
     loopback: bool,
 
     /// Frames dropped because a loopback address arrived on an interface that
     /// is not [`Config::loopback`], since the last
     /// [`Interface::take_rx_loopback_dropped`].
-    #[cfg(feature = "proto-ipv4")]
+    #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
     rx_loopback_dropped: u64,
 }
 
@@ -433,11 +433,12 @@ pub struct Config {
     /// This interface is a loopback interface: everything it carries stays on
     /// this machine.
     ///
-    /// A 127/8 address means "this machine" and nothing else, so on any other
-    /// interface such an address is either spoofed or misrouted, and ingress
-    /// drops it. The default is `false`, which is the checked direction: an
-    /// interface that never says what it is gets the check, not the exemption.
-    #[cfg(feature = "proto-ipv4")]
+    /// IPv4 127/8 and IPv6 ::1 mean "this machine" and nothing else, so on any
+    /// other interface such an address is either spoofed or misrouted, and
+    /// ingress drops it. The default is `false`, which is the checked
+    /// direction: an interface that never says what it is gets the check, not
+    /// the exemption.
+    #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
     pub loopback: bool,
 
     /// Reply to ICMP echo requests addressed to this interface.
@@ -471,7 +472,7 @@ impl Config {
             pan_id: None,
             #[cfg(feature = "proto-ipv6")]
             slaac: false,
-            #[cfg(feature = "proto-ipv4")]
+            #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
             loopback: false,
             auto_icmp_echo_reply: false,
             discovery_silent_time: Self::DEFAULT_DISCOVERY_SILENT_TIME,
@@ -605,9 +606,9 @@ impl Interface {
                 tcp_syn_cookies_rejected: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_cookie_restores_dropped: 0,
-                #[cfg(feature = "proto-ipv4")]
+                #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
                 loopback: config.loopback,
-                #[cfg(feature = "proto-ipv4")]
+                #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
                 rx_loopback_dropped: 0,
             },
         }
@@ -633,7 +634,7 @@ impl Interface {
     /// Frames dropped because a loopback address arrived on an interface that
     /// is not [`Config::loopback`]. Reading the count clears it, so the caller
     /// accumulates.
-    #[cfg(feature = "proto-ipv4")]
+    #[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
     pub fn take_rx_loopback_dropped(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_loopback_dropped)
     }

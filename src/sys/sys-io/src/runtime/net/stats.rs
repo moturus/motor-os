@@ -274,10 +274,11 @@ pub(super) struct NetStats {
     /// either more neighbors than the cache holds or someone trying to flush
     /// it.
     pub neighbor_admission_refused: Cell<u64>,
-    /// Frames the netstack dropped because a 127/8 address arrived on a device
-    /// that is not loopback. Nothing legitimate produces one: such a frame is
-    /// either a peer claiming to be a local process -- the trust every program
-    /// that checks for a loopback peer relies on -- or a badly misrouted one.
+    /// Frames the netstack dropped because an IPv4 or IPv6 loopback address
+    /// arrived on a device that is not loopback. Nothing legitimate produces
+    /// one: such a frame is either a peer claiming to be a local process -- the
+    /// trust every program that checks for a loopback peer relies on -- or a
+    /// badly misrouted one.
     pub rx_loopback_dropped: Cell<u64>,
     /// Received frame lengths, bucketed by [`RX_SIZE_BUCKETS`]. This is what
     /// `device_rx_bytes / device_rx_packets` averages away: the same 509 B/pkt

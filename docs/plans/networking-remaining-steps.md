@@ -66,7 +66,7 @@ highest-priority section because they matter before L2 deployment.
   destination/flag rules, key entries by the advertised target, and make
   uncorrelated advertisements non-evicting. This limits admission/eviction
   attacks but does not authenticate on-link peers.
-- Before assigning an external device an IPv6 address, extend the
+- COMPLETED: Before assigning an external device an IPv6 address, extend the
   external-ingress loopback-source filter beyond IPv4 127/8.
 
 ## Remaining things to do for completeness

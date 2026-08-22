@@ -1,5 +1,56 @@
 use super::*;
 
+/// IPv6 ::1 has the same interface-local trust boundary as IPv4 127/8.
+#[test]
+#[cfg(feature = "medium-ip")]
+fn loopback_addresses_are_refused_off_loopback() {
+    const LOCAL: Ipv6Address = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
+    const REMOTE: Ipv6Address = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
+
+    fn packet(src_addr: Ipv6Address, dst_addr: Ipv6Address) -> Vec<u8> {
+        let repr = Ipv6Repr {
+            src_addr,
+            dst_addr,
+            next_header: IpProtocol::Ipv6NoNxt,
+            payload_len: 0,
+            hop_limit: 64,
+        };
+        let mut bytes = vec![0; repr.buffer_len()];
+        repr.emit(&mut Ipv6Packet::new_unchecked(&mut bytes));
+        bytes
+    }
+
+    fn feed(loopback: bool, src_addr: Ipv6Address, dst_addr: Ipv6Address) -> u64 {
+        let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.loopback = loopback;
+        let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(LOCAL.into(), 64));
+            addrs.push(IpCidr::new(Ipv6Address::LOCALHOST.into(), 128));
+        });
+
+        let bytes = packet(src_addr, dst_addr);
+        let mut sockets = SocketSet::new();
+        let _ = iface.inner.process_ipv6(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::Ip,
+            &Ipv6Packet::new_checked(&bytes[..]).unwrap(),
+            None,
+        );
+        iface.take_rx_loopback_dropped()
+    }
+
+    assert_eq!(feed(false, Ipv6Address::LOCALHOST, LOCAL), 1);
+    assert_eq!(feed(false, REMOTE, LOCAL), 0);
+    assert_eq!(feed(false, REMOTE, Ipv6Address::LOCALHOST), 1);
+    assert_eq!(
+        feed(true, Ipv6Address::LOCALHOST, Ipv6Address::LOCALHOST),
+        0
+    );
+}
+
 #[cfg(all(
     feature = "medium-ip",
     feature = "proto-ipv6-fragmentation",
