@@ -420,7 +420,7 @@ set +o pipefail
 
 # $(...) drops trailing newlines, so this is the last non-empty line.
 systest_output="$(cat "$SYSTEST_LOG")"
-[ "${systest_output##*$'\n'}" = "PASS" ] ||
+[ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
   fail "systest did not finish with PASS"
 
 # The SSH login shell consumes russhd's one-time capability environment.
