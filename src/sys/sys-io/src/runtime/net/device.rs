@@ -21,7 +21,12 @@ use moto_tooling::iobuf::IoBuf;
 type RxQueue = Rc<RefCell<VecDeque<(IoBuf, RxMeta)>>>;
 // Egress packets travel with their TSO segment size (0 = a regular
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
-type TxQueue = Rc<RefCell<VecDeque<(IoBuf, u16)>>>;
+enum TxWork {
+    Packet(IoBuf, u16),
+    Barrier(moto_async::oneshot::Sender<()>),
+}
+
+type TxQueue = Rc<RefCell<VecDeque<TxWork>>>;
 
 /// Max TCP payload of one TSO super-segment we ask moto-netstack to emit.
 /// Bounded by BIG_BUF_SIZE minus headers; 60K leaves comfortable room
@@ -318,21 +323,41 @@ impl VirtioDevice {
             }
             let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
 
-            if let Some((packet, tso_seg_size)) = maybe_tx_vec {
-                log::debug!("NET TX {} bytes", packet.len());
-                stats
-                    .device_tx_packets
-                    .set(stats.device_tx_packets.get() + 1);
-                stats
-                    .device_tx_bytes
-                    .set(stats.device_tx_bytes.get() + packet.len() as u64);
-                let (completion, descs) = net_dev.clone().post_write(packet, tso_seg_size).await;
-                inflight_descs += descs;
-                completions.push_back((completion, descs));
-            } else {
-                tx_notify.notified().await;
+            match maybe_tx_vec {
+                Some(TxWork::Packet(packet, tso_seg_size)) => {
+                    log::debug!("NET TX {} bytes", packet.len());
+                    stats
+                        .device_tx_packets
+                        .set(stats.device_tx_packets.get() + 1);
+                    stats
+                        .device_tx_bytes
+                        .set(stats.device_tx_bytes.get() + packet.len() as u64);
+                    let (completion, descs) =
+                        net_dev.clone().post_write(packet, tso_seg_size).await;
+                    inflight_descs += descs;
+                    completions.push_back((completion, descs));
+                }
+                Some(TxWork::Barrier(waiter)) => {
+                    while let Some((completion, descs)) = completions.pop_front() {
+                        let (buf, _) = completion.await;
+                        buf_cache.push_buf(buf);
+                        inflight_descs -= descs;
+                    }
+                    let _ = waiter.send(());
+                }
+                None => tx_notify.notified().await,
             }
         }
+    }
+
+    fn complete_transmits(&self, waiters: Vec<moto_async::oneshot::Sender<()>>) {
+        if waiters.is_empty() {
+            return;
+        }
+        self.tx_queue
+            .borrow_mut()
+            .extend(waiters.into_iter().map(TxWork::Barrier));
+        self.tx_notify.notify_one();
     }
 }
 
@@ -398,7 +423,7 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
         let result = f(packet.as_mut());
         self.tx_queue
             .borrow_mut()
-            .push_back((packet, self.tso_seg_size));
+            .push_back(TxWork::Packet(packet, self.tso_seg_size));
         self.tx_notify.notify_one();
         log::debug!("TxToken: consume {len}.");
         result
@@ -716,6 +741,7 @@ pub(super) struct NetDev<'a> {
 
     // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
+    transmit_waiters: Vec<moto_async::oneshot::Sender<()>>,
 }
 
 impl<'a> NetDev<'a> {
@@ -811,6 +837,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use: std::collections::HashSet::new(),
             icmp_identifiers_in_use: std::collections::HashSet::new(),
             device_runtime_notify: notify,
+            transmit_waiters: Vec::new(),
         }
     }
 
@@ -820,6 +847,13 @@ impl<'a> NetDev<'a> {
 
     pub(super) fn config(&self) -> &config::DeviceCfg {
         &self.config
+    }
+
+    pub(super) fn transmit_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
+        let (waiter, completion) = moto_async::oneshot();
+        self.transmit_waiters.push(waiter);
+        self.device_runtime_notify.notify_one();
+        completion
     }
 
     // Have to have this as a method here because it borrows self twice: for the socket and for the iface.
@@ -917,12 +951,14 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
+            transmit_waiters,
             external: _,
         } = self;
         // Every segment this poll emits reads the timestamp clock, so it is
         // advanced once here rather than per segment.
         tsval::tick();
 
+        let waiters = std::mem::take(transmit_waiters);
         let result = match device {
             NetstackDevice::Loopback(loopback) => {
                 iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
@@ -931,6 +967,14 @@ impl<'a> NetDev<'a> {
                 iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
             }
         };
+        match device {
+            NetstackDevice::Loopback(_) => {
+                for waiter in waiters {
+                    let _ = waiter.send(());
+                }
+            }
+            NetstackDevice::VirtIo(virtio_device) => virtio_device.complete_transmits(waiters),
+        }
 
         // One poll drains the whole receive queue, so a batch of dropped
         // frames costs one counter update here rather than one per frame.
@@ -1049,6 +1093,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
+            transmit_waiters: _,
             external: _,
         } = self;
         match device {
