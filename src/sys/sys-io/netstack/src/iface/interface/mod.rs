@@ -1282,13 +1282,13 @@ impl Interface {
             .wrapping_add(expired.incomplete as u64);
     }
 
-    fn record_socketless_dispatch_error(&mut self, error: DispatchError) {
+    fn record_socketless_dispatch_error(_stats: &mut IpPacketStats, error: DispatchError) {
         #[cfg(any(
             feature = "proto-ipv4-fragmentation",
             feature = "proto-ipv6-fragmentation"
         ))]
         if error == DispatchError::FragmenterBusy {
-            let counter = &mut self.inner.ip_packet_stats.egress_fragment_stage_busy_drops;
+            let counter = &mut _stats.egress_fragment_stage_busy_drops;
             *counter = counter.wrapping_add(1);
         }
         net_debug!("Failed to send response: {:?}", error);
@@ -1318,7 +1318,10 @@ impl Interface {
                         && let Err(err) =
                             self.inner.dispatch(tx_token, packet, &mut self.fragmenter)
                     {
-                        self.record_socketless_dispatch_error(err);
+                        Self::record_socketless_dispatch_error(
+                            &mut self.inner.ip_packet_stats,
+                            err,
+                        );
                     }
                 }
                 #[cfg(feature = "medium-ip")]
@@ -1333,7 +1336,10 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        self.record_socketless_dispatch_error(err);
+                        Self::record_socketless_dispatch_error(
+                            &mut self.inner.ip_packet_stats,
+                            err,
+                        );
                     }
                 }
                 #[cfg(feature = "medium-ieee802154")]
@@ -1348,7 +1354,10 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        self.record_socketless_dispatch_error(err);
+                        Self::record_socketless_dispatch_error(
+                            &mut self.inner.ip_packet_stats,
+                            err,
+                        );
                     }
                 }
             }
