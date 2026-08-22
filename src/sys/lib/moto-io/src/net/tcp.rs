@@ -492,7 +492,6 @@ impl TcpListener {
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
-            diag: StreamDiag::default(),
         });
         crate::net::channel::stats_tcp_stream_created();
 
@@ -718,33 +717,6 @@ pub struct TcpStream {
 
     // Written TX bytes awaiting pickup by the IO thread; see PendingTxPage.
     pending_tx: Mutex<VecDeque<PendingTxPage>>,
-
-    diag: StreamDiag,
-}
-
-/// Readiness-path diagnostics (from the russhd-wedge diagnosis; record in
-/// networking-remaining-steps.md's git history): cheap
-/// Relaxed counters stamped on the data path, sampled by the channel
-/// watchdog to spot a socket whose readiness edge went missing. Timestamps
-/// are `Instant::as_u64` ticks; 0 means never.
-#[derive(Default)]
-pub(super) struct StreamDiag {
-    /// Bytes handed to readers by `poll_rx` (the reader-progress signal).
-    pub rx_bytes: AtomicU64,
-    /// READABLE edges emitted through the event listener.
-    pub readable_raised: AtomicU64,
-    pub last_readable_ts: AtomicU64,
-    /// WRITABLE edges emitted through the event listener.
-    pub writable_raised: AtomicU64,
-    pub last_writable_ts: AtomicU64,
-    /// `poll_rx` returned `E_NOT_READY`: a reader saw WouldBlock and now
-    /// depends on a future READABLE edge.
-    pub rx_not_ready: AtomicU64,
-    pub last_rx_not_ready_ts: AtomicU64,
-    /// `write_nonblocking` returned `E_NOT_READY`: a writer saw WouldBlock
-    /// and now depends on a future WRITABLE edge.
-    pub tx_not_ready: AtomicU64,
-    pub last_tx_not_ready_ts: AtomicU64,
 }
 
 /// A TX io_page in the stream's `pending_tx` queue, not yet sent to sys-io.
@@ -1076,7 +1048,6 @@ impl TcpStream {
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
             pending_tx: Mutex::new(VecDeque::new()),
-            diag: StreamDiag::default(),
         });
         super::channel::stats_tcp_stream_created();
 
@@ -1293,25 +1264,6 @@ impl TcpStream {
     }
 
     fn poll_rx(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
-        let res = self.poll_rx_inner(bufs, peek);
-        match &res {
-            Ok(n) => {
-                if !peek && *n > 0 {
-                    self.diag.rx_bytes.fetch_add(*n as u64, Ordering::Relaxed);
-                }
-            }
-            Err(err) if *err == moto_rt::E_NOT_READY => {
-                self.diag.rx_not_ready.fetch_add(1, Ordering::Relaxed);
-                self.diag
-                    .last_rx_not_ready_ts
-                    .store(Instant::now().as_u64(), Ordering::Relaxed);
-            }
-            Err(_) => {}
-        }
-        res
-    }
-
-    fn poll_rx_inner(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
         let mut recv_q = self.recv_queue.lock();
 
         loop {
@@ -1462,18 +1414,6 @@ impl TcpStream {
     }
 
     fn raise_readiness(&self, edges: Readiness) {
-        if edges.contains(Readiness::READABLE) {
-            self.diag.readable_raised.fetch_add(1, Ordering::Relaxed);
-            self.diag
-                .last_readable_ts
-                .store(Instant::now().as_u64(), Ordering::Relaxed);
-        }
-        if edges.contains(Readiness::WRITABLE) {
-            self.diag.writable_raised.fetch_add(1, Ordering::Relaxed);
-            self.diag
-                .last_writable_ts
-                .store(Instant::now().as_u64(), Ordering::Relaxed);
-        }
         if let Some(listener) = &self.event_listener {
             listener.on_readiness(edges);
         }
@@ -1596,12 +1536,6 @@ impl TcpStream {
         }
 
         if written == 0 {
-            // Stamped before the recheck below: a WRITABLE the recheck
-            // raises must timestamp as answering this WouldBlock.
-            self.diag.tx_not_ready.fetch_add(1, Ordering::Relaxed);
-            self.diag
-                .last_tx_not_ready_ts
-                .store(Instant::now().as_u64(), Ordering::Relaxed);
             // Registers and re-checks (see maybe_can_write): space
             // appearing concurrently raises WRITABLE, and NOT_READY
             // stays correct either way -- the caller polls and retries.
@@ -1878,46 +1812,6 @@ impl TcpStream {
     pub fn take_error(&self) -> ErrorCode {
         let err = self.error.swap(moto_rt::E_OK, Ordering::Relaxed);
         err as ErrorCode
-    }
-
-    pub(super) fn diag(&self) -> &StreamDiag {
-        &self.diag
-    }
-
-    /// One PDIAG line for this stream to the kernel log, then the
-    /// listener's delivery-side state. Counter ages are ms; -1 = never.
-    pub(super) fn log_diag(&self, tag: &str, now: Instant) {
-        fn age_ms(now: Instant, ts: u64) -> i64 {
-            if ts == 0 {
-                -1
-            } else {
-                now.duration_since(Instant::from_u64(ts)).as_millis() as i64
-            }
-        }
-        let d = &self.diag;
-        let handle = self.handle.load(Ordering::Acquire);
-        moto_log!(
-            "PDIAG {} h=0x{:x} st={:?} q={} rxb={} rr={}@{} wr={}@{} rnr={}@{} tnr={}@{} sp={} ptx={} rxw={}",
-            tag,
-            handle,
-            self.tcp_state(),
-            self.has_rx_bytes() as u8,
-            d.rx_bytes.load(Ordering::Relaxed),
-            d.readable_raised.load(Ordering::Relaxed),
-            age_ms(now, d.last_readable_ts.load(Ordering::Relaxed)),
-            d.writable_raised.load(Ordering::Relaxed),
-            age_ms(now, d.last_writable_ts.load(Ordering::Relaxed)),
-            d.rx_not_ready.load(Ordering::Relaxed),
-            age_ms(now, d.last_rx_not_ready_ts.load(Ordering::Relaxed)),
-            d.tx_not_ready.load(Ordering::Relaxed),
-            age_ms(now, d.last_tx_not_ready_ts.load(Ordering::Relaxed)),
-            self.have_write_buffer_space() as u8,
-            self.pending_tx.lock().len(),
-            self.rx_waiters.len(),
-        );
-        if let Some(listener) = &self.event_listener {
-            listener.log_diag(handle);
-        }
     }
 }
 

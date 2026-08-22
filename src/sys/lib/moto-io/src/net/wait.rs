@@ -85,6 +85,7 @@ impl WaitSet {
         }
     }
 
+    #[cfg(feature = "netdev")]
     pub(super) fn len(&self) -> usize {
         self.inner.lock().waiters.len()
     }

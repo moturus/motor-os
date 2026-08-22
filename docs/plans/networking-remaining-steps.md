@@ -23,7 +23,7 @@ deletion and rewiring, stop it rather than delaying the highest-priority items.
   concrete Cubic field. Also remove sys-io's now-redundant explicit Cubic
   selection. This deletes a broken unused Reno implementation and makes it
   impossible to build TCP accidentally without congestion control.
-- Remove the temporary PDIAG readiness instrumentation end to end. This is
+- COMPLETED: Remove the temporary PDIAG readiness instrumentation end to end. This is
   naturally two bounded deletion patches if needed: first remove moto-io's
   per-channel RXSTALL/TXSTALL watchdog, `StreamDiag`, data-path stamps, and
   listener logging hook; then remove rt.vdso's `SourceDiag`/`RegistryDiag`
