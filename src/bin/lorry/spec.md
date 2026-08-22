@@ -902,6 +902,15 @@ family, effective flags/linker/lints, build-script results, and dependency
 metadata. Distinct host/target, feature, profile, panic, and harness contexts
 are distinct units.
 
+Each rustc unit writes into a deterministic private directory below the
+profile's `build` tree. Lorry passes one `-L dependency` search path for every
+unit in the complete transitive Rust dependency closure and passes direct
+artifacts through exact `--extern` paths. A unit's own output directory is
+never one of its dependency search paths, and completed unit directories are
+not modified later in the build. This follows Cargo's current per-unit output
+layout while retaining the selected compatibility family's unit identities
+and artifact names.
+
 A dependency manifest with `[lib] proc-macro = true` produces a first-class
 procedural-macro unit. Lorry must compile it with `--crate-type proc-macro`
 for the compiler host, compile its normal and build dependency closure for

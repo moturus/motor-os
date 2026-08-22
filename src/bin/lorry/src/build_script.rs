@@ -77,7 +77,7 @@ pub struct EnvironmentOptions<'a> {
     pub rustc: &'a Path,
     pub host: &'a str,
     pub target: &'a TargetInfo,
-    pub host_profile: &'a Path,
+    pub dynamic_library_paths: &'a [PathBuf],
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub release: bool,
@@ -109,7 +109,6 @@ pub fn environment(
         (&manifest.path, "CARGO_MANIFEST_PATH"),
         (options.out_dir, "OUT_DIR"),
         (options.temp_dir, "temporary directory"),
-        (options.host_profile, "host profile"),
     ] {
         if !path.is_absolute() {
             return Err(Error::failure(format!(
@@ -221,7 +220,7 @@ pub fn environment(
     for name in ["TMPDIR", "TMP", "TEMP"] {
         value(&mut values, name, options.temp_dir);
     }
-    let dynamic = std::env::join_paths([options.host_profile.join("deps")]).map_err(|error| {
+    let dynamic = std::env::join_paths(options.dynamic_library_paths).map_err(|error| {
         Error::failure(format!(
             "failed to construct build-script dynamic-library search path: {error}"
         ))
@@ -890,7 +889,7 @@ mod tests {
             )
             .unwrap(),
         };
-        let host_profile = fixture.root.join("host/release");
+        let dynamic_library_paths = [fixture.root.join("host-dependency")];
         let environment = environment(
             &manifest,
             &unit,
@@ -900,7 +899,7 @@ mod tests {
                 rustc: Path::new("/tools/rustc"),
                 host: "x86_64-unknown-linux-gnu",
                 target: &target,
-                host_profile: &host_profile,
+                dynamic_library_paths: &dynamic_library_paths,
                 out_dir: &fixture.out,
                 temp_dir: &fixture.root.join("temp"),
                 release: true,
@@ -928,7 +927,7 @@ mod tests {
         assert_eq!(environment["TMP"], fixture.root.join("temp"));
         assert_eq!(
             environment[dynamic_library_path_variable()],
-            std::env::join_paths([host_profile.join("deps")]).unwrap()
+            std::env::join_paths(&dynamic_library_paths).unwrap()
         );
         for rejected in [
             "HOME",

@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
 use crate::cache::{BuildCaches, BuildScriptInput, CacheKey, DependencyInput, UnitInput};
 use crate::compile::{
-    BuildOutput, CommandOptions, RustcOutput, dependency_rustc_invocation,
-    dependency_rustc_invocation_with_build_output,
+    BuildOutput, CommandOptions, RustcOutput, dependency_directories, dependency_rustc_invocation,
+    dependency_rustc_invocation_with_build_output, unit_output_directory,
 };
 use crate::diagnostic::{Error, Result};
 use crate::hash::sha256_file;
@@ -176,14 +176,6 @@ fn execute_inner(
     options: &Options<'_>,
     previous: Option<(&CompilationPlan, &Outputs)>,
 ) -> Result<Outputs> {
-    create_directory(
-        &options.host_profile.join("deps"),
-        "host dependency directory",
-    )?;
-    create_directory(
-        &options.target_profile.join("deps"),
-        "target dependency directory",
-    )?;
     let commands = CommandOptions {
         cargo: options.cargo,
         workspace_root: options.workspace_root,
@@ -392,12 +384,22 @@ fn execute_unit(
                         )));
                     }
                 };
-                let root = options.host_profile.join("build").join(format!(
-                    "{}-{}",
-                    manifest.name,
-                    planned.identity.extra_filename.trim_start_matches('-')
-                ));
-                let out_dir = root.join("out");
+                let compile = plan.units.get(compile_key).ok_or_else(|| {
+                    Error::failure(format!(
+                        "build-script executable unit for `{} {}` is absent",
+                        key.package.name, key.package.version
+                    ))
+                })?;
+                let directories = dependency_directories(plan, compile, commands)?;
+                let dynamic_library_paths = directories
+                    .iter()
+                    .filter(|directory| directory.compile_kind == CompileKind::Host)
+                    .map(|directory| directory.path.clone())
+                    .collect::<Vec<_>>();
+                let out_dir = unit_output_directory(planned, commands);
+                let root = out_dir
+                    .parent()
+                    .ok_or_else(|| Error::failure("build-script output has no unit directory"))?;
                 let temp_dir = root.join("tmp");
                 create_directory(&out_dir, "build-script OUT_DIR")?;
                 create_directory(&temp_dir, "build-script temporary directory")?;
@@ -414,7 +416,7 @@ fn execute_unit(
                         rustc: &options.toolchain.rustc,
                         host: &options.host.triple,
                         target,
-                        host_profile: options.host_profile,
+                        dynamic_library_paths: &dynamic_library_paths,
                         out_dir: &out_dir,
                         temp_dir: &temp_dir,
                         release: options.release,
@@ -439,7 +441,11 @@ fn execute_unit(
                     planned.source_remap.as_ref(),
                 )?;
                 environment.extend(native.environment);
-                let mut read_only = sandbox_inputs(manifests, options);
+                let mut read_only = sandbox_inputs(
+                    manifests,
+                    options,
+                    directories.iter().map(|directory| directory.path.clone()),
+                );
                 read_only.extend(native.read_only);
                 read_only.sort();
                 read_only.dedup();
@@ -918,13 +924,13 @@ fn install_unhashed(source: &Path, destination: &Path) -> Result<()> {
 fn sandbox_inputs(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &Options<'_>,
+    dependency_directories: impl IntoIterator<Item = PathBuf>,
 ) -> Vec<PathBuf> {
     let mut paths = manifests
         .values()
         .map(|manifest| manifest.root.clone())
         .collect::<Vec<_>>();
-    paths.push(options.host_profile.join("deps"));
-    paths.push(options.target_profile.join("deps"));
+    paths.extend(dependency_directories);
     if let Some(toolchain_root) = options
         .toolchain
         .rustc

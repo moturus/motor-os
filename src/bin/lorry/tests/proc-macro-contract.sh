@@ -119,12 +119,13 @@ printf '%s\n' \
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" +"$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET"
 )
-find "$WORK/project/target/lorry/debug/deps" -maxdepth 1 -type f \
+find "$WORK/project/target/lorry/debug/build/derive-answer" -type f \
     -name 'libderive_answer-*.so' | grep -q .
-[ "$(find "$WORK/project/target/lorry/debug/deps" -maxdepth 1 -type f \
+[ "$(find "$WORK/project/target/lorry/debug/build/macro-helper" -type f \
     -name 'libmacro_helper-*.rlib' | wc -l)" -eq 2 ]
-if find "$WORK/project/target/lorry/$MOTOR_TARGET/debug/deps" \
-    -maxdepth 1 -type f -name 'libderive_answer-*.so' | grep -q .; then
+if [ -d "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" ] &&
+    find "$WORK/project/target/lorry/$MOTOR_TARGET/debug/build/derive-answer" \
+        -type f -name 'libderive_answer-*.so' | grep -q .; then
     echo "proc macro was incorrectly compiled as a Motor target artifact" >&2
     exit 1
 fi

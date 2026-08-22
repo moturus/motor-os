@@ -18,12 +18,12 @@ use crate::manifest::{
 use crate::process::{self, RustcCommand};
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
-use crate::resolver::{Resolution, TargetSelection, selected_root_features};
+use crate::resolver::{CompileKind, Resolution, TargetSelection, selected_root_features};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
+use crate::unit::{CompilationPlan, PlanOptions, UnitEdgeKind, UnitKey, UnitKind};
 use crate::validation::ValidationMode;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -518,13 +518,6 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let destination = profile_destination(build.manifest, build.physical_target, build.release);
     let staging = AtomicDirectory::new(&profile_parent, profile_name)?;
-    let dependencies = staging.path().join("deps");
-    fs::create_dir(&dependencies).map_err(|error| {
-        Error::failure(format!(
-            "failed to create dependency output `{}`: {error}",
-            dependencies.display()
-        ))
-    })?;
     crate::trace::event("created build staging directory");
 
     Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
@@ -761,12 +754,16 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
 
     drop(prepared);
     if build.physical_target.is_some() {
-        fs::remove_dir_all(&host_profile).map_err(|error| {
-            Error::failure(format!(
-                "failed to remove temporary host dependency output `{}`: {error}",
-                host_profile.display()
-            ))
-        })?;
+        match fs::remove_dir_all(&host_profile) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to remove temporary host dependency output `{}`: {error}",
+                    host_profile.display()
+                )));
+            }
+        }
     }
 
     let relative_primary = compiled
@@ -1547,6 +1544,13 @@ struct RootDependency {
     rlib: PathBuf,
     rmeta: PathBuf,
     proc_macro: Option<PathBuf>,
+    search_paths: Vec<RootSearchPath>,
+}
+
+#[derive(Clone)]
+struct RootSearchPath {
+    compile_kind: CompileKind,
+    path: PathBuf,
 }
 
 fn root_dependencies(
@@ -1606,9 +1610,67 @@ fn root_dependencies(
             rlib,
             rmeta,
             proc_macro,
+            search_paths: root_dependency_search_paths(plan, outputs, key)?,
         });
     }
     Ok(result)
+}
+
+fn root_dependency_search_paths(
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+    root: &UnitKey,
+) -> Result<Vec<RootSearchPath>> {
+    let mut selected = BTreeSet::new();
+    let mut pending = vec![root.clone()];
+    while let Some(key) = pending.pop() {
+        if !selected.insert(key.clone()) {
+            continue;
+        }
+        let planned = plan.units.get(&key).ok_or_else(|| {
+            Error::failure(format!(
+                "root dependency search path references absent unit `{} {}`",
+                key.package.name, key.package.version
+            ))
+        })?;
+        pending.extend(
+            planned
+                .unit
+                .dependencies
+                .iter()
+                .filter(|edge| edge.kind == UnitEdgeKind::RustDependency)
+                .map(|edge| edge.unit.clone()),
+        );
+    }
+    plan.order
+        .iter()
+        .filter(|key| selected.contains(*key))
+        .map(|key| {
+            let artifact = outputs.artifacts.get(key).ok_or_else(|| {
+                Error::failure(format!(
+                    "root dependency search unit `{} {}` has no artifact",
+                    key.package.name, key.package.version
+                ))
+            })?;
+            let path = match artifact {
+                crate::compile::RustcOutput::Library { rlib, .. } => rlib,
+                crate::compile::RustcOutput::ProcMacro {
+                    dynamic_library, ..
+                } => dynamic_library,
+                crate::compile::RustcOutput::BuildScript { .. } => {
+                    return Err(Error::failure(
+                        "root Rust dependency resolved to a build-script artifact",
+                    ));
+                }
+            }
+            .parent()
+            .ok_or_else(|| Error::failure("root dependency artifact has no parent directory"))?;
+            Ok(RootSearchPath {
+                compile_kind: key.compile_kind,
+                path: path.to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -1968,7 +2030,7 @@ fn compile_root_library(
     build: &Build<'_>,
     target: &LibraryTarget,
     staging: &Path,
-    host_profile: &Path,
+    _host_profile: &Path,
     dependencies: &[RootDependency],
     features: &[String],
     test_profile: bool,
@@ -1979,23 +2041,24 @@ fn compile_root_library(
         .collect::<Vec<_>>();
     let target = RootTarget::Library(target);
     let identity = root_identity(build, target, false, test_profile, features, &identities);
+    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
+    create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
         build,
         target,
         false,
         &identity,
         staging,
-        host_profile,
         dependencies,
         None,
         features,
         test_profile,
     );
-    run_root_rustc(build, target, false, host_profile, &arguments, None)?;
+    run_root_rustc(build, target, false, dependencies, &arguments, None)?;
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
-    let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
-    let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
-    let dep_info = staging.join("deps").join(format!("{stem}.d"));
+    let rlib = output_dir.join(format!("lib{stem}.rlib"));
+    let rmeta = output_dir.join(format!("lib{stem}.rmeta"));
+    let dep_info = output_dir.join(format!("{stem}.d"));
     verify_artifacts([&rlib, &rmeta, &dep_info])?;
     Ok(RootLibraryArtifact {
         identity,
@@ -2010,7 +2073,7 @@ fn compile_root_binary(
     target: &BinaryTarget,
     test: bool,
     staging: &Path,
-    host_profile: &Path,
+    _host_profile: &Path,
     dependencies: &[RootDependency],
     library: Option<&RootLibraryArtifact>,
     features: &[String],
@@ -2025,20 +2088,21 @@ fn compile_root_binary(
     }
     let target = RootTarget::Binary(target);
     let identity = root_identity(build, target, test, test_profile, features, &identities);
+    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
+    create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
         build,
         target,
         test,
         &identity,
         staging,
-        host_profile,
         dependencies,
         library,
         features,
         test_profile,
     );
-    run_root_rustc(build, target, test, host_profile, &arguments, None)?;
-    let hashed = staging.join("deps").join(format!(
+    run_root_rustc(build, target, test, dependencies, &arguments, None)?;
+    let hashed = output_dir.join(format!(
         "{}{}",
         target.crate_name(),
         identity.extra_filename
@@ -2071,7 +2135,7 @@ fn compile_root_harness(
     build: &Build<'_>,
     target: RootTarget<'_>,
     staging: &Path,
-    host_profile: &Path,
+    _host_profile: &Path,
     dependencies: &[RootDependency],
     library: Option<&RootLibraryArtifact>,
     features: &[String],
@@ -2087,13 +2151,14 @@ fn compile_root_harness(
     }
     identities.extend_from_slice(artifact_dependencies);
     let identity = root_identity(build, target, true, true, features, &identities);
+    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
+    create_directory(&output_dir, "root rustc output directory")?;
     let arguments = rustc_arguments(
         build,
         target,
         true,
         &identity,
         staging,
-        host_profile,
         dependencies,
         library,
         features,
@@ -2103,11 +2168,11 @@ fn compile_root_harness(
         build,
         target,
         true,
-        host_profile,
+        dependencies,
         &arguments,
         integration_environment,
     )?;
-    let artifact = staging.join("deps").join(format!(
+    let artifact = output_dir.join(format!(
         "{}{}",
         target.crate_name(),
         identity.extra_filename
@@ -2142,11 +2207,19 @@ fn root_identity(
     })
 }
 
+fn root_output_directory(staging: &Path, package_name: &str, identity: &Identity) -> PathBuf {
+    staging
+        .join("build")
+        .join(package_name)
+        .join(identity.extra_filename.trim_start_matches('-'))
+        .join("out")
+}
+
 fn run_root_rustc(
     build: &Build<'_>,
     target: RootTarget<'_>,
     test: bool,
-    host_profile: &Path,
+    dependencies: &[RootDependency],
     arguments: &[OsString],
     integration_environment: Option<IntegrationEnvironment<'_>>,
 ) -> Result<()> {
@@ -2170,7 +2243,7 @@ fn run_root_rustc(
     }
     let environment = rustc_environment(
         build,
-        host_profile,
+        dependencies,
         target,
         integration_environment.as_ref(),
     )?;
@@ -2197,6 +2270,15 @@ fn verify_artifacts<'a>(artifacts: impl IntoIterator<Item = &'a PathBuf>) -> Res
     Ok(())
 }
 
+fn create_directory(path: &Path, description: &str) -> Result<()> {
+    fs::create_dir_all(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to create {description} `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
 fn install_primary(source: &Path, destination: &Path) -> Result<()> {
     match fs::hard_link(source, destination) {
         Ok(()) => Ok(()),
@@ -2216,7 +2298,6 @@ fn rustc_arguments(
     test: bool,
     identity: &Identity,
     staging: &Path,
-    host_profile: &Path,
     root_dependencies: &[RootDependency],
     root_library: Option<&RootLibraryArtifact>,
     features: &[String],
@@ -2314,7 +2395,7 @@ fn rustc_arguments(
         &format!("extra-filename={}", identity.extra_filename),
     );
     push(&mut args, "--out-dir");
-    args.push(staging.join("deps").into_os_string());
+    args.push(root_output_directory(staging, &build.manifest.name, identity).into_os_string());
     if let Some(target) = build.physical_target {
         push(&mut args, "--target");
         push(&mut args, target);
@@ -2336,12 +2417,15 @@ fn rustc_arguments(
     if let Some(linker) = &build.target_options.linker {
         codegen(&mut args, &format!("linker={}", linker.display()));
     }
-    push(&mut args, "-L");
-    args.push(format!("dependency={}", staging.join("deps").display()).into());
-    if build.physical_target.is_some() {
-        let host_dependencies = host_profile.join("deps");
-        push(&mut args, "-L");
-        args.push(format!("dependency={}", host_dependencies.display()).into());
+    let mut seen = BTreeSet::new();
+    for directory in root_dependencies
+        .iter()
+        .flat_map(|dependency| &dependency.search_paths)
+    {
+        if seen.insert(&directory.path) {
+            push(&mut args, "-L");
+            args.push(format!("dependency={}", directory.path.display()).into());
+        }
     }
     for dependency in root_dependencies {
         push(&mut args, "--extern");
@@ -2386,7 +2470,7 @@ fn root_lto_arguments(arguments: &mut Vec<OsString>, lto: CargoUnitLto<'_>) {
 
 fn rustc_environment(
     build: &Build<'_>,
-    host_profile: &Path,
+    dependencies: &[RootDependency],
     target: RootTarget<'_>,
     integration_environment: Option<&IntegrationEnvironment<'_>>,
 ) -> Result<BTreeMap<String, OsString>> {
@@ -2471,11 +2555,21 @@ fn rustc_environment(
     );
     value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
     value(&mut values, "CARGO_PRIMARY_PACKAGE", "1");
-    value(
-        &mut values,
-        dynamic_library_path_variable(),
-        host_profile.join("deps").as_os_str(),
-    );
+    let mut seen = BTreeSet::new();
+    let dynamic_library_paths = dependencies
+        .iter()
+        .flat_map(|dependency| &dependency.search_paths)
+        .filter(|directory| directory.compile_kind == CompileKind::Host)
+        .filter_map(|directory| {
+            seen.insert(directory.path.clone())
+                .then_some(&directory.path)
+        });
+    let dynamic = env::join_paths(dynamic_library_paths).map_err(|error| {
+        Error::failure(format!(
+            "failed to construct root rustc dynamic-library search path: {error}"
+        ))
+    })?;
+    value(&mut values, dynamic_library_path_variable(), dynamic);
     Ok(values)
 }
 
@@ -3223,13 +3317,19 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"dependency-ok");
         assert!(
-            fs::read_dir(fixture.0.join("target/lorry/debug/deps"))
+            fs::read_dir(fixture.0.join("target/lorry/debug/build/root-bin"))
                 .unwrap()
-                .any(|entry| entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("libroot_bin-"))
+                .any(|unit| {
+                    fs::read_dir(unit.unwrap().path().join("out"))
+                        .unwrap()
+                        .any(|entry| {
+                            entry
+                                .unwrap()
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with("libroot_bin-")
+                        })
+                })
         );
     }
 

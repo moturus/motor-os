@@ -301,6 +301,13 @@ units. `identity.rs` and `compile.rs` reproduce the supported Cargo rustc
 argument and metadata conventions. `executor.rs` validates inputs, invokes
 children without a shell, and verifies expected outputs.
 
+Compilation units use Cargo's current private per-unit output layout. Direct
+and transitive Rust dependencies are exposed as separate search directories,
+so concurrently executing rustc processes never scan a directory another
+unit is changing. Direct `--extern` arguments still name exact artifacts, and
+the Cargo 1.97--1.99 compatibility selection continues to control unit hashes
+and filenames rather than the output-directory topology.
+
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
 It routes immutable crates.io and reviewed required-patch units to
