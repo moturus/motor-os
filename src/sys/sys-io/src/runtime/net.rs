@@ -412,12 +412,15 @@ impl NetRuntime {
         // the inline fast path below dispatchable per message.
 
         const MAX_IN_FLIGHT: usize = 64;
+        const INLINE_DATA_YIELD_BUDGET: u8 = 32;
+
         let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
         // Pre-populate.
         for _ in 0..MAX_IN_FLIGHT {
             let _ = ticket_tx.send(()).await;
         }
 
+        let mut inline_data_messages = 0_u8;
         loop {
             match receiver.recv().await {
                 Ok(msg) => {
@@ -433,6 +436,14 @@ impl NetRuntime {
                         || msg.command == (NetCmd::TcpStreamRxAck as u16)
                     {
                         self.on_msg(msg, sender.clone()).await;
+                        inline_data_messages += 1;
+                        if inline_data_messages == INLINE_DATA_YIELD_BUDGET {
+                            inline_data_messages = 0;
+                            // A client can keep this ring permanently ready.
+                            // Poll kernel I/O and put this task behind work
+                            // discovered there before draining another batch.
+                            moto_async::yield_to_io().await;
+                        }
                         continue;
                     }
 

@@ -56,7 +56,7 @@ Within each group, order is the suggested pickup order.
   Trigger: an application writes more than the 128 KiB ring to a peer that
   stops reading, then closes or exits. Clear the queue in `drop_tcp_socket`
   and never let the linger task take a waker the TX task still needs.
-- Give the inline data path a yield budget. `runtime/net.rs` dispatches
+- COMPLETED: Give the inline data path a yield budget. `runtime/net.rs` dispatches
   `TcpStreamTx` and `TcpStreamRxAck` inline and loops while the ring is
   non-empty; the executor polls a task until it returns `Pending`. A client
   that keeps its ring non-empty (two producer threads suffice) starves device

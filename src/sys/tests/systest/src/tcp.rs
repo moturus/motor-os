@@ -1322,6 +1322,140 @@ fn test_total_clients_is_monotonic() {
     println!("test_total_clients_is_monotonic() PASS");
 }
 
+fn test_inline_tcp_data_flood_yields_to_other_clients() {
+    use moto_sys_io::api_net;
+
+    const MIN_MESSAGES: u64 = 4_096;
+    const MIN_FULL_OBSERVATIONS: u64 = 128;
+
+    let flood_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let flood_addr = flood_listener.local_addr().unwrap();
+    let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let probe_addr = probe_listener.local_addr().unwrap();
+    let clients_before = read_sys_io_metric("net.active_clients");
+
+    let flood_connection =
+        Arc::new(moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap());
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    flood_connection
+        .send(api_net::tcp_stream_connect_request(&flood_addr, 0))
+        .unwrap();
+    let response = recv_raw_net_response(&flood_connection);
+    response.status().unwrap();
+    let flood_handle = response.handle;
+    let (flood_peer, _) = flood_listener.accept().unwrap();
+
+    let probe_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let messages = Arc::new(AtomicU64::new(0));
+    let full_observations = Arc::new(AtomicU64::new(0));
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let mut producers = Vec::new();
+    for _ in 0..2 {
+        let connection = flood_connection.clone();
+        let stop = stop.clone();
+        let messages = messages.clone();
+        let full_observations = full_observations.clone();
+        let start = start.clone();
+        producers.push(std::thread::spawn(move || {
+            let mut ack = moto_ipc::io_channel::Msg::new();
+            ack.command = api_net::NetCmd::TcpStreamRxAck as u16;
+            ack.handle = flood_handle;
+            start.wait();
+            let mut sent = 0_u64;
+            while !stop.load(Ordering::Acquire) {
+                match connection.send(ack) {
+                    Ok(()) => {
+                        sent += 1;
+                        messages.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(moto_rt::Error::NotReady) => {
+                        full_observations.fetch_add(1, Ordering::Relaxed);
+                        std::hint::spin_loop();
+                    }
+                    Err(err) => panic!("inline-data producer failed: {err:?}"),
+                }
+            }
+            sent
+        }));
+    }
+    start.wait();
+
+    // More than one ring's worth of successful sends proves sys-io is
+    // continuously draining this channel; full observations prove both
+    // producers are keeping pressure on it when the probe starts.
+    let load_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while messages.load(Ordering::Relaxed) < MIN_MESSAGES
+        || full_observations.load(Ordering::Relaxed) < MIN_FULL_OBSERVATIONS
+    {
+        assert!(
+            std::time::Instant::now() < load_deadline,
+            "inline-data producers did not saturate the ring: {} messages, {} full observations",
+            messages.load(Ordering::Relaxed),
+            full_observations.load(Ordering::Relaxed)
+        );
+        std::thread::yield_now();
+    }
+
+    probe_connection
+        .send(api_net::tcp_stream_connect_request(&probe_addr, 0))
+        .unwrap();
+    let probe_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut probe_response = None;
+    let mut probe_error = None;
+    while std::time::Instant::now() < probe_deadline {
+        match probe_connection.recv() {
+            Ok(response) => {
+                probe_response = Some(response);
+                break;
+            }
+            Err(moto_rt::Error::NotReady) => std::thread::yield_now(),
+            Err(err) => {
+                probe_error = Some(err);
+                break;
+            }
+        }
+    }
+    stop.store(true, Ordering::Release);
+    let producer_messages: Vec<_> = producers
+        .into_iter()
+        .map(|producer| producer.join().unwrap())
+        .collect();
+
+    let probe_status = probe_response.map(|response| response.status());
+    let probe_peer = if probe_status == Some(Ok(())) {
+        Some(probe_listener.accept().unwrap().0)
+    } else {
+        None
+    };
+    assert!(producer_messages.iter().all(|count| *count > 0));
+    let clients_with_raw_connections = read_sys_io_metric("net.active_clients");
+    assert!(clients_with_raw_connections >= 2);
+
+    drop((probe_peer, probe_listener));
+    drop((flood_peer, flood_listener));
+    drop(probe_connection);
+    drop(flood_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| {
+        value <= clients_with_raw_connections - 2
+    });
+
+    assert!(
+        probe_error.is_none(),
+        "probe receive failed: {probe_error:?}"
+    );
+    probe_status
+        .unwrap_or_else(|| {
+            panic!(
+                "another client did not connect during the inline-data flood; producer messages: {producer_messages:?}"
+            )
+        })
+        .unwrap();
+    println!("test_inline_tcp_data_flood_yields_to_other_clients() PASS");
+}
+
 fn test_resolved_listener_bind_conflicts() {
     use moto_sys_io::api_net;
 
@@ -1373,6 +1507,7 @@ pub fn test_native_net_cancellation() {
     // Run this first, while test_channel_teardown's assert-empty guarantee
     // still provides stable baselines for the global sys-io gauges.
     test_total_clients_is_monotonic();
+    test_inline_tcp_data_flood_yields_to_other_clients();
     test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
     test_stale_cross_connection_accept_is_requeued();
