@@ -1,4 +1,5 @@
 use super::socket::MotoSocket;
+use crate::runtime::channel_budget::ClientSender;
 use moto_sys::SysHandle;
 use std::{
     cell::RefCell,
@@ -22,11 +23,11 @@ pub(super) struct TcpListener {
     // - or 0.0.0.0:PORT.
     // - or, if the user gave us IPADDR:0, this will have IPADDR:EPHEMERAL_PORT.
     socket_addr: SocketAddr,
-    client_sender: moto_ipc::io_channel::Sender,
+    client_sender: ClientSender,
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, moto_ipc::io_channel::Sender)>,
+    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, ClientSender)>,
 
     // Connected sockets that did not yet emit the accept QE.
     // When the socket is accepted, the oneshot should be fired.
@@ -69,7 +70,7 @@ impl TcpListener {
         self.listener_id
     }
 
-    pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
+    pub(super) fn client_sender(&self) -> &ClientSender {
         &self.client_sender
     }
 
@@ -374,7 +375,7 @@ impl TcpListener {
         remote_addr: SocketAddr,
         accepted_tx: moto_async::oneshot::Sender<()>,
         accept_req: moto_ipc::io_channel::Msg,
-        client_sender: moto_ipc::io_channel::Sender,
+        client_sender: ClientSender,
     ) {
         let moto_socket = this
             .borrow()
@@ -432,7 +433,7 @@ impl TcpListener {
     pub(super) async fn bind(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        client_sender: &moto_ipc::io_channel::Sender,
+        client_sender: &ClientSender,
     ) -> std::io::Result<()> {
         runtime.pressure.admit()?;
         let mut resp = msg;
@@ -561,7 +562,7 @@ impl TcpListener {
     pub(super) async fn accept(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
         let tcp_listener = runtime

@@ -110,6 +110,8 @@ mod ids {
     pub const NET_EGRESS_FRAGMENT_STAGE_BUSY_DROPS: u32 = 62;
     pub const NET_PMTU_UPDATES_ACCEPTED: u32 = 63;
     pub const NET_ICMP_PMTU_MESSAGES_REJECTED: u32 = 64;
+
+    pub const NET_CHANNELS: u32 = 65;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -344,7 +346,7 @@ impl NetStats {
 
     /// Build a snapshot of the metrics in moto-stats wire form. Mirrors
     /// [`descriptors`].
-    fn entries(&self) -> Vec<MetricEntry> {
+    fn entries(&self, channels: u64) -> Vec<MetricEntry> {
         let mut entries = vec![
             MetricEntry::global(ids::NET_NUM_DEVICES, self.num_devices.get()),
             MetricEntry::global(ids::NET_ACTIVE_CLIENTS, self.active_clients.get()),
@@ -409,6 +411,7 @@ impl NetStats {
             ),
             MetricEntry::global(ids::NET_LISTENERS_ARMED, self.net_listeners_armed.get()),
             MetricEntry::global(ids::NET_CLIENTS_REFUSED, self.clients_refused.get()),
+            MetricEntry::global(ids::NET_CHANNELS, channels),
             MetricEntry::global(ids::NET_TCP_RST_SUPPRESSED, self.tcp_rst_suppressed.get()),
             MetricEntry::global(
                 ids::NET_TCP_COOKIES_SUPPRESSED,
@@ -543,6 +546,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         ),
         MetricDescWire::new(ids::NET_LISTENERS_ARMED, "net.listeners_armed"),
         MetricDescWire::new(ids::NET_CLIENTS_REFUSED, "net.clients_refused"),
+        MetricDescWire::new(ids::NET_CHANNELS, "net.channels"),
         MetricDescWire::new(ids::NET_TCP_RST_SUPPRESSED, "net.tcp.rst_suppressed"),
         MetricDescWire::new(
             ids::NET_TCP_COOKIES_SUPPRESSED,
@@ -652,7 +656,8 @@ async fn stats_responder_task(
         // The receiver is gone if the polling thread stopped waiting; ignore.
         match req {
             StatsRequest::Metrics(respond_to) => {
-                let _ = respond_to.send(runtime.stats.entries());
+                let _ =
+                    respond_to.send(runtime.stats.entries(runtime.channel_budget.net_channels()));
             }
             StatsRequest::TcpSockets {
                 start_id,
@@ -879,7 +884,7 @@ pub(crate) mod self_test {
     fn every_metric_is_described() -> Result<(), String> {
         let described: Vec<u32> = descriptors().iter().map(|desc| desc.metric).collect();
         let reported: Vec<u32> = NetStats::default()
-            .entries()
+            .entries(0)
             .iter()
             .map(|entry| entry.metric)
             .collect();

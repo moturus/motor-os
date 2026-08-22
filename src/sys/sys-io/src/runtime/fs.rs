@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use moto_sys::caps::ProcessRole;
 
+use crate::runtime::channel_budget;
 use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
@@ -279,17 +280,21 @@ pub(crate) struct FsRuntime {
     fs: Rc<LocalRwLock<FS>>,
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
+    channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
 struct PendingLockResponse {
     entry_id: EntryId,
     connection_id: u64,
     open_id: u64,
-    sender: moto_ipc::io_channel::Sender,
+    sender: channel_budget::ClientSender,
     response: moto_ipc::io_channel::Msg,
 }
 
-pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalRwLock<FS>>> {
+pub(super) async fn init(
+    block_device: virtio_async::VirtioDevice,
+    channel_budget: Rc<channel_budget::ChannelBudget>,
+) -> Result<Rc<LocalRwLock<FS>>> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
 
@@ -356,6 +361,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
         fs: fs.clone(),
         fs_stats,
         locks: Default::default(),
+        channel_budget,
     };
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
@@ -436,6 +442,15 @@ async fn fs_listener(
         }
     };
 
+    // The wait-handle budget (see channel_budget): a channel past it would
+    // eventually make the runtime thread's SysCpu::wait exceed the kernel's
+    // handle cap, which is fatal. Dropped like the pressure refusal above;
+    // the client's pending op fails with the channel error.
+    let Ok(sender) = runtime.channel_budget.admit_fs(sender) else {
+        log::debug!("FS: dropping new client: the channel budget is exhausted.");
+        return Ok(());
+    };
+
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
     //
@@ -497,7 +512,7 @@ fn served_under_pressure(msg: &moto_ipc::io_channel::Msg) -> bool {
 
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
-    sender: moto_ipc::io_channel::Sender,
+    sender: channel_budget::ClientSender,
     runtime: FsRuntime,
     role: Role,
 ) {
@@ -569,7 +584,7 @@ async fn on_msg(
 
 async fn on_cmd_file_lock(
     msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    sender: &channel_budget::ClientSender,
     runtime: FsRuntime,
 ) -> Result<()> {
     use lock_manager::{Acquire, Mode};

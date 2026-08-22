@@ -41,6 +41,9 @@ pub struct KernelConfig {
 
 impl KernelConfig {
     const DEFAULT_MAX_USER_MEMORY: u64 = u64::MAX; // 32_u64 * (1_u64 << 20);
+
+    // sys-io's client-channel budget (sys-io/src/runtime/channel_budget.rs)
+    // mirrors this cap; lowering it here requires lowering the budget too.
     const DEFAULT_MAX_WAIT_HANDLES: u32 = 1024;
 
     const fn new() -> Self {

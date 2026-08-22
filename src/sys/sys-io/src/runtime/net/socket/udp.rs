@@ -6,6 +6,8 @@ use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 
+use crate::runtime::channel_budget::ClientSender;
+
 use super::super::NetRuntime;
 use super::MotoSocket;
 use super::SocketBase;
@@ -41,7 +43,7 @@ impl MotoSocket {
         device_idx: usize,
         socket_addr: SocketAddr,
         ephemeral_port: Option<u16>,
-        client_sender: moto_ipc::io_channel::Sender,
+        client_sender: ClientSender,
         subchannel_mask: u64,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         let rx_buffer = moto_netstack::socket::udp::PacketBuffer::new(
@@ -216,7 +218,7 @@ impl MotoSocket {
     pub async fn udp_bind_for_remote(
         runtime: &NetRuntime,
         mut msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
     ) -> std::io::Result<()> {
         let remote_addr = api_net::get_socket_addr(&msg.payload);
         if remote_addr.ip().is_unspecified() {
@@ -240,7 +242,7 @@ impl MotoSocket {
     pub async fn udp_bind(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
     ) -> std::io::Result<()> {
         let socket_addr = api_net::get_socket_addr(&msg.payload);
         let ip_addr = socket_addr.ip();
@@ -261,7 +263,7 @@ impl MotoSocket {
     async fn udp_bind_on_device(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
         mut socket_addr: SocketAddr,
         device_idx: usize,
     ) -> std::io::Result<()> {

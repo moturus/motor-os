@@ -92,6 +92,7 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::stats::TcpProtocolState;
 
+use crate::runtime::channel_budget::ClientSender;
 use crate::runtime::net::tcp_listener::TcpListener;
 
 use super::super::EphemeralTcpPort;
@@ -447,7 +448,7 @@ impl MotoSocket {
         runtime: &NetRuntime,
         device_idx: usize,
         local_addr: SocketAddr,
-        client_sender: moto_ipc::io_channel::Sender,
+        client_sender: ClientSender,
         subchannel_mask: u64,
         sizes: TcpBufferSizes,
         rings: RingBuild,
@@ -1718,7 +1719,7 @@ impl MotoSocket {
     pub async fn tcp_connect(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
     ) -> std::io::Result<()> {
         runtime.pressure.admit()?;
         let remote_addr = api_net::get_socket_addr(&msg.payload);

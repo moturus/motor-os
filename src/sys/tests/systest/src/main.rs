@@ -1223,7 +1223,7 @@ fn main() {
     stdio_file_relay::run_tests();
     // fs::run_tests();
 
-    println!("PASS");
+    println!("systest: ALL PASS");
 
     std::thread::sleep(Duration::new(0, 10_000_000));
 }

@@ -1,4 +1,6 @@
 use moto_sys::SysHandle;
+
+use crate::runtime::channel_budget::ClientSender;
 use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
 
 /// Common socket stuff. We (have to) mimic moto-netstack's structure, which
@@ -53,7 +55,7 @@ pub(super) struct SocketBase {
     local_addr: SocketAddr,
 
     // Denormalized for quick validation.
-    client_sender: moto_ipc::io_channel::Sender,
+    client_sender: ClientSender,
 
     // The socket is "detached" from its client and should be
     // dropped when last TX bytes are out (RX is not happening
@@ -67,7 +69,7 @@ impl SocketBase {
         runtime: super::NetRuntime,
         device_idx: usize,
         socket_addr: SocketAddr,
-        client_sender: moto_ipc::io_channel::Sender,
+        client_sender: ClientSender,
     ) -> Self {
         let device_notify = runtime.inner.borrow().devices[device_idx]
             .device_runtime_notify
@@ -94,7 +96,7 @@ impl SocketBase {
         self.socket_id.into()
     }
 
-    pub(super) fn sender(&self) -> &moto_ipc::io_channel::Sender {
+    pub(super) fn sender(&self) -> &ClientSender {
         &self.client_sender
     }
 
@@ -180,10 +182,7 @@ impl MotoSocket {
     }
 
     // Listening TCP sockets on accept change their clients.
-    pub(super) fn set_client_sender(
-        &mut self,
-        client_sender: &moto_ipc::io_channel::Sender,
-    ) -> bool {
+    pub(super) fn set_client_sender(&mut self, client_sender: &ClientSender) -> bool {
         let prev_handle = self.base.client_sender.remote_handle();
         let next_handle = client_sender.remote_handle();
         let mut runtime_ref = self.base.runtime.inner.borrow_mut();
