@@ -979,6 +979,95 @@ fn test_wake_on_sleep_poll_resume() {
     println!("----- moto_async::test_wake_on_sleep_poll_resume PASS");
 }
 
+fn test_yield_to_io_services_system_handle() {
+    use std::{cell::Cell, rc::Rc};
+
+    let (handle_here, handle_there) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let wake_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        SysCpu::wake(handle_here).unwrap();
+    });
+
+    let turns = moto_async::LocalRuntime::new().block_on(async {
+        let completed = Rc::new(Cell::new(false));
+        let completed_waiter = completed.clone();
+        let waiter = moto_async::LocalRuntime::spawn(async move {
+            handle_there.as_future().await.unwrap();
+            completed_waiter.set(true);
+        });
+        let completed_hot = completed.clone();
+        let hot = moto_async::LocalRuntime::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut turns = 0_u64;
+            while !completed_hot.get() {
+                moto_async::yield_to_io().await;
+                turns += 1;
+                assert!(
+                    Instant::now() < deadline,
+                    "yield_to_io did not service a latched system-handle wake"
+                );
+            }
+            turns
+        });
+
+        // The waiter registers first, then the hot spawned task keeps the run
+        // queue non-empty until its explicit I/O turn discovers the wake.
+        let turns = hot.await;
+        waiter.await;
+        turns
+    });
+
+    wake_thread.join().unwrap();
+    moto_sys::SysObj::put(handle_here).unwrap();
+    moto_sys::SysObj::put(handle_there).unwrap();
+    assert!(turns > 0);
+    println!("----- moto_async::test_yield_to_io_services_system_handle PASS");
+}
+
+fn test_yield_to_io_services_timer() {
+    use std::{cell::Cell, rc::Rc};
+
+    let turns = moto_async::LocalRuntime::new().block_on(async {
+        let completed = Rc::new(Cell::new(false));
+        let completed_timer = completed.clone();
+        let timer = moto_async::LocalRuntime::spawn(async move {
+            moto_async::sleep(Duration::from_millis(10)).await;
+            completed_timer.set(true);
+        });
+
+        // Arm the timer, then keep the root future runnable past its deadline.
+        moto_async::yield_now().await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut turns = 0_u64;
+        while !completed.get() {
+            moto_async::yield_to_io().await;
+            turns += 1;
+            assert!(
+                Instant::now() < deadline,
+                "yield_to_io did not service an expired timer"
+            );
+        }
+        timer.await;
+        turns
+    });
+
+    assert!(turns > 0);
+    println!("----- moto_async::test_yield_to_io_services_timer PASS");
+}
+
+fn test_yield_to_io_flushes_deferred_wake() {
+    let (probe, handle) = spawn_wake_probe();
+
+    moto_async::LocalRuntime::new().block_on(async move {
+        moto_async::LocalRuntime::set_wake_on_sleep(handle);
+        moto_async::yield_to_io().await;
+    });
+
+    probe.join().unwrap();
+    println!("----- moto_async::test_yield_to_io_flushes_deferred_wake PASS");
+}
+
 fn test_cancelled_timers_do_not_accumulate() {
     // Regression test: a `select!` whose timer branch always loses (the
     // shape of sys-io's device task) used to leave one cancelled entry per
@@ -1091,6 +1180,9 @@ pub fn run_all_tests() {
     test_for_each_concurrent();
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
+    test_yield_to_io_services_system_handle();
+    test_yield_to_io_services_timer();
+    test_yield_to_io_flushes_deferred_wake();
     test_cancelled_timers_do_not_accumulate();
     test_sleep_reused_across_selects();
 
