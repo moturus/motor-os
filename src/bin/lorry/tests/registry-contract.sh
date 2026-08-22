@@ -59,7 +59,7 @@ echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
 "$RUSTC" --edition=2024 -D warnings -O "$CACHE_CURL_SOURCE" \
     -o "$WORK/cache-curl"
 "$WORK/cache-curl" prepare "$HOST_CARGO_HOME" \
-    "$WORK/archive-cache" "$WORK/crates-io" "$PROJECT/Cargo.lock"
+    "$WORK/crates-io" "$PROJECT/Cargo.lock"
 cat >"$CONFIG" <<EOF
 config-version = 1
 

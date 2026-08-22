@@ -36,14 +36,11 @@ fn run() -> Result<(), String> {
 }
 
 fn prepare(arguments: &[std::ffi::OsString]) -> Result<(), String> {
-    if arguments.len() < 4 {
-        return Err(
-            "usage: lorry-cache-curl prepare CARGO_HOME ARCHIVE_CACHE OUTPUT LOCK...".to_owned(),
-        );
+    if arguments.len() < 3 {
+        return Err("usage: lorry-cache-curl prepare CARGO_HOME OUTPUT LOCK...".to_owned());
     }
     let cargo_home = absolute(&arguments[0], "Cargo home")?;
-    let archive_cache = absolute(&arguments[1], "archive cache")?;
-    let output = absolute(&arguments[2], "fixture output")?;
+    let output = absolute(&arguments[1], "fixture output")?;
     if output.exists() {
         return Err(format!(
             "fixture output `{}` already exists",
@@ -52,7 +49,7 @@ fn prepare(arguments: &[std::ffi::OsString]) -> Result<(), String> {
     }
 
     let mut packages = BTreeSet::new();
-    for lock in &arguments[3..] {
+    for lock in &arguments[2..] {
         packages.extend(load_lock(Path::new(lock))?);
     }
     if packages.is_empty() {
@@ -60,8 +57,7 @@ fn prepare(arguments: &[std::ffi::OsString]) -> Result<(), String> {
     }
 
     let index_roots = children(&cargo_home.join("registry/index"))?;
-    let mut archive_roots = children(&cargo_home.join("registry/cache"))?;
-    archive_roots.push(archive_cache);
+    let archive_roots = children(&cargo_home.join("registry/cache"))?;
     let mut by_name = BTreeMap::<String, Vec<Package>>::new();
     for package in packages {
         by_name
