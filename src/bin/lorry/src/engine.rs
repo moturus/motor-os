@@ -511,13 +511,12 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
             ))
         })?;
     }
-    let profile_name = if build.release { "release" } else { "debug" };
     let profile_parent = match build.physical_target {
         Some(target) => target_root.join(target),
         None => target_root.clone(),
     };
     let destination = profile_destination(build.manifest, build.physical_target, build.release);
-    let staging = AtomicDirectory::new(&profile_parent, profile_name)?;
+    let staging = AtomicDirectory::new_compact(&profile_parent)?;
     crate::trace::event("created build staging directory");
 
     Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
@@ -2212,7 +2211,7 @@ fn root_output_directory(staging: &Path, package_name: &str, identity: &Identity
         .join("build")
         .join(package_name)
         .join(identity.extra_filename.trim_start_matches('-'))
-        .join("out")
+        .join("deps")
 }
 
 fn run_root_rustc(
@@ -3320,7 +3319,7 @@ mod tests {
             fs::read_dir(fixture.0.join("target/lorry/debug/build/root-bin"))
                 .unwrap()
                 .any(|unit| {
-                    fs::read_dir(unit.unwrap().path().join("out"))
+                    fs::read_dir(unit.unwrap().path().join("deps"))
                         .unwrap()
                         .any(|entry| {
                             entry

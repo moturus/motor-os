@@ -139,6 +139,14 @@ impl Drop for AtomicFile {
 
 impl AtomicDirectory {
     pub fn new(parent: &Path, label: &str) -> Result<Self> {
+        Self::create(parent, || unique_name(label, "staging"))
+    }
+
+    pub fn new_compact(parent: &Path) -> Result<Self> {
+        Self::create(parent, compact_unique_name)
+    }
+
+    fn create(parent: &Path, mut next_name: impl FnMut() -> String) -> Result<Self> {
         fs::create_dir_all(parent).map_err(|error| {
             Error::failure(format!(
                 "failed to create output parent `{}`: {error}",
@@ -146,7 +154,7 @@ impl AtomicDirectory {
             ))
         })?;
         for _ in 0..100 {
-            let path = parent.join(unique_name(label, "staging"));
+            let path = parent.join(next_name());
             match create_private_directory(&path) {
                 Ok(()) => {
                     set_private(&path)?;
@@ -350,14 +358,19 @@ pub(crate) fn move_no_replace(_source: &Path, destination: &Path) -> Result<bool
 }
 
 fn unique_name(label: &str, role: &str) -> String {
+    format!(".{label}.lorry-{role}-{}", unique_suffix())
+}
+
+fn compact_unique_name() -> String {
+    format!(".l-{}", unique_suffix())
+}
+
+fn unique_suffix() -> String {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".{label}.lorry-{role}-{}-{time:x}-{sequence:x}",
-        std::process::id()
-    )
+    format!("{:x}-{time:x}-{sequence:x}", std::process::id())
 }
 
 fn set_private(_path: &Path) -> Result<()> {
@@ -475,6 +488,15 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compact_staging_keeps_build_paths_short() {
+        let root = temp_root("compact");
+        let staging = AtomicDirectory::new_compact(&root).unwrap();
+        let name = staging.path().file_name().unwrap().to_string_lossy();
+        assert!(name.len() <= 32, "staging name is too long: {name}");
         fs::remove_dir_all(root).unwrap();
     }
 

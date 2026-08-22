@@ -662,15 +662,15 @@ rustc_verify_prereqs() {
 		die "$LLVM_IMG/devtools/llvm/bin/llvm is missing — the LLVM stage stages the multicall cc fronts"
 
 	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
-	# ChildStdio EOF mapping + O_APPEND, and a 2 GiB data partition).
+	# ChildStdio EOF mapping + O_APPEND, and a 4 GiB data partition).
 	grep -q 'E_BAD_HANDLE) => Ok(0)' "$MOTOR/src/sys/lib/rt.vdso/src/stdio.rs" || \
 		die "motor-os checkout lacks the ChildStdio EOF fix (rt.vdso/src/stdio.rs) — update the checkout"
 	grep -q 'self.metadata(entry_id)?.size' "$MOTOR/src/sys/lib/rt.vdso/src/rt_fs.rs" || \
 		die "motor-os checkout lacks the O_APPEND fix (rt.vdso/src/rt_fs.rs) — update the checkout"
 	local yaml="$MOTOR/src/imager/motor-os-dev.yaml" size
 	size="$(sed -n 's/^data_partition_size_mb: *\([0-9]\{1,\}\).*/\1/p' "$yaml")"
-	if [ -z "$size" ] || [ "$size" -lt 2048 ]; then
-		die "data_partition_size_mb in $yaml must be >= 2048 — update the checkout"
+	if [ -z "$size" ] || [ "$size" -lt 4096 ]; then
+		die "data_partition_size_mb in $yaml must be >= 4096 — update the checkout"
 	fi
 }
 
