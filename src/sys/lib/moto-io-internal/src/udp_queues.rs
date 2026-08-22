@@ -11,11 +11,16 @@ use core::net::SocketAddr;
 use moto_ipc::io_channel;
 use moto_rt::ErrorCode;
 
+pub const UDP_TX_QUEUE_MAX_DATAGRAMS: usize = 16;
+pub const UDP_TX_QUEUE_MAX_BYTES: usize = 64 * io_channel::PAGE_SIZE;
+
 pub struct UdpFragmentingQueue {
     socket_id: u64,
     subchannel_mask: u64,
     queue: VecDeque<UdpDatagram>,
     msg: Option<io_channel::Msg>,
+    queued_bytes: usize,
+    byte_limit: Option<usize>,
 }
 
 impl Drop for UdpFragmentingQueue {
@@ -29,14 +34,22 @@ pub trait PageAllocator = FnOnce(u64) -> Result<io_channel::IoPage, ErrorCode>;
 pub trait PageGetter = FnOnce(u16) -> Result<io_channel::IoPage, ErrorCode>;
 
 impl UdpFragmentingQueue {
-    const MAX_LEN: usize = 16;
-
     pub fn new(socket_id: u64, subchannel_mask: u64) -> Self {
+        Self::new_inner(socket_id, subchannel_mask, None)
+    }
+
+    pub fn new_tx(socket_id: u64, subchannel_mask: u64) -> Self {
+        Self::new_inner(socket_id, subchannel_mask, Some(UDP_TX_QUEUE_MAX_BYTES))
+    }
+
+    fn new_inner(socket_id: u64, subchannel_mask: u64, byte_limit: Option<usize>) -> Self {
         Self {
             socket_id,
             subchannel_mask,
             queue: VecDeque::new(),
             msg: None,
+            queued_bytes: 0,
+            byte_limit,
         }
     }
 
@@ -48,6 +61,7 @@ impl UdpFragmentingQueue {
     /// pages -- only the staged message does, and [`Self::take_msg`] owns it.
     pub fn clear(&mut self) {
         self.queue.clear();
+        self.queued_bytes = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -55,13 +69,24 @@ impl UdpFragmentingQueue {
     }
 
     pub fn is_full(&self) -> bool {
-        self.queue.len() >= Self::MAX_LEN
+        self.queue.len() >= UDP_TX_QUEUE_MAX_DATAGRAMS
+            || self
+                .byte_limit
+                .is_some_and(|limit| self.queued_bytes >= limit)
     }
 
-    pub fn push_back(&mut self, bytes: &[u8], addr: SocketAddr) {
-        if self.queue.len() < Self::MAX_LEN {
-            self.queue.push_back(UdpDatagram::new(bytes, addr))
+    pub fn push_back(&mut self, bytes: &[u8], addr: SocketAddr) -> bool {
+        if self.queue.len() >= UDP_TX_QUEUE_MAX_DATAGRAMS
+            || self
+                .byte_limit
+                .is_some_and(|limit| bytes.len() > limit - self.queued_bytes)
+        {
+            return false;
         }
+
+        self.queued_bytes += bytes.len();
+        self.queue.push_back(UdpDatagram::new(bytes, addr));
+        true
     }
 
     pub fn push_front(&mut self, msg: io_channel::Msg) {
@@ -80,7 +105,8 @@ impl UdpFragmentingQueue {
         let msg = udp_datagram.next_msg(self.socket_id, self.subchannel_mask, page_allocator)?;
 
         if udp_datagram.is_done() {
-            self.queue.pop_front().unwrap();
+            let datagram = self.queue.pop_front().unwrap();
+            self.queued_bytes -= datagram.bytes.len();
         }
 
         Some(msg)
@@ -100,7 +126,8 @@ impl UdpFragmentingQueue {
             .await?;
 
         if udp_datagram.is_done() {
-            self.queue.pop_front().unwrap();
+            let datagram = self.queue.pop_front().unwrap();
+            self.queued_bytes -= datagram.bytes.len();
         }
 
         Some(msg)
@@ -186,15 +213,31 @@ pub struct UdpDefragmentingQueue {
     queue: VecDeque<UdpFragment>,
     datagram: Option<UdpDatagram>,
     fragment_sequence: Option<FragmentSequence>,
+    dropping_fragment_sequence: bool,
+    tx_limits: bool,
+    queued_datagrams: usize,
+    queued_bytes: usize,
 }
 
 impl UdpDefragmentingQueue {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        Self::new_inner(false)
+    }
+
+    pub fn new_tx() -> Self {
+        Self::new_inner(true)
+    }
+
+    fn new_inner(tx_limits: bool) -> Self {
         Self {
             queue: VecDeque::new(),
             datagram: None,
             fragment_sequence: None,
+            dropping_fragment_sequence: false,
+            tx_limits,
+            queued_datagrams: 0,
+            queued_bytes: 0,
         }
     }
 
@@ -203,13 +246,17 @@ impl UdpDefragmentingQueue {
         self.queue.clear();
         self.datagram = None;
         self.fragment_sequence = None;
+        self.dropping_fragment_sequence = false;
+        self.queued_datagrams = 0;
+        self.queued_bytes = 0;
     }
 
     pub fn is_empty(&self) -> bool {
         self.datagram.is_none() && self.queue.is_empty()
     }
 
-    pub fn push_back<F>(&mut self, msg: io_channel::Msg, page_getter: F) -> Result<(), ErrorCode>
+    /// Returns `true` exactly once when admission drops a whole datagram.
+    pub fn push_back<F>(&mut self, msg: io_channel::Msg, page_getter: F) -> Result<bool, ErrorCode>
     where
         F: PageGetter,
     {
@@ -229,6 +276,32 @@ impl UdpDefragmentingQueue {
                 }
             };
 
+        if self.dropping_fragment_sequence {
+            debug_assert!(self.fragment_sequence.is_some());
+            if sz != 0 {
+                let page_idx = msg.payload.shared_pages()[11];
+                let _ = page_getter(page_idx)?;
+            }
+            self.fragment_sequence = next_sequence;
+            self.dropping_fragment_sequence = self.fragment_sequence.is_some();
+            return Ok(false);
+        }
+
+        let starts_datagram = fragment_id == 0 || fragment_id == 1;
+        let exceeds_limits = self.tx_limits
+            && ((starts_datagram && self.queued_datagrams >= UDP_TX_QUEUE_MAX_DATAGRAMS)
+                || sz as usize > UDP_TX_QUEUE_MAX_BYTES - self.queued_bytes);
+        if exceeds_limits {
+            if sz != 0 {
+                let page_idx = msg.payload.shared_pages()[11];
+                let _ = page_getter(page_idx)?;
+            }
+            self.drop_partial_datagram();
+            self.fragment_sequence = next_sequence;
+            self.dropping_fragment_sequence = self.fragment_sequence.is_some();
+            return Ok(true);
+        }
+
         let fragment = if sz == 0 {
             UdpFragment::empty(addr)
         } else {
@@ -239,16 +312,40 @@ impl UdpDefragmentingQueue {
 
         self.queue.push_back(fragment);
         self.fragment_sequence = next_sequence;
-        Ok(())
+        if self.tx_limits {
+            self.queued_bytes += sz as usize;
+            if starts_datagram {
+                self.queued_datagrams += 1;
+            }
+        }
+        Ok(false)
+    }
+
+    fn drop_partial_datagram(&mut self) {
+        let Some(sequence) = self.fragment_sequence else {
+            return;
+        };
+        for _ in 0..sequence.fragments {
+            let fragment = self.queue.pop_back().unwrap();
+            self.queued_bytes -= fragment.sz as usize;
+        }
+        self.queued_datagrams -= 1;
     }
 
     pub fn push_front(&mut self, datagram: UdpDatagram) {
+        if self.tx_limits {
+            self.queued_datagrams += 1;
+            self.queued_bytes += datagram.slice().len();
+            debug_assert!(self.queued_datagrams <= UDP_TX_QUEUE_MAX_DATAGRAMS);
+            debug_assert!(self.queued_bytes <= UDP_TX_QUEUE_MAX_BYTES);
+        }
         assert!(self.datagram.replace(datagram).is_none());
     }
 
     #[allow(clippy::result_unit_err)]
     pub fn next_datagram(&mut self) -> Result<Option<UdpDatagram>, ()> {
         if let Some(datagram) = self.datagram.take() {
+            self.remove_datagram(&datagram);
             return Ok(Some(datagram));
         }
 
@@ -265,12 +362,14 @@ impl UdpDefragmentingQueue {
                 addr,
             } = self.queue.pop_front().unwrap();
 
-            Ok(Some(UdpDatagram {
+            let datagram = UdpDatagram {
                 page: page.map(|page| (page, sz as usize)),
                 bytes,
                 addr,
                 consumed: 0,
-            }))
+            };
+            self.remove_datagram(&datagram);
+            Ok(Some(datagram))
         } else {
             if fragment.fragment_id != 1 {
                 // this is a bug: fragments start at 1.
@@ -313,12 +412,21 @@ impl UdpDefragmentingQueue {
                 return Err(());
             }
 
-            Ok(Some(UdpDatagram {
+            let datagram = UdpDatagram {
                 page: None,
                 bytes,
                 addr,
                 consumed: 0,
-            }))
+            };
+            self.remove_datagram(&datagram);
+            Ok(Some(datagram))
+        }
+    }
+
+    fn remove_datagram(&mut self, datagram: &UdpDatagram) {
+        if self.tx_limits {
+            self.queued_datagrams -= 1;
+            self.queued_bytes -= datagram.slice().len();
         }
     }
 
@@ -331,7 +439,7 @@ impl UdpDefragmentingQueue {
         let Some(datagram) = self.next_datagram()? else {
             return Ok(false);
         };
-        assert!(self.datagram.replace(datagram).is_none());
+        self.push_front(datagram);
         Ok(true)
     }
 
