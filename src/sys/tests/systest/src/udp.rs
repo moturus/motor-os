@@ -482,6 +482,39 @@ fn test_native_udp_tx_byte_limit() {
     println!("-- test_native_udp_tx_byte_limit() PASS");
 }
 
+fn test_native_udp_rx_queue_limit() {
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
+            .await
+            .unwrap();
+
+        for port in 1..=17 {
+            socket.inject_empty_rx_for_test(([127, 0, 0, 1], port).into());
+        }
+
+        let mut byte = [0_u8; 1];
+        for port in 1..=16 {
+            assert_eq!(
+                socket.try_recv_from(&mut byte, false),
+                Ok((0, ([127, 0, 0, 1], port).into()))
+            );
+        }
+        assert_eq!(
+            socket.try_recv_from(&mut byte, false),
+            Err(moto_rt::E_NOT_READY),
+            "the newest datagram survived RX queue overflow"
+        );
+
+        drop(socket);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    println!("-- test_native_udp_rx_queue_limit() PASS");
+}
+
 fn test_native_close_ends_udp_io() {
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -913,6 +946,7 @@ pub fn run_all_tests() {
     test_udp_timeouts();
     test_udp_dup_shares_posix_flags();
     test_native_udp_tx_byte_limit();
+    test_native_udp_rx_queue_limit();
     test_cancelled_native_io_waiters_are_removed();
     test_native_close_ends_udp_io();
     test_udp_tx_progresses_after_page_free();
