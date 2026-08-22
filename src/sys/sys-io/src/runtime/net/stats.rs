@@ -114,6 +114,7 @@ mod ids {
     pub const NET_ICMP_ERRORS_SUPPRESSED: u32 = 66;
     pub const NET_UDP_TX_ADMISSION_DROPS: u32 = 67;
     pub const NET_UDP_TX_BUFFER_FULL_DROPS: u32 = 68;
+    pub const NET_DEVICE_TX_ALLOCATION_DROPS: u32 = 69;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -171,6 +172,9 @@ pub(super) struct NetStats {
     pub device_tx_packets: Cell<u64>,
     /// Bytes in those frames, headers included.
     pub device_tx_bytes: Cell<u64>,
+    /// Frames dropped after admission because no DMA-capable TX buffer could
+    /// be allocated. TCP may recover by retransmitting; UDP does not.
+    pub device_tx_allocation_drops: Cell<u64>,
     /// TcpStreamRx messages (io_pages) sent to clients.
     pub tcp_rx_msgs: Cell<u64>,
     /// Payload bytes in those messages. Page fill ratio =
@@ -374,6 +378,10 @@ impl NetStats {
             MetricEntry::global(ids::NET_DEVICE_RX_BYTES, self.device_rx_bytes.get()),
             MetricEntry::global(ids::NET_DEVICE_TX_PACKETS, self.device_tx_packets.get()),
             MetricEntry::global(ids::NET_DEVICE_TX_BYTES, self.device_tx_bytes.get()),
+            MetricEntry::global(
+                ids::NET_DEVICE_TX_ALLOCATION_DROPS,
+                self.device_tx_allocation_drops.get(),
+            ),
             MetricEntry::global(ids::NET_TCP_RX_MSGS, self.tcp_rx_msgs.get()),
             MetricEntry::global(ids::NET_TCP_RX_BYTES, self.tcp_rx_bytes.get()),
             MetricEntry::global(ids::NET_TCP_TX_MSGS, self.tcp_tx_msgs.get()),
@@ -527,6 +535,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_DEVICE_RX_BYTES, "net.device.rx_bytes"),
         MetricDescWire::new(ids::NET_DEVICE_TX_PACKETS, "net.device.tx_packets"),
         MetricDescWire::new(ids::NET_DEVICE_TX_BYTES, "net.device.tx_bytes"),
+        MetricDescWire::new(
+            ids::NET_DEVICE_TX_ALLOCATION_DROPS,
+            "net.device.tx_allocation_drops",
+        ),
         MetricDescWire::new(ids::NET_TCP_RX_MSGS, "net.tcp.rx_msgs"),
         MetricDescWire::new(ids::NET_TCP_RX_BYTES, "net.tcp.rx_bytes"),
         MetricDescWire::new(ids::NET_TCP_TX_MSGS, "net.tcp.tx_msgs"),

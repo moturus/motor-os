@@ -26,7 +26,63 @@ enum TxWork {
     Barrier(moto_async::oneshot::Sender<()>),
 }
 
-type TxQueue = Rc<RefCell<VecDeque<TxWork>>>;
+/// Bytes owned by one admitted TX token before its packet size is known.
+/// [`BIG_BUF_SIZE`] is the largest buffer the token can consume.
+const TX_RESERVATION: usize = BIG_BUF_SIZE;
+
+struct TxQueueState {
+    work: VecDeque<TxWork>,
+    bytes: usize,
+    byte_limit: usize,
+}
+
+impl TxQueueState {
+    fn new(byte_limit: usize) -> Self {
+        assert!(byte_limit >= TX_RESERVATION);
+        Self {
+            work: VecDeque::new(),
+            bytes: 0,
+            byte_limit,
+        }
+    }
+
+    fn reserve(&mut self) -> bool {
+        if self.bytes > self.byte_limit - TX_RESERVATION {
+            return false;
+        }
+        self.bytes += TX_RESERVATION;
+        true
+    }
+
+    fn cancel_reservation(&mut self) {
+        self.bytes -= TX_RESERVATION;
+    }
+
+    fn push_packet(&mut self, packet: IoBuf, tso_seg_size: u16) {
+        debug_assert!(packet.capacity() <= TX_RESERVATION);
+        self.bytes -= TX_RESERVATION - packet.capacity();
+        self.work.push_back(TxWork::Packet(packet, tso_seg_size));
+    }
+
+    /// Pop work and report whether doing so reopened packet admission.
+    fn pop_front(&mut self) -> (Option<TxWork>, bool) {
+        let was_full = self.bytes > self.byte_limit - TX_RESERVATION;
+        let work = self.work.pop_front();
+        if let Some(TxWork::Packet(packet, _)) = &work {
+            self.bytes -= packet.capacity();
+        }
+        (
+            work,
+            was_full && self.bytes <= self.byte_limit - TX_RESERVATION,
+        )
+    }
+
+    fn push_barriers(&mut self, waiters: Vec<moto_async::oneshot::Sender<()>>) {
+        self.work.extend(waiters.into_iter().map(TxWork::Barrier));
+    }
+}
+
+type TxQueue = Rc<RefCell<TxQueueState>>;
 
 /// Max TCP payload of one TSO super-segment we ask moto-netstack to emit.
 /// Bounded by BIG_BUF_SIZE minus headers; 60K leaves comfortable room
@@ -98,6 +154,7 @@ pub(super) struct VirtioDevice {
     tso: bool,
 
     buf_cache: BufCache,
+    stats: Rc<NetStats>,
 }
 
 /// The IP MTU to assume when the device reports none. Ethernet's default, and
@@ -168,16 +225,23 @@ impl VirtioDevice {
         let frame_mtu = frame_mtu(inner.mtu());
         let csum_offload = inner.csum_offload();
         let tso = inner.tso();
+        // Match the software queue to one hardware ring of ordinary frames.
+        // TSO buffers are charged by their 64 KiB allocation, so they consume
+        // 32 times as much of this bound as an MTU-sized frame.
+        let tx_queue_bytes = (inner.txq_sz() as usize)
+            .saturating_mul(SMALL_BUF_SIZE)
+            .max(TX_RESERVATION);
         let this = Self {
             inner,
             rx_queue: Default::default(),
-            tx_queue: Default::default(),
+            tx_queue: Rc::new(RefCell::new(TxQueueState::new(tx_queue_bytes))),
             rx_notify: Default::default(),
             tx_notify: Default::default(),
             frame_mtu,
             csum_offload,
             tso,
             buf_cache: Default::default(),
+            stats: stats.clone(),
         };
 
         let _ = moto_async::LocalRuntime::spawn(Self::rx_task(
@@ -191,6 +255,7 @@ impl VirtioDevice {
             this.inner.clone(),
             this.tx_queue.clone(),
             this.tx_notify.clone(),
+            this.rx_notify.clone(),
             this.buf_cache.clone(),
             stats,
         ));
@@ -296,6 +361,7 @@ impl VirtioDevice {
         net_dev: Rc<NetDevice>,
         tx_queue: TxQueue,
         tx_notify: Rc<moto_async::LocalNotify>,
+        capacity_notify: Rc<moto_async::LocalNotify>,
         buf_cache: BufCache,
         stats: Rc<NetStats>,
     ) {
@@ -321,7 +387,10 @@ impl VirtioDevice {
                 buf_cache.push_buf(buf);
                 inflight_descs -= descs;
             }
-            let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
+            let (maybe_tx_vec, capacity_reopened) = tx_queue.borrow_mut().pop_front();
+            if capacity_reopened {
+                capacity_notify.notify_one();
+            }
 
             match maybe_tx_vec {
                 Some(TxWork::Packet(packet, tso_seg_size)) => {
@@ -354,9 +423,7 @@ impl VirtioDevice {
         if waiters.is_empty() {
             return;
         }
-        self.tx_queue
-            .borrow_mut()
-            .extend(waiters.into_iter().map(TxWork::Barrier));
+        self.tx_queue.borrow_mut().push_barriers(waiters);
         self.tx_notify.notify_one();
     }
 }
@@ -395,9 +462,19 @@ pub struct VirtioTxToken {
     tx_queue: TxQueue,
     tx_notify: Rc<moto_async::LocalNotify>,
     buf_cache: BufCache,
+    stats: Rc<NetStats>,
     // From PacketMeta::tso_seg_size via set_meta (the iface calls it just
     // before consume): nonzero marks a TCP super-segment.
     tso_seg_size: u16,
+    reserved: bool,
+}
+
+impl Drop for VirtioTxToken {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.tx_queue.borrow_mut().cancel_reservation();
+        }
+    }
 }
 
 impl moto_netstack::phy::TxToken for VirtioTxToken {
@@ -405,7 +482,7 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
         self.tso_seg_size = meta.tso_seg_size;
     }
 
-    fn consume<R, F>(self, len: usize, f: F) -> R
+    fn consume<R, F>(mut self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
@@ -416,6 +493,9 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
             // buffers are DMA-capable and page-aligned, a scarcer resource
             // than the plain allocation used here.
             log::error!("NET: TX: dropping a {len}-byte packet: no buffer.");
+            self.stats
+                .device_tx_allocation_drops
+                .set(self.stats.device_tx_allocation_drops.get() + 1);
             let mut scratch = vec![0u8; len];
             return f(scratch.as_mut_slice());
         };
@@ -423,7 +503,8 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
         let result = f(packet.as_mut());
         self.tx_queue
             .borrow_mut()
-            .push_back(TxWork::Packet(packet, self.tso_seg_size));
+            .push_packet(packet, self.tso_seg_size);
+        self.reserved = false;
         self.tx_notify.notify_one();
         log::debug!("TxToken: consume {len}.");
         result
@@ -446,6 +527,9 @@ impl moto_netstack::phy::Device for VirtioDevice {
         timestamp: moto_netstack::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         log::debug!("VirtioDevice::receive()");
+        if self.rx_queue.borrow().is_empty() || !self.tx_queue.borrow_mut().reserve() {
+            return None;
+        }
         self.rx_queue.borrow_mut().pop_front().map(|(buf, meta)| {
             log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
@@ -458,7 +542,9 @@ impl moto_netstack::phy::Device for VirtioDevice {
                     tx_queue: self.tx_queue.clone(),
                     tx_notify: self.tx_notify.clone(),
                     buf_cache: self.buf_cache.clone(),
+                    stats: self.stats.clone(),
                     tso_seg_size: 0,
+                    reserved: true,
                 },
             )
         })
@@ -466,11 +552,16 @@ impl moto_netstack::phy::Device for VirtioDevice {
 
     fn transmit(&mut self, timestamp: moto_netstack::time::Instant) -> Option<Self::TxToken<'_>> {
         log::debug!("VirtioDevice::transmit()");
+        if !self.tx_queue.borrow_mut().reserve() {
+            return None;
+        }
         Some(VirtioTxToken {
             tx_queue: self.tx_queue.clone(),
             tx_notify: self.tx_notify.clone(),
             buf_cache: self.buf_cache.clone(),
+            stats: self.stats.clone(),
             tso_seg_size: 0,
+            reserved: true,
         })
     }
 
@@ -1235,6 +1326,10 @@ pub(crate) mod self_test {
             "net::device::rx_ring_refills_after_transient_allocation_failure",
             rx_ring_refills_after_transient_allocation_failure,
         ),
+        (
+            "net::device::tx_queue_is_bounded_and_reopens",
+            tx_queue_is_bounded_and_reopens,
+        ),
     ];
 
     /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
@@ -1270,6 +1365,39 @@ pub(crate) mod self_test {
             None
         );
         st_assert_eq!(calls, 0);
+        Ok(())
+    }
+
+    /// Admission reserves the largest possible packet, never exceeds its byte
+    /// bound, and reports the full-to-writable edge when the device dequeues.
+    fn tx_queue_is_bounded_and_reopens() -> Result<(), String> {
+        let mut queue = TxQueueState::new(TX_RESERVATION * 2);
+
+        st_assert!(queue.reserve());
+        st_assert!(queue.reserve());
+        st_assert!(!queue.reserve());
+        queue.cancel_reservation();
+        st_assert!(queue.reserve());
+        queue.cancel_reservation();
+        queue.cancel_reservation();
+        st_assert_eq!(queue.bytes, 0);
+
+        for _ in 0..2 {
+            st_assert!(queue.reserve());
+            let packet = IoBuf::new_from_size_align(BIG_BUF_SIZE)
+                .ok_or_else(|| "could not allocate TX self-test buffer".to_owned())?;
+            queue.push_packet(packet, 0);
+        }
+        st_assert_eq!(queue.bytes, queue.byte_limit);
+        st_assert!(!queue.reserve());
+
+        let (packet, reopened) = queue.pop_front();
+        st_assert!(matches!(packet, Some(TxWork::Packet(_, 0))));
+        st_assert!(reopened);
+        let (packet, reopened) = queue.pop_front();
+        st_assert!(matches!(packet, Some(TxWork::Packet(_, 0))));
+        st_assert!(!reopened);
+        st_assert_eq!(queue.bytes, 0);
         Ok(())
     }
 
