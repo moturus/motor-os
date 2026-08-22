@@ -2400,8 +2400,9 @@ impl<'a> Socket<'a> {
             (_, TcpControl::Rst, _) => (),
             // The initial SYN cannot contain an acknowledgement.
             (State::Listen, _, None) => (),
-            // This case is handled in `accepts()`.
-            (State::Listen, _, Some(_)) => unreachable!(),
+            // `accepts()` rejects this; drop it as well if a future demux
+            // regression reaches the state machine directly.
+            (State::Listen, _, Some(_)) => return None,
             // SYN|ACK in the SYN-SENT state must have the exact ACK number.
             (State::SynSent, TcpControl::Syn, Some(ack_number)) => {
                 if ack_number != self.local_seq_no + 1 {
@@ -2526,6 +2527,26 @@ impl<'a> Socket<'a> {
                 );
                 None
             };
+        }
+
+        // Once the sequence check above accepts an RST, it takes precedence
+        // over every other field in the segment. In particular, payload on an
+        // RST must not reach the rx-shutdown data check below and draw a reset
+        // in response.
+        if repr.control == TcpControl::Rst {
+            if self.state == State::SynReceived && self.listen_endpoint.port != 0 {
+                // This SYN-RECEIVED socket came from LISTEN, so a reset returns
+                // it to the listening pool. Simultaneous open has no endpoint.
+                tcp_trace!("received RST");
+                self.tuple = None;
+                self.set_state(State::Listen);
+            } else if self.state != State::Listen {
+                tcp_trace!("received RST");
+                self.rst_received = true;
+                self.set_state(State::Closed);
+                self.tuple = None;
+            }
+            return None;
         }
 
         // RFC 7323 section 5.3, check R1 -- PAWS. A segment whose timestamp
@@ -2748,29 +2769,6 @@ impl<'a> Socket<'a> {
 
         // Validate and update the state.
         match (self.state, control) {
-            // RSTs are not accepted in the LISTEN state.
-            (State::Listen, TcpControl::Rst) => return None,
-
-            // RSTs in SYN-RECEIVED flip the socket back to the LISTEN state.
-            // Here we need to additionally check `listen_endpoint`, because we want to make sure
-            // that SYN-RECEIVED was actually converted from the LISTEN state (another possible
-            // reason is TCP simultaneous open).
-            (State::SynReceived, TcpControl::Rst) if self.listen_endpoint.port != 0 => {
-                tcp_trace!("received RST");
-                self.tuple = None;
-                self.set_state(State::Listen);
-                return None;
-            }
-
-            // RSTs in any other state close the socket.
-            (_, TcpControl::Rst) => {
-                tcp_trace!("received RST");
-                self.rst_received = true;
-                self.set_state(State::Closed);
-                self.tuple = None;
-                return None;
-            }
-
             // SYN packets in the LISTEN state change it to SYN-RECEIVED.
             (State::Listen, TcpControl::Syn) => {
                 if ip_repr.src_addr().is_unspecified() {
@@ -7961,6 +7959,27 @@ mod test {
             })
         );
         assert_eq!(s.state, State::Closed);
+        assert_eq!(s.tuple, None);
+    }
+
+    #[test]
+    fn test_rx_shutdown_rst_with_payload_does_not_reply() {
+        let mut s = socket_fin_wait_2();
+        s.set_rx_shutdown();
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                payload: &b"abc"[..],
+                ..SEND_TEMPL
+            }
+        );
+
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
         assert_eq!(s.tuple, None);
     }
 

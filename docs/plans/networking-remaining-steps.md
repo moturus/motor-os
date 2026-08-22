@@ -39,7 +39,7 @@ Within each group, order is the suggested pickup order.
   destination in `iface/interface/mod.rs` dispatch. Under `panic = "abort"`
   one forged 60-byte frame stops sys-io; the SYN-cookie path reaches the same
   assert. Also refuse an unspecified remote in the Listen SYN arm.
-- Sweep every `assert!`, `debug_assert!`, and `unreachable!` on the
+- COMPLETED: Sweep every `assert!`, `debug_assert!`, and `unreachable!` on the
   ingress-to-dispatch path so none is reachable from network input. Known
   cases: the Listen-state `unreachable!()` in `netstack/src/socket/tcp.rs`
   (defense in depth against demux or cookie-restore regressions), and
