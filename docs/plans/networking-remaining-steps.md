@@ -38,7 +38,7 @@ deletion and rewiring, stop it rather than delaying the highest-priority items.
 These are small, high-consequence stabilization items. Land them before wider
 network exposure or a release that treats networking as robust.
 
-- Clamp an advertised peer MSS to a safe minimum. Accepting MSS=1 permits a
+- COMPLETED: Clamp an advertised peer MSS to a safe minimum. Accepting MSS=1 permits a
   crafted SYN to turn the send path into one-byte packets. This is reachable
   before application authentication on externally listening services.
 - Rate-limit ICMP error replies (UDP port unreachable, protocol unreachable,
