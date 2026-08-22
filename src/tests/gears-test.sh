@@ -483,7 +483,8 @@ while [[ "$tui_output" != *"Motor OS Gears"* ]]; do
   tui_output+="$byte"
 done
 printf '\033[200~one\ntwo\033[201~' >&"$tui_pty_in"
-while [[ "$tui_output" != *"...> two"* ]]; do
+# Prompt styling may put terminal control bytes between the prefix and draft.
+while [[ "$tui_output" != *"two"* ]]; do
   if ! IFS= read -r -N 1 -u "$tui_pty_out" byte; then
     fail "Motor TUI ended before rendering bracketed paste: $tui_output"
   fi
@@ -530,7 +531,8 @@ tui_action_output+="$tui_action_chunk"
 echo "gears-test: attended TUI painted"
 printf '\020' >&"$tui_action_in"
 tui_action_chunk=""
-while [[ "$tui_action_chunk" != *"state: paused"* ]]; do
+# Styled redraws may emit the status label and its changed value separately.
+while [[ "$tui_action_chunk" != *"paused"* ]]; do
   if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
     fail "attended Motor TUI ended before pausing: $tui_action_output"
   fi
@@ -540,7 +542,7 @@ tui_action_output+="$tui_action_chunk"
 echo "gears-test: attended TUI paused"
 printf '\020' >&"$tui_action_in"
 tui_action_chunk=""
-while [[ "$tui_action_chunk" != *"state: idle"* ]]; do
+while [[ "$tui_action_chunk" != *"idle"* ]]; do
   if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
     fail "attended Motor TUI ended before resuming: $tui_action_output"
   fi
@@ -560,7 +562,7 @@ tui_action_output+="$tui_action_chunk"
 echo "gears-test: attended TUI requested approval"
 printf '\033[6~y' >&"$tui_action_in"
 tui_action_chunk=""
-while [[ "$tui_action_chunk" != *"state: completed"* ]]; do
+while [[ "$tui_action_chunk" != *"completed"* ]]; do
   if ! IFS= read -r -N 1 -u "$tui_action_out" byte; then
     fail "attended Motor TUI ended before completing: $tui_action_output"
   fi
