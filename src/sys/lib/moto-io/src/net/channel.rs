@@ -18,9 +18,7 @@ use core::task::Poll;
 use crossbeam::utils::CachePadded;
 use moto_async::AsFuture;
 use moto_ipc::io_channel;
-use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
-use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
@@ -227,26 +225,6 @@ impl NetDriver {
     /// `moto_async::LocalRuntime`; returns after `request_shutdown` (or the
     /// last reservation release) once both tasks drain their queues.
     pub async fn run(self) {
-        // Observation-only PDIAG watchdog (from the russhd-wedge diagnosis;
-        // record in networking-remaining-steps.md's git history). Holds a
-        // `Weak` so it never delays channel teardown;
-        // dies with the channel or the runtime, whichever goes first.
-        {
-            let channel = Arc::downgrade(&self.channel);
-            drop(moto_async::LocalRuntime::spawn(async move {
-                let mut prev = BTreeMap::new();
-                loop {
-                    moto_async::sleep(DIAG_TICK).await;
-                    let Some(channel) = channel.upgrade() else {
-                        return;
-                    };
-                    if channel.exiting.load(Ordering::Acquire) {
-                        return;
-                    }
-                    channel.diag_tick(&mut prev, Instant::now());
-                }
-            }));
-        }
         let rx = {
             let channel = self.channel.clone();
             moto_async::LocalRuntime::spawn(async move { channel.rx_task().await })
@@ -258,17 +236,6 @@ impl NetDriver {
         rx.await;
         tx.await;
     }
-}
-
-/// PDIAG watchdog sampling interval; a stall signature must hold across a
-/// full tick before it is logged.
-const DIAG_TICK: core::time::Duration = core::time::Duration::from_secs(15);
-
-/// Per-stream sample the PDIAG watchdog compares across ticks.
-struct DiagSample {
-    rx_bytes: u64,
-    readable_raised: u64,
-    had_rx_queued: bool,
 }
 
 // -------------------------------- implementation details ------------------------------ //
@@ -1188,66 +1155,6 @@ impl NetChannel {
         // wake.
         self.wake_tx_wakers();
         self.progress_udp_tx();
-    }
-
-    /// One PDIAG watchdog pass: log streams matching a lost-readiness-edge
-    /// signature (see `StreamDiag`), plus channel gauges when any do.
-    fn diag_tick(&self, prev: &mut BTreeMap<u64, DiagSample>, now: Instant) {
-        let streams: Vec<Arc<TcpStream>> = self
-            .tcp_streams
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-
-        let mut next = BTreeMap::new();
-        let mut stalled = false;
-        for stream in streams {
-            let handle = stream.handle();
-            let diag = stream.diag();
-            let cur = DiagSample {
-                rx_bytes: diag.rx_bytes.load(Ordering::Relaxed),
-                readable_raised: diag.readable_raised.load(Ordering::Relaxed),
-                had_rx_queued: stream.has_rx_bytes(),
-            };
-            if let Some(old) = prev.get(&handle) {
-                // RX bytes queued across the whole tick with no reader
-                // progress and no READABLE edge: a lost edge, or a reader
-                // that stopped reading -- the listener state logged
-                // alongside discriminates.
-                if old.had_rx_queued
-                    && cur.had_rx_queued
-                    && cur.rx_bytes == old.rx_bytes
-                    && cur.readable_raised == old.readable_raised
-                {
-                    stream.log_diag("RXSTALL", now);
-                    stalled = true;
-                }
-                // A writer saw WouldBlock, no WRITABLE edge answered it for
-                // a full tick, yet buffer space exists now.
-                let not_ready_ts = diag.last_tx_not_ready_ts.load(Ordering::Relaxed);
-                if not_ready_ts != 0
-                    && diag.last_writable_ts.load(Ordering::Relaxed) < not_ready_ts
-                    && now.duration_since(Instant::from_u64(not_ready_ts)) >= DIAG_TICK
-                    && stream.have_write_buffer_space()
-                {
-                    stream.log_diag("TXSTALL", now);
-                    stalled = true;
-                }
-            }
-            next.insert(handle, cur);
-        }
-        *prev = next;
-
-        if stalled {
-            moto_log!(
-                "PDIAG chan txw={} wrw={} sqf={} rpc={}",
-                self.tx_waiters.len(),
-                self.write_waiters.lock().len(),
-                self.send_queue.is_full() as u8,
-                self.rpc_map.lock().len(),
-            );
-        }
     }
 
     #[cfg(feature = "netdev")]

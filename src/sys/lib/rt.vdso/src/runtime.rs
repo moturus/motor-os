@@ -73,8 +73,7 @@ pub(crate) struct Registration {
 }
 
 enum DeliveryResult {
-    Delivered(EventBits),
-    Ignored,
+    Keep,
     Remove,
 }
 
@@ -131,7 +130,7 @@ impl Registration {
         }
         let events = events & deliverable(state.interests);
         if events == 0 {
-            return DeliveryResult::Ignored;
+            return DeliveryResult::Keep;
         }
 
         state.queued |= events;
@@ -144,15 +143,10 @@ impl Registration {
         };
         drop(state);
 
-        registry.diag.on_events.fetch_add(1, Ordering::Relaxed);
-        registry
-            .diag
-            .last_on_event_ts
-            .store(moto_rt::time::Instant::now().as_u64(), Ordering::Relaxed);
         if wake {
             registry.poller.wake();
         }
-        DeliveryResult::Delivered(events)
+        DeliveryResult::Keep
     }
 
     fn activate(self: &Arc<Self>) -> bool {
@@ -299,43 +293,15 @@ impl EventSourceBase {
     }
 }
 
-/// PDIAG per-source delivery counters (from the russhd-wedge diagnosis;
-/// record in networking-remaining-steps.md's git history): Relaxed
-/// stamps on the edge-delivery path, dumped by
-/// `EventSourceManaged::log_diag` when the channel watchdog flags the
-/// owning socket as stalled. Timestamps are `Instant::as_u64`; 0 = never.
-#[derive(Default)]
-struct SourceDiag {
-    edges_in: AtomicU64, // on_event calls
-    last_in_bits: AtomicU64,
-    last_in_ts: AtomicU64,
-    delivered: AtomicU64, // per-registry deliveries
-    last_delivered_bits: AtomicU64,
-    last_delivered_ts: AtomicU64,
-    dropped_no_reg: AtomicU64,   // on_event with no registrations
-    dropped_interest: AtomicU64, // bits matched no registered interest
-}
-
-fn diag_age_ms(now: moto_rt::time::Instant, ts: u64) -> i64 {
-    if ts == 0 {
-        -1
-    } else {
-        now.duration_since(moto_rt::time::Instant::from_u64(ts))
-            .as_millis() as i64
-    }
-}
-
 // An event source that is managed by an internal I/O thread.
 pub struct EventSourceManaged {
     base: EventSourceBase,
-    diag: SourceDiag,
 }
 
 impl EventSourceManaged {
     pub fn new(supported_interests: Interests) -> Self {
         Self {
             base: EventSourceBase::new(supported_interests),
-            diag: SourceDiag::default(),
         }
     }
 
@@ -357,29 +323,12 @@ impl EventSourceManaged {
     }
 
     pub fn on_event(&self, events: EventBits) {
-        let now = moto_rt::time::Instant::now().as_u64();
-        self.diag.edges_in.fetch_add(1, Ordering::Relaxed);
-        self.diag.last_in_bits.store(events, Ordering::Relaxed);
-        self.diag.last_in_ts.store(now, Ordering::Relaxed);
         {
             let mut dropped_registries = alloc::vec::Vec::new();
             let registries = self.base.registries.lock();
-            if registries.is_empty() {
-                self.diag.dropped_no_reg.fetch_add(1, Ordering::Relaxed);
-            }
             for registration in registries.values() {
-                match registration.deliver(events) {
-                    DeliveryResult::Delivered(delivered) => {
-                        self.diag.delivered.fetch_add(1, Ordering::Relaxed);
-                        self.diag
-                            .last_delivered_bits
-                            .store(delivered, Ordering::Relaxed);
-                        self.diag.last_delivered_ts.store(now, Ordering::Relaxed);
-                    }
-                    DeliveryResult::Ignored => {
-                        self.diag.dropped_interest.fetch_add(1, Ordering::Relaxed);
-                    }
-                    DeliveryResult::Remove => dropped_registries.push(registration.clone()),
+                if matches!(registration.deliver(events), DeliveryResult::Remove) {
+                    dropped_registries.push(registration.clone());
                 }
             }
             drop(registries);
@@ -395,45 +344,6 @@ impl EventSourceManaged {
     pub fn on_closed_locally(&self, source_fd: RtFd) {
         self.base.on_closed_locally(source_fd);
     }
-
-    /// PDIAG dump: this source's delivery counters, then each registration
-    /// with its registry's pending bits and poller state. `handle` tags the
-    /// lines with the owning socket's sys-io handle.
-    pub fn log_diag(&self, handle: u64) {
-        let now = moto_rt::time::Instant::now();
-        let diag = &self.diag;
-        crate::moto_log!(
-            "PDIAG src h=0x{:x} in={}@{} bits=0x{:x} del={}@{} dbits=0x{:x} d0={} dint={}",
-            handle,
-            diag.edges_in.load(Ordering::Relaxed),
-            diag_age_ms(now, diag.last_in_ts.load(Ordering::Relaxed)),
-            diag.last_in_bits.load(Ordering::Relaxed),
-            diag.delivered.load(Ordering::Relaxed),
-            diag_age_ms(now, diag.last_delivered_ts.load(Ordering::Relaxed)),
-            diag.last_delivered_bits.load(Ordering::Relaxed),
-            diag.dropped_no_reg.load(Ordering::Relaxed),
-            diag.dropped_interest.load(Ordering::Relaxed),
-        );
-
-        // Snapshot registrations first; the registry dump takes other locks.
-        let regs: alloc::vec::Vec<Arc<Registration>> =
-            self.base.registries.lock().values().cloned().collect();
-        if regs.is_empty() {
-            crate::moto_log!("PDIAG reg h=0x{:x} NO-REGISTRATIONS", handle);
-        }
-        for registration in regs {
-            let Some(registry) = registration.registry.upgrade() else {
-                crate::moto_log!(
-                    "PDIAG reg h=0x{:x} r={} fd={} DEAD",
-                    handle,
-                    registration.r_id,
-                    registration.source_fd
-                );
-                continue;
-            };
-            registry.log_diag_for(handle, &registration, now);
-        }
-    }
 }
 
 /// The veneer half of the Stage-F seam: a net socket's mio-agnostic readiness
@@ -441,10 +351,6 @@ impl EventSourceManaged {
 /// translation is deliberately outside the state machine so the latter stays
 /// poll-agnostic.
 impl moto_io::net::readiness::NetEventListener for EventSourceManaged {
-    fn log_diag(&self, handle: u64) {
-        EventSourceManaged::log_diag(self, handle);
-    }
-
     fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
         use moto_io::net::readiness::Readiness;
         use moto_rt::poll;
@@ -744,60 +650,6 @@ impl Drop for EventSourceUnmanaged {
     }
 }
 
-static REGISTRIES: SpinLock<BTreeMap<u64, Weak<Registry>>> = SpinLock::new(BTreeMap::new());
-
-/// PDIAG registry watchdog: a poller that has sat parked across a full
-/// tick while its registry holds undelivered events is the delivery
-/// protocol's one impossible state -- log it with the registry's
-/// counters. Spawned once, on the first registry; ticks on the core IO
-/// runtime, which a wedged poller cannot stall.
-async fn registry_watchdog() {
-    const TICK: core::time::Duration = core::time::Duration::from_secs(15);
-    loop {
-        moto_async::sleep(TICK).await;
-        let registries: alloc::vec::Vec<Arc<Registry>> = REGISTRIES
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-        let now = moto_rt::time::Instant::now();
-        for registry in registries {
-            let parked_since = registry.diag.parked_since.load(Ordering::Relaxed);
-            if parked_since == 0
-                || now.duration_since(moto_rt::time::Instant::from_u64(parked_since)) < TICK
-            {
-                continue;
-            }
-            let ready: Vec<Arc<Registration>> = registry.ready.lock().iter().cloned().collect();
-            let mut first = None;
-            for registration in &ready {
-                let state = registration.state.lock();
-                if state.lifecycle == RegLifecycle::Active && state.queued != 0 {
-                    first = Some((state.token, state.queued));
-                    break;
-                }
-            }
-            let Some((token, bits)) = first else {
-                continue;
-            };
-            let diag = &registry.diag;
-            crate::moto_log!(
-                "PDIAG regwd r={} evq={} tok={} bits=0x{:x} parked_ms={} waits={} onev={}@{} coll={}@{}",
-                registry.id,
-                ready.len(),
-                token,
-                bits,
-                diag_age_ms(now, parked_since),
-                diag.waits.load(Ordering::Relaxed),
-                diag.on_events.load(Ordering::Relaxed),
-                diag_age_ms(now, diag.last_on_event_ts.load(Ordering::Relaxed)),
-                diag.collected.load(Ordering::Relaxed),
-                diag_age_ms(now, diag.last_collect_ts.load(Ordering::Relaxed)),
-            );
-        }
-    }
-}
-
 /// The delivery half of the registry's wait protocol (design section 6):
 /// event producers call `wake()`, pollers park on the bridge parker.
 ///
@@ -885,18 +737,6 @@ impl PollerSlot {
     }
 }
 
-/// PDIAG per-registry counters: Relaxed stamps on the wait/deliver path,
-/// dumped by `Registry::log_diag_for`. Timestamps are `Instant::as_u64`.
-#[derive(Default)]
-struct RegistryDiag {
-    on_events: AtomicU64, // on_event calls (edges delivered in)
-    last_on_event_ts: AtomicU64,
-    waits: AtomicU64,     // wait() entries
-    collected: AtomicU64, // events handed to pollers
-    last_collect_ts: AtomicU64,
-    parked_since: AtomicU64, // set before park, cleared after; 0 = not parked
-}
-
 pub struct Registry {
     id: u64,
     self_ref: Weak<Registry>,
@@ -904,17 +744,10 @@ pub struct Registry {
     ops: moto_rt::mutex::Mutex<()>,
     poller: PollerSlot,
     event_source: EventSourceManaged,
-    diag: RegistryDiag,
 
     // Keep the registration, rather than only a weak source reference: the
     // object is the identity shared by the source map and ready queue.
     pollees: SpinLock<BTreeMap<RtFd, Arc<Registration>>>,
-}
-
-impl Drop for Registry {
-    fn drop(&mut self) {
-        let _ = REGISTRIES.lock().remove(&self.id);
-    }
 }
 
 impl PosixFile for Registry {
@@ -970,25 +803,15 @@ impl Registry {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
-        let result = Arc::new_cyclic(|self_ref| Self {
+        Arc::new_cyclic(|self_ref| Self {
             id,
             self_ref: self_ref.clone(),
             ready: SpinLock::new(VecDeque::new()),
             ops: moto_rt::mutex::Mutex::new(()),
             poller: PollerSlot::new(),
             event_source: EventSourceManaged::new(moto_rt::poll::POLL_READABLE),
-            diag: RegistryDiag::default(),
             pollees: SpinLock::new(BTreeMap::new()),
-        });
-
-        REGISTRIES.lock().insert(id, Arc::downgrade(&result));
-
-        static WATCHDOG_SPAWNED: AtomicBool = AtomicBool::new(false);
-        if !WATCHDOG_SPAWNED.swap(true, Ordering::AcqRel) {
-            crate::io_runtime::spawn(registry_watchdog);
-        }
-
-        result
+        })
     }
 
     pub fn add(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
@@ -1111,7 +934,6 @@ impl Registry {
         if events_buf.is_empty() {
             return 0;
         }
-        self.diag.waits.fetch_add(1, Ordering::Relaxed);
 
         loop {
             // Wait phase: arm before the event check (see arm()).
@@ -1123,11 +945,7 @@ impl Registry {
                 return collected as i32;
             }
 
-            self.diag
-                .parked_since
-                .store(moto_rt::time::Instant::now().as_u64(), Ordering::Relaxed);
             self.poller.park(&ticket, deadline);
-            self.diag.parked_since.store(0, Ordering::Relaxed);
             // The claim is only needed while parked.
             self.poller.disarm(ticket);
 
@@ -1166,53 +984,6 @@ impl Registry {
             };
             idx += 1;
         }
-        if idx > 0 {
-            self.diag.collected.fetch_add(idx as u64, Ordering::Relaxed);
-            self.diag
-                .last_collect_ts
-                .store(moto_rt::time::Instant::now().as_u64(), Ordering::Relaxed);
-        }
         idx
-    }
-
-    /// PDIAG dump: one line with this registry's state as seen by the
-    /// source registration -- its pending bits, queue depth, and poller state.
-    fn log_diag_for(
-        &self,
-        handle: u64,
-        registration: &Arc<Registration>,
-        now: moto_rt::time::Instant,
-    ) {
-        let state = registration.state.lock();
-        let lifecycle = match state.lifecycle {
-            RegLifecycle::Adding => "adding",
-            RegLifecycle::Active => "active",
-            RegLifecycle::Retired => "retired",
-        };
-        let token = state.token;
-        let interests = state.interests;
-        let pending = state.queued;
-        let enqueued = state.pending;
-        drop(state);
-        let event_queue = self.ready.lock().len();
-        let diag = &self.diag;
-        crate::moto_log!(
-            "PDIAG reg h=0x{:x} r={} fd={} tok={} int=0x{:x} pend=0x{:x} queued={} state={} evq={} waits={} onev={}@{} coll={}@{} parked_ms={}",
-            handle,
-            self.id,
-            registration.source_fd,
-            token,
-            interests,
-            pending,
-            enqueued,
-            lifecycle,
-            event_queue,
-            diag.waits.load(Ordering::Relaxed),
-            diag.on_events.load(Ordering::Relaxed),
-            diag_age_ms(now, diag.last_on_event_ts.load(Ordering::Relaxed)),
-            diag.collected.load(Ordering::Relaxed),
-            diag_age_ms(now, diag.last_collect_ts.load(Ordering::Relaxed)),
-            diag_age_ms(now, diag.parked_since.load(Ordering::Relaxed)),
-        );
     }
 }
