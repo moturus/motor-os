@@ -86,7 +86,6 @@ use std::io::ErrorKind;
 use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
-use moto_netstack::socket::tcp::CongestionControl;
 use moto_netstack::socket::tcp::State as NetstackTcpState;
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
@@ -487,11 +486,6 @@ impl MotoSocket {
                 moto_netstack::socket::tcp::win_shift_for_capacity(sizes.rx),
             ),
         };
-        // Named rather than left to the feature-derived default, so that the
-        // choice is visible here rather than implied by a Cargo feature, and so
-        // that dropping the feature fails the build instead of quietly restoring
-        // the uncontrolled `usize::MAX` window.
-        netstack_socket.set_congestion_control(CongestionControl::Cubic);
         // RFC 7323 timestamps. Offering them is what turns them on at all --
         // the netstack drops its own generator when a peer's SYN comes back
         // without the option, so this decides only what we ask for. It costs 12
@@ -2366,33 +2360,5 @@ impl TcpTxBuf {
 
     fn is_consumed(&self) -> bool {
         self.consumed == self.len
-    }
-}
-
-/// Debug-only tests of the code above, run inside a live sys-io. See
-/// [`crate::self_test`].
-#[cfg(debug_assertions)]
-pub(crate) mod self_test {
-    use crate::self_test::{SelfTest, st_assert_eq};
-    use moto_netstack::socket::tcp::{CongestionControl, Socket, SocketBuffer};
-
-    pub(crate) const TESTS: &[SelfTest] = &[(
-        "net::socket::tcp::cubic_is_the_default_controller",
-        cubic_is_the_default_controller,
-    )];
-
-    /// A fresh netstack socket must already be Cubic, before anyone sets it.
-    ///
-    /// `new_socket` names Cubic explicitly, which a dropped `socket-tcp-cubic`
-    /// feature would break at compile time. The default is the other half:
-    /// nothing would fail to compile if the build reverted to `None`, whose
-    /// window is `usize::MAX`, and only this notices that.
-    fn cubic_is_the_default_controller() -> Result<(), String> {
-        let buffer = || SocketBuffer::new(vec![0; 64]);
-        st_assert_eq!(
-            Socket::new(buffer(), buffer()).congestion_control(),
-            CongestionControl::Cubic
-        );
-        Ok(())
     }
 }

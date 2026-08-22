@@ -1,7 +1,5 @@
 use crate::time::Instant;
 
-use super::Controller;
-
 // Constants for the Cubic congestion control algorithm.
 // See RFC 8312.
 const BETA_CUBIC: f64 = 0.7;
@@ -9,7 +7,7 @@ const C: f64 = 0.4;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Cubic {
+pub(in crate::socket::tcp) struct Cubic {
     cwnd: usize,     // Congestion window
     min_cwnd: usize, // The minimum size of congestion window
     w_max: usize,    // Window size just before congestion
@@ -29,7 +27,7 @@ pub struct Cubic {
 }
 
 impl Cubic {
-    pub fn new() -> Cubic {
+    pub(in crate::socket::tcp) fn new() -> Cubic {
         Cubic {
             cwnd: 1024 * 2,
             min_cwnd: 1024 * 2,
@@ -57,26 +55,31 @@ impl Cubic {
     }
 }
 
-impl Controller for Cubic {
-    fn window(&self) -> usize {
+impl Cubic {
+    pub(in crate::socket::tcp) fn window(&self) -> usize {
         self.cwnd
     }
 
-    fn on_retransmit(&mut self, now: Instant) {
+    pub(in crate::socket::tcp) fn on_retransmit(&mut self, now: Instant) {
         self.on_congestion(now);
     }
 
-    fn on_duplicate_ack(&mut self, now: Instant) {
+    pub(in crate::socket::tcp) fn on_duplicate_ack(&mut self, now: Instant) {
         self.on_congestion(now);
     }
 
-    fn set_remote_window(&mut self, remote_window: usize) {
+    pub(in crate::socket::tcp) fn set_remote_window(&mut self, remote_window: usize) {
         if self.rwnd < remote_window {
             self.rwnd = remote_window;
         }
     }
 
-    fn on_ack(&mut self, _now: Instant, len: usize, _rtt: &crate::socket::tcp::RttEstimator) {
+    pub(in crate::socket::tcp) fn on_ack(
+        &mut self,
+        _now: Instant,
+        len: usize,
+        _rtt: &crate::socket::tcp::RttEstimator,
+    ) {
         if self.cwnd < self.ssthresh {
             // Slow start; both regions are just the window itself here.
             self.cwnd = self
@@ -97,7 +100,7 @@ impl Controller for Cubic {
         }
     }
 
-    fn pre_transmit(&mut self, now: Instant) {
+    pub(in crate::socket::tcp) fn pre_transmit(&mut self, now: Instant) {
         let Some(recovery_start) = self.recovery_start else {
             self.recovery_start = Some(now);
             return;
@@ -130,7 +133,7 @@ impl Controller for Cubic {
         self.cwnd = w_cubic.max(self.w_est).max(self.min_cwnd).min(self.rwnd);
     }
 
-    fn set_mss(&mut self, mss: usize) {
+    pub(in crate::socket::tcp) fn set_mss(&mut self, mss: usize) {
         self.min_cwnd = mss;
         // The peer's MSS becomes known exactly once, in the handshake, which is
         // also the only moment an *initial* window means anything: nothing has

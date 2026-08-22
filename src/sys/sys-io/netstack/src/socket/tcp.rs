@@ -586,19 +586,6 @@ impl Display for Tuple {
     }
 }
 
-/// A congestion control algorithm.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum CongestionControl {
-    None,
-
-    #[cfg(feature = "socket-tcp-reno")]
-    Reno,
-
-    #[cfg(feature = "socket-tcp-cubic")]
-    Cubic,
-}
-
 /// A Transmission Control Protocol socket.
 ///
 /// A TCP socket may passively listen for connections or actively connect to another endpoint.
@@ -739,7 +726,7 @@ pub struct Socket<'a> {
     nagle: bool,
 
     /// The congestion control algorithm.
-    congestion_controller: congestion::AnyController,
+    congestion_controller: congestion::Cubic,
 
     /// tsval generator - if some, tcp timestamp is enabled
     tsval_generator: Option<TcpTimestampGenerator>,
@@ -848,7 +835,7 @@ impl<'a> Socket<'a> {
             nagle: true,
             tsval_generator: None,
             last_remote_tsval: 0,
-            congestion_controller: congestion::AnyController::new(),
+            congestion_controller: congestion::Cubic::new(),
 
             #[cfg(feature = "async")]
             rx_waker: WakerRegistration::new(),
@@ -895,55 +882,6 @@ impl<'a> Socket<'a> {
     /// Return whether TCP Timestamp is enabled.
     pub fn timestamp_enabled(&self) -> bool {
         self.tsval_generator.is_some()
-    }
-
-    /// Set an algorithm for congestion control.
-    ///
-    /// `CongestionControl::None` indicates that no congestion control is applied.
-    /// Options `CongestionControl::Cubic` and `CongestionControl::Reno` are also available.
-    /// To use Reno and Cubic, please enable the `socket-tcp-reno` and `socket-tcp-cubic` features
-    /// in the `moto-netstack` crate, respectively.
-    ///
-    /// `CongestionControl::Reno` is a classic congestion control algorithm valued for its simplicity.
-    /// Despite having a lower algorithmic complexity than `Cubic`,
-    /// it is less efficient in terms of bandwidth usage.
-    ///
-    /// `CongestionControl::Cubic` represents a modern congestion control algorithm designed to
-    /// be more efficient and fair compared to `CongestionControl::Reno`.
-    /// It is the default choice for Linux, Windows, and macOS.
-    /// `CongestionControl::Cubic` relies on double precision (`f64`) floating point operations, which may cause issues in some contexts:
-    /// * Small embedded processors (such as Cortex-M0, Cortex-M1, and Cortex-M3) do not have an FPU, and floating point operations consume significant amounts of CPU time and Flash space.
-    /// * Interrupt handlers should almost always avoid floating-point operations.
-    /// * Kernel-mode code on desktop processors usually avoids FPU operations to reduce the penalty of saving and restoring FPU registers.
-    ///
-    /// In all these cases, `CongestionControl::Reno` is a better choice of congestion control algorithm.
-    pub fn set_congestion_control(&mut self, congestion_control: CongestionControl) {
-        use congestion::*;
-
-        self.congestion_controller = match congestion_control {
-            CongestionControl::None => AnyController::None(no_control::NoControl),
-
-            #[cfg(feature = "socket-tcp-reno")]
-            CongestionControl::Reno => AnyController::Reno(reno::Reno::new()),
-
-            #[cfg(feature = "socket-tcp-cubic")]
-            CongestionControl::Cubic => AnyController::Cubic(cubic::Cubic::new()),
-        }
-    }
-
-    /// Return the current congestion control algorithm.
-    pub fn congestion_control(&self) -> CongestionControl {
-        use congestion::*;
-
-        match self.congestion_controller {
-            AnyController::None(_) => CongestionControl::None,
-
-            #[cfg(feature = "socket-tcp-reno")]
-            AnyController::Reno(_) => CongestionControl::Reno,
-
-            #[cfg(feature = "socket-tcp-cubic")]
-            AnyController::Cubic(_) => CongestionControl::Cubic,
-        }
     }
 
     /// Register a waker for receive operations.
@@ -1360,9 +1298,7 @@ impl<'a> Socket<'a> {
             .into();
 
         self.remote_mss = restore.remote_mss as usize;
-        self.congestion_controller
-            .inner_mut()
-            .set_mss(self.remote_mss);
+        self.congestion_controller.set_mss(self.remote_mss);
         self.remote_has_sack = restore.peer_sack;
         self.remote_win_scale = restore.peer_wscale;
         if self.remote_win_scale.is_none() {
@@ -1370,7 +1306,6 @@ impl<'a> Socket<'a> {
         }
         self.remote_win_len = (restore.remote_window as usize) << restore.peer_wscale.unwrap_or(0);
         self.congestion_controller
-            .inner_mut()
             .set_remote_window(self.remote_win_len);
 
         match restore.peer_tsval {
@@ -2043,7 +1978,7 @@ impl<'a> Socket<'a> {
             // edge the fallback. One congestion charge per episode.
             if self.recovery_point.is_none() {
                 self.recovery_point = Some(self.remote_last_seq);
-                self.congestion_controller.inner_mut().on_duplicate_ack(now);
+                self.congestion_controller.on_duplicate_ack(now);
             }
         }
         self.rack_reo_timeout = next;
@@ -2103,7 +2038,7 @@ impl<'a> Socket<'a> {
             .saturating_sub(self.tx_scoreboard.sacked_octets())
             .saturating_sub(self.tx_scoreboard.lost_octets());
         let seg = self.remote_mss.min(end - start);
-        pipe + seg <= self.congestion_controller.inner().window()
+        pipe + seg <= self.congestion_controller.window()
     }
 
     fn set_state(&mut self, state: State) {
@@ -2779,7 +2714,6 @@ impl<'a> Socket<'a> {
 
             self.rtte.on_ack(cx.now(), ack_number);
             self.congestion_controller
-                .inner_mut()
                 .on_ack(cx.now(), ack_len, &self.rtte);
         }
 
@@ -2835,9 +2769,7 @@ impl<'a> Socket<'a> {
                         tcp_trace!("received SYNACK with zero MSS, ignoring");
                         return None;
                     }
-                    self.congestion_controller
-                        .inner_mut()
-                        .set_mss(max_seg_size as usize);
+                    self.congestion_controller.set_mss(max_seg_size as usize);
                     self.remote_mss = max_seg_size as usize
                 }
 
@@ -2890,9 +2822,7 @@ impl<'a> Socket<'a> {
                         return None;
                     }
                     self.remote_mss = max_seg_size as usize;
-                    self.congestion_controller
-                        .inner_mut()
-                        .set_mss(self.remote_mss);
+                    self.congestion_controller.set_mss(self.remote_mss);
                 }
 
                 self.remote_seq_no = repr.seq_number + 1;
@@ -3001,7 +2931,6 @@ impl<'a> Socket<'a> {
         self.remote_win_len = new_remote_win_len;
 
         self.congestion_controller
-            .inner_mut()
             .set_remote_window(new_remote_win_len);
 
         if ack_len > 0 {
@@ -3070,9 +2999,7 @@ impl<'a> Socket<'a> {
             if self.rx_dsack_count > dsack_before {
                 self.tlp_high_seq = None;
             } else if ack_number >= high {
-                self.congestion_controller
-                    .inner_mut()
-                    .on_duplicate_ack(cx.now());
+                self.congestion_controller.on_duplicate_ack(cx.now());
                 self.tlp_high_seq = None;
             }
         }
@@ -3149,9 +3076,7 @@ impl<'a> Socket<'a> {
                         // fallback for peers that starve RACK of feedback.
                         if !self.remote_has_sack && self.recovery_point.is_none() {
                             self.recovery_point = Some(self.remote_last_seq);
-                            self.congestion_controller
-                                .inner_mut()
-                                .on_duplicate_ack(cx.now());
+                            self.congestion_controller.on_duplicate_ack(cx.now());
                         }
                     }
                 }
@@ -3401,7 +3326,7 @@ impl<'a> Socket<'a> {
     /// was bounded by the remote window alone. Every congestion signal was
     /// being delivered and acted on; none of it reached the wire.
     fn congestion_window_headroom(&self) -> usize {
-        let cwnd = self.congestion_controller.inner().window();
+        let cwnd = self.congestion_controller.window();
 
         // Sequence-number subtraction panics on underflow, and sys-io aborts on
         // panic. The ACK path restores this ordering right after it advances
@@ -3580,9 +3505,7 @@ impl<'a> Socket<'a> {
             self.remote_last_ts = Some(cx.now());
         }
 
-        self.congestion_controller
-            .inner_mut()
-            .pre_transmit(cx.now());
+        self.congestion_controller.pre_transmit(cx.now());
 
         // The reordering window can close between ACKs; the timer
         // re-checks with the same rack cursor once the clock passes it.
@@ -3711,9 +3634,7 @@ impl<'a> Socket<'a> {
             self.rtte.on_retransmit();
 
             if rto_expired {
-                self.congestion_controller
-                    .inner_mut()
-                    .on_retransmit(cx.now());
+                self.congestion_controller.on_retransmit(cx.now());
             }
         }
 
@@ -4050,9 +3971,6 @@ impl<'a> Socket<'a> {
         if repr.segment_len() > 0 {
             self.rtte
                 .on_send(cx.now(), repr.seq_number + repr.segment_len());
-            self.congestion_controller
-                .inner_mut()
-                .post_transmit(cx.now(), repr.segment_len());
             fresh_send = self.tx_scoreboard.on_transmit(
                 repr.seq_number,
                 repr.seq_number + repr.segment_len(),
@@ -9706,7 +9624,7 @@ mod test {
             .on_transmit(una, una + 4_380, Instant::from_millis(1));
         s.tx_scoreboard.mark_sacked(una + 1_800, una + 2_000);
         s.tlp_pto = Some(Instant::from_secs(10));
-        let cwnd = s.congestion_controller.inner().window();
+        let cwnd = s.congestion_controller.window();
 
         // A quote for the second wire segment of a 4,380-byte TSO run.
         s.mark_pmtu_loss(una + 1_460, 1_460);
@@ -9734,7 +9652,7 @@ mod test {
                 .iter()
                 .any(|run| run.start == una + 4_000 && run.end == una + 4_380 && run.lost)
         );
-        assert_eq!(s.congestion_controller.inner().window(), cwnd);
+        assert_eq!(s.congestion_controller.window(), cwnd);
         assert_eq!(s.recovery_point, None);
         assert_eq!(s.tlp_pto, None);
     }
@@ -13580,9 +13498,6 @@ mod test {
     // Tests for congestion control
     // =========================================================================================//
 
-    // Every test in here needs a controller with a real window to observe:
-    // `NoControl` reports `usize::MAX` and bounds nothing.
-    #[cfg(any(feature = "socket-tcp-reno", feature = "socket-tcp-cubic"))]
     mod congestion_control {
         use super::*;
 
@@ -13604,7 +13519,7 @@ mod test {
         fn test_congestion_window_bounds_bytes_in_flight() {
             let mut s = socket_established_for_congestion_control();
             assert_eq!(
-                s.congestion_controller.inner().window(),
+                s.congestion_controller.window(),
                 2 * CC_MSS,
                 "this test is written around a two-segment initial window"
             );
@@ -13666,7 +13581,7 @@ mod test {
                 window_len: CC_WIN_LEN,
                 ..SEND_TEMPL
             });
-            assert_eq!(s.congestion_controller.inner().window(), 3 * CC_MSS);
+            assert_eq!(s.congestion_controller.window(), 3 * CC_MSS);
 
             // 3072 bytes of window against 1024 still in flight: room for two more
             // segments, and then not a third.
@@ -13721,7 +13636,7 @@ mod test {
                     }
                 );
                 assert_eq!(
-                    s.congestion_controller.inner().window(),
+                    s.congestion_controller.window(),
                     expected,
                     "passive open, mss {mss}"
                 );
@@ -13754,29 +13669,25 @@ mod test {
                 }
             );
             assert_eq!(s.state, State::Established);
-            assert_eq!(s.congestion_controller.inner().window(), 14_600);
+            assert_eq!(s.congestion_controller.window(), 14_600);
         }
 
-        // Reno's `on_duplicate_ack` only lowers `ssthresh`, which is idempotent --
-        // it brings the window itself down in `on_retransmit`. Cubic's two hooks
-        // are the same reduction, so Cubic is where a repeated signal compounds and
-        // where the reduction is visible in the window straight away.
-        #[cfg(feature = "socket-tcp-cubic")]
+        // Cubic's two loss hooks apply the same reduction, so a repeated signal
+        // compounds and is visible in the window immediately.
         #[test]
         fn test_duplicate_acks_reduce_the_window_once_per_loss() {
             let mut s = socket_established_for_congestion_control();
-            s.set_congestion_control(CongestionControl::Cubic);
 
             // Lift the window clear of `min_cwnd`: at its default the floor absorbs
             // every reduction, and a floored window hides what this measures.
             for _ in 0..32 {
-                s.congestion_controller.inner_mut().on_ack(
+                s.congestion_controller.on_ack(
                     Instant::from_millis(0),
                     2048,
                     &RttEstimator::default(),
                 );
             }
-            let cwnd_before = s.congestion_controller.inner().window();
+            let cwnd_before = s.congestion_controller.window();
             assert!(cwnd_before > 32 * 1024, "cwnd_before = {cwnd_before}");
 
             // Something has to be in flight for an ACK to be a duplicate of it.
@@ -13805,7 +13716,6 @@ mod test {
                 // the fast retransmit armed by the third duplicate -- itself a
                 // second congestion signal -- stays out of the measurement.
                 s.congestion_controller
-                    .inner_mut()
                     .pre_transmit(Instant::from_millis(1000 + i * 5));
             }
 
@@ -13814,7 +13724,7 @@ mod test {
                 "the third duplicate should still arm the fast retransmit"
             );
 
-            let cwnd_after = s.congestion_controller.inner().window();
+            let cwnd_after = s.congestion_controller.window();
             assert!(
                 cwnd_after < cwnd_before,
                 "the loss should have cost something: {cwnd_before} -> {cwnd_after}"
@@ -13833,20 +13743,18 @@ mod test {
         // charge the controller a second time (`on_retransmit`), so one loss
         // cost beta squared -- 0.49 -- instead of 0.7. The loss is one event;
         // the controller hears about it once.
-        #[cfg(feature = "socket-tcp-cubic")]
         #[test]
         fn test_fast_retransmit_charges_the_controller_once() {
             let mut s = socket_established_for_congestion_control();
-            s.set_congestion_control(CongestionControl::Cubic);
 
             for _ in 0..32 {
-                s.congestion_controller.inner_mut().on_ack(
+                s.congestion_controller.on_ack(
                     Instant::from_millis(0),
                     2048,
                     &RttEstimator::default(),
                 );
             }
-            let cwnd_before = s.congestion_controller.inner().window();
+            let cwnd_before = s.congestion_controller.window();
             assert!(cwnd_before > 32 * 1024, "cwnd_before = {cwnd_before}");
 
             s.send_slice(&[0; 8192][..]).unwrap();
@@ -13880,7 +13788,7 @@ mod test {
             }));
             recv_nothing!(s, time 1105);
 
-            let cwnd_after = s.congestion_controller.inner().window();
+            let cwnd_after = s.congestion_controller.window();
             assert!(
                 cwnd_after < cwnd_before,
                 "the loss should have cost something: {cwnd_before} -> {cwnd_after}"
@@ -13895,20 +13803,18 @@ mod test {
         // An expired RTO is not the duplicate-ACK event's echo -- it is the
         // controller's only signal on a silent link, and skipping it there
         // would leave the window untouched by a real loss.
-        #[cfg(feature = "socket-tcp-cubic")]
         #[test]
         fn test_rto_still_charges_the_controller() {
             let mut s = socket_established_for_congestion_control();
-            s.set_congestion_control(CongestionControl::Cubic);
 
             for _ in 0..32 {
-                s.congestion_controller.inner_mut().on_ack(
+                s.congestion_controller.on_ack(
                     Instant::from_millis(0),
                     2048,
                     &RttEstimator::default(),
                 );
             }
-            let cwnd_before = s.congestion_controller.inner().window();
+            let cwnd_before = s.congestion_controller.window();
 
             s.send_slice(&[0; 1024][..]).unwrap();
             recv!(s, time 0, Ok(TcpRepr {
@@ -13928,10 +13834,9 @@ mod test {
                 ..RECV_TEMPL
             }));
             s.congestion_controller
-                .inner_mut()
                 .pre_transmit(Instant::from_millis(5010));
 
-            let cwnd_after = s.congestion_controller.inner().window();
+            let cwnd_after = s.congestion_controller.window();
             assert!(
                 cwnd_after < cwnd_before,
                 "an RTO left the window uncharged: {cwnd_before} -> {cwnd_after}"
@@ -14093,26 +13998,6 @@ mod test {
                 "the segment should be retransmitted 200 ms after it was sent"
             )
         });
-    }
-
-    #[test]
-    fn test_set_get_congestion_control() {
-        let mut s = socket_established();
-
-        #[cfg(feature = "socket-tcp-reno")]
-        {
-            s.set_congestion_control(CongestionControl::Reno);
-            assert_eq!(s.congestion_control(), CongestionControl::Reno);
-        }
-
-        #[cfg(feature = "socket-tcp-cubic")]
-        {
-            s.set_congestion_control(CongestionControl::Cubic);
-            assert_eq!(s.congestion_control(), CongestionControl::Cubic);
-        }
-
-        s.set_congestion_control(CongestionControl::None);
-        assert_eq!(s.congestion_control(), CongestionControl::None);
     }
 
     // =========================================================================================//
