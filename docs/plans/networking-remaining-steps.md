@@ -88,7 +88,7 @@ cleanup.
 - COMPLETED: On `UdpSocket::close`, wake RX and TX waiters and reject every later send or
   receive consistently; a closed socket must not report success for a datagram
   it cannot transmit.
-- Restore RX ring depth after transient buffer-allocation failures. Track the
+- COMPLETED: Restore RX ring depth after transient buffer-allocation failures. Track the
   deficit caused by a failed `pop_buf` and refill it on a later successful
   poll.
 - Replace `drop_tcp_socket`'s fixed 1 ms delay with an explicit
