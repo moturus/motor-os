@@ -1633,7 +1633,7 @@ impl MotoSocket {
             let deadline =
                 moto_async::Instant::now() + std::time::Duration::from_secs(linger_secs as u64);
             moto_async::LocalRuntime::spawn(async move {
-                Self::tcp_linger_task(socket_clone, deadline, lingerer).await
+                Self::tcp_linger_task(socket_clone, deadline, lingerer, close_req).await
             });
         } else {
             log::debug!("TCP socket 0x{socket_id:x}: not lingering.");
@@ -1655,6 +1655,7 @@ impl MotoSocket {
         moto_socket: Rc<RefCell<Self>>,
         deadline: moto_async::Instant,
         lingerer: Option<moto_async::oneshot::Receiver<()>>,
+        close_req: Option<moto_ipc::io_channel::Msg>,
     ) {
         use futures::FutureExt;
 
@@ -1706,7 +1707,15 @@ impl MotoSocket {
         }
 
         moto_socket.borrow_mut().base.lingering = false;
+        let close_response = close_req.map(|mut resp| {
+            let sender = moto_socket.borrow().base.sender().clone();
+            resp.status = moto_rt::E_OK;
+            (sender, resp)
+        });
         Self::drop_tcp_socket(moto_socket).await;
+        if let Some((sender, resp)) = close_response {
+            let _ = sender.send(resp).await;
+        }
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
@@ -2157,8 +2166,9 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        // We respond OK immediately (if the socket is found, etc.),
-        // and do all the cleanup work later/asynchronously.
+        // Explicit positive SO_LINGER defers the response until the linger
+        // resolves. Other successful closes respond after handing cleanup to
+        // the asynchronous linger task (or after an immediate drop).
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
             return Err(ErrorKind::NotFound.into());
