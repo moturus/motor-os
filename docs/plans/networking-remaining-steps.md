@@ -85,7 +85,7 @@ cleanup.
 - COMPLETED: Make a TCP writer that was already parked when reset/closure arrived return
   the stored reset or broken-pipe error when it committed zero bytes. Preserve
   partial-write semantics when it committed data.
-- On `UdpSocket::close`, wake RX and TX waiters and reject every later send or
+- COMPLETED: On `UdpSocket::close`, wake RX and TX waiters and reject every later send or
   receive consistently; a closed socket must not report success for a datagram
   it cannot transmit.
 - Restore RX ring depth after transient buffer-allocation failures. Track the

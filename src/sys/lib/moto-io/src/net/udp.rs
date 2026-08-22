@@ -80,7 +80,10 @@ impl UdpSocket {
         }
 
         self.discard_unstaged_tx();
+        self.rx_queue.lock().clear();
 
+        self.wake_rx_waiters();
+        self.wake_tx_waiters();
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
@@ -255,7 +258,8 @@ impl UdpSocket {
     // layers blocking, `SO_*TIMEO` and `O_NONBLOCK` on top.
 
     /// Nonblocking receive or peek: `Ok((n, from))` with a datagram,
-    /// `E_NOT_READY` when the socket would block.
+    /// `E_NOT_READY` when the socket would block, `E_NOT_CONNECTED` after
+    /// close.
     pub fn try_recv_from(
         &self,
         buf: &mut [u8],
@@ -289,7 +293,8 @@ impl UdpSocket {
     }
 
     /// Nonblocking send: `Ok(n)` when queued, `E_NOT_READY` when the TX queue
-    /// is full, `E_INVALID_ARGUMENT` when the payload is oversized.
+    /// is full, `E_INVALID_ARGUMENT` when the payload is oversized,
+    /// `E_NOT_CONNECTED` after close.
     pub fn try_send_to(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
         self.send_to_nonblocking(buf, addr)
     }
@@ -323,6 +328,10 @@ impl UdpSocket {
         buf: &mut [u8],
         peek: bool,
     ) -> Result<(usize, SocketAddr), ErrorCode> {
+        if self.is_closed() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
+
         if peek {
             self.peek_from_nonblocking(buf)
         } else {
@@ -401,6 +410,10 @@ impl UdpSocket {
     }
 
     fn send_to_nonblocking(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
+        if self.is_closed() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
+
         if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -410,6 +423,9 @@ impl UdpSocket {
         }
 
         let mut tx_queue = self.tx_queue.lock();
+        if self.is_closed() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
         if tx_queue.is_full() {
             return Err(E_NOT_READY);
         }
@@ -448,8 +464,15 @@ impl UdpSocket {
         let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
         match cmd {
             api_net::NetCmd::UdpSocketTxRx => {
+                let mut rx_queue = self.rx_queue.lock();
+                if self.is_closed() {
+                    drop(rx_queue);
+                    if msg.payload.args_16()[10] != 0 {
+                        let _ = self.channel().get_page(msg.payload.shared_pages()[11]);
+                    }
+                    return;
+                }
                 let notify = {
-                    let mut rx_queue = self.rx_queue.lock();
                     rx_queue
                         .push_back(msg, |idx| self.channel().get_page(idx))
                         .unwrap();
@@ -462,6 +485,9 @@ impl UdpSocket {
                 }
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
+                if self.is_closed() {
+                    return;
+                }
                 self.raise_readiness(Readiness::WRITABLE);
                 self.on_channel_tx_progress();
             }
@@ -502,6 +528,10 @@ impl UdpSocket {
         } else {
             Err(resp.status)
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -697,12 +727,20 @@ impl core::future::Future for UdpReadable<'_> {
 
         let this = self.get_mut();
         let socket = this.socket;
+        if socket.is_closed() {
+            socket.remove_rx_waker(&mut this.waiter_id);
+            return Poll::Ready(());
+        }
         if socket.has_rx_datagram() {
             socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         socket.add_rx_waker(&mut this.waiter_id, cx.waker());
         if socket.has_rx_datagram() {
+            socket.remove_rx_waker(&mut this.waiter_id);
+            return Poll::Ready(());
+        }
+        if socket.is_closed() {
             socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
@@ -736,6 +774,10 @@ impl core::future::Future for UdpWritable<'_> {
 
         let this = self.get_mut();
         let socket = this.socket;
+        if socket.is_closed() {
+            socket.remove_tx_waker(&mut this.waiter_id);
+            return Poll::Ready(());
+        }
         if !socket.tx_queue_full() {
             socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
@@ -748,6 +790,10 @@ impl core::future::Future for UdpWritable<'_> {
         }
         socket.add_tx_waker(&mut this.waiter_id, cx.waker());
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
+            return Poll::Ready(());
+        }
+        if socket.is_closed() {
             socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
