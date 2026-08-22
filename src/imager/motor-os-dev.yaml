@@ -85,4 +85,4 @@ source_dirs:
 filesystem: "motor-fs"
 img_name: "motor-os-dev.qcow2"
 image_format: "qcow2"
-data_partition_size_mb: 2048
+data_partition_size_mb: 4096
