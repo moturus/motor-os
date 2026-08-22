@@ -67,6 +67,16 @@ impl BufCache {
     }
 }
 
+/// Allocate one missing RX-ring buffer, retaining the deficit on failure.
+fn allocate_rx_refill<T>(deficit: &mut usize, allocate: impl FnOnce() -> Option<T>) -> Option<T> {
+    if *deficit == 0 {
+        return None;
+    }
+    let buffer = allocate()?;
+    *deficit -= 1;
+    Some(buffer)
+}
+
 pub(super) struct VirtioDevice {
     inner: Rc<NetDevice>,
     rx_queue: RxQueue,
@@ -207,6 +217,7 @@ impl VirtioDevice {
             };
             completions.push_back(net_dev.clone().post_read(buf).await);
         }
+        let mut rx_deficit = rxq_sz - completions.len();
 
         #[cfg(debug_assertions)]
         {
@@ -256,14 +267,23 @@ impl VirtioDevice {
                     let Some(buf) = buf_cache.pop_buf(SMALL_BUF_SIZE) else {
                         // One fewer buffer in flight; the queue keeps working.
                         log::error!("NET: RX: could not allocate a receive buffer.");
+                        rx_deficit += 1;
+                        debug_assert!(rx_deficit <= rxq_sz);
                         continue;
                     };
                     buf
                 }
             };
 
-            log::debug!("NET: RX: posting read");
+            log::debug!("NET: RX: posting read.");
             completions.push_back(net_dev.clone().post_read(next_buf).await);
+            while let Some(refill) =
+                allocate_rx_refill(&mut rx_deficit, || buf_cache.pop_buf(SMALL_BUF_SIZE))
+            {
+                log::debug!("NET: RX: refilling missing read.");
+                completions.push_back(net_dev.clone().post_read(refill).await);
+            }
+            debug_assert_eq!(completions.len() + rx_deficit, rxq_sz);
         }
     }
 
@@ -1166,6 +1186,10 @@ pub(crate) mod self_test {
             "net::device::only_external_devices_rate_limit_egress",
             only_external_devices_rate_limit_egress,
         ),
+        (
+            "net::device::rx_ring_refills_after_transient_allocation_failure",
+            rx_ring_refills_after_transient_allocation_failure,
+        ),
     ];
 
     /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
@@ -1173,6 +1197,35 @@ pub(crate) mod self_test {
     /// [`super::super::init`] sees when the operator wrote no overrides.
     fn net_cfg() -> config::NetConfig {
         toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap()
+    }
+
+    /// A failed refill remains recorded and is retried after a later RX
+    /// completion makes another allocation opportunity.
+    fn rx_ring_refills_after_transient_allocation_failure() -> Result<(), String> {
+        let mut deficit = 2;
+
+        let first = allocate_rx_refill(&mut deficit, || Some(1_u8));
+        st_assert_eq!(first, Some(1));
+        st_assert_eq!(deficit, 1);
+
+        let failed = allocate_rx_refill(&mut deficit, || None::<u8>);
+        st_assert_eq!(failed, None);
+        st_assert_eq!(deficit, 1);
+
+        let second = allocate_rx_refill(&mut deficit, || Some(2_u8));
+        st_assert_eq!(second, Some(2));
+        st_assert_eq!(deficit, 0);
+
+        let mut calls = 0;
+        st_assert_eq!(
+            allocate_rx_refill::<()>(&mut deficit, || {
+                calls += 1;
+                Some(())
+            }),
+            None
+        );
+        st_assert_eq!(calls, 0);
+        Ok(())
     }
 
     /// The egress rate limits reach external interfaces and skip loopback.
