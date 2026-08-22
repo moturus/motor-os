@@ -198,6 +198,13 @@ impl UdpDefragmentingQueue {
         }
     }
 
+    /// Drop every partial or complete datagram, releasing its I/O pages.
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.datagram = None;
+        self.fragment_sequence = None;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.datagram.is_none() && self.queue.is_empty()
     }

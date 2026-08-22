@@ -450,6 +450,112 @@ fn test_cancelled_native_io_waiters_are_removed() {
     println!("-- test_cancelled_native_io_waiters_are_removed() PASS");
 }
 
+fn test_native_close_ends_udp_io() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct WakeFlag(AtomicBool);
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
+    let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
+            .await
+            .unwrap();
+
+        let recv_wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let recv_waker = Waker::from(recv_wake.clone());
+        let mut recv_cx = Context::from_waker(&recv_waker);
+        let mut recv_buf = [0_u8; 1];
+        let mut recv = Box::pin(socket.recv_from_future(&mut recv_buf, false));
+        assert!(matches!(recv.as_mut().poll(&mut recv_cx), Poll::Pending));
+
+        let readable_wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+        let readable_waker = Waker::from(readable_wake.clone());
+        let mut readable_cx = Context::from_waker(&readable_waker);
+        let mut readable = Box::pin(socket.readable());
+        assert!(matches!(
+            readable.as_mut().poll(&mut readable_cx),
+            Poll::Pending
+        ));
+        assert_eq!(socket.rx_waiter_count(), 2);
+
+        socket.with_tx_pages_exhausted_for_test(|| {
+            let queued = [1_u8];
+            loop {
+                match socket.try_send_to(&queued, &destination) {
+                    Ok(1) => {}
+                    Err(moto_rt::E_NOT_READY) => break,
+                    result => panic!("unexpected UDP send result: {result:?}"),
+                }
+            }
+
+            let send_wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let send_waker = Waker::from(send_wake.clone());
+            let mut send_cx = Context::from_waker(&send_waker);
+            let pending = [2_u8];
+            let mut send = Box::pin(socket.send_to_future(&pending, &destination));
+            assert!(matches!(send.as_mut().poll(&mut send_cx), Poll::Pending));
+
+            let writable_wake = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let writable_waker = Waker::from(writable_wake.clone());
+            let mut writable_cx = Context::from_waker(&writable_waker);
+            let mut writable = Box::pin(socket.writable());
+            assert!(matches!(
+                writable.as_mut().poll(&mut writable_cx),
+                Poll::Pending
+            ));
+            assert_eq!(socket.tx_waiter_count(), 2);
+
+            socket.close();
+
+            assert!(recv_wake.0.load(Ordering::Acquire));
+            assert!(readable_wake.0.load(Ordering::Acquire));
+            assert!(send_wake.0.load(Ordering::Acquire));
+            assert!(writable_wake.0.load(Ordering::Acquire));
+            assert_eq!(socket.rx_waiter_count(), 0);
+            assert_eq!(socket.tx_waiter_count(), 0);
+
+            assert_eq!(
+                recv.as_mut().poll(&mut recv_cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            assert_eq!(
+                send.as_mut().poll(&mut send_cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            assert_eq!(readable.as_mut().poll(&mut readable_cx), Poll::Ready(()));
+            assert_eq!(writable.as_mut().poll(&mut writable_cx), Poll::Ready(()));
+
+            assert_eq!(
+                socket.try_recv_from(&mut [0_u8; 1], false),
+                Err(moto_rt::E_NOT_CONNECTED)
+            );
+            assert_eq!(
+                socket.try_send_to(&[3_u8], &destination),
+                Err(moto_rt::E_NOT_CONNECTED)
+            );
+        });
+
+        drop((recv, readable));
+        drop(socket);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    println!("-- test_native_close_ends_udp_io() PASS");
+}
+
 fn test_udp_tx_progresses_after_page_free() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -775,6 +881,7 @@ pub fn run_all_tests() {
     test_udp_timeouts();
     test_udp_dup_shares_posix_flags();
     test_cancelled_native_io_waiters_are_removed();
+    test_native_close_ends_udp_io();
     test_udp_tx_progresses_after_page_free();
     udp_rebind_after_close_test();
     udp_close_does_not_overtake_tx_test();
