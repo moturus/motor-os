@@ -2286,6 +2286,9 @@ impl<'a> Socket<'a> {
         {
             return false;
         }
+        if self.state == State::Listen && ip_repr.src_addr().is_unspecified() {
+            return false;
+        }
 
         if let Some(tuple) = &self.tuple {
             // Reject packets not matching the 4-tuple
@@ -2770,6 +2773,9 @@ impl<'a> Socket<'a> {
 
             // SYN packets in the LISTEN state change it to SYN-RECEIVED.
             (State::Listen, TcpControl::Syn) => {
+                if ip_repr.src_addr().is_unspecified() {
+                    return None;
+                }
                 tcp_trace!("received SYN");
                 if let Some(max_seg_size) = repr.max_seg_size {
                     if max_seg_size == 0 {
@@ -5135,6 +5141,27 @@ mod test {
             }
         );
         sanity!(s, socket_syn_received());
+    }
+
+    #[test]
+    fn test_listen_rejects_unspecified_remote() {
+        let mut s = socket_listen();
+        let tcp_repr = TcpRepr {
+            control: TcpControl::Syn,
+            seq_number: REMOTE_SEQ,
+            ack_number: None,
+            ..SEND_TEMPL
+        };
+        let ip_repr = IpReprIpvX(IpvXRepr {
+            src_addr: IpvXAddress::UNSPECIFIED,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        });
+
+        assert!(!s.socket.accepts(&mut s.cx, &ip_repr, &tcp_repr));
+        assert_eq!(s.state, State::Listen);
     }
 
     #[test]

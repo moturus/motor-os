@@ -397,6 +397,67 @@ fn loopback_addresses_are_refused_off_loopback() {
     );
 }
 
+/// An unspecified IPv4 source is reserved for address acquisition. It must
+/// not create a connection or draw a reply when DHCP is absent.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn unspecified_ipv4_source_is_refused() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const LOCAL_PORT: u16 = 49_504;
+
+    let tcp_repr = TcpRepr {
+        src_port: 4242,
+        dst_port: LOCAL_PORT,
+        control: TcpControl::Syn,
+        seq_number: TcpSeqNumber(20_000),
+        ack_number: None,
+        window_len: 64,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None; 3],
+        timestamp: None,
+        payload: &[],
+    };
+    let ipv4_repr = Ipv4Repr {
+        src_addr: Ipv4Address::UNSPECIFIED,
+        dst_addr: LOCAL_ADDR,
+        next_header: IpProtocol::Tcp,
+        payload_len: tcp_repr.buffer_len(),
+        hop_limit: 64,
+    };
+    let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+    ipv4_repr.emit(
+        &mut Ipv4Packet::new_unchecked(&mut bytes),
+        &ChecksumCapabilities::default(),
+    );
+    tcp_repr.emit(
+        &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+        &Ipv4Address::UNSPECIFIED.into(),
+        &LOCAL_ADDR.into(),
+        &ChecksumCapabilities::default(),
+    );
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+    let mut socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    socket.listen(LOCAL_PORT).unwrap();
+    let handle = sockets.add(0, socket);
+
+    device.push_rx(bytes);
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::Listen
+    );
+    assert!(device.tx_queue.is_empty());
+}
+
 /// A connection request no socket took is dropped when a listener owns the
 /// endpoint and reset when nothing does, and every dropped one names the
 /// listener it was for so that listener's pool can be deepened.

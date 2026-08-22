@@ -32,7 +32,7 @@ Within each group, order is the suggested pickup order.
 
 ### sys-io dies or wedges
 
-- Drop IPv4 packets from the unspecified source `0.0.0.0` unless they are
+- COMPLETED: Drop IPv4 packets from the unspecified source `0.0.0.0` unless they are
   DHCP, which is not compiled. `iface/interface/ipv4.rs` admits them; a SYN to
   any listening port becomes a Listen-state connection whose remote is
   `0.0.0.0`, and the SYN|ACK hits the release `assert!` on an unspecified

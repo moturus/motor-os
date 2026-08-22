@@ -272,9 +272,9 @@ impl InterfaceInner {
         let mut ipv4_repr = check!(Ipv4Repr::parse(ipv4_packet, &self.caps.checksum));
         #[cfg(not(feature = "proto-ipv4-fragmentation"))]
         let ipv4_repr = check!(Ipv4Repr::parse(ipv4_packet, &self.caps.checksum));
-        if !self.is_unicast_v4(ipv4_repr.src_addr) && !ipv4_repr.src_addr.is_unspecified() {
-            // Discard packets with non-unicast source addresses but allow unspecified
-            net_debug!("non-unicast or unspecified source address");
+        let src_unspecified = ipv4_repr.src_addr.is_unspecified();
+        if !self.is_unicast_v4(ipv4_repr.src_addr) && !src_unspecified {
+            net_debug!("non-unicast source address");
             return None;
         }
 
@@ -384,7 +384,8 @@ impl InterfaceInner {
         let ip_repr = IpRepr::Ipv4(ipv4_repr);
 
         #[cfg(feature = "socket-raw")]
-        let handled_by_raw_socket = self.raw_socket_filter(sockets, &ip_repr, ip_payload);
+        let handled_by_raw_socket =
+            !src_unspecified && self.raw_socket_filter(sockets, &ip_repr, ip_payload);
         #[cfg(not(feature = "socket-raw"))]
         let handled_by_raw_socket = false;
 
@@ -416,6 +417,11 @@ impl InterfaceInner {
                     }
                 }
             }
+        }
+
+        if src_unspecified {
+            net_debug!("unspecified source address outside DHCP");
+            return None;
         }
 
         if !self.has_ip_addr(ipv4_repr.dst_addr)
