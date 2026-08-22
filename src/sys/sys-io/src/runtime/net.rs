@@ -745,6 +745,9 @@ pub(super) async fn init(
     }
 
     if devices.is_empty() {
+        log::warn!(
+            "NET runtime intentionally disabled: valid configuration produced zero usable devices."
+        );
         return Ok(());
     }
 
