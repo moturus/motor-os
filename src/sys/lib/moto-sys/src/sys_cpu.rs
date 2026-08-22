@@ -39,7 +39,7 @@ impl SysCpu {
 
     /// Exit the current process. To exit the current thread, call
     /// ```
-    ///    let _ = moto_sys::SysObj::put(SysHandle::SELF);
+    ///    let _ = moto_sys::SysObj::put(moto_sys::SysHandle::SELF);
     /// ```
     #[cfg(feature = "userspace")]
     pub fn exit_process(code: u64) -> ! {

@@ -486,6 +486,7 @@ impl TcpListener {
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
+            local_rx_shutdown: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             peer_reset: AtomicBool::new(false),
             subchannel_mask,
@@ -701,6 +702,10 @@ pub struct TcpStream {
     // to fail, so the _local_ state should reflect the
     // shutdown before the driver reports the new state.
     rx_closed: AtomicBool,
+    /// The application committed `shutdown(Read)`. Unlike `rx_closed`, this
+    /// is not set by a remote FIN or RST and therefore selects clean EOF over
+    /// the peer-reset error.
+    local_rx_shutdown: AtomicBool,
     tx_closed: AtomicBool,
     /// The peer reset the connection (the state-change event carried the
     /// reset cause). Sticky; selects `E_CONNECTION_RESET` over
@@ -808,6 +813,15 @@ impl TcpStream {
         let handle = self.handle.load(Ordering::Acquire);
         assert_ne!(0, handle);
         handle
+    }
+
+    fn option_handle(&self) -> Result<u64, ErrorCode> {
+        let handle = self.handle.load(Ordering::Acquire);
+        if handle == 0 {
+            Err(moto_rt::E_NOT_CONNECTED)
+        } else {
+            Ok(handle)
+        }
     }
 
     pub fn weak(&self) -> Weak<Self> {
@@ -1056,6 +1070,7 @@ impl TcpStream {
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
+            local_rx_shutdown: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             peer_reset: AtomicBool::new(false),
             subchannel_mask,
@@ -1323,11 +1338,11 @@ impl TcpStream {
             // No RX bytes; the front message, if any, is not an Rx.
             let Some(msg) = recv_q.pop_front() else {
                 if self.rx_closed.load(Ordering::Acquire) {
-                    return Ok(0);
+                    return self.dead_read_result();
                 }
                 match self.tcp_state() {
                     TcpState::Closed | TcpState::WriteOnly => {
-                        return Ok(0);
+                        return self.dead_read_result();
                     }
                     _ => return Err(moto_rt::E_NOT_READY),
                 }
@@ -1347,7 +1362,7 @@ impl TcpStream {
             self.set_tcp_state(new_state);
             match self.tcp_state() {
                 TcpState::Closed | TcpState::WriteOnly => {
-                    return Ok(0);
+                    return self.dead_read_result();
                 }
                 _ => {
                     recv_q = self.recv_queue.lock();
@@ -1394,14 +1409,14 @@ impl TcpStream {
     }
 
     /// Nonblocking write: writes what fits now (`Ok(n)`, at least one byte),
-    /// `E_NOT_READY` when fully backpressured, `E_NOT_CONNECTED` on a closed
-    /// write half.
+    /// `E_NOT_READY` when fully backpressured, `dead_write_error` on a
+    /// closed write half.
     pub fn try_write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         if bufs.is_empty() {
             return Ok(0);
         }
         if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return Err(self.dead_write_error());
         }
         self.write_nonblocking(bufs)
     }
@@ -1478,22 +1493,33 @@ impl TcpStream {
 
     /// Whether the write half is still open: not closed by a state edge and
     /// not locally shut down. The veneer's spin loop bails to
-    /// `E_NOT_CONNECTED` the moment this goes false.
+    /// `dead_write_error` the moment this goes false.
     pub fn can_write_now(&self) -> bool {
         self.tcp_state().can_write() && !self.tx_closed.load(Ordering::Acquire)
     }
 
     /// Whether the peer reset this connection -- the recorded cause behind
     /// a dead stream, for native callers that want ECONNRESET fidelity.
-    ///
-    /// The std-facing write error deliberately stays `E_NOT_CONNECTED` for
-    /// now: emitting `E_CONNECTION_RESET` (22) launders to `Unknown` through
-    /// the toolchain std's older moto-rt enum bound (observed as raw code 2
-    /// at the app). Flip the dead-write error to
-    /// `moto_rt::E_CONNECTION_RESET` when the toolchain's moto-rt knows the
-    /// code.
     pub fn peer_reset(&self) -> bool {
         self.peer_reset.load(Ordering::Acquire)
+    }
+
+    fn dead_read_result(&self) -> Result<usize, ErrorCode> {
+        if self.peer_reset() && !self.local_rx_shutdown.load(Ordering::Acquire) {
+            Err(moto_rt::E_CONNECTION_RESET)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// The error a write on a dead write half reports: the recorded reset
+    /// cause wins over the generic not-connected.
+    pub fn dead_write_error(&self) -> ErrorCode {
+        if self.peer_reset() {
+            moto_rt::E_CONNECTION_RESET
+        } else {
+            moto_rt::E_NOT_CONNECTED
+        }
     }
 
     /// Copy from `src` (skipping its first `offset` bytes) into `dst`;
@@ -1697,12 +1723,13 @@ impl TcpStream {
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = option;
         let resp = self
             .channel()
             .rpc_after_send(req, || {
                 if read {
+                    self.local_rx_shutdown.store(true, Ordering::Release);
                     self.rx_closed.store(true, Ordering::Release);
                     // SHUT_RD is local and discards already-buffered data.
                     // Complete it at the queue-ownership boundary so dropping
@@ -1730,7 +1757,7 @@ impl TcpStream {
     pub async fn set_linger_async(&self, duration: Option<Duration>) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
         if let Some(duration) = duration {
             req.payload.args_32_mut()[2] = 1;
@@ -1748,7 +1775,7 @@ impl TcpStream {
     pub async fn linger_async(&self) -> Result<Option<Duration>, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
         let resp = self.channel().rpc(req).await;
         if !resp.status().is_ok() {
@@ -1765,7 +1792,7 @@ impl TcpStream {
     pub async fn set_nodelay_async(&self, nodelay: bool) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         req.payload.args_64_mut()[1] = nodelay as u64;
         let resp = self.channel().rpc(req).await;
@@ -1780,7 +1807,7 @@ impl TcpStream {
     pub async fn nodelay_async(&self) -> Result<bool, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
@@ -1794,7 +1821,7 @@ impl TcpStream {
     pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
         let resp = self.channel().rpc(req).await;
@@ -1809,7 +1836,7 @@ impl TcpStream {
     pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
-        req.handle = self.handle();
+        req.handle = self.option_handle()?;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
@@ -1827,7 +1854,7 @@ impl TcpStream {
         buffer_size_rpc(
             self.channel(),
             api_net::NetCmd::TcpStreamSetOption,
-            self.handle(),
+            self.option_handle()?,
             rcv,
             Some(bytes),
         )
@@ -1839,7 +1866,7 @@ impl TcpStream {
         buffer_size_rpc(
             self.channel(),
             api_net::NetCmd::TcpStreamGetOption,
-            self.handle(),
+            self.option_handle()?,
             rcv,
             None,
         )

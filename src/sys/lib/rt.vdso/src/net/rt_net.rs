@@ -535,6 +535,24 @@ pub unsafe extern "C" fn udp_connect(rt_fd: RtFd, addr: *const netc::sockaddr) -
     moto_rt::E_OK
 }
 
+pub extern "C" fn udp_multicast_op_v4(
+    _rt_fd: RtFd,
+    _op: u64,
+    _addr: *const netc::in_addr,
+    _iface: *const netc::in_addr,
+) -> ErrorCode {
+    moto_rt::E_NOT_IMPLEMENTED
+}
+
+pub extern "C" fn udp_multicast_op_v6(
+    _rt_fd: RtFd,
+    _op: u64,
+    _addr: *const netc::in6_addr,
+    _iface: u32,
+) -> ErrorCode {
+    moto_rt::E_NOT_IMPLEMENTED
+}
+
 #[allow(unused)]
 pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     match a1 {

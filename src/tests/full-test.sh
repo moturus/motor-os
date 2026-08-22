@@ -36,12 +36,15 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
 "$WD/test-vm-console-filter.sh"
+"$WD/test-vm-image-format.sh"
+# Keep a local runtime version bump from breaking only the dev-image suite.
+python3 "$WD/test-dev-path-locks.py"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
 # both to run this same suite against the dev image, which adds native
 # toolchains, tests, source trees, Gears, and Lorry to the standard contents.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.img}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
@@ -74,6 +77,16 @@ for crate in red rmux rush russhd; do
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
 
+# sys-init's dependency-free config parser is host-tested separately from its
+# Motor-only process-management binary.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
+fi
+
 # Platform wire helpers are no_std in the image and unit-tested on the host.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
@@ -84,7 +97,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,medium-ethernet,medium-ip,proto-ipv4,proto-ipv6,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
+NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-tcp-cubic,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo +nightly test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
@@ -152,6 +165,7 @@ vm_rmux() {
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
+. "$WD/test-udp-fragmentation.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -258,6 +272,7 @@ VMM_PID=""
 # cleanup routine
 stop_vmm() {
   set +e
+  stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
@@ -327,6 +342,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
 fi
 [ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
+[ "$(vm_ssh /system/bin/pwd)" = "/user" ] ||
+  fail "russhd did not start the SSH command in /user"
+[ "$(vm_ssh /system/bin/printenv HOME)" = "HOME=/user" ] ||
+  fail "russhd did not set HOME to /user"
 rush_path="$(printf 'printenv PATH\nexit\n' |
   vm_ssh "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
@@ -347,6 +366,8 @@ vm_ssh /system/bin/ping -c 1 2001:db8::1
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
+test_udp_fragmentation
+
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
@@ -359,13 +380,14 @@ udp_sockets="$(read_udp_socket_count)"
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
 resolver_pid="$(vm_ssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/\*/, "", $1); print $1; exit }')"
+  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
 vm_ssh /system/bin/kill "$resolver_pid"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" /system/services/dns-resolver >> /tmp/full-test-dns-resolver.log 2>&1 &
+"${SSH[@]}" MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+  >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
 resolver_restarted=0
@@ -398,16 +420,16 @@ set +o pipefail
 
 # $(...) drops trailing newlines, so this is the last non-empty line.
 systest_output="$(cat "$SYSTEST_LOG")"
-[ "${systest_output##*$'\n'}" = "PASS" ] ||
-  fail "systest did not finish with PASS"
+[ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
+  fail "systest did not finish with 'systest: ALL PASS'"
 
 # The SSH login shell consumes russhd's one-time capability environment.
-# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED from that shell to
-# the focused lifetime coordinator so it can create the detached child this
-# test requires. Do not interpose another rush: it deliberately would not pass
-# this capability to a program absent from rush.toml's trusted list.
+# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE
+# from that shell to the focused lifetime coordinator so it can create the
+# detached Interactive child this test requires. Do not interpose another rush:
+# it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x2c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x6c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
@@ -465,7 +487,8 @@ bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
   fail "kill by \$! failed: '$out'"
-printf '%s\n' "$out" | awk -v pid="$bang" '$1 == pid { found = 1 } END { exit !found }' ||
+printf '%s\n' "$out" |
+  awk -v pid="$bang" '{ gsub(/[+*?]/, "", $1); if ($1 == pid) found = 1 } END { exit !found }' ||
   fail "\$! ($bang) is not a pid in the process list: '$out'"
 
 # rmux: a pane is a terminal to the program in it, without a pty (rmux/details.md

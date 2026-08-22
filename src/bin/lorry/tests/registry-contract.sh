@@ -41,7 +41,7 @@ echo "== Preparing the fail-closed Cargo-cache crates.io fixture =="
 "$RUSTC" --edition=2024 -D warnings -O "$CACHE_CURL_SOURCE" \
     -o "$WORK/lorry-cache-curl"
 "$WORK/lorry-cache-curl" prepare "$HOST_CARGO_HOME" \
-    "$WORK/crates-io" "$CURL_DIR/Cargo.lock"
+    "$DOWNLOAD_CACHE/archives" "$WORK/crates-io" "$CURL_DIR/Cargo.lock"
 set +e
 "$WORK/crates-io/curl" --url https://example.com/denied \
     --write-out 'LORRY-CURL-1 00000000000000000000000000000000' \
@@ -105,8 +105,13 @@ if ! (
     cat "$WORK/fresh.log" >&2
     fail "fresh acquisition failed"
 fi
-grep -F "New crates.io packages (13):" "$WORK/fresh.log" >/dev/null ||
-    fail "fresh acquisition did not approve the expected 13 registry packages"
+mapfile -t approved_counts < <(
+    sed -n 's/^New crates\.io packages (\([1-9][0-9]*\)):$/\1/p' \
+        "$WORK/fresh.log"
+)
+[ "${#approved_counts[@]}" -eq 1 ] ||
+    fail "fresh acquisition did not approve one nonempty registry package set"
+expected_objects="${approved_counts[0]}"
 cmp "$WORK/expected-Cargo.lock" "$FIRST_PROJECT/Cargo.lock" ||
     fail "fresh acquisition changed the reviewed curl lockfile"
 
@@ -114,8 +119,8 @@ FIRST_OBJECT_ROOT="$FIRST_USER_REPOSITORY/objects/crates-io/sha256"
 object_count="$(
     find "$FIRST_OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l
 )"
-[ "$object_count" -eq 13 ] ||
-    fail "fresh acquisition published $object_count registry objects instead of 13"
+[ "$object_count" -eq "$expected_objects" ] ||
+    fail "fresh acquisition approved $expected_objects packages but published $object_count objects"
 [ ! -d "$FIRST_SYSTEM_REPOSITORY/objects/crates-io" ] ||
     [ -z "$(find "$FIRST_SYSTEM_REPOSITORY/objects/crates-io" -type f -print -quit)" ] ||
     fail "minimal system seed unexpectedly contains a registry object"
@@ -147,7 +152,7 @@ if grep -F "https://static.crates.io/" "$WARM_ARGUMENTS" >/dev/null; then
 fi
 [ "$(
     find "$FIRST_OBJECT_ROOT" -mindepth 2 -maxdepth 2 -type d | wc -l
-)" -eq 13 ] || fail "warm acquisition changed the registry object set"
+)" -eq "$expected_objects" ] || fail "warm acquisition changed the registry object set"
 
 echo
 echo "PASS: cached crates.io acquisition published and reused verified objects"

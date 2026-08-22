@@ -145,6 +145,11 @@ impl InterfaceInner {
                 // endpoints that minted recently are checked, so a prober
                 // cannot grind the cookie hash against an idle listener.
                 if let Some(restore) = self.check_cookie_ack(&ip_repr, &tcp_repr) {
+                    if self.tcp_cookie_restores.iter().any(|pending| {
+                        pending.local == restore.local && pending.remote == restore.remote
+                    }) {
+                        return None;
+                    }
                     if self.tcp_cookie_restores.push(restore).is_err() {
                         // The peer retransmits into a drained queue later;
                         // a reset would kill its established connection.

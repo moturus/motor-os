@@ -14,6 +14,8 @@ mod ieee802154;
 mod ipv4;
 #[cfg(feature = "proto-ipv6")]
 mod ipv6;
+#[cfg(any(feature = "proto-ipv4", feature = "proto-ipv6"))]
+mod pmtu;
 #[cfg(feature = "proto-sixlowpan")]
 mod sixlowpan;
 
@@ -33,6 +35,15 @@ use super::packet::*;
 use core::result::Result;
 use heapless::Vec;
 
+#[cfg(feature = "proto-ipv4-fragmentation")]
+use super::fragmentation::Ipv4ReassemblyContext;
+#[cfg(feature = "proto-ipv6-fragmentation")]
+use super::fragmentation::Ipv6FragKey;
+#[cfg(any(
+    feature = "proto-ipv4-fragmentation",
+    feature = "proto-ipv6-fragmentation"
+))]
+use super::fragmentation::{AssemblerError, AssemblerOutcome};
 #[cfg(feature = "_proto-fragmentation")]
 use super::fragmentation::{FragKey, PacketAssemblerSet};
 use super::fragmentation::{Fragmenter, FragmentsBuffer};
@@ -47,15 +58,31 @@ use crate::config::IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT;
 use crate::iface::Routes;
 #[cfg(feature = "proto-ipv6-slaac")]
 use crate::iface::Slaac;
+#[cfg(feature = "proto-ipv4-fragmentation")]
+use crate::phy::IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
 use crate::phy::PacketMeta;
 use crate::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use crate::rand::Rand;
-#[cfg(feature = "socket-tcp")]
+#[cfg(any(feature = "socket-tcp", feature = "proto-ipv4-fragmentation"))]
 use crate::siphash::SipHasher24;
 use crate::socket::*;
 use crate::time::{Duration, Instant};
 
 use crate::wire::*;
+
+#[cfg(feature = "proto-ipv6")]
+fn ipv6_device_eligible(caps: &DeviceCapabilities) -> bool {
+    caps.ip_mtu() >= IPV6_MIN_MTU || {
+        #[cfg(feature = "medium-ieee802154")]
+        {
+            caps.medium == Medium::Ieee802154
+        }
+        #[cfg(not(feature = "medium-ieee802154"))]
+        {
+            false
+        }
+    }
+}
 
 macro_rules! check {
     ($e:expr) => {
@@ -84,6 +111,25 @@ pub enum PollResult {
     None,
     /// You should check the state of sockets again for received data or completion of operations.
     SocketStateChanged,
+}
+
+/// Drain-on-read IP fragmentation, reassembly, and PMTU counters.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct IpPacketStats {
+    pub ipv4_fragments_rx: u64,
+    pub ipv6_fragments_rx: u64,
+    pub ipv4_fragments_tx: u64,
+    pub ipv6_fragments_tx: u64,
+    pub reassemblies_completed: u64,
+    pub reassembly_malformed_drops: u64,
+    pub reassembly_no_slot_drops: u64,
+    pub reassembly_allocation_drops: u64,
+    pub reassembly_expiry_drops: u64,
+    pub reassembly_duplicates: u64,
+    pub reassembly_range_limit_drops: u64,
+    pub egress_fragment_stage_busy_drops: u64,
+    pub pmtu_updates_accepted: u64,
+    pub icmp_pmtu_messages_rejected: u64,
 }
 
 /// Result returned by [`Interface::poll_ingress_single`].
@@ -151,7 +197,7 @@ pub struct InterfaceInner {
     #[cfg(feature = "medium-ieee802154")]
     pan_id: Option<Ieee802154Pan>,
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    ipv4_id: u16,
+    ipv4_fragment_ids: ipv4::Ipv4FragmentIds,
     #[cfg(feature = "proto-sixlowpan")]
     sixlowpan_address_context:
         Vec<SixlowpanAddressContext, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT>,
@@ -178,6 +224,9 @@ pub struct InterfaceInner {
     /// verify, since the last [`Interface::take_rx_csum_failed`]. Frames the
     /// device vouched for are not verified, so they cannot land here.
     rx_csum_failed: u64,
+
+    /// Fragmentation, reassembly, and PMTU events since the last stats drain.
+    ip_packet_stats: IpPacketStats,
 
     /// Neighbor mappings an unsolicited packet offered while the cache was
     /// full, since the last [`Interface::take_neighbor_admission_refused`].
@@ -314,6 +363,13 @@ pub struct Config {
     /// The seed doesn't have to be cryptographically secure.
     pub random_seed: u64,
 
+    /// Key for assigning IPv4 fragment identifiers to tuple buckets.
+    ///
+    /// Draw this independently from the platform entropy source for every
+    /// interface. Tests may use a fixed value for deterministic identifiers.
+    #[cfg(feature = "proto-ipv4-fragmentation")]
+    pub ipv4_fragment_id_key: [u8; 16],
+
     /// Key for the TCP initial sequence number hash (RFC 6528).
     ///
     /// Unlike [`Config::random_seed`], this one does have to be unpredictable
@@ -387,6 +443,8 @@ impl Config {
     pub fn new(hardware_addr: HardwareAddress) -> Self {
         Config {
             random_seed: 0,
+            #[cfg(feature = "proto-ipv4-fragmentation")]
+            ipv4_fragment_id_key: [0; 16],
             #[cfg(feature = "socket-tcp")]
             tcp_isn_key: [0; 16],
             #[cfg(feature = "socket-tcp")]
@@ -422,6 +480,7 @@ impl Interface {
             "The hardware address does not match the medium of the interface."
         );
 
+        #[allow(unused_mut)]
         let mut rand = Rand::new(config.random_seed);
 
         #[cfg(feature = "medium-ieee802154")]
@@ -445,15 +504,11 @@ impl Interface {
             }
         }
 
-        #[cfg(feature = "proto-ipv4")]
-        let mut ipv4_id;
-
-        #[cfg(feature = "proto-ipv4")]
-        loop {
-            ipv4_id = rand.rand_u16();
-            if ipv4_id != 0 {
-                break;
-            }
+        #[allow(unused_mut)]
+        let mut routes = Routes::new();
+        #[cfg(feature = "proto-ipv6")]
+        if !ipv6_device_eligible(&caps) {
+            routes.disable_ipv6();
         }
 
         Interface {
@@ -475,7 +530,7 @@ impl Interface {
                 hardware_addr: config.hardware_addr,
                 ip_addrs: alloc::vec::Vec::new(),
                 any_ip: false,
-                routes: Routes::new(),
+                routes,
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_cache: NeighborCache::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -489,7 +544,7 @@ impl Interface {
                 #[cfg(feature = "proto-sixlowpan-fragmentation")]
                 tag,
                 #[cfg(feature = "proto-ipv4-fragmentation")]
-                ipv4_id,
+                ipv4_fragment_ids: ipv4::Ipv4FragmentIds::new(config.ipv4_fragment_id_key),
                 #[cfg(feature = "proto-sixlowpan")]
                 sixlowpan_address_context: Vec::new(),
                 #[cfg(feature = "proto-ipv6-slaac")]
@@ -502,6 +557,7 @@ impl Interface {
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
+                ip_packet_stats: IpPacketStats::default(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_admission_refused: 0,
                 #[cfg(feature = "socket-tcp")]
@@ -546,6 +602,11 @@ impl Interface {
     /// verify. Reading the count clears it, so the caller accumulates.
     pub fn take_rx_csum_failed(&mut self) -> u64 {
         core::mem::take(&mut self.inner.rx_csum_failed)
+    }
+
+    /// Fragmentation, reassembly, and PMTU events. Reading clears the counters.
+    pub fn take_ip_packet_stats(&mut self) -> IpPacketStats {
+        core::mem::take(&mut self.inner.ip_packet_stats)
     }
 
     /// Frames dropped because a loopback address arrived on an interface that
@@ -803,6 +864,19 @@ impl Interface {
     pub fn update_ip_addrs<F: FnOnce(&mut alloc::vec::Vec<IpCidr>)>(&mut self, f: F) {
         f(&mut self.inner.ip_addrs);
         InterfaceInner::flush_neighbor_cache(&mut self.inner);
+        #[cfg(feature = "proto-ipv6")]
+        if !ipv6_device_eligible(&self.inner.caps)
+            && self
+                .inner
+                .ip_addrs
+                .iter()
+                .any(|cidr| matches!(cidr, IpCidr::Ipv6(_)))
+        {
+            self.inner
+                .ip_addrs
+                .retain(|cidr| !matches!(cidr, IpCidr::Ipv6(_)));
+            panic!("IPv6 addresses require an interface MTU of at least 1280");
+        }
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs);
 
         #[cfg(all(
@@ -978,6 +1052,22 @@ impl Interface {
         }
     }
 
+    #[cfg(any(
+        feature = "proto-ipv4-fragmentation",
+        feature = "proto-ipv6-fragmentation"
+    ))]
+    fn ip_fragment_egress(&mut self, device: &mut (impl Device + ?Sized)) -> bool {
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv4) {
+            return self.ipv4_egress(device);
+        }
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv6) {
+            return self.ipv6_egress(device);
+        }
+        false
+    }
+
     /// Transmit packets queued in the sockets.
     ///
     /// This function returns a value indicating whether the state of any socket
@@ -997,17 +1087,45 @@ impl Interface {
         // Free inside `poll()`'s own loop, where the edge already drained.
         self.refresh_stale_poll_at(sockets);
 
-        match self.inner.caps.medium {
+        #[cfg(feature = "_proto-fragmentation")]
+        let fragment_emitted = match self.inner.caps.medium {
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => {
                 #[cfg(feature = "proto-sixlowpan-fragmentation")]
-                self.sixlowpan_egress(device);
+                {
+                    self.sixlowpan_egress(device)
+                }
+                #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
+                {
+                    false
+                }
             }
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ip"))]
             _ => {
-                #[cfg(feature = "proto-ipv4-fragmentation")]
-                self.ipv4_egress(device);
+                #[cfg(any(
+                    feature = "proto-ipv4-fragmentation",
+                    feature = "proto-ipv6-fragmentation"
+                ))]
+                {
+                    self.ip_fragment_egress(device)
+                }
+                #[cfg(not(any(
+                    feature = "proto-ipv4-fragmentation",
+                    feature = "proto-ipv6-fragmentation"
+                )))]
+                {
+                    false
+                }
             }
+        };
+
+        #[cfg(feature = "_proto-fragmentation")]
+        if !self.fragmenter.is_empty() {
+            return if fragment_emitted {
+                PollResult::SocketStateChanged
+            } else {
+                PollResult::None
+            };
         }
 
         #[cfg(feature = "proto-ipv6-slaac")]
@@ -1037,7 +1155,7 @@ impl Interface {
         self.inner.now = timestamp;
 
         #[cfg(feature = "_proto-fragmentation")]
-        self.fragments.assembler.remove_expired(timestamp);
+        self.remove_expired_fragments(timestamp);
 
         self.socket_ingress(device, sockets)
     }
@@ -1049,7 +1167,7 @@ impl Interface {
         self.inner.now = timestamp;
 
         #[cfg(feature = "_proto-fragmentation")]
-        self.fragments.assembler.remove_expired(timestamp);
+        self.remove_expired_fragments(timestamp);
 
         #[cfg(feature = "proto-ipv6-slaac")]
         if self.inner.slaac.sync_required(timestamp) {
@@ -1154,6 +1272,28 @@ impl Interface {
         }
     }
 
+    #[cfg(feature = "_proto-fragmentation")]
+    fn remove_expired_fragments(&mut self, timestamp: Instant) {
+        let expired = self.fragments.assembler.remove_expired(timestamp);
+        self.inner.ip_packet_stats.reassembly_expiry_drops = self
+            .inner
+            .ip_packet_stats
+            .reassembly_expiry_drops
+            .wrapping_add(expired.incomplete as u64);
+    }
+
+    fn record_socketless_dispatch_error(&mut self, error: DispatchError) {
+        #[cfg(any(
+            feature = "proto-ipv4-fragmentation",
+            feature = "proto-ipv6-fragmentation"
+        ))]
+        if error == DispatchError::FragmenterBusy {
+            let counter = &mut self.inner.ip_packet_stats.egress_fragment_stage_busy_drops;
+            *counter = counter.wrapping_add(1);
+        }
+        net_debug!("Failed to send response: {:?}", error);
+    }
+
     fn socket_ingress(
         &mut self,
         device: &mut (impl Device + ?Sized),
@@ -1178,7 +1318,7 @@ impl Interface {
                         && let Err(err) =
                             self.inner.dispatch(tx_token, packet, &mut self.fragmenter)
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
                 #[cfg(feature = "medium-ip")]
@@ -1193,7 +1333,7 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
                 #[cfg(feature = "medium-ieee802154")]
@@ -1208,7 +1348,7 @@ impl Interface {
                             &mut self.fragmenter,
                         )
                     {
-                        net_debug!("Failed to send response: {:?}", err);
+                        self.record_socketless_dispatch_error(err);
                     }
                 }
             }
@@ -1443,6 +1583,17 @@ impl InterfaceInner {
         self.caps.ip_mtu()
     }
 
+    #[allow(unused)] // unused depending on which sockets are enabled
+    pub(crate) fn ip_mtu_for(&mut self, destination: IpAddress) -> usize {
+        let interface_mtu = self.caps.ip_mtu();
+        if destination.is_unicast() {
+            self.routes
+                .effective_pmtu(destination, interface_mtu, self.now)
+        } else {
+            interface_mtu
+        }
+    }
+
     /// See [`DeviceCapabilities::max_tso_size`]. 0 = the device does not
     /// support TCP segmentation offload.
     #[allow(unused)]
@@ -1461,7 +1612,11 @@ impl InterfaceInner {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(addr) => self.get_source_address_ipv4(addr).map(|a| a.into()),
             #[cfg(feature = "proto-ipv6")]
-            IpAddress::Ipv6(addr) => Some(self.get_source_address_ipv6(addr).into()),
+            IpAddress::Ipv6(addr) if ipv6_device_eligible(&self.caps) => {
+                Some(self.get_source_address_ipv6(addr).into())
+            }
+            #[cfg(feature = "proto-ipv6")]
+            IpAddress::Ipv6(_) => None,
         }
     }
 
@@ -1545,7 +1700,7 @@ impl InterfaceInner {
             #[cfg(feature = "proto-ipv6")]
             Ok(IpVersion::Ipv6) => {
                 let ipv6_packet = check!(Ipv6Packet::new_checked(ip_payload));
-                self.process_ipv6(sockets, meta, HardwareAddress::Ip, &ipv6_packet)
+                self.process_ipv6(sockets, meta, HardwareAddress::Ip, &ipv6_packet, Some(frag))
             }
             // Drop all other traffic.
             _ => None,
@@ -1624,6 +1779,11 @@ impl InterfaceInner {
     }
 
     fn route(&self, addr: &IpAddress, timestamp: Instant) -> Option<IpAddress> {
+        #[cfg(feature = "proto-ipv6")]
+        if matches!(addr, IpAddress::Ipv6(_)) && !ipv6_device_eligible(&self.caps) {
+            return None;
+        }
+
         // Send directly.
         // note: no need to use `self.is_broadcast()` to check for subnet-local broadcast addrs
         //       here because `in_same_network` will already return true.
@@ -1842,6 +2002,32 @@ impl InterfaceInner {
         self.neighbor_learned = true;
     }
 
+    #[cfg(any(
+        feature = "proto-ipv4-fragmentation",
+        feature = "proto-ipv6-fragmentation"
+    ))]
+    fn count_reassembly_error(&mut self, error: AssemblerError) {
+        let counter = match error {
+            AssemblerError::Invalid
+            | AssemblerError::SizeLimit
+            | AssemblerError::FinalSize
+            | AssemblerError::Overlap => &mut self.ip_packet_stats.reassembly_malformed_drops,
+            AssemblerError::RangeLimit => &mut self.ip_packet_stats.reassembly_range_limit_drops,
+            AssemblerError::Allocation => &mut self.ip_packet_stats.reassembly_allocation_drops,
+            AssemblerError::Poisoned => return,
+        };
+        *counter = counter.wrapping_add(1);
+    }
+
+    fn count_pmtu_message(&mut self, accepted: bool) {
+        let counter = if accepted {
+            &mut self.ip_packet_stats.pmtu_updates_accepted
+        } else {
+            &mut self.ip_packet_stats.icmp_pmtu_messages_rejected
+        };
+        *counter = counter.wrapping_add(1);
+    }
+
     fn dispatch_ip<Tx: TxToken>(
         &mut self,
         // NOTE(unused_mut): tx_token isn't always mutated, depending on
@@ -1851,8 +2037,17 @@ impl InterfaceInner {
         packet: Packet,
         frag: &mut Fragmenter,
     ) -> Result<(), DispatchError> {
+        #[cfg(feature = "_proto-fragmentation")]
+        if !frag.is_empty() && frag.finished() {
+            frag.reset();
+        }
+        #[cfg(feature = "_proto-fragmentation")]
+        if !frag.is_empty() {
+            return Err(DispatchError::FragmenterBusy);
+        }
         let mut ip_repr = packet.ip_repr();
         assert!(!ip_repr.dst_addr().is_unspecified());
+        let path_mtu = self.ip_mtu_for(ip_repr.dst_addr());
 
         // Dispatch IEEE802.15.4:
 
@@ -1869,9 +2064,6 @@ impl InterfaceInner {
         // Dispatch IP/Ethernet:
 
         let caps = self.caps.clone();
-
-        #[cfg(feature = "proto-ipv4-fragmentation")]
-        let ipv4_id = self.next_ipv4_frag_ident();
 
         // First we calculate the total length that we will have to emit.
         let mut total_len = ip_repr.buffer_len();
@@ -1928,7 +2120,7 @@ impl InterfaceInner {
                 // TSO super-segments (meta.tso_seg_size != 0) exceed the wire
                 // MTU by design — the device segments them — so they always
                 // take the direct-emit path below.
-                if meta.tso_seg_size == 0 && total_ip_len > self.caps.ip_mtu() {
+                if meta.tso_seg_size == 0 && total_ip_len > path_mtu {
                     #[cfg(feature = "proto-ipv4-fragmentation")]
                     {
                         net_debug!("start fragmentation");
@@ -1936,8 +2128,9 @@ impl InterfaceInner {
                         // Calculate how much we will send now (including the Ethernet header).
 
                         let ip_header_len = _repr.buffer_len();
+                        let payload_mtu = path_mtu - ip_header_len;
                         let first_frag_data_len =
-                            self.caps.max_ipv4_fragment_size(_repr.buffer_len());
+                            payload_mtu - payload_mtu % IPV4_FRAGMENT_PAYLOAD_ALIGNMENT;
                         let first_frag_ip_len = first_frag_data_len + ip_header_len;
                         let mut tx_len = first_frag_ip_len;
                         #[cfg(feature = "medium-ethernet")]
@@ -1945,61 +2138,66 @@ impl InterfaceInner {
                             tx_len += EthernetFrame::<&[u8]>::header_len();
                         }
 
-                        if frag.buffer.len() < total_ip_len {
+                        if frag.buffer.len() < _repr.payload_len {
                             net_debug!(
                                 "Fragmentation buffer is too small, at least {} needed. Dropping",
-                                total_ip_len
+                                _repr.payload_len
                             );
                             return Ok(());
                         }
+
+                        let ipv4_id = self.ipv4_fragment_ids.next(
+                            _repr.src_addr,
+                            _repr.dst_addr,
+                            _repr.next_header,
+                        );
 
                         #[cfg(feature = "medium-ethernet")]
                         {
                             frag.ipv4.dst_hardware_addr = dst_hardware_addr;
                         }
 
-                        // Save the total packet len (without the Ethernet header, but with the first
-                        // IP header).
-                        frag.packet_len = total_ip_len;
-
-                        // Save the IP header for other fragments.
+                        // Stage only the fragmentable payload; each fragment
+                        // receives a freshly emitted IP header.
+                        frag.packet_len = _repr.payload_len;
+                        frag.ip_version = Some(IpVersion::Ipv4);
                         frag.ipv4.repr = *_repr;
+                        frag.ipv4.path_mtu = path_mtu;
+                        packet.emit_payload(
+                            &IpRepr::Ipv4(*_repr),
+                            &mut frag.buffer[.._repr.payload_len],
+                            &caps,
+                        );
 
-                        // Modify the IP header
                         _repr.payload_len = first_frag_data_len;
-
-                        // Save the number of bytes we will send now.
-                        frag.sent_bytes = first_frag_ip_len;
-
-                        // Emit the IP header to the buffer.
-                        emit_ip(&ip_repr, &mut frag.buffer);
-
-                        let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut frag.buffer[..]);
+                        let first_repr = *_repr;
+                        frag.sent_bytes = first_frag_data_len;
                         frag.ipv4.ident = ipv4_id;
-                        ipv4_packet.set_ident(ipv4_id);
-                        ipv4_packet.set_more_frags(true);
-                        ipv4_packet.set_dont_frag(false);
-                        ipv4_packet.set_frag_offset(0);
-
-                        if caps.checksum.ipv4.tx() {
-                            ipv4_packet.fill_checksum();
-                        }
 
                         // Transmit the first packet.
                         tx_token.consume(tx_len, |mut tx_buffer| {
                             #[cfg(feature = "medium-ethernet")]
                             if matches!(self.caps.medium, Medium::Ethernet) {
-                                emit_ethernet(&ip_repr, tx_buffer);
+                                emit_ethernet(&IpRepr::Ipv4(first_repr), tx_buffer);
                                 tx_buffer = &mut tx_buffer[EthernetFrame::<&[u8]>::header_len()..];
                             }
 
-                            // Change the offset for the next packet.
-                            frag.ipv4.frag_offset = (first_frag_ip_len - ip_header_len) as u16;
-
-                            // Copy the IP header and the payload.
-                            tx_buffer[..first_frag_ip_len]
-                                .copy_from_slice(&frag.buffer[..first_frag_ip_len]);
+                            let mut ipv4_packet =
+                                Ipv4Packet::new_unchecked(&mut tx_buffer[..ip_header_len]);
+                            first_repr.emit(&mut ipv4_packet, &caps.checksum);
+                            ipv4_packet.set_ident(ipv4_id);
+                            ipv4_packet.set_more_frags(true);
+                            ipv4_packet.set_dont_frag(false);
+                            ipv4_packet.set_frag_offset(0);
+                            if caps.checksum.ipv4.tx() {
+                                ipv4_packet.fill_checksum();
+                            }
+                            tx_buffer[ip_header_len..first_frag_ip_len]
+                                .copy_from_slice(&frag.buffer[..first_frag_data_len]);
+                            frag.ipv4.frag_offset = first_frag_data_len as u16;
                         });
+                        self.ip_packet_stats.ipv4_fragments_tx =
+                            self.ip_packet_stats.ipv4_fragments_tx.wrapping_add(1);
 
                         Ok(())
                     }
@@ -2028,14 +2226,46 @@ impl InterfaceInner {
                     Ok(())
                 }
             }
-            // We don't support IPv6 fragmentation yet.
             #[cfg(feature = "proto-ipv6")]
-            IpRepr::Ipv6(_) => {
-                // Check if we need to fragment it (TSO super-segments are
-                // exempt — the device segments them; see the IPv4 arm).
-                if meta.tso_seg_size == 0 && total_ip_len > self.caps.ip_mtu() {
-                    net_debug!("IPv6 fragmentation support is unimplemented. Dropping.");
-                    Ok(())
+            IpRepr::Ipv6(_repr) => {
+                // TSO super-segments are segmented by the device, never here.
+                if meta.tso_seg_size == 0 && total_ip_len > path_mtu {
+                    #[cfg(feature = "proto-ipv6-fragmentation")]
+                    {
+                        if _repr.next_header != IpProtocol::Udp {
+                            net_debug!("IPv6 source fragmentation is supported only for UDP.");
+                            return Ok(());
+                        }
+                        if frag.buffer.len() < _repr.payload_len {
+                            return Ok(());
+                        }
+
+                        packet.emit_payload(
+                            &IpRepr::Ipv6(*_repr),
+                            &mut frag.buffer[.._repr.payload_len],
+                            &caps,
+                        );
+                        frag.ipv6.repr = *_repr;
+                        frag.ipv6.path_mtu = path_mtu;
+                        #[cfg(feature = "medium-ethernet")]
+                        {
+                            frag.ipv6.dst_hardware_addr = dst_hardware_addr;
+                        }
+                        let ident = self.rand.rand_u32();
+                        frag.ipv6.ident = if ident == 0 { 1 } else { ident };
+                        frag.sent_bytes = 0;
+                        frag.ip_version = Some(IpVersion::Ipv6);
+                        frag.packet_len = _repr.payload_len;
+                        self.dispatch_ipv6_frag(tx_token, frag);
+                        Ok(())
+                    }
+                    #[cfg(not(feature = "proto-ipv6-fragmentation"))]
+                    {
+                        net_debug!(
+                            "Enable the proto-ipv6-fragmentation feature for fragmentation support."
+                        );
+                        Ok(())
+                    }
                 } else {
                     tx_token.set_meta(meta);
 
@@ -2058,6 +2288,9 @@ impl InterfaceInner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum DispatchError {
+    #[cfg(feature = "_proto-fragmentation")]
+    /// Another fragmented datagram owns the single bounded staging slot.
+    FragmenterBusy,
     /// No route to dispatch this packet. Retrying won't help unless
     /// configuration is changed.
     NoRoute,

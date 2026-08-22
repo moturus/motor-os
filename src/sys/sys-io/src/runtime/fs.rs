@@ -11,6 +11,9 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
 
+use moto_sys::caps::ProcessRole;
+
+use crate::runtime::channel_budget;
 use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
@@ -31,6 +34,20 @@ const MAX_IN_FLIGHT: usize = 64;
 /// How far sequential readahead prefetches past the current read (in 4K
 /// blocks). See `maybe_readahead` and `on_cmd_read_multi`.
 const READAHEAD_BLOCKS: u64 = 32;
+
+const _: () = {
+    assert!(ProcessRole::None as u8 == Role::None as u8);
+    assert!(ProcessRole::Interactive as u8 == Role::Interactive as u8);
+    assert!(ProcessRole::System as u8 == Role::System as u8);
+};
+
+fn fs_role(capabilities: u64) -> Role {
+    match ProcessRole::from_caps(capabilities) {
+        ProcessRole::None => Role::None,
+        ProcessRole::Interactive => Role::Interactive,
+        ProcessRole::System => Role::System,
+    }
+}
 
 // We allow(private_interfaces) to hide a warning that VirtioPartition
 // has less visibility than enum FS, which is by design: the enum
@@ -263,17 +280,21 @@ pub(crate) struct FsRuntime {
     fs: Rc<LocalRwLock<FS>>,
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
+    channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
 struct PendingLockResponse {
     entry_id: EntryId,
     connection_id: u64,
     open_id: u64,
-    sender: moto_ipc::io_channel::Sender,
+    sender: channel_budget::ClientSender,
     response: moto_ipc::io_channel::Msg,
 }
 
-pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalRwLock<FS>>> {
+pub(super) async fn init(
+    block_device: virtio_async::VirtioDevice,
+    channel_budget: Rc<channel_budget::ChannelBudget>,
+) -> Result<Rc<LocalRwLock<FS>>> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
 
@@ -340,6 +361,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
         fs: fs.clone(),
         fs_stats,
         locks: Default::default(),
+        channel_budget,
     };
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
@@ -409,6 +431,26 @@ async fn fs_listener(
         return Ok(());
     }
 
+    let role = match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
+        Ok(capabilities) => fs_role(capabilities),
+        Err(err) => {
+            log::warn!(
+                "FS: dropping client 0x{:x}: cannot query peer capabilities: {err:?}",
+                sender.remote_handle().as_u64()
+            );
+            return Ok(());
+        }
+    };
+
+    // The wait-handle budget (see channel_budget): a channel past it would
+    // eventually make the runtime thread's SysCpu::wait exceed the kernel's
+    // handle cap, which is fatal. Dropped like the pressure refusal above;
+    // the client's pending op fails with the channel error.
+    let Ok(sender) = runtime.channel_budget.admit_fs(sender) else {
+        log::debug!("FS: dropping new client: the channel budget is exhausted.");
+        return Ok(());
+    };
+
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
     //
@@ -435,7 +477,7 @@ async fn fs_listener(
                 let runtime = runtime.clone();
                 let ticket_tx = ticket_tx.clone();
                 moto_async::LocalRuntime::spawn(async move {
-                    on_msg(msg, sender, runtime).await;
+                    on_msg(msg, sender, runtime, role).await;
                     let _ = ticket_tx.send(()).await;
                 });
             }
@@ -470,8 +512,9 @@ fn served_under_pressure(msg: &moto_ipc::io_channel::Msg) -> bool {
 
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
-    sender: moto_ipc::io_channel::Sender,
+    sender: channel_budget::ClientSender,
     runtime: FsRuntime,
+    role: Role,
 ) {
     // The memory-pressure gate. The gate itself does not allocate (a shared-
     // page load, a Cell bump, a POD response), though by this point the
@@ -495,31 +538,37 @@ async fn on_msg(
     }
 
     if let Err(err) = match msg.command {
-        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_SET_PERMISSIONS => {
-            on_cmd_set_permissions(msg, &sender, runtime).await
+        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_CREATE_FILE => {
+            on_cmd_create_file(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_SET_PERMISSIONS => {
+            on_cmd_set_permissions(msg, &sender, runtime, role).await
+        }
+        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_DELETE_ENTRY => {
+            on_cmd_delete_entry(msg, &sender, runtime, role).await
+        }
         moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
-            on_cmd_get_first_entry(msg, &sender, runtime).await
+            on_cmd_get_first_entry(msg, &sender, runtime, role).await
         }
         moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => {
-            on_cmd_get_next_entry(msg, &sender, runtime).await
+            on_cmd_get_next_entry(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, runtime, true).await,
+        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_MOVE_ENTRY => {
+            on_cmd_move_entry(msg, &sender, runtime, role, true).await
+        }
         moto_sys_io::api_fs::CMD_MOVE_NOREPLACE => {
-            on_cmd_move_entry(msg, &sender, runtime, false).await
+            on_cmd_move_entry(msg, &sender, runtime, role, false).await
         }
         moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => {
-            on_cmd_copy_file_range(msg, &sender, runtime).await
+            on_cmd_copy_file_range(msg, &sender, runtime, role).await
         }
         moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
 
@@ -535,7 +584,7 @@ async fn on_msg(
 
 async fn on_cmd_file_lock(
     msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    sender: &channel_budget::ClientSender,
     runtime: FsRuntime,
 ) -> Result<()> {
     use lock_manager::{Acquire, Mode};
@@ -612,17 +661,18 @@ async fn on_cmd_stat(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
     let fs = runtime.fs.read().await;
-    let Some((entry_id, entry_kind)) = fs
-        .stat(Role::System, parent_id, fname.as_str())
-        .await
-        .map_err(|err| {
-            log::warn!("fs.stat(Role::System, ) failed: {err:?}");
-            err
-        })?
+    let Some((entry_id, entry_kind)) =
+        fs.stat(role, parent_id, fname.as_str())
+            .await
+            .map_err(|err| {
+                log::warn!("fs.stat({role:?}, ) failed: {err:?}");
+                err
+            })?
     else {
         log::debug!("stat({parent_id}, {fname}): not found");
         return Err(std::io::Error::from(ErrorKind::NotFound));
@@ -637,6 +687,7 @@ async fn on_cmd_create_file(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -644,7 +695,7 @@ async fn on_cmd_create_file(
     let mut fs = runtime.fs.write().await;
     let entry_id = fs
         .create_entry(
-            Role::System,
+            role,
             parent_id,
             EntryKind::File,
             fname.as_str(),
@@ -652,7 +703,7 @@ async fn on_cmd_create_file(
         )
         .await
         .map_err(|err| {
-            log::warn!("fs.create_entry(Role::System, ) failed: {err:?}");
+            log::warn!("fs.create_entry({role:?}, ) failed: {err:?}");
             map_err_into_native(err)
         })
         .map_err(map_native_error)?;
@@ -667,6 +718,7 @@ async fn on_cmd_create_dir(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -674,7 +726,7 @@ async fn on_cmd_create_dir(
     let mut fs = runtime.fs.write().await;
     let entry_id = fs
         .create_entry(
-            Role::System,
+            role,
             parent_id,
             EntryKind::Directory,
             fname.as_str(),
@@ -682,7 +734,7 @@ async fn on_cmd_create_dir(
         )
         .await
         .map_err(|err| {
-            log::debug!("fs.create_entry(Role::System, ) failed: {err:?}");
+            log::debug!("fs.create_entry({role:?}, ) failed: {err:?}");
             map_err_into_native(err)
         })
         .map_err(map_native_error)?;
@@ -697,11 +749,12 @@ async fn on_cmd_write(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     // Multi-page write requests carry the total length in `flags`; classic
     // single-page requests never set it. See `api_fs::write_multi_msg_encode`.
     if msg.flags != 0 {
-        return on_cmd_write_multi(msg, sender, runtime).await;
+        return on_cmd_write_multi(msg, sender, runtime, role).await;
     }
 
     let (file_id, offset, len, io_page) =
@@ -715,12 +768,7 @@ async fn on_cmd_write(
 
     let mut fs = runtime.fs.write().await;
     let written = fs
-        .write(
-            Role::System,
-            file_id,
-            offset,
-            &io_page.bytes()[..(len as usize)],
-        )
+        .write(role, file_id, offset, &io_page.bytes()[..(len as usize)])
         .await?;
     assert_eq!(written, len as usize);
     core::mem::drop(fs);
@@ -745,6 +793,7 @@ async fn on_cmd_write_multi(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -757,12 +806,7 @@ async fn on_cmd_write_multi(
         let mut chunk_offset = offset;
         for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
             match fs_guard
-                .write(
-                    Role::System,
-                    file_id,
-                    chunk_offset,
-                    &io_page.bytes()[..size],
-                )
+                .write(role, file_id, chunk_offset, &io_page.bytes()[..size])
                 .await
             {
                 Ok(written) => {
@@ -798,6 +842,7 @@ async fn on_cmd_read(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let started = stats::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
@@ -805,7 +850,7 @@ async fn on_cmd_read(
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
     if len as usize > moto_ipc::io_channel::PAGE_SIZE {
-        return on_cmd_read_multi(msg, sender, runtime, file_id, offset, len).await;
+        return on_cmd_read_multi(msg, sender, runtime, role, file_id, offset, len).await;
     }
 
     let io_page = sender
@@ -816,7 +861,7 @@ async fn on_cmd_read(
     let fs_guard = runtime.fs.read().await;
     let read = fs_guard
         .read(
-            Role::System,
+            role,
             file_id,
             offset,
             &mut io_page.bytes_mut()[..(len as usize)],
@@ -853,6 +898,7 @@ async fn on_cmd_read_multi(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
     file_id: EntryId,
     offset: u64,
     len: u16,
@@ -887,7 +933,7 @@ async fn on_cmd_read_multi(
         for (&size, io_page) in chunk_sizes[..num_chunks].iter().zip(&pages) {
             let read = fs_guard
                 .read(
-                    Role::System,
+                    role,
                     file_id,
                     chunk_offset,
                     &mut io_page.bytes_mut()[..size],
@@ -980,11 +1026,12 @@ async fn on_cmd_metadata(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
 
     let fs = runtime.fs.read().await;
-    let metadata = fs.metadata(Role::System, entry_id).await?;
+    let metadata = fs.metadata(role, entry_id).await?;
 
     let io_page = sender
         .alloc_page(u64::MAX)
@@ -1001,6 +1048,7 @@ async fn on_cmd_set_permissions(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
     let access = AccessPermissions::try_from(raw_access)?;
@@ -1008,7 +1056,7 @@ async fn on_cmd_set_permissions(
     let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.set_permissions(Role::System, entry_id, Role::System, access)
+        fs.set_permissions(role, entry_id, role, access)
             .await
             .map_err(map_err_into_native),
     );
@@ -1022,13 +1070,14 @@ async fn on_cmd_resize(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
 
     let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.resize(Role::System, file_id, new_size)
+        fs.resize(role, file_id, new_size)
             .await
             .map_err(map_err_into_native),
     );
@@ -1042,13 +1091,14 @@ async fn on_cmd_delete_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
 
     let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.delete_entry(Role::System, entry_id)
+        fs.delete_entry(role, entry_id)
             .await
             .map_err(map_err_into_native),
     );
@@ -1075,13 +1125,11 @@ async fn on_cmd_get_first_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
     let fs = runtime.fs.read().await;
-    let resp = api_fs::get_first_entry_resp_encode(
-        msg,
-        fs.get_first_entry(Role::System, parent_id).await?,
-    );
+    let resp = api_fs::get_first_entry_resp_encode(msg, fs.get_first_entry(role, parent_id).await?);
     core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
@@ -1092,10 +1140,11 @@ async fn on_cmd_get_next_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_next_entry_req_decode(msg);
     let fs = runtime.fs.read().await;
-    let next_entry_id = fs.get_next_entry(Role::System, entry_id).await?;
+    let next_entry_id = fs.get_next_entry(role, entry_id).await?;
     core::mem::drop(fs);
     let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
 
@@ -1107,10 +1156,11 @@ async fn on_cmd_get_name(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let entry_id = api_fs::get_name_req_decode(msg);
     let fs = runtime.fs.read().await;
-    let name = fs.name(Role::System, entry_id).await?;
+    let name = fs.name(role, entry_id).await?;
     core::mem::drop(fs);
     if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
         return Err(std::io::ErrorKind::InvalidData.into());
@@ -1131,6 +1181,7 @@ async fn on_cmd_move_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
     replace: bool,
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
@@ -1138,10 +1189,10 @@ async fn on_cmd_move_entry(
 
     let mut fs = runtime.fs.write().await;
     let result = if replace {
-        fs.move_entry(Role::System, entry_id, new_parent_id, fname.as_str())
+        fs.move_entry(role, entry_id, new_parent_id, fname.as_str())
             .await
     } else {
-        fs.move_noreplace(Role::System, entry_id, new_parent_id, fname.as_str())
+        fs.move_noreplace(role, entry_id, new_parent_id, fname.as_str())
             .await
     };
     let resp = api_fs::empty_resp_encode(msg.id, result.map_err(map_err_into_native));
@@ -1155,6 +1206,7 @@ async fn on_cmd_copy_file_range(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    role: Role,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
 
@@ -1162,7 +1214,7 @@ async fn on_cmd_copy_file_range(
 
     // In this implementation, from_offset == to_offset.
     let copied = fs
-        .copy_file_range(Role::System, from, offset, to, offset, size)
+        .copy_file_range(role, from, offset, to, offset, size)
         .await?;
     core::mem::drop(fs);
 

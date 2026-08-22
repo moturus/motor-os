@@ -1,4 +1,5 @@
 use super::socket::MotoSocket;
+use crate::runtime::channel_budget::ClientSender;
 use moto_sys::SysHandle;
 use std::{
     cell::RefCell,
@@ -11,6 +12,8 @@ use std::{
 const DEFAULT_NUM_LISTENING_SOCKETS: usize = 4;
 const MAX_NUM_LISTENING_SOCKETS: usize = 32;
 
+type PendingSocket = (u64, SocketAddr, moto_async::oneshot::Sender<()>);
+
 pub(super) struct TcpListener {
     listener_id: u64,
     runtime: super::NetRuntime,
@@ -20,15 +23,15 @@ pub(super) struct TcpListener {
     // - or 0.0.0.0:PORT.
     // - or, if the user gave us IPADDR:0, this will have IPADDR:EPHEMERAL_PORT.
     socket_addr: SocketAddr,
-    client_sender: moto_ipc::io_channel::Sender,
+    client_sender: ClientSender,
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, moto_ipc::io_channel::Sender)>,
+    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, ClientSender)>,
 
     // Connected sockets that did not yet emit the accept QE.
     // When the socket is accepted, the oneshot should be fired.
-    pending_sockets: VecDeque<(u64, SocketAddr, moto_async::oneshot::Sender<()>)>,
+    pending_sockets: VecDeque<PendingSocket>,
 
     // Pure listening sockets. We need to track them to drop when the listener is dropped.
     listening_sockets: HashSet<u64>,
@@ -67,7 +70,7 @@ impl TcpListener {
         self.listener_id
     }
 
-    pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
+    pub(super) fn client_sender(&self) -> &ClientSender {
         &self.client_sender
     }
 
@@ -87,8 +90,30 @@ impl TcpListener {
     pub(super) fn hard_reset(&mut self) {
         self.close_pools();
         self.pending_accepts.clear();
-        self.pending_sockets.clear();
+        while self.pop_pending_socket().is_some() {}
         self.listening_sockets.clear();
+    }
+
+    fn queue_pending_socket(
+        &mut self,
+        socket: PendingSocket,
+        at_front: bool,
+    ) -> Result<(), PendingSocket> {
+        if !self.runtime.completed.try_admit(self.listener_id) {
+            return Err(socket);
+        }
+        if at_front {
+            self.pending_sockets.push_front(socket);
+        } else {
+            self.pending_sockets.push_back(socket);
+        }
+        Ok(())
+    }
+
+    fn pop_pending_socket(&mut self) -> Option<PendingSocket> {
+        let socket = self.pending_sockets.pop_front()?;
+        self.runtime.completed.release(self.listener_id);
+        Some(socket)
     }
 
     // Hand back whatever demand-driven growth this listener's pools hold: they
@@ -195,7 +220,7 @@ impl TcpListener {
         Ok((l, p))
     }
 
-    async fn spawn_listening_sockets(
+    fn spawn_listening_sockets(
         listener: Rc<RefCell<Self>>,
         num_listeners: usize,
     ) -> std::io::Result<()> {
@@ -206,8 +231,11 @@ impl TcpListener {
 
         for (addr, device_idx) in listening_on {
             for _ in 0..num_listeners {
-                MotoSocket::create_tcp_listening_socket(Rc::downgrade(&listener), device_idx, addr)
-                    .await?;
+                MotoSocket::create_tcp_listening_socket(
+                    Rc::downgrade(&listener),
+                    device_idx,
+                    addr,
+                )?;
             }
         }
 
@@ -242,7 +270,7 @@ impl TcpListener {
                 listener.pending_sockets.len() + listener.listening_sockets.len(),
             );
 
-            for entry in listener.pending_sockets.drain(..) {
+            while let Some(entry) = listener.pop_pending_socket() {
                 socket_ids.push(entry.0);
             }
             socket_ids.extend(listener.listening_sockets.drain());
@@ -272,9 +300,14 @@ impl TcpListener {
     pub(super) fn on_socket_dropped(this: Rc<RefCell<Self>>, socket_id: u64) {
         let mut this_ref = this.borrow_mut();
         this_ref.listening_sockets.remove(&socket_id);
-        this_ref
+        if let Some(position) = this_ref
             .pending_sockets
-            .retain(|(id, _, _)| *id != socket_id);
+            .iter()
+            .position(|(id, _, _)| *id == socket_id)
+        {
+            this_ref.pending_sockets.remove(position);
+            this_ref.runtime.completed.release(this_ref.listener_id);
+        }
     }
 
     pub(super) async fn on_socket_connected(
@@ -292,7 +325,7 @@ impl TcpListener {
 
         log::debug!("TCP Listener: incoming conn {remote_addr:?} on socket 0x{socket_id:x}");
 
-        let accepted = {
+        let (accepted, refused) = {
             let mut this_ref = this.borrow_mut();
             assert!(this_ref.listening_sockets.remove(&socket_id));
             MotoSocket::set_ttl(&moto_socket, this_ref.ttl);
@@ -311,12 +344,12 @@ impl TcpListener {
             };
 
             if let Some((msg, client)) = pending_accept {
-                Some((msg, accepted_tx, client))
+                (Some((msg, accepted_tx, client)), None)
             } else {
-                this_ref
-                    .pending_sockets
-                    .push_back((socket_id, remote_addr, accepted_tx));
-                None
+                match this_ref.queue_pending_socket((socket_id, remote_addr, accepted_tx), false) {
+                    Ok(()) => (None, None),
+                    Err((_, _, accepted_tx)) => (None, Some(accepted_tx)),
+                }
             }
         };
 
@@ -330,6 +363,9 @@ impl TcpListener {
                 client,
             )
             .await
+        } else if let Some(_accepted_tx) = refused {
+            log::debug!("TCP accept backlog full; resetting socket 0x{socket_id:x}.");
+            MotoSocket::drop_tcp_socket(moto_socket).await;
         }
     }
 
@@ -339,7 +375,7 @@ impl TcpListener {
         remote_addr: SocketAddr,
         accepted_tx: moto_async::oneshot::Sender<()>,
         accept_req: moto_ipc::io_channel::Msg,
-        client_sender: moto_ipc::io_channel::Sender,
+        client_sender: ClientSender,
     ) {
         let moto_socket = this
             .borrow()
@@ -373,9 +409,12 @@ impl TcpListener {
                 "Discarding accept for closed connection 0x{:x}.",
                 client_sender.remote_handle().as_u64()
             );
-            this.borrow_mut()
-                .pending_sockets
-                .push_front((socket_id, remote_addr, accepted_tx));
+            let queued = this
+                .borrow_mut()
+                .queue_pending_socket((socket_id, remote_addr, accepted_tx), true);
+            if let Err((_, _, _accepted_tx)) = queued {
+                MotoSocket::drop_tcp_socket(moto_socket).await;
+            }
             return;
         }
 
@@ -394,7 +433,7 @@ impl TcpListener {
     pub(super) async fn bind(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        client_sender: &moto_ipc::io_channel::Sender,
+        client_sender: &ClientSender,
     ) -> std::io::Result<()> {
         runtime.pressure.admit()?;
         let mut resp = msg;
@@ -468,7 +507,7 @@ impl TcpListener {
         );
 
         // Start listening.
-        if let Err(err) = Self::spawn_listening_sockets(listener.clone(), num_listeners).await {
+        if let Err(err) = Self::spawn_listening_sockets(listener.clone(), num_listeners) {
             Self::unregister_and_drop(runtime, listener).await;
             return Err(err);
         }
@@ -523,7 +562,7 @@ impl TcpListener {
     pub(super) async fn accept(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &ClientSender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
         let tcp_listener = runtime
@@ -540,7 +579,7 @@ impl TcpListener {
         Self::check_same_process(&tcp_listener, sender, "Accept", listener_id)?;
 
         if let Some((socket_id, remote_addr, accepted_tx)) =
-            { tcp_listener.borrow_mut().pending_sockets.pop_front() }
+            { tcp_listener.borrow_mut().pop_pending_socket() }
         {
             Self::process_matched_accept(
                 tcp_listener,

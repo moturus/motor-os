@@ -83,7 +83,10 @@ impl DemuxIndex {
     pub(crate) fn retire(&mut self, meta: &Meta) {
         match meta.demux_key {
             Some(DemuxKey::TcpTuple { local, remote }) => {
-                self.tcp_tuples.remove(&(local, remote));
+                let key = (local, remote);
+                if self.tcp_tuples.get(&key).copied() == Some(meta.handle) {
+                    self.tcp_tuples.remove(&key);
+                }
             }
             Some(DemuxKey::TcpListen(endpoint)) => {
                 let key = (endpoint.port, endpoint.addr);
@@ -505,6 +508,13 @@ impl SocketSet<'_> {
         cx: &mut super::Context,
         restore: &crate::socket::tcp::TcpCookieRestore,
     ) -> Result<(), crate::socket::tcp::ListenError> {
+        let _ = self.get::<crate::socket::tcp::Socket>(handle);
+        if self.tcp_tuple(restore.local, restore.remote).is_some() {
+            // A retransmitted completing ACK can outlive the queue batch that
+            // first restored this tuple. The existing connection owns it.
+            return Err(crate::socket::tcp::ListenError::InvalidState);
+        }
+
         let result = self
             .get_mut::<crate::socket::tcp::Socket>(handle)
             .restore_from_cookie(cx, restore);
@@ -569,6 +579,24 @@ impl SocketSet<'_> {
 mod tests {
     use super::*;
     use crate::socket::tcp;
+
+    #[cfg(feature = "proto-ipv4")]
+    #[test]
+    fn stale_tuple_retirement_keeps_the_current_owner() {
+        let local = IpEndpoint::new(IpAddress::v4(192, 168, 1, 1), 80);
+        let remote = IpEndpoint::new(IpAddress::v4(192, 168, 1, 2), 1000);
+        let owner = SocketHandle::from(1);
+        let mut set = SocketSet::new();
+        let stale = set.add(2, socket());
+        let meta = &mut set.sockets.get_mut(&u64::from(stale)).unwrap().meta;
+        meta.demux_key = Some(DemuxKey::TcpTuple { local, remote });
+
+        let mut demux = DemuxIndex::default();
+        demux.tcp_tuples.insert((local, remote), owner);
+        demux.retire(meta);
+
+        assert_eq!(demux.tcp_tuple(local, remote), Some(owner));
+    }
 
     fn socket() -> tcp::Socket<'static> {
         tcp::Socket::new(

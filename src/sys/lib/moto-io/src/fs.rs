@@ -665,7 +665,7 @@ impl FsClient {
         Ok(metadata)
     }
 
-    /// Change the System role's permissions for a directory entry.
+    /// Narrow the calling process role's permissions for a directory entry.
     pub async fn set_permissions(
         self: &Rc<Self>,
         entry_id: EntryId,

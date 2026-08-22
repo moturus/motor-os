@@ -1,16 +1,24 @@
 #!/bin/sh
 
-rm -f /tmp/firecracker.socket
-rm -f /tmp/firecracker.log
-touch /tmp/firecracker.log
-
 WD="$(dirname "$0")"
 IMAGE="${MOTO_IMAGE:-motor-os-base.img}"
 SMP="${MOTO_SMP:-2}"
 MEMORY_MIB="${MOTO_MEMORY_MIB:-64}"
+RUNTIME_DIR="${MOTO_FC_RUNTIME_DIR:-/tmp}"
 case "$IMAGE" in
   "" | *[!A-Za-z0-9._-]*)
     echo "run-fc: invalid image filename '$IMAGE'" >&2
+    exit 2
+    ;;
+esac
+case "$IMAGE" in
+  *.img | *.raw) ;;
+  *.qcow2)
+    echo "run-fc: Firecracker requires a raw image, not '$IMAGE'" >&2
+    exit 2
+    ;;
+  *)
+    echo "run-fc: unsupported image filename '$IMAGE'" >&2
     exit 2
     ;;
 esac
@@ -26,10 +34,30 @@ case "$MEMORY_MIB" in
     exit 2
     ;;
 esac
+case "$RUNTIME_DIR" in
+  /*) ;;
+  *)
+    echo "run-fc: MOTO_FC_RUNTIME_DIR must be an absolute path" >&2
+    exit 2
+    ;;
+esac
+case "$RUNTIME_DIR" in
+  *[!A-Za-z0-9_./-]*)
+    echo "run-fc: invalid MOTO_FC_RUNTIME_DIR '$RUNTIME_DIR'" >&2
+    exit 2
+    ;;
+esac
+
+SOCKET="$RUNTIME_DIR/firecracker.socket"
+LOG="$RUNTIME_DIR/firecracker.log"
+CONFIG="$RUNTIME_DIR/fc-config.json"
+mkdir -p "$RUNTIME_DIR"
+rm -f "$SOCKET" "$LOG"
+touch "$LOG"
 # Firecracker strictly requires absolute paths in its JSON configuration
 ABS_WD="$(cd "$WD" && pwd)"
 
-cat <<EOF > /tmp/fc-config.json
+cat <<EOF > "$CONFIG"
 {
   "boot-source": {
     "kernel_image_path": "${ABS_WD}/kloader",
@@ -56,7 +84,7 @@ cat <<EOF > /tmp/fc-config.json
     "mem_size_mib": ${MEMORY_MIB}
   },
   "logger": {
-    "log_path": "/tmp/firecracker.log",
+    "log_path": "${LOG}",
     "level": "Debug",
     "show_level": true,
     "show_log_origin": true
@@ -64,5 +92,5 @@ cat <<EOF > /tmp/fc-config.json
 }
 EOF
 
-exec firecracker --enable-pci --api-sock /tmp/firecracker.socket \
-  --config-file /tmp/fc-config.json "$@"
+exec firecracker --enable-pci --api-sock "$SOCKET" \
+  --config-file "$CONFIG" "$@"

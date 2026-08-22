@@ -367,11 +367,11 @@ pub extern "C" fn motor_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.net_udp_multicast_op_v4.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_multicast_op_v4 as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_multicast_op_v6.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_multicast_op_v6 as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -418,6 +418,10 @@ pub extern "C" fn motor_start(version: u64) {
     );
     vtable.current_exe.store(
         rt_process::current_exe as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.current_pid.store(
+        rt_process::current_pid as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

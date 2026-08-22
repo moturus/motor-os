@@ -56,6 +56,7 @@ pub(crate) fn run_all() -> Outcome {
     for (name, test) in crate::runtime::net::SELF_TESTS
         .iter()
         .chain(crate::runtime::fs::SELF_TESTS)
+        .chain(crate::runtime::channel_budget::SELF_TESTS)
         .copied()
         .flatten()
     {

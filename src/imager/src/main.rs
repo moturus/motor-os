@@ -16,6 +16,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, PathBuf};
+use std::process::Command;
 use std::{collections::BTreeMap, fs, path::Path};
 
 use mbrman::BOOT_ACTIVE;
@@ -55,6 +56,14 @@ struct Config {
     filesystem: String,
     data_partition_size_mb: u64,
     img_name: String,
+    image_format: ImageFormat,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ImageFormat {
+    Raw,
+    Qcow2,
 }
 
 async fn create_motorfs_partition_async(
@@ -323,6 +332,26 @@ fn create_mbr_disk(
     write_partition(&mbr, 3, part3, &mut disk);
 }
 
+fn convert_raw_to_qcow2(raw: &Path, qcow2: &Path) -> io::Result<()> {
+    let output = Command::new("qemu-img")
+        .args(["convert", "-f", "raw", "-O", "qcow2"])
+        .arg("--")
+        .arg(raw)
+        .arg(qcow2)
+        .output()
+        .map_err(|err| io::Error::new(err.kind(), format!("failed to run qemu-img: {err}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(io::Error::other(format!(
+        "qemu-img failed with {}: {}",
+        output.status,
+        stderr.trim()
+    )))
+}
+
 fn add_dir(
     files: &mut BTreeMap<PathBuf, String>,
     dir_to_add: PathBuf,
@@ -511,14 +540,26 @@ fn main() {
         _ => panic!("Unknown filesystem: {}", config.filesystem),
     }
 
+    let result = img_dir.join(&config.img_name);
+    let raw = match config.image_format {
+        ImageFormat::Raw => result.clone(),
+        ImageFormat::Qcow2 => tmp_img_dir.join("disk.raw"),
+    };
     create_mbr_disk(
         &bin_dir.join("mbr.bin"),
         &bin_dir.join("boot.bin"),
         &initrd,
         &fs_partition,
         Some(&config.filesystem),
-        &img_dir.join(config.img_name.as_str()),
+        &raw,
     );
+    if config.image_format == ImageFormat::Qcow2 {
+        let qcow2 = tmp_img_dir.join("disk.qcow2");
+        convert_raw_to_qcow2(&raw, &qcow2)
+            .unwrap_or_else(|err| panic!("failed to create qcow2 image {result:?}: {err}"));
+        fs::rename(qcow2, &result)
+            .unwrap_or_else(|err| panic!("failed to publish qcow2 image {result:?}: {err}"));
+    }
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
 }
@@ -546,6 +587,8 @@ mod tests {
     fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
+        assert_eq!(config.img_name, "motor-os.qcow2");
+        assert_eq!(config.image_format, ImageFormat::Qcow2);
         assert_eq!(config.data_partition_size_mb, 256);
         assert_eq!(
             config.static_dirs,
@@ -569,12 +612,18 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path.contains("/tests/")));
+        assert!(!config
+            .input_files
+            .iter()
+            .any(|path| path == "/system/bin/curl"));
     }
 
     #[test]
     fn dev_image_requires_the_native_toolchain() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
 
+        assert_eq!(config.img_name, "motor-os-dev.qcow2");
+        assert_eq!(config.image_format, ImageFormat::Qcow2);
         assert!(config
             .input_files
             .iter()
@@ -583,6 +632,10 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/devtools/bin/gears"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/system/bin/curl"));
         assert_eq!(
             config.static_dirs,
             [
@@ -635,6 +688,8 @@ mod tests {
     fn base_image_has_no_dns_or_dev_content() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
 
+        assert_eq!(config.img_name, "motor-os-base.img");
+        assert_eq!(config.image_format, ImageFormat::Raw);
         assert_eq!(config.data_partition_size_mb, 64);
         assert_eq!(config.static_dirs, ["img_files/motor-os-base"]);
         assert!(config
@@ -720,6 +775,26 @@ mod tests {
                 "/devtools/src/example/src/main.rs"
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn converts_raw_images_to_qcow2() {
+        let root =
+            std::env::temp_dir().join(format!("motor-imager-qcow2-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+        let raw = root.join("disk.raw");
+        let qcow2 = root.join("disk.qcow2");
+        fs::write(&raw, [0_u8; 4096]).unwrap();
+
+        convert_raw_to_qcow2(&raw, &qcow2).unwrap();
+        assert_eq!(&fs::read(&qcow2).unwrap()[..4], b"QFI\xfb");
+
+        let error = convert_raw_to_qcow2(&root.join("missing.raw"), &qcow2).unwrap_err();
+        assert!(error.to_string().contains("qemu-img failed"));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -291,14 +291,11 @@ impl UdpSocket {
     /// Nonblocking send: `Ok(n)` when queued, `E_NOT_READY` when the TX queue
     /// is full, `E_INVALID_ARGUMENT` when the payload is oversized.
     pub fn try_send_to(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
-        if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
         self.send_to_nonblocking(buf, addr)
     }
 
     /// The send future the veneer parks on and a native reactor awaits.
-    /// Cancel-safe. Callers pre-check `MAX_UDP_PAYLOAD` via `try_send_to`.
+    /// Cancel-safe.
     pub fn send_to_future<'a, 'b>(
         &'a self,
         buf: &'b [u8],
@@ -404,6 +401,10 @@ impl UdpSocket {
     }
 
     fn send_to_nonblocking(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
+        if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
         if !self.tx_queue.lock().is_empty() {
             self.try_tx();
         }

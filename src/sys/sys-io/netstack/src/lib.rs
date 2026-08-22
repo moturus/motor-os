@@ -145,7 +145,7 @@ compile_error!("You must enable at most one of the following features: defmt, lo
 mod macros;
 mod parsers;
 mod rand;
-#[cfg(feature = "socket-tcp")]
+#[cfg(any(feature = "socket-tcp", feature = "proto-ipv4-fragmentation"))]
 mod siphash;
 
 #[cfg(test)]
@@ -157,9 +157,9 @@ pub mod config {
     // test. Anything here that differs from what sys-io deploys is a capacity
     // the test suite does not cover.
     //
-    // The two sys-io actually chooses are pinned by `const` assertions in
-    // `sys-io/src/runtime/net/socket/tcp.rs`, which is the only place that can
-    // see both numbers. `ASSEMBLER_MAX_SEGMENT_COUNT` is kept equal here.
+    // The production values relevant to these tests are pinned by `const`
+    // assertions in sys-io, which is the only crate that can see the deployed
+    // feature result. The assembler and fragmentation settings stay equal here.
     // (The interface's address and route tables grow on demand and no longer
     // appear in this module at all.)
     //
@@ -179,13 +179,13 @@ pub mod config {
     pub const DNS_MAX_NAME_SIZE: usize = 255;
     pub const DNS_MAX_RESULT_COUNT: usize = 1;
     pub const DNS_MAX_SERVER_COUNT: usize = 1;
-    pub const FRAGMENTATION_BUFFER_SIZE: usize = 4096;
+    pub const FRAGMENTATION_BUFFER_SIZE: usize = 65536;
     pub const IFACE_MAX_MULTICAST_GROUP_COUNT: usize = 4;
     pub const IFACE_MAX_PREFIX_COUNT: usize = 1;
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
     pub const IFACE_NEIGHBOR_CACHE_COUNT: usize = 3;
     pub const REASSEMBLY_BUFFER_COUNT: usize = 4;
-    pub const REASSEMBLY_BUFFER_SIZE: usize = 1500;
+    pub const REASSEMBLY_BUFFER_SIZE: usize = 65536;
     pub const RPL_RELATIONS_BUFFER_COUNT: usize = 16;
     pub const RPL_PARENTS_BUFFER_COUNT: usize = 8;
     pub const IPV6_HBH_MAX_OPTIONS: usize = 4;

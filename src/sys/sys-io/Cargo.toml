@@ -32,7 +32,9 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   "medium-ethernet",
   "medium-ip",
   "proto-ipv4",
+  "proto-ipv4-fragmentation",
   "proto-ipv6",
+  "proto-ipv6-fragmentation",
   "socket-icmp",
   "socket-tcp",
   # Selecting neither controller leaves TCP with no congestion control at all.
@@ -55,6 +57,11 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   # hardcoded config. Keeping the two equal is manual, and the `const` assertion
   # in `runtime/net/socket/tcp.rs` is what makes a drift a build failure.
   "assembler-max-segment-count-32",
+  # One accepted maximum UDP datagram fits in the bounded source-fragment
+  # stage; four ingress datagrams share the same per-interface byte cap.
+  "fragmentation-buffer-size-65536",
+  "reassembly-buffer-size-65536",
+  "reassembly-buffer-count-4",
   # Addresses and routes per interface have no cap feature any more: the
   # tables grow to whatever /system/cfg/sys-net.toml writes, bounded by the
   # config loader's 64 KiB file limit.

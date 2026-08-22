@@ -106,11 +106,12 @@ mod ids {
     // FS traffic was refused is visible solely as deltas in these two.
     pub const FS_PRESSURE_REFUSED: u32 = 1014;
     pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
+    pub const FS_CHANNELS: u32 = 1016;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(fs: &FS, stats: &FsStats) -> Vec<MetricEntry> {
+async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
@@ -142,6 +143,7 @@ async fn entries(fs: &FS, stats: &FsStats) -> Vec<MetricEntry> {
             ids::FS_PRESSURE_REFUSED_CLIENTS,
             stats.pressure_refused_clients.get(),
         ),
+        MetricEntry::global(ids::FS_CHANNELS, channels),
     ]
 }
 
@@ -169,6 +171,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             ids::FS_PRESSURE_REFUSED_CLIENTS,
             "fs.pressure_refused_clients",
         ),
+        MetricDescWire::new(ids::FS_CHANNELS, "fs.channels"),
     ]
 }
 
@@ -205,7 +208,12 @@ async fn stats_responder_task(
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
-        let snapshot = entries(&*runtime.fs.read().await, &runtime.fs_stats).await;
+        let snapshot = entries(
+            &*runtime.fs.read().await,
+            &runtime.fs_stats,
+            runtime.channel_budget.fs_channels(),
+        )
+        .await;
         // The receiver is gone if the stats-server thread stopped waiting; ignore.
         let _ = req.respond_to.send(snapshot);
     }
