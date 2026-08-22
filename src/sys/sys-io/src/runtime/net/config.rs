@@ -399,6 +399,10 @@ pub(crate) mod self_test {
             parses_echo_reply_policy,
         ),
         (
+            "net::config::distinguishes_valid_zero_devices_from_invalid_config",
+            distinguishes_valid_zero_devices_from_invalid_config,
+        ),
+        (
             "net::config::route_selection_handles_connected_and_default_routes",
             route_selection_handles_connected_and_default_routes,
         ),
@@ -502,6 +506,17 @@ pub(crate) mod self_test {
         st_assert!(config.auto_icmp_echo_reply);
         st_assert!(config.loopback);
         st_assert!(config.devices.is_empty());
+        Ok(())
+    }
+
+    /// A valid configuration may deliberately produce no interfaces; malformed
+    /// input is the startup-fatal case and must remain distinguishable.
+    fn distinguishes_valid_zero_devices_from_invalid_config() -> Result<(), String> {
+        let config = parse("auto_icmp_echo_reply = true\nloopback = false\n")?;
+        st_assert!(!config.loopback);
+        st_assert!(config.devices.is_empty());
+
+        st_assert!(parse("auto_icmp_echo_reply = true\nloopback = invalid\n").is_err());
         Ok(())
     }
 

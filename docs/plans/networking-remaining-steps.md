@@ -46,7 +46,7 @@ network exposure or a release that treats networking as robust.
   bucket. Keep loopback exempt; the approved default is 200 replies per second.
   Without a bound, spoofed-source traffic can use an external interface as a
   reflector and consume sys-io at packet rate.
-- Make an invalid `sys-net.toml` abort sys-io startup loudly. Do not continue
+- COMPLETED: Make an invalid `sys-net.toml` abort sys-io startup loudly. Do not continue
   without loopback and the net-channel listener after a parse failure. Preserve
   the supported, intentional no-listener outcome for a valid configuration
   containing zero devices, and log/test the two cases distinctly.

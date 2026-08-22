@@ -184,7 +184,7 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
     };
 
     if let Err(err) = net::init(net_devices, fs, channel_budget).await {
-        log::error!("Network initialization failed: {err:?}.");
+        panic!("Cannot proceed without networking: {err:?}.");
     }
 
     log::debug!("Runtime initialized.");
