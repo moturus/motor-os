@@ -102,9 +102,9 @@ cleanup.
   reason-specific counter; do not retain partial datagrams or park a datagram
   without a send-waker. The finite channel-page budget is an indirect global
   bound today, not a per-socket admission policy.
-- Bound the client UDP RX defragmenter by bytes and datagrams from the existing
+- COMPLETED: Bound the client UDP RX defragmenter by bytes and datagrams from the existing
   channel-page budget. Apply the same bound to partial reassembly and drop the
-  complete newest datagram on overflow with a reason-specific counter.
+  complete newest datagram on overflow.
 - Give ephemeral allocation and explicit TCP/UDP binds one authoritative port
   reservation view. Check all live bindings, retry occupied candidates, and
   preserve loopback simultaneous-open behavior.

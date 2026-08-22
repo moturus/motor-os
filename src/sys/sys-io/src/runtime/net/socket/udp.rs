@@ -77,7 +77,7 @@ impl MotoSocket {
             base,
             SocketState::Udp(UdpState {
                 ephemeral_port,
-                tx_queue: UdpDefragmentingQueue::new_tx(),
+                tx_queue: UdpDefragmentingQueue::new_bounded(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
                     socket_id,
                     subchannel_mask,

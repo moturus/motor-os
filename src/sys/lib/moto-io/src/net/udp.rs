@@ -229,7 +229,7 @@ impl UdpSocket {
             subchannel_mask,
             tx_queue: Mutex::new(UdpFragmentingQueue::new_tx(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
-            rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
+            rx_queue: Mutex::new(UdpDefragmentingQueue::new_bounded()),
             rx_waiters: WaitSet::new(),
             tx_waiters: WaitSet::new(),
             closed: AtomicBool::new(false),
@@ -591,6 +591,12 @@ impl UdpSocket {
     #[cfg(feature = "netdev")]
     pub fn channel_udp_socket_count_for_test(&self) -> usize {
         self.channel().udp_socket_count_for_test()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn inject_empty_rx_for_test(&self, source: SocketAddr) {
+        self.process_incoming_msg(api_net::udp_socket_tx_rx_empty_msg(self.handle, &source));
     }
 
     /// Run a netdev test while this socket has no allocatable TX pages.

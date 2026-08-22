@@ -11,8 +11,8 @@ use core::net::SocketAddr;
 use moto_ipc::io_channel;
 use moto_rt::ErrorCode;
 
-pub const UDP_TX_QUEUE_MAX_DATAGRAMS: usize = 16;
-pub const UDP_TX_QUEUE_MAX_BYTES: usize = 64 * io_channel::PAGE_SIZE;
+pub const UDP_QUEUE_MAX_DATAGRAMS: usize = 16;
+pub const UDP_QUEUE_MAX_BYTES: usize = 64 * io_channel::PAGE_SIZE;
 
 pub struct UdpFragmentingQueue {
     socket_id: u64,
@@ -39,7 +39,7 @@ impl UdpFragmentingQueue {
     }
 
     pub fn new_tx(socket_id: u64, subchannel_mask: u64) -> Self {
-        Self::new_inner(socket_id, subchannel_mask, Some(UDP_TX_QUEUE_MAX_BYTES))
+        Self::new_inner(socket_id, subchannel_mask, Some(UDP_QUEUE_MAX_BYTES))
     }
 
     fn new_inner(socket_id: u64, subchannel_mask: u64, byte_limit: Option<usize>) -> Self {
@@ -69,14 +69,14 @@ impl UdpFragmentingQueue {
     }
 
     pub fn is_full(&self) -> bool {
-        self.queue.len() >= UDP_TX_QUEUE_MAX_DATAGRAMS
+        self.queue.len() >= UDP_QUEUE_MAX_DATAGRAMS
             || self
                 .byte_limit
                 .is_some_and(|limit| self.queued_bytes >= limit)
     }
 
     pub fn push_back(&mut self, bytes: &[u8], addr: SocketAddr) -> bool {
-        if self.queue.len() >= UDP_TX_QUEUE_MAX_DATAGRAMS
+        if self.queue.len() >= UDP_QUEUE_MAX_DATAGRAMS
             || self
                 .byte_limit
                 .is_some_and(|limit| bytes.len() > limit - self.queued_bytes)
@@ -214,7 +214,7 @@ pub struct UdpDefragmentingQueue {
     datagram: Option<UdpDatagram>,
     fragment_sequence: Option<FragmentSequence>,
     dropping_fragment_sequence: bool,
-    tx_limits: bool,
+    bounded: bool,
     queued_datagrams: usize,
     queued_bytes: usize,
 }
@@ -225,17 +225,17 @@ impl UdpDefragmentingQueue {
         Self::new_inner(false)
     }
 
-    pub fn new_tx() -> Self {
+    pub fn new_bounded() -> Self {
         Self::new_inner(true)
     }
 
-    fn new_inner(tx_limits: bool) -> Self {
+    fn new_inner(bounded: bool) -> Self {
         Self {
             queue: VecDeque::new(),
             datagram: None,
             fragment_sequence: None,
             dropping_fragment_sequence: false,
-            tx_limits,
+            bounded,
             queued_datagrams: 0,
             queued_bytes: 0,
         }
@@ -288,9 +288,9 @@ impl UdpDefragmentingQueue {
         }
 
         let starts_datagram = fragment_id == 0 || fragment_id == 1;
-        let exceeds_limits = self.tx_limits
-            && ((starts_datagram && self.queued_datagrams >= UDP_TX_QUEUE_MAX_DATAGRAMS)
-                || sz as usize > UDP_TX_QUEUE_MAX_BYTES - self.queued_bytes);
+        let exceeds_limits = self.bounded
+            && ((starts_datagram && self.queued_datagrams >= UDP_QUEUE_MAX_DATAGRAMS)
+                || sz as usize > UDP_QUEUE_MAX_BYTES - self.queued_bytes);
         if exceeds_limits {
             if sz != 0 {
                 let page_idx = msg.payload.shared_pages()[11];
@@ -312,7 +312,7 @@ impl UdpDefragmentingQueue {
 
         self.queue.push_back(fragment);
         self.fragment_sequence = next_sequence;
-        if self.tx_limits {
+        if self.bounded {
             self.queued_bytes += sz as usize;
             if starts_datagram {
                 self.queued_datagrams += 1;
@@ -333,11 +333,11 @@ impl UdpDefragmentingQueue {
     }
 
     pub fn push_front(&mut self, datagram: UdpDatagram) {
-        if self.tx_limits {
+        if self.bounded {
             self.queued_datagrams += 1;
             self.queued_bytes += datagram.slice().len();
-            debug_assert!(self.queued_datagrams <= UDP_TX_QUEUE_MAX_DATAGRAMS);
-            debug_assert!(self.queued_bytes <= UDP_TX_QUEUE_MAX_BYTES);
+            debug_assert!(self.queued_datagrams <= UDP_QUEUE_MAX_DATAGRAMS);
+            debug_assert!(self.queued_bytes <= UDP_QUEUE_MAX_BYTES);
         }
         assert!(self.datagram.replace(datagram).is_none());
     }
@@ -424,7 +424,7 @@ impl UdpDefragmentingQueue {
     }
 
     fn remove_datagram(&mut self, datagram: &UdpDatagram) {
-        if self.tx_limits {
+        if self.bounded {
             self.queued_datagrams -= 1;
             self.queued_bytes -= datagram.slice().len();
         }
