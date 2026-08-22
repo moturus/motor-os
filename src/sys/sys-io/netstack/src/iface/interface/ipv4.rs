@@ -631,14 +631,21 @@ impl InterfaceInner {
     }
 
     pub(super) fn icmpv4_reply<'frame, 'icmp: 'frame>(
-        &self,
+        &mut self,
         ipv4_repr: Ipv4Repr,
         icmp_repr: Icmpv4Repr<'icmp>,
     ) -> Option<Packet<'frame>> {
+        let is_error = matches!(
+            icmp_repr,
+            Icmpv4Repr::DstUnreachable { .. } | Icmpv4Repr::TimeExceeded { .. }
+        );
         if !self.is_unicast_v4(ipv4_repr.src_addr) {
             // Do not send ICMP replies to non-unicast sources
             None
         } else if self.is_unicast_v4(ipv4_repr.dst_addr) {
+            if is_error && !self.icmp_error_permitted() {
+                return None;
+            }
             // Reply as normal when src_addr and dst_addr are both unicast
             let ipv4_reply_repr = Ipv4Repr {
                 src_addr: ipv4_repr.dst_addr,

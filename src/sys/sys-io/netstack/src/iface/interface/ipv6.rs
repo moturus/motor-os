@@ -538,7 +538,7 @@ impl InterfaceInner {
         ipv6_repr: Ipv6Repr,
         ip_payload: &'frame [u8],
     ) -> HopByHopResponse<'frame> {
-        let param_problem = || {
+        let mut param_problem = || {
             let payload_len =
                 icmp_reply_payload_len(ip_payload.len(), IPV6_MIN_MTU, ipv6_repr.buffer_len());
             self.icmpv6_reply(
@@ -820,10 +820,20 @@ impl InterfaceInner {
     }
 
     pub(super) fn icmpv6_reply<'frame, 'icmp: 'frame>(
-        &self,
+        &mut self,
         ipv6_repr: Ipv6Repr,
         icmp_repr: Icmpv6Repr<'icmp>,
     ) -> Option<Packet<'frame>> {
+        let is_error = matches!(
+            icmp_repr,
+            Icmpv6Repr::DstUnreachable { .. }
+                | Icmpv6Repr::PktTooBig { .. }
+                | Icmpv6Repr::TimeExceeded { .. }
+                | Icmpv6Repr::ParamProblem { .. }
+        );
+        if is_error && !self.icmp_error_permitted() {
+            return None;
+        }
         let src_addr = ipv6_repr.dst_addr;
         let dst_addr = ipv6_repr.src_addr;
 

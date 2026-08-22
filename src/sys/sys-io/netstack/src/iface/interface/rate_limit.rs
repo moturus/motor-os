@@ -1,10 +1,9 @@
 //! A token bucket for the answers this interface sends with no socket behind
-//! them -- the no-listener reset and the cookie SYN|ACK. Both are one reply
-//! per unsolicited segment, so a peer spraying segments at spoofed source
-//! addresses would otherwise turn this machine into a reflector aimed at
-//! whoever those addresses name. The bucket bounds the reflected rate; what
-//! it refuses is simply not answered, which for both reply kinds the peer
-//! already handles by retransmitting.
+//! them -- ICMP errors, the no-listener reset, and the cookie SYN|ACK. Each is
+//! one reply per unsolicited packet, so a peer spraying packets with spoofed
+//! source addresses would otherwise turn this machine into a reflector aimed
+//! at whoever those addresses name. Independent buckets bound each reply
+//! kind's reflected rate; what one refuses is simply not answered.
 
 use crate::time::Instant;
 

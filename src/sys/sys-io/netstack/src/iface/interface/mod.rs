@@ -21,7 +21,6 @@ mod sixlowpan;
 
 #[cfg(feature = "multicast")]
 pub(crate) mod multicast;
-#[cfg(feature = "socket-tcp")]
 mod rate_limit;
 #[cfg(feature = "socket-tcp")]
 mod syn_cookies;
@@ -228,6 +227,14 @@ pub struct InterfaceInner {
     /// Fragmentation, reassembly, and PMTU events since the last stats drain.
     ip_packet_stats: IpPacketStats,
 
+    /// Limits automatically generated ICMP error replies, from
+    /// [`Config::icmp_error_rate_limit`].
+    icmp_error_limiter: rate_limit::TokenBucket,
+
+    /// ICMP error replies the bucket above suppressed, since the last
+    /// [`Interface::take_icmp_error_suppressed`].
+    icmp_error_suppressed: u64,
+
     /// Neighbor mappings an unsolicited packet offered while the cache was
     /// full, since the last [`Interface::take_neighbor_admission_refused`].
     /// Such a packet may not displace an entry, so the mapping is not learned.
@@ -386,6 +393,11 @@ pub struct Config {
     #[cfg(feature = "socket-tcp")]
     pub tcp_cookie_key: [u8; 16],
 
+    /// Token-bucket rate, per second, for automatically generated ICMP errors;
+    /// zero (the default) leaves them unlimited. Echo replies are exempt. A
+    /// suppressed error leaves the triggering packet unanswered.
+    pub icmp_error_rate_limit: u32,
+
     /// Token-bucket rate, per second, for the resets answering segments no
     /// socket owns; zero (the default) leaves them unlimited. Every such
     /// reset is one reply per unsolicited segment, so without a bound a peer
@@ -449,6 +461,7 @@ impl Config {
             tcp_isn_key: [0; 16],
             #[cfg(feature = "socket-tcp")]
             tcp_cookie_key: [0; 16],
+            icmp_error_rate_limit: 0,
             #[cfg(feature = "socket-tcp")]
             tcp_rst_rate_limit: 0,
             #[cfg(feature = "socket-tcp")]
@@ -558,6 +571,8 @@ impl Interface {
                 discovery_silent_time: config.discovery_silent_time,
                 rx_csum_failed: 0,
                 ip_packet_stats: IpPacketStats::default(),
+                icmp_error_limiter: rate_limit::TokenBucket::new(config.icmp_error_rate_limit, now),
+                icmp_error_suppressed: 0,
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_admission_refused: 0,
                 #[cfg(feature = "socket-tcp")]
@@ -607,6 +622,12 @@ impl Interface {
     /// Fragmentation, reassembly, and PMTU events. Reading clears the counters.
     pub fn take_ip_packet_stats(&mut self) -> IpPacketStats {
         core::mem::take(&mut self.inner.ip_packet_stats)
+    }
+
+    /// ICMP error replies [`Config::icmp_error_rate_limit`] suppressed.
+    /// Reading the count clears it, so the caller accumulates.
+    pub fn take_icmp_error_suppressed(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.icmp_error_suppressed)
     }
 
     /// Frames dropped because a loopback address arrived on an interface that
@@ -2026,6 +2047,15 @@ impl InterfaceInner {
             AssemblerError::Poisoned => return,
         };
         *counter = counter.wrapping_add(1);
+    }
+
+    fn icmp_error_permitted(&mut self) -> bool {
+        if self.icmp_error_limiter.try_take(self.now) {
+            true
+        } else {
+            self.icmp_error_suppressed = self.icmp_error_suppressed.wrapping_add(1);
+            false
+        }
     }
 
     fn count_pmtu_message(&mut self, accepted: bool) {

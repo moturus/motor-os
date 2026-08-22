@@ -808,6 +808,94 @@ fn syn_cookie_reply_degrades_and_disengages() {
     assert!(iface.engage_tcp_syn_cookies(one_more, config));
 }
 
+/// Automatic ICMP errors share their dedicated bucket across protocols and IP
+/// families. Echo replies bypass it, and an address-policy rejection does not
+/// spend a token for a packet that would not be sent.
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "proto-ipv4"))]
+fn icmp_error_replies_are_rate_limited() {
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+
+    let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+    let mut config = Config::new(HardwareAddress::Ip);
+    config.icmp_error_rate_limit = 2;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs.push(IpCidr::new(LOCAL_ADDR.into(), 24));
+    });
+
+    let request = Ipv4Repr {
+        src_addr: REMOTE_ADDR,
+        dst_addr: LOCAL_ADDR,
+        next_header: IpProtocol::Udp,
+        payload_len: 0,
+        hop_limit: 64,
+    };
+    let error = Icmpv4Repr::DstUnreachable {
+        reason: Icmpv4DstUnreachable::PortUnreachable,
+        next_hop_mtu: None,
+        header: request,
+        data: &[],
+    };
+
+    assert!(
+        iface
+            .inner
+            .icmpv4_reply(
+                Ipv4Repr {
+                    src_addr: Ipv4Address::new(0, 0, 0, 0),
+                    ..request
+                },
+                error,
+            )
+            .is_none()
+    );
+
+    for expected in [true, true, false, false, false] {
+        assert_eq!(iface.inner.icmpv4_reply(request, error).is_some(), expected);
+    }
+    assert_eq!(iface.take_icmp_error_suppressed(), 3);
+
+    iface.inner.set_now(Instant::from_millis(499));
+    assert!(iface.inner.icmpv4_reply(request, error).is_none());
+    assert_eq!(iface.take_icmp_error_suppressed(), 1);
+    iface.inner.set_now(Instant::from_millis(500));
+    assert!(iface.inner.icmpv4_reply(request, error).is_some());
+    assert_eq!(iface.take_icmp_error_suppressed(), 0);
+
+    #[cfg(feature = "proto-ipv6")]
+    {
+        let request = Ipv6Repr {
+            src_addr: Ipv6Address::new(0, 0, 0, 0, 0, 0, 0, 1),
+            dst_addr: Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1),
+            next_header: IpProtocol::Unknown(255),
+            payload_len: 0,
+            hop_limit: 64,
+        };
+        let error = Icmpv6Repr::ParamProblem {
+            reason: Icmpv6ParamProblem::UnrecognizedNxtHdr,
+            pointer: request.buffer_len() as u32,
+            header: request,
+            data: &[],
+        };
+        iface.inner.set_now(Instant::from_secs(1));
+        assert!(iface.inner.icmpv6_reply(request, error).is_some());
+        assert!(iface.inner.icmpv6_reply(request, error).is_none());
+        assert_eq!(iface.take_icmp_error_suppressed(), 1);
+    }
+
+    let echo = Icmpv4Repr::EchoReply {
+        ident: 1,
+        seq_no: 1,
+        data: &[],
+    };
+    for _ in 0..100 {
+        assert!(iface.inner.icmpv4_reply(request, echo).is_some());
+    }
+    assert_eq!(iface.take_icmp_error_suppressed(), 0);
+}
+
 /// The reflector's resets ride [`Config::tcp_rst_rate_limit`]'s token
 /// bucket: a spray of segments no socket owns -- SYNs at a closed port and
 /// stray ACKs alike, since both share the reset path -- draws at most the
