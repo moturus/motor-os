@@ -112,6 +112,8 @@ mod ids {
 
     pub const NET_CHANNELS: u32 = 65;
     pub const NET_ICMP_ERRORS_SUPPRESSED: u32 = 66;
+    pub const NET_UDP_TX_ADMISSION_DROPS: u32 = 67;
+    pub const NET_UDP_TX_BUFFER_FULL_DROPS: u32 = 68;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -193,6 +195,10 @@ pub(super) struct NetStats {
     /// keeps its close behind the datagrams it staged never lands here, so a
     /// rising count means datagrams are being lost to that reordering.
     pub udp_tx_dropped: Cell<u64>,
+    /// Complete UDP datagrams discarded at the per-socket TX admission limits.
+    pub udp_tx_admission_drops: Cell<u64>,
+    /// Complete UDP datagrams discarded because the netstack TX ring was full.
+    pub udp_tx_buffer_full_drops: Cell<u64>,
     /// Receive completions the virtio driver rejected before the netstack saw
     /// them: a used length that cannot hold the virtio-net header or overruns
     /// the buffer we posted, or a header the negotiated feature set cannot
@@ -376,6 +382,14 @@ impl NetStats {
             MetricEntry::global(ids::NET_TCP_RX_ALLOC_WAITS, self.tcp_rx_alloc_waits.get()),
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
+            MetricEntry::global(
+                ids::NET_UDP_TX_ADMISSION_DROPS,
+                self.udp_tx_admission_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_UDP_TX_BUFFER_FULL_DROPS,
+                self.udp_tx_buffer_full_drops.get(),
+            ),
             MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
             MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
             MetricEntry::global(ids::NET_TCP_HALF_OPEN, self.tcp_half_open.get()),
@@ -521,6 +535,14 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
+        MetricDescWire::new(
+            ids::NET_UDP_TX_ADMISSION_DROPS,
+            "net.udp.tx_admission_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_UDP_TX_BUFFER_FULL_DROPS,
+            "net.udp.tx_buffer_full_drops",
+        ),
         MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
         MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),
         MetricDescWire::new(ids::NET_TCP_HALF_OPEN, "net.tcp.half_open"),

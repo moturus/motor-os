@@ -96,7 +96,7 @@ cleanup.
   reaches the device.
 - COMPLETED: Bound each listener's queued native `pending_accepts` RPCs at 1,024 and reply
   to every queued request with a closed/canceled error during teardown.
-- Bound the per-socket UDP TX queue by bytes and datagrams before channel
+- COMPLETED: Bound the per-socket UDP TX queue by bytes and datagrams before channel
   fragments are copied out of their pages. On admission overflow or netstack
   `BufferFull`, drop the complete newest datagram immediately and increment a
   reason-specific counter; do not retain partial datagrams or park a datagram

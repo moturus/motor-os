@@ -421,6 +421,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
                     result => panic!("unexpected UDP send result: {result:?}"),
                 }
             }
+            assert_eq!(queued, 16, "unexpected UDP TX datagram limit");
 
             for _ in 0..128 {
                 let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
@@ -448,6 +449,37 @@ fn test_cancelled_native_io_waiters_are_removed() {
     });
 
     println!("-- test_cancelled_native_io_waiters_are_removed() PASS");
+}
+
+fn test_native_udp_tx_byte_limit() {
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
+    let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
+    let datagram = vec![0_u8; moto_rt::net::MAX_UDP_PAYLOAD];
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = crate::net_harness::host_channel().await;
+        let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
+            .await
+            .unwrap();
+
+        socket.with_tx_pages_exhausted_for_test(|| {
+            for _ in 0..4 {
+                assert_eq!(
+                    socket.try_send_to(&datagram, &destination),
+                    Ok(datagram.len())
+                );
+            }
+            assert_eq!(
+                socket.try_send_to(&datagram, &destination),
+                Err(moto_rt::E_NOT_READY)
+            );
+        });
+
+        drop(socket);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+    });
+
+    println!("-- test_native_udp_tx_byte_limit() PASS");
 }
 
 fn test_native_close_ends_udp_io() {
@@ -880,6 +912,7 @@ pub fn run_all_tests() {
     test_udp_connect();
     test_udp_timeouts();
     test_udp_dup_shares_posix_flags();
+    test_native_udp_tx_byte_limit();
     test_cancelled_native_io_waiters_are_removed();
     test_native_close_ends_udp_io();
     test_udp_tx_progresses_after_page_free();

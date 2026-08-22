@@ -77,7 +77,7 @@ impl MotoSocket {
             base,
             SocketState::Udp(UdpState {
                 ephemeral_port,
-                tx_queue: UdpDefragmentingQueue::new(),
+                tx_queue: UdpDefragmentingQueue::new_tx(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
                     socket_id,
                     subchannel_mask,
@@ -106,7 +106,7 @@ impl MotoSocket {
                         buf.len(),
                         addr
                     );
-                    udp_state.rx_queue.borrow_mut().push_back(buf, addr);
+                    let _ = udp_state.rx_queue.borrow_mut().push_back(buf, addr);
                     Poll::Ready(true)
                 } else {
                     #[cfg(debug_assertions)]
@@ -402,21 +402,31 @@ impl MotoSocket {
         };
 
         let fragment_id = msg.payload.args_16()[9];
-        if udp_state
+        let fragment_size = msg.payload.args_16()[10];
+        let admission_dropped = match udp_state
             .tx_queue
             .push_back(msg, |idx| sender.get_page(idx).map_err(|err| err.into()))
-            .is_err()
         {
-            if let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) {
-                log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
-            } else {
-                log::warn!("UDP TX: can't determine client PID.");
-            };
-            let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
-            return Ok(());
+            Ok(dropped) => dropped,
+            Err(_) => {
+                if let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) {
+                    log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
+                } else {
+                    log::warn!("UDP TX: can't determine client PID.");
+                };
+                let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+                return Ok(());
+            }
+        };
+
+        if admission_dropped {
+            runtime
+                .stats
+                .udp_tx_admission_drops
+                .set(runtime.stats.udp_tx_admission_drops.get() + 1);
         }
 
-        let mut need_udp_tx_ack = fragment_id != 0;
+        let mut need_udp_tx_ack = fragment_id != 0 || (admission_dropped && fragment_size != 0);
 
         let mut inner_ref = runtime.inner.borrow_mut();
         let mut inner = &mut *inner_ref;
@@ -447,10 +457,12 @@ impl MotoSocket {
                         continue;
                     }
                     moto_netstack::socket::udp::SendError::BufferFull => {
-                        // Can't send the packet: re-insert it into the pending queue.
-                        udp_state.tx_queue.push_front(datagram);
-                        log::debug!("reinserting UDP dgram");
-                        break;
+                        need_udp_tx_ack |= !datagram.slice().is_empty();
+                        runtime
+                            .stats
+                            .udp_tx_buffer_full_drops
+                            .set(runtime.stats.udp_tx_buffer_full_drops.get() + 1);
+                        log::debug!("dropping UDP datagram: netstack TX buffer full");
                     }
                 }
             } else {

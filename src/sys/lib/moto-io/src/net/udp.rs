@@ -227,7 +227,7 @@ impl UdpSocket {
             handle: resp.handle,
             event_listener,
             subchannel_mask,
-            tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
+            tx_queue: Mutex::new(UdpFragmentingQueue::new_tx(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
             rx_waiters: WaitSet::new(),
@@ -426,11 +426,9 @@ impl UdpSocket {
         if self.is_closed() {
             return Err(moto_rt::E_NOT_CONNECTED);
         }
-        if tx_queue.is_full() {
+        if !tx_queue.push_back(buf, *addr) {
             return Err(E_NOT_READY);
         }
-
-        tx_queue.push_back(buf, *addr);
         drop(tx_queue);
 
         self.try_tx();
