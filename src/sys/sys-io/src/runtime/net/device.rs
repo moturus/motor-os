@@ -21,10 +21,7 @@ use moto_tooling::iobuf::IoBuf;
 type RxQueue = Rc<RefCell<VecDeque<(IoBuf, RxMeta)>>>;
 // Egress packets travel with their TSO segment size (0 = a regular
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
-enum TxWork {
-    Packet(IoBuf, u16),
-    Barrier(moto_async::oneshot::Sender<()>),
-}
+type TxWork = (IoBuf, u16);
 
 /// Bytes owned by one admitted TX token before its packet size is known.
 /// [`BIG_BUF_SIZE`] is the largest buffer the token can consume.
@@ -61,24 +58,20 @@ impl TxQueueState {
     fn push_packet(&mut self, packet: IoBuf, tso_seg_size: u16) {
         debug_assert!(packet.capacity() <= TX_RESERVATION);
         self.bytes -= TX_RESERVATION - packet.capacity();
-        self.work.push_back(TxWork::Packet(packet, tso_seg_size));
+        self.work.push_back((packet, tso_seg_size));
     }
 
     /// Pop work and report whether doing so reopened packet admission.
     fn pop_front(&mut self) -> (Option<TxWork>, bool) {
         let was_full = self.bytes > self.byte_limit - TX_RESERVATION;
         let work = self.work.pop_front();
-        if let Some(TxWork::Packet(packet, _)) = &work {
+        if let Some((packet, _)) = &work {
             self.bytes -= packet.capacity();
         }
         (
             work,
             was_full && self.bytes <= self.byte_limit - TX_RESERVATION,
         )
-    }
-
-    fn push_barriers(&mut self, waiters: Vec<moto_async::oneshot::Sender<()>>) {
-        self.work.extend(waiters.into_iter().map(TxWork::Barrier));
     }
 }
 
@@ -393,7 +386,7 @@ impl VirtioDevice {
             }
 
             match maybe_tx_vec {
-                Some(TxWork::Packet(packet, tso_seg_size)) => {
+                Some((packet, tso_seg_size)) => {
                     log::debug!("NET TX {} bytes", packet.len());
                     stats
                         .device_tx_packets
@@ -406,25 +399,9 @@ impl VirtioDevice {
                     inflight_descs += descs;
                     completions.push_back((completion, descs));
                 }
-                Some(TxWork::Barrier(waiter)) => {
-                    while let Some((completion, descs)) = completions.pop_front() {
-                        let (buf, _) = completion.await;
-                        buf_cache.push_buf(buf);
-                        inflight_descs -= descs;
-                    }
-                    let _ = waiter.send(());
-                }
                 None => tx_notify.notified().await,
             }
         }
-    }
-
-    fn complete_transmits(&self, waiters: Vec<moto_async::oneshot::Sender<()>>) {
-        if waiters.is_empty() {
-            return;
-        }
-        self.tx_queue.borrow_mut().push_barriers(waiters);
-        self.tx_notify.notify_one();
     }
 }
 
@@ -466,6 +443,7 @@ pub struct VirtioTxToken {
     // From PacketMeta::tso_seg_size via set_meta (the iface calls it just
     // before consume): nonzero marks a TCP super-segment.
     tso_seg_size: u16,
+    tcp_reset: bool,
     reserved: bool,
 }
 
@@ -480,6 +458,7 @@ impl Drop for VirtioTxToken {
 impl moto_netstack::phy::TxToken for VirtioTxToken {
     fn set_meta(&mut self, meta: moto_netstack::phy::PacketMeta) {
         self.tso_seg_size = meta.tso_seg_size;
+        self.tcp_reset = meta.tcp_reset;
     }
 
     fn consume<R, F>(mut self, len: usize, f: F) -> R
@@ -496,6 +475,11 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
             self.stats
                 .device_tx_allocation_drops
                 .set(self.stats.device_tx_allocation_drops.get() + 1);
+            if self.tcp_reset {
+                self.stats
+                    .tcp_abort_failed
+                    .set(self.stats.tcp_abort_failed.get() + 1);
+            }
             let mut scratch = vec![0u8; len];
             return f(scratch.as_mut_slice());
         };
@@ -544,6 +528,7 @@ impl moto_netstack::phy::Device for VirtioDevice {
                     buf_cache: self.buf_cache.clone(),
                     stats: self.stats.clone(),
                     tso_seg_size: 0,
+                    tcp_reset: false,
                     reserved: true,
                 },
             )
@@ -561,6 +546,7 @@ impl moto_netstack::phy::Device for VirtioDevice {
             buf_cache: self.buf_cache.clone(),
             stats: self.stats.clone(),
             tso_seg_size: 0,
+            tcp_reset: false,
             reserved: true,
         })
     }
@@ -832,7 +818,7 @@ pub(super) struct NetDev<'a> {
 
     // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
-    transmit_waiters: Vec<moto_async::oneshot::Sender<()>>,
+    poll_waiters: Vec<moto_async::oneshot::Sender<()>>,
 }
 
 impl<'a> NetDev<'a> {
@@ -928,7 +914,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use: std::collections::HashSet::new(),
             icmp_identifiers_in_use: std::collections::HashSet::new(),
             device_runtime_notify: notify,
-            transmit_waiters: Vec::new(),
+            poll_waiters: Vec::new(),
         }
     }
 
@@ -940,9 +926,11 @@ impl<'a> NetDev<'a> {
         &self.config
     }
 
-    pub(super) fn transmit_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
+    /// Complete after one interface poll has attempted all currently ready
+    /// egress. This deliberately says nothing about device completion.
+    pub(super) fn poll_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
         let (waiter, completion) = moto_async::oneshot();
-        self.transmit_waiters.push(waiter);
+        self.poll_waiters.push(waiter);
         self.device_runtime_notify.notify_one();
         completion
     }
@@ -1042,14 +1030,14 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
-            transmit_waiters,
+            poll_waiters,
             external: _,
         } = self;
         // Every segment this poll emits reads the timestamp clock, so it is
         // advanced once here rather than per segment.
         tsval::tick();
 
-        let waiters = std::mem::take(transmit_waiters);
+        let waiters = std::mem::take(poll_waiters);
         let result = match device {
             NetstackDevice::Loopback(loopback) => {
                 iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
@@ -1058,13 +1046,8 @@ impl<'a> NetDev<'a> {
                 iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
             }
         };
-        match device {
-            NetstackDevice::Loopback(_) => {
-                for waiter in waiters {
-                    let _ = waiter.send(());
-                }
-            }
-            NetstackDevice::VirtIo(virtio_device) => virtio_device.complete_transmits(waiters),
+        for waiter in waiters {
+            let _ = waiter.send(());
         }
 
         // One poll drains the whole receive queue, so a batch of dropped
@@ -1184,7 +1167,7 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
-            transmit_waiters: _,
+            poll_waiters: _,
             external: _,
         } = self;
         match device {
@@ -1392,10 +1375,10 @@ pub(crate) mod self_test {
         st_assert!(!queue.reserve());
 
         let (packet, reopened) = queue.pop_front();
-        st_assert!(matches!(packet, Some(TxWork::Packet(_, 0))));
+        st_assert!(matches!(packet, Some((_, 0))));
         st_assert!(reopened);
         let (packet, reopened) = queue.pop_front();
-        st_assert!(matches!(packet, Some(TxWork::Packet(_, 0))));
+        st_assert!(matches!(packet, Some((_, 0))));
         st_assert!(!reopened);
         st_assert_eq!(queue.bytes, 0);
         Ok(())

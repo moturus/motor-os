@@ -115,6 +115,7 @@ mod ids {
     pub const NET_UDP_TX_ADMISSION_DROPS: u32 = 67;
     pub const NET_UDP_TX_BUFFER_FULL_DROPS: u32 = 68;
     pub const NET_DEVICE_TX_ALLOCATION_DROPS: u32 = 69;
+    pub const NET_TCP_ABORT_FAILED: u32 = 70;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -175,6 +176,9 @@ pub(super) struct NetStats {
     /// Frames dropped after admission because no DMA-capable TX buffer could
     /// be allocated. TCP may recover by retransmitting; UDP does not.
     pub device_tx_allocation_drops: Cell<u64>,
+    /// Active TCP resets that could not be queued. Socket teardown still
+    /// proceeds; resets are best-effort and are never retransmitted.
+    pub tcp_abort_failed: Cell<u64>,
     /// TcpStreamRx messages (io_pages) sent to clients.
     pub tcp_rx_msgs: Cell<u64>,
     /// Payload bytes in those messages. Page fill ratio =
@@ -382,6 +386,7 @@ impl NetStats {
                 ids::NET_DEVICE_TX_ALLOCATION_DROPS,
                 self.device_tx_allocation_drops.get(),
             ),
+            MetricEntry::global(ids::NET_TCP_ABORT_FAILED, self.tcp_abort_failed.get()),
             MetricEntry::global(ids::NET_TCP_RX_MSGS, self.tcp_rx_msgs.get()),
             MetricEntry::global(ids::NET_TCP_RX_BYTES, self.tcp_rx_bytes.get()),
             MetricEntry::global(ids::NET_TCP_TX_MSGS, self.tcp_tx_msgs.get()),
@@ -539,6 +544,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             ids::NET_DEVICE_TX_ALLOCATION_DROPS,
             "net.device.tx_allocation_drops",
         ),
+        MetricDescWire::new(ids::NET_TCP_ABORT_FAILED, "net.tcp.abort_failed"),
         MetricDescWire::new(ids::NET_TCP_RX_MSGS, "net.tcp.rx_msgs"),
         MetricDescWire::new(ids::NET_TCP_RX_BYTES, "net.tcp.rx_bytes"),
         MetricDescWire::new(ids::NET_TCP_TX_MSGS, "net.tcp.tx_msgs"),

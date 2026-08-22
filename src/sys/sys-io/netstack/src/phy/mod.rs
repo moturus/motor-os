@@ -173,6 +173,11 @@ pub struct PacketMeta {
     /// [`DeviceCapabilities::max_tso_size`].
     pub tso_seg_size: u16,
 
+    /// Transmit only: this frame is a TCP reset emitted by a live socket.
+    /// Devices may use this to account for a best-effort reset that could not
+    /// be queued after the TCP state machine considered it sent.
+    pub tcp_reset: bool,
+
     /// Receive only: the device vouched for this frame's L4 checksum, so the
     /// stack must not verify it in software. Either the device verified it
     /// (e.g. virtio's VIRTIO_NET_HDR_F_DATA_VALID), or the checksum field

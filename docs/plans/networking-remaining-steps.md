@@ -62,15 +62,16 @@ Within each group, order is the suggested pickup order.
   that keeps its ring non-empty (two producer threads suffice) starves device
   polls, timers, every other channel, and the file system on sys-io's only
   thread.
-- Bound the netstack-to-device TX queue and the abort wait. `device.rs`
-  `transmit()` always hands out a token and `consume` pushes to `tx_queue`,
-  falling back to a heap buffer when pooled buffers run out, so a client
-  faster than the device grows sys-io to allocation failure; the same scratch
-  path silently loses the packet, including an abort's RST. Return `None`
-  past a queue depth. `drop_tcp_socket` awaits `transmit_completion()` with
-  no timeout, so a wedged host or device turns every close, linger, and
-  client teardown into a permanent hang and leaks channel-budget slots; bound
-  the wait and count the timeouts.
+- COMPLETED: Bound the netstack-to-device TX queue and make TCP aborts
+  best-effort. TX admission now reserves the largest possible packet against
+  a byte limit derived from the virtio ring, returns `None` when full, and
+  wakes the netstack when dequeueing reopens capacity; TSO super-segments are
+  charged by their actual DMA buffer size. Pooled-buffer allocation failures
+  retain the scratch path required by the device trait but count the dropped
+  frame. `drop_tcp_socket` now waits only for one local `iface.poll()` to
+  attempt the reset, never for device completion, so a wedged host cannot
+  retain the socket. Failed reset admission or allocation increments
+  `net.tcp.abort_failed` before teardown continues.
 - Give neighbor discovery per-destination backoff and a give-up. sys-io sets
   `discovery_silent_time` to 5 ms; egress is re-permitted when it expires,
   TCP re-solicits every 5 ms until its timeout, and UDP keeps the datagram at

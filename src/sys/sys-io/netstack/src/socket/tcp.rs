@@ -3901,6 +3901,7 @@ impl<'a> Socket<'a> {
         ip_repr.set_payload_len(repr.buffer_len());
 
         let mut meta = PacketMeta::default();
+        meta.tcp_reset = repr.control == TcpControl::Rst;
         {
             // Segments larger than the effective MSS exist only when the
             // device advertised TSO (see the sizing above); tell it the
@@ -12519,6 +12520,22 @@ mod test {
             ..RECV_TEMPL
         }));
         assert_eq!(s.socket.poll_at(&mut s.cx), PollAt::Ingress);
+    }
+
+    #[test]
+    fn test_abort_marks_reset_metadata() {
+        let mut s = socket_established();
+        s.abort();
+
+        let mut observed = None;
+        s.socket
+            .dispatch(&mut s.cx, |_, meta, (_, repr)| {
+                assert_eq!(repr.control, TcpControl::Rst);
+                observed = Some(meta.tcp_reset);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(observed, Some(true));
     }
 
     // =========================================================================================//

@@ -1469,16 +1469,31 @@ impl MotoSocket {
                 (socket_id, aborted)
             });
         log::debug!("Dropping TCP socket 0x{socket_id:x}.");
+        let runtime = moto_socket.borrow().base.runtime.clone();
         if aborted {
             let completion = {
                 let socket_ref = moto_socket.borrow();
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                runtime_ref.devices[socket_ref.base.device_idx].transmit_completion()
+                runtime_ref.devices[socket_ref.base.device_idx].poll_completion()
             };
             let _ = completion.await;
-        }
 
-        let runtime = moto_socket.borrow().base.runtime.clone();
+            // A successful reset dispatch clears the peer tuple after calling
+            // TxToken::consume; a remaining tuple means no TX token was available.
+            let reset_pending =
+                Self::with_tcp_socket_set(&moto_socket, |_socket_id, sockets, handle, _state| {
+                    sockets
+                        .get::<moto_netstack::socket::tcp::Socket>(handle)
+                        .remote_endpoint()
+                        .is_some()
+                });
+            if reset_pending {
+                runtime
+                    .stats
+                    .tcp_abort_failed
+                    .set(runtime.stats.tcp_abort_failed.get() + 1);
+            }
+        }
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
