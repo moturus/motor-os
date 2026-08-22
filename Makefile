@@ -216,7 +216,9 @@ gears-mock-provider:
 
 lorry:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/lorry && CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
+	cd src/bin/lorry && \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(ROOT_DIR)/../motor-sysroot/bin/motor-clang" \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
 # ring's Git checkout generates packaged assembly on the Linux host. Curl is

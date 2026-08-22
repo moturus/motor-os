@@ -100,9 +100,10 @@ copy_package() {
     local source="$1"
     local destination="$2"
     mkdir -p "$destination"
-    rm -rf "$destination/src" "$destination/.lorry"
+    rm -rf "$destination/src" "$destination/.cargo" "$destination/.lorry"
     cp "$source/Cargo.toml" "$source/Cargo.lock" "$destination/"
     cp -R "$source/src" "$destination/src"
+    cp -R "$source/.cargo" "$destination/.cargo"
     if [ -d "$source/.lorry" ]; then
         cp -R "$source/.lorry" "$destination/.lorry"
         rm -rf "$destination/.lorry/vendor"
@@ -256,10 +257,9 @@ prepare_host() {
     copy_native_fixture "$WORK/native-fixture"
     rm -rf "$WORK/proc-macro-fixture"
     cp -R "$SCRIPT_DIR/proc-macro-fixture" "$WORK/proc-macro-fixture"
-    rm -rf "$guest_tree/src/bin/lorry/target" \
-        "$guest_tree/src/bin/lorry/.cargo"
+    rm -rf "$guest_tree/src/bin/lorry/target"
     mkdir -p "$source/.cargo"
-    printf '[target.%s]\nlinker = "%s"\n' \
+    printf '[target.%s]\nlinker = "%s"\nrustflags = ["-Clink-self-contained=no", "-Cdefault-linker-libraries=yes"]\n' \
         "$MOTOR_TARGET" "$MOTOR_LINKER" \
         >"$source/.cargo/config.toml"
 
