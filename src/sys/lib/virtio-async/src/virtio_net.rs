@@ -97,6 +97,15 @@ const MAX_TX_RUNS: usize = 17;
 /// completions starves itself forever.
 pub const MAX_TX_DESCS: usize = 1 + MAX_TX_RUNS;
 
+const fn tx_queue_size_supported(queue_size: u16) -> bool {
+    queue_size as usize >= MAX_TX_DESCS
+}
+
+const _: () = {
+    assert!(!tx_queue_size_supported(16));
+    assert!(tx_queue_size_supported(18));
+};
+
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const ETHERTYPE_IPV6: u16 = 0x86DD;
 
@@ -262,6 +271,15 @@ impl NetDevice {
         let guest_gso = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_GUEST_GSO) != 0;
         let mrg_rxbuf = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_MRG_RXBUF) != 0;
         dev_mut.init_virtqueues(2, 2)?; // Step 7
+
+        let tx_queue_size = dev_mut.virtqueues[Self::VIRTQ_TX].borrow().queue_size();
+        if !tx_queue_size_supported(tx_queue_size) {
+            log::error!(
+                "Virtio NET device {:?}: TX queue has {tx_queue_size} descriptors; at least {MAX_TX_DESCS} required.",
+                dev_mut.pci_device.id
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
         dev_mut.driver_ok(); // Step 8
 
         if dev_mut.device_cfg.is_none() {

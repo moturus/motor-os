@@ -50,7 +50,7 @@ network exposure or a release that treats networking as robust.
   without loopback and the net-channel listener after a parse failure. Preserve
   the supported, intentional no-listener outcome for a valid configuration
   containing zero devices, and log/test the two cases distinctly.
-- Reject virtio-net devices with fewer than 18 raw TX descriptors during
+- COMPLETED: Reject virtio-net devices with fewer than 18 raw TX descriptors during
   initialization. The TX headroom loop otherwise unwraps an empty completion
   deque for legal 8- or 16-descriptor queues.
 
