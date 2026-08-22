@@ -77,7 +77,7 @@ cleanup.
 
 ### Socket lifecycle and resource robustness
 
-- Complete `SO_LINGER(secs > 0)` close RPCs. Pass the close request to the
+- COMPLETED: Complete `SO_LINGER(secs > 0)` close RPCs. Pass the close request to the
   linger task and reply when linger resolves instead of leaving an awaiting
   client parked forever. The ordinary moto-io drop path is fire-and-forget, so
   this does not make every positive-linger close hang, but the RPC contract is

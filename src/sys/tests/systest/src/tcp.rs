@@ -970,6 +970,90 @@ fn test_stale_cross_connection_accept_is_requeued() {
     println!("test_stale_cross_connection_accept_is_requeued() PASS");
 }
 
+/// A positive SO_LINGER close is an RPC even though the ordinary moto-io drop
+/// path uses an id-zero, fire-and-forget close. Keep the peer's write half open
+/// until the FIN arrives to prove sys-io retains and eventually answers the
+/// explicit request instead of dropping it when the linger task is spawned.
+fn test_positive_linger_close_rpc_completes() {
+    use moto_sys_io::api_net;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&connection);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+    // A socket that never sent application data intentionally takes the abort
+    // path, so put one byte on the wire to exercise graceful linger.
+    let page = connection.alloc_page(u64::MAX).unwrap();
+    page.bytes_mut()[0] = b'x';
+    connection
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    peer.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"x");
+
+    let mut set_linger = moto_ipc::io_channel::Msg::new();
+    set_linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
+    set_linger.handle = handle;
+    set_linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+    set_linger.payload.args_32_mut()[2] = 1;
+    set_linger.payload.args_32_mut()[3] = 5;
+    connection.send(set_linger).unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    const CLOSE_ID: u64 = 0x4c49_4e47_4552;
+    let mut close = moto_ipc::io_channel::Msg::new();
+    close.id = CLOSE_ID;
+    close.command = api_net::NetCmd::TcpStreamClose as u16;
+    close.handle = handle;
+    connection.send(close).unwrap();
+
+    // EOF proves sys-io has processed the close and sent its FIN. The peer is
+    // still open, so the positive linger must not have answered yet.
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    loop {
+        match connection.recv() {
+            Ok(msg) => assert_ne!(msg.command, api_net::NetCmd::TcpStreamClose as u16),
+            Err(moto_rt::Error::NotReady) => break,
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
+    }
+
+    drop(peer);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let close_resp = loop {
+        match connection.recv() {
+            Ok(msg) if msg.command == api_net::NetCmd::TcpStreamClose as u16 => break msg,
+            Ok(_) | Err(moto_rt::Error::NotReady) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for positive-linger close response"
+                );
+                std::thread::yield_now();
+            }
+            Err(err) => panic!("raw sys-io receive failed: {err:?}"),
+        }
+    };
+    assert_eq!(close_resp.id, CLOSE_ID);
+    close_resp.status().unwrap();
+
+    drop(connection);
+    drop(listener);
+    wait_for_sockets_released(client_addr);
+    wait_for_sockets_released(listener_addr);
+    println!("test_positive_linger_close_rpc_completes() PASS");
+}
+
 fn test_failed_tcp_setup_rolls_back_socket() {
     use moto_sys_io::api_net;
 
@@ -1083,6 +1167,9 @@ pub fn test_native_net_cancellation() {
     test_native_stream_drop_under_backpressure();
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
+    // Keep the raw connection last: its disconnect accounting is asynchronous
+    // and must not perturb the exact client-count baselines above.
+    test_positive_linger_close_rpc_completes();
 }
 
 pub fn test_native_listener_drop_backpressure() {
