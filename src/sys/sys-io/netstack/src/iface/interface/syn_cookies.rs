@@ -13,7 +13,7 @@
 //! socket restoration live with the callers.
 
 use crate::siphash::SipHasher24;
-use crate::socket::tcp::TcpCookieRestore;
+use crate::socket::tcp::{MIN_REMOTE_MSS, TcpCookieRestore};
 use crate::time::{Duration, Instant};
 use crate::wire::{
     IpEndpoint, IpProtocol, IpRepr, TCP_HEADER_LEN, TcpControl, TcpRepr, TcpSeqNumber,
@@ -175,11 +175,11 @@ impl InterfaceInner {
 }
 
 /// The MSS values a cookie can carry, ascending. Three index bits leave room
-/// for eight; these four cover the real world (RFC 1122's default, the IPv6
+/// for eight; these five cover the real world (RFC 1122's default, the IPv6
 /// minimum-MTU path, tunneled Ethernet, plain Ethernet). A peer's advertised
 /// MSS rounds down to one of them, so a restored connection never sends larger
 /// segments than the peer asked for.
-const MSS_TABLE: [u16; 4] = [536, 1220, 1440, 1460];
+const MSS_TABLE: [u16; 5] = [MIN_REMOTE_MSS, 536, 1220, 1440, 1460];
 
 /// Bits 20..0 of the cookie hold the tag; bits 23..21 the MSS index; bits
 /// 31..24 the counter's low byte.
@@ -202,7 +202,7 @@ pub(crate) fn mint(
     counter: i64,
     peer_mss: Option<u16>,
 ) -> TcpSeqNumber {
-    let mss = peer_mss.unwrap_or(MSS_TABLE[0]);
+    let mss = peer_mss.unwrap_or(536);
     let mss_idx = MSS_TABLE.iter().rposition(|&v| v <= mss).unwrap_or(0);
 
     let isn = ((counter as u32) << 24)
@@ -336,13 +336,16 @@ mod tests {
         verify(&KEY, local, remote, counter_now, isn)
     }
 
-    /// The advertised MSS comes back rounded down to a table value, and a SYN
-    /// without the option gets the protocol default.
+    /// The advertised MSS comes back clamped or rounded down to a table value,
+    /// and a SYN without the option gets the protocol default.
     #[test]
     fn the_mss_survives_the_roundtrip_rounded_down() {
         for (advertised, restored) in [
             (None, 536),
-            (Some(400), 536),
+            (Some(1), MIN_REMOTE_MSS),
+            (Some(47), MIN_REMOTE_MSS),
+            (Some(MIN_REMOTE_MSS), MIN_REMOTE_MSS),
+            (Some(400), MIN_REMOTE_MSS),
             (Some(536), 536),
             (Some(1219), 536),
             (Some(1400), 1220),
@@ -390,9 +393,9 @@ mod tests {
         }
         assert_eq!(
             verify_here(T, TcpSeqNumber((cookie ^ (1 << 21)) as i32)),
-            Some(1220)
+            Some(MIN_REMOTE_MSS)
         );
-        // Index 4, past the table's end.
+        // Index 5 is outside the table.
         assert_eq!(
             verify_here(T, TcpSeqNumber((cookie ^ (1 << 23)) as i32)),
             None

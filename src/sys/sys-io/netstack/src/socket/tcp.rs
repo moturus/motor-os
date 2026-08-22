@@ -746,6 +746,13 @@ pub struct Socket<'a> {
 
 const DEFAULT_MSS: usize = 536;
 
+/// Lowest peer-advertised MSS honored, preventing packet-per-byte output.
+pub(crate) const MIN_REMOTE_MSS: u16 = 48;
+
+fn clamp_remote_mss(mss: u16) -> usize {
+    usize::from(mss.max(MIN_REMOTE_MSS))
+}
+
 /// The window scale [`Socket::new`] derives for a ring of `capacity` bytes:
 /// what a caller constructing a smaller ring passes to
 /// [`Socket::new_with_win_shift`] for its configured capacity.
@@ -1297,7 +1304,7 @@ impl<'a> Socket<'a> {
             .unwrap_or(u16::MAX)
             .into();
 
-        self.remote_mss = restore.remote_mss as usize;
+        self.remote_mss = clamp_remote_mss(restore.remote_mss);
         self.congestion_controller.set_mss(self.remote_mss);
         self.remote_has_sack = restore.peer_sack;
         self.remote_win_scale = restore.peer_wscale;
@@ -2769,8 +2776,8 @@ impl<'a> Socket<'a> {
                         tcp_trace!("received SYNACK with zero MSS, ignoring");
                         return None;
                     }
-                    self.congestion_controller.set_mss(max_seg_size as usize);
-                    self.remote_mss = max_seg_size as usize
+                    self.remote_mss = clamp_remote_mss(max_seg_size);
+                    self.congestion_controller.set_mss(self.remote_mss);
                 }
 
                 let local = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
@@ -2821,7 +2828,7 @@ impl<'a> Socket<'a> {
                         tcp_trace!("received SYNACK with zero MSS, ignoring");
                         return None;
                     }
-                    self.remote_mss = max_seg_size as usize;
+                    self.remote_mss = clamp_remote_mss(max_seg_size);
                     self.congestion_controller.set_mss(self.remote_mss);
                 }
 
@@ -13619,6 +13626,7 @@ mod test {
             // placeholder, and keeping the placeholder there would be twenty
             // segments in flight before a single ACK.
             for (mss, expected) in [
+                (1u16, 480usize),
                 (100u16, 1_000usize),
                 (1460, 14_600),
                 (4000, 14_600),
@@ -13663,13 +13671,14 @@ mod test {
                     control: TcpControl::Syn,
                     seq_number: REMOTE_SEQ,
                     ack_number: Some(LOCAL_SEQ + 1),
-                    max_seg_size: Some(1460),
+                    max_seg_size: Some(1),
                     window_scale: Some(0),
                     ..SEND_TEMPL
                 }
             );
             assert_eq!(s.state, State::Established);
-            assert_eq!(s.congestion_controller.window(), 14_600);
+            assert_eq!(s.remote_mss, usize::from(MIN_REMOTE_MSS));
+            assert_eq!(s.congestion_controller.window(), 480);
         }
 
         // Cubic's two loss hooks apply the same reduction, so a repeated signal
@@ -14524,6 +14533,21 @@ mod test {
             peer_sack: true,
             peer_tsval: None,
         }
+    }
+
+    #[test]
+    fn test_restore_from_cookie_clamps_tiny_peer_mss() {
+        let mut s = socket();
+        s.socket
+            .restore_from_cookie(
+                &mut s.cx,
+                &TcpCookieRestore {
+                    remote_mss: 1,
+                    ..cookie_restore()
+                },
+            )
+            .unwrap();
+        assert_eq!(s.remote_mss, usize::from(MIN_REMOTE_MSS));
     }
 
     /// A restored socket is an established socket: it receives, acknowledges
