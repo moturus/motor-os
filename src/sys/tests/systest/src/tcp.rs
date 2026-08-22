@@ -1220,6 +1220,57 @@ fn test_positive_linger_close_rpc_completes() {
     println!("test_positive_linger_close_rpc_completes() PASS");
 }
 
+/// Fill every layer between a writer and a peer that never reads, then let a
+/// positive linger expire. The queued client pages belong to sys-io by then;
+/// dropping the socket must release them instead of tripping its destructor.
+fn test_positive_linger_timeout_discards_stalled_tx() {
+    use std::os::fd::AsRawFd;
+
+    const SEND_RING_SIZE: usize = 128 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+    let (peer, _) = listener.accept().unwrap();
+
+    moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::from_secs(1))).unwrap();
+    moto_rt::net::set_linger(peer.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+
+    let chunk = [0x5a_u8; 16 * 1024];
+    let mut sent = 0_usize;
+    let mut hit_timeout = false;
+    for _ in 0..4096 {
+        match client.write(&chunk) {
+            Ok(n) => {
+                assert!(n > 0, "write returned Ok(0)");
+                sent += n;
+            }
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+                hit_timeout = true;
+                break;
+            }
+        }
+    }
+    assert!(hit_timeout, "write never timed out against a stalled peer");
+    assert!(
+        sent > SEND_RING_SIZE,
+        "writer stalled before filling the {SEND_RING_SIZE}-byte send ring: {sent} bytes"
+    );
+
+    drop(client);
+    wait_for_sockets_released(client_addr);
+
+    drop(peer);
+    drop(listener);
+    wait_for_sockets_released(listener_addr);
+    println!("test_positive_linger_timeout_discards_stalled_tx() PASS");
+}
+
 fn test_failed_tcp_setup_rolls_back_socket() {
     use moto_sys_io::api_net;
 
@@ -1335,6 +1386,7 @@ pub fn test_native_net_cancellation() {
     test_native_stream_drop_under_backpressure();
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
+    test_positive_linger_timeout_discards_stalled_tx();
     // Keep the raw connection last: its disconnect accounting is asynchronous
     // and must not perturb the exact client-count baselines above.
     test_positive_linger_close_rpc_completes();

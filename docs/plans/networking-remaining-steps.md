@@ -47,7 +47,7 @@ Within each group, order is the suggested pickup order.
   payload at RCV.NXT arrives on an rx-shutdown FIN-WAIT socket because the
   rx-shutdown check runs before the RST arm. Debug builds, which the gate
   runs, panic; release answers an RST with an RST. Move the RST arm first.
-- Clear a socket's queued client TX pages before the socket is dropped at
+- COMPLETED: Clear a socket's queued client TX pages before the socket is dropped at
   linger expiry. In `runtime/net/socket/tcp.rs`, a close with unsent pages
   takes `DrainThenFinish`; when the peer stalls for the whole linger, step 1
   times out, step 2 registers the linger task on the single-slot send waker

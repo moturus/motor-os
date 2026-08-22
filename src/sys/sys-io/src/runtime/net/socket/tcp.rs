@@ -1461,6 +1461,11 @@ impl MotoSocket {
                 }
                 state.rx_closed = true;
                 state.tx_closed = true;
+                // Linger can expire while the TX task still owns client pages
+                // it could not hand to a full netstack send buffer. This drop
+                // is the final owner of the socket, so release those pages
+                // before `on_tcp_socket_drop` checks its teardown invariants.
+                state.tx_queue.clear();
                 (socket_id, aborted)
             });
         log::debug!("Dropping TCP socket 0x{socket_id:x}.");
@@ -1668,16 +1673,20 @@ impl MotoSocket {
         // Step 1: the TX task hands the client's remaining writes to the
         // netstack and closes. Present only when there were any (see
         // `close_tcp_socket_inner`); the FIN is already queued otherwise.
-        if let Some(lingerer) = lingerer {
+        let tx_task_done = if let Some(lingerer) = lingerer {
             futures::select! {
             _ = lingerer.fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: TX done.");
+                true
             },
             _ = moto_async::sleep_until(deadline.into()).fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: TX timed out.");
+                false
             },
             }
-        }
+        } else {
+            true
+        };
 
         // Step 2: the close handshake. `is_open()` is false in CLOSED and
         // TIME-WAIT, which are its two ends -- our FIN acknowledged and, if we
@@ -1688,7 +1697,10 @@ impl MotoSocket {
         // was done held a socket's whole 128 KiB of buffers for that second.
         // Taking that waker over is safe only because the TX task is finished
         // with it -- step 1 above, or `may_send()` already false.
-        {
+        // A TX timeout has already exhausted the common deadline. Do not poll
+        // the handshake waiter even once in that case: registering its waker
+        // would replace the still-blocked TX task's single send waker.
+        if tx_task_done {
             let closed = std::future::poll_fn(|cx| {
                 Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
                     if netstack_socket.is_open() {
