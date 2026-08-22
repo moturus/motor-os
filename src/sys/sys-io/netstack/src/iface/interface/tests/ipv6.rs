@@ -1003,9 +1003,56 @@ fn ndisc_neighbor_advertisement_ethernet(#[case] medium: Medium) {
             &IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0002)),
             iface.inner.now,
         ),
+        NeighborAnswer::NotFound,
+    );
+    assert_eq!(
+        iface.inner.neighbor_cache.lookup(
+            &IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x0002)),
+            iface.inner.now,
+        ),
         NeighborAnswer::Found(HardwareAddress::Ethernet(EthernetAddress::from_bytes(&[
             0, 0, 0, 0, 0, 1
         ]))),
+    );
+}
+
+#[rstest]
+#[case::ethernet(Medium::Ethernet)]
+#[cfg(feature = "medium-ethernet")]
+fn ndisc_solicited_advertisement_to_multicast_is_rejected(#[case] medium: Medium) {
+    let (mut iface, _sockets, _device) = setup(medium);
+    let source = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
+    let target = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+    let lladdr = EthernetAddress([0x52, 0x54, 0, 0, 0, 2]);
+
+    iface.inner.neighbor_cache.limit_rate(
+        IpAddress::Ipv6(target),
+        iface.inner.now,
+        Duration::from_millis(1000),
+    );
+    assert_eq!(
+        iface.inner.process_ndisc(
+            Ipv6Repr {
+                src_addr: source,
+                dst_addr: IPV6_LINK_LOCAL_ALL_NODES,
+                next_header: IpProtocol::Icmpv6,
+                payload_len: 0,
+                hop_limit: 0xff,
+            },
+            NdiscRepr::NeighborAdvert {
+                flags: NdiscNeighborFlags::SOLICITED,
+                target_addr: target,
+                lladdr: Some(lladdr.into()),
+            },
+        ),
+        None
+    );
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(target), iface.inner.now),
+        NeighborAnswer::RateLimited
     );
 }
 
@@ -1130,8 +1177,8 @@ fn test_handle_valid_ndisc_request(#[case] medium: Medium) {
     let mut eth_bytes = vec![0u8; 86];
 
     let local_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
-    let remote_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
     let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
+    let remote_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 2);
     let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x00]);
 
     let solicit = Icmpv6Repr::Ndisc(NdiscRepr::NeighborSolicit {
@@ -1291,13 +1338,12 @@ fn test_ndisc_solicitation_never_evicts(#[case] medium: Medium) {
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
-fn test_ndisc_advert_never_evicts_gateway(#[case] medium: Medium) {
+fn test_ndisc_advert_requires_target_probe_to_evict(#[case] medium: Medium) {
     use crate::config::IFACE_NEIGHBOR_CACHE_COUNT;
 
-    let (mut iface, mut sockets, _device) = setup(medium);
+    let (mut iface, _sockets, _device) = setup(medium);
 
     let local_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 1);
-    let local_hw_addr = EthernetAddress([0x02, 0x02, 0x02, 0x02, 0x02, 0x02]);
     let gateway_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0xfe);
     let gateway_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0xfe]);
 
@@ -1318,49 +1364,88 @@ fn test_ndisc_advert_never_evicts_gateway(#[case] medium: Medium) {
         );
     }
 
-    // A stream of forged advertisements, each from an address of its own.
-    for n in 0..IFACE_NEIGHBOR_CACHE_COUNT as u8 + 2 {
-        let other_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, (20 + n).into());
-        let other_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 20 + n]);
+    // Source and advertised target deliberately differ: target is the cache
+    // key and the address a request record has to name.
+    let source_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x80);
+    let target_ip_addr = Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0xff);
+    let remote_hw_addr = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x01, 0xff]);
+    let ip_repr = Ipv6Repr {
+        src_addr: source_ip_addr,
+        dst_addr: local_ip_addr,
+        next_header: IpProtocol::Icmpv6,
+        hop_limit: 0xff,
+        payload_len: 0,
+    };
+    let advert = NdiscRepr::NeighborAdvert {
+        flags: NdiscNeighborFlags::SOLICITED,
+        target_addr: target_ip_addr,
+        lladdr: Some(remote_hw_addr.into()),
+    };
 
-        let advert = Icmpv6Repr::Ndisc(NdiscRepr::NeighborAdvert {
-            flags: NdiscNeighborFlags::SOLICITED,
-            target_addr: other_ip_addr,
-            lladdr: Some(other_hw_addr.into()),
-        });
-        let ip_repr = IpRepr::Ipv6(Ipv6Repr {
-            src_addr: other_ip_addr,
-            dst_addr: local_ip_addr,
-            next_header: IpProtocol::Icmpv6,
-            hop_limit: 0xff,
-            payload_len: advert.buffer_len(),
-        });
+    // With no target probe, the advertisement may not evict.
+    assert_eq!(iface.inner.process_ndisc(ip_repr, advert), None);
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(target_ip_addr), iface.inner.now),
+        NeighborAnswer::NotFound
+    );
+    assert_eq!(
+        iface.inner.neighbor_cache.lookup(
+            &IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 11)),
+            iface.inner.now
+        ),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(EthernetAddress([
+            0x52, 0x54, 0, 0, 0, 11
+        ])))
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
 
-        let mut eth_bytes = vec![0u8; 86];
-        let mut frame = EthernetFrame::new_unchecked(&mut eth_bytes);
-        frame.set_dst_addr(local_hw_addr);
-        frame.set_src_addr(other_hw_addr);
-        frame.set_ethertype(EthernetProtocol::Ipv6);
-        ip_repr.emit(frame.payload_mut(), &ChecksumCapabilities::default());
-        advert.emit(
-            &other_ip_addr,
-            &local_ip_addr,
-            &mut Icmpv6Packet::new_unchecked(&mut frame.payload_mut()[ip_repr.header_len()..]),
-            &ChecksumCapabilities::default(),
-        );
+    // A source-address probe does not correlate with the advertised target.
+    iface.inner.neighbor_cache.limit_rate(
+        IpAddress::Ipv6(source_ip_addr),
+        iface.inner.now,
+        Duration::from_millis(1000),
+    );
+    assert_eq!(iface.inner.process_ndisc(ip_repr, advert), None);
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(source_ip_addr), iface.inner.now),
+        NeighborAnswer::RateLimited
+    );
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(target_ip_addr), iface.inner.now),
+        NeighborAnswer::NotFound
+    );
+    assert_eq!(iface.take_neighbor_admission_refused(), 1);
 
-        assert!(
-            iface
-                .inner
-                .process_ethernet(
-                    &mut sockets,
-                    PacketMeta::default(),
-                    frame.into_inner(),
-                    &mut iface.fragments
-                )
-                .is_none()
-        );
-    }
+    // A target probe admits the same advertisement and permits eviction.
+    iface.inner.neighbor_cache.limit_rate(
+        IpAddress::Ipv6(target_ip_addr),
+        iface.inner.now,
+        Duration::from_millis(1000),
+    );
+    assert_eq!(iface.inner.process_ndisc(ip_repr, advert), None);
+    assert_eq!(
+        iface
+            .inner
+            .neighbor_cache
+            .lookup(&IpAddress::Ipv6(target_ip_addr), iface.inner.now),
+        NeighborAnswer::Found(HardwareAddress::Ethernet(remote_hw_addr))
+    );
+    assert_eq!(
+        iface.inner.neighbor_cache.lookup(
+            &IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 11)),
+            iface.inner.now
+        ),
+        NeighborAnswer::NotFound
+    );
 
     // The gateway is still cached, so egress through it still resolves.
     assert_eq!(

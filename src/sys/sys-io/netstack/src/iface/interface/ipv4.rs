@@ -534,16 +534,24 @@ impl InterfaceInner {
                 //
                 // A request is unsolicited, though: any peer on the segment can send one, so it
                 // may take a free slot or refresh a mapping but may never displace one. A reply
-                // answers a request of our own, so it keeps the evicting fill.
+                // may evict only when it matches a live record of a request we sent; an
+                // uncorrelated reply is subject to the same non-evicting admission policy.
+                let protocol_addr = IpAddress::Ipv4(source_protocol_addr);
                 if operation == ArpOperation::Request {
                     self.fill_neighbor_unsolicited(
-                        source_protocol_addr.into(),
+                        protocol_addr,
+                        source_hardware_addr.into(),
+                        timestamp,
+                    );
+                } else if self.neighbor_cache.take_probe(&protocol_addr, timestamp) {
+                    self.fill_neighbor_solicited(
+                        protocol_addr,
                         source_hardware_addr.into(),
                         timestamp,
                     );
                 } else {
-                    self.fill_neighbor_solicited(
-                        source_protocol_addr.into(),
+                    self.fill_neighbor_unsolicited(
+                        protocol_addr,
                         source_hardware_addr.into(),
                         timestamp,
                     );

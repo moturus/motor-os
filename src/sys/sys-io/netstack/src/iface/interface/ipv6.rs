@@ -742,16 +742,31 @@ impl InterfaceInner {
                 target_addr,
                 flags,
             } => {
-                let ip_addr = ip_repr.src_addr.into();
+                if !target_addr.x_is_unicast()
+                    || (ip_repr.dst_addr.is_multicast()
+                        && flags.contains(NdiscNeighborFlags::SOLICITED))
+                {
+                    return None;
+                }
+
                 if let Some(lladdr) = lladdr {
                     let lladdr = check!(lladdr.parse(self.caps.medium));
-                    if !lladdr.is_unicast() || !target_addr.x_is_unicast() {
+                    if !lladdr.is_unicast() {
                         return None;
                     }
-                    if flags.contains(NdiscNeighborFlags::OVERRIDE)
-                        || !self.neighbor_cache.lookup(&ip_addr, self.now).found()
-                    {
-                        self.fill_neighbor_solicited(ip_addr, lladdr, self.now)
+
+                    let target = IpAddress::Ipv6(target_addr);
+                    let current = self.neighbor_cache.lookup(&target, self.now);
+                    let can_update = flags.contains(NdiscNeighborFlags::OVERRIDE)
+                        || !matches!(current, NeighborAnswer::Found(old) if old != lladdr);
+                    if can_update {
+                        let correlated = flags.contains(NdiscNeighborFlags::SOLICITED)
+                            && self.neighbor_cache.take_probe(&target, self.now);
+                        if correlated {
+                            self.fill_neighbor_solicited(target, lladdr, self.now);
+                        } else {
+                            self.fill_neighbor_unsolicited(target, lladdr, self.now);
+                        }
                     }
                 }
                 None
