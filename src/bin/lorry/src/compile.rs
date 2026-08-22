@@ -473,11 +473,15 @@ pub(crate) fn unit_output_directory(
     planned: &PlannedUnit,
     options: &CommandOptions<'_>,
 ) -> PathBuf {
-    profile_dir(planned.unit.key.compile_kind, options)
+    let unit = profile_dir(planned.unit.key.compile_kind, options)
         .join("build")
         .join(&planned.unit.key.package.name)
-        .join(planned.identity.extra_filename.trim_start_matches('-'))
-        .join("out")
+        .join(planned.identity.extra_filename.trim_start_matches('-'));
+    match planned.unit.key.kind {
+        UnitKind::Library | UnitKind::ProcMacro => unit.join("deps"),
+        UnitKind::BuildScriptCompile => unit.join("build-script"),
+        UnitKind::BuildScriptRun => unit.join("build-script-execution/out"),
+    }
 }
 
 fn expected_output(
@@ -909,7 +913,7 @@ mod tests {
                 "-C",
                 "extra-filename=-a52364eda26712a9",
                 "--out-dir",
-                "/target/release/build/version_check/a52364eda26712a9/out",
+                "/target/release/build/version_check/a52364eda26712a9/deps",
                 "-C",
                 "strip=symbols",
                 "--cap-lints",
@@ -964,13 +968,13 @@ mod tests {
                 "-C",
                 "extra-filename=-54bde9ff4b0e1354",
                 "--out-dir",
-                "/target/release/build/generic-array/54bde9ff4b0e1354/out",
+                "/target/release/build/generic-array/54bde9ff4b0e1354/build-script",
                 "-C",
                 "strip=symbols",
                 "-L",
-                "dependency=/target/release/build/version_check/a52364eda26712a9/out",
+                "dependency=/target/release/build/version_check/a52364eda26712a9/deps",
                 "--extern",
-                "version_check=/target/release/build/version_check/a52364eda26712a9/out/libversion_check-a52364eda26712a9.rlib",
+                "version_check=/target/release/build/version_check/a52364eda26712a9/deps/libversion_check-a52364eda26712a9.rlib",
                 "--cap-lints",
                 "warn",
                 "--verbose",
@@ -980,15 +984,15 @@ mod tests {
             invocation.output,
             RustcOutput::BuildScript {
                 executable: Path::new(
-                    "/target/release/build/generic-array/54bde9ff4b0e1354/out/build_script_build-54bde9ff4b0e1354"
+                    "/target/release/build/generic-array/54bde9ff4b0e1354/build-script/build_script_build-54bde9ff4b0e1354"
                 )
                 .to_owned(),
                 unhashed_executable: Path::new(
-                    "/target/release/build/generic-array/54bde9ff4b0e1354/out/build-script-build"
+                    "/target/release/build/generic-array/54bde9ff4b0e1354/build-script/build-script-build"
                 )
                 .to_owned(),
                 dep_info: Path::new(
-                    "/target/release/build/generic-array/54bde9ff4b0e1354/out/build_script_build-54bde9ff4b0e1354.d"
+                    "/target/release/build/generic-array/54bde9ff4b0e1354/build-script/build_script_build-54bde9ff4b0e1354.d"
                 )
                 .to_owned(),
             }
@@ -999,6 +1003,18 @@ mod tests {
             .iter()
             .find(|key| key.package == generic_array && key.kind == UnitKind::BuildScriptRun)
             .unwrap();
+        assert_eq!(
+            unit_output_directory(&plan.units[run_key], &command_options),
+            host.join("build")
+                .join("generic-array")
+                .join(
+                    plan.units[run_key]
+                        .identity
+                        .extra_filename
+                        .trim_start_matches('-'),
+                )
+                .join("build-script-execution/out")
+        );
         assert!(
             dependency_rustc_invocation(&plan, &manifests, run_key, &command_options,)
                 .unwrap()

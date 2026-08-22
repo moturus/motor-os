@@ -34,7 +34,7 @@ use std::io::Result;
 pub const MAX_FILENAME_LEN: usize = 255;
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
-pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
+pub(crate) const MAX_BLOCKS_IN_TXN: usize = 16;
 pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 64;
 
 #[cfg(test)]

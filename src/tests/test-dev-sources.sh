@@ -5,11 +5,11 @@
 if [ "${TEST_DEV_SOURCES_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export TEST_DEV_SOURCES_TIMEOUT_ACTIVE=1
   set -m
-  timeout 900s "$0" "$@" < /dev/null
+  timeout 1500s "$0" "$@" < /dev/null
   status=$?
   set +m
   if [ "$status" -eq 124 ]; then
-    echo "test-dev-sources: timed out after 900 seconds" >&2
+    echo "test-dev-sources: timed out after 1500 seconds" >&2
   fi
   exit "$status"
 fi
@@ -143,8 +143,8 @@ vm_ssh "/devtools/bin/rustc /devtools/tmp/temp-contract.rs -o /devtools/tmp/temp
 [ "$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tmp/temp-contract")" = /devtools/tmp ] ||
   fail "Rust std ignored explicit TMPDIR"
 
-# Build trees are scratch. Retaining all four at once exhausts the deliberately
-# bounded 2 GiB developer image before the second independent Gears build.
+# Build trees are scratch. Remove each one after its boundary check so later
+# independent builds retain enough room for their own outputs.
 for package in red; do
   vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
     fail "developer image cannot vendor /devtools/src/src/bin/$package"

@@ -788,8 +788,8 @@ environment. On Linux, curl may use its compiled-in system trust configuration
 unless `[network].ca-bundle` is set. Motor always supplies its default or
 configured absolute CA bundle.
 
-One curl process performs one public HTTPS request using these separate common
-arguments:
+One curl process performs one public HTTPS request attempt using these separate
+common arguments:
 
 ```text
 --disable
@@ -824,8 +824,10 @@ an exact content length, and is bounded to 8 MiB.
 `--disable` is first so curl configuration files cannot affect the request.
 The child receives only a deterministic locale; proxy, netrc, credential,
 home/config, and TLS environment variables are absent. Lorry deliberately
-omits `--location`, performs no automatic retry, and starts another curl only
-after it has validated a redirect.
+omits `--location`. It retries curl timeout status 28 at most twice, using a
+fresh process and empty response staging for each attempt. It retries no other
+curl status and starts another curl for a redirect only after it has validated
+that redirect.
 
 Curl stdout is only the response body. Lorry drains it incrementally into a
 privately created staging file, enforces the request-specific limit, and
@@ -853,11 +855,12 @@ canonical, and the reported size must equal the observed body byte count.
 Lorry terminates curl as soon as the body limit is exceeded; it does not rely
 on a declared content length or curl's newer `--max-filesize` behavior.
 
-A nonzero curl status is a transport failure and a partial body is discarded.
-With a zero curl status, Lorry applies HTTP policy itself: a final sparse-index,
-archive, or Git service response must be 200; 301, 302, 303, 307, and 308 may
-provide one valid redirect; every other status fails. A Git POST may follow
-only 307 or 308 and never follows a redirect after the first Git request.
+A nonzero curl status is a transport failure and a partial body is discarded;
+only timeout status 28 receives the two bounded retries above. With a zero curl
+status, Lorry applies HTTP policy itself: a final sparse-index, archive, or Git
+service response must be 200; 301, 302, 303, 307, and 308 may provide one valid
+redirect; every other status fails. A Git POST may follow only 307 or 308 and
+never follows a redirect after the first Git request.
 Redirects are limited to five hops.
 Each destination must be HTTPS, contain no user information or fragment, avoid
 loops, and have an allowed canonical site before curl receives it. URL query

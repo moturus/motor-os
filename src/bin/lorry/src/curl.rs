@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use crate::redirect::{HttpsUrl, TrustPolicy, redact_url};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
+const TIMEOUT_RETRIES: usize = 2;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -396,24 +397,13 @@ pub(crate) fn git_request(
     }
     arguments.splice(url_position..url_position, request_arguments);
 
-    let mut command = Command::new(executable);
-    command
-        .args(arguments)
-        .env_clear()
-        .env("LC_ALL", "C")
-        .stdin(if body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let captured = capture(
-        &mut command,
+    let captured = capture_request(
+        executable,
+        &arguments,
         destination,
         max_body_bytes,
         REQUEST_TIMEOUT,
-        body,
+        body.as_deref(),
     )?;
     let parsed = parse_git_trailer(&captured.stderr, &nonce, captured.body_size);
     if !captured.status.success() {
@@ -444,16 +434,9 @@ fn execute_request(
     max_body_bytes: u64,
     process_timeout: Duration,
 ) -> Result<(Vec<u8>, Metadata)> {
-    let mut command = Command::new(executable);
-    command
-        .args(arguments)
-        .env_clear()
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let captured = capture(
-        &mut command,
+    let captured = capture_request(
+        executable,
+        &arguments,
         destination,
         max_body_bytes,
         process_timeout,
@@ -692,6 +675,60 @@ struct Captured {
     status: ExitStatus,
     stderr: Vec<u8>,
     body_size: u64,
+}
+
+fn capture_request(
+    executable: &Path,
+    arguments: &[OsString],
+    destination: File,
+    max_body_bytes: u64,
+    timeout: Duration,
+    input: Option<&[u8]>,
+) -> Result<Captured> {
+    retry_timeouts(destination, |destination| {
+        let mut command = Command::new(executable);
+        command
+            .args(arguments)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        capture(
+            &mut command,
+            destination,
+            max_body_bytes,
+            timeout,
+            input.map(<[u8]>::to_vec),
+        )
+    })
+}
+
+fn retry_timeouts(
+    mut destination: File,
+    mut attempt: impl FnMut(File) -> Result<Captured>,
+) -> Result<Captured> {
+    for retries in 0..=TIMEOUT_RETRIES {
+        let captured = attempt(destination.try_clone().map_err(|error| {
+            Error::failure(format!(
+                "failed to duplicate curl response staging: {error}"
+            ))
+        })?)?;
+        if captured.status.code() != Some(28) || retries == TIMEOUT_RETRIES {
+            return Ok(captured);
+        }
+        destination.set_len(0).map_err(|error| {
+            Error::failure(format!("failed to truncate curl response staging: {error}"))
+        })?;
+        destination.seek(SeekFrom::Start(0)).map_err(|error| {
+            Error::failure(format!("failed to rewind curl response staging: {error}"))
+        })?;
+    }
+    unreachable!()
 }
 
 fn capture(
@@ -1246,12 +1283,17 @@ mod tests {
 
     impl TlsServer {
         fn start(scenario: &str) -> Self {
+            Self::start_attempts(scenario, 1)
+        }
+
+        fn start_attempts(scenario: &str, attempts: usize) -> Self {
             let server = std::env::var_os("LORRY_TEST_TLS_SERVER")
                 .expect("the repository integration fixture did not set LORRY_TEST_TLS_SERVER");
             let mut command = Command::new(server);
             command
                 .args(["--exact", "tls_server_child", "--nocapture"])
-                .env("LORRY_TEST_TLS_SERVER_SCENARIO", scenario);
+                .env("LORRY_TEST_TLS_SERVER_SCENARIO", scenario)
+                .env("LORRY_TEST_TLS_SERVER_ATTEMPTS", attempts.to_string());
             let mut child = command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -1345,7 +1387,7 @@ mod tests {
     }
 
     fn assert_tls_request_times_out(max_time: &str, speed_time: &str) {
-        let server = TlsServer::start("stall");
+        let server = TlsServer::start_attempts("stall", TIMEOUT_RETRIES + 1);
         let (path, file) = destination();
         let nonce = nonce().unwrap();
         let mut arguments = arguments(
@@ -1577,5 +1619,71 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retries_only_timeout_status_and_discards_partial_bodies() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (path, file) = destination();
+        let mut calls = 0;
+        let captured = retry_timeouts(file, |mut destination| {
+            calls += 1;
+            destination
+                .write_all(match calls {
+                    1 => b"first partial",
+                    2 => b"second partial",
+                    _ => b"complete",
+                })
+                .unwrap();
+            Ok(Captured {
+                status: ExitStatus::from_raw(if calls < 3 { 28 << 8 } else { 0 }),
+                stderr: Vec::new(),
+                body_size: 0,
+            })
+        })
+        .unwrap();
+        assert!(captured.status.success());
+        assert_eq!(calls, 3);
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        fs::remove_file(path).unwrap();
+
+        let (path, file) = destination();
+        calls = 0;
+        let captured = retry_timeouts(file, |mut destination| {
+            calls += 1;
+            destination.write_all(b"failure").unwrap();
+            Ok(Captured {
+                status: ExitStatus::from_raw(7 << 8),
+                stderr: Vec::new(),
+                body_size: 0,
+            })
+        })
+        .unwrap();
+        assert_eq!(captured.status.code(), Some(7));
+        assert_eq!(calls, 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounds_timeout_retries() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (path, file) = destination();
+        let mut calls = 0;
+        let captured = retry_timeouts(file, |_| {
+            calls += 1;
+            Ok(Captured {
+                status: ExitStatus::from_raw(28 << 8),
+                stderr: Vec::new(),
+                body_size: 0,
+            })
+        })
+        .unwrap();
+        assert_eq!(captured.status.code(), Some(28));
+        assert_eq!(calls, TIMEOUT_RETRIES + 1);
+        fs::remove_file(path).unwrap();
     }
 }
