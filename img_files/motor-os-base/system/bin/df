@@ -1,8 +1,8 @@
 #!/system/bin/rush
 
-echo "Total disk capacity:"
+echo -n "Total disk capacity: "
 /system/bin/sysbox stats get -h 2:1000
 
-echo "Available bytes:"
+echo -n "     Available bytes:"
 /system/bin/sysbox stats get -h 2:1001
 
