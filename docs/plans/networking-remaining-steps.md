@@ -89,7 +89,7 @@ Within each group, order is the suggested pickup order.
 
 ### Replies on a shared segment
 
-- Require the `ff02::1:ff00::/104` prefix and compare 24 bits in the
+- COMPLETED: Require the `ff02::1:ff00::/104` prefix and compare 24 bits in the
   solicited-node check (`iface/interface/ipv6.rs` compares the low 16 bits of
   any destination; the comment says 24). Today a frame to our MAC or the
   broadcast MAC with any destination sharing our low 16 bits passes the

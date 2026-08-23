@@ -1764,7 +1764,7 @@ fn test_router_advertisement(#[case] medium: Medium) {
 fn test_solicited_node_addrs(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
     let mut new_addrs = vec![
-        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 0, 2), 64),
+        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 1, 2), 64),
         IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 3, 4, 0, 0xffff), 64),
     ];
     iface.update_ip_addrs(|addrs| {
@@ -1774,7 +1774,7 @@ fn test_solicited_node_addrs(#[case] medium: Medium) {
     assert!(
         iface
             .inner
-            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002))
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff01, 0x0002))
     );
     assert!(
         iface
@@ -1785,6 +1785,16 @@ fn test_solicited_node_addrs(#[case] medium: Medium) {
         !iface
             .inner
             .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003))
+    );
+    assert!(
+        !iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002))
+    );
+    assert!(
+        !iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff05, 0, 0, 0, 0, 1, 0xff01, 0x0002))
     );
 }
 

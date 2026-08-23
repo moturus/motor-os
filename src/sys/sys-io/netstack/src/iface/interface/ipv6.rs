@@ -273,15 +273,11 @@ impl InterfaceInner {
     ///
     /// [RFC 4291 § 2.7.1]: https://tools.ietf.org/html/rfc4291#section-2.7.1
     pub fn has_solicited_node(&self, addr: Ipv6Address) -> bool {
-        self.ip_addrs.iter().any(|cidr| {
-            match *cidr {
-                IpCidr::Ipv6(cidr) if cidr.address() != Ipv6Address::LOCALHOST => {
-                    // Take the lower order 24 bits of the IPv6 address and
-                    // append those bits to FF02:0:0:0:0:1:FF00::/104.
-                    addr.octets()[14..] == cidr.address().octets()[14..]
-                }
-                _ => false,
+        self.ip_addrs.iter().any(|cidr| match *cidr {
+            IpCidr::Ipv6(cidr) if cidr.address() != Ipv6Address::LOCALHOST => {
+                addr == cidr.address().solicited_node()
             }
+            _ => false,
         })
     }
 
