@@ -710,6 +710,12 @@ pub(super) const DEFAULT_MAX_RST_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap(
 /// workloads have shown. `max_syn_cookie_rate` overrides it.
 pub(super) const DEFAULT_MAX_SYN_COOKIE_RATE: NonZeroU32 = NonZeroU32::new(1000).unwrap();
 
+/// Aggregate ARP and NDP requests emitted per second by one external device.
+/// The one-second bucket absorbs ordinary discovery bursts, while the reserve
+/// keeps spoofable passive replies from starving local and established work.
+const DEFAULT_NEIGHBOR_SOLICIT_RATE: u32 = 20;
+const DEFAULT_NEIGHBOR_SOLICIT_RESERVE: u32 = 4;
+
 /// The netstack configuration every interface is constructed from, so that the
 /// draws above have exactly one call site and a self-test can take
 /// configurations the way two devices would.
@@ -745,6 +751,8 @@ fn iface_config(
         config.icmp_error_rate_limit = net_cfg.max_icmp_error_rate.get();
         config.tcp_rst_rate_limit = net_cfg.max_rst_rate.get();
         config.tcp_cookie_rate_limit = net_cfg.max_syn_cookie_rate.get();
+        config.neighbor_solicit_rate_limit = DEFAULT_NEIGHBOR_SOLICIT_RATE;
+        config.neighbor_solicit_reserve = DEFAULT_NEIGHBOR_SOLICIT_RESERVE;
     }
     config
 }
@@ -1080,6 +1088,13 @@ impl<'a> NetDev<'a> {
                 .set(stats.neighbor_admission_refused.get() + neighbors_refused);
         }
 
+        let solicitations_suppressed = iface.take_neighbor_solicit_suppressed();
+        if solicitations_suppressed != 0 {
+            stats
+                .neighbor_solicitation_suppressed
+                .set(stats.neighbor_solicitation_suppressed.get() + solicitations_suppressed);
+        }
+
         let udp_unreachable = iface.take_udp_tx_unreachable_drops();
         if udp_unreachable != 0 {
             stats
@@ -1410,11 +1425,21 @@ pub(crate) mod self_test {
             external.discovery_silent_time,
             moto_netstack::time::Duration::from_millis(50)
         );
+        st_assert_eq!(
+            external.neighbor_solicit_rate_limit,
+            DEFAULT_NEIGHBOR_SOLICIT_RATE
+        );
+        st_assert_eq!(
+            external.neighbor_solicit_reserve,
+            DEFAULT_NEIGHBOR_SOLICIT_RESERVE
+        );
 
         let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
         st_assert_eq!(loopback.icmp_error_rate_limit, 0);
         st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
         st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
+        st_assert_eq!(loopback.neighbor_solicit_rate_limit, 0);
+        st_assert_eq!(loopback.neighbor_solicit_reserve, 0);
         Ok(())
     }
 

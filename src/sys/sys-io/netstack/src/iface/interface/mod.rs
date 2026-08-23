@@ -1479,9 +1479,12 @@ impl Interface {
                 continue;
             };
             #[cfg(feature = "socket-udp")]
-            if item.meta.neighbor_resolution_failed(self.inner.now, |ip_addr| {
-                self.inner.has_neighbor(&ip_addr)
-            }) && let Socket::Udp(socket) = &mut item.socket
+            if item
+                .meta
+                .neighbor_resolution_failed(self.inner.now, |ip_addr| {
+                    self.inner.has_neighbor(&ip_addr)
+                })
+                && let Socket::Udp(socket) = &mut item.socket
             {
                 if socket.discard_tx_head() {
                     self.inner.udp_tx_unreachable_drops =
@@ -1967,12 +1970,7 @@ impl InterfaceInner {
     where
         Tx: TxToken,
     {
-        self.lookup_hardware_addr_with_neighbor_reserve(
-            tx_token,
-            dst_addr,
-            fragmenter,
-            false,
-        )
+        self.lookup_hardware_addr_with_neighbor_reserve(tx_token, dst_addr, fragmenter, false)
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
@@ -2063,8 +2061,7 @@ impl InterfaceInner {
             .neighbor_solicit_limiter
             .try_take_above_reserve(self.now, reserve)
         {
-            self.neighbor_solicit_suppressed =
-                self.neighbor_solicit_suppressed.wrapping_add(1);
+            self.neighbor_solicit_suppressed = self.neighbor_solicit_suppressed.wrapping_add(1);
             return Err(DispatchError::NeighborPending(NeighborPending::Deferred));
         }
 

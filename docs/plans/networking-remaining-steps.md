@@ -76,12 +76,12 @@ Within each group, order is the suggested pickup order.
   now uses a shared 50 ms ARP/NDP quiet interval. UDP gives a neighbor three
   probes and their response windows, then drops the blocking datagram and
   counts `net.udp.tx_unreachable_drops`; `NoRoute` drops immediately, while
-  `FragmenterBusy` has a separate local backoff. TCP still re-solicits every
-  50 ms until its timeout, UDP has no caller-visible `EHOSTUNREACH`, and
-  spoofed on-link sources (half-open sockets plus every socketless RST,
-  cookie, and ICMP reply) can still drive aggregate ARP/NS traffic. Decide the
-  TCP terminal behavior and add an interface-wide solicitation token bucket;
-  the 64-entry silent map evicts under churn and then suppresses nothing.
+  `FragmenterBusy` has a separate local backoff. An external interface now
+  emits at most 20 aggregate ARP/NS requests per second with a one-second
+  burst; spoofable passive/socketless work cannot spend the last four tokens,
+  and `net.neighbor.solicit_suppressed` counts deferrals. TCP still
+  re-solicits every 50 ms until its timeout, and UDP has no caller-visible
+  `EHOSTUNREACH`. Decide those terminal/error behaviors.
 
 ### Replies on a shared segment
 

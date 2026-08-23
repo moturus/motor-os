@@ -117,6 +117,7 @@ mod ids {
     pub const NET_DEVICE_TX_ALLOCATION_DROPS: u32 = 69;
     pub const NET_TCP_ABORT_FAILED: u32 = 70;
     pub const NET_UDP_TX_UNREACHABLE_DROPS: u32 = 71;
+    pub const NET_NEIGHBOR_SOLICITATION_SUPPRESSED: u32 = 72;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -292,6 +293,10 @@ pub(super) struct NetStats {
     /// either more neighbors than the cache holds or someone trying to flush
     /// it.
     pub neighbor_admission_refused: Cell<u64>,
+    /// ARP and NDP requests held back by the aggregate interface limit. A
+    /// rising count means neighbor churn or spoofed sources are exhausting the
+    /// untrusted share; protected socket work may still use the reserve.
+    pub neighbor_solicitation_suppressed: Cell<u64>,
     /// Frames the netstack dropped because an IPv4 or IPv6 loopback address
     /// arrived on a device that is not loopback. Nothing legitimate produces
     /// one: such a frame is either a peer claiming to be a local process -- the
@@ -427,6 +432,10 @@ impl NetStats {
             MetricEntry::global(
                 ids::NET_NEIGHBOR_ADMISSION_REFUSED,
                 self.neighbor_admission_refused.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_NEIGHBOR_SOLICITATION_SUPPRESSED,
+                self.neighbor_solicitation_suppressed.get(),
             ),
             MetricEntry::global(ids::NET_RX_LOOPBACK_DROPPED, self.rx_loopback_dropped.get()),
         ];
@@ -586,6 +595,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(
             ids::NET_NEIGHBOR_ADMISSION_REFUSED,
             "net.neighbor.admission_refused",
+        ),
+        MetricDescWire::new(
+            ids::NET_NEIGHBOR_SOLICITATION_SUPPRESSED,
+            "net.neighbor.solicit_suppressed",
         ),
         MetricDescWire::new(ids::NET_RX_LOOPBACK_DROPPED, "net.rx.loopback_dropped"),
     ];

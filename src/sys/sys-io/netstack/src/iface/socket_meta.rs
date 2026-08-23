@@ -22,7 +22,9 @@ enum NeighborState {
         silent_until: Instant,
         attempts: u8,
     },
-    Backoff { retry_at: Instant },
+    Backoff {
+        retry_at: Instant,
+    },
 }
 
 /// Network socket metadata.
@@ -114,11 +116,7 @@ impl Meta {
         }
     }
 
-    pub(crate) fn neighbor_resolution_failed<F>(
-        &self,
-        timestamp: Instant,
-        has_neighbor: F,
-    ) -> bool
+    pub(crate) fn neighbor_resolution_failed<F>(&self, timestamp: Instant, has_neighbor: F) -> bool
     where
         F: Fn(IpAddress) -> bool,
     {
@@ -323,10 +321,7 @@ mod tests {
 
         for now in [1000, 1050] {
             m.neighbor_missing(Instant::from_millis(now), NEIGHBOR, delay);
-            assert!(!m.neighbor_resolution_failed(
-                Instant::from_millis(now + 50),
-                |_| false
-            ));
+            assert!(!m.neighbor_resolution_failed(Instant::from_millis(now + 50), |_| false));
         }
         m.neighbor_missing(Instant::from_millis(1100), NEIGHBOR, delay);
         assert!(!m.neighbor_resolution_failed(Instant::from_millis(1149), |_| false));
@@ -337,10 +332,7 @@ mod tests {
     #[test]
     fn transient_backoff_does_not_become_neighbor_failure() {
         let mut m = meta();
-        m.defer(
-            Instant::from_millis(1000),
-            Duration::from_millis(50),
-        );
+        m.defer(Instant::from_millis(1000), Duration::from_millis(50));
 
         assert_eq!(
             m.poll_at(PollAt::Now, |_| false, Instant::from_millis(1049)),

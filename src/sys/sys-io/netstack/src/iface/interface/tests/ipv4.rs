@@ -2767,6 +2767,76 @@ fn udp_unreachable_heads_do_not_block_queue() {
     assert_eq!(delivered, 1);
 }
 
+#[test]
+#[cfg(all(feature = "medium-ethernet", feature = "socket-udp"))]
+fn aggregate_throttling_does_not_spend_udp_neighbor_attempts() {
+    use crate::socket::udp;
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ethernet);
+    iface.inner.discovery_silent_time = Duration::from_millis(50);
+    iface.inner.neighbor_solicit_limiter = rate_limit::TokenBucket::new(2, Instant::ZERO);
+    iface.inner.neighbor_solicit_reserve = 1;
+
+    let noise = Ipv4Address::new(192, 168, 1, 19);
+    let unresolved = Ipv4Address::new(192, 168, 1, 20);
+    assert_eq!(
+        iface
+            .inner
+            .lookup_hardware_addr_with_neighbor_reserve(
+                device.transmit(Instant::ZERO).unwrap(),
+                &IpAddress::Ipv4(noise),
+                &mut iface.fragmenter,
+                false,
+            )
+            .map(|(hardware_addr, _)| hardware_addr),
+        Err(DispatchError::NeighborPending(NeighborPending::Solicited))
+    );
+
+    let mut socket = udp::Socket::new(
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 8]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 8]),
+    );
+    socket.bind(5000).unwrap();
+    socket
+        .send_slice(b"lost", IpEndpoint::new(unresolved.into(), 4000))
+        .unwrap();
+    let handle = sockets.add(0, socket);
+
+    // The protected UDP socket spends the reserve at t=0. At t=50 only a
+    // fraction of a token has refilled, so the aggregate limiter defers it.
+    // Later full tokens fund attempts two and three; only those real requests
+    // advance the terminal-failure clock.
+    for now in [0, 50, 500, 1000, 1049] {
+        iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
+    }
+    assert_eq!(sockets.get::<udp::Socket>(handle).send_queue(), 4);
+    assert_eq!(iface.take_udp_tx_unreachable_drops(), 0);
+
+    iface.poll(Instant::from_millis(1050), &mut device, &mut sockets);
+    assert_eq!(sockets.get::<udp::Socket>(handle).send_queue(), 0);
+    assert_eq!(iface.take_udp_tx_unreachable_drops(), 1);
+    assert_eq!(iface.take_neighbor_solicit_suppressed(), 1);
+
+    let requested: Vec<_> = device
+        .tx_queue
+        .into_iter()
+        .filter_map(|bytes| {
+            let frame = EthernetFrame::new_checked(&bytes[..]).ok()?;
+            let packet = ArpPacket::new_checked(frame.payload()).ok()?;
+            let ArpRepr::EthernetIpv4 {
+                operation: ArpOperation::Request,
+                target_protocol_addr,
+                ..
+            } = ArpRepr::parse(&packet).ok()?
+            else {
+                return None;
+            };
+            Some(target_protocol_addr)
+        })
+        .collect();
+    assert_eq!(requested, vec![noise, unresolved, unresolved, unresolved]);
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]
