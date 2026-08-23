@@ -434,11 +434,11 @@ pub(super) async fn write_resolv_conf(
             libc,
             async_fs::EntryKind::File,
             TEMP_NAME,
-            [
-                async_fs::AccessPermissions::R,
-                async_fs::AccessPermissions::R,
+            async_fs::RolePermissions::new(
                 async_fs::AccessPermissions::Rw,
-            ],
+                async_fs::AccessPermissions::R,
+                async_fs::AccessPermissions::R,
+            ),
         )
         .await?;
 

@@ -26,13 +26,14 @@ pub const CMD_COPY_FILE_RANGE: u16 = 14;
 pub const CMD_FILE_LOCK: u16 = 15;
 pub const CMD_SET_PERMISSIONS: u16 = 16;
 pub const CMD_MOVE_NOREPLACE: u16 = 17;
+pub const CMD_SET_ALL_PERMISSIONS: u16 = 18;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
 /// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
 /// unrecognized command is answered `InvalidData` as usual, not counted and
 /// refused as a pressure refusal.
 pub fn known_cmd(cmd: u16) -> bool {
-    (CMD_STAT..=CMD_MOVE_NOREPLACE).contains(&cmd)
+    (CMD_STAT..=CMD_SET_ALL_PERMISSIONS).contains(&cmd)
 }
 
 /// The `shared_pages` slot in which a single-page request or response
@@ -470,6 +471,24 @@ pub fn set_permissions_msg_encode(entry_id: EntryId, access: async_fs::AccessPer
 
 pub fn set_permissions_msg_decode(msg: Msg) -> (EntryId, u8) {
     (msg.payload.arg_128(), msg.payload.args_8()[23])
+}
+
+pub fn set_all_permissions_msg_encode(
+    entry_id: EntryId,
+    permissions: async_fs::RolePermissions,
+) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_SET_ALL_PERMISSIONS;
+    msg.payload.set_arg_128(entry_id);
+    msg.payload.args_8_mut()[16] = permissions.system as u8;
+    msg.payload.args_8_mut()[17] = permissions.interactive as u8;
+    msg.payload.args_8_mut()[18] = permissions.none as u8;
+    msg
+}
+
+pub fn set_all_permissions_msg_decode(msg: Msg) -> (EntryId, [u8; 3]) {
+    let bytes = msg.payload.args_8();
+    (msg.payload.arg_128(), [bytes[16], bytes[17], bytes[18]])
 }
 
 pub fn resize_msg_encode(file_id: u128, new_size: u64) -> Msg {

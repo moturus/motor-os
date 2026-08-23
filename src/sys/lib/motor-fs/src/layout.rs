@@ -842,7 +842,7 @@ impl DirEntryBlock {
         entry_id: EntryIdInternal,
         kind: async_fs::EntryKind,
         filename: &str,
-        perms: [async_fs::AccessPermissions; 3],
+        permissions: async_fs::RolePermissions,
     ) {
         let mut child_block = txn.get_empty_block_mut(entry_id.block_no);
         let mut child_block_ref = child_block.block_mut();
@@ -860,7 +860,7 @@ impl DirEntryBlock {
         child.set_name(filename).unwrap();
 
         child.metadata.set_kind(kind);
-        child.metadata.set_perms(perms);
+        child.metadata.set_permissions(permissions);
         child.parent_id = parent_id;
 
         child.hash_seed = std::random::random(..);

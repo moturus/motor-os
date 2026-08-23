@@ -154,6 +154,11 @@ perms[1] = Interactive role
 perms[2] = System role
 ```
 
+Complete permission states use `RolePermissions { system, interactive, none }`
+outside `Metadata`. This named display order prevents callers from confusing it
+with the internal role-indexed byte order; `Metadata` converts at the storage
+boundary.
+
 > Note: this makes the raw byte order read `None, Interactive, System` in a hex
 > dump (reverse of "natural" order). That is the deliberate cost of making
 > `index == privilege`, which keeps `may_set` (§4) a one-line comparison.
@@ -321,12 +326,12 @@ pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPe
     }
 }
 
-/// True iff `perms` (indexed by `Role`) satisfies cross-role monotonicity:
-/// `perms[None] ⊆ perms[Interactive] ⊆ perms[System]` (§1, §4a). Used to
+/// True iff `perms` satisfies cross-role monotonicity:
+/// `perms.none ⊆ perms.interactive ⊆ perms.system` (§1, §4a). Used to
 /// validate the initial permissions passed to `create_entry`.
-pub fn perms_monotonic(perms: [AccessPermissions; 3]) -> bool {
-    perms[Role::System as usize].can_narrow_to(perms[Role::Interactive as usize])
-        && perms[Role::Interactive as usize].can_narrow_to(perms[Role::None as usize])
+pub fn perms_monotonic(perms: RolePermissions) -> bool {
+    perms.system.can_narrow_to(perms.interactive)
+        && perms.interactive.can_narrow_to(perms.none)
 }
 ```
 
@@ -482,7 +487,24 @@ Implement via a new `Txn::do_set_permissions_txn` mirroring the existing
    `metadata.set_access(L, metadata.access(L)?.meet(access))`.
 7. `metadata.modified = Timestamp::now()`; `txn.commit()`.
 
-### 6.2 Changed: `create_entry`
+### 6.2 New: `set_all_permissions`
+
+The exact setter takes a complete `RolePermissions` value and changes all
+three bytes in one transaction. It differs the old and requested values before
+calling `may_set`, so unchanged higher-role fields do not cause rejection. It
+then validates monotonicity across the complete requested state and either
+writes all three bytes plus `modified`, or writes nothing. Unlike the
+single-role setter, it never cascades or clamps.
+
+The runtime `FileSystem` method always applies the normal authority rules. A
+separate inherent `MotorFs::set_all_permissions_image_admin` method is compiled
+only with the opt-in `image-admin` feature on Linux. It requires a System
+caller, but permits that caller to widen any role after monotonicity validation.
+This host-only image-editing exception is not exposed through `FileSystem` or
+filesystem IPC, and enabling `image-admin` for a Motor OS target is a compile
+error.
+
+### 6.3 Changed: `create_entry`
 
 `create_entry` must accept the initial permissions for the new entry and the
 caller's role, so creation authority matches §4:
@@ -494,7 +516,7 @@ async fn create_entry(
     parent_id: EntryId,
     kind: EntryKind,
     name: &str,
-    perms: [AccessPermissions; 3], // indexed by Role; convenience: [AccessPermissions::Rwx; 3] = default
+    permissions: RolePermissions,
 ) -> Result<EntryId>;
 ```
 
@@ -523,7 +545,7 @@ mean `Rwx`).
 > a follow-up `set_permissions` call. This is racier and cannot express
 > "create already-restricted"; prefer adding the parameter.
 
-### 6.3 `metadata()` already carries permissions
+### 6.4 `metadata()` already carries permissions
 
 `MotorFs::metadata()` (`fs.rs:413`) returns `Metadata` by value, so once `perms`
 is populated, callers can read it via `Metadata::access(role)`. No signature

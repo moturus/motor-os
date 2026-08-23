@@ -4,6 +4,7 @@ use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
 use async_fs::Role;
+use async_fs::RolePermissions;
 use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
 use rand::Rng;
@@ -319,7 +320,7 @@ async fn flush_error_test() -> Result<()> {
         crate::ROOT_DIR_ID,
         EntryKind::Directory,
         "pending",
-        [AccessPermissions::Rwx; 3],
+        RolePermissions::all(AccessPermissions::Rwx),
     )
     .await?;
 
@@ -357,7 +358,7 @@ async fn basic_test() -> Result<()> {
             root,
             async_fs::EntryKind::Directory,
             "first",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     assert_eq!(1, fs.metadata(Role::System, root).await?.size);
@@ -371,7 +372,7 @@ async fn basic_test() -> Result<()> {
             first,
             async_fs::EntryKind::Directory,
             "/",
-            [AccessPermissions::Rwx; 3]
+            RolePermissions::all(AccessPermissions::Rwx)
         )
         .await
         .err()
@@ -437,7 +438,7 @@ async fn basic_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "dir1",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     let dir2 = fs
@@ -446,7 +447,7 @@ async fn basic_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "dir2",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     let dir3 = fs
@@ -455,7 +456,7 @@ async fn basic_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "dir3",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     assert_eq!(3, fs.metadata(Role::System, root).await?.size);
@@ -470,7 +471,7 @@ async fn basic_test() -> Result<()> {
             dir2,
             EntryKind::Directory,
             "dir22",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     assert_eq!(dir2, fs.get_parent(Role::System, dir22).await?.unwrap());
@@ -482,7 +483,7 @@ async fn basic_test() -> Result<()> {
             dir2,
             EntryKind::File,
             "file",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     assert_eq!(dir2, fs.get_parent(Role::System, file).await?.unwrap());
@@ -601,7 +602,7 @@ async fn move_noreplace_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "from",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     let to = fs
@@ -610,7 +611,7 @@ async fn move_noreplace_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "to",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     let source = fs
@@ -619,7 +620,7 @@ async fn move_noreplace_test() -> Result<()> {
             from,
             EntryKind::File,
             "source",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
     let target = fs
@@ -628,7 +629,7 @@ async fn move_noreplace_test() -> Result<()> {
             to,
             EntryKind::File,
             "target",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await?;
 
@@ -669,7 +670,7 @@ async fn readdir_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "parent",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -685,7 +686,7 @@ async fn readdir_test() -> Result<()> {
                 parent_id,
                 EntryKind::Directory,
                 name.as_str(),
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap(),
@@ -700,7 +701,7 @@ async fn readdir_test() -> Result<()> {
                 parent_id,
                 EntryKind::File,
                 name.as_str(),
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap(),
@@ -758,7 +759,7 @@ async fn hash_collision_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "d",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -786,7 +787,7 @@ async fn hash_collision_test() -> Result<()> {
                 dir,
                 EntryKind::File,
                 name,
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap();
@@ -799,7 +800,7 @@ async fn hash_collision_test() -> Result<()> {
             dir,
             EntryKind::File,
             name,
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -812,7 +813,7 @@ async fn hash_collision_test() -> Result<()> {
             dir,
             EntryKind::File,
             "collide_b",
-            [AccessPermissions::Rwx; 3]
+            RolePermissions::all(AccessPermissions::Rwx)
         )
         .await
         .unwrap_err()
@@ -920,7 +921,7 @@ async fn hash_collision_test() -> Result<()> {
             dir,
             EntryKind::File,
             name,
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -953,7 +954,7 @@ async fn hash_collision_stress_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "stress",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -979,7 +980,7 @@ async fn hash_collision_stress_test() -> Result<()> {
             dir,
             EntryKind::File,
             name,
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1038,7 +1039,7 @@ async fn hash_collision_move_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "a",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1048,7 +1049,7 @@ async fn hash_collision_move_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "b",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1061,7 +1062,7 @@ async fn hash_collision_move_test() -> Result<()> {
             a,
             EntryKind::File,
             "movehash_a1",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1071,7 +1072,7 @@ async fn hash_collision_move_test() -> Result<()> {
             a,
             EntryKind::File,
             "movehash_a2",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1081,7 +1082,7 @@ async fn hash_collision_move_test() -> Result<()> {
             a,
             EntryKind::File,
             "movehash_a3",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1090,7 +1091,7 @@ async fn hash_collision_move_test() -> Result<()> {
         b,
         EntryKind::File,
         "movehash_b1",
-        [AccessPermissions::Rwx; 3],
+        RolePermissions::all(AccessPermissions::Rwx),
     )
     .await
     .unwrap();
@@ -1201,7 +1202,7 @@ async fn readdir_large_dir_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "big",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1219,7 +1220,7 @@ async fn readdir_large_dir_test() -> Result<()> {
             dir,
             EntryKind::File,
             &name,
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1233,7 +1234,7 @@ async fn readdir_large_dir_test() -> Result<()> {
             dir,
             EntryKind::File,
             name,
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1284,7 +1285,7 @@ async fn midsize_file_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "parent dir",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1300,7 +1301,7 @@ async fn midsize_file_test() -> Result<()> {
             parent_id,
             EntryKind::File,
             "foo",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1368,7 +1369,7 @@ async fn midsize_file_test() -> Result<()> {
             crate::ROOT_DIR_ID,
             EntryKind::File,
             "bar",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1435,7 +1436,7 @@ async fn lookup_cursor_test() -> Result<()> {
             root,
             EntryKind::File,
             "cursor",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1546,7 +1547,7 @@ async fn delete_reopen_test() -> Result<()> {
             root,
             EntryKind::File,
             "foo",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1562,7 +1563,7 @@ async fn delete_reopen_test() -> Result<()> {
             root,
             EntryKind::File,
             "bar",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1594,7 +1595,7 @@ async fn delete_reopen_test() -> Result<()> {
             root,
             EntryKind::File,
             "baz",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1635,7 +1636,7 @@ async fn no_lost_commits_test() -> Result<()> {
             root,
             EntryKind::File,
             "foo",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1674,7 +1675,7 @@ async fn txn_log_replay_test() -> Result<()> {
                 crate::ROOT_DIR_ID,
                 EntryKind::File,
                 "foo",
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap();
@@ -1685,7 +1686,7 @@ async fn txn_log_replay_test() -> Result<()> {
                 crate::ROOT_DIR_ID,
                 EntryKind::File,
                 "bar",
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap();
@@ -1768,7 +1769,7 @@ async fn random_file_test() -> Result<()> {
             crate::ROOT_DIR_ID,
             EntryKind::File,
             "foo",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1900,7 +1901,7 @@ async fn copy_file_test() -> Result<()> {
             root,
             EntryKind::File,
             "src",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1940,7 +1941,7 @@ async fn copy_file_test() -> Result<()> {
             root,
             EntryKind::File,
             "dst",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1966,7 +1967,7 @@ async fn copy_file_test() -> Result<()> {
             root,
             EntryKind::File,
             "dst2",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -1999,7 +2000,7 @@ async fn copy_file_test() -> Result<()> {
             root,
             EntryKind::File,
             "dst3",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2021,7 +2022,7 @@ async fn copy_file_test() -> Result<()> {
             root,
             EntryKind::File,
             "dst4",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2125,7 +2126,7 @@ async fn inline_data_test() -> Result<()> {
             root,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2175,7 +2176,7 @@ async fn inline_data_test() -> Result<()> {
             root,
             EntryKind::File,
             "big",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2198,7 +2199,7 @@ async fn inline_data_test() -> Result<()> {
             root,
             EntryKind::File,
             "g",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2241,7 +2242,7 @@ async fn inline_data_test() -> Result<()> {
             root,
             EntryKind::File,
             "s",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2287,7 +2288,7 @@ async fn inline_truncate_spine_test() -> Result<()> {
             root,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2318,7 +2319,7 @@ async fn inline_truncate_spine_test() -> Result<()> {
             root,
             EntryKind::File,
             "f2",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2353,7 +2354,7 @@ async fn resize_truncate_test() -> Result<()> {
             root,
             EntryKind::File,
             "big",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2407,7 +2408,7 @@ async fn resize_truncate_test() -> Result<()> {
             root,
             EntryKind::File,
             "filler",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2447,7 +2448,7 @@ async fn resize_truncate_random_test() -> Result<()> {
             root,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2508,7 +2509,7 @@ async fn resize_truncate_wide_leaf_test() -> Result<()> {
                 root,
                 EntryKind::File,
                 "w",
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap();
@@ -2556,7 +2557,7 @@ async fn resize_truncate_crash_regrow_test() -> Result<()> {
                 root,
                 EntryKind::File,
                 "f",
-                [AccessPermissions::Rwx; 3],
+                RolePermissions::all(AccessPermissions::Rwx),
             )
             .await
             .unwrap();
@@ -2631,7 +2632,7 @@ async fn resize_truncate_accounting_walk_test() -> Result<()> {
             root,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2699,7 +2700,7 @@ async fn resize_truncate_no_alloc_test() -> Result<()> {
             root,
             EntryKind::File,
             "big",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2739,7 +2740,7 @@ async fn resize_truncate_no_alloc_test() -> Result<()> {
             root,
             EntryKind::File,
             "filler",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -2794,7 +2795,7 @@ async fn write_speed_test() -> Result<()> {
             crate::ROOT_DIR_ID,
             EntryKind::File,
             "foo",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3000,11 +3001,7 @@ fn perms_monotonic_check() {
     // (§8.6) accepts nested arrays, rejects inversions and incomparable pairs.
     use AccessPermissions::{R, Rw, Rwx, Rx};
     let idx = |n: AccessPermissions, i: AccessPermissions, s: AccessPermissions| {
-        let mut p = [Rwx; 3];
-        p[Role::None as usize] = n;
-        p[Role::Interactive as usize] = i;
-        p[Role::System as usize] = s;
-        p
+        RolePermissions::new(s, i, n)
     };
     assert!(async_fs::perms_monotonic(idx(R, Rw, Rwx)));
     assert!(async_fs::perms_monotonic(idx(
@@ -3065,7 +3062,7 @@ async fn permissions_storage_test() -> Result<()> {
             root,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3077,9 +3074,11 @@ async fn permissions_storage_test() -> Result<()> {
     }
 
     // Restricted but monotonic: None=R ⊆ Interactive=Rw ⊆ System=Rwx.
-    let mut p = [AccessPermissions::Rwx; 3];
-    p[Role::None as usize] = AccessPermissions::R;
-    p[Role::Interactive as usize] = AccessPermissions::Rw;
+    let p = RolePermissions::new(
+        AccessPermissions::Rwx,
+        AccessPermissions::Rw,
+        AccessPermissions::R,
+    );
     let g = fs
         .create_entry(Role::System, root, EntryKind::File, "g", p)
         .await
@@ -3114,7 +3113,7 @@ async fn permissions_storage_test() -> Result<()> {
             root,
             EntryKind::File,
             "i",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3125,16 +3124,22 @@ async fn permissions_storage_test() -> Result<()> {
             .unwrap(),
         AccessPermissions::Rwx
     );
-    let mut ip = [AccessPermissions::Rwx; 3];
-    ip[Role::None as usize] = AccessPermissions::R;
-    ip[Role::Interactive as usize] = AccessPermissions::Rw;
+    let ip = RolePermissions::new(
+        AccessPermissions::Rwx,
+        AccessPermissions::Rw,
+        AccessPermissions::R,
+    );
     fs.create_entry(Role::Interactive, root, EntryKind::File, "i2", ip)
         .await
         .unwrap();
 
     // Non-monotonic creation is rejected.
-    let mut bad = [AccessPermissions::Rwx; 3];
-    bad[Role::Interactive as usize] = AccessPermissions::R; // None(Rwx) wider than Interactive(R)
+    // None(Rwx) is wider than Interactive(R).
+    let bad = RolePermissions::new(
+        AccessPermissions::Rwx,
+        AccessPermissions::R,
+        AccessPermissions::Rwx,
+    );
     assert_eq!(
         fs.create_entry(Role::System, root, EntryKind::File, "bad", bad)
             .await
@@ -3144,8 +3149,11 @@ async fn permissions_storage_test() -> Result<()> {
     );
 
     // An Interactive caller cannot restrict the System byte at creation.
-    let mut sysrestrict = [AccessPermissions::Rwx; 3];
-    sysrestrict[Role::System as usize] = AccessPermissions::R;
+    let sysrestrict = RolePermissions::new(
+        AccessPermissions::R,
+        AccessPermissions::R,
+        AccessPermissions::R,
+    );
     assert_eq!(
         fs.create_entry(
             Role::Interactive,
@@ -3217,7 +3225,7 @@ async fn permissions_authority_test() -> Result<()> {
             root,
             EntryKind::File,
             "auth",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3271,7 +3279,7 @@ async fn permissions_authority_test() -> Result<()> {
             root,
             EntryKind::File,
             "cascade",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3293,7 +3301,7 @@ async fn permissions_authority_test() -> Result<()> {
             root,
             EntryKind::File,
             "cap",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3328,7 +3336,7 @@ async fn permissions_authority_test() -> Result<()> {
             root,
             EntryKind::File,
             "seal",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3389,7 +3397,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "d",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3399,7 +3407,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             dir,
             EntryKind::File,
             "f",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3440,7 +3448,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             dir,
             EntryKind::File,
             "new",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .map(|_| ()),
@@ -3468,7 +3476,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "a",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3478,7 +3486,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             root,
             EntryKind::Directory,
             "b",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3488,7 +3496,7 @@ async fn permissions_enforcement_test() -> Result<()> {
             a,
             EntryKind::File,
             "m",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();
@@ -3619,7 +3627,7 @@ async fn create_concurrency_test_fs(
             crate::ROOT_DIR_ID,
             EntryKind::File,
             "concurrent",
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .unwrap();

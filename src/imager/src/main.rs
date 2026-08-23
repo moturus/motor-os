@@ -28,14 +28,14 @@ const SECTOR_SIZE: u32 = 512;
 
 const SOURCE_TREE_EXCLUDED_DIRS: [&str; 4] = [".git", ".lorry", "__pycache__", "target"];
 
-fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissions; 3]> {
+fn image_file_permissions(source: &Path) -> io::Result<async_fs::RolePermissions> {
     let executable = fs::metadata(source)?.permissions().mode() & 0o111 != 0;
     let access = if executable {
         async_fs::AccessPermissions::Rwx
     } else {
         async_fs::AccessPermissions::Rw
     };
-    Ok([access; 3])
+    Ok(async_fs::RolePermissions::all(access))
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,11 +575,11 @@ mod tests {
 
         assert_eq!(
             image_file_permissions(&source).unwrap(),
-            [async_fs::AccessPermissions::Rw; 3]
+            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rw)
         );
         assert_eq!(
             image_file_permissions(&executable).unwrap(),
-            [async_fs::AccessPermissions::Rwx; 3]
+            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx)
         );
     }
 

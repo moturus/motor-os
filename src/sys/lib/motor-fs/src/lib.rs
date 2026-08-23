@@ -11,6 +11,9 @@
 //! - Only resistance to "power off" is built-in.
 #![feature(random)]
 
+#[cfg(all(feature = "image-admin", target_os = "motor"))]
+compile_error!("motor-fs feature `image-admin` is only available on Linux hosts");
+
 mod bplus_tree;
 mod city_hash;
 mod fs;

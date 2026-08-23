@@ -33,7 +33,7 @@ pub async fn motor_fs_create_dir_all(
                 parent_id,
                 async_fs::EntryKind::Directory,
                 filename,
-                [async_fs::AccessPermissions::Rwx; 3],
+                async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
             )
             .await
             .unwrap()

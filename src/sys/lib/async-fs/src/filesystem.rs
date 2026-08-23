@@ -69,6 +69,41 @@ pub enum AccessPermissions {
     None = 4,
 }
 
+/// Complete permissions in the same System/Interactive/None order displayed
+/// by filesystem tools. Storage remains indexed by [`Role`] internally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RolePermissions {
+    pub system: AccessPermissions,
+    pub interactive: AccessPermissions,
+    pub none: AccessPermissions,
+}
+
+impl RolePermissions {
+    pub const fn new(
+        system: AccessPermissions,
+        interactive: AccessPermissions,
+        none: AccessPermissions,
+    ) -> Self {
+        Self {
+            system,
+            interactive,
+            none,
+        }
+    }
+
+    pub const fn all(access: AccessPermissions) -> Self {
+        Self::new(access, access, access)
+    }
+
+    pub const fn get(self, role: Role) -> AccessPermissions {
+        match role {
+            Role::System => self.system,
+            Role::Interactive => self.interactive,
+            Role::None => self.none,
+        }
+    }
+}
+
 impl AccessPermissions {
     /// (read, write, execute)
     pub fn triple(self) -> (bool, bool, bool) {
@@ -173,9 +208,8 @@ pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPe
 /// True iff `perms` (indexed by `Role`) satisfies cross-role monotonicity:
 /// `perms[None] ⊆ perms[Interactive] ⊆ perms[System]`. Used to validate the
 /// initial permissions passed to `create_entry`.
-pub fn perms_monotonic(perms: [AccessPermissions; 3]) -> bool {
-    perms[Role::System as usize].can_narrow_to(perms[Role::Interactive as usize])
-        && perms[Role::Interactive as usize].can_narrow_to(perms[Role::None as usize])
+pub fn perms_monotonic(perms: RolePermissions) -> bool {
+    perms.system.can_narrow_to(perms.interactive) && perms.interactive.can_narrow_to(perms.none)
 }
 
 pub type EntryId = u128;
@@ -304,12 +338,21 @@ impl Metadata {
         self.perms[role as usize] = access as u8;
     }
 
-    /// Overwrite all three per-role permission bytes at once (indexed by
-    /// `Role`). Used when initializing a new entry.
-    pub fn set_perms(&mut self, perms: [AccessPermissions; 3]) {
-        self.set_access(Role::None, perms[Role::None as usize]);
-        self.set_access(Role::Interactive, perms[Role::Interactive as usize]);
-        self.set_access(Role::System, perms[Role::System as usize]);
+    /// Decode the complete permission state. Errors only on a corrupt
+    /// on-disk byte.
+    pub fn permissions(&self) -> Result<RolePermissions> {
+        Ok(RolePermissions::new(
+            self.access(Role::System)?,
+            self.access(Role::Interactive)?,
+            self.access(Role::None)?,
+        ))
+    }
+
+    /// Overwrite all three role-indexed permission bytes at once.
+    pub fn set_permissions(&mut self, permissions: RolePermissions) {
+        self.set_access(Role::System, permissions.system);
+        self.set_access(Role::Interactive, permissions.interactive);
+        self.set_access(Role::None, permissions.none);
     }
 }
 
@@ -325,14 +368,15 @@ pub trait FileSystem {
     ) -> Result<Option<(EntryId, EntryKind)>>;
 
     /// Create a file or directory with the given initial per-role permissions
-    /// (indexed by `Role`). `[Access::Rwx; 3]` is the fully-permissive default.
+    /// in System/Interactive/None order. `RolePermissions::all(Access::Rwx)`
+    /// is the fully-permissive default.
     async fn create_entry(
         &mut self,
         role: Role,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
-        perms: [AccessPermissions; 3],
+        permissions: RolePermissions,
     ) -> Result<EntryId>;
 
     /// Change one role's permission on an entry, acting as `caller`. Enforces
@@ -344,6 +388,16 @@ pub trait FileSystem {
         entry_id: EntryId,
         target: Role,
         access: AccessPermissions,
+    ) -> Result<()>;
+
+    /// Atomically install an exact complete permission state. Authority is
+    /// checked only for fields that differ from their current values.
+    #[allow(clippy::double_must_use)]
+    async fn set_all_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        permissions: RolePermissions,
     ) -> Result<()>;
 
     /// Delete the file or directory.

@@ -6,7 +6,7 @@
 
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
-use async_fs::{EntryId, EntryKind, Role};
+use async_fs::{EntryId, EntryKind, Role, RolePermissions};
 use async_trait::async_trait;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -80,6 +80,23 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             Ok(_) => Ok(()),
             Err(err) => Err(err.kind().into()),
         }
+    }
+
+    #[cfg(all(feature = "image-admin", target_os = "linux"))]
+    pub async fn set_all_permissions_image_admin(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        self.check_err()?;
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
+        Txn::do_set_all_permissions_image_admin_txn(self, caller, entry_id.into(), permissions)
+            .await
     }
 
     /// Mode-E access enforcement: require that `role` holds the `need`
@@ -539,7 +556,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         parent_id: EntryId,
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
-        perms: [async_fs::AccessPermissions; 3],
+        permissions: RolePermissions,
     ) -> Result<EntryId> {
         self.check_err()?;
         validate_filename(filename)?;
@@ -553,14 +570,14 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         // §6.2 -- may_set forbids *touching* a higher role even to its unchanged
         // Rwx default, which would reject a lower-privileged caller using the
         // default perms.)
-        if !async_fs::perms_monotonic(perms) {
+        if !async_fs::perms_monotonic(permissions) {
             return Err(ErrorKind::PermissionDenied.into());
         }
         for target in [Role::None, Role::Interactive, Role::System] {
             let allowed = if (role as u8) >= (target as u8) {
                 true
             } else {
-                perms[target as usize] == async_fs::AccessPermissions::Rwx
+                permissions.get(target) == async_fs::AccessPermissions::Rwx
             };
             if !allowed {
                 return Err(ErrorKind::PermissionDenied.into());
@@ -588,7 +605,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         }
 
         log::debug!("create_entry: parent_id: {parent_id:x} kind: {kind:?} fname: '{filename}'");
-        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename, perms)
+        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename, permissions)
             .await
             .map(|e| e.into())
     }
@@ -607,6 +624,21 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             entry_id
         };
         Txn::do_set_permissions_txn(self, caller, entry_id.into(), target, access).await
+    }
+
+    async fn set_all_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        self.check_err()?;
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
+        Txn::do_set_all_permissions_txn(self, caller, entry_id.into(), permissions).await
     }
 
     async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()> {

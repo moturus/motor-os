@@ -1,6 +1,7 @@
 use async_fs::AccessPermissions;
 use async_fs::EntryId;
 use async_fs::Role;
+use async_fs::RolePermissions;
 use async_fs::{EntryKind, FileSystem};
 use async_trait::async_trait;
 use moto_async::{AsFuture, LocalRwLock};
@@ -95,12 +96,12 @@ impl FileSystem for FS {
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
-        perms: [AccessPermissions; 3],
+        permissions: RolePermissions,
     ) -> Result<EntryId> {
         match self {
             FS::MotorFs(motor_fs) => {
                 motor_fs
-                    .create_entry(role, parent_id, kind, name, perms)
+                    .create_entry(role, parent_id, kind, name, permissions)
                     .await
             }
         }
@@ -118,6 +119,21 @@ impl FileSystem for FS {
             FS::MotorFs(motor_fs) => {
                 motor_fs
                     .set_permissions(caller, entry_id, target, access)
+                    .await
+            }
+        }
+    }
+
+    async fn set_all_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .set_all_permissions(caller, entry_id, permissions)
                     .await
             }
         }
@@ -549,6 +565,9 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_SET_PERMISSIONS => {
             on_cmd_set_permissions(msg, &sender, runtime, role).await
         }
+        moto_sys_io::api_fs::CMD_SET_ALL_PERMISSIONS => {
+            on_cmd_set_all_permissions(msg, &sender, runtime, role).await
+        }
         moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime, role).await,
         moto_sys_io::api_fs::CMD_DELETE_ENTRY => {
             on_cmd_delete_entry(msg, &sender, runtime, role).await
@@ -699,7 +718,7 @@ async fn on_cmd_create_file(
             parent_id,
             EntryKind::File,
             fname.as_str(),
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .map_err(|err| {
@@ -730,7 +749,7 @@ async fn on_cmd_create_dir(
             parent_id,
             EntryKind::Directory,
             fname.as_str(),
-            [AccessPermissions::Rwx; 3],
+            RolePermissions::all(AccessPermissions::Rwx),
         )
         .await
         .map_err(|err| {
@@ -1057,6 +1076,32 @@ async fn on_cmd_set_permissions(
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.set_permissions(role, entry_id, role, access)
+            .await
+            .map_err(map_err_into_native),
+    );
+    core::mem::drop(fs);
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_set_all_permissions(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+    role: Role,
+) -> Result<()> {
+    let (entry_id, raw_permissions) = api_fs::set_all_permissions_msg_decode(msg);
+    let permissions = RolePermissions::new(
+        raw_permissions[0].try_into()?,
+        raw_permissions[1].try_into()?,
+        raw_permissions[2].try_into()?,
+    );
+
+    let mut fs = runtime.fs.write().await;
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        fs.set_all_permissions(role, entry_id, permissions)
             .await
             .map_err(map_err_into_native),
     );
