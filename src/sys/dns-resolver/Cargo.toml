@@ -4,7 +4,6 @@ version = "0.1.0"
 authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
-build = "build.rs"
 
 [dependencies]
 moto-dns = { path = "../lib/moto-dns" }
@@ -14,4 +13,3 @@ moto-rt  = { path = "../lib/moto-rt"  }
 moto-sys = { path = "../lib/moto-sys" }
 
 log = "=0.4.28"
-

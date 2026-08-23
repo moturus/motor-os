@@ -21,20 +21,6 @@ HOST_LORRY_TARGET_DIR := $(ROOT_DIR)/build/lorry/stage2/host-target
 HOST_LORRY := $(HOST_LORRY_TARGET_DIR)/release/lorry
 DEV_SOURCE_DIR := $(ROOT_DIR)/build/imager/dev-sources
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
-MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
-MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
-MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/devtools/llvm)
-ifneq ($(MOTOR_DNS_STRICT_LINK),1)
-	MOTOR_DNS_COMPAT_LINK_ARG := -C link-arg=-Wl,--allow-multiple-definition
-endif
-MOTOR_DNS_RUSTFLAGS := -C linker=$(MOTOR_DNS_CLANG) \
-	-C link-arg=--no-default-config \
-	-C link-arg=--target=x86_64-unknown-motor \
-	-C link-arg=--sysroot=$(MOTOR_DNS_SYSROOT) \
-	$(MOTOR_DNS_COMPAT_LINK_ARG) \
-	-C link-self-contained=no \
-	-C default-linker-libraries=yes
-
 DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
@@ -112,13 +98,7 @@ sys-tty:
 
 dns-resolver:
 	mkdir -p $(BIN_DIR)
-	cd src/sys/dns-resolver && \
-		MOTOR_DNS_CLANG="$(MOTOR_DNS_CLANG)" \
-		MOTOR_DNS_SYSROOT="$(MOTOR_DNS_SYSROOT)" \
-		MOTOR_DNS_SDK="$(MOTOR_DNS_SDK)" \
-		CARGO_PROFILE_RELEASE_LTO=false \
-		RUSTFLAGS="$(MOTOR_DNS_RUSTFLAGS)" \
-		CARGO_TARGET_DIR="$(OBJ_DIR)/dns-resolver" $(DO_BUILD)
+	cd src/sys/dns-resolver && CARGO_TARGET_DIR="$(OBJ_DIR)/dns-resolver" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/dns-resolver" \
 		"$(OBJ_DIR)/dns-resolver/$(SUB_DIR)/dns-resolver"
 
@@ -287,12 +267,7 @@ clippy: vdso
 	cd src/sys/sys-init && $(DO_CLIPPY)
 	cd src/sys/strobe && $(DO_CLIPPY)
 	cd src/sys/sys-tty && $(DO_CLIPPY)
-	cd src/sys/dns-resolver && \
-		MOTOR_DNS_CLANG="$(MOTOR_DNS_CLANG)" \
-		MOTOR_DNS_SYSROOT="$(MOTOR_DNS_SYSROOT)" \
-		MOTOR_DNS_SDK="$(MOTOR_DNS_SDK)" \
-		CARGO_PROFILE_RELEASE_LTO=false \
-		RUSTFLAGS="$(MOTOR_DNS_RUSTFLAGS)" $(DO_CLIPPY)
+	cd src/sys/dns-resolver && $(DO_CLIPPY)
 	cd src/sys/tools/sysbox && $(DO_CLIPPY)
 	cd src/sys/tools/mdbg && $(DO_CLIPPY)
 	cd src/sys/tests/systest && $(DO_CLIPPY)

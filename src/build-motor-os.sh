@@ -563,11 +563,8 @@ EOF
 -resource-dir /$TOOLS/lib/clang/$CLANG_MAJOR
 EOF
 
-	# mlibc reads its config from /system/cfg/libc (MLIBC_SYSCONFDIR). Ship the
-	# resolver, hosts, and services databases needed by its generic DNS client.
-	cat > "$LIBC_IMG/$CFG_LIBC/resolv.conf" << 'EOF'
-nameserver 8.8.8.8
-EOF
+	# Ship libc's hosts and services databases. sys-io atomically generates
+	# resolv.conf from static per-device configuration or active DHCP leases.
 	cat > "$LIBC_IMG/$CFG_LIBC/services" << 'EOF'
 domain 53/tcp
 domain 53/udp
@@ -992,9 +989,9 @@ verify_stage2_sysroot() {
 }
 
 # The LLVM stage initially creates the C ABI shim with the bootstrap Motor
-# toolchain. Rebuild it after the forked stage2 toolchain is complete so the
-# DNS resolver and every later mixed Rust+C link use the final std/moto-rt
-# implementation. A fresh target directory avoids cargo accepting artifacts
+# toolchain. Rebuild it after the forked stage2 toolchain is complete so every
+# later mixed Rust+C link uses the final std/moto-rt implementation. A fresh
+# target directory avoids cargo accepting artifacts
 # fingerprinted by the compiler that the rustc stage just replaced.
 rebuild_shim() {
 	log "rebuilding moto-rt-cabi with the final Motor Rust toolchain"
@@ -1003,7 +1000,7 @@ rebuild_shim() {
 	for symbol in motor_start memcpy memmove memset memcmp; do
 		if "$B/llvm-nm" --defined-only "${rustlibs[@]}" 2>/dev/null |
 				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "final Motor target libraries still define strong $symbol; update the motor-os-rustc toolchain before the strict DNS resolver link"
+			die "final Motor target libraries still define strong $symbol; mixed Rust+C links would be unsafe"
 		fi
 	done
 
@@ -1018,7 +1015,7 @@ rebuild_shim() {
 	for symbol in motor_start memcpy memmove memset memcmp; do
 		if "$B/llvm-nm" --defined-only "$shim" 2>/dev/null |
 				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "final moto-rt-cabi still defines strong $symbol; the strict DNS resolver link would be unsafe"
+			die "final moto-rt-cabi still defines strong $symbol; mixed Rust+C links would be unsafe"
 		fi
 	done
 	cp "$shim" "$SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
@@ -1132,7 +1129,7 @@ build_images() {
 	# Keep make's output visible: when a component fails, the compiler diagnostic
 	# is the whole diagnosis, and the log alone is easy to overlook.
 	( cd "$MOTOR" && \
-		make images BUILD=release MOTOR_DNS_STRICT_LINK=1 -j"$(nproc)" ) \
+		make images BUILD=release -j"$(nproc)" ) \
 		2>&1 | tee "$MAKE_LOG"
 	grep -q 'built the Motor OS base image' "$MAKE_LOG" &&
 		grep -q 'built the standard Motor OS image' "$MAKE_LOG" &&
