@@ -9,6 +9,7 @@ use std::io::Result;
 
 pub struct AsyncFileBlockDevice {
     file: tokio::sync::Mutex<tokio::fs::File>,
+    base_offset: u64,
     num_blocks: u64,
 }
 
@@ -27,7 +28,32 @@ impl AsyncFileBlockDevice {
 
         Ok(Self {
             file: tokio::sync::Mutex::new(file),
+            base_offset: 0,
             num_blocks: len >> BLOCK_SIZE.ilog2(),
+        })
+    }
+
+    /// Open a byte range of a file as a bounded block device. The range length
+    /// must be block-aligned, but its base may use a smaller disk-sector
+    /// alignment.
+    pub async fn open_region(path: &Utf8Path, offset: u64, length: u64) -> Result<Self> {
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await?;
+        let file_len = file.metadata().await?.len();
+        let Some(end) = offset.checked_add(length) else {
+            return Err(ErrorKind::InvalidInput.into());
+        };
+        if length & ((BLOCK_SIZE as u64) - 1) != 0 || end > file_len {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        Ok(Self {
+            file: tokio::sync::Mutex::new(file),
+            base_offset: offset,
+            num_blocks: length >> BLOCK_SIZE.ilog2(),
         })
     }
 
@@ -43,6 +69,7 @@ impl AsyncFileBlockDevice {
 
         Ok(Self {
             file: tokio::sync::Mutex::new(file),
+            base_offset: 0,
             num_blocks,
         })
     }
@@ -71,7 +98,9 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
 
         let mut file = self.file.lock().await;
         if let Err(err) = file
-            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+            .seek(std::io::SeekFrom::Start(
+                self.base_offset + block_no * (BLOCK_SIZE as u64),
+            ))
             .await
         {
             return (block, Err(err));
@@ -100,7 +129,9 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
 
         let mut file = self.file.lock().await;
         let res = file
-            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+            .seek(std::io::SeekFrom::Start(
+                self.base_offset + block_no * (BLOCK_SIZE as u64),
+            ))
             .await;
 
         if let Err(err) = res {
