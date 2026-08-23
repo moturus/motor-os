@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for MacAddress {
     }
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, Eq, PartialEq)]
 pub(super) struct IpRoute {
     pub ip_network: IpNetwork,
     pub gateway: IpAddr,
@@ -97,6 +97,9 @@ pub(super) struct DeviceCfg {
     /// Pin this entry to one NIC. When absent, entries are assigned the
     /// remaining virtio-net devices in configuration-name order.
     pub mac: Option<MacAddress>,
+    /// Acquire this device's IPv4 address, default route, and DNS servers.
+    #[serde(default)]
+    pub dhcp: bool,
     #[serde(default)]
     pub cidrs: Vec<IpNetwork>,
     #[serde(default)]
@@ -108,6 +111,7 @@ impl DeviceCfg {
         use std::str::FromStr;
         Self {
             mac: Some(MacAddress::from_str(mac).unwrap()),
+            dhcp: false,
             cidrs: vec![],
             routes: vec![],
         }
@@ -151,6 +155,27 @@ pub(super) struct NetConfig {
     pub max_syn_cookie_rate: NonZeroU32,
 
     pub devices: BTreeMap<String, DeviceCfg>,
+}
+
+impl NetConfig {
+    fn validate(self) -> Result<Self, String> {
+        for (name, device) in &self.devices {
+            if !device.dhcp {
+                continue;
+            }
+            let static_ipv4 = device.cidrs.iter().any(IpNetwork::is_ipv4)
+                || device
+                    .routes
+                    .iter()
+                    .any(|route| route.ip_network.is_ipv4() || route.gateway.is_ipv4());
+            if static_ipv4 {
+                return Err(format!(
+                    "devices.{name}: DHCP and static IPv4 configuration cannot be combined"
+                ));
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn default_max_half_open_global() -> NonZeroUsize {
@@ -344,16 +369,19 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
 
-    toml::from_str::<NetConfig>(config_str).map_err(|err| {
-        log::error!(
-            "{}:{} error parsing {}: {:#?}.",
-            file!(),
-            line!(),
-            CFG_PATH,
-            err
-        );
-        std::io::Error::from(ErrorKind::InvalidInput)
-    })
+    toml::from_str::<NetConfig>(config_str)
+        .map_err(|err| err.to_string())
+        .and_then(NetConfig::validate)
+        .map_err(|err| {
+            log::error!(
+                "{}:{} error parsing {}: {}.",
+                file!(),
+                line!(),
+                CFG_PATH,
+                err
+            );
+            std::io::Error::from(ErrorKind::InvalidInput)
+        })
 }
 
 pub(super) fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
@@ -409,6 +437,10 @@ pub(crate) mod self_test {
         (
             "net::config::device_mac_is_optional",
             device_mac_is_optional,
+        ),
+        (
+            "net::config::dhcp_owns_ipv4_configuration",
+            dhcp_owns_ipv4_configuration,
         ),
         (
             "net::config::route_selection_handles_connected_and_default_routes",
@@ -533,6 +565,7 @@ pub(crate) mod self_test {
             toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n")
                 .map_err(|err| err.to_string())?;
         st_assert!(without.devices["net0"].mac.is_none());
+        st_assert!(!without.devices["net0"].dhcp);
         st_assert!(without.devices["net0"].cidrs.is_empty());
         st_assert!(without.devices["net0"].routes.is_empty());
 
@@ -545,6 +578,28 @@ pub(crate) mod self_test {
             with.devices["net0"].mac.as_ref().unwrap().raw(),
             [2, 0, 0, 0, 0, 1]
         );
+        Ok(())
+    }
+
+    fn dhcp_owns_ipv4_configuration() -> Result<(), String> {
+        let config: NetConfig = toml::from_str(
+            "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+             dhcp = true\ncidrs = [\"2001:db8::2/64\"]\n",
+        )
+        .map_err(|err| err.to_string())?;
+        st_assert!(config.validate()?.devices["net0"].dhcp);
+
+        for static_config in [
+            "cidrs = [\"192.0.2.2/24\"]\n",
+            "routes = [{ ip_network = \"0.0.0.0/0\", gateway = \"192.0.2.1\" }]\n",
+        ] {
+            let parsed: NetConfig = toml::from_str(&format!(
+                "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+                 dhcp = true\n{static_config}"
+            ))
+            .map_err(|err| err.to_string())?;
+            st_assert!(parsed.validate().is_err());
+        }
         Ok(())
     }
 
@@ -605,7 +660,9 @@ pub(crate) mod self_test {
     const MINIMAL: &str = "auto_icmp_echo_reply = true\nloopback = true\n";
 
     fn parse(config: &str) -> Result<NetConfig, String> {
-        toml::from_str(&format!("{config}[devices]\n")).map_err(|err| err.to_string())
+        toml::from_str(&format!("{config}[devices]\n"))
+            .map_err(|err| err.to_string())
+            .and_then(NetConfig::validate)
     }
 
     /// A config predating the caps must still load, on the defaults.

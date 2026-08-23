@@ -4,13 +4,14 @@ use std::{
     collections::VecDeque,
     io::ErrorKind,
     mem::ManuallyDrop,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     rc::Rc,
 };
 
 use super::config;
 use super::stats::NetStats;
+use ipnetwork::IpNetwork;
 use virtio_async::virtio_net::NetDevice;
 use virtio_async::virtio_net::RxMeta;
 
@@ -813,6 +814,8 @@ pub(super) struct NetDev<'a> {
     device: NetstackDevice,
     iface: moto_netstack::iface::Interface,
     pub(super) sockets: moto_netstack::iface::SocketSet<'a>,
+    dhcp_socket: Option<moto_netstack::iface::SocketHandle>,
+    dhcp_lease: Option<DhcpLease>,
 
     /// [`NetstackDevice::is_external`], taken once at construction because both
     /// the netstack configuration and every ephemeral allocation need it.
@@ -827,6 +830,106 @@ pub(super) struct NetDev<'a> {
     // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
     poll_waiters: Vec<moto_async::oneshot::Sender<()>>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct DhcpLease {
+    address: IpNetwork,
+    route: Option<config::IpRoute>,
+}
+
+pub(super) struct PollResult {
+    pub activity: moto_netstack::iface::PollResult,
+    pub addresses_changed: bool,
+    pub dns_servers: Option<Vec<Ipv4Addr>>,
+}
+
+enum DhcpUpdate {
+    Deconfigured,
+    Configured {
+        address: IpNetwork,
+        router: Option<Ipv4Addr>,
+        dns_servers: Vec<Ipv4Addr>,
+    },
+}
+
+fn apply_dhcp_update(
+    name: &str,
+    config: &mut config::DeviceCfg,
+    iface: &mut moto_netstack::iface::Interface,
+    current: &mut Option<DhcpLease>,
+    update: DhcpUpdate,
+) -> (bool, Vec<Ipv4Addr>) {
+    let old_lease = current.take();
+    if let Some(old) = &old_lease {
+        config.cidrs.retain(|cidr| cidr != &old.address);
+        if let Some(route) = &old.route {
+            config.routes.retain(|candidate| candidate != route);
+        }
+    }
+
+    let (new_lease, dns_servers) = match update {
+        DhcpUpdate::Deconfigured => (None, Vec::new()),
+        DhcpUpdate::Configured {
+            address,
+            router,
+            dns_servers,
+        } => {
+            let route = router.and_then(|gateway| {
+                if address.contains(IpAddr::V4(gateway)) {
+                    Some(config::IpRoute {
+                        ip_network: "0.0.0.0/0".parse().unwrap(),
+                        gateway: IpAddr::V4(gateway),
+                    })
+                } else {
+                    log::warn!("{name}: DHCP router {gateway} is outside {address}; ignoring it.");
+                    None
+                }
+            });
+            config.cidrs.push(address);
+            if let Some(route) = &route {
+                config.routes.push(route.clone());
+            }
+            (Some(DhcpLease { address, route }), dns_servers)
+        }
+    };
+
+    let addresses_changed = old_lease != new_lease;
+    *current = new_lease;
+    if addresses_changed {
+        iface.update_ip_addrs(|addrs| {
+            addrs.retain(|cidr| !matches!(cidr, moto_netstack::wire::IpCidr::Ipv4(_)));
+            addrs.extend(
+                config
+                    .cidrs
+                    .iter()
+                    .filter(|cidr| cidr.is_ipv4())
+                    .map(config::ip_network_to_cidr),
+            );
+        });
+        iface.routes_mut().update(|routes| {
+            routes.retain(|route| !matches!(route.cidr, moto_netstack::wire::IpCidr::Ipv4(_)));
+            routes.extend(
+                config
+                    .routes
+                    .iter()
+                    .filter(|route| route.ip_network.is_ipv4())
+                    .map(|route| moto_netstack::iface::Route {
+                        cidr: config::ip_network_to_cidr(&route.ip_network),
+                        via_router: route.gateway.into(),
+                        preferred_until: None,
+                        expires_at: None,
+                    }),
+            );
+        });
+
+        match current {
+            Some(lease) => log::info!("{name}: DHCP configured {:?}.", lease.address),
+            None => log::warn!("{name}: DHCP lease lost; IPv4 deconfigured."),
+        }
+    }
+
+    (addresses_changed, dns_servers)
 }
 
 impl<'a> NetDev<'a> {
@@ -907,12 +1010,18 @@ impl<'a> NetDev<'a> {
 
         log::debug!("New NET device {name}.");
 
+        let mut sockets = moto_netstack::iface::SocketSet::new();
+        let dhcp_socket = (external && dev_cfg.dhcp)
+            .then(|| sockets.add(u64::MAX, moto_netstack::socket::dhcpv4::Socket::new()));
+
         Self {
             name: name.to_owned(),
             config: dev_cfg.clone(),
             device,
             iface,
-            sockets: moto_netstack::iface::SocketSet::new(),
+            sockets,
+            dhcp_socket,
+            dhcp_lease: None,
             external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
@@ -1023,13 +1132,15 @@ impl<'a> NetDev<'a> {
         &mut self,
         stats: &NetStats,
         backlog: &super::backlog::BacklogBudget,
-    ) -> moto_netstack::iface::PollResult {
+    ) -> PollResult {
         let NetDev {
             name,
             config,
             device,
             iface,
             sockets,
+            dhcp_socket,
+            dhcp_lease,
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
@@ -1050,6 +1161,29 @@ impl<'a> NetDev<'a> {
             NetstackDevice::VirtIo(virtio_device) => {
                 iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
             }
+        };
+
+        let dhcp_update = dhcp_socket.and_then(|handle| {
+            let socket = sockets.get_mut::<moto_netstack::socket::dhcpv4::Socket>(handle);
+            socket.poll().map(|event| match event {
+                moto_netstack::socket::dhcpv4::Event::Deconfigured => DhcpUpdate::Deconfigured,
+                moto_netstack::socket::dhcpv4::Event::Configured(lease) => DhcpUpdate::Configured {
+                    address: IpNetwork::new(
+                        IpAddr::V4(lease.address.address().into()),
+                        lease.address.prefix_len(),
+                    )
+                    .unwrap(),
+                    router: lease.router.map(Into::into),
+                    dns_servers: lease.dns_servers.iter().copied().map(Into::into).collect(),
+                },
+            })
+        });
+        let (addresses_changed, dns_servers) = match dhcp_update {
+            Some(update) => {
+                let (changed, dns) = apply_dhcp_update(name, config, iface, dhcp_lease, update);
+                (changed, Some(dns))
+            }
+            None => (false, None),
         };
         for waiter in waiters {
             let _ = waiter.send(());
@@ -1171,7 +1305,11 @@ impl<'a> NetDev<'a> {
                 .set(stats.tcp_cookie_restores_dropped.get() + restores_dropped);
         }
 
-        result
+        PollResult {
+            activity: result,
+            addresses_changed,
+            dns_servers,
+        }
     }
 
     pub(super) fn poll_delay(&mut self) -> Option<std::time::Duration> {
@@ -1188,6 +1326,7 @@ impl<'a> NetDev<'a> {
             device_runtime_notify: notify,
             poll_waiters: _,
             external: _,
+            ..
         } = self;
         match device {
             NetstackDevice::Loopback(loopback) => iface
@@ -1323,6 +1462,10 @@ pub(crate) mod self_test {
         (
             "net::device::a_large_config_is_installed_whole",
             a_large_config_is_installed_whole,
+        ),
+        (
+            "net::device::dhcp_lease_updates_are_reversible",
+            dhcp_lease_updates_are_reversible,
         ),
         (
             "net::device::only_external_devices_rate_limit_egress",
@@ -1490,6 +1633,62 @@ pub(crate) mod self_test {
             .routes_mut()
             .update(|storage| routes = storage.len());
         st_assert_eq!(routes, ENTRIES);
+
+        Ok(())
+    }
+
+    fn dhcp_lease_updates_are_reversible() -> Result<(), String> {
+        let mut cfg = config::DeviceCfg::new("02:00:00:00:00:7f");
+        cfg.cidrs.push("2001:db8::2/64".parse().unwrap());
+        cfg.routes.push(config::IpRoute {
+            ip_network: "::/0".parse().unwrap(),
+            gateway: "2001:db8::1".parse().unwrap(),
+        });
+        let mut dev = NetDev::new(
+            "self-test",
+            &cfg,
+            &net_cfg(),
+            NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
+                moto_netstack::phy::Medium::Ip,
+            )),
+        );
+
+        let configured = DhcpUpdate::Configured {
+            address: "192.0.2.10/24".parse().unwrap(),
+            router: Some("192.0.2.1".parse().unwrap()),
+            dns_servers: vec!["192.0.2.53".parse().unwrap()],
+        };
+        let (changed, dns) = apply_dhcp_update(
+            &dev.name,
+            &mut dev.config,
+            &mut dev.iface,
+            &mut dev.dhcp_lease,
+            configured,
+        );
+        st_assert!(changed);
+        st_assert_eq!(
+            dns,
+            vec!["192.0.2.53".parse::<std::net::Ipv4Addr>().unwrap()]
+        );
+        st_assert!(dev.ip_addesses().contains(&"192.0.2.10".parse().unwrap()));
+        st_assert_eq!(dev.config.cidrs.len(), 2);
+        st_assert_eq!(dev.config.routes.len(), 2);
+
+        let (changed, dns) = apply_dhcp_update(
+            &dev.name,
+            &mut dev.config,
+            &mut dev.iface,
+            &mut dev.dhcp_lease,
+            DhcpUpdate::Deconfigured,
+        );
+        st_assert!(changed);
+        st_assert!(dns.is_empty());
+        st_assert_eq!(
+            dev.ip_addesses(),
+            vec!["2001:db8::2".parse::<std::net::IpAddr>().unwrap()]
+        );
+        st_assert_eq!(dev.config.cidrs, vec!["2001:db8::2/64".parse().unwrap()]);
+        st_assert_eq!(dev.config.routes.len(), 1);
 
         Ok(())
     }

@@ -36,6 +36,7 @@ moto-netstack = { path = "netstack", default-features = false, features = [
   "proto-ipv6",
   "proto-ipv6-fragmentation",
   "socket-icmp",
+  "socket-dhcpv4",
   # TCP always uses Cubic. Motor VMs enable SSE/AVX at boot, and the kernel
   # preserves their floating-point state across context switches.
   "socket-tcp",

@@ -186,8 +186,12 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let activity =
+                let outcome =
                     this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                if outcome.addresses_changed {
+                    this.rebuild_ip_addresses();
+                }
+                let _ = outcome.dns_servers;
                 // A poll that refused a connection request has just deepened
                 // that listener's pool; the growth needs a way back.
                 if this.backlog.needs_sweeper() {
@@ -210,7 +214,7 @@ impl NetRuntime {
                         });
                     }
                 }
-                match activity {
+                match outcome.activity {
                     moto_netstack::iface::PollResult::None => {
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
                         // Note: we cannot move the op from the previous line into the if
@@ -609,6 +613,23 @@ impl NetRuntime {
                 .map(|(device_idx, device)| (device_idx, device.config())),
             *ip_addr,
         )
+    }
+
+    fn rebuild_ip_addresses(&self) {
+        let mut inner = self.inner.borrow_mut();
+        let addresses: Vec<(IpAddr, usize)> = inner
+            .devices
+            .iter()
+            .enumerate()
+            .flat_map(|(device_idx, device)| {
+                device
+                    .ip_addesses()
+                    .into_iter()
+                    .map(move |address| (address, device_idx))
+            })
+            .collect();
+        inner.ip_addresses.clear();
+        inner.ip_addresses.extend(addresses);
     }
 
     fn get_ephemeral_tcp_port(
