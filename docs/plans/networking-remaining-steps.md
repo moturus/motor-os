@@ -96,12 +96,13 @@ Within each group, order is the suggested pickup order.
   ownership check, and we answer echo, Parameter Problem, Port Unreachable,
   and socketless RST with a source address we do not own; wildcard listeners
   and UDP sockets also see it.
-- Do not reply for destinations we should ignore: run the destination check
+- COMPLETED: Do not reply for destinations we should ignore: run the destination check
   before Hop-by-Hop processing (a broadcast frame with a bad option makes
   every host emit Parameter Problem from a foreign source); send no Port
-  Unreachable or Parameter Problem for multicast destinations (RFC 4443
-  2.4(e)); discard TCP to broadcast or multicast destinations instead of
-  answering with an RST sourced from that address (RFC 9293 3.10.7.2).
+  Unreachable or Parameter Problem for multicast destinations (preserving
+  RFC 4443 2.4(e)'s Packet Too Big and unrecognized-option exceptions);
+  discard TCP to broadcast or multicast destinations instead of answering
+  with an RST sourced from that address (RFC 9293 3.10.7.2).
 - Turn broadcast echo replies off by default. `ipv4.rs` answers echo to the
   limited and subnet broadcast, `auto_icmp_echo_reply` ships enabled, and
   echo replies are exempt from the error limiter.

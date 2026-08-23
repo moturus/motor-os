@@ -18,6 +18,9 @@ impl InterfaceInner {
         ip_payload: &'frame [u8],
     ) -> Option<Packet<'frame>> {
         let (src_addr, dst_addr) = (ip_repr.src_addr(), ip_repr.dst_addr());
+        if self.is_broadcast(&dst_addr) || dst_addr.is_multicast() {
+            return None;
+        }
         let tcp_packet = check!(TcpPacket::new_checked(ip_payload));
         let checksum_caps = self.caps.checksum.rx_vouched(meta.l4_csum_vouched);
         let tcp_repr = match TcpRepr::parse(&tcp_packet, &src_addr, &dst_addr, &checksum_caps) {
