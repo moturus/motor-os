@@ -1,11 +1,21 @@
 use std::{cmp::Ordering, io::IsTerminal, path::Path};
 
-const DIRECTORY_COLOR: &str = "\x1b[1;38;5;214m";
+// const DIRECTORY_COLOR: &str = "\x1b[1;38;5;214m"; // Bold orange.
+const DIRECTORY_COLOR: &str = "\x1b[38;5;214m"; // Orange.
+const EXECUTABLE_COLOR: &str = "\x1b[91m"; // Bright red.
 const COLOR_RESET: &str = "\x1b[0m";
 
-fn name_colors(is_directory: bool, stdout_is_terminal: bool) -> (&'static str, &'static str) {
-    if is_directory && stdout_is_terminal {
+fn name_colors(
+    is_directory: bool,
+    is_executable: bool,
+    stdout_is_terminal: bool,
+) -> (&'static str, &'static str) {
+    if !stdout_is_terminal {
+        ("", "")
+    } else if is_directory {
         (DIRECTORY_COLOR, COLOR_RESET)
+    } else if is_executable {
+        (EXECUTABLE_COLOR, COLOR_RESET)
     } else {
         ("", "")
     }
@@ -16,6 +26,13 @@ struct DetailedEntry {
     kind: DetailedEntryKind,
     size: u64,
     permissions: [PermissionTriplet; 3],
+}
+
+impl DetailedEntry {
+    fn is_executable(&self) -> bool {
+        self.kind == DetailedEntryKind::File
+            && self.permissions.iter().any(|permission| permission.execute)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,7 +213,8 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
             continue;
         }
         let is_directory = entry.kind == DetailedEntryKind::Directory;
-        let (color_in, color_out) = name_colors(is_directory, stdout_is_terminal);
+        let (color_in, color_out) =
+            name_colors(is_directory, entry.is_executable(), stdout_is_terminal);
         let permissions = permission_string(entry.kind, entry.permissions);
         if is_directory {
             println!(
@@ -221,53 +239,32 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
 }
 
 fn list_plain(dir: &str, list_dots: bool) {
-    let path = std::fs::canonicalize(Path::new(dir));
-    if path.is_err() {
-        eprintln!("error reading directory '{dir}' (1).\n");
-        return;
-    }
-    let readdir = std::fs::read_dir(path.unwrap().as_path());
-    if readdir.is_err() {
-        eprintln!("error reading directory '{dir}' (2).\n");
-        return;
-    }
-
-    let mut entries = std::vec![];
-
-    for e in readdir.unwrap() {
-        if e.is_err() {
-            continue;
+    let path = match std::fs::canonicalize(Path::new(dir)) {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("error reading directory '{dir}'.\n");
+            return;
         }
-        entries.push(e.unwrap());
-    }
-    entries.sort_by(|a, b| {
-        match (
-            a.file_type().unwrap().is_dir(),
-            b.file_type().unwrap().is_dir(),
-        ) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
+    };
+    let mut entries = match read_detailed_entries(&path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            eprintln!("error reading directory '{dir}'.\n");
+            return;
         }
-    });
+    };
+    entries.sort_by(compare_detailed_entries);
 
     let stdout_is_terminal = std::io::stdout().is_terminal();
 
-    for e in &entries {
-        let ft = e.file_type().unwrap();
-        let fname = e.file_name().to_str().unwrap().to_owned();
-        if fname.as_str() == "." && !list_dots {
+    for entry in &entries {
+        if (entry.name == "." || entry.name == "..") && !list_dots {
             continue;
         }
-        if fname.as_str() == ".." && !list_dots {
-            continue;
-        }
-        let (color_in, color_out) = name_colors(ft.is_dir(), stdout_is_terminal);
-        if ft.is_dir() || ft.is_file() {
-            print!("{color_in}{fname}{color_out} ");
-        } else {
-            print!("? {fname}");
-        }
+        let is_directory = entry.kind == DetailedEntryKind::Directory;
+        let (color_in, color_out) =
+            name_colors(is_directory, entry.is_executable(), stdout_is_terminal);
+        print!("{color_in}{}{color_out} ", entry.name);
     }
     println!();
 }

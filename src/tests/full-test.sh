@@ -516,9 +516,10 @@ case "$out" in
   *) fail "rmux did not give the console back" ;;
 esac
 
-# sysbox ls colors directory names like rush's prompt and leaves files in the
-# terminal's default color. A pane supplies the terminal that enables colors;
-# the child names do not appear in the command, so they only match ls output.
+# sysbox ls colors directory names orange, executable files bright red, and
+# non-executable files with the terminal's default color. A pane
+# supplies the terminal that enables colors; the child names do not appear in
+# the command, so they only match ls output.
 vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color
 vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/amber-dir
 vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/z-directory
@@ -533,16 +534,28 @@ check_ls_colors() {
   output="$(printf '/system/bin/ls %s /devtools/tmp/sysbox-ls-color\nexit\n' "$option" |
     vm_rmux 2>&1)"
   case "$output" in
-    *"amber-dir"*"default-file"*) ;;
+    *"amber-dir"*"a-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
   esac
   prefix="${output%%amber-dir*}"
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  [ "$style" = $'\033'"[0;1;38;5;214m" ] ||
+  [ "$style" = $'\033'"[0;38;5;214m" ] ||
     fail "ls $option directory style was '$style'"
-  prefix="${output%%default-file*}"
+  prefix="${output%%a-file*}"
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  [ "$style" = $'\033'"[0m" ] || fail "ls $option file style was '$style'"
+  [ "$style" = $'\033'"[0;91m" ] ||
+    fail "ls $option executable style was '$style'"
+
+  output="$(printf '/system/bin/ls %s /user/cfg\nexit\n' "$option" |
+    vm_rmux 2>&1)"
+  case "$output" in
+    *"rush.toml"*) ;;
+    *) fail "ls $option did not list the non-executable test file: '$output'" ;;
+  esac
+  prefix="${output%%rush.toml*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  [ "$style" = $'\033'"[0m" ] ||
+    fail "ls $option non-executable style was '$style'"
 }
 check_ls_colors ""
 check_ls_colors "-l"
