@@ -116,6 +116,7 @@ mod ids {
     pub const NET_UDP_TX_BUFFER_FULL_DROPS: u32 = 68;
     pub const NET_DEVICE_TX_ALLOCATION_DROPS: u32 = 69;
     pub const NET_TCP_ABORT_FAILED: u32 = 70;
+    pub const NET_UDP_TX_UNREACHABLE_DROPS: u32 = 71;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -207,6 +208,9 @@ pub(super) struct NetStats {
     pub udp_tx_admission_drops: Cell<u64>,
     /// Complete UDP datagrams discarded because the netstack TX ring was full.
     pub udp_tx_buffer_full_drops: Cell<u64>,
+    /// UDP datagrams discarded because their route or next-hop neighbor could
+    /// not be resolved. Dropping the head lets later datagrams proceed.
+    pub udp_tx_unreachable_drops: Cell<u64>,
     /// Receive completions the virtio driver rejected before the netstack saw
     /// them: a used length that cannot hold the virtio-net header or overruns
     /// the buffer we posted, or a header the negotiated feature set cannot
@@ -403,6 +407,10 @@ impl NetStats {
                 ids::NET_UDP_TX_BUFFER_FULL_DROPS,
                 self.udp_tx_buffer_full_drops.get(),
             ),
+            MetricEntry::global(
+                ids::NET_UDP_TX_UNREACHABLE_DROPS,
+                self.udp_tx_unreachable_drops.get(),
+            ),
             MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
             MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
             MetricEntry::global(ids::NET_TCP_HALF_OPEN, self.tcp_half_open.get()),
@@ -560,6 +568,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(
             ids::NET_UDP_TX_BUFFER_FULL_DROPS,
             "net.udp.tx_buffer_full_drops",
+        ),
+        MetricDescWire::new(
+            ids::NET_UDP_TX_UNREACHABLE_DROPS,
+            "net.udp.tx_unreachable_drops",
         ),
         MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
         MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),

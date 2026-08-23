@@ -2646,6 +2646,88 @@ fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
     assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
 }
 
+#[test]
+#[cfg(all(feature = "medium-ethernet", feature = "socket-udp"))]
+fn udp_unreachable_heads_do_not_block_queue() {
+    use crate::socket::udp;
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ethernet);
+    iface.inner.discovery_silent_time = Duration::from_millis(50);
+
+    let unresolved = Ipv4Address::new(192, 168, 1, 20);
+    let reachable = Ipv4Address::new(192, 168, 1, 30);
+    let reachable_hw = EthernetAddress([0x52, 0x54, 0x00, 0x00, 0x00, 0x30]);
+    iface.inner.neighbor_cache.fill(
+        IpAddress::Ipv4(reachable),
+        HardwareAddress::Ethernet(reachable_hw),
+        Instant::ZERO,
+    );
+
+    let mut socket = udp::Socket::new(
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; 8]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 3], vec![0; 12]),
+    );
+    socket.bind(5000).unwrap();
+    socket
+        .send_slice(b"lost", IpEndpoint::new(unresolved.into(), 4000))
+        .unwrap();
+    socket
+        .send_slice(
+            b"dead",
+            IpEndpoint::new(IpAddress::v4(10, 0, 0, 1), 4000),
+        )
+        .unwrap();
+    socket
+        .send_slice(b"sent", IpEndpoint::new(reachable.into(), 4000))
+        .unwrap();
+    let handle = sockets.add(0, socket);
+
+    for now in [0, 50, 100] {
+        iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
+    }
+    iface.poll(Instant::from_millis(149), &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 3);
+    assert_eq!(sockets.get::<udp::Socket>(handle).send_queue(), 12);
+    assert_eq!(iface.take_udp_tx_unreachable_drops(), 0);
+
+    // After the third response window, both unreachable heads unblock the third.
+    iface.poll(Instant::from_millis(150), &mut device, &mut sockets);
+    assert_eq!(sockets.get::<udp::Socket>(handle).send_queue(), 0);
+    assert_eq!(iface.take_udp_tx_unreachable_drops(), 2);
+    assert_eq!(iface.take_udp_tx_unreachable_drops(), 0);
+
+    let mut arp_requests = 0;
+    let mut delivered = 0;
+    for bytes in device.tx_queue {
+        let frame = EthernetFrame::new_checked(&bytes[..]).unwrap();
+        match frame.ethertype() {
+            EthernetProtocol::Arp => {
+                let packet = ArpPacket::new_checked(frame.payload()).unwrap();
+                let ArpRepr::EthernetIpv4 {
+                    operation: ArpOperation::Request,
+                    target_protocol_addr,
+                    ..
+                } = ArpRepr::parse(&packet).unwrap()
+                else {
+                    panic!("expected ARP request")
+                };
+                assert_eq!(target_protocol_addr, unresolved);
+                arp_requests += 1;
+            }
+            EthernetProtocol::Ipv4 => {
+                assert_eq!(frame.dst_addr(), reachable_hw);
+                let packet = Ipv4Packet::new_checked(frame.payload()).unwrap();
+                assert_eq!(packet.dst_addr(), reachable);
+                assert_eq!(UdpPacket::new_checked(packet.payload()).unwrap().payload(), b"sent");
+                delivered += 1;
+            }
+            other => panic!("unexpected Ethernet protocol {other:?}"),
+        }
+    }
+    assert_eq!(arp_requests, 3);
+    assert_eq!(delivered, 1);
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]

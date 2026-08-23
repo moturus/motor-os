@@ -72,17 +72,16 @@ Within each group, order is the suggested pickup order.
   attempt the reset, never for device completion, so a wedged host cannot
   retain the socket. Failed reset admission or allocation increments
   `net.tcp.abort_failed` before teardown continues.
-- Give neighbor discovery per-destination backoff and a give-up. sys-io sets
-  `discovery_silent_time` to 5 ms; egress is re-permitted when it expires,
-  TCP re-solicits every 5 ms until its timeout, and UDP keeps the datagram at
-  the head of its queue forever (`storage/packet_buffer.rs`), blocking the
-  socket. Spoofed on-link sources (half-open sockets plus every socketless
-  RST, cookie, and ICMP reply) turn into tens of thousands of ARP/NS
-  broadcasts per second onto the segment; a peer that powers off wedges the
-  UDP socket. Back off to about 1 s, fail the datagram or socket after a few
-  probes as Linux does (`EHOSTUNREACH`), and add an interface-wide
-  solicitation token bucket. The 64-entry silent map evicts under churn and
-  then suppresses nothing.
+- Finish neighbor-discovery failure reporting and aggregate limiting. sys-io
+  now uses a shared 50 ms ARP/NDP quiet interval. UDP gives a neighbor three
+  probes and their response windows, then drops the blocking datagram and
+  counts `net.udp.tx_unreachable_drops`; `NoRoute` drops immediately, while
+  `FragmenterBusy` has a separate local backoff. TCP still re-solicits every
+  50 ms until its timeout, UDP has no caller-visible `EHOSTUNREACH`, and
+  spoofed on-link sources (half-open sockets plus every socketless RST,
+  cookie, and ICMP reply) can still drive aggregate ARP/NS traffic. Decide the
+  TCP terminal behavior and add an interface-wide solicitation token bucket;
+  the 64-entry silent map evicts under churn and then suppresses nothing.
 
 ### Replies on a shared segment
 

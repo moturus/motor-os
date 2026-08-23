@@ -730,13 +730,9 @@ fn iface_config(
     config.tcp_cookie_key = random_bytes();
     config.loopback = !external;
     config.auto_icmp_echo_reply = auto_icmp_echo_reply;
-    // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
-    // ("reduce ARP delay"): the first packet to an unresolved peer waits out
-    // this delay whenever its request is lost, and a second of that is a
-    // second of connect latency. The delay is per destination, so the price
-    // of the aggressive value is 200 requests/s aimed at one address that
-    // does not answer, not 200 requests/s from the interface as a whole.
-    config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+    // Keep lost-request latency low without sys-io's old 5 ms request rate;
+    // the cache applies this quiet interval independently per destination.
+    config.discovery_silent_time = moto_netstack::time::Duration::from_millis(50);
     // The egress limits on socketless replies -- no-listener resets and
     // cookie SYN|ACKs -- exist because those replies go wherever a spoofable
     // source address says. On loopback the only peer is this machine, already
@@ -1084,6 +1080,13 @@ impl<'a> NetDev<'a> {
                 .set(stats.neighbor_admission_refused.get() + neighbors_refused);
         }
 
+        let udp_unreachable = iface.take_udp_tx_unreachable_drops();
+        if udp_unreachable != 0 {
+            stats
+                .udp_tx_unreachable_drops
+                .set(stats.udp_tx_unreachable_drops.get() + udp_unreachable);
+        }
+
         let syn_rst = iface.take_tcp_syn_rst_unmatched();
         if syn_rst != 0 {
             stats
@@ -1402,6 +1405,10 @@ pub(crate) mod self_test {
         st_assert_eq!(
             external.tcp_cookie_rate_limit,
             DEFAULT_MAX_SYN_COOKIE_RATE.get()
+        );
+        st_assert_eq!(
+            external.discovery_silent_time,
+            moto_netstack::time::Duration::from_millis(50)
         );
 
         let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);

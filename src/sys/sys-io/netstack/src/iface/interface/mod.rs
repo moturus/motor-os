@@ -241,6 +241,11 @@ pub struct InterfaceInner {
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     neighbor_admission_refused: u64,
 
+    /// UDP datagrams discarded after neighbor resolution exhausted or because
+    /// no route existed, since the last stats drain.
+    #[cfg(feature = "socket-udp")]
+    udp_tx_unreachable_drops: u64,
+
     /// Connection requests that drew the reset path because nothing was
     /// listening for them, since the last
     /// [`Interface::take_tcp_syn_rst_unmatched`]. When the reflector's bucket
@@ -576,6 +581,8 @@ impl Interface {
                 icmp_error_suppressed: 0,
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
                 neighbor_admission_refused: 0,
+                #[cfg(feature = "socket-udp")]
+                udp_tx_unreachable_drops: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
                 #[cfg(feature = "socket-tcp")]
@@ -645,6 +652,13 @@ impl Interface {
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     pub fn take_neighbor_admission_refused(&mut self) -> u64 {
         core::mem::take(&mut self.inner.neighbor_admission_refused)
+    }
+
+    /// UDP datagrams discarded after terminal egress failure. Reading clears
+    /// the count, so the caller accumulates.
+    #[cfg(feature = "socket-udp")]
+    pub fn take_udp_tx_unreachable_drops(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.udp_tx_unreachable_drops)
     }
 
     /// Connection requests reset because nothing was listening for them.
@@ -1403,7 +1417,7 @@ impl Interface {
 
         enum EgressError {
             Exhausted,
-            Dispatch,
+            Dispatch(DispatchError),
         }
 
         let mut result = PollResult::None;
@@ -1427,6 +1441,20 @@ impl Interface {
             let Some(item) = items.get_mut(&id) else {
                 continue;
             };
+            #[cfg(feature = "socket-udp")]
+            if item.meta.neighbor_resolution_failed(self.inner.now, |ip_addr| {
+                self.inner.has_neighbor(&ip_addr)
+            }) && let Socket::Udp(socket) = &mut item.socket
+            {
+                if socket.discard_tx_head() {
+                    self.inner.udp_tx_unreachable_drops =
+                        self.inner.udp_tx_unreachable_drops.wrapping_add(1);
+                    result = PollResult::SocketStateChanged;
+                }
+                item.meta.reset_egress();
+                refresh_poll_at(&mut self.inner, poll_index, item);
+                continue;
+            }
             if !item
                 .meta
                 .egress_permitted(self.inner.now, |ip_addr| self.inner.has_neighbor(&ip_addr))
@@ -1447,7 +1475,7 @@ impl Interface {
 
                 inner
                     .dispatch_ip(t, meta, response, &mut self.fragmenter)
-                    .map_err(|_| EgressError::Dispatch)?;
+                    .map_err(EgressError::Dispatch)?;
 
                 result = PollResult::SocketStateChanged;
                 served = true;
@@ -1455,7 +1483,7 @@ impl Interface {
                 Ok(())
             };
 
-            let result = match &mut item.socket {
+            let dispatch_result = match &mut item.socket {
                 #[cfg(feature = "socket-raw")]
                 Socket::Raw(socket) => socket.dispatch(&mut self.inner, |inner, (ip, raw)| {
                     respond(
@@ -1533,7 +1561,7 @@ impl Interface {
                 first_served = Some(id);
             }
 
-            match result {
+            match dispatch_result {
                 Err(EgressError::Exhausted) => {
                     // Device buffer full. The refused socket goes first next
                     // pass.
@@ -1541,16 +1569,37 @@ impl Interface {
                     refused = true;
                     break;
                 }
-                Err(EgressError::Dispatch) => {
-                    // `NeighborCache` already takes care of rate limiting the neighbor discovery
-                    // requests from the socket. However, without an additional rate limiting
-                    // mechanism, we would spin on every socket that has yet to discover its
-                    // neighbor.
+                Err(EgressError::Dispatch(DispatchError::NeighborPending)) => {
+                    // The cache limits discovery per destination; the socket
+                    // delay prevents every waiter on it from spinning.
                     item.meta.neighbor_missing(
                         self.inner.now,
                         neighbor_addr.expect("non-IP response packet"),
                         self.inner.discovery_silent_time,
                     );
+                    refresh_poll_at(&mut self.inner, poll_index, item);
+                }
+                Err(EgressError::Dispatch(DispatchError::NoRoute)) => {
+                    #[cfg(feature = "socket-udp")]
+                    if let Socket::Udp(socket) = &mut item.socket {
+                        if socket.discard_tx_head() {
+                            self.inner.udp_tx_unreachable_drops =
+                                self.inner.udp_tx_unreachable_drops.wrapping_add(1);
+                            result = PollResult::SocketStateChanged;
+                        }
+                        item.meta.reset_egress();
+                        refresh_poll_at(&mut self.inner, poll_index, item);
+                        continue;
+                    }
+                    item.meta
+                        .defer(self.inner.now, self.inner.discovery_silent_time);
+                    refresh_poll_at(&mut self.inner, poll_index, item);
+                }
+                #[cfg(feature = "_proto-fragmentation")]
+                Err(EgressError::Dispatch(DispatchError::FragmenterBusy)) => {
+                    item.meta
+                        .defer(self.inner.now, self.inner.discovery_silent_time);
+                    refresh_poll_at(&mut self.inner, poll_index, item);
                 }
                 Ok(()) => {}
             }

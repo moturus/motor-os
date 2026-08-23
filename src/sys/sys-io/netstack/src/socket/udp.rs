@@ -634,6 +634,17 @@ impl<'a> Socket<'a> {
         }
     }
 
+    /// Discard the datagram blocking the transmit queue after a terminal
+    /// egress failure. Returns whether there was one to discard.
+    pub(crate) fn discard_tx_head(&mut self) -> bool {
+        if self.tx_buffer.dequeue().is_err() {
+            return false;
+        }
+        #[cfg(feature = "async")]
+        self.tx_waker.wake();
+        true
+    }
+
     fn expire_recent_sends(&mut self, timestamp: Instant) {
         self.recent_sends.retain(|send| timestamp < send.expires_at);
     }

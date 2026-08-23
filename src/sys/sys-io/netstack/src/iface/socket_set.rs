@@ -571,6 +571,11 @@ impl SocketSet<'_> {
     /// Panics if `handle` does not refer to a live UDP socket.
     pub fn udp_close(&mut self, handle: SocketHandle) {
         self.get_mut::<crate::socket::udp::Socket>(handle).close();
+        self.sockets
+            .get_mut(&handle.0)
+            .expect("handle does not refer to a live UDP socket")
+            .meta
+            .reset_egress();
         self.sync_demux(handle);
     }
 }
