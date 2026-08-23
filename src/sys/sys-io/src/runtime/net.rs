@@ -86,6 +86,10 @@ struct NetRuntimeInner {
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
 
+    // Resolver servers are kept per device so losing one DHCP lease does not
+    // discard another device's static or leased configuration.
+    dns_servers: Vec<Vec<IpAddr>>,
+
     clients: HashMap<SysHandle, ClientConnection>,
 }
 
@@ -141,6 +145,10 @@ struct NetRuntime {
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
 
+    // A fixed temporary filename is safe only while resolver publications are
+    // serialized; the newest waiter recomputes the aggregate after acquiring.
+    dns_write_lock: Rc<moto_async::LocalMutex<()>>,
+
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
@@ -191,7 +199,12 @@ impl NetRuntime {
                 if outcome.addresses_changed {
                     this.rebuild_ip_addresses();
                 }
-                let _ = outcome.dns_servers;
+                if let Some(servers) = outcome.dns_servers {
+                    this.update_dns_servers(
+                        device_idx,
+                        servers.into_iter().map(IpAddr::V4).collect(),
+                    );
+                }
                 // A poll that refused a connection request has just deepened
                 // that listener's pool; the growth needs a way back.
                 if this.backlog.needs_sweeper() {
@@ -616,20 +629,74 @@ impl NetRuntime {
     }
 
     fn rebuild_ip_addresses(&self) {
-        let mut inner = self.inner.borrow_mut();
-        let addresses: Vec<(IpAddr, usize)> = inner
-            .devices
-            .iter()
-            .enumerate()
-            .flat_map(|(device_idx, device)| {
-                device
-                    .ip_addesses()
-                    .into_iter()
-                    .map(move |address| (address, device_idx))
-            })
-            .collect();
-        inner.ip_addresses.clear();
-        inner.ip_addresses.extend(addresses);
+        let (removed, added, listeners) = {
+            let mut inner = self.inner.borrow_mut();
+            let addresses: HashMap<IpAddr, usize> = inner
+                .devices
+                .iter()
+                .enumerate()
+                .flat_map(|(device_idx, device)| {
+                    device
+                        .ip_addesses()
+                        .into_iter()
+                        .map(move |address| (address, device_idx))
+                })
+                .collect();
+            let removed = inner
+                .ip_addresses
+                .iter()
+                .filter(|(address, device_idx)| addresses.get(address) != Some(device_idx))
+                .map(|(address, device_idx)| (*address, *device_idx))
+                .collect::<Vec<_>>();
+            let added = addresses
+                .iter()
+                .filter(|(address, device_idx)| inner.ip_addresses.get(address) != Some(device_idx))
+                .map(|(address, device_idx)| (*address, *device_idx))
+                .collect::<Vec<_>>();
+            inner.ip_addresses = addresses;
+            let listeners = inner.tcp_listeners.values().cloned().collect::<Vec<_>>();
+            (removed, added, listeners)
+        };
+
+        for (address, device_idx) in removed {
+            for listener in &listeners {
+                tcp_listener::TcpListener::remove_address(listener, address, device_idx);
+            }
+        }
+        for (address, device_idx) in added {
+            for listener in &listeners {
+                tcp_listener::TcpListener::add_address(listener, address, device_idx);
+            }
+        }
+    }
+
+    fn update_dns_servers(&self, device_idx: usize, servers: Vec<IpAddr>) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if inner.dns_servers[device_idx] == servers {
+                return;
+            }
+            inner.dns_servers[device_idx] = servers;
+        }
+
+        let this = self.clone();
+        moto_async::LocalRuntime::spawn(async move {
+            let _writer = this.dns_write_lock.lock().await;
+            let servers = {
+                let inner = this.inner.borrow();
+                let mut seen = HashSet::new();
+                inner
+                    .dns_servers
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|server| seen.insert(*server))
+                    .collect::<Vec<_>>()
+            };
+            if let Err(err) = config::write_resolv_conf(&this.fs, &servers).await {
+                log::error!("failed to publish DNS servers: {err:?}");
+            }
+        });
     }
 
     fn get_ephemeral_tcp_port(
@@ -799,6 +866,10 @@ pub(super) async fn init(
         device_idx += 1;
     }
 
+    let dns_servers = devices
+        .iter()
+        .map(|device| device.config().dns_servers.clone())
+        .collect::<Vec<_>>();
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             next_socket_id: 1,
@@ -806,6 +877,7 @@ pub(super) async fn init(
             tcp_listeners: HashMap::new(),
             devices,
             ip_addresses,
+            dns_servers,
             clients: HashMap::new(),
         })),
         stats: net_stats.clone(),
@@ -822,8 +894,22 @@ pub(super) async fn init(
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
         orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.clone(),
+        dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
         channel_budget,
     };
+
+    let initial_dns_servers = {
+        let inner = runtime.inner.borrow();
+        let mut seen = HashSet::new();
+        inner
+            .dns_servers
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|server| seen.insert(*server))
+            .collect::<Vec<_>>()
+    };
+    config::write_resolv_conf(&fs, &initial_dns_servers).await?;
 
     runtime.stats.num_devices.set(device_idx as u64);
     stats::spawn_stats_responder(runtime.clone());
