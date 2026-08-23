@@ -219,6 +219,13 @@ pub struct InterfaceInner {
     auto_icmp_echo_reply: bool,
     discovery_silent_time: Duration,
 
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    neighbor_solicit_limiter: rate_limit::TokenBucket,
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    neighbor_solicit_reserve: u32,
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    neighbor_solicit_suppressed: u64,
+
     /// Received TCP and UDP segments dropped because their checksum did not
     /// verify, since the last [`Interface::take_rx_csum_failed`]. Frames the
     /// device vouched for are not verified, so they cannot land here.
@@ -453,6 +460,16 @@ pub struct Config {
     /// A destination that never answers therefore costs one request per delay
     /// and does not delay discovery of any other address.
     pub discovery_silent_time: Duration,
+
+    /// Aggregate neighbor solicitations permitted per second. The bucket can
+    /// burst up to one second's allowance; zero leaves discovery unlimited.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    pub neighbor_solicit_rate_limit: u32,
+
+    /// Tokens inside the aggregate allowance reserved for locally initiated
+    /// and established socket traffic. Values above the rate are clamped.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    pub neighbor_solicit_reserve: u32,
 }
 
 impl Config {
@@ -481,6 +498,10 @@ impl Config {
             loopback: false,
             auto_icmp_echo_reply: false,
             discovery_silent_time: Self::DEFAULT_DISCOVERY_SILENT_TIME,
+            #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+            neighbor_solicit_rate_limit: 0,
+            #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+            neighbor_solicit_reserve: 0,
         }
     }
 }
@@ -575,6 +596,15 @@ impl Interface {
                 rand,
                 auto_icmp_echo_reply: config.auto_icmp_echo_reply,
                 discovery_silent_time: config.discovery_silent_time,
+                #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+                neighbor_solicit_limiter: rate_limit::TokenBucket::new(
+                    config.neighbor_solicit_rate_limit,
+                    now,
+                ),
+                #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+                neighbor_solicit_reserve: config.neighbor_solicit_reserve,
+                #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+                neighbor_solicit_suppressed: 0,
                 rx_csum_failed: 0,
                 ip_packet_stats: IpPacketStats::default(),
                 icmp_error_limiter: rate_limit::TokenBucket::new(config.icmp_error_rate_limit, now),
@@ -652,6 +682,13 @@ impl Interface {
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     pub fn take_neighbor_admission_refused(&mut self) -> u64 {
         core::mem::take(&mut self.inner.neighbor_admission_refused)
+    }
+
+    /// Neighbor solicitations suppressed by the aggregate interface limit.
+    /// Reading clears the count, so the caller accumulates.
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    pub fn take_neighbor_solicit_suppressed(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.neighbor_solicit_suppressed)
     }
 
     /// UDP datagrams discarded after terminal egress failure. Reading clears
@@ -1464,6 +1501,15 @@ impl Interface {
                 continue;
             }
 
+            let can_use_neighbor_reserve = match &item.socket {
+                #[cfg(feature = "socket-tcp")]
+                Socket::Tcp(socket) => {
+                    socket.state() != crate::socket::tcp::State::SynReceived
+                        || socket.listen_endpoint().port == 0
+                }
+                #[allow(unreachable_patterns)]
+                _ => true,
+            };
             let mut neighbor_addr = None;
             let mut served = false;
             let mut respond = |inner: &mut InterfaceInner, meta: PacketMeta, response: Packet| {
@@ -1474,7 +1520,13 @@ impl Interface {
                 })?;
 
                 inner
-                    .dispatch_ip(t, meta, response, &mut self.fragmenter)
+                    .dispatch_ip_with_neighbor_reserve(
+                        t,
+                        meta,
+                        response,
+                        &mut self.fragmenter,
+                        can_use_neighbor_reserve,
+                    )
                     .map_err(EgressError::Dispatch)?;
 
                 result = PollResult::SocketStateChanged;
@@ -1569,10 +1621,25 @@ impl Interface {
                     refused = true;
                     break;
                 }
-                Err(EgressError::Dispatch(DispatchError::NeighborPending)) => {
+                Err(EgressError::Dispatch(DispatchError::NeighborPending(
+                    pending @ (NeighborPending::Solicited | NeighborPending::Waiting),
+                ))) => {
                     // The cache limits discovery per destination; the socket
                     // delay prevents every waiter on it from spinning.
                     item.meta.neighbor_missing(
+                        self.inner.now,
+                        neighbor_addr.expect("non-IP response packet"),
+                        self.inner.discovery_silent_time,
+                    );
+                    if pending == NeighborPending::Solicited && first_served.is_none() {
+                        first_served = Some(id);
+                    }
+                    refresh_poll_at(&mut self.inner, poll_index, item);
+                }
+                Err(EgressError::Dispatch(DispatchError::NeighborPending(
+                    NeighborPending::Deferred,
+                ))) => {
+                    item.meta.neighbor_deferred(
                         self.inner.now,
                         neighbor_addr.expect("non-IP response packet"),
                         self.inner.discovery_silent_time,
@@ -1890,11 +1957,31 @@ impl InterfaceInner {
     }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    #[cfg(test)]
     fn lookup_hardware_addr<Tx>(
         &mut self,
         tx_token: Tx,
         dst_addr: &IpAddress,
         fragmenter: &mut Fragmenter,
+    ) -> Result<(HardwareAddress, Tx), DispatchError>
+    where
+        Tx: TxToken,
+    {
+        self.lookup_hardware_addr_with_neighbor_reserve(
+            tx_token,
+            dst_addr,
+            fragmenter,
+            false,
+        )
+    }
+
+    #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
+    fn lookup_hardware_addr_with_neighbor_reserve<Tx>(
+        &mut self,
+        tx_token: Tx,
+        dst_addr: &IpAddress,
+        fragmenter: &mut Fragmenter,
+        can_use_reserve: bool,
     ) -> Result<(HardwareAddress, Tx), DispatchError>
     where
         Tx: TxToken,
@@ -1961,8 +2048,24 @@ impl InterfaceInner {
 
         match self.neighbor_cache.lookup(&dst_addr, self.now) {
             NeighborAnswer::Found(hardware_addr) => return Ok((hardware_addr, tx_token)),
-            NeighborAnswer::RateLimited => return Err(DispatchError::NeighborPending),
+            NeighborAnswer::RateLimited => {
+                return Err(DispatchError::NeighborPending(NeighborPending::Waiting));
+            }
             _ => (), // XXX
+        }
+
+        let reserve = if can_use_reserve {
+            0
+        } else {
+            self.neighbor_solicit_reserve
+        };
+        if !self
+            .neighbor_solicit_limiter
+            .try_take_above_reserve(self.now, reserve)
+        {
+            self.neighbor_solicit_suppressed =
+                self.neighbor_solicit_suppressed.wrapping_add(1);
+            return Err(DispatchError::NeighborPending(NeighborPending::Deferred));
         }
 
         match dst_addr {
@@ -1993,7 +2096,7 @@ impl InterfaceInner {
                     })
                 {
                     net_debug!("Failed to dispatch ARP request: {:?}", e);
-                    return Err(DispatchError::NeighborPending);
+                    return Err(DispatchError::NeighborPending(NeighborPending::Deferred));
                 }
             }
 
@@ -2024,7 +2127,7 @@ impl InterfaceInner {
                     self.dispatch_ip(tx_token, PacketMeta::default(), packet, fragmenter)
                 {
                     net_debug!("Failed to dispatch NDISC solicit: {:?}", e);
-                    return Err(DispatchError::NeighborPending);
+                    return Err(DispatchError::NeighborPending(NeighborPending::Deferred));
                 }
             }
 
@@ -2036,7 +2139,7 @@ impl InterfaceInner {
         // destination, and for this destination only.
         self.neighbor_cache
             .limit_rate(dst_addr, self.now, self.discovery_silent_time);
-        Err(DispatchError::NeighborPending)
+        Err(DispatchError::NeighborPending(NeighborPending::Solicited))
     }
 
     fn flush_neighbor_cache(&mut self) {
@@ -2126,6 +2229,17 @@ impl InterfaceInner {
         packet: Packet,
         frag: &mut Fragmenter,
     ) -> Result<(), DispatchError> {
+        self.dispatch_ip_with_neighbor_reserve(tx_token, meta, packet, frag, false)
+    }
+
+    fn dispatch_ip_with_neighbor_reserve<Tx: TxToken>(
+        &mut self,
+        #[allow(unused_mut)] mut tx_token: Tx,
+        meta: PacketMeta,
+        packet: Packet,
+        frag: &mut Fragmenter,
+        _can_use_neighbor_reserve: bool,
+    ) -> Result<(), DispatchError> {
         #[cfg(feature = "_proto-fragmentation")]
         if !frag.is_empty() && frag.finished() {
             frag.reset();
@@ -2142,8 +2256,12 @@ impl InterfaceInner {
 
         #[cfg(feature = "medium-ieee802154")]
         if matches!(self.caps.medium, Medium::Ieee802154) {
-            let (addr, tx_token) =
-                self.lookup_hardware_addr(tx_token, &ip_repr.dst_addr(), frag)?;
+            let (addr, tx_token) = self.lookup_hardware_addr_with_neighbor_reserve(
+                tx_token,
+                &ip_repr.dst_addr(),
+                frag,
+                _can_use_neighbor_reserve,
+            )?;
             let addr = addr.ieee802154_or_panic();
 
             self.dispatch_ieee802154(addr, tx_token, meta, packet, frag);
@@ -2167,8 +2285,12 @@ impl InterfaceInner {
         #[cfg(feature = "medium-ethernet")]
         let (dst_hardware_addr, mut tx_token) = match self.caps.medium {
             Medium::Ethernet => {
-                let (hardware_addr, tx_token) =
-                    self.lookup_hardware_addr(tx_token, &ip_repr.dst_addr(), frag)?;
+                let (hardware_addr, tx_token) = self.lookup_hardware_addr_with_neighbor_reserve(
+                    tx_token,
+                    &ip_repr.dst_addr(),
+                    frag,
+                    _can_use_neighbor_reserve,
+                )?;
                 (hardware_addr.ethernet_or_panic(), tx_token)
             }
             #[cfg(any(feature = "medium-ip", feature = "medium-ieee802154"))]
@@ -2376,6 +2498,17 @@ impl InterfaceInner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+enum NeighborPending {
+    /// This dispatch emitted the request for the shared response window.
+    Solicited,
+    /// Another dispatch already emitted the request for this destination.
+    Waiting,
+    /// No request went out; retry without consuming a socket attempt.
+    Deferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum DispatchError {
     #[cfg(feature = "_proto-fragmentation")]
     /// Another fragmented datagram owns the single bounded staging slot.
@@ -2383,8 +2516,6 @@ enum DispatchError {
     /// No route to dispatch this packet. Retrying won't help unless
     /// configuration is changed.
     NoRoute,
-    /// We do have a route to dispatch this packet, but we haven't discovered
-    /// the neighbor for it yet. Discovery has been initiated, dispatch
-    /// should be retried later.
-    NeighborPending,
+    /// We have a route, but its next-hop neighbor is not resolved yet.
+    NeighborPending(NeighborPending),
 }

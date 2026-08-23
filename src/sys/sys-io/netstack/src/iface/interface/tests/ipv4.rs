@@ -2290,7 +2290,7 @@ fn test_handle_other_arp_request(#[case] medium: Medium) {
             &IpAddress::Ipv4(remote_ip_addr),
             &mut iface.fragmenter,
         ),
-        Err(DispatchError::NeighborPending)
+        Err(DispatchError::NeighborPending(NeighborPending::Solicited))
     );
 }
 
@@ -2573,7 +2573,7 @@ fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
                 &mut iface.fragmenter,
             )
             .map(|(hardware_addr, _)| hardware_addr),
-        Err(DispatchError::NeighborPending)
+        Err(DispatchError::NeighborPending(NeighborPending::Solicited))
     );
     assert_eq!(requested(&mut device), vec![black_hole]);
 
@@ -2587,7 +2587,7 @@ fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
                 &mut iface.fragmenter,
             )
             .map(|(hardware_addr, _)| hardware_addr),
-        Err(DispatchError::NeighborPending)
+        Err(DispatchError::NeighborPending(NeighborPending::Waiting))
     );
     assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
 
@@ -2602,7 +2602,7 @@ fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
                 &mut iface.fragmenter,
             )
             .map(|(hardware_addr, _)| hardware_addr),
-        Err(DispatchError::NeighborPending)
+        Err(DispatchError::NeighborPending(NeighborPending::Solicited))
     );
     assert_eq!(requested(&mut device), vec![answering]);
 
@@ -2644,6 +2644,34 @@ fn test_discovery_silence_is_per_destination(#[case] medium: Medium) {
         Ok(HardwareAddress::Ethernet(answering_hw_addr))
     );
     assert_eq!(requested(&mut device), Vec::<Ipv4Address>::new());
+
+    iface.inner.neighbor_solicit_limiter = rate_limit::TokenBucket::new(2, now);
+    iface.inner.neighbor_solicit_reserve = 1;
+    let untrusted = Ipv4Address::new(192, 168, 1, 40);
+    let throttled = Ipv4Address::new(192, 168, 1, 41);
+    let protected = Ipv4Address::new(192, 168, 1, 42);
+
+    for (address, can_use_reserve, expected) in [
+        (untrusted, false, NeighborPending::Solicited),
+        (throttled, false, NeighborPending::Deferred),
+        (protected, true, NeighborPending::Solicited),
+    ] {
+        assert_eq!(
+            iface
+                .inner
+                .lookup_hardware_addr_with_neighbor_reserve(
+                    device.transmit(now).unwrap(),
+                    &IpAddress::Ipv4(address),
+                    &mut iface.fragmenter,
+                    can_use_reserve,
+                )
+                .map(|(hardware_addr, _)| hardware_addr),
+            Err(DispatchError::NeighborPending(expected))
+        );
+    }
+    assert_eq!(requested(&mut device), vec![untrusted, protected]);
+    assert_eq!(iface.take_neighbor_solicit_suppressed(), 1);
+    assert_eq!(iface.take_neighbor_solicit_suppressed(), 0);
 }
 
 #[test]

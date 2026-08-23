@@ -142,6 +142,27 @@ impl Meta {
         };
     }
 
+    pub(crate) fn neighbor_deferred(
+        &mut self,
+        timestamp: Instant,
+        neighbor: IpAddress,
+        delay: Duration,
+    ) {
+        let attempts = match self.neighbor_state {
+            NeighborState::Waiting {
+                neighbor: pending,
+                attempts,
+                ..
+            } if pending == neighbor => attempts,
+            _ => 0,
+        };
+        self.neighbor_state = NeighborState::Waiting {
+            neighbor,
+            silent_until: timestamp + delay,
+            attempts,
+        };
+    }
+
     pub(crate) fn neighbor_missing(
         &mut self,
         timestamp: Instant,
@@ -327,5 +348,18 @@ mod tests {
         );
         assert!(!m.neighbor_resolution_failed(Instant::from_millis(2000), |_| false));
         assert!(m.egress_permitted(Instant::from_millis(1050), |_| false));
+    }
+
+    #[test]
+    fn deferred_solicitation_does_not_consume_an_attempt() {
+        let mut m = meta();
+        let delay = Duration::from_millis(50);
+        m.neighbor_missing(Instant::from_millis(1000), NEIGHBOR, delay);
+        m.neighbor_missing(Instant::from_millis(1050), NEIGHBOR, delay);
+        m.neighbor_deferred(Instant::from_millis(1100), NEIGHBOR, delay);
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+
+        m.neighbor_missing(Instant::from_millis(1150), NEIGHBOR, delay);
+        assert!(m.neighbor_resolution_failed(Instant::from_millis(1200), |_| false));
     }
 }

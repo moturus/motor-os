@@ -39,6 +39,12 @@ impl TokenBucket {
 
     /// Whether a reply may go out at `now`; `true` spends the token.
     pub(super) fn try_take(&mut self, now: Instant) -> bool {
+        self.try_take_above_reserve(now, 0)
+    }
+
+    /// Spend a token without dipping into `reserve` whole tokens. This lets
+    /// trusted work retain a small floor inside one aggregate rate limit.
+    pub(super) fn try_take_above_reserve(&mut self, now: Instant, reserve: u32) -> bool {
         if self.rate == 0 {
             return true;
         }
@@ -53,7 +59,8 @@ impl TokenBucket {
             self.refilled = now;
         }
 
-        if self.tokens >= COST {
+        let floor = reserve.min(self.rate) as u64 * COST;
+        if self.tokens >= floor + COST {
             self.tokens -= COST;
             true
         } else {
@@ -139,5 +146,20 @@ mod tests {
         assert!(!bucket.try_take(at(500_000)));
         // And the retreat did not push the refill point back either.
         assert!(bucket.try_take(at(2_000_000)));
+    }
+
+    #[test]
+    fn a_reserve_is_only_available_to_unrestricted_callers() {
+        let mut bucket = TokenBucket::new(5, at(0));
+        for _ in 0..3 {
+            assert!(bucket.try_take_above_reserve(at(0), 2));
+        }
+        assert!(!bucket.try_take_above_reserve(at(0), 2));
+        assert!(bucket.try_take(at(0)));
+        assert!(bucket.try_take(at(0)));
+        assert!(!bucket.try_take(at(0)));
+
+        assert!(!bucket.try_take_above_reserve(at(200_000), 2));
+        assert!(bucket.try_take(at(200_000)));
     }
 }
