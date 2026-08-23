@@ -1,4 +1,5 @@
 pub mod cat;
+pub mod chmod;
 pub mod cp;
 pub mod date;
 pub mod find;
