@@ -1208,6 +1208,10 @@ impl<'a> NetDev<'a> {
         addresses
     }
 
+    pub(super) fn is_external(&self) -> bool {
+        self.external
+    }
+
     pub(super) fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
         let port = find_ephemeral_port(ephemeral_scan_start(self.external), |port| {
             self.udp_ports_in_use.contains(&port)

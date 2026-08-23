@@ -141,7 +141,7 @@ Within each group, order is the suggested pickup order.
   the previous occupant's pages (a lingering close to a slow peer) leaves an
   accepted connection that reads its request and never becomes writable.
   Same shape as the fixed partial-write bug.
-- Accept wildcard binds. UDP refuses any unspecified address, not only
+- COMPLETED: Accept wildcard binds. UDP refuses any unspecified address, not only
   `0.0.0.0:0`, so no UDP server can start and the idiomatic client bind
   fails; let sys-io choose the address (and port when zero). Make wildcard
   TCP listeners family-correct: `0.0.0.0:P` currently accepts IPv6 peers and

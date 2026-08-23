@@ -22,7 +22,7 @@ pub(super) struct TcpListener {
 
     // What the user gave us, with one caveat:
     // - either a fully specified IPADDR:PORT,
-    // - or 0.0.0.0:PORT.
+    // - or a family-specific unspecified address and fixed port.
     // - or, if the user gave us IPADDR:0, this will have IPADDR:EPHEMERAL_PORT.
     socket_addr: SocketAddr,
     client_sender: ClientSender,
@@ -204,7 +204,12 @@ impl TcpListener {
 
             let mut listening_on = Vec::with_capacity(runtime_mut.ip_addresses.len());
             for (addr, device_idx) in &runtime_mut.ip_addresses {
-                listening_on.push((SocketAddr::new(*addr, socket_addr.port()), *device_idx));
+                if addr.is_ipv4() == ip_addr.is_ipv4() {
+                    listening_on.push((SocketAddr::new(*addr, socket_addr.port()), *device_idx));
+                }
+            }
+            if listening_on.is_empty() {
+                return Err(ErrorKind::InvalidInput.into());
             }
 
             (listening_on, None)
@@ -652,6 +657,12 @@ impl TcpListener {
             moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
                 resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.tx as u64;
             }
+            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+                if !tcp_listener.borrow().socket_addr.is_ipv6() {
+                    return Err(ErrorKind::Unsupported.into());
+                }
+                resp.payload.args_8_mut()[23] = 1;
+            }
             _ => return Err(ErrorKind::InvalidInput.into()),
         }
         resp.status = moto_rt::E_OK;
@@ -704,6 +715,14 @@ impl TcpListener {
                 let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
                 tcp_listener.borrow_mut().buffer_sizes.tx = bytes;
                 resp.payload.args_64_mut()[1] = bytes as u64;
+            }
+            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+                if msg.payload.args_8()[23] > 1 {
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+                if !tcp_listener.borrow().socket_addr.is_ipv6() || msg.payload.args_8()[23] == 0 {
+                    return Err(ErrorKind::Unsupported.into());
+                }
             }
             _ => return Err(ErrorKind::InvalidInput.into()),
         }

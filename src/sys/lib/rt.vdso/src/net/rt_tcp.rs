@@ -524,6 +524,16 @@ impl RtTcpListener {
                 let ttl = unsafe { *(ptr as *const u32) };
                 into_error_code(moto_async::block_on_sync(self.inner.set_ttl_async(ttl)))
             }
+            moto_rt::net::SO_ONLY_IPV6 => {
+                assert_eq!(len, 1);
+                let only_v6 = unsafe { *(ptr as *const u8) };
+                if only_v6 > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
+                }
+                into_error_code(moto_async::block_on_sync(
+                    self.inner.set_only_v6_async(only_v6 != 0),
+                ))
+            }
             moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
                 assert_eq!(len, core::mem::size_of::<u64>());
                 let bytes = unsafe { *(ptr as *const u64) };
@@ -558,6 +568,16 @@ impl RtTcpListener {
                 // failures go back to the caller that asked for them.
                 unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
                 moto_rt::E_OK
+            }
+            moto_rt::net::SO_ONLY_IPV6 => {
+                assert_eq!(len, 1);
+                match moto_async::block_on_sync(self.inner.only_v6_async()) {
+                    Ok(only_v6) => {
+                        unsafe { *(ptr as *mut u8) = only_v6 as u8 };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
             }
             moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
                 assert_eq!(len, core::mem::size_of::<u64>());

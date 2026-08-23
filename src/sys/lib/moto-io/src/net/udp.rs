@@ -173,9 +173,6 @@ impl UdpSocket {
         socket_addr: &SocketAddr,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
-        if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
         Self::bind_inner(
             reservation.into_channel_reservation(),
             socket_addr,
@@ -235,7 +232,12 @@ impl UdpSocket {
         if select_route {
             assert_eq!(requested_addr.is_ipv4(), socket_addr.is_ipv4());
         } else {
-            assert_eq!(requested_addr.ip(), socket_addr.ip());
+            if requested_addr.ip().is_unspecified() {
+                assert_eq!(requested_addr.is_ipv4(), socket_addr.is_ipv4());
+                assert!(!socket_addr.ip().is_unspecified());
+            } else {
+                assert_eq!(requested_addr.ip(), socket_addr.ip());
+            }
             if requested_addr.port() != 0 {
                 assert_eq!(requested_addr.port(), socket_addr.port());
             }

@@ -663,6 +663,37 @@ impl TcpListener {
         }
     }
 
+    /// Set the effective IPv6-only state. Motor listeners are bound
+    /// atomically, so an IPv6 listener is always created IPv6-only; asking
+    /// for dual-stack service is unsupported rather than silently ignored.
+    pub async fn set_only_v6_async(&self, only_v6: bool) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_ONLY_V6;
+        req.payload.args_8_mut()[23] = only_v6 as u8;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read whether this listener accepts only IPv6 connections.
+    pub async fn only_v6_async(&self) -> Result<bool, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_ONLY_V6;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_8()[23] != 0)
+        } else {
+            Err(resp.status)
+        }
+    }
+
     /// Configure the buffer size accepted sockets are built with; applies
     /// to accepts served by sockets constructed after the change.
     pub async fn set_buffer_size_async(&self, rcv: bool, bytes: u64) -> Result<(), ErrorCode> {

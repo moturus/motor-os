@@ -1030,7 +1030,7 @@ fn test_stale_cross_connection_accept_is_requeued() {
 
     // A second FIFO control task is a barrier proving the accept task above
     // reached the listener before this connection is closed.
-    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    let invalid_addr = "192.0.2.1:0".parse().unwrap();
     stale_connection
         .send(api_net::bind_udp_socket_request(&invalid_addr, 0))
         .unwrap();
@@ -1090,7 +1090,7 @@ fn test_pending_accept_queue_is_bounded_and_canceled() {
     bind_resp.status().unwrap();
     let listener_id = bind_resp.handle;
 
-    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    let invalid_addr = "192.0.2.1:0".parse().unwrap();
     for batch in 0..CAP / BATCH {
         for offset in 0..BATCH {
             let id = (batch * BATCH + offset + 1) as u64;
@@ -2030,6 +2030,32 @@ fn test_tcp_listener_ttl() {
     assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
 
     println!("test_tcp_listener_ttl() PASS");
+}
+
+#[allow(deprecated)]
+fn test_tcp_wildcards_are_family_scoped() {
+    let v4 = std::net::TcpListener::bind("0.0.0.0:3342").unwrap();
+    let v6 = std::net::TcpListener::bind("[::]:3342").unwrap();
+
+    assert!(v6.only_v6().unwrap());
+    v6.set_only_v6(true).unwrap();
+    assert_eq!(
+        v6.set_only_v6(false).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+
+    let client4 = std::net::TcpStream::connect("127.0.0.1:3342").unwrap();
+    let (server4, peer4) = v4.accept().unwrap();
+    assert!(peer4.is_ipv4());
+    assert!(server4.local_addr().unwrap().is_ipv4());
+
+    let client6 = std::net::TcpStream::connect("[::1]:3342").unwrap();
+    let (server6, peer6) = v6.accept().unwrap();
+    assert!(peer6.is_ipv6());
+    assert!(server6.local_addr().unwrap().is_ipv6());
+
+    drop((client4, server4, client6, server6));
+    println!("test_tcp_wildcards_are_family_scoped() PASS");
 }
 
 #[allow(deprecated)]
@@ -3852,6 +3878,7 @@ pub fn run_all_tests() {
     test_write_after_peer_graceful_close_resets();
     test_read_after_peer_reset_reports_error();
     test_tcp_listener_ttl();
+    test_tcp_wildcards_are_family_scoped();
     test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();
     test_native_buffer_options();
