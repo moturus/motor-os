@@ -1,3 +1,30 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TtyRole {
+    System,
+    Interactive,
+    None,
+}
+
+/// Parses the text after `tty:` as an optional role and a bare program path.
+pub fn process_tty_line(value: &str) -> Result<(TtyRole, String), String> {
+    let (role, command) = match value.split_once(':') {
+        Some((role, command)) => {
+            let role = match role {
+                "system" => TtyRole::System,
+                "interactive" => TtyRole::Interactive,
+                "none" => TtyRole::None,
+                _ => return Err("invalid role".to_owned()),
+            };
+            (role, command)
+        }
+        None => (TtyRole::Interactive, value),
+    };
+    if command.is_empty() || command.chars().any(char::is_whitespace) {
+        return Err("tty command must be a bare program path".to_owned());
+    }
+    Ok((role, command.to_owned()))
+}
+
 /// Parses the text after `svc:` as a decimal capability mask and command.
 pub fn process_service_line(cap_cmd: &str) -> Result<(u64, String), String> {
     let (caps, cmd) = cap_cmd

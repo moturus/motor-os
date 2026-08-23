@@ -94,6 +94,10 @@ pub fn wait_child(child: &mut Child) -> std::io::Result<WaitOutcome> {
 /// The Unix host has no capability model, so there is nothing to grant; the
 /// `spawn-detached` list is inert here (the env var it would set means nothing
 /// off Motor). Present so the shell core stays free of `cfg`.
+pub fn ordinary_child_cap_grant() -> Option<(&'static str, String)> {
+    None
+}
+
 pub fn detach_cap_grant() -> Option<(&'static str, String)> {
     None
 }

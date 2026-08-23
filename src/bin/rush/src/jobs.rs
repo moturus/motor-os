@@ -138,8 +138,14 @@ pub fn spawn(
         cmd.env(k, v);
     }
 
+    if let Some((key, val)) = sys::ordinary_child_cap_grant()
+        && !env.iter().any(|(name, _)| name == key)
+    {
+        cmd.env(key, val);
+    }
+
     // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED.
-    // Set after the env loop so a stray MOTURUS_CAPS in the shell environment
+    // Set after the env loop so a stray MOTOR_OS_CAPS in the shell environment
     // cannot override the grant.
     if let Some((key, val)) = detach_grant_for(program) {
         cmd.env(key, val);

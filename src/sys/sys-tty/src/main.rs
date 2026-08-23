@@ -90,8 +90,15 @@ fn main() {
     command.env_clear();
     command.env("HOME", USER_HOME);
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
-    // This explicit replacement mask keeps the console shell Interactive and
-    // lets programs it trusts start daemons that outlive the session.
+    let role_cap = match moto_sys::caps::ProcessRole::from_caps(
+        moto_sys::ProcessStaticPage::get().capabilities,
+    ) {
+        moto_sys::caps::ProcessRole::System => moto_sys::caps::CAP_SYS,
+        moto_sys::caps::ProcessRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
+        moto_sys::caps::ProcessRole::None => 0,
+    };
+    // Preserve the configured session role without handing the console command
+    // sys-tty's I/O-manager authority.
     command.env(
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!(
@@ -99,7 +106,7 @@ fn main() {
             moto_sys::caps::CAP_SPAWN
                 | moto_sys::caps::CAP_LOG
                 | moto_sys::caps::CAP_SPAWN_DETACHED
-                | moto_sys::caps::CAP_INTERACTIVE
+                | role_cap
         ),
     );
     for assignment in &assignments {

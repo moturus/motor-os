@@ -34,12 +34,16 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
+pub use unix::{
+    detach_cap_grant, exit_status_code, kill, ordinary_child_cap_grant, set_disposition, wait_child,
+};
 
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
-pub use motor::{detach_cap_grant, exit_status_code, kill, set_disposition, wait_child};
+pub use motor::{
+    detach_cap_grant, exit_status_code, kill, ordinary_child_cap_grant, set_disposition, wait_child,
+};
 
 // ---- signals ---------------------------------------------------------------
 
