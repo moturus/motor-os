@@ -260,11 +260,11 @@ impl RtTcpStream {
             _ => {}
         }
 
-        if (interests & moto_rt::poll::POLL_WRITABLE != 0)
-            && self.inner.have_write_buffer_space()
-            && state.can_write()
-        {
-            events |= moto_rt::poll::POLL_WRITABLE;
+        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && state.can_write() {
+            // If the shared channel is out of TX pages, arm its page-release
+            // waiter instead of losing the level transition. The native
+            // helper closes the check/register race with a second check.
+            self.inner.maybe_can_write();
         }
 
         if ((interests & moto_rt::poll::POLL_READABLE) != 0)
@@ -289,6 +289,14 @@ impl RtTcpStream {
         if events != 0 {
             self.events.on_event(events);
         }
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(crate) fn arm_writable_without_pages_for_test(&self) {
+        self.inner.with_tx_pages_exhausted_for_test(|| {
+            assert!(!self.inner.have_write_buffer_space());
+            self.maybe_raise_events(moto_rt::poll::POLL_WRITABLE);
+        });
     }
 }
 

@@ -135,7 +135,7 @@ Within each group, order is the suggested pickup order.
   `rx_park` on a dead server handle spins and every parked RPC, read future,
   and blocking call on that channel hangs forever. The same happens when
   sys-io dies. Set `exiting`, drop the RPC map, and fail the sockets.
-- Arm WRITABLE at poll registration when the subchannel's TX pages are
+- COMPLETED: Arm WRITABLE at poll registration when the subchannel's TX pages are
   exhausted. `rt_tcp.rs` synthesizes WRITABLE only if page space exists and
   arms nothing otherwise; a subchannel index reused while sys-io still holds
   the previous occupant's pages (a lingering close to a slow peer) leaves an

@@ -571,6 +571,17 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
         1 => return crate::net::pool::NET_POOL.client_count() as u64,
         #[cfg(feature = "netdev")]
         2 => moto_io::net::channel::poison_connect_for_test(a2 != 0),
+        #[cfg(feature = "netdev")]
+        3 => {
+            let Some(posix_file) = posix::get_file(a2 as RtFd) else {
+                panic!("invalid TCP fd {a2}");
+            };
+            let Some(stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>()
+            else {
+                panic!("fd {a2} is not a TCP stream");
+            };
+            stream.arm_writable_without_pages_for_test();
+        }
         _ => panic!("Unrecognized option {a1}"),
     }
 

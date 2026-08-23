@@ -944,6 +944,8 @@ impl TcpStream {
             pages.push(page);
         }
         f();
+        drop(pages);
+        self.channel().wake_waiters_for_test();
     }
 
     #[doc(hidden)]
