@@ -35,9 +35,9 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" main.img systest mio-test tokio-tests \
-    BUILD=release -j"$(nproc)"
+    rnetbench BUILD=release -j"$(nproc)"
 else
-  make -C "$ROOT_DIR" main.img systest mio-test tokio-tests -j"$(nproc)"
+  make -C "$ROOT_DIR" main.img systest mio-test tokio-tests rnetbench -j"$(nproc)"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -46,6 +46,8 @@ if [ "$BUILD" = "release" ]; then
 else
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 fi
+cargo build --release --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+HOST_RNET="$ROOT_DIR/src/bin/rnetbench/target/release/rnetbench"
 
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
@@ -183,12 +185,18 @@ read_udp_socket_count() {
 }
 
 DNS_RESOLVER_SSH_PID=""
+RNETBENCH_SSH_PID=""
 VMM_PID=""
 
 # cleanup routine
 stop_vmm() {
   set +e
   stop_udp_fragment_echo
+  if [ -n "$RNETBENCH_SSH_PID" ]; then
+    kill "$RNETBENCH_SSH_PID" 2>/dev/null
+    wait "$RNETBENCH_SSH_PID" 2>/dev/null
+    RNETBENCH_SSH_PID=""
+  fi
   stop_vm "$VMM_PID"
   VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
@@ -243,7 +251,8 @@ printf '%s\n' \
   'mkdir /devtools/tmp' \
   "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
   "put $ROOT_DIR/build/bin/$BUILD/mio-test /devtools/tests/mio-test" \
-  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" |
+  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" \
+  "put $ROOT_DIR/build/bin/$BUILD/rnetbench /devtools/tests/rnetbench" |
   sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
@@ -256,6 +265,29 @@ vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
+
+echo "-- bounded TX queue liveness --"
+coproc RNETBENCH_SERVER {
+  "${SSH[@]}" "TMPDIR=/devtools/tmp /devtools/tests/rnetbench --server" 2>&1
+}
+RNETBENCH_SSH_PID="$!"
+RNETBENCH_OUT_FD="${RNETBENCH_SERVER[0]}"
+RNETBENCH_IN_FD="${RNETBENCH_SERVER[1]}"
+IFS= read -r rnetbench_banner <&"$RNETBENCH_OUT_FD"
+[ "$rnetbench_banner" = "rnetbench server: listening on 0.0.0.0:40000" ] ||
+  fail "rnetbench server did not become ready: '$rnetbench_banner'"
+for pass in 1 2; do
+  echo "rnetbench four-stream pass $pass"
+  timeout 20s "$HOST_RNET" -c 192.168.4.2:40000 -P 4 -t 1
+done
+printf '\003' >&"$RNETBENCH_IN_FD"
+rnetbench_server_output="$(cat <&"$RNETBENCH_OUT_FD")"
+rnetbench_server_status=0
+wait "$RNETBENCH_SSH_PID" || rnetbench_server_status="$?"
+RNETBENCH_SSH_PID=""
+[ "$rnetbench_server_status" -eq 0 ] ||
+  fail "rnetbench server exited with status $rnetbench_server_status"
+printf '%s\n' "$rnetbench_banner" "$rnetbench_server_output"
 
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test

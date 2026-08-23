@@ -32,6 +32,7 @@ struct TxQueueState {
     work: VecDeque<TxWork>,
     bytes: usize,
     byte_limit: usize,
+    exhausted: bool,
 }
 
 impl TxQueueState {
@@ -41,11 +42,13 @@ impl TxQueueState {
             work: VecDeque::new(),
             bytes: 0,
             byte_limit,
+            exhausted: false,
         }
     }
 
     fn reserve(&mut self) -> bool {
         if self.bytes > self.byte_limit - TX_RESERVATION {
+            self.exhausted = true;
             return false;
         }
         self.bytes += TX_RESERVATION;
@@ -73,6 +76,10 @@ impl TxQueueState {
             work,
             was_full && self.bytes <= self.byte_limit - TX_RESERVATION,
         )
+    }
+
+    fn take_exhausted(&mut self) -> bool {
+        std::mem::take(&mut self.exhausted)
     }
 }
 
@@ -842,6 +849,7 @@ pub(super) struct PollResult {
     pub activity: moto_netstack::iface::PollResult,
     pub addresses_changed: bool,
     pub dns_servers: Option<Vec<Ipv4Addr>>,
+    pub tx_exhausted: bool,
 }
 
 enum DhcpUpdate {
@@ -1154,12 +1162,16 @@ impl<'a> NetDev<'a> {
         tsval::tick();
 
         let waiters = std::mem::take(poll_waiters);
-        let result = match device {
-            NetstackDevice::Loopback(loopback) => {
-                iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
-            }
+        let (result, tx_exhausted) = match device {
+            NetstackDevice::Loopback(loopback) => (
+                iface.poll(moto_netstack::time::Instant::now(), loopback, sockets),
+                false,
+            ),
             NetstackDevice::VirtIo(virtio_device) => {
-                iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
+                let result =
+                    iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets);
+                let tx_exhausted = virtio_device.tx_queue.borrow_mut().take_exhausted();
+                (result, tx_exhausted)
             }
         };
 
@@ -1309,6 +1321,7 @@ impl<'a> NetDev<'a> {
             activity: result,
             addresses_changed,
             dns_servers,
+            tx_exhausted,
         }
     }
 
@@ -1539,6 +1552,8 @@ pub(crate) mod self_test {
         }
         st_assert_eq!(queue.bytes, queue.byte_limit);
         st_assert!(!queue.reserve());
+        st_assert!(queue.take_exhausted());
+        st_assert!(!queue.take_exhausted());
 
         let (packet, reopened) = queue.pop_front();
         st_assert!(matches!(packet, Some((_, 0))));

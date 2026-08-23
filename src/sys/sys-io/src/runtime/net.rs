@@ -229,6 +229,14 @@ impl NetRuntime {
                 }
                 match outcome.activity {
                     moto_netstack::iface::PollResult::None => {
+                        // A full software TX queue leaves ready sockets at
+                        // PollAt::Now, but repolling cannot make progress. Wait
+                        // for the TX worker to reopen admission (or for RX)
+                        // instead of starving that worker in an immediate loop.
+                        if outcome.tx_exhausted {
+                            notify.notified().await;
+                            continue;
+                        }
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
                         // Note: we cannot move the op from the previous line into the if
                         // condition below, because Rust will keep this.inner borrowed for
