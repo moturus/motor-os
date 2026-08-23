@@ -72,18 +72,20 @@ Within each group, order is the suggested pickup order.
   attempt the reset, never for device completion, so a wedged host cannot
   retain the socket. Failed reset admission or allocation increments
   `net.tcp.abort_failed` before teardown continues.
-- Finish neighbor-discovery failure reporting and aggregate limiting. sys-io
+- COMPLETED: Finish neighbor-discovery failure reporting and aggregate limiting. sys-io
   now uses a shared 50 ms ARP/NDP quiet interval. UDP gives a neighbor three
   probes and their response windows, then drops the blocking datagram and
   counts `net.udp.tx_unreachable_drops`; `NoRoute` drops immediately, while
   `FragmenterBusy` has a separate local backoff. An external interface now
   emits at most 20 aggregate ARP/NS requests per second with a one-second
   burst; spoofable passive/socketless work cannot spend the last four tokens,
-  and `net.neighbor.solicit_suppressed` counts deferrals. TCP and other
-  non-UDP sockets start a fresh three-probe batch after a one-second hold-down
-  instead of re-soliciting every 50 ms forever. Active TCP connect still has
-  no neighbor-resolution terminal error, and UDP has no caller-visible
-  `EHOSTUNREACH`. Decide those terminal/error behaviors.
+  and `net.neighbor.solicit_suppressed` counts deferrals. Established TCP and
+  other non-UDP sockets start a fresh three-probe batch after a one-second
+  hold-down instead of re-soliciting every 50 ms forever. An active TCP
+  connect closes after its first exhausted batch and reports Motor OS's
+  existing `E_NOT_CONNECTED`. UDP intentionally exposes no asynchronous
+  socket error: datagrams remain lossy, and the drop metric supplies operator
+  visibility without an ambiguous per-socket error.
 
 ### Replies on a shared segment
 

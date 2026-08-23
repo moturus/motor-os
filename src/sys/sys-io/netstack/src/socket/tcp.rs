@@ -1491,6 +1491,14 @@ impl<'a> Socket<'a> {
         self.set_state(State::Closed);
     }
 
+    /// Fail an active open before its SYN reached the peer.
+    pub(crate) fn fail_connect(&mut self) {
+        debug_assert_eq!(self.state, State::SynSent);
+        // There is no peer to reset when neighbor discovery failed, and
+        // retaining the tuple would make CLOSED dispatch try to resolve it.
+        self.reset();
+    }
+
     /// Return whether the socket is passively listening for incoming connections.
     ///
     /// In terms of the TCP state machine, the socket must be in the `LISTEN` state.

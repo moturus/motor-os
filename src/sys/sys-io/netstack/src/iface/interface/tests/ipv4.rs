@@ -2839,7 +2839,7 @@ fn aggregate_throttling_does_not_spend_udp_neighbor_attempts() {
 
 #[test]
 #[cfg(all(feature = "medium-ethernet", feature = "socket-tcp"))]
-fn tcp_neighbor_failure_enters_hold_down() {
+fn tcp_neighbor_failure_closes_active_connect() {
     use crate::socket::tcp;
 
     let (mut iface, mut sockets, mut device) = setup(Medium::Ethernet);
@@ -2884,18 +2884,19 @@ fn tcp_neighbor_failure_enters_hold_down() {
         assert_eq!(arp_requests(&device), expected);
     }
 
-    // The third response window expires at t=150. No fourth request is sent;
-    // the next batch begins only after the one-second hold-down.
-    for now in [150, 1149] {
+    // The third response window expires at t=150. An active connect then
+    // closes without trying to resolve the neighbor again for a reset.
+    iface.poll(Instant::from_millis(150), &mut device, &mut sockets);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::Closed
+    );
+    assert_eq!(sockets.get::<tcp::Socket>(handle).remote_endpoint(), None);
+
+    for now in [1150, 2150] {
         iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
         assert_eq!(arp_requests(&device), 3);
     }
-    iface.poll(Instant::from_millis(1150), &mut device, &mut sockets);
-    assert_eq!(arp_requests(&device), 4);
-    assert_eq!(
-        sockets.get::<tcp::Socket>(handle).state(),
-        tcp::State::SynSent
-    );
 }
 
 #[rstest]

@@ -1498,6 +1498,18 @@ impl Interface {
                     continue;
                 }
 
+                #[cfg(feature = "socket-tcp")]
+                if let Socket::Tcp(socket) = &mut item.socket
+                    && socket.state() == crate::socket::tcp::State::SynSent
+                {
+                    socket.fail_connect();
+                    item.meta.reset_egress();
+                    demux.resync(item);
+                    refresh_poll_at(&mut self.inner, poll_index, item);
+                    result = PollResult::SocketStateChanged;
+                    continue;
+                }
+
                 item.meta
                     .neighbor_hold_down(self.inner.now, NEIGHBOR_FAILURE_HOLD_DOWN);
                 refresh_poll_at(&mut self.inner, poll_index, item);

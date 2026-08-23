@@ -2897,6 +2897,16 @@ fn test_neighbor_admission() {
     println!("-- test_neighbor_admission() PASS");
 }
 
+/// A host absent from systest's dedicated tap must fail at neighbor discovery,
+/// not leave an active open retrying until its caller-supplied deadline.
+fn test_unresolved_neighbor_fails_connect() {
+    let absent = "192.168.4.254:9".parse().unwrap();
+    let err = std::net::TcpStream::connect_timeout(&absent, Duration::from_secs(2)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotConnected);
+
+    println!("-- test_unresolved_neighbor_fails_connect() PASS");
+}
+
 /// sys-io accounts for every listening socket that is waiting on a peer to
 /// finish the handshake, and resets connection requests no socket wants.
 ///
@@ -3820,6 +3830,7 @@ fn test_timeout_storm_under_traffic() {
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
+    test_unresolved_neighbor_fails_connect();
     test_channel_teardown();
     test_completed_accept_backlog_is_bounded();
     test_backlog_saturation_liveness();
