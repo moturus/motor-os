@@ -1726,7 +1726,9 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "moto-async",
  "moto-dns",
+ "moto-io",
  "moto-ipc",
  "moto-rt",
  "moto-stats",

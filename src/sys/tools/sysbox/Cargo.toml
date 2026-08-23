@@ -11,7 +11,9 @@ edition = "2021"
 # Cargo.toml, whose backend is what makes a console with no termios, no ioctl
 # and no signals look like a terminal (docs/tui.md).
 crossterm    = { version = "0.29", default-features = false, features = ["events"] }
+moto-async   = { path = "../../lib/moto-async"  }
 moto-dns     = { path = "../../lib/moto-dns"    }
+moto-io      = { path = "../../lib/moto-io"     }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-rt      = { path = "../../lib/moto-rt"     }
 moto-stats   = { path = "../../lib/moto-stats"  }

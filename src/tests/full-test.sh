@@ -521,6 +521,8 @@ esac
 # the child names do not appear in the command, so they only match ls output.
 vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color
 vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/amber-dir
+vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/z-directory
+vm_ssh /system/bin/cp /system/bin/ls /devtools/tmp/sysbox-ls-color/a-file
 vm_ssh /system/bin/cp /system/bin/ls /devtools/tmp/sysbox-ls-color/default-file
 check_ls_colors() {
   local option="$1"
@@ -544,6 +546,28 @@ check_ls_colors() {
 }
 check_ls_colors ""
 check_ls_colors "-l"
+
+# Directories sort before files in both output modes, with each group sorted by
+# name. The names deliberately put a file before a directory lexically.
+for option in "" "-l"; do
+  sorted_ls="$(vm_ssh /system/bin/ls $option /devtools/tmp/sysbox-ls-color)"
+  case "$sorted_ls" in
+    *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
+    *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
+  esac
+done
+
+# Long listings use Linux-shaped type/permission fields. The three permission
+# triplets are Motor FS System, Interactive, and None roles, in that order.
+long_ls="$(vm_ssh /system/bin/ls -l /devtools/tmp/sysbox-ls-color)"
+case "$long_ls" in
+  *"drwxrwxrwx"*"amber-dir"*) ;;
+  *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
+esac
+case "$long_ls" in
+  *"-rwxrwxrwx"*"default-file"*) ;;
+  *) fail "ls -l did not report file permissions: '$long_ls'" ;;
+esac
 
 # rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,
 # §7.6). The motions and the compacted history are unit-tested on the host in

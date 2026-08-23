@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, path::Path};
+use std::{cmp::Ordering, io::IsTerminal, path::Path};
 
 const DIRECTORY_COLOR: &str = "\x1b[1;38;5;214m";
 const COLOR_RESET: &str = "\x1b[0m";
@@ -9,6 +9,111 @@ fn name_colors(is_directory: bool, stdout_is_terminal: bool) -> (&'static str, &
     } else {
         ("", "")
     }
+}
+
+struct DetailedEntry {
+    name: String,
+    kind: DetailedEntryKind,
+    size: u64,
+    permissions: [PermissionTriplet; 3],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailedEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Clone, Copy)]
+struct PermissionTriplet {
+    read: bool,
+    write: bool,
+    execute: bool,
+}
+
+fn compare_detailed_entries(a: &DetailedEntry, b: &DetailedEntry) -> Ordering {
+    match (
+        a.kind == DetailedEntryKind::Directory,
+        b.kind == DetailedEntryKind::Directory,
+    ) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    }
+}
+
+fn permission_string(kind: DetailedEntryKind, permissions: [PermissionTriplet; 3]) -> String {
+    let mut result = String::with_capacity(10);
+    result.push(match kind {
+        DetailedEntryKind::Directory => 'd',
+        DetailedEntryKind::File => '-',
+    });
+
+    for permission in permissions {
+        result.extend(permission_chars(permission));
+    }
+    result
+}
+
+fn permission_chars(permission: PermissionTriplet) -> [char; 3] {
+    [
+        if permission.read { 'r' } else { '-' },
+        if permission.write { 'w' } else { '-' },
+        if permission.execute { 'x' } else { '-' },
+    ]
+}
+
+fn read_detailed_entries(dir: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
+    use moto_io::fs::{EntryKind, FsClient, Role};
+
+    let dir = dir
+        .to_str()
+        .ok_or(moto_rt::Error::InvalidArgument)?
+        .to_owned();
+
+    moto_async::LocalRuntime::new().block_on(async move {
+        let client = FsClient::connect()?;
+        let (dir_id, kind) = client.stat(&dir).await?;
+        if kind != EntryKind::Directory {
+            return Err(moto_rt::Error::NotADirectory);
+        }
+
+        let mut entries = Vec::new();
+        let mut entry_id = client.get_first_entry(dir_id).await?;
+        while let Some(id) = entry_id {
+            // Fetch the successor first, as std::fs::read_dir does, so a
+            // concurrently removed current entry cannot strand the cursor.
+            entry_id = client.get_next_entry(id).await?;
+            let metadata = client.metadata(id).await?;
+            let kind = match metadata.try_kind()? {
+                EntryKind::Directory => DetailedEntryKind::Directory,
+                EntryKind::File => DetailedEntryKind::File,
+            };
+            let mut permissions = [PermissionTriplet {
+                read: false,
+                write: false,
+                execute: false,
+            }; 3];
+            for (idx, role) in [Role::System, Role::Interactive, Role::None]
+                .into_iter()
+                .enumerate()
+            {
+                let (read, write, execute) = metadata.access(role)?.triple();
+                permissions[idx] = PermissionTriplet {
+                    read,
+                    write,
+                    execute,
+                };
+            }
+            entries.push(DetailedEntry {
+                name: client.name(id).await?,
+                kind,
+                size: metadata.size,
+                permissions,
+            });
+        }
+        Ok(entries)
+    })
 }
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
@@ -64,79 +169,53 @@ pub fn do_command(args: &[String]) {
 }
 
 fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
-    let path = std::fs::canonicalize(Path::new(dir));
-    if path.is_err() {
-        eprintln!("error reading directory '{dir}'.\n");
-        return;
-    }
-    let readdir = std::fs::read_dir(path.unwrap().as_path());
-    if readdir.is_err() {
-        eprintln!("error reading directory '{dir}'.\n");
-        return;
-    }
-
-    let mut entries = std::vec![];
-
-    let mut max_size = 0;
-    for e in readdir.unwrap() {
-        max_size = max_size.max(e.as_ref().unwrap().metadata().unwrap().len());
-        entries.push(e);
-    }
-    entries.sort_by(|a, b| {
-        if a.as_ref().unwrap().file_type().unwrap().is_dir()
-            && !&b.as_ref().unwrap().file_type().unwrap().is_dir()
-        {
-            std::cmp::Ordering::Less
-        } else {
-            a.as_ref()
-                .unwrap()
-                .file_name()
-                .cmp(&b.as_ref().unwrap().file_name())
+    let path = match std::fs::canonicalize(Path::new(dir)) {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("error reading directory '{dir}'.\n");
+            return;
         }
-    });
+    };
+    let mut entries = match read_detailed_entries(&path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            eprintln!("error reading directory '{dir}'.\n");
+            return;
+        }
+    };
+
+    let max_size = entries.iter().map(|entry| entry.size).max().unwrap_or(0);
+    entries.sort_by(compare_detailed_entries);
 
     let size_len = max_size.to_string().len();
 
     let stdout_is_terminal = std::io::stdout().is_terminal();
 
-    for e in &entries {
-        match e {
-            Ok(e) => {
-                let ft = e.file_type().unwrap();
-                let fname = e.file_name().to_str().unwrap().to_owned();
-                if fname.as_str() == "." && !list_dots {
-                    continue;
-                }
-                if fname.as_str() == ".." && !list_dots {
-                    continue;
-                }
-                let (color_in, color_out) = name_colors(ft.is_dir(), stdout_is_terminal);
-                if ft.is_dir() {
-                    print!("d ");
-                    for _ in 0..size_len {
-                        print!(" ");
-                    }
-                    println!(" {color_in}{fname}{color_out}");
-                } else if ft.is_file() {
-                    println!(
-                        "f {:width$} {}{}{}",
-                        if human_friendly {
-                            crate::format_bytes(e.metadata().unwrap().len())
-                        } else {
-                            format!("{}", e.metadata().unwrap().len())
-                        },
-                        color_in,
-                        fname,
-                        color_out,
-                        width = size_len,
-                    );
+    for entry in &entries {
+        if (entry.name == "." || entry.name == "..") && !list_dots {
+            continue;
+        }
+        let is_directory = entry.kind == DetailedEntryKind::Directory;
+        let (color_in, color_out) = name_colors(is_directory, stdout_is_terminal);
+        let permissions = permission_string(entry.kind, entry.permissions);
+        if is_directory {
+            println!(
+                "{permissions} {:width$} {color_in}{}{color_out}",
+                "",
+                entry.name,
+                width = size_len,
+            );
+        } else {
+            println!(
+                "{permissions} {:width$} {color_in}{}{color_out}",
+                if human_friendly {
+                    crate::format_bytes(entry.size)
                 } else {
-                    println!("? {fname}");
-                }
-            }
-            Err(_) => {
-                eprintln!("--error--");
-            }
+                    entry.size.to_string()
+                },
+                entry.name,
+                width = size_len,
+            );
         }
     }
 }
@@ -162,10 +241,13 @@ fn list_plain(dir: &str, list_dots: bool) {
         entries.push(e.unwrap());
     }
     entries.sort_by(|a, b| {
-        if a.file_type().unwrap().is_dir() && !&b.file_type().unwrap().is_dir() {
-            std::cmp::Ordering::Less
-        } else {
-            a.file_name().cmp(&b.file_name())
+        match (
+            a.file_type().unwrap().is_dir(),
+            b.file_type().unwrap().is_dir(),
+        ) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => a.file_name().cmp(&b.file_name()),
         }
     });
 
@@ -188,20 +270,4 @@ fn list_plain(dir: &str, list_dots: bool) {
         }
     }
     println!();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_directories_use_the_rush_prompt_color() {
-        assert_eq!(name_colors(true, true), ("\x1b[1;38;5;214m", "\x1b[0m"));
-    }
-
-    #[test]
-    fn files_and_non_terminal_output_use_the_default_color() {
-        assert_eq!(name_colors(false, true), ("", ""));
-        assert_eq!(name_colors(true, false), ("", ""));
-    }
 }
