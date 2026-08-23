@@ -120,7 +120,7 @@ Within each group, order is the suggested pickup order.
   start is never re-entered; with everything written off as lost at RTO, up
   to 0.7 cwnd of retransmissions bursts out. RFC 5681 and RFC 8312 require one
   segment.
-- Check the assembler before growing the receive ring.
+- COMPLETED: Check the assembler before growing the receive ring.
   `apply_pending_rx_growth` tests `rx_buffer.is_empty()` but not the
   assembler; `grow_to` resets `read_at` to zero, so out-of-order payload
   already in the ring is mapped to different offsets and a later hole fill

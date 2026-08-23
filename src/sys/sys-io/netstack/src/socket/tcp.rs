@@ -656,7 +656,7 @@ pub struct Socket<'a> {
     /// smaller than the configured capacity the scale was chosen for.
     win_shift_override: Option<u8>,
     /// Latched rx capacity target; applies once the connection is
-    /// synchronized and the ring holds no unconsumed bytes.
+    /// synchronized and neither the ring nor assembler holds bytes.
     pending_rx_capacity: Option<usize>,
     /// Latched tx capacity target; applies once the connection is
     /// synchronized and the ring is fully acked and drained.
@@ -1663,10 +1663,10 @@ impl<'a> Socket<'a> {
     /// The request is clamped to `65535 << shift`, the most the announced
     /// window scale can express; growth never re-announces the shift
     /// (RFC 7323 makes the scale immutable once sent). It applies at the
-    /// first moment the connection is synchronized and the ring holds no
-    /// unconsumed bytes: immediately when both already hold, at the
-    /// ESTABLISHED edge, or when the ring is fully read out. A request at
-    /// or below the current capacity clears any pending growth
+    /// first moment the connection is synchronized and neither the ring nor
+    /// out-of-order assembler holds bytes: immediately if those conditions
+    /// already hold, at the ESTABLISHED edge, or when the ring is fully read
+    /// out. A request at or below the current capacity clears any pending growth
     /// (shrinking is not supported).
     pub fn grow_rx_capacity(&mut self, bytes: usize) {
         let target = bytes.min(65535usize << self.remote_win_shift);
@@ -1693,7 +1693,7 @@ impl<'a> Socket<'a> {
     }
 
     fn apply_pending_rx_growth(&mut self) {
-        if self.growth_deferred() || !self.rx_buffer.is_empty() {
+        if self.growth_deferred() || !self.rx_buffer.is_empty() || !self.assembler.is_empty() {
             return;
         }
         if let Some(target) = self.pending_rx_capacity.take() {
@@ -5094,6 +5094,70 @@ mod test {
         assert_eq!(s.recv_capacity(), 64);
 
         assert_eq!(s.socket.recv_slice(&mut buf[..]), Ok(3));
+        assert_eq!(s.recv_capacity(), 256);
+        assert_eq!(s.effective_recv_capacity(), 256);
+    }
+
+    #[test]
+    fn test_grow_rx_latches_until_out_of_order_data_is_read() {
+        let mut s = socket_established();
+
+        // Rotate the ring so resetting its read cursor would remap an
+        // out-of-order write to different storage.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"rotate"[..],
+                ..SEND_TEMPL
+            }
+        );
+        let mut rotated = [0; 6];
+        assert_eq!(s.socket.recv_slice(&mut rotated), Ok(6));
+        assert_eq!(&rotated, b"rotate");
+
+        let next = REMOTE_SEQ + 1 + rotated.len();
+        send!(
+            s,
+            TcpRepr {
+                seq_number: next + 4,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"WXYZ"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(next),
+                ..RECV_TEMPL
+            })
+        );
+        assert!(s.rx_buffer.is_empty());
+        assert!(!s.assembler.is_empty());
+
+        s.socket.grow_rx_capacity(256);
+        assert_eq!(s.recv_capacity(), 64);
+        assert_eq!(s.effective_recv_capacity(), 256);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: next,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcd"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(next + 8),
+                window_len: 56,
+                ..RECV_TEMPL
+            })
+        );
+
+        let mut data = [0; 8];
+        assert_eq!(s.socket.recv_slice(&mut data), Ok(8));
+        assert_eq!(&data, b"abcdWXYZ");
         assert_eq!(s.recv_capacity(), 256);
         assert_eq!(s.effective_recv_capacity(), 256);
     }
