@@ -7,13 +7,14 @@
 //!
 //! Two things make this practical, both deliberate Phase 8 design choices:
 //!
-//! - The editor never *waits* on the terminal. It asks for the width
-//!   ([`crossterm::terminal::window_size`], which on a pty is `TIOCGWINSZ`) and
-//!   is never blocked by the answer — so a test does not have to impersonate a
-//!   terminal that reports one, and a console that never does cannot hang the
-//!   shell. Where the size comes from on a console with no ioctl is crossterm's
-//!   Motor OS backend, which subscribes to it in band; `test-terminal-size.sh`
-//!   drives that end, this file drives the pty one.
+//! - The editor asks the terminal two things, and waits for neither for long.
+//!   The width comes from [`crossterm::terminal::window_size`], which on a pty
+//!   is `TIOCGWINSZ` and never blocks; where it comes from on a console with no
+//!   ioctl is crossterm's Motor OS backend, which subscribes to it in band
+//!   (`test-terminal-size.sh` drives that end, this file drives the pty one).
+//!   The cursor's column comes from `ESC[6n`, which is a round trip — so [`Pty`]
+//!   answers it, as the terminal it stands in for would, and a console that does
+//!   not answer costs the shell one timeout and is never asked again.
 //! - Rendering goes through one function, and [`screen`] below replays what it
 //!   writes to recover what the user would see, rather than matching raw bytes —
 //!   the same reason a terminal exists. That the editor paints *incrementally*
@@ -41,6 +42,9 @@ const RUSH: &str = env!("CARGO_BIN_EXE_rush");
 struct Pty {
     master: std::fs::File,
     child: std::process::Child,
+    /// The width the pty is currently at, which the cursor replies are
+    /// computed against. [`Pty::resize`] keeps it true.
+    cols: usize,
     /// Every byte the shell has written, from the first prompt on.
     ///
     /// The screen is what all of them add up to, which is the only way to read
@@ -98,8 +102,15 @@ impl Pty {
         Pty {
             master,
             child,
+            cols: cols as usize,
             seen: String::new(),
         }
+    }
+
+    /// Resize the terminal under the shell, as a pane split does.
+    fn resize(&mut self, cols: u16) {
+        set_pty_cols(&self.master, cols);
+        self.cols = cols as usize;
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -127,6 +138,7 @@ impl Pty {
         let mut buf = [0_u8; 4096];
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut idle_since = Instant::now();
+        let mut answered = 0;
         set_nonblocking(&self.master);
         while Instant::now() < deadline {
             match self.master.read(&mut buf) {
@@ -134,6 +146,19 @@ impl Pty {
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
                     idle_since = Instant::now();
+                    // The shell is blocked until its `ESC[6n` is answered, so
+                    // the answer goes back from inside this loop: after it, the
+                    // loop is what reads the paint that answering unblocked.
+                    // Counting on the whole of `out` catches a request split
+                    // across two reads.
+                    let asked = out
+                        .windows(DSR.len())
+                        .filter(|w| *w == DSR.as_bytes())
+                        .count();
+                    while answered < asked {
+                        self.answer_cursor_query(&String::from_utf8_lossy(&out));
+                        answered += 1;
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if idle_since.elapsed() > Duration::from_millis(250) && !out.is_empty() {
@@ -148,6 +173,19 @@ impl Pty {
         let out = String::from_utf8_lossy(&out).into_owned();
         self.seen.push_str(&out);
         out
+    }
+
+    /// Answer `ESC[6n` with where everything written so far left the cursor.
+    ///
+    /// The shell is blocked on this reply, so it has to go back while the read
+    /// loop above is still running rather than after it settles.
+    fn answer_cursor_query(&mut self, pending: &str) {
+        let mut session = self.seen.clone();
+        session.push_str(pending);
+        let (_, (row, col)) = replay(&session, self.cols);
+        let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+        let _ = self.master.write_all(reply.as_bytes());
+        let _ = self.master.flush();
     }
 
     /// Wait for the shell to paint its first prompt, which is when it is
@@ -260,6 +298,12 @@ fn cells(c: char) -> usize {
 /// own repaint vocabulary (`\r`, cursor motion, erase-to-end-of-line, erase
 /// screen), and no more. Anything the editor does not emit is ignored.
 fn screen(bytes: &str, cols: usize) -> Vec<String> {
+    replay(bytes, cols).0
+}
+
+/// The same replay, keeping the cursor: `ESC[6n` asks where these bytes left
+/// it, and answering that is part of being the terminal these tests stand in for.
+fn replay(bytes: &str, cols: usize) -> (Vec<String>, (usize, usize)) {
     let mut grid: Vec<Vec<char>> = vec![vec![' '; cols]];
     let (mut row, mut col) = (0_usize, 0_usize);
     let mut chars = bytes.chars().peekable();
@@ -370,7 +414,7 @@ fn screen(bytes: &str, cols: usize) -> Vec<String> {
     while rows.last().map(|r| r.is_empty()).unwrap_or(false) {
         rows.pop();
     }
-    rows
+    (rows, (row, col))
 }
 
 /// Type `keys` into a fresh shell and return what the screen shows.
@@ -391,6 +435,9 @@ fn prompt_line(rows: &[String]) -> String {
 }
 
 const CR: &[u8] = b"\r";
+
+/// The cursor position report the editor asks for before each prompt.
+const DSR: &str = "\x1b[6n";
 
 // ---- the tests --------------------------------------------------------------
 
@@ -965,17 +1012,18 @@ fn a_blank_line_inside_a_quoted_string_is_kept() {
 #[test]
 fn output_with_no_trailing_newline_survives_the_next_prompt() {
     // The editor paints from column 0 and erases as it goes, so a prompt drawn
-    // where partial output left the cursor would wipe it off the screen — which
-    // is exactly what happened before `term::mark_partial_line`.
+    // where partial output left the cursor would wipe it off the screen. It
+    // paints from `term::line_origin` instead, which is where that output
+    // stopped — so the output stays and the prompt continues its row, as bash's
+    // does.
     let rows = typed(b"printf partial\recho next\r", 80);
     assert!(
-        rows.iter().any(|r| r.starts_with("partial")),
-        "the output is still there: {rows:?}"
+        rows.iter().any(|r| r.starts_with("partial$ ")),
+        "the output is still there, with the prompt after it: {rows:?}"
     );
-    // zsh's marker says the line was cut short, and the prompt starts below it.
     assert!(
-        rows.iter().any(|r| r == "partial%"),
-        "the marker shows why: {rows:?}"
+        !rows.iter().any(|r| r.contains('%')),
+        "and nothing is added to say so: {rows:?}"
     );
     assert!(rows.iter().any(|r| r == "next"), "{rows:?}");
 }
@@ -990,17 +1038,6 @@ fn a_complete_line_of_output_gets_no_marker() {
         !rows.iter().any(|r| r.contains('%')),
         "no marker anywhere: {rows:?}"
     );
-}
-
-/// The spaces `term::mark_partial_line` writes after its marker: the width the
-/// prompt was laid out for, less the marker's own column.
-fn marker_widths(seen: &str) -> Vec<usize> {
-    seen.split("\x1b[7m%\x1b[0m")
-        .skip(1)
-        // The row of spaces ends where the editor goes back to column 0.
-        .filter_map(|rest| rest.split_once("\x1b[1G"))
-        .map(|(spaces, _)| spaces.len() + 1)
-        .collect()
 }
 
 #[test]
@@ -1018,11 +1055,22 @@ fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
     let mut pty = Pty::spawn(80, &[]);
     pty.await_prompt();
 
-    set_pty_cols(&pty.master, 40);
-    // Enter: the prompt that follows is the first one laid out at the new size.
+    pty.resize(40);
+    // Enter: the prompt that follows is the first one laid out at the new size,
+    // and a line that overruns 40 columns is where that shows.
     pty.master.write_all(CR).unwrap();
     let _ = pty.read_output();
-    assert_eq!(marker_widths(&pty.seen), vec![80, 40], "in: {:?}", pty.seen);
+    pty.send(&b"x".repeat(45));
+
+    let rows = pty.screen(40);
+    assert!(
+        rows.iter().any(|r| *r == format!("$ {}", "x".repeat(38))),
+        "the prompt's row ends at 40: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| *r == "x".repeat(7)),
+        "and the rest wrapped onto the next: {rows:?}"
+    );
 }
 
 #[test]
@@ -1040,7 +1088,7 @@ fn the_line_being_edited_is_repainted_at_the_new_width_with_no_key_typed() {
     pty.send(line.as_bytes());
     let _ = pty.read_output();
 
-    set_pty_cols(&pty.master, 40);
+    pty.resize(40);
     let repaint = pty.read_output();
 
     // A width that changed forces a full repaint, which starts at column 0 —
@@ -1064,7 +1112,7 @@ fn a_resize_during_a_history_search_redraws_the_search_and_does_not_end_it() {
     pty.send(b"\x12yyy");
     let _ = pty.read_output();
 
-    set_pty_cols(&pty.master, 40);
+    pty.resize(40);
     let repaint = pty.read_output();
 
     // "(reverse-i-search)`yyy': " is 24 columns, and the line it found is 50,
@@ -1091,7 +1139,7 @@ fn columns_and_lines_are_the_size_the_command_is_run_at() {
     let rows = pty.screen(80);
     assert!(rows.iter().any(|r| r == "size=80,24"), "{rows:?}");
 
-    set_pty_cols(&pty.master, 40);
+    pty.resize(40);
     pty.send(b"echo size=$COLUMNS,$LINES\r");
     let rows = pty.screen(40);
     assert!(rows.iter().any(|r| r == "size=40,24"), "{rows:?}");
@@ -1104,7 +1152,7 @@ fn a_size_the_environment_carried_in_stays_in_the_environment() {
     // shell, so keeping it current there is what reaches the shell's children.
     let mut pty = Pty::spawn(80, &[("COLUMNS", "80"), ("LINES", "24")]);
     pty.await_prompt();
-    set_pty_cols(&pty.master, 40);
+    pty.resize(40);
     pty.send(b"export -p | grep COLUMNS\r");
     let rows = pty.screen(40);
     assert!(

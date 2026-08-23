@@ -7,7 +7,6 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox cat");
     println!("\tsysbox cp");
     println!("\tsysbox date");
-    println!("\tsysbox echo");
     println!("\tsysbox find");
     println!("\tsysbox free");
     println!("\tsysbox help");
@@ -89,7 +88,6 @@ fn main() {
         "cat" => commands::cat::do_command(&args[1..]),
         "cp" => commands::cp::do_command(&args[1..]),
         "date" => commands::date::do_command(&args[1..]),
-        "echo" => commands::echo::do_command(&args[1..]),
         "find" => commands::find::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
@@ -117,19 +115,5 @@ fn main() {
     }
 
     // TODO: remove when stdrt::flush() works.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // std::thread::sleep(std::time::Duration::from_millis(100));
 }
-
-/*
-fn do_syslog() {
-    log::trace!("frosh: syslog");
-    match moto_log::get_tail_entries() {
-        Ok(log_entries) => {
-            for entry in &log_entries {
-                write_serial!("{}\n", entry);
-            }
-        }
-        Err(e) => write_serial!("Error obtaining syslog: {}\n", e),
-    }
-}
-*/

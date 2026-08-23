@@ -46,8 +46,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::sync::Mutex;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, SetAttribute};
-use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{Clear, ClearType, EnableLineWrap, disable_raw_mode, enable_raw_mode};
 use crossterm::{Command, cursor};
 
 use crate::complete::{self, Quote};
@@ -534,6 +533,8 @@ struct Painted {
     line: Vec<char>,
     /// The width it was laid out for. A different one moves every cell.
     cols: usize,
+    /// The column it started at. A different one moves every cell too.
+    origin: usize,
     /// Rows it occupies, and where among them the cursor was left.
     rows: usize,
     crow: usize,
@@ -552,6 +553,13 @@ struct Term {
     /// Sampled at the start of each line and updated whenever the terminal says
     /// it changed shape, so that one line is never painted at two widths.
     cols: usize,
+    /// The column the first row of a paint starts at: where output with no
+    /// trailing newline left the cursor. Zero for a row the editor owns whole.
+    origin: usize,
+    /// Whether the console answers `ESC[6n`. One timeout is enough to stop
+    /// asking: a console that did not answer will not answer the next prompt
+    /// either, and every one of them would wait for it.
+    ask_origin: bool,
     /// Whether there is no terminal at all (`--piped`).
     piped: bool,
 
@@ -566,6 +574,8 @@ impl Term {
             history: History::new(),
             painted: None,
             cols: DEFAULT_COLS,
+            origin: 0,
+            ask_origin: true,
             piped,
             kill_ring: Vec::new(),
         }
@@ -586,13 +596,13 @@ impl Term {
     /// Paint prompt + line and leave the cursor at `pos`.
     fn render(&mut self, prompt: &Prompt, line: &[char], pos: usize) {
         let cols = self.cols;
-        let lay = layout(prompt.width, line, pos, cols);
+        let lay = layout(self.origin + prompt.width, line, pos, cols);
         let prev = self.painted.take();
 
         match &prev {
             // The screen is still the one we painted, laid out the same way, so
             // most of what is wanted is already on it.
-            Some(p) if p.cols == cols && p.prompt == prompt.text => {
+            Some(p) if p.cols == cols && p.origin == self.origin && p.prompt == prompt.text => {
                 self.render_diff(p, prompt, line, &lay)
             }
             // A changed prompt or width moves every cell after it, and a screen
@@ -604,6 +614,7 @@ impl Term {
             prompt: prompt.text.clone(),
             line: line.to_vec(),
             cols,
+            origin: self.origin,
             rows: lay.rows,
             crow: lay.crow,
             ccol: lay.ccol,
@@ -614,7 +625,7 @@ impl Term {
     /// character that changed, and whatever the old line left on the screen past
     /// the end of the new one.
     fn render_diff(&mut self, prev: &Painted, prompt: &Prompt, line: &[char], lay: &Layout) {
-        let (plen, cols) = (prompt.width, prev.cols);
+        let (plen, cols) = (prev.origin + prompt.width, prev.cols);
         // Everything before the first character that differs is already on the
         // screen, in the cells it belongs in — the prompt and the width have not
         // moved, so nothing before the change can have moved either.
@@ -685,12 +696,17 @@ impl Term {
         lay: &Layout,
         cols: usize,
     ) {
-        // With no memory of the screen, the cursor is at column 0 of a row that
-        // is ours to take: erase that row and nothing else. That is the contract
-        // every `reset_screen` caller leaves behind.
+        // With no memory of the screen, the cursor is at `origin` of a row that
+        // is ours from there on: erase that much of it and nothing else. That is
+        // the contract every `reset_screen` caller leaves behind.
         let (rows, crow) = prev.map_or((1, 0), |p| (p.rows, p.crow));
+        let plen = self.origin + prompt.width;
         let mut buf = String::new();
 
+        // The layout below is the terminal's own wrapping, so say so: a shell
+        // inherits whatever mode the last program left, and QEMU's BIOS leaves
+        // a console with wrapping off.
+        paint(&mut buf, EnableLineWrap);
         paint(&mut buf, cursor::Hide); // one flicker-free paint
         // Down to the last row of the *previous* paint, then erase upward.
         if rows > crow + 1 {
@@ -701,7 +717,7 @@ impl Term {
             paint(&mut buf, Clear(ClearType::UntilNewLine));
             paint(&mut buf, cursor::MoveUp(1));
         }
-        paint(&mut buf, cursor::MoveToColumn(0));
+        paint(&mut buf, cursor::MoveToColumn(steps(self.origin)));
         paint(&mut buf, Clear(ClearType::UntilNewLine));
 
         buf.push_str(&prompt.text);
@@ -710,7 +726,7 @@ impl Term {
             wrap_now(&mut buf);
         }
         // The cursor is at the end of the text; walk it back to `pos`.
-        let end = cell_at(prompt.width, line, line.len(), cols);
+        let end = cell_at(plen, line, line.len(), cols);
         move_cursor(&mut buf, end, (lay.crow, lay.ccol));
         paint(&mut buf, cursor::Show);
 
@@ -726,39 +742,32 @@ impl Term {
     /// have: it takes that row over and erases it.
     fn reset_screen(&mut self) {
         self.painted = None;
+        self.origin = 0;
     }
 
-    /// Get to column 0 without destroying a last line of output that had no
-    /// trailing newline (`printf hi`, or a file that does not end in one).
+    /// The column output with no trailing newline (`printf hi`, or a file that
+    /// does not end in one) left the cursor in.
     ///
-    /// The editor paints from column 0 and erases as it goes, so a prompt drawn
-    /// where such output left the cursor would wipe it off the screen. It cannot
-    /// simply ask where the cursor is — that is a round-trip the console may
-    /// never answer — so it uses the trick zsh calls
-    /// `PROMPT_SP`: write a marker and then a whole row of spaces, and let the
-    /// terminal's own wrapping decide.
-    ///
-    /// - Cursor mid-row: the spaces run off the end and wrap to a fresh row,
-    ///   leaving the marker behind to show the output was cut short.
-    /// - Cursor already at column 0: marker + spaces fill the row *exactly*
-    ///   without wrapping, `\r` returns to it, and the prompt paints over the
-    ///   marker. Nothing shows.
-    ///
-    /// The cursor stays hidden throughout. Those spaces walk it the full width
-    /// of the screen and back, once for every prompt, and on a slow console you
-    /// can watch it go: hiding it costs twelve bytes a prompt, and is the
-    /// difference between a marker nobody ever sees and a cursor that sweeps the
-    /// row before every prompt.
-    fn mark_partial_line(&mut self) {
-        let mut buf = String::new();
-        paint(&mut buf, cursor::Hide);
-        paint(&mut buf, SetAttribute(Attribute::Reverse)); // as zsh's marker is
-        buf.push('%');
-        paint(&mut buf, SetAttribute(Attribute::Reset));
-        buf.push_str(&" ".repeat(self.cols.saturating_sub(1)));
-        paint(&mut buf, cursor::MoveToColumn(0));
-        paint(&mut buf, cursor::Show);
-        self.write(buf.as_bytes());
+    /// The editor paints from this column and erases from it, so such output
+    /// survives and the prompt continues its row, the way bash's does. `ESC[6n`
+    /// is the only way to ask — the editor cannot see what a child wrote
+    /// straight to the console — and a console that does not answer costs one
+    /// timeout and is not asked again; its partial lines are painted over, as
+    /// they were before anyone asked.
+    fn line_origin(&mut self) -> usize {
+        if !self.ask_origin {
+            return 0;
+        }
+        match cursor::position() {
+            // A row filled exactly to its last column reports that column with
+            // a wrap still pending, which is also what a cursor legitimately
+            // sitting there reports; the prompt starts there either way.
+            Ok((col, _)) => usize::from(col).min(self.cols.saturating_sub(1)),
+            Err(_) => {
+                self.ask_origin = false;
+                0
+            }
+        }
     }
 
     /// Wait for the next key.
@@ -803,7 +812,7 @@ impl Term {
         let mut saved: Vec<char> = Vec::new();
 
         self.reset_screen();
-        self.mark_partial_line();
+        self.origin = self.line_origin();
         self.render(&prompt, &line, pos);
 
         loop {

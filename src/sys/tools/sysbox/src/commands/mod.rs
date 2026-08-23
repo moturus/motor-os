@@ -1,7 +1,6 @@
 pub mod cat;
 pub mod cp;
 pub mod date;
-pub mod echo;
 pub mod find;
 pub mod free;
 pub mod kill;
