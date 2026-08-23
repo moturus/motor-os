@@ -109,7 +109,7 @@ Within each group, order is the suggested pickup order.
 
 ### TCP lifecycle
 
-- Cap SYN retransmissions and give `connect()` a default timeout. The
+- COMPLETED: Cap SYN retransmissions and give `connect()` a default timeout. The
   netstack has no retry counter, only the optional `timeout`; sys-io sets it
   only when the request carries a deadline, and std and mio pass none. A
   connect to a black hole retransmits forever with the RTO capped at 60 s,

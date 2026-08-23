@@ -220,6 +220,9 @@ const RTTE_MIN_RTO: u32 = 200_000;
 // seconds
 const RTTE_MAX_RTO: u32 = 60_000_000;
 
+/// Linux's default active-open policy: the initial SYN plus six retries.
+const MAX_SYN_RETRANSMISSIONS: u8 = 6;
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RttEstimator {
@@ -604,6 +607,12 @@ pub struct Socket<'a> {
     /// other way a socket reaches Closed. The owner reads it through
     /// [`Socket::reset_received`] to report ECONNRESET faithfully.
     rst_received: bool,
+    /// The most recent active open ended because its deadline or retry budget
+    /// expired, rather than because a peer refused it.
+    connect_timed_out: bool,
+    /// SYN retransmissions emitted by the current active open. The initial
+    /// SYN is not included.
+    syn_retransmits: u8,
     /// The local receive half is gone: the owner closed or shut down
     /// reading. New data after our FIN earns an RST (Linux RCV_SHUTDOWN
     /// semantics), and the close-handshake states release the rings.
@@ -800,6 +809,8 @@ impl<'a> Socket<'a> {
             rx_buffer,
             rx_fin_received: false,
             rst_received: false,
+            connect_timed_out: false,
+            syn_retransmits: 0,
             rx_shutdown: false,
             timeout: None,
             keep_alive: None,
@@ -1169,6 +1180,12 @@ impl<'a> Socket<'a> {
         self.rst_received
     }
 
+    /// Whether the current active open ended by exhausting a local bound.
+    #[inline]
+    pub fn connect_timed_out(&self) -> bool {
+        self.connect_timed_out
+    }
+
     fn reset(&mut self) {
         self.state = State::Closed;
         self.timer = Timer::new();
@@ -1180,6 +1197,8 @@ impl<'a> Socket<'a> {
         self.rx_buffer.clear();
         self.rx_fin_received = false;
         self.rst_received = false;
+        self.connect_timed_out = false;
+        self.syn_retransmits = 0;
         self.rx_shutdown = false;
         self.listen_endpoint = IpListenEndpoint::default();
         self.tuple = None;
@@ -3576,9 +3595,18 @@ impl<'a> Socket<'a> {
         }
 
         // Check if any state needs to be changed because of a timer.
-        if self.timed_out(cx.now()) {
+        let syn_retries_exhausted = self.state == State::SynSent
+            && self.syn_retransmits >= MAX_SYN_RETRANSMISSIONS
+            && matches!(
+                self.timer,
+                Timer::Retransmit { expires_at } if cx.now() >= expires_at
+            );
+        if self.timed_out(cx.now()) || syn_retries_exhausted {
             // If a timeout expires, we should abort the connection.
             net_debug!("timeout exceeded");
+            if self.state == State::SynSent {
+                self.connect_timed_out = true;
+            }
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) && self.timer.should_retransmit(cx.now()) {
             // If a retransmit timer expired, we should resend data starting at the last ACK.
@@ -3589,6 +3617,9 @@ impl<'a> Socket<'a> {
             // here applied a multiplicative reduction twice (beta squared,
             // 0.49) per lost segment. Only an expired RTO is news.
             let rto_expired = !matches!(self.timer, Timer::FastRetransmit);
+            if rto_expired && self.state == State::SynSent {
+                self.syn_retransmits += 1;
+            }
 
             let data_state = matches!(
                 self.state,
@@ -5844,6 +5875,7 @@ mod test {
             }
         );
         assert_eq!(s.state, State::Closed);
+        assert!(!s.connect_timed_out());
     }
 
     #[test]
@@ -12387,6 +12419,41 @@ mod test {
             ..RECV_TEMPL
         }));
         assert_eq!(s.state, State::Closed);
+        assert!(s.connect_timed_out());
+    }
+
+    #[test]
+    fn test_connect_syn_retransmit_limit() {
+        let mut s = socket();
+        s.local_seq_no = LOCAL_SEQ;
+        s.socket
+            .connect(&mut s.cx, REMOTE_END, LOCAL_END.port)
+            .unwrap();
+
+        let syn = TcpRepr {
+            control: TcpControl::Syn,
+            seq_number: LOCAL_SEQ,
+            ack_number: None,
+            max_seg_size: Some(BASE_MSS),
+            window_scale: Some(0),
+            sack_permitted: true,
+            ..RECV_TEMPL
+        };
+        recv!(s, time 0, Ok(syn));
+        for at in [1_000, 3_000, 7_000, 15_000, 31_000, 63_000] {
+            recv!(s, time at, Ok(syn));
+        }
+        assert_eq!(s.state, State::SynSent);
+
+        recv!(s, time 123_000, Ok(TcpRepr {
+            control:    TcpControl::Rst,
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(TcpSeqNumber(0)),
+            window_scale: None,
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.state, State::Closed);
+        assert!(s.connect_timed_out());
     }
 
     #[test]

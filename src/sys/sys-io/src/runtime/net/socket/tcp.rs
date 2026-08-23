@@ -103,6 +103,10 @@ use super::SocketState;
 /// For how long sockets linger upon close.
 const DEFAULT_LINGER_SECS: u32 = 60;
 
+/// Six SYN retransmissions with the netstack's 1, 2, 4, 8, 16, 32, then
+/// 60-second RTO schedule exhaust at 123 seconds.
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(123);
+
 /// Per-direction TCP buffer sizes a socket is configured for, decoded from
 /// the connect/bind request's spare payload bytes and clamped to sys-io's
 /// floor and cap (requests outside the range clamp, POSIX-style; no error).
@@ -1009,6 +1013,10 @@ impl MotoSocket {
             return;
         };
 
+        let connect_timed_out =
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.connect_timed_out()
+            });
         Self::drop_tcp_socket(moto_socket.clone()).await;
 
         let (sender, msg) = {
@@ -1019,9 +1027,13 @@ impl MotoSocket {
             let tcp_state = state.unwrap_tcp_mut();
             let mut msg = tcp_state.connect_req.take().unwrap();
             msg.handle = base.socket_id;
-            msg.status = match api_net::tcp_stream_connect_timeout(&msg) {
-                Some(deadline) if deadline <= moto_rt::time::Instant::now() => moto_rt::E_TIMED_OUT,
-                _ => moto_rt::E_NOT_CONNECTED,
+            msg.status = if connect_timed_out
+                || api_net::tcp_stream_connect_timeout(&msg)
+                    .is_some_and(|deadline| deadline <= moto_rt::time::Instant::now())
+            {
+                moto_rt::E_TIMED_OUT
+            } else {
+                moto_rt::E_NOT_CONNECTED
             };
 
             (base.client_sender.clone(), msg)
@@ -1796,27 +1808,23 @@ impl MotoSocket {
                 RingBuild::Configured,
             )?;
 
-            // Set timeout, if needed.
-            if let Some(timeout) = api_net::tcp_stream_connect_timeout(&msg) {
-                Self::with_tcp_netstack_socket(
-                    &moto_socket,
-                    |socket_id, netstack_socket, _state| {
-                        let now = moto_rt::time::Instant::now();
-                        if timeout <= now {
-                            // We check this upon receiving sqe; the thread got preempted or something.
-                            // Just use an arbitrary small timeout.
-                            netstack_socket
-                                .set_timeout(Some(moto_netstack::time::Duration::from_micros(10)));
-                        } else {
-                            netstack_socket.set_timeout(Some(
-                                moto_netstack::time::Duration::from_micros(
-                                    timeout.duration_since(now).as_micros() as u64,
-                                ),
-                            ));
-                        }
-                    },
-                );
-            }
+            // A caller deadline may shorten, but never extend, the protocol's
+            // bounded active-open lifetime.
+            let now = moto_rt::time::Instant::now();
+            let default_deadline = now + DEFAULT_CONNECT_TIMEOUT;
+            let deadline = api_net::tcp_stream_connect_timeout(&msg)
+                .map_or(default_deadline, |deadline| deadline.min(default_deadline));
+            let timeout = if deadline <= now {
+                // The request can arrive after its caller-provided deadline.
+                moto_netstack::time::Duration::from_micros(10)
+            } else {
+                moto_netstack::time::Duration::from_micros(
+                    deadline.duration_since(now).as_micros() as u64
+                )
+            };
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, _state| {
+                netstack_socket.set_timeout(Some(timeout));
+            });
 
             // Issue the moto-netstack connect request.
             let connect_result = {
