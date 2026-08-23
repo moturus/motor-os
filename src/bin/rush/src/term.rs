@@ -29,6 +29,12 @@
 //! they agree on where the terminal puts things; that agreement is what lets a
 //! partial paint land exactly where a full one would have.
 //!
+//! A prompt after command output is the one deliberately approximate case.
+//! Rush cannot see where a child left the cursor without asking the terminal,
+//! so it follows bash: write the prompt at the current cursor and treat that
+//! unknown position as column zero for later redisplay. Partial output is kept
+//! on the prompt's row, and no prompt depends on a terminal round trip.
+//!
 //! The one thing the model needs from outside is the terminal's width, which is
 //! [`crossterm::terminal::size`]: on the host an ioctl, and on Motor OS the last
 //! size the terminal reported while the editor was waiting for a key. Nothing is
@@ -533,8 +539,6 @@ struct Painted {
     line: Vec<char>,
     /// The width it was laid out for. A different one moves every cell.
     cols: usize,
-    /// The column it started at. A different one moves every cell too.
-    origin: usize,
     /// Rows it occupies, and where among them the cursor was left.
     rows: usize,
     crow: usize,
@@ -553,13 +557,10 @@ struct Term {
     /// Sampled at the start of each line and updated whenever the terminal says
     /// it changed shape, so that one line is never painted at two widths.
     cols: usize,
-    /// The column the first row of a paint starts at: where output with no
-    /// trailing newline left the cursor. Zero for a row the editor owns whole.
-    origin: usize,
-    /// Whether the console answers `ESC[6n`. One timeout is enough to stop
-    /// asking: a console that did not answer will not answer the next prompt
-    /// either, and every one of them would wait for it.
-    ask_origin: bool,
+    /// The next full paint begins wherever command output left the cursor,
+    /// without first moving to column zero. Like bash, the editor then treats
+    /// that unknown physical column as zero for its own redisplay arithmetic.
+    paint_at_cursor: bool,
     /// Whether there is no terminal at all (`--piped`).
     piped: bool,
 
@@ -574,8 +575,7 @@ impl Term {
             history: History::new(),
             painted: None,
             cols: DEFAULT_COLS,
-            origin: 0,
-            ask_origin: true,
+            paint_at_cursor: false,
             piped,
             kill_ring: Vec::new(),
         }
@@ -596,13 +596,13 @@ impl Term {
     /// Paint prompt + line and leave the cursor at `pos`.
     fn render(&mut self, prompt: &Prompt, line: &[char], pos: usize) {
         let cols = self.cols;
-        let lay = layout(self.origin + prompt.width, line, pos, cols);
+        let lay = layout(prompt.width, line, pos, cols);
         let prev = self.painted.take();
 
         match &prev {
             // The screen is still the one we painted, laid out the same way, so
             // most of what is wanted is already on it.
-            Some(p) if p.cols == cols && p.origin == self.origin && p.prompt == prompt.text => {
+            Some(p) if p.cols == cols && p.prompt == prompt.text => {
                 self.render_diff(p, prompt, line, &lay)
             }
             // A changed prompt or width moves every cell after it, and a screen
@@ -614,7 +614,6 @@ impl Term {
             prompt: prompt.text.clone(),
             line: line.to_vec(),
             cols,
-            origin: self.origin,
             rows: lay.rows,
             crow: lay.crow,
             ccol: lay.ccol,
@@ -625,7 +624,7 @@ impl Term {
     /// character that changed, and whatever the old line left on the screen past
     /// the end of the new one.
     fn render_diff(&mut self, prev: &Painted, prompt: &Prompt, line: &[char], lay: &Layout) {
-        let (plen, cols) = (prev.origin + prompt.width, prev.cols);
+        let (plen, cols) = (prompt.width, prev.cols);
         // Everything before the first character that differs is already on the
         // screen, in the cells it belongs in — the prompt and the width have not
         // moved, so nothing before the change can have moved either.
@@ -696,11 +695,14 @@ impl Term {
         lay: &Layout,
         cols: usize,
     ) {
-        // With no memory of the screen, the cursor is at `origin` of a row that
-        // is ours from there on: erase that much of it and nothing else. That is
-        // the contract every `reset_screen` caller leaves behind.
+        // Most callers with no memory of the screen leave the cursor at column
+        // zero of a row the editor may erase. A fresh prompt is different:
+        // command output may not have ended in a newline, so it begins exactly
+        // where that output stopped and does not erase or reposition first.
         let (rows, crow) = prev.map_or((1, 0), |p| (p.rows, p.crow));
-        let plen = self.origin + prompt.width;
+        let starts_at_cursor = prev.is_none() && self.paint_at_cursor;
+        self.paint_at_cursor = false;
+        let plen = prompt.width;
         let mut buf = String::new();
 
         // The layout below is the terminal's own wrapping, so say so: a shell
@@ -717,8 +719,10 @@ impl Term {
             paint(&mut buf, Clear(ClearType::UntilNewLine));
             paint(&mut buf, cursor::MoveUp(1));
         }
-        paint(&mut buf, cursor::MoveToColumn(steps(self.origin)));
-        paint(&mut buf, Clear(ClearType::UntilNewLine));
+        if !starts_at_cursor {
+            paint(&mut buf, cursor::MoveToColumn(0));
+            paint(&mut buf, Clear(ClearType::UntilNewLine));
+        }
 
         buf.push_str(&prompt.text);
         buf.extend(line.iter());
@@ -742,32 +746,18 @@ impl Term {
     /// have: it takes that row over and erases it.
     fn reset_screen(&mut self) {
         self.painted = None;
-        self.origin = 0;
+        self.paint_at_cursor = false;
     }
 
-    /// The column output with no trailing newline (`printf hi`, or a file that
-    /// does not end in one) left the cursor in.
+    /// Forget the old paint and put the next prompt at the current cursor.
     ///
-    /// The editor paints from this column and erases from it, so such output
-    /// survives and the prompt continues its row, the way bash's does. `ESC[6n`
-    /// is the only way to ask — the editor cannot see what a child wrote
-    /// straight to the console — and a console that does not answer costs one
-    /// timeout and is not asked again; its partial lines are painted over, as
-    /// they were before anyone asked.
-    fn line_origin(&mut self) -> usize {
-        if !self.ask_origin {
-            return 0;
-        }
-        match cursor::position() {
-            // A row filled exactly to its last column reports that column with
-            // a wrap still pending, which is also what a cursor legitimately
-            // sitting there reports; the prompt starts there either way.
-            Ok((col, _)) => usize::from(col).min(self.cols.saturating_sub(1)),
-            Err(_) => {
-                self.ask_origin = false;
-                0
-            }
-        }
+    /// Rush cannot see what a child wrote straight to the terminal and asking
+    /// it would make every prompt depend on a round trip. Bash makes the same
+    /// tradeoff: preserve the partial output and assume the prompt began at
+    /// column zero when later edits need cursor arithmetic.
+    fn start_line(&mut self) {
+        self.painted = None;
+        self.paint_at_cursor = true;
     }
 
     /// Wait for the next key.
@@ -811,8 +801,7 @@ impl Term {
         let mut hist = self.history.len();
         let mut saved: Vec<char> = Vec::new();
 
-        self.reset_screen();
-        self.origin = self.line_origin();
+        self.start_line();
         self.render(&prompt, &line, pos);
 
         loop {

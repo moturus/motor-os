@@ -7,14 +7,11 @@
 //!
 //! Two things make this practical, both deliberate Phase 8 design choices:
 //!
-//! - The editor asks the terminal two things, and waits for neither for long.
-//!   The width comes from [`crossterm::terminal::window_size`], which on a pty
-//!   is `TIOCGWINSZ` and never blocks; where it comes from on a console with no
-//!   ioctl is crossterm's Motor OS backend, which subscribes to it in band
-//!   (`test-terminal-size.sh` drives that end, this file drives the pty one).
-//!   The cursor's column comes from `ESC[6n`, which is a round trip — so [`Pty`]
-//!   answers it, as the terminal it stands in for would, and a console that does
-//!   not answer costs the shell one timeout and is never asked again.
+//! - The editor never waits on an answer from the terminal. The width comes
+//!   from [`crossterm::terminal::window_size`], which on a pty is `TIOCGWINSZ`;
+//!   where it comes from on a console with no ioctl is crossterm's Motor OS
+//!   backend, which subscribes to it in band (`test-terminal-size.sh` drives
+//!   that end, this file drives the pty one).
 //! - Rendering goes through one function, and [`screen`] below replays what it
 //!   writes to recover what the user would see, rather than matching raw bytes —
 //!   the same reason a terminal exists. That the editor paints *incrementally*
@@ -42,9 +39,6 @@ const RUSH: &str = env!("CARGO_BIN_EXE_rush");
 struct Pty {
     master: std::fs::File,
     child: std::process::Child,
-    /// The width the pty is currently at, which the cursor replies are
-    /// computed against. [`Pty::resize`] keeps it true.
-    cols: usize,
     /// Every byte the shell has written, from the first prompt on.
     ///
     /// The screen is what all of them add up to, which is the only way to read
@@ -102,7 +96,6 @@ impl Pty {
         Pty {
             master,
             child,
-            cols: cols as usize,
             seen: String::new(),
         }
     }
@@ -110,7 +103,6 @@ impl Pty {
     /// Resize the terminal under the shell, as a pane split does.
     fn resize(&mut self, cols: u16) {
         set_pty_cols(&self.master, cols);
-        self.cols = cols as usize;
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -138,7 +130,6 @@ impl Pty {
         let mut buf = [0_u8; 4096];
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut idle_since = Instant::now();
-        let mut answered = 0;
         set_nonblocking(&self.master);
         while Instant::now() < deadline {
             match self.master.read(&mut buf) {
@@ -146,19 +137,6 @@ impl Pty {
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
                     idle_since = Instant::now();
-                    // The shell is blocked until its `ESC[6n` is answered, so
-                    // the answer goes back from inside this loop: after it, the
-                    // loop is what reads the paint that answering unblocked.
-                    // Counting on the whole of `out` catches a request split
-                    // across two reads.
-                    let asked = out
-                        .windows(DSR.len())
-                        .filter(|w| *w == DSR.as_bytes())
-                        .count();
-                    while answered < asked {
-                        self.answer_cursor_query(&String::from_utf8_lossy(&out));
-                        answered += 1;
-                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if idle_since.elapsed() > Duration::from_millis(250) && !out.is_empty() {
@@ -173,19 +151,6 @@ impl Pty {
         let out = String::from_utf8_lossy(&out).into_owned();
         self.seen.push_str(&out);
         out
-    }
-
-    /// Answer `ESC[6n` with where everything written so far left the cursor.
-    ///
-    /// The shell is blocked on this reply, so it has to go back while the read
-    /// loop above is still running rather than after it settles.
-    fn answer_cursor_query(&mut self, pending: &str) {
-        let mut session = self.seen.clone();
-        session.push_str(pending);
-        let (_, (row, col)) = replay(&session, self.cols);
-        let reply = format!("\x1b[{};{}R", row + 1, col + 1);
-        let _ = self.master.write_all(reply.as_bytes());
-        let _ = self.master.flush();
     }
 
     /// Wait for the shell to paint its first prompt, which is when it is
@@ -298,12 +263,6 @@ fn cells(c: char) -> usize {
 /// own repaint vocabulary (`\r`, cursor motion, erase-to-end-of-line, erase
 /// screen), and no more. Anything the editor does not emit is ignored.
 fn screen(bytes: &str, cols: usize) -> Vec<String> {
-    replay(bytes, cols).0
-}
-
-/// The same replay, keeping the cursor: `ESC[6n` asks where these bytes left
-/// it, and answering that is part of being the terminal these tests stand in for.
-fn replay(bytes: &str, cols: usize) -> (Vec<String>, (usize, usize)) {
     let mut grid: Vec<Vec<char>> = vec![vec![' '; cols]];
     let (mut row, mut col) = (0_usize, 0_usize);
     let mut chars = bytes.chars().peekable();
@@ -414,7 +373,7 @@ fn replay(bytes: &str, cols: usize) -> (Vec<String>, (usize, usize)) {
     while rows.last().map(|r| r.is_empty()).unwrap_or(false) {
         rows.pop();
     }
-    (rows, (row, col))
+    rows
 }
 
 /// Type `keys` into a fresh shell and return what the screen shows.
@@ -436,9 +395,6 @@ fn prompt_line(rows: &[String]) -> String {
 
 const CR: &[u8] = b"\r";
 
-/// The cursor position report the editor asks for before each prompt.
-const DSR: &str = "\x1b[6n";
-
 // ---- the tests --------------------------------------------------------------
 
 #[test]
@@ -449,6 +405,17 @@ fn typing_a_command_shows_it_and_runs_it() {
         "the typed line: {rows:?}"
     );
     assert!(rows.iter().any(|r| r == "hello"), "its output: {rows:?}");
+}
+
+#[test]
+fn a_prompt_never_asks_for_the_cursor_position() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    assert!(
+        !pty.seen.contains("\x1b[6n"),
+        "the prompt must not depend on a terminal reply: {:?}",
+        pty.seen
+    );
 }
 
 #[test]
@@ -1011,11 +978,8 @@ fn a_blank_line_inside_a_quoted_string_is_kept() {
 
 #[test]
 fn output_with_no_trailing_newline_survives_the_next_prompt() {
-    // The editor paints from column 0 and erases as it goes, so a prompt drawn
-    // where partial output left the cursor would wipe it off the screen. It
-    // paints from `term::line_origin` instead, which is where that output
-    // stopped — so the output stays and the prompt continues its row, as bash's
-    // does.
+    // The first paint begins wherever the output stopped, without moving to
+    // column zero or asking the terminal where that is. Bash does the same.
     let rows = typed(b"printf partial\recho next\r", 80);
     assert!(
         rows.iter().any(|r| r.starts_with("partial$ ")),
@@ -1026,6 +990,21 @@ fn output_with_no_trailing_newline_survives_the_next_prompt() {
         "and nothing is added to say so: {rows:?}"
     );
     assert!(rows.iter().any(|r| r == "next"), "{rows:?}");
+}
+
+#[test]
+fn a_wrapped_edit_after_partial_output_keeps_the_command_intact() {
+    let mut keys = b"printf partial\recho 123456789012345".to_vec();
+    for _ in 0..5 {
+        keys.extend_from_slice(b"\x1b[D");
+    }
+    keys.extend_from_slice(b"X\r");
+
+    let rows = typed(&keys, 20);
+    assert!(
+        rows.iter().any(|r| r == "1234567890X12345"),
+        "redisplay after unknown-column wrapping must not change the command: {rows:?}"
+    );
 }
 
 #[test]
@@ -1043,10 +1022,7 @@ fn a_complete_line_of_output_gets_no_marker() {
 #[test]
 fn a_prompt_is_laid_out_for_the_width_the_terminal_is_now() {
     // This is the shape of an rmux pane a split has just halved: the terminal
-    // is a different size than it was, and a prompt laid out for the size it
-    // used to be is the stray `%` of rmux's details.md §3.2 — a marker plus a
-    // row of spaces for a screen that is no longer there, so the spaces
-    // overflow and the marker stays on show.
+    // is a different size than it was, so the next line must use the new width.
     //
     // How the editor is *told* is the platform's business now (crossterm): here
     // a `SIGWINCH` from the pty, and on Motor OS — which has no signals and no
