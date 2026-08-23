@@ -3684,7 +3684,8 @@ impl<'a> Socket<'a> {
             self.rtte.on_retransmit();
 
             if rto_expired {
-                self.congestion_controller.on_retransmit(cx.now());
+                self.congestion_controller
+                    .on_retransmission_timeout(cx.now());
             }
         }
 
@@ -13953,6 +13954,7 @@ mod test {
         #[test]
         fn test_rto_still_charges_the_controller() {
             let mut s = socket_established_for_congestion_control();
+            s.congestion_controller.set_mss(CC_MSS);
 
             for _ in 0..32 {
                 s.congestion_controller.on_ack(
@@ -13984,9 +13986,9 @@ mod test {
                 .pre_transmit(Instant::from_millis(5010));
 
             let cwnd_after = s.congestion_controller.window();
-            assert!(
-                cwnd_after < cwnd_before,
-                "an RTO left the window uncharged: {cwnd_before} -> {cwnd_after}"
+            assert_eq!(
+                cwnd_after, CC_MSS,
+                "an RTO did not restart at one MSS: {cwnd_before} -> {cwnd_after}"
             );
         }
     }

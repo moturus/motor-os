@@ -40,7 +40,8 @@ impl Cubic {
         }
     }
 
-    /// Both loss signals open a new congestion epoch identically.
+    /// Record the common CUBIC epoch state for either loss signal. The caller
+    /// selects fast recovery or an RTO slow-start restart afterward.
     fn on_congestion(&mut self, now: Instant) {
         self.w_max = self.cwnd;
         // RFC 8312 section 4.7: ssthresh = cwnd * beta. Halving (Reno's
@@ -49,7 +50,8 @@ impl Cubic {
         // needlessly deep slow-start exit.
         self.ssthresh = ((self.cwnd as f64) * BETA_CUBIC) as usize;
         self.k = cube_root(((self.w_max as f64) * (1.0 - BETA_CUBIC)) / C).unwrap_or(0.0);
-        // Both regions restart from the same reduced window.
+        // Fast recovery restarts both regions from the reduced window. An RTO
+        // overrides this estimate with one MSS below.
         self.w_est = ((self.w_max as f64) * BETA_CUBIC) as usize;
         self.recovery_start = Some(now);
     }
@@ -60,8 +62,12 @@ impl Cubic {
         self.cwnd
     }
 
-    pub(in crate::socket::tcp) fn on_retransmit(&mut self, now: Instant) {
+    pub(in crate::socket::tcp) fn on_retransmission_timeout(&mut self, now: Instant) {
         self.on_congestion(now);
+        // RFC 5681 section 3.1: after an RTO, restart with one segment and
+        // slow-start back to the congestion threshold.
+        self.cwnd = self.min_cwnd;
+        self.w_est = self.min_cwnd;
     }
 
     pub(in crate::socket::tcp) fn on_duplicate_ack(&mut self, now: Instant) {
@@ -215,7 +221,7 @@ mod test {
                 cubic.set_mss(1480);
 
                 if i & 1 == 0 {
-                    cubic.on_retransmit(now);
+                    cubic.on_retransmission_timeout(now);
                 } else {
                     cubic.on_duplicate_ack(now);
                 }
@@ -246,7 +252,7 @@ mod test {
         let t1 = Instant::from_micros(0);
         let t2 = Instant::from_micros(i64::MAX);
 
-        cubic.on_retransmit(t2);
+        cubic.on_duplicate_ack(t2);
         cubic.pre_transmit(t1);
 
         let cwnd = cubic.window();
@@ -263,7 +269,7 @@ mod test {
         let t1 = Instant::from_millis(0);
         let t2 = Instant::from_micros(i64::MAX);
 
-        cubic.on_retransmit(t1);
+        cubic.on_duplicate_ack(t1);
         cubic.pre_transmit(t2);
 
         let cwnd = cubic.window();
@@ -282,7 +288,7 @@ mod test {
         let t3 = Instant::from_millis(199);
         let t4 = Instant::from_millis(20000);
 
-        cubic.on_retransmit(t1);
+        cubic.on_duplicate_ack(t1);
 
         cubic.pre_transmit(t2);
         let cwnd2 = cubic.window();
@@ -303,7 +309,7 @@ mod test {
     }
 
     #[test]
-    fn cubic_slow_start() {
+    fn cubic_rto_reenters_slow_start() {
         let mut cubic = Cubic::new();
 
         let t1 = Instant::from_micros(0);
@@ -324,10 +330,15 @@ mod test {
         let t3 = Instant::from_micros(2000);
 
         let cwnd = cubic.window();
-        cubic.on_retransmit(t3);
+        cubic.on_retransmission_timeout(t3);
         // RFC 8312 section 4.7: the avoidance boundary is cwnd * beta, the
-        // same window the epoch restarts from -- not Reno's half.
+        // prior congestion window's Cubic reduction -- not Reno's half.
         assert_eq!(((cwnd as f64) * BETA_CUBIC) as usize, cubic.ssthresh);
+        assert_eq!(cubic.window(), cubic.min_cwnd);
+
+        cubic.on_ack(t3, cubic.min_cwnd, &RttEstimator::default());
+        assert_eq!(cubic.window(), 2 * cubic.min_cwnd);
+        assert!(cubic.window() < cubic.ssthresh);
     }
 
     #[test]
@@ -363,7 +374,7 @@ mod test {
         while cubic.window() < target {
             cubic.on_ack(now, 1460, &RttEstimator::default());
         }
-        cubic.on_retransmit(now);
+        cubic.on_duplicate_ack(now);
         cubic
     }
 

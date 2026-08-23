@@ -115,7 +115,7 @@ Within each group, order is the suggested pickup order.
   connect to a black hole retransmits forever with the RTO capped at 60 s,
   pinning the socket, channel slot, and ephemeral port. Linux fails after
   about 127 s.
-- Collapse cwnd after an RTO. `congestion/cubic.rs` shares `on_congestion`
+- COMPLETED: Collapse cwnd after an RTO. `congestion/cubic.rs` shares `on_congestion`
   between both loss signals, so after a timeout cwnd stays at 0.7x and slow
   start is never re-entered; with everything written off as lost at RTO, up
   to 0.7 cwnd of retransmissions bursts out. RFC 5681 and RFC 8312 require one
