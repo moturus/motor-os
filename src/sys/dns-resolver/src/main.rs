@@ -436,14 +436,15 @@ fn ipc_self_test() {
     assert_v4(&after_bad_request.addresses[0], [192, 0, 2, 2]);
 
     for _ in 0..8 {
-        assert!(matches!(
-            client_resolve_external(
-                &mut client,
-                "motor-os-resolver-does-not-exist.invalid",
-                AddressFamily::V4
-            ),
-            Err(ClientError::Resolver(Status::NotFound))
-        ));
+        let result = client_resolve_external(
+            &mut client,
+            "motor-os-resolver-does-not-exist.invalid",
+            AddressFamily::V4,
+        );
+        assert!(
+            matches!(result, Err(ClientError::Resolver(Status::NotFound))),
+            "unexpected negative lookup result: {result:?}"
+        );
     }
 
     for _ in 0..32 {
