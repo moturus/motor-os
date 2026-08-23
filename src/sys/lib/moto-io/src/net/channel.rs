@@ -210,6 +210,12 @@ impl NetClient {
             .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
         self.channel.begin_exit();
     }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn fail_for_test(&self) {
+        self.channel.fail();
+    }
 }
 
 /// One channel's progress driver (design section 5.2): the rx and tx tasks
@@ -316,6 +322,9 @@ impl PendingBind {
         mut self,
     ) -> Result<(ChannelReservation, io_channel::Msg), ErrorCode> {
         self.resp.status()?;
+        if self.reservation.as_ref().unwrap().channel().is_failed() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
         Ok((self.reservation.take().unwrap(), self.resp))
     }
 }
@@ -327,6 +336,10 @@ impl Drop for PendingBind {
         };
         if self.resp.status().is_err() {
             return; // sys-io created nothing to roll back.
+        }
+
+        if reservation.channel().is_failed() {
+            return;
         }
 
         let mut msg = io_channel::Msg::new();
@@ -680,6 +693,7 @@ pub(crate) struct NetChannel {
     rx_task_waker: Mutex<Option<core::task::Waker>>,
 
     exiting: CachePadded<AtomicBool>,
+    failed: CachePadded<AtomicBool>,
 }
 
 /// Cancellation-aware wait to place one message in the staging queue.
@@ -731,10 +745,14 @@ impl Drop for RpcRegistration<'_> {
     fn drop(&mut self) {
         if !self.sent {
             let removed = self.channel.rpc_map.lock().remove(&self.id);
-            debug_assert!(matches!(
-                removed,
-                Some(RpcWaiter::Response(_) | RpcWaiter::Connect { .. } | RpcWaiter::Bind { .. })
-            ));
+            debug_assert!(
+                matches!(
+                    removed,
+                    Some(
+                        RpcWaiter::Response(_) | RpcWaiter::Connect { .. } | RpcWaiter::Bind { .. }
+                    )
+                ) || self.channel.is_failed()
+            );
         }
     }
 }
@@ -910,6 +928,11 @@ impl NetChannel {
                     // A cancelled bind leaves no receiver; dropping the
                     // undelivered PendingBind rolls the new handle back.
                     let _ = tx.send(pending);
+                }
+                None if self.is_failed() => {
+                    // The TX task can observe the dead handle while the RX
+                    // task still owns a final ring response. Failure already
+                    // resolved its waiter, so this late response is stale.
                 }
                 None => panic!("unexpected msg"),
             }
@@ -1219,7 +1242,10 @@ impl NetChannel {
                 // still delivers the pending closes.
                 return;
             }
-            self.rx_park().await;
+            if !self.rx_park().await {
+                self.fail();
+                return;
+            }
         }
     }
 
@@ -1230,16 +1256,16 @@ impl NetChannel {
     ///
     /// A signal arriving between the failed recv above and the executor's
     /// wait stays latched on the handle; the wait returns immediately.
-    async fn rx_park(&self) {
+    async fn rx_park(&self) -> bool {
         let mut conn_fut = core::pin::pin!(self.conn.server_handle().as_future());
         core::future::poll_fn(|cx| {
             *self.rx_task_waker.lock() = Some(cx.waker().clone());
             if self.exiting.load(Ordering::Acquire) {
-                return Poll::Ready(());
+                return Poll::Ready(true);
             }
-            conn_fut.as_mut().poll(cx).map(|_| ())
+            conn_fut.as_mut().poll(cx).map(|result| result.is_ok())
         })
-        .await;
+        .await
     }
 
     /// The tx task: the send half of the old IO thread loop as a resident
@@ -1255,6 +1281,12 @@ impl NetChannel {
         let mut driver_record = None;
 
         loop {
+            if self.failed.load(Ordering::Acquire) {
+                carry.clear();
+                drop(driver_record.take());
+                self.discard_queued_work();
+                return;
+            }
             let batch = self.tx_send_batch(&mut carry, &mut driver_record);
 
             match batch {
@@ -1316,7 +1348,9 @@ impl NetChannel {
                     // the connection handle as it processes messages.
                     self.wake_driver();
                     self.wake_waiters();
-                    let _ = self.conn.server_handle().as_future().await;
+                    if self.conn.server_handle().as_future().await.is_err() {
+                        self.fail();
+                    }
                 }
                 TxBatch::BatchLimit => {
                     self.wake_driver();
@@ -1465,6 +1499,96 @@ impl NetChannel {
         }
     }
 
+    fn fail(&self) {
+        if self.failed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        self.client_state.fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
+
+        let streams: Vec<_> = self
+            .tcp_streams
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let listeners: Vec<_> = self
+            .tcp_listeners
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        let sockets: Vec<_> = self
+            .udp_sockets
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+
+        for stream in streams {
+            stream.on_channel_failed();
+        }
+        for listener in listeners {
+            listener.on_channel_failed();
+        }
+        for socket in sockets {
+            socket.on_channel_failed();
+        }
+
+        let waiters = core::mem::take(&mut *self.rpc_map.lock());
+        for (id, waiter) in waiters {
+            self.fail_rpc_waiter(id, waiter);
+        }
+
+        self.discard_queued_work();
+        self.wake_tx_wakers();
+        self.begin_exit();
+    }
+
+    fn fail_rpc_waiter(&self, id: u64, waiter: RpcWaiter) {
+        let mut resp = io_channel::Msg::new();
+        resp.id = id;
+        resp.status = moto_rt::E_NOT_CONNECTED;
+        match waiter {
+            RpcWaiter::Response(tx) => {
+                let _ = tx.send(resp);
+            }
+            RpcWaiter::Connect { stream, tx } => {
+                if let Some(stream) = stream.upgrade() {
+                    let _ = stream.on_connect_response(resp);
+                }
+                if let Some(tx) = tx {
+                    let _ = tx.send(resp);
+                }
+            }
+            RpcWaiter::Accept { listener } => {
+                if let Some(listener) = listener.upgrade() {
+                    listener.on_accept_response(resp);
+                }
+            }
+            RpcWaiter::Bind {
+                reservation,
+                drop_command,
+                tx,
+            } => {
+                let _ = tx.send(PendingBind {
+                    reservation: Some(reservation),
+                    drop_command,
+                    resp,
+                });
+            }
+        }
+    }
+
+    fn discard_queued_work(&self) {
+        while self.unstage_msg().is_some() {}
+        while self.driver_queue.pop().is_some() {}
+    }
+
+    pub(super) fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
     /// Build a channel over an established sys-io connection. No thread is
     /// spawned and no global state is touched: the caller decides who hosts
     /// the channel's [`NetDriver`].
@@ -1492,6 +1616,7 @@ impl NetChannel {
             tx_task_waker: Mutex::new(None),
             rx_task_waker: Mutex::new(None),
             exiting: CachePadded::new(AtomicBool::new(false)),
+            failed: CachePadded::new(AtomicBool::new(false)),
         })
     }
 
@@ -1518,6 +1643,9 @@ impl NetChannel {
                 .insert(stream.handle(), stream.weak())
                 .is_none()
         );
+        if self.is_failed() {
+            stream.on_channel_failed();
+        }
     }
 
     pub fn udp_socket_created(&self, socket: &UdpSocket) {
@@ -1527,6 +1655,9 @@ impl NetChannel {
                 .insert(socket.handle(), socket.weak())
                 .is_none()
         );
+        if self.is_failed() {
+            socket.on_channel_failed();
+        }
     }
 
     /// Stop routing for a socket. Called from `UdpSocket::close`, which runs
@@ -1545,6 +1676,9 @@ impl NetChannel {
         self.tcp_listeners
             .lock()
             .insert(listener.handle(), Arc::downgrade(listener));
+        if self.is_failed() {
+            listener.on_channel_failed();
+        }
     }
 
     pub fn tcp_listener_dropped(&self, handle: u64) {
@@ -1588,12 +1722,16 @@ impl NetChannel {
     ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
         req.id = self.new_req_id();
-        assert!(
-            self.rpc_map
-                .lock()
-                .insert(req.id, RpcWaiter::Response(tx))
-                .is_none()
-        );
+        {
+            let mut rpc_map = self.rpc_map.lock();
+            if self.is_failed() {
+                let mut resp = io_channel::Msg::new();
+                resp.id = req.id;
+                resp.status = moto_rt::E_NOT_CONNECTED;
+                return resp;
+            }
+            assert!(rpc_map.insert(req.id, RpcWaiter::Response(tx)).is_none());
+        }
 
         let mut registration = RpcRegistration {
             channel: self,
@@ -1621,19 +1759,31 @@ impl NetChannel {
         debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
         let (tx, rx) = moto_async::oneshot();
         req.id = self.new_req_id();
-        assert!(
-            self.rpc_map
-                .lock()
-                .insert(
-                    req.id,
-                    RpcWaiter::Bind {
-                        reservation,
-                        drop_command,
-                        tx,
-                    },
-                )
-                .is_none()
-        );
+        {
+            let mut rpc_map = self.rpc_map.lock();
+            if self.is_failed() {
+                let mut resp = io_channel::Msg::new();
+                resp.id = req.id;
+                resp.status = moto_rt::E_NOT_CONNECTED;
+                return PendingBind {
+                    reservation: Some(reservation),
+                    drop_command,
+                    resp,
+                };
+            }
+            assert!(
+                rpc_map
+                    .insert(
+                        req.id,
+                        RpcWaiter::Bind {
+                            reservation,
+                            drop_command,
+                            tx,
+                        },
+                    )
+                    .is_none()
+            );
+        }
 
         let mut registration = RpcRegistration {
             channel: self,
@@ -1658,18 +1808,29 @@ impl NetChannel {
     ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
         req.id = self.new_req_id();
-        assert!(
-            self.rpc_map
-                .lock()
-                .insert(
-                    req.id,
-                    RpcWaiter::Connect {
-                        stream,
-                        tx: Some(tx),
-                    },
-                )
-                .is_none()
-        );
+        {
+            let mut rpc_map = self.rpc_map.lock();
+            if self.is_failed() {
+                let mut resp = io_channel::Msg::new();
+                resp.id = req.id;
+                resp.status = moto_rt::E_NOT_CONNECTED;
+                if let Some(stream) = stream.upgrade() {
+                    let _ = stream.on_connect_response(resp);
+                }
+                return resp;
+            }
+            assert!(
+                rpc_map
+                    .insert(
+                        req.id,
+                        RpcWaiter::Connect {
+                            stream,
+                            tx: Some(tx),
+                        },
+                    )
+                    .is_none()
+            );
+        }
 
         let mut registration = RpcRegistration {
             channel: self,
@@ -1686,7 +1847,14 @@ impl NetChannel {
     /// first, then the request moves to the driver's guaranteed FIFO.
     pub(super) fn enqueue_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
         assert_ne!(0, req.id);
-        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
+        let mut rpc_map = self.rpc_map.lock();
+        if self.is_failed() {
+            drop(rpc_map);
+            self.fail_rpc_waiter(req.id, waiter);
+            return;
+        }
+        assert!(rpc_map.insert(req.id, waiter).is_none());
+        drop(rpc_map);
         self.enqueue_driver_messages(VecDeque::from([req]), None);
     }
 
@@ -1698,7 +1866,12 @@ impl NetChannel {
         waiter: RpcWaiter,
     ) -> Result<(), ErrorCode> {
         assert_ne!(0, req.id);
-        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
+        let mut rpc_map = self.rpc_map.lock();
+        if self.is_failed() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
+        assert!(rpc_map.insert(req.id, waiter).is_none());
+        drop(rpc_map);
         if self.post_msg(req).is_ok() {
             Ok(())
         } else {
@@ -1758,6 +1931,9 @@ impl NetChannel {
             staged_fence: self.staged_pushed.load(Ordering::Relaxed),
             _reservation: reservation,
         });
+        if self.is_failed() {
+            self.discard_queued_work();
+        }
         self.maybe_wake_io_thread();
     }
 

@@ -129,7 +129,7 @@ Within each group, order is the suggested pickup order.
 
 ### Client path
 
-- Detect a refused or dead channel and fail every waiter on it. sys-io's
+- COMPLETED: Detect a refused or dead channel and fail every waiter on it. sys-io's
   `refuse_client` answers only the first RPC, while the pool hands up to four
   parked reservers a fresh channel; moto-io has no disconnect detection, so
   `rx_park` on a dead server handle spins and every parked RPC, read future,

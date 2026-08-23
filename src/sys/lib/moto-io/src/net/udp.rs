@@ -75,6 +75,14 @@ impl UdpSocket {
     /// on every pass, so a `Drop` that waited for the last reference could
     /// well run there, after the close call had already returned.
     pub fn close(&self) {
+        self.close_inner(false);
+    }
+
+    pub(super) fn on_channel_failed(&self) {
+        self.close_inner(true);
+    }
+
+    fn close_inner(&self, channel_failed: bool) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -84,6 +92,15 @@ impl UdpSocket {
 
         self.wake_rx_waiters();
         self.wake_tx_waiters();
+        if channel_failed {
+            self.raise_readiness(
+                Readiness::READABLE
+                    | Readiness::WRITABLE
+                    | Readiness::READ_CLOSED
+                    | Readiness::WRITE_CLOSED
+                    | Readiness::ERROR,
+            );
+        }
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
@@ -97,7 +114,11 @@ impl UdpSocket {
         // the record itself waits for the datagrams this socket had already
         // handed to the channel, which must reach a socket sys-io still has.
         let reservation = self.channel_reservation.lock().take().unwrap();
-        self.channel.enqueue_teardown(reservation, req);
+        if channel_failed || self.channel.is_failed() {
+            drop(reservation);
+        } else {
+            self.channel.enqueue_teardown(reservation, req);
+        }
 
         // Balance stats_udp_socket_created(): the decrement was missing, which
         // stage-E's assert_empty (now checking num_udp_sockets) would trip on.

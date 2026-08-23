@@ -1006,6 +1006,114 @@ fn test_dropped_futures_leave_no_waiters() {
     println!("net_driver::test_dropped_futures_leave_no_waiters PASS");
 }
 
+/// Losing sys-io fails every kind of work parked on the channel and retires
+/// the driver instead of spinning on the dead server handle.
+fn test_channel_failure_wakes_every_waiter() {
+    use std::future::Future;
+    use std::sync::atomic::AtomicBool;
+    use std::task::Poll;
+
+    let peer_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let peer_addr = peer_listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = peer_listener.accept().unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = host_channel().await;
+        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &peer_addr,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let udp = moto_io::net::udp::UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        )
+        .await
+        .unwrap();
+        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        listener.post_accept(client.try_reserve().unwrap());
+
+        let mut tcp_byte = [0_u8; 1];
+        let mut tcp_bufs = [&mut tcp_byte[..]];
+        let mut tcp_read = Box::pin(stream.read_future(&mut tcp_bufs, false));
+        let mut udp_byte = [0_u8; 1];
+        let mut udp_read = Box::pin(udp.recv_from_future(&mut udp_byte, false));
+        let mut accept = Box::pin(listener.accept());
+        let mut ttl = Box::pin(stream.ttl_async());
+
+        core::future::poll_fn(|cx| {
+            assert!(tcp_read.as_mut().poll(cx).is_pending());
+            assert!(udp_read.as_mut().poll(cx).is_pending());
+            assert!(accept.as_mut().poll(cx).is_pending());
+            assert!(ttl.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(stream.rx_waiter_count(), 1);
+        assert_eq!(udp.rx_waiter_count(), 1);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 2);
+
+        client.fail_for_test();
+
+        core::future::poll_fn(|cx| {
+            assert_eq!(
+                tcp_read.as_mut().poll(cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            assert!(matches!(
+                udp_read.as_mut().poll(cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            ));
+            assert!(matches!(
+                accept.as_mut().poll(cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            ));
+            assert_eq!(
+                ttl.as_mut().poll(cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(stream.rx_waiter_count(), 0);
+        assert_eq!(udp.rx_waiter_count(), 0);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 0);
+        assert_eq!(client.try_reserve().err(), Some(ReserveError::ShuttingDown));
+
+        drop((tcp_read, udp_read, accept, ttl));
+        drop((stream, udp, listener));
+        assert_eq!(client.reservations(), 0);
+        assert!(
+            bounded(driver_task, 5).await,
+            "failed NetDriver did not exit"
+        );
+    });
+
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("net_driver::test_channel_failure_wakes_every_waiter PASS");
+}
+
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
@@ -1018,6 +1126,7 @@ pub fn run_all_tests() {
     test_partial_write_raises_writable();
     test_connected_udp_ignores_foreign_datagrams();
     test_dropped_futures_leave_no_waiters();
+    test_channel_failure_wakes_every_waiter();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
 }
