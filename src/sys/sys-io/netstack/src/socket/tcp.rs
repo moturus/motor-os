@@ -442,6 +442,10 @@ impl RackState {
 /// octet of sequence space) is not acceptable.
 const ORPHAN_RING_FLOOR: usize = 16 * 1024;
 
+/// TIME-WAIT has already consumed the peer's FIN and needs only a nonzero
+/// receive window while it acknowledges duplicates of that FIN.
+const TIME_WAIT_RING_FLOOR: usize = 1;
+
 impl Timer {
     fn new() -> Timer {
         Timer::Idle {
@@ -2089,22 +2093,28 @@ impl<'a> Socket<'a> {
             self.apply_pending_tx_growth();
         }
 
-        // An orphaned socket's rings are dead once our FIN is acked: no
-        // reader ever again, and everything sent is acknowledged. Keep only
-        // the floor for the rest of the handshake. The assembler check
-        // matters: out-of-order octets stashed before the close live in the
-        // ring past the readable region, invisible to `is_empty`.
+        // An orphaned socket's rings are dead once our FIN is acked: no reader
+        // ever again, and everything sent is acknowledged. A small window is
+        // needed through FIN-WAIT-2 so the peer's FIN remains acceptable. Once
+        // that FIN is consumed, TIME-WAIT only acknowledges duplicates. The
+        // assembler check matters: out-of-order octets live in the ring past
+        // the readable region, invisible to `is_empty`.
         if self.rx_shutdown
             && matches!(self.state, State::FinWait2 | State::TimeWait)
             && self.rx_buffer.is_empty()
             && self.assembler.is_empty()
             && self.tx_buffer.is_empty()
         {
-            if self.rx_buffer.capacity() > ORPHAN_RING_FLOOR {
-                self.rx_buffer.release_to(ORPHAN_RING_FLOOR);
+            let floor = if self.state == State::TimeWait {
+                TIME_WAIT_RING_FLOOR
+            } else {
+                ORPHAN_RING_FLOOR
+            };
+            if self.rx_buffer.capacity() > floor {
+                self.rx_buffer.release_to(floor);
             }
-            if self.tx_buffer.capacity() > ORPHAN_RING_FLOOR {
-                self.tx_buffer.release_to(ORPHAN_RING_FLOOR);
+            if self.tx_buffer.capacity() > floor {
+                self.tx_buffer.release_to(floor);
             }
         }
 
@@ -8165,12 +8175,14 @@ mod test {
             }
         );
         assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.rx_buffer.capacity(), 1);
+        assert_eq!(s.tx_buffer.capacity(), 1);
         recv!(
             s,
             [TcpRepr {
                 seq_number: LOCAL_SEQ + 1 + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 1),
-                window_len: 16384,
+                window_len: 1,
                 ..RECV_TEMPL
             }]
         );

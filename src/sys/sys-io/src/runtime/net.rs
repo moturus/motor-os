@@ -703,9 +703,18 @@ impl NetRuntime {
         &self,
         device_idx: usize,
         ip_addr: IpAddr,
+        remote_addr: SocketAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port = self.inner.borrow_mut().devices[device_idx]
-            .get_ephemeral_tcp_port(&ip_addr, |_| false)?;
+        let mut inner = self.inner.borrow_mut();
+        let NetRuntimeInner {
+            devices, sockets, ..
+        } = &mut *inner;
+        let local_port = devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
+            let local_addr = SocketAddr::new(ip_addr, port);
+            sockets.values().any(|socket| {
+                socket::MotoSocket::occupies_tcp_tuple(socket, device_idx, local_addr, remote_addr)
+            })
+        })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,

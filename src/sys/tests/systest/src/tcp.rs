@@ -1220,10 +1220,12 @@ fn test_positive_linger_close_rpc_completes() {
     println!("test_positive_linger_close_rpc_completes() PASS");
 }
 
-/// Once the raw client channel dies, neither a close already waiting in
-/// SO_LINGER nor an active socket may retain its rings and ephemeral port.
+/// Once the raw client channel dies, a committed close may keep its bounded
+/// protocol state, but it must advance to FIN-WAIT-2 rather than retaining an
+/// active socket or resetting a completed stream.
 fn test_client_death_reclaims_tcp_sockets() {
     use moto_sys_io::api_net;
+    use moto_sys_io::stats::TcpProtocolState;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
@@ -1268,8 +1270,16 @@ fn test_client_death_reclaims_tcp_sockets() {
 
     drop(connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    wait_for_sockets_released(client_addr);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        api_net::TcpState::Closed,
+        TcpProtocolState::FinWait2,
+    );
     drop(peer);
+    // This peer never sent application data, so its own drop is intentionally
+    // abortive; the retained FIN-WAIT-2 socket consumes that reset and closes.
+    wait_for_sockets_released(client_addr);
 
     // A channel that dies before issuing close must not turn its active
     // socket into a default 60-second orphan either.
@@ -1293,9 +1303,15 @@ fn test_client_death_reclaims_tcp_sockets() {
     peer.read_exact(&mut byte).unwrap();
     drop(connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    wait_for_sockets_released(client_addr);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        api_net::TcpState::Closed,
+        TcpProtocolState::FinWait2,
+    );
 
     drop(peer);
+    wait_for_sockets_released(client_addr);
     drop(listener);
     wait_for_sockets_released(listener_addr);
     println!("test_client_death_reclaims_tcp_sockets() PASS");
@@ -1829,6 +1845,8 @@ fn test_tcp_socket_state_transitions() {
 // Before stage E, NetChannel::drop was a todo!() and channels were pooled
 // forever, so this leak check could never pass.
 fn test_channel_teardown() {
+    use std::os::fd::AsRawFd;
+
     const N: usize = 12;
     const ROUNDS: usize = 3;
     let addr = "127.0.0.1:3340";
@@ -1843,6 +1861,10 @@ fn test_channel_teardown() {
                 let mut byte = [0_u8; 1];
                 server.read_exact(&mut byte).unwrap();
                 server.write_all(&byte).unwrap();
+                // This test exercises channel reclamation, not graceful TCP
+                // retention. Abort its finished streams so their control
+                // blocks cannot consume later tests' orphan budget.
+                moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
                 servers.push(server);
             }
             // Every accepted stream drops here, on this (non-runtime) thread.
@@ -1855,6 +1877,7 @@ fn test_channel_teardown() {
             let mut byte = [0_u8; 1];
             client.read_exact(&mut byte).unwrap();
             assert_eq!(byte[0], i as u8);
+            moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
             clients.push(client);
         }
         acceptor.join().unwrap();
@@ -1922,11 +1945,12 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     }
 }
 
-fn client_iter() {
+fn client_iter() -> SocketAddr {
     let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
     assert_eq!(addrs.len(), 1);
     let mut stream =
         std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
+    let local_addr = stream.local_addr().unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write_all(&tx).unwrap();
 
@@ -1941,6 +1965,7 @@ fn client_iter() {
         }
     }
     let _ = stream.shutdown(std::net::Shutdown::Both);
+    local_addr
 }
 
 fn test_io_latency() {
@@ -2060,9 +2085,15 @@ fn test_tcp_loopback() {
         core::hint::spin_loop()
     }
 
-    client_iter();
-    client_iter();
-    client_iter();
+    for _ in 0..3 {
+        let client_addr = client_iter();
+        wait_for_tcp_socket_state(
+            client_addr,
+            Some("127.0.0.1:3333".parse().unwrap()),
+            moto_sys_io::api_net::TcpState::Closed,
+            moto_sys_io::stats::TcpProtocolState::TimeWait,
+        );
+    }
     std::thread::sleep(Duration::from_millis(100));
     println!("will test latency");
     std::thread::sleep(Duration::from_millis(100));
