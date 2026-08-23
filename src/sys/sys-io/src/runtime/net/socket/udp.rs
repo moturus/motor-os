@@ -241,20 +241,42 @@ impl MotoSocket {
 
     pub async fn udp_bind(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
-        let socket_addr = api_net::get_socket_addr(&msg.payload);
-        let ip_addr = socket_addr.ip();
-        if ip_addr.is_unspecified() {
-            // We don't allow binding to an unspecified addr (yet?).
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        let Some(device_idx) = runtime.inner.borrow().ip_addresses.get(&ip_addr).copied() else {
-            #[cfg(debug_assertions)]
-            log::debug!("IP addr {ip_addr:?} not found");
-            return Err(ErrorKind::InvalidInput.into());
+        let requested = api_net::get_socket_addr(&msg.payload);
+        let (socket_addr, device_idx) = if requested.ip().is_unspecified() {
+            let inner = runtime.inner.borrow();
+            let mut fallback = None;
+            let mut selected = None;
+            for (device_idx, device) in inner.devices.iter().enumerate() {
+                for ip_addr in device.ip_addesses() {
+                    if ip_addr.is_ipv4() != requested.is_ipv4() {
+                        continue;
+                    }
+                    let candidate = (SocketAddr::new(ip_addr, requested.port()), device_idx);
+                    if device.is_external() {
+                        selected = Some(candidate);
+                        break;
+                    }
+                    fallback.get_or_insert(candidate);
+                }
+                if selected.is_some() {
+                    break;
+                }
+            }
+            let selected = selected.or(fallback).ok_or(ErrorKind::InvalidInput)?;
+            api_net::put_socket_addr(&mut msg.payload, &selected.0);
+            selected
+        } else {
+            let ip_addr = requested.ip();
+            let Some(device_idx) = runtime.inner.borrow().ip_addresses.get(&ip_addr).copied()
+            else {
+                #[cfg(debug_assertions)]
+                log::debug!("IP addr {ip_addr:?} not found");
+                return Err(ErrorKind::InvalidInput.into());
+            };
+            (requested, device_idx)
         };
 
         Self::udp_bind_on_device(runtime, msg, sender, socket_addr, device_idx).await

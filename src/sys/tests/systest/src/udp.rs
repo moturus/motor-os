@@ -33,6 +33,29 @@ fn test_udp_basic() {
     println!("-- test_udp_basic() PASS");
 }
 
+fn test_udp_wildcard_bind_selects_address() {
+    let v4 = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let v4_addr = v4.local_addr().unwrap();
+    assert!(v4_addr.is_ipv4());
+    assert!(!v4_addr.ip().is_unspecified());
+    assert!(!v4_addr.ip().is_loopback());
+    assert_ne!(v4_addr.port(), 0);
+
+    let v4_fixed = std::net::UdpSocket::bind("0.0.0.0:3341").unwrap();
+    let v4_fixed_addr = v4_fixed.local_addr().unwrap();
+    assert_eq!(v4_fixed_addr.ip(), v4_addr.ip());
+    assert_eq!(v4_fixed_addr.port(), 3341);
+
+    let v6 = std::net::UdpSocket::bind("[::]:0").unwrap();
+    let v6_addr = v6.local_addr().unwrap();
+    assert!(v6_addr.is_ipv6());
+    assert!(!v6_addr.ip().is_unspecified());
+    assert!(!v6_addr.ip().is_loopback());
+    assert_ne!(v6_addr.port(), 0);
+
+    println!("-- test_udp_wildcard_bind_selects_address() PASS");
+}
+
 fn test_native_udp_ttl() {
     moto_async::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
@@ -936,6 +959,7 @@ fn malformed_udp_fragments_only_kill_the_client() {
 
 pub fn run_all_tests() {
     test_udp_basic();
+    test_udp_wildcard_bind_selects_address();
     test_native_udp_ttl();
     test_native_udp_size_limit();
     test_posix_udp_ttl();

@@ -79,6 +79,7 @@ impl Drop for PendingAcceptCleanup {
         // would cycle between the queue and the error path forever.
         if self.resp.status().is_ok()
             && let Some(listener) = self.listener.upgrade()
+            && listener.error.load(Ordering::Acquire) == moto_rt::E_OK
         {
             listener.requeue_pending_accept(PendingAccept {
                 cleanup: PendingAcceptCleanup {
@@ -103,7 +104,7 @@ impl Drop for PendingAcceptCleanup {
         }
 
         super::channel::clear_rx_queue(&recv_queue, &channel);
-        if self.resp.status().is_ok() {
+        if self.resp.status().is_ok() && !channel.is_failed() {
             channel.enqueue_teardown(
                 reservation,
                 super::channel::tcp_stream_close_msg(self.handle),
@@ -123,10 +124,10 @@ struct AcceptDispatch {
     /// carry it: sys-io answers the oldest outstanding request, which need
     /// not be the one this caller posted, and a caller keyed to its own
     /// request would wait for a connection it has no reason to expect.
-    waiters: VecDeque<moto_async::oneshot::Sender<PendingAccept>>,
+    waiters: VecDeque<moto_async::oneshot::Sender<Result<PendingAccept, ErrorCode>>>,
     /// Completed accepts no caller has claimed yet, in arrival order; a
     /// reclaimed (cancelled-caller) connection re-enters at the front.
-    ready: VecDeque<PendingAccept>,
+    ready: VecDeque<Result<PendingAccept, ErrorCode>>,
 }
 
 pub struct TcpListener {
@@ -155,6 +156,8 @@ pub struct TcpListener {
     pending_accept_queues:
         Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
 
+    error: AtomicU16,
+
     me: Weak<TcpListener>,
 }
 
@@ -178,7 +181,11 @@ impl Drop for TcpListener {
         // channel alive until sys-io accepts the close.
         let reservation = self.channel_reservation.take().unwrap();
         let channel = reservation.channel().clone();
-        channel.enqueue_teardown(reservation, msg);
+        if channel.is_failed() {
+            drop(reservation);
+        } else {
+            channel.enqueue_teardown(reservation, msg);
+        }
     }
 }
 
@@ -187,6 +194,16 @@ impl TcpListener {
     // exist before the next message for the new stream is dispatched.
     pub(super) fn on_accept_response(&self, resp: io_channel::Msg) {
         let reservation = self.accept_requests.lock().remove(&resp.id).unwrap();
+
+        if resp.status().is_err() {
+            drop(reservation);
+            if self.error.load(Ordering::Acquire) == moto_rt::E_OK
+                && self.dispatch_accept(Err(resp.status), false)
+            {
+                self.raise_readiness(Readiness::READABLE | Readiness::ERROR);
+            }
+            return;
+        }
 
         // First, create the pending_accept_queue; only then publish the
         // pending accept (a racing accept must not miss the queue).
@@ -202,7 +219,7 @@ impl TcpListener {
             handle: resp.handle,
             resp,
         };
-        if !self.dispatch_pending_accept(PendingAccept { cleanup }, false) {
+        if !self.dispatch_accept(Ok(PendingAccept { cleanup }), false) {
             return;
         }
 
@@ -216,24 +233,28 @@ impl TcpListener {
     /// what `test_cancelled_native_accept_redelivers_connection` pins. A
     /// `reclaimed` connection re-enters at the queue front -- it is older
     /// than anything queued behind it.
-    fn dispatch_pending_accept(&self, mut pending: PendingAccept, reclaimed: bool) -> bool {
+    fn dispatch_accept(
+        &self,
+        mut result: Result<PendingAccept, ErrorCode>,
+        reclaimed: bool,
+    ) -> bool {
         loop {
             let waiter = {
                 let mut dispatch = self.accept_dispatch.lock();
                 let Some(waiter) = dispatch.waiters.pop_front() else {
                     if reclaimed {
-                        dispatch.ready.push_front(pending);
+                        dispatch.ready.push_front(result);
                     } else {
-                        dispatch.ready.push_back(pending);
+                        dispatch.ready.push_back(result);
                     }
                     return true;
                 };
                 waiter
             };
             // Sent outside the lock: a successful send wakes the caller.
-            match waiter.send(pending) {
+            match waiter.send(result) {
                 Ok(()) => return false,
-                Err(returned) => pending = returned,
+                Err(returned) => result = returned,
             }
         }
     }
@@ -242,9 +263,32 @@ impl TcpListener {
     /// it, re-raising readiness -- the original READABLE edge for it was
     /// consumed.
     fn requeue_pending_accept(&self, pending: PendingAccept) {
-        if self.dispatch_pending_accept(pending, true) {
+        if self.dispatch_accept(Ok(pending), true) {
             self.raise_readiness(Readiness::READABLE);
         }
+    }
+
+    pub(super) fn on_channel_failed(&self) {
+        self.error
+            .store(moto_rt::E_NOT_CONNECTED, Ordering::Release);
+        let (ready, waiters) = {
+            let mut dispatch = self.accept_dispatch.lock();
+            (
+                core::mem::take(&mut dispatch.ready),
+                core::mem::take(&mut dispatch.waiters),
+            )
+        };
+        drop(ready);
+        for waiter in waiters {
+            let _ = waiter.send(Err(moto_rt::E_NOT_CONNECTED));
+        }
+        self.raise_readiness(
+            Readiness::READABLE
+                | Readiness::WRITABLE
+                | Readiness::READ_CLOSED
+                | Readiness::WRITE_CLOSED
+                | Readiness::ERROR,
+        );
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -350,6 +394,7 @@ impl TcpListener {
             accept_requests: Mutex::new(BTreeMap::new()),
             accept_dispatch: Mutex::new(AcceptDispatch::default()),
             pending_accept_queues: Mutex::new(BTreeMap::new()),
+            error: AtomicU16::new(moto_rt::E_OK),
             me: me.clone(),
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
@@ -378,11 +423,15 @@ impl TcpListener {
 
     /// Pop a ready incoming connection or await the next one. The vdso veneer
     /// drives this with `block_on_sync`; a native user awaits it.
-    async fn next_pending_accept(&self) -> PendingAccept {
+    async fn next_pending_accept(&self) -> Result<PendingAccept, ErrorCode> {
         let rx = {
             let mut dispatch = self.accept_dispatch.lock();
             if let Some(pending_accept) = dispatch.ready.pop_front() {
                 return pending_accept;
+            }
+            let error = self.error.load(Ordering::Acquire);
+            if error != moto_rt::E_OK {
+                return Err(error);
             }
             // Park atomically with the emptiness check just made, and before
             // posting: the request posted below may not be the one sys-io
@@ -402,8 +451,19 @@ impl TcpListener {
     /// Nonblocking accept: an already-queued incoming connection, or
     /// `E_NOT_READY`. The accepted stream gets no readiness observer.
     pub fn try_accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
-            return Err(moto_rt::E_NOT_READY);
+        let pending = {
+            let mut dispatch = self.accept_dispatch.lock();
+            match dispatch.ready.pop_front() {
+                Some(result) => result?,
+                None => {
+                    let error = self.error.load(Ordering::Acquire);
+                    return Err(if error == moto_rt::E_OK {
+                        moto_rt::E_NOT_READY
+                    } else {
+                        error
+                    });
+                }
+            }
         };
         self.build_accepted_stream(pending, None)
     }
@@ -411,7 +471,7 @@ impl TcpListener {
     /// Accept, resolving once an incoming connection is available. A native
     /// user awaits this; the vdso drives the observed variant below.
     pub async fn accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let pending = self.next_pending_accept().await;
+        let pending = self.next_pending_accept().await?;
         self.build_accepted_stream(pending, None)
     }
 
@@ -427,8 +487,19 @@ impl TcpListener {
         &self,
         make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
-        let Some(pending) = self.accept_dispatch.lock().ready.pop_front() else {
-            return Err(moto_rt::E_NOT_READY);
+        let pending = {
+            let mut dispatch = self.accept_dispatch.lock();
+            match dispatch.ready.pop_front() {
+                Some(result) => result?,
+                None => {
+                    let error = self.error.load(Ordering::Acquire);
+                    return Err(if error == moto_rt::E_OK {
+                        moto_rt::E_NOT_READY
+                    } else {
+                        error
+                    });
+                }
+            }
         };
         self.build_observed_stream(pending, make_observer)
     }
@@ -439,7 +510,7 @@ impl TcpListener {
         &self,
         make_observer: &dyn Fn() -> Arc<L>,
     ) -> Result<(Arc<TcpStream>, Arc<L>, SocketAddr), ErrorCode> {
-        let pending = self.next_pending_accept().await;
+        let pending = self.next_pending_accept().await?;
         self.build_observed_stream(pending, make_observer)
     }
 
@@ -462,6 +533,11 @@ impl TcpListener {
         pending: PendingAccept,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+        let error = self.error.load(Ordering::Acquire);
+        if error != moto_rt::E_OK {
+            drop(pending);
+            return Err(error);
+        }
         if pending.cleanup.resp.status().is_err() {
             let status = pending.cleanup.resp.status;
             drop(pending);
@@ -582,6 +658,37 @@ impl TcpListener {
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
             Ok(resp.payload.args_8()[23] as u32)
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Set the effective IPv6-only state. Motor listeners are bound
+    /// atomically, so an IPv6 listener is always created IPv6-only; asking
+    /// for dual-stack service is unsupported rather than silently ignored.
+    pub async fn set_only_v6_async(&self, only_v6: bool) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_ONLY_V6;
+        req.payload.args_8_mut()[23] = only_v6 as u8;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read whether this listener accepts only IPv6 connections.
+    pub async fn only_v6_async(&self) -> Result<bool, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_ONLY_V6;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_8()[23] != 0)
         } else {
             Err(resp.status)
         }
@@ -776,7 +883,11 @@ impl Drop for TcpStream {
         channel.tcp_stream_dropped(self.handle());
         super::channel::stats_tcp_stream_dropped();
 
-        channel.enqueue_teardown_messages(reservation, messages);
+        if channel.is_failed() {
+            drop(reservation);
+        } else {
+            channel.enqueue_teardown_messages(reservation, messages);
+        }
     }
 }
 
@@ -864,6 +975,8 @@ impl TcpStream {
             pages.push(page);
         }
         f();
+        drop(pages);
+        self.channel().wake_waiters_for_test();
     }
 
     #[doc(hidden)]
@@ -1200,6 +1313,29 @@ impl TcpStream {
         Ok(())
     }
 
+    pub(super) fn on_channel_failed(&self) {
+        let _ = self.error.compare_exchange(
+            moto_rt::E_OK,
+            moto_rt::E_NOT_CONNECTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.rx_closed.store(true, Ordering::Release);
+        self.tx_closed.store(true, Ordering::Release);
+        self.pending_tx.lock().clear();
+        self.tcp_state_driver
+            .store(TcpState::Closed.into(), Ordering::Release);
+        self.wake_rx_waiters();
+        self.channel().wake_tx_wakers();
+        self.raise_readiness(
+            Readiness::READABLE
+                | Readiness::WRITABLE
+                | Readiness::READ_CLOSED
+                | Readiness::WRITE_CLOSED
+                | Readiness::ERROR,
+        );
+    }
+
     fn set_tcp_state(&self, new_state: TcpState) {
         let mut prev_state = self.tcp_state();
         let mut new_state = new_state;
@@ -1445,7 +1581,9 @@ impl TcpStream {
     }
 
     fn dead_read_result(&self) -> Result<usize, ErrorCode> {
-        if self.peer_reset() && !self.local_rx_shutdown.load(Ordering::Acquire) {
+        if self.channel().is_failed() {
+            Err(moto_rt::E_NOT_CONNECTED)
+        } else if self.peer_reset() && !self.local_rx_shutdown.load(Ordering::Acquire) {
             Err(moto_rt::E_CONNECTION_RESET)
         } else {
             Ok(0)

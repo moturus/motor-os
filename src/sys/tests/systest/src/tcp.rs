@@ -559,7 +559,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         stream.set_linger_async(Some(Duration::MAX)).await.unwrap();
         assert_eq!(
             stream.linger_async().await.unwrap(),
-            Some(Duration::from_secs(u32::MAX as u64))
+            Some(Duration::from_secs(60))
         );
         stream.set_linger_async(None).await.unwrap();
         assert_eq!(stream.linger_async().await.unwrap(), None);
@@ -1030,7 +1030,7 @@ fn test_stale_cross_connection_accept_is_requeued() {
 
     // A second FIFO control task is a barrier proving the accept task above
     // reached the listener before this connection is closed.
-    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    let invalid_addr = "192.0.2.1:0".parse().unwrap();
     stale_connection
         .send(api_net::bind_udp_socket_request(&invalid_addr, 0))
         .unwrap();
@@ -1090,7 +1090,7 @@ fn test_pending_accept_queue_is_bounded_and_canceled() {
     bind_resp.status().unwrap();
     let listener_id = bind_resp.handle;
 
-    let invalid_addr = "0.0.0.0:0".parse().unwrap();
+    let invalid_addr = "192.0.2.1:0".parse().unwrap();
     for batch in 0..CAP / BATCH {
         for offset in 0..BATCH {
             let id = (batch * BATCH + offset + 1) as u64;
@@ -1220,6 +1220,154 @@ fn test_positive_linger_close_rpc_completes() {
     println!("test_positive_linger_close_rpc_completes() PASS");
 }
 
+/// Once the raw client channel dies, a committed close may keep its bounded
+/// protocol state, but it must advance to FIN-WAIT-2 rather than retaining an
+/// active socket or resetting a completed stream.
+fn test_client_death_reclaims_tcp_sockets() {
+    use moto_sys_io::api_net;
+    use moto_sys_io::stats::TcpProtocolState;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let clients_before = read_sys_io_metric("net.active_clients");
+
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&connection);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+    let page = connection.alloc_page(u64::MAX).unwrap();
+    page.bytes_mut()[0] = b'x';
+    connection
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    peer.read_exact(&mut byte).unwrap();
+
+    let mut set_linger = moto_ipc::io_channel::Msg::new();
+    set_linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
+    set_linger.handle = handle;
+    set_linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+    set_linger.payload.args_32_mut()[2] = 1;
+    set_linger.payload.args_32_mut()[3] = 60;
+    connection.send(set_linger).unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let mut close = moto_ipc::io_channel::Msg::new();
+    close.id = 1;
+    close.command = api_net::NetCmd::TcpStreamClose as u16;
+    close.handle = handle;
+    connection.send(close).unwrap();
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    assert!(!sockets_on_addr_released(client_addr));
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        api_net::TcpState::Closed,
+        TcpProtocolState::FinWait2,
+    );
+    drop(peer);
+    // This peer never sent application data, so its own drop is intentionally
+    // abortive; the retained FIN-WAIT-2 socket consumes that reset and closes.
+    wait_for_sockets_released(client_addr);
+
+    // A channel that dies before issuing close must not turn its active
+    // socket into a default 60-second orphan either.
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&connection);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+    let page = connection.alloc_page(u64::MAX).unwrap();
+    page.bytes_mut()[0] = b'y';
+    connection
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    peer.read_exact(&mut byte).unwrap();
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_tcp_socket_state(
+        client_addr,
+        Some(listener_addr),
+        api_net::TcpState::Closed,
+        TcpProtocolState::FinWait2,
+    );
+
+    drop(peer);
+    wait_for_sockets_released(client_addr);
+    drop(listener);
+    wait_for_sockets_released(listener_addr);
+    println!("test_client_death_reclaims_tcp_sockets() PASS");
+}
+
+/// Fill every layer between a writer and a peer that never reads, then let a
+/// positive linger expire. The queued client pages belong to sys-io by then;
+/// dropping the socket must release them instead of tripping its destructor.
+fn test_positive_linger_timeout_discards_stalled_tx() {
+    use std::os::fd::AsRawFd;
+
+    const SEND_RING_SIZE: usize = 128 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let mut client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+    let (peer, _) = listener.accept().unwrap();
+
+    moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::from_secs(1))).unwrap();
+    moto_rt::net::set_linger(peer.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    client
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+
+    let chunk = [0x5a_u8; 16 * 1024];
+    let mut sent = 0_usize;
+    let mut hit_timeout = false;
+    for _ in 0..4096 {
+        match client.write(&chunk) {
+            Ok(n) => {
+                assert!(n > 0, "write returned Ok(0)");
+                sent += n;
+            }
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+                hit_timeout = true;
+                break;
+            }
+        }
+    }
+    assert!(hit_timeout, "write never timed out against a stalled peer");
+    assert!(
+        sent > SEND_RING_SIZE,
+        "writer stalled before filling the {SEND_RING_SIZE}-byte send ring: {sent} bytes"
+    );
+
+    drop(client);
+    wait_for_sockets_released(client_addr);
+
+    drop(peer);
+    drop(listener);
+    wait_for_sockets_released(listener_addr);
+    println!("test_positive_linger_timeout_discards_stalled_tx() PASS");
+}
+
 fn test_failed_tcp_setup_rolls_back_socket() {
     use moto_sys_io::api_net;
 
@@ -1269,6 +1417,140 @@ fn test_total_clients_is_monotonic() {
     }
 
     println!("test_total_clients_is_monotonic() PASS");
+}
+
+fn test_inline_tcp_data_flood_yields_to_other_clients() {
+    use moto_sys_io::api_net;
+
+    const MIN_MESSAGES: u64 = 4_096;
+    const MIN_FULL_OBSERVATIONS: u64 = 128;
+
+    let flood_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let flood_addr = flood_listener.local_addr().unwrap();
+    let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let probe_addr = probe_listener.local_addr().unwrap();
+    let clients_before = read_sys_io_metric("net.active_clients");
+
+    let flood_connection =
+        Arc::new(moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap());
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    flood_connection
+        .send(api_net::tcp_stream_connect_request(&flood_addr, 0))
+        .unwrap();
+    let response = recv_raw_net_response(&flood_connection);
+    response.status().unwrap();
+    let flood_handle = response.handle;
+    let (flood_peer, _) = flood_listener.accept().unwrap();
+
+    let probe_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let messages = Arc::new(AtomicU64::new(0));
+    let full_observations = Arc::new(AtomicU64::new(0));
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let mut producers = Vec::new();
+    for _ in 0..2 {
+        let connection = flood_connection.clone();
+        let stop = stop.clone();
+        let messages = messages.clone();
+        let full_observations = full_observations.clone();
+        let start = start.clone();
+        producers.push(std::thread::spawn(move || {
+            let mut ack = moto_ipc::io_channel::Msg::new();
+            ack.command = api_net::NetCmd::TcpStreamRxAck as u16;
+            ack.handle = flood_handle;
+            start.wait();
+            let mut sent = 0_u64;
+            while !stop.load(Ordering::Acquire) {
+                match connection.send(ack) {
+                    Ok(()) => {
+                        sent += 1;
+                        messages.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(moto_rt::Error::NotReady) => {
+                        full_observations.fetch_add(1, Ordering::Relaxed);
+                        std::hint::spin_loop();
+                    }
+                    Err(err) => panic!("inline-data producer failed: {err:?}"),
+                }
+            }
+            sent
+        }));
+    }
+    start.wait();
+
+    // More than one ring's worth of successful sends proves sys-io is
+    // continuously draining this channel; full observations prove both
+    // producers are keeping pressure on it when the probe starts.
+    let load_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while messages.load(Ordering::Relaxed) < MIN_MESSAGES
+        || full_observations.load(Ordering::Relaxed) < MIN_FULL_OBSERVATIONS
+    {
+        assert!(
+            std::time::Instant::now() < load_deadline,
+            "inline-data producers did not saturate the ring: {} messages, {} full observations",
+            messages.load(Ordering::Relaxed),
+            full_observations.load(Ordering::Relaxed)
+        );
+        std::thread::yield_now();
+    }
+
+    probe_connection
+        .send(api_net::tcp_stream_connect_request(&probe_addr, 0))
+        .unwrap();
+    let probe_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut probe_response = None;
+    let mut probe_error = None;
+    while std::time::Instant::now() < probe_deadline {
+        match probe_connection.recv() {
+            Ok(response) => {
+                probe_response = Some(response);
+                break;
+            }
+            Err(moto_rt::Error::NotReady) => std::thread::yield_now(),
+            Err(err) => {
+                probe_error = Some(err);
+                break;
+            }
+        }
+    }
+    stop.store(true, Ordering::Release);
+    let producer_messages: Vec<_> = producers
+        .into_iter()
+        .map(|producer| producer.join().unwrap())
+        .collect();
+
+    let probe_status = probe_response.map(|response| response.status());
+    let probe_peer = if probe_status == Some(Ok(())) {
+        Some(probe_listener.accept().unwrap().0)
+    } else {
+        None
+    };
+    assert!(producer_messages.iter().all(|count| *count > 0));
+    let clients_with_raw_connections = read_sys_io_metric("net.active_clients");
+    assert!(clients_with_raw_connections >= 2);
+
+    drop((probe_peer, probe_listener));
+    drop((flood_peer, flood_listener));
+    drop(probe_connection);
+    drop(flood_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| {
+        value <= clients_with_raw_connections - 2
+    });
+
+    assert!(
+        probe_error.is_none(),
+        "probe receive failed: {probe_error:?}"
+    );
+    probe_status
+        .unwrap_or_else(|| {
+            panic!(
+                "another client did not connect during the inline-data flood; producer messages: {producer_messages:?}"
+            )
+        })
+        .unwrap();
+    println!("test_inline_tcp_data_flood_yields_to_other_clients() PASS");
 }
 
 fn test_resolved_listener_bind_conflicts() {
@@ -1322,6 +1604,7 @@ pub fn test_native_net_cancellation() {
     // Run this first, while test_channel_teardown's assert-empty guarantee
     // still provides stable baselines for the global sys-io gauges.
     test_total_clients_is_monotonic();
+    test_inline_tcp_data_flood_yields_to_other_clients();
     test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
     test_stale_cross_connection_accept_is_requeued();
@@ -1335,6 +1618,8 @@ pub fn test_native_net_cancellation() {
     test_native_stream_drop_under_backpressure();
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
+    test_positive_linger_timeout_discards_stalled_tx();
+    test_client_death_reclaims_tcp_sockets();
     // Keep the raw connection last: its disconnect accounting is asynchronous
     // and must not perturb the exact client-count baselines above.
     test_positive_linger_close_rpc_completes();
@@ -1560,6 +1845,8 @@ fn test_tcp_socket_state_transitions() {
 // Before stage E, NetChannel::drop was a todo!() and channels were pooled
 // forever, so this leak check could never pass.
 fn test_channel_teardown() {
+    use std::os::fd::AsRawFd;
+
     const N: usize = 12;
     const ROUNDS: usize = 3;
     let addr = "127.0.0.1:3340";
@@ -1574,6 +1861,10 @@ fn test_channel_teardown() {
                 let mut byte = [0_u8; 1];
                 server.read_exact(&mut byte).unwrap();
                 server.write_all(&byte).unwrap();
+                // This test exercises channel reclamation, not graceful TCP
+                // retention. Abort its finished streams so their control
+                // blocks cannot consume later tests' orphan budget.
+                moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
                 servers.push(server);
             }
             // Every accepted stream drops here, on this (non-runtime) thread.
@@ -1586,6 +1877,7 @@ fn test_channel_teardown() {
             let mut byte = [0_u8; 1];
             client.read_exact(&mut byte).unwrap();
             assert_eq!(byte[0], i as u8);
+            moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
             clients.push(client);
         }
         acceptor.join().unwrap();
@@ -1653,11 +1945,12 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     }
 }
 
-fn client_iter() {
+fn client_iter() -> SocketAddr {
     let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
     assert_eq!(addrs.len(), 1);
     let mut stream =
         std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
+    let local_addr = stream.local_addr().unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write_all(&tx).unwrap();
 
@@ -1672,6 +1965,7 @@ fn client_iter() {
         }
     }
     let _ = stream.shutdown(std::net::Shutdown::Both);
+    local_addr
 }
 
 fn test_io_latency() {
@@ -1791,9 +2085,15 @@ fn test_tcp_loopback() {
         core::hint::spin_loop()
     }
 
-    client_iter();
-    client_iter();
-    client_iter();
+    for _ in 0..3 {
+        let client_addr = client_iter();
+        wait_for_tcp_socket_state(
+            client_addr,
+            Some("127.0.0.1:3333".parse().unwrap()),
+            moto_sys_io::api_net::TcpState::Closed,
+            moto_sys_io::stats::TcpProtocolState::TimeWait,
+        );
+    }
     std::thread::sleep(Duration::from_millis(100));
     println!("will test latency");
     std::thread::sleep(Duration::from_millis(100));
@@ -1843,6 +2143,32 @@ fn test_tcp_listener_ttl() {
     assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
 
     println!("test_tcp_listener_ttl() PASS");
+}
+
+#[allow(deprecated)]
+fn test_tcp_wildcards_are_family_scoped() {
+    let v4 = std::net::TcpListener::bind("0.0.0.0:3342").unwrap();
+    let v6 = std::net::TcpListener::bind("[::]:3342").unwrap();
+
+    assert!(v6.only_v6().unwrap());
+    v6.set_only_v6(true).unwrap();
+    assert_eq!(
+        v6.set_only_v6(false).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+
+    let client4 = std::net::TcpStream::connect("127.0.0.1:3342").unwrap();
+    let (server4, peer4) = v4.accept().unwrap();
+    assert!(peer4.is_ipv4());
+    assert!(server4.local_addr().unwrap().is_ipv4());
+
+    let client6 = std::net::TcpStream::connect("[::1]:3342").unwrap();
+    let (server6, peer6) = v6.accept().unwrap();
+    assert!(peer6.is_ipv6());
+    assert!(server6.local_addr().unwrap().is_ipv6());
+
+    drop((client4, server4, client6, server6));
+    println!("test_tcp_wildcards_are_family_scoped() PASS");
 }
 
 #[allow(deprecated)]
@@ -2708,6 +3034,16 @@ fn test_neighbor_admission() {
     );
 
     println!("-- test_neighbor_admission() PASS");
+}
+
+/// A host absent from systest's dedicated tap must fail at neighbor discovery,
+/// not leave an active open retrying until its caller-supplied deadline.
+fn test_unresolved_neighbor_fails_connect() {
+    let absent = "192.168.4.254:9".parse().unwrap();
+    let err = std::net::TcpStream::connect_timeout(&absent, Duration::from_secs(2)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotConnected);
+
+    println!("-- test_unresolved_neighbor_fails_connect() PASS");
 }
 
 /// sys-io accounts for every listening socket that is waiting on a peer to
@@ -3633,6 +3969,7 @@ fn test_timeout_storm_under_traffic() {
 pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
+    test_unresolved_neighbor_fails_connect();
     test_channel_teardown();
     test_completed_accept_backlog_is_bounded();
     test_backlog_saturation_liveness();
@@ -3654,6 +3991,7 @@ pub fn run_all_tests() {
     test_write_after_peer_graceful_close_resets();
     test_read_after_peer_reset_reports_error();
     test_tcp_listener_ttl();
+    test_tcp_wildcards_are_family_scoped();
     test_unsupported_tcp_options_return_errors();
     test_tcp_buffer_sizes();
     test_native_buffer_options();

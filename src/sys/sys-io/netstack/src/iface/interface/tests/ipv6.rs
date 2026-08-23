@@ -685,6 +685,21 @@ fn hop_by_hop_discard_param_problem(#[case] medium: Medium) {
         ),
         response
     );
+
+    // Destination ownership is checked before Hop-by-Hop options. A packet
+    // for another host must not make this interface report its bad option.
+    let mut foreign_data = data;
+    foreign_data[39] = 3;
+    assert_eq!(
+        iface.inner.process_ipv6(
+            &mut sockets,
+            PacketMeta::default(),
+            HardwareAddress::default(),
+            &Ipv6Packet::new_checked(&foreign_data[..]).unwrap(),
+            None,
+        ),
+        None
+    );
 }
 
 #[rstest]
@@ -698,8 +713,8 @@ fn hop_by_hop_discard_with_multicast(#[case] medium: Medium) {
     //  - Unknown option (discard (0b11) + ParamProblem)
     // - ICMP echo request
     //
-    // In this case, even if the destination address is a multicast address, an ICMPv6 ParamProblem
-    // should be transmitted.
+    // RFC 4443's multicast exception permits Parameter Problem code 2 for an
+    // unrecognized option whose high bits request a reply.
     let data = [
         0x60, 0x0, 0x0, 0x0, 0x0, 0x1b, 0x0, 0x40, 0xfd, 0xbe, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
         0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0xff, 0x02, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
@@ -920,27 +935,7 @@ fn unknown_proto_with_multicast_dst_address(#[case] medium: Medium) {
         0x0, 0x0, 0x0, 0x0, 0x1,
     ];
 
-    let response = Some(Packet::new_ipv6(
-        Ipv6Repr {
-            src_addr: Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0001),
-            dst_addr: Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0002),
-            hop_limit: 64,
-            next_header: IpProtocol::Icmpv6,
-            payload_len: 48,
-        },
-        IpPayload::Icmpv6(Icmpv6Repr::ParamProblem {
-            reason: Icmpv6ParamProblem::UnrecognizedNxtHdr,
-            pointer: 40,
-            header: Ipv6Repr {
-                src_addr: Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0002),
-                dst_addr: Ipv6Address::new(0xff02, 0, 0, 0, 0, 0, 0, 0x0001),
-                hop_limit: 64,
-                next_header: IpProtocol::Unknown(0x0c),
-                payload_len: 0,
-            },
-            data: &[],
-        }),
-    ));
+    let response = None;
 
     let (mut iface, mut sockets, _device) = setup(medium);
 
@@ -1210,7 +1205,7 @@ fn ndisc_neighbor_advertisement_ieee802154(#[case] medium: Medium) {
 
     assert_eq!(
         iface.inner.neighbor_cache.lookup(
-            &IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0002)),
+            &IpAddress::Ipv6(Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x0002)),
             iface.inner.now,
         ),
         NeighborAnswer::Found(HardwareAddress::Ieee802154(Ieee802154Address::from_bytes(
@@ -1764,7 +1759,7 @@ fn test_router_advertisement(#[case] medium: Medium) {
 fn test_solicited_node_addrs(#[case] medium: Medium) {
     let (mut iface, _, _) = setup(medium);
     let mut new_addrs = vec![
-        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 0, 2), 64),
+        IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 1, 2, 1, 2), 64),
         IpCidr::new(IpAddress::v6(0xfe80, 0, 0, 0, 3, 4, 0, 0xffff), 64),
     ];
     iface.update_ip_addrs(|addrs| {
@@ -1774,7 +1769,7 @@ fn test_solicited_node_addrs(#[case] medium: Medium) {
     assert!(
         iface
             .inner
-            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002))
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff01, 0x0002))
     );
     assert!(
         iface
@@ -1785,6 +1780,16 @@ fn test_solicited_node_addrs(#[case] medium: Medium) {
         !iface
             .inner
             .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0003))
+    );
+    assert!(
+        !iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff02, 0, 0, 0, 0, 1, 0xff00, 0x0002))
+    );
+    assert!(
+        !iface
+            .inner
+            .has_solicited_node(Ipv6Address::new(0xff05, 0, 0, 0, 0, 1, 0xff01, 0x0002))
     );
 }
 

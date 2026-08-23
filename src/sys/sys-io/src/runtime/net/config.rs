@@ -86,7 +86,7 @@ impl<'de> Deserialize<'de> for MacAddress {
     }
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, Eq, PartialEq)]
 pub(super) struct IpRoute {
     pub ip_network: IpNetwork,
     pub gateway: IpAddr,
@@ -94,18 +94,30 @@ pub(super) struct IpRoute {
 
 #[derive(Clone, Deserialize, Debug)]
 pub(super) struct DeviceCfg {
-    pub mac: MacAddress,
+    /// Pin this entry to one NIC. When absent, entries are assigned the
+    /// remaining virtio-net devices in configuration-name order.
+    pub mac: Option<MacAddress>,
+    /// Acquire this device's IPv4 address, default route, and DNS servers.
+    #[serde(default)]
+    pub dhcp: bool,
+    #[serde(default)]
     pub cidrs: Vec<IpNetwork>,
+    #[serde(default)]
     pub routes: Vec<IpRoute>,
+    /// Resolver addresses for a statically configured device.
+    #[serde(default)]
+    pub dns_servers: Vec<IpAddr>,
 }
 
 impl DeviceCfg {
     pub fn new(mac: &str) -> Self {
         use std::str::FromStr;
         Self {
-            mac: MacAddress::from_str(mac).unwrap(),
+            mac: Some(MacAddress::from_str(mac).unwrap()),
+            dhcp: false,
             cidrs: vec![],
             routes: vec![],
+            dns_servers: vec![],
         }
     }
 }
@@ -147,6 +159,32 @@ pub(super) struct NetConfig {
     pub max_syn_cookie_rate: NonZeroU32,
 
     pub devices: BTreeMap<String, DeviceCfg>,
+}
+
+impl NetConfig {
+    fn validate(self) -> Result<Self, String> {
+        for (name, device) in &self.devices {
+            if !device.dhcp {
+                continue;
+            }
+            let static_ipv4 = device.cidrs.iter().any(IpNetwork::is_ipv4)
+                || device
+                    .routes
+                    .iter()
+                    .any(|route| route.ip_network.is_ipv4() || route.gateway.is_ipv4());
+            if static_ipv4 {
+                return Err(format!(
+                    "devices.{name}: DHCP and static IPv4 configuration cannot be combined"
+                ));
+            }
+            if !device.dns_servers.is_empty() {
+                return Err(format!(
+                    "devices.{name}: DHCP and static DNS servers cannot be combined"
+                ));
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn default_max_half_open_global() -> NonZeroUsize {
@@ -340,16 +378,97 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
 
-    toml::from_str::<NetConfig>(config_str).map_err(|err| {
-        log::error!(
-            "{}:{} error parsing {}: {:#?}.",
-            file!(),
-            line!(),
-            CFG_PATH,
-            err
-        );
-        std::io::Error::from(ErrorKind::InvalidInput)
-    })
+    toml::from_str::<NetConfig>(config_str)
+        .map_err(|err| err.to_string())
+        .and_then(NetConfig::validate)
+        .map_err(|err| {
+            log::error!(
+                "{}:{} error parsing {}: {}.",
+                file!(),
+                line!(),
+                CFG_PATH,
+                err
+            );
+            std::io::Error::from(ErrorKind::InvalidInput)
+        })
+}
+
+fn resolv_conf_contents(servers: &[IpAddr]) -> String {
+    if servers.is_empty() {
+        return "# no active DNS servers\n".to_owned();
+    }
+    servers
+        .iter()
+        .map(|server| format!("nameserver {server}\n"))
+        .collect()
+}
+
+pub(super) async fn write_resolv_conf(
+    fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
+    servers: &[IpAddr],
+) -> std::io::Result<()> {
+    const TEMP_NAME: &str = ".resolv.conf.dhcp";
+    let contents = resolv_conf_contents(servers);
+    let mut fs = fs.write().await;
+
+    let Some((system, _)) = fs
+        .stat(async_fs::Role::System, async_fs::ROOT_ID, "system")
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some((cfg, _)) = fs.stat(async_fs::Role::System, system, "cfg").await? else {
+        return Ok(());
+    };
+    let Some((libc, _)) = fs.stat(async_fs::Role::System, cfg, "libc").await? else {
+        // The base image has no libc overlay and no resolver file to update.
+        return Ok(());
+    };
+
+    if let Some((stale, _)) = fs.stat(async_fs::Role::System, libc, TEMP_NAME).await? {
+        fs.delete_entry(async_fs::Role::System, stale).await?;
+    }
+    let temp = fs
+        .create_entry(
+            async_fs::Role::System,
+            libc,
+            async_fs::EntryKind::File,
+            TEMP_NAME,
+            [
+                async_fs::AccessPermissions::R,
+                async_fs::AccessPermissions::R,
+                async_fs::AccessPermissions::Rw,
+            ],
+        )
+        .await?;
+
+    let mut written = 0usize;
+    while written < contents.len() {
+        let end = chunk_end(written, contents.len());
+        match fs
+            .write(
+                async_fs::Role::System,
+                temp,
+                written as u64,
+                &contents.as_bytes()[written..end],
+            )
+            .await
+        {
+            Ok(0) => {
+                let _ = fs.delete_entry(async_fs::Role::System, temp).await;
+                return Err(ErrorKind::WriteZero.into());
+            }
+            Ok(count) => written += count,
+            Err(err) => {
+                let _ = fs.delete_entry(async_fs::Role::System, temp).await;
+                return Err(err);
+            }
+        }
+    }
+    fs.move_entry(async_fs::Role::System, temp, libc, "resolv.conf")
+        .await?;
+    log::info!("published {} DNS server(s)", servers.len());
+    Ok(())
 }
 
 pub(super) fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
@@ -401,6 +520,18 @@ pub(crate) mod self_test {
         (
             "net::config::distinguishes_valid_zero_devices_from_invalid_config",
             distinguishes_valid_zero_devices_from_invalid_config,
+        ),
+        (
+            "net::config::device_mac_is_optional",
+            device_mac_is_optional,
+        ),
+        (
+            "net::config::dhcp_owns_ipv4_configuration",
+            dhcp_owns_ipv4_configuration,
+        ),
+        (
+            "net::config::dhcp_resolver_contents",
+            dhcp_resolver_contents,
         ),
         (
             "net::config::route_selection_handles_connected_and_default_routes",
@@ -520,6 +651,63 @@ pub(crate) mod self_test {
         Ok(())
     }
 
+    fn device_mac_is_optional() -> Result<(), String> {
+        let without: NetConfig =
+            toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n")
+                .map_err(|err| err.to_string())?;
+        st_assert!(without.devices["net0"].mac.is_none());
+        st_assert!(!without.devices["net0"].dhcp);
+        st_assert!(without.devices["net0"].cidrs.is_empty());
+        st_assert!(without.devices["net0"].routes.is_empty());
+        st_assert!(without.devices["net0"].dns_servers.is_empty());
+
+        let with: NetConfig = toml::from_str(
+            "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+             mac = \"02:00:00:00:00:01\"\n",
+        )
+        .map_err(|err| err.to_string())?;
+        st_assert_eq!(
+            with.devices["net0"].mac.as_ref().unwrap().raw(),
+            [2, 0, 0, 0, 0, 1]
+        );
+        Ok(())
+    }
+
+    fn dhcp_owns_ipv4_configuration() -> Result<(), String> {
+        let config: NetConfig = toml::from_str(
+            "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+             dhcp = true\ncidrs = [\"2001:db8::2/64\"]\n",
+        )
+        .map_err(|err| err.to_string())?;
+        st_assert!(config.validate()?.devices["net0"].dhcp);
+
+        for static_config in [
+            "cidrs = [\"192.0.2.2/24\"]\n",
+            "routes = [{ ip_network = \"0.0.0.0/0\", gateway = \"192.0.2.1\" }]\n",
+            "dns_servers = [\"192.0.2.53\"]\n",
+        ] {
+            let parsed: NetConfig = toml::from_str(&format!(
+                "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+                 dhcp = true\n{static_config}"
+            ))
+            .map_err(|err| err.to_string())?;
+            st_assert!(parsed.validate().is_err());
+        }
+        Ok(())
+    }
+
+    fn dhcp_resolver_contents() -> Result<(), String> {
+        st_assert_eq!(resolv_conf_contents(&[]), "# no active DNS servers\n");
+        st_assert_eq!(
+            resolv_conf_contents(&[
+                "192.0.2.53".parse().unwrap(),
+                "2001:db8::53".parse().unwrap()
+            ]),
+            "nameserver 192.0.2.53\nnameserver 2001:db8::53\n"
+        );
+        Ok(())
+    }
+
     fn route_selection_handles_connected_and_default_routes() -> Result<(), String> {
         let net0 = device("192.168.4.2/24", &[("0.0.0.0/0", "192.168.4.1")]);
         let devices = [(0, &net0)];
@@ -577,7 +765,9 @@ pub(crate) mod self_test {
     const MINIMAL: &str = "auto_icmp_echo_reply = true\nloopback = true\n";
 
     fn parse(config: &str) -> Result<NetConfig, String> {
-        toml::from_str(&format!("{config}[devices]\n")).map_err(|err| err.to_string())
+        toml::from_str(&format!("{config}[devices]\n"))
+            .map_err(|err| err.to_string())
+            .and_then(NetConfig::validate)
     }
 
     /// A config predating the caps must still load, on the defaults.

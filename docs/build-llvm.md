@@ -567,12 +567,9 @@ cat > $IMG/devtools/cfg/llvm/x86_64-unknown-motor.cfg << EOF
 -resource-dir /devtools/llvm/lib/clang/$CLANG_MAJOR
 EOF
 
-# 6. mlibc reads its config from /system/cfg/libc (MLIBC_SYSCONFDIR). Its generic
-#    resolver needs a nameserver, the domain service entry, and a minimal hosts
-#    database. `motor-dns-test` is a deterministic resolver-service smoke name.
-cat > $LIBC_IMG/system/cfg/libc/resolv.conf << 'EOF'
-nameserver 8.8.8.8
-EOF
+# 6. Keep libc's service and hosts databases in /system/cfg/libc.
+#    sys-io generates resolv.conf from static device configuration or DHCP.
+#    `motor-dns-test` is a deterministic resolver-service smoke name.
 cat > $LIBC_IMG/system/cfg/libc/services << 'EOF'
 domain 53/tcp
 domain 53/udp

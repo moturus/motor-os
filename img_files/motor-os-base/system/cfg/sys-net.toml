@@ -38,8 +38,16 @@ max_rst_rate = 200
 max_syn_cookie_rate = 1000
 
 [devices.net0]
-mac = "a4:a1:c2:00:00:01"
+# With no `mac`, named entries consume virtio-net devices in this file's
+# deterministic name order. Set `mac = "a4:a1:c2:00:00:01"` to pin an entry
+# when device order is not the desired mapping.
+#
+# For a DHCP-configured cloud interface, replace the IPv4 CIDR and IPv4 route
+# below with `dhcp = true`. DHCP owns that device's IPv4 address, default
+# route, and DNS servers; static IPv4 configuration cannot be combined with
+# it. A static IPv6 CIDR and IPv6 routes may remain alongside DHCPv4.
 cidrs = ["192.168.4.2/24", "2001:db8::2/64"]
+dns_servers = ["8.8.8.8"]
 
 [[devices.net0.routes]]
 ip_network = "0.0.0.0/0"  # The default gateway.

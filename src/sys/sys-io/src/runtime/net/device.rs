@@ -4,13 +4,14 @@ use std::{
     collections::VecDeque,
     io::ErrorKind,
     mem::ManuallyDrop,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
     rc::Rc,
 };
 
 use super::config;
 use super::stats::NetStats;
+use ipnetwork::IpNetwork;
 use virtio_async::virtio_net::NetDevice;
 use virtio_async::virtio_net::RxMeta;
 
@@ -21,12 +22,68 @@ use moto_tooling::iobuf::IoBuf;
 type RxQueue = Rc<RefCell<VecDeque<(IoBuf, RxMeta)>>>;
 // Egress packets travel with their TSO segment size (0 = a regular
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
-enum TxWork {
-    Packet(IoBuf, u16),
-    Barrier(moto_async::oneshot::Sender<()>),
+type TxWork = (IoBuf, u16);
+
+/// Bytes owned by one admitted TX token before its packet size is known.
+/// [`BIG_BUF_SIZE`] is the largest buffer the token can consume.
+const TX_RESERVATION: usize = BIG_BUF_SIZE;
+
+struct TxQueueState {
+    work: VecDeque<TxWork>,
+    bytes: usize,
+    byte_limit: usize,
+    exhausted: bool,
 }
 
-type TxQueue = Rc<RefCell<VecDeque<TxWork>>>;
+impl TxQueueState {
+    fn new(byte_limit: usize) -> Self {
+        assert!(byte_limit >= TX_RESERVATION);
+        Self {
+            work: VecDeque::new(),
+            bytes: 0,
+            byte_limit,
+            exhausted: false,
+        }
+    }
+
+    fn reserve(&mut self) -> bool {
+        if self.bytes > self.byte_limit - TX_RESERVATION {
+            self.exhausted = true;
+            return false;
+        }
+        self.bytes += TX_RESERVATION;
+        true
+    }
+
+    fn cancel_reservation(&mut self) {
+        self.bytes -= TX_RESERVATION;
+    }
+
+    fn push_packet(&mut self, packet: IoBuf, tso_seg_size: u16) {
+        debug_assert!(packet.capacity() <= TX_RESERVATION);
+        self.bytes -= TX_RESERVATION - packet.capacity();
+        self.work.push_back((packet, tso_seg_size));
+    }
+
+    /// Pop work and report whether doing so reopened packet admission.
+    fn pop_front(&mut self) -> (Option<TxWork>, bool) {
+        let was_full = self.bytes > self.byte_limit - TX_RESERVATION;
+        let work = self.work.pop_front();
+        if let Some((packet, _)) = &work {
+            self.bytes -= packet.capacity();
+        }
+        (
+            work,
+            was_full && self.bytes <= self.byte_limit - TX_RESERVATION,
+        )
+    }
+
+    fn take_exhausted(&mut self) -> bool {
+        std::mem::take(&mut self.exhausted)
+    }
+}
+
+type TxQueue = Rc<RefCell<TxQueueState>>;
 
 /// Max TCP payload of one TSO super-segment we ask moto-netstack to emit.
 /// Bounded by BIG_BUF_SIZE minus headers; 60K leaves comfortable room
@@ -98,6 +155,7 @@ pub(super) struct VirtioDevice {
     tso: bool,
 
     buf_cache: BufCache,
+    stats: Rc<NetStats>,
 }
 
 /// The IP MTU to assume when the device reports none. Ethernet's default, and
@@ -168,16 +226,23 @@ impl VirtioDevice {
         let frame_mtu = frame_mtu(inner.mtu());
         let csum_offload = inner.csum_offload();
         let tso = inner.tso();
+        // Match the software queue to one hardware ring of ordinary frames.
+        // TSO buffers are charged by their 64 KiB allocation, so they consume
+        // 32 times as much of this bound as an MTU-sized frame.
+        let tx_queue_bytes = (inner.txq_sz() as usize)
+            .saturating_mul(SMALL_BUF_SIZE)
+            .max(TX_RESERVATION);
         let this = Self {
             inner,
             rx_queue: Default::default(),
-            tx_queue: Default::default(),
+            tx_queue: Rc::new(RefCell::new(TxQueueState::new(tx_queue_bytes))),
             rx_notify: Default::default(),
             tx_notify: Default::default(),
             frame_mtu,
             csum_offload,
             tso,
             buf_cache: Default::default(),
+            stats: stats.clone(),
         };
 
         let _ = moto_async::LocalRuntime::spawn(Self::rx_task(
@@ -191,11 +256,16 @@ impl VirtioDevice {
             this.inner.clone(),
             this.tx_queue.clone(),
             this.tx_notify.clone(),
+            this.rx_notify.clone(),
             this.buf_cache.clone(),
             stats,
         ));
 
         this
+    }
+
+    fn mac(&self) -> &[u8; 6] {
+        self.inner.mac()
     }
 
     async fn rx_task(
@@ -296,6 +366,7 @@ impl VirtioDevice {
         net_dev: Rc<NetDevice>,
         tx_queue: TxQueue,
         tx_notify: Rc<moto_async::LocalNotify>,
+        capacity_notify: Rc<moto_async::LocalNotify>,
         buf_cache: BufCache,
         stats: Rc<NetStats>,
     ) {
@@ -321,10 +392,13 @@ impl VirtioDevice {
                 buf_cache.push_buf(buf);
                 inflight_descs -= descs;
             }
-            let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
+            let (maybe_tx_vec, capacity_reopened) = tx_queue.borrow_mut().pop_front();
+            if capacity_reopened {
+                capacity_notify.notify_one();
+            }
 
             match maybe_tx_vec {
-                Some(TxWork::Packet(packet, tso_seg_size)) => {
+                Some((packet, tso_seg_size)) => {
                     log::debug!("NET TX {} bytes", packet.len());
                     stats
                         .device_tx_packets
@@ -337,27 +411,9 @@ impl VirtioDevice {
                     inflight_descs += descs;
                     completions.push_back((completion, descs));
                 }
-                Some(TxWork::Barrier(waiter)) => {
-                    while let Some((completion, descs)) = completions.pop_front() {
-                        let (buf, _) = completion.await;
-                        buf_cache.push_buf(buf);
-                        inflight_descs -= descs;
-                    }
-                    let _ = waiter.send(());
-                }
                 None => tx_notify.notified().await,
             }
         }
-    }
-
-    fn complete_transmits(&self, waiters: Vec<moto_async::oneshot::Sender<()>>) {
-        if waiters.is_empty() {
-            return;
-        }
-        self.tx_queue
-            .borrow_mut()
-            .extend(waiters.into_iter().map(TxWork::Barrier));
-        self.tx_notify.notify_one();
     }
 }
 
@@ -395,17 +451,29 @@ pub struct VirtioTxToken {
     tx_queue: TxQueue,
     tx_notify: Rc<moto_async::LocalNotify>,
     buf_cache: BufCache,
+    stats: Rc<NetStats>,
     // From PacketMeta::tso_seg_size via set_meta (the iface calls it just
     // before consume): nonzero marks a TCP super-segment.
     tso_seg_size: u16,
+    tcp_reset: bool,
+    reserved: bool,
+}
+
+impl Drop for VirtioTxToken {
+    fn drop(&mut self) {
+        if self.reserved {
+            self.tx_queue.borrow_mut().cancel_reservation();
+        }
+    }
 }
 
 impl moto_netstack::phy::TxToken for VirtioTxToken {
     fn set_meta(&mut self, meta: moto_netstack::phy::PacketMeta) {
         self.tso_seg_size = meta.tso_seg_size;
+        self.tcp_reset = meta.tcp_reset;
     }
 
-    fn consume<R, F>(self, len: usize, f: F) -> R
+    fn consume<R, F>(mut self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
@@ -416,6 +484,14 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
             // buffers are DMA-capable and page-aligned, a scarcer resource
             // than the plain allocation used here.
             log::error!("NET: TX: dropping a {len}-byte packet: no buffer.");
+            self.stats
+                .device_tx_allocation_drops
+                .set(self.stats.device_tx_allocation_drops.get() + 1);
+            if self.tcp_reset {
+                self.stats
+                    .tcp_abort_failed
+                    .set(self.stats.tcp_abort_failed.get() + 1);
+            }
             let mut scratch = vec![0u8; len];
             return f(scratch.as_mut_slice());
         };
@@ -423,7 +499,8 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
         let result = f(packet.as_mut());
         self.tx_queue
             .borrow_mut()
-            .push_back(TxWork::Packet(packet, self.tso_seg_size));
+            .push_packet(packet, self.tso_seg_size);
+        self.reserved = false;
         self.tx_notify.notify_one();
         log::debug!("TxToken: consume {len}.");
         result
@@ -446,6 +523,9 @@ impl moto_netstack::phy::Device for VirtioDevice {
         timestamp: moto_netstack::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         log::debug!("VirtioDevice::receive()");
+        if self.rx_queue.borrow().is_empty() || !self.tx_queue.borrow_mut().reserve() {
+            return None;
+        }
         self.rx_queue.borrow_mut().pop_front().map(|(buf, meta)| {
             log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
@@ -458,7 +538,10 @@ impl moto_netstack::phy::Device for VirtioDevice {
                     tx_queue: self.tx_queue.clone(),
                     tx_notify: self.tx_notify.clone(),
                     buf_cache: self.buf_cache.clone(),
+                    stats: self.stats.clone(),
                     tso_seg_size: 0,
+                    tcp_reset: false,
+                    reserved: true,
                 },
             )
         })
@@ -466,11 +549,17 @@ impl moto_netstack::phy::Device for VirtioDevice {
 
     fn transmit(&mut self, timestamp: moto_netstack::time::Instant) -> Option<Self::TxToken<'_>> {
         log::debug!("VirtioDevice::transmit()");
+        if !self.tx_queue.borrow_mut().reserve() {
+            return None;
+        }
         Some(VirtioTxToken {
             tx_queue: self.tx_queue.clone(),
             tx_notify: self.tx_notify.clone(),
             buf_cache: self.buf_cache.clone(),
+            stats: self.stats.clone(),
             tso_seg_size: 0,
+            tcp_reset: false,
+            reserved: true,
         })
     }
 
@@ -633,6 +722,12 @@ pub(super) const DEFAULT_MAX_RST_RATE: NonZeroU32 = NonZeroU32::new(200).unwrap(
 /// workloads have shown. `max_syn_cookie_rate` overrides it.
 pub(super) const DEFAULT_MAX_SYN_COOKIE_RATE: NonZeroU32 = NonZeroU32::new(1000).unwrap();
 
+/// Aggregate ARP and NDP requests emitted per second by one external device.
+/// The one-second bucket absorbs ordinary discovery bursts, while the reserve
+/// keeps spoofable passive replies from starving local and established work.
+const DEFAULT_NEIGHBOR_SOLICIT_RATE: u32 = 20;
+const DEFAULT_NEIGHBOR_SOLICIT_RESERVE: u32 = 4;
+
 /// The netstack configuration every interface is constructed from, so that the
 /// draws above have exactly one call site and a self-test can take
 /// configurations the way two devices would.
@@ -653,13 +748,9 @@ fn iface_config(
     config.tcp_cookie_key = random_bytes();
     config.loopback = !external;
     config.auto_icmp_echo_reply = auto_icmp_echo_reply;
-    // 200x more aggressive than the netstack's 1 s default, from `fa203b4b`
-    // ("reduce ARP delay"): the first packet to an unresolved peer waits out
-    // this delay whenever its request is lost, and a second of that is a
-    // second of connect latency. The delay is per destination, so the price
-    // of the aggressive value is 200 requests/s aimed at one address that
-    // does not answer, not 200 requests/s from the interface as a whole.
-    config.discovery_silent_time = moto_netstack::time::Duration::from_millis(5);
+    // Keep lost-request latency low without sys-io's old 5 ms request rate;
+    // the cache applies this quiet interval independently per destination.
+    config.discovery_silent_time = moto_netstack::time::Duration::from_millis(50);
     // The egress limits on socketless replies -- no-listener resets and
     // cookie SYN|ACKs -- exist because those replies go wherever a spoofable
     // source address says. On loopback the only peer is this machine, already
@@ -672,6 +763,8 @@ fn iface_config(
         config.icmp_error_rate_limit = net_cfg.max_icmp_error_rate.get();
         config.tcp_rst_rate_limit = net_cfg.max_rst_rate.get();
         config.tcp_cookie_rate_limit = net_cfg.max_syn_cookie_rate.get();
+        config.neighbor_solicit_rate_limit = DEFAULT_NEIGHBOR_SOLICIT_RATE;
+        config.neighbor_solicit_reserve = DEFAULT_NEIGHBOR_SOLICIT_RESERVE;
     }
     config
 }
@@ -728,6 +821,8 @@ pub(super) struct NetDev<'a> {
     device: NetstackDevice,
     iface: moto_netstack::iface::Interface,
     pub(super) sockets: moto_netstack::iface::SocketSet<'a>,
+    dhcp_socket: Option<moto_netstack::iface::SocketHandle>,
+    dhcp_lease: Option<DhcpLease>,
 
     /// [`NetstackDevice::is_external`], taken once at construction because both
     /// the netstack configuration and every ephemeral allocation need it.
@@ -741,7 +836,108 @@ pub(super) struct NetDev<'a> {
 
     // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
-    transmit_waiters: Vec<moto_async::oneshot::Sender<()>>,
+    poll_waiters: Vec<moto_async::oneshot::Sender<()>>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct DhcpLease {
+    address: IpNetwork,
+    route: Option<config::IpRoute>,
+}
+
+pub(super) struct PollResult {
+    pub activity: moto_netstack::iface::PollResult,
+    pub addresses_changed: bool,
+    pub dns_servers: Option<Vec<Ipv4Addr>>,
+    pub tx_exhausted: bool,
+}
+
+enum DhcpUpdate {
+    Deconfigured,
+    Configured {
+        address: IpNetwork,
+        router: Option<Ipv4Addr>,
+        dns_servers: Vec<Ipv4Addr>,
+    },
+}
+
+fn apply_dhcp_update(
+    name: &str,
+    config: &mut config::DeviceCfg,
+    iface: &mut moto_netstack::iface::Interface,
+    current: &mut Option<DhcpLease>,
+    update: DhcpUpdate,
+) -> (bool, Vec<Ipv4Addr>) {
+    let old_lease = current.take();
+    if let Some(old) = &old_lease {
+        config.cidrs.retain(|cidr| cidr != &old.address);
+        if let Some(route) = &old.route {
+            config.routes.retain(|candidate| candidate != route);
+        }
+    }
+
+    let (new_lease, dns_servers) = match update {
+        DhcpUpdate::Deconfigured => (None, Vec::new()),
+        DhcpUpdate::Configured {
+            address,
+            router,
+            dns_servers,
+        } => {
+            let route = router.and_then(|gateway| {
+                if address.contains(IpAddr::V4(gateway)) {
+                    Some(config::IpRoute {
+                        ip_network: "0.0.0.0/0".parse().unwrap(),
+                        gateway: IpAddr::V4(gateway),
+                    })
+                } else {
+                    log::warn!("{name}: DHCP router {gateway} is outside {address}; ignoring it.");
+                    None
+                }
+            });
+            config.cidrs.push(address);
+            if let Some(route) = &route {
+                config.routes.push(route.clone());
+            }
+            (Some(DhcpLease { address, route }), dns_servers)
+        }
+    };
+
+    let addresses_changed = old_lease != new_lease;
+    *current = new_lease;
+    if addresses_changed {
+        iface.update_ip_addrs(|addrs| {
+            addrs.retain(|cidr| !matches!(cidr, moto_netstack::wire::IpCidr::Ipv4(_)));
+            addrs.extend(
+                config
+                    .cidrs
+                    .iter()
+                    .filter(|cidr| cidr.is_ipv4())
+                    .map(config::ip_network_to_cidr),
+            );
+        });
+        iface.routes_mut().update(|routes| {
+            routes.retain(|route| !matches!(route.cidr, moto_netstack::wire::IpCidr::Ipv4(_)));
+            routes.extend(
+                config
+                    .routes
+                    .iter()
+                    .filter(|route| route.ip_network.is_ipv4())
+                    .map(|route| moto_netstack::iface::Route {
+                        cidr: config::ip_network_to_cidr(&route.ip_network),
+                        via_router: route.gateway.into(),
+                        preferred_until: None,
+                        expires_at: None,
+                    }),
+            );
+        });
+
+        match current {
+            Some(lease) => log::info!("{name}: DHCP configured {:?}.", lease.address),
+            None => log::warn!("{name}: DHCP lease lost; IPv4 deconfigured."),
+        }
+    }
+
+    (addresses_changed, dns_servers)
 }
 
 impl<'a> NetDev<'a> {
@@ -752,8 +948,8 @@ impl<'a> NetDev<'a> {
         mut device: NetstackDevice,
     ) -> Self {
         let hardware_addr = match &device {
-            NetstackDevice::VirtIo(_) => moto_netstack::wire::HardwareAddress::Ethernet(
-                moto_netstack::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
+            NetstackDevice::VirtIo(dev) => moto_netstack::wire::HardwareAddress::Ethernet(
+                moto_netstack::wire::EthernetAddress::from_bytes(dev.mac()),
             ),
             NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
         };
@@ -762,10 +958,7 @@ impl<'a> NetDev<'a> {
         // timestamp and an unoffset one would be this machine's uptime.
         tsval::init();
         let config = iface_config(hardware_addr, net_cfg, external);
-        log::debug!(
-            "Initializing net device {name} with\nmac {:x?}",
-            dev_cfg.mac
-        );
+        log::debug!("Initializing net device {name} with\nmac {hardware_addr:?}");
 
         let (mut iface, notify) = match &mut device {
             NetstackDevice::VirtIo(dev) => (
@@ -825,19 +1018,25 @@ impl<'a> NetDev<'a> {
 
         log::debug!("New NET device {name}.");
 
+        let mut sockets = moto_netstack::iface::SocketSet::new();
+        let dhcp_socket = (external && dev_cfg.dhcp)
+            .then(|| sockets.add(u64::MAX, moto_netstack::socket::dhcpv4::Socket::new()));
+
         Self {
             name: name.to_owned(),
             config: dev_cfg.clone(),
             device,
             iface,
-            sockets: moto_netstack::iface::SocketSet::new(),
+            sockets,
+            dhcp_socket,
+            dhcp_lease: None,
             external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
             icmp_identifiers_in_use: std::collections::HashSet::new(),
             device_runtime_notify: notify,
-            transmit_waiters: Vec::new(),
+            poll_waiters: Vec::new(),
         }
     }
 
@@ -849,9 +1048,11 @@ impl<'a> NetDev<'a> {
         &self.config
     }
 
-    pub(super) fn transmit_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
+    /// Complete after one interface poll has attempted all currently ready
+    /// egress. This deliberately says nothing about device completion.
+    pub(super) fn poll_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
         let (waiter, completion) = moto_async::oneshot();
-        self.transmit_waiters.push(waiter);
+        self.poll_waiters.push(waiter);
         self.device_runtime_notify.notify_one();
         completion
     }
@@ -939,41 +1140,65 @@ impl<'a> NetDev<'a> {
         &mut self,
         stats: &NetStats,
         backlog: &super::backlog::BacklogBudget,
-    ) -> moto_netstack::iface::PollResult {
+    ) -> PollResult {
         let NetDev {
             name,
             config,
             device,
             iface,
             sockets,
+            dhcp_socket,
+            dhcp_lease,
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
-            transmit_waiters,
+            poll_waiters,
             external: _,
         } = self;
         // Every segment this poll emits reads the timestamp clock, so it is
         // advanced once here rather than per segment.
         tsval::tick();
 
-        let waiters = std::mem::take(transmit_waiters);
-        let result = match device {
-            NetstackDevice::Loopback(loopback) => {
-                iface.poll(moto_netstack::time::Instant::now(), loopback, sockets)
-            }
+        let waiters = std::mem::take(poll_waiters);
+        let (result, tx_exhausted) = match device {
+            NetstackDevice::Loopback(loopback) => (
+                iface.poll(moto_netstack::time::Instant::now(), loopback, sockets),
+                false,
+            ),
             NetstackDevice::VirtIo(virtio_device) => {
-                iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets)
+                let result =
+                    iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets);
+                let tx_exhausted = virtio_device.tx_queue.borrow_mut().take_exhausted();
+                (result, tx_exhausted)
             }
         };
-        match device {
-            NetstackDevice::Loopback(_) => {
-                for waiter in waiters {
-                    let _ = waiter.send(());
-                }
+
+        let dhcp_update = dhcp_socket.and_then(|handle| {
+            let socket = sockets.get_mut::<moto_netstack::socket::dhcpv4::Socket>(handle);
+            socket.poll().map(|event| match event {
+                moto_netstack::socket::dhcpv4::Event::Deconfigured => DhcpUpdate::Deconfigured,
+                moto_netstack::socket::dhcpv4::Event::Configured(lease) => DhcpUpdate::Configured {
+                    address: IpNetwork::new(
+                        IpAddr::V4(lease.address.address().into()),
+                        lease.address.prefix_len(),
+                    )
+                    .unwrap(),
+                    router: lease.router.map(Into::into),
+                    dns_servers: lease.dns_servers.iter().copied().map(Into::into).collect(),
+                },
+            })
+        });
+        let (addresses_changed, dns_servers) = match dhcp_update {
+            Some(update) => {
+                let (changed, dns) = apply_dhcp_update(name, config, iface, dhcp_lease, update);
+                (changed, Some(dns))
             }
-            NetstackDevice::VirtIo(virtio_device) => virtio_device.complete_transmits(waiters),
+            None => (false, None),
+        };
+        for waiter in waiters {
+            let _ = waiter.send(());
         }
 
         // One poll drains the whole receive queue, so a batch of dropped
@@ -1008,6 +1233,20 @@ impl<'a> NetDev<'a> {
             stats
                 .neighbor_admission_refused
                 .set(stats.neighbor_admission_refused.get() + neighbors_refused);
+        }
+
+        let solicitations_suppressed = iface.take_neighbor_solicit_suppressed();
+        if solicitations_suppressed != 0 {
+            stats
+                .neighbor_solicitation_suppressed
+                .set(stats.neighbor_solicitation_suppressed.get() + solicitations_suppressed);
+        }
+
+        let udp_unreachable = iface.take_udp_tx_unreachable_drops();
+        if udp_unreachable != 0 {
+            stats
+                .udp_tx_unreachable_drops
+                .set(stats.udp_tx_unreachable_drops.get() + udp_unreachable);
         }
 
         let syn_rst = iface.take_tcp_syn_rst_unmatched();
@@ -1078,7 +1317,12 @@ impl<'a> NetDev<'a> {
                 .set(stats.tcp_cookie_restores_dropped.get() + restores_dropped);
         }
 
-        result
+        PollResult {
+            activity: result,
+            addresses_changed,
+            dns_servers,
+            tx_exhausted,
+        }
     }
 
     pub(super) fn poll_delay(&mut self) -> Option<std::time::Duration> {
@@ -1093,8 +1337,9 @@ impl<'a> NetDev<'a> {
             tcp_ports_in_use,
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
-            transmit_waiters: _,
+            poll_waiters: _,
             external: _,
+            ..
         } = self;
         match device {
             NetstackDevice::Loopback(loopback) => iface
@@ -1114,6 +1359,10 @@ impl<'a> NetDev<'a> {
         }
 
         addresses
+    }
+
+    pub(super) fn is_external(&self) -> bool {
+        self.external
     }
 
     pub(super) fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
@@ -1228,12 +1477,20 @@ pub(crate) mod self_test {
             a_large_config_is_installed_whole,
         ),
         (
+            "net::device::dhcp_lease_updates_are_reversible",
+            dhcp_lease_updates_are_reversible,
+        ),
+        (
             "net::device::only_external_devices_rate_limit_egress",
             only_external_devices_rate_limit_egress,
         ),
         (
             "net::device::rx_ring_refills_after_transient_allocation_failure",
             rx_ring_refills_after_transient_allocation_failure,
+        ),
+        (
+            "net::device::tx_queue_is_bounded_and_reopens",
+            tx_queue_is_bounded_and_reopens,
         ),
     ];
 
@@ -1273,6 +1530,41 @@ pub(crate) mod self_test {
         Ok(())
     }
 
+    /// Admission reserves the largest possible packet, never exceeds its byte
+    /// bound, and reports the full-to-writable edge when the device dequeues.
+    fn tx_queue_is_bounded_and_reopens() -> Result<(), String> {
+        let mut queue = TxQueueState::new(TX_RESERVATION * 2);
+
+        st_assert!(queue.reserve());
+        st_assert!(queue.reserve());
+        st_assert!(!queue.reserve());
+        queue.cancel_reservation();
+        st_assert!(queue.reserve());
+        queue.cancel_reservation();
+        queue.cancel_reservation();
+        st_assert_eq!(queue.bytes, 0);
+
+        for _ in 0..2 {
+            st_assert!(queue.reserve());
+            let packet = IoBuf::new_from_size_align(BIG_BUF_SIZE)
+                .ok_or_else(|| "could not allocate TX self-test buffer".to_owned())?;
+            queue.push_packet(packet, 0);
+        }
+        st_assert_eq!(queue.bytes, queue.byte_limit);
+        st_assert!(!queue.reserve());
+        st_assert!(queue.take_exhausted());
+        st_assert!(!queue.take_exhausted());
+
+        let (packet, reopened) = queue.pop_front();
+        st_assert!(matches!(packet, Some((_, 0))));
+        st_assert!(reopened);
+        let (packet, reopened) = queue.pop_front();
+        st_assert!(matches!(packet, Some((_, 0))));
+        st_assert!(!reopened);
+        st_assert_eq!(queue.bytes, 0);
+        Ok(())
+    }
+
     /// The egress rate limits reach external interfaces and skip loopback.
     ///
     /// Both directions, like the loopback-bit test below: a limiter left off
@@ -1292,11 +1584,25 @@ pub(crate) mod self_test {
             external.tcp_cookie_rate_limit,
             DEFAULT_MAX_SYN_COOKIE_RATE.get()
         );
+        st_assert_eq!(
+            external.discovery_silent_time,
+            moto_netstack::time::Duration::from_millis(50)
+        );
+        st_assert_eq!(
+            external.neighbor_solicit_rate_limit,
+            DEFAULT_NEIGHBOR_SOLICIT_RATE
+        );
+        st_assert_eq!(
+            external.neighbor_solicit_reserve,
+            DEFAULT_NEIGHBOR_SOLICIT_RESERVE
+        );
 
         let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
         st_assert_eq!(loopback.icmp_error_rate_limit, 0);
         st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
         st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
+        st_assert_eq!(loopback.neighbor_solicit_rate_limit, 0);
+        st_assert_eq!(loopback.neighbor_solicit_reserve, 0);
         Ok(())
     }
 
@@ -1342,6 +1648,62 @@ pub(crate) mod self_test {
             .routes_mut()
             .update(|storage| routes = storage.len());
         st_assert_eq!(routes, ENTRIES);
+
+        Ok(())
+    }
+
+    fn dhcp_lease_updates_are_reversible() -> Result<(), String> {
+        let mut cfg = config::DeviceCfg::new("02:00:00:00:00:7f");
+        cfg.cidrs.push("2001:db8::2/64".parse().unwrap());
+        cfg.routes.push(config::IpRoute {
+            ip_network: "::/0".parse().unwrap(),
+            gateway: "2001:db8::1".parse().unwrap(),
+        });
+        let mut dev = NetDev::new(
+            "self-test",
+            &cfg,
+            &net_cfg(),
+            NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
+                moto_netstack::phy::Medium::Ip,
+            )),
+        );
+
+        let configured = DhcpUpdate::Configured {
+            address: "192.0.2.10/24".parse().unwrap(),
+            router: Some("192.0.2.1".parse().unwrap()),
+            dns_servers: vec!["192.0.2.53".parse().unwrap()],
+        };
+        let (changed, dns) = apply_dhcp_update(
+            &dev.name,
+            &mut dev.config,
+            &mut dev.iface,
+            &mut dev.dhcp_lease,
+            configured,
+        );
+        st_assert!(changed);
+        st_assert_eq!(
+            dns,
+            vec!["192.0.2.53".parse::<std::net::Ipv4Addr>().unwrap()]
+        );
+        st_assert!(dev.ip_addesses().contains(&"192.0.2.10".parse().unwrap()));
+        st_assert_eq!(dev.config.cidrs.len(), 2);
+        st_assert_eq!(dev.config.routes.len(), 2);
+
+        let (changed, dns) = apply_dhcp_update(
+            &dev.name,
+            &mut dev.config,
+            &mut dev.iface,
+            &mut dev.dhcp_lease,
+            DhcpUpdate::Deconfigured,
+        );
+        st_assert!(changed);
+        st_assert!(dns.is_empty());
+        st_assert_eq!(
+            dev.ip_addesses(),
+            vec!["2001:db8::2".parse::<std::net::IpAddr>().unwrap()]
+        );
+        st_assert_eq!(dev.config.cidrs, vec!["2001:db8::2/64".parse().unwrap()]);
+        st_assert_eq!(dev.config.routes.len(), 1);
 
         Ok(())
     }

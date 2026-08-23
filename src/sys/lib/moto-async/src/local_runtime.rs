@@ -259,6 +259,10 @@ struct LocalRuntimeInner {
     wake_on_sleep: core::cell::Cell<Option<SysHandle>>,
 
     currently_running_task: core::cell::Cell<Option<TaskId>>,
+
+    // Set only by the task currently being polled. The scheduler consumes it
+    // at the safe point after releasing that task's borrow.
+    io_turn_requested: core::cell::Cell<bool>,
 }
 
 impl LocalRuntimeInner {
@@ -274,6 +278,7 @@ impl LocalRuntimeInner {
             run_state: Arc::new(AtomicU32::new(RUN_STATE_POLLING)),
             wake_on_sleep: core::cell::Cell::new(None),
             currently_running_task: Default::default(),
+            io_turn_requested: Default::default(),
         }
     }
 
@@ -333,6 +338,40 @@ impl LocalRuntimeInner {
 
     fn next_runnable(&self) -> Option<TaskId> {
         self.runqueue.borrow_mut().pop_front()
+    }
+
+    fn request_io_turn(&self) {
+        let already_requested = self.io_turn_requested.replace(true);
+        debug_assert!(!already_requested);
+    }
+
+    fn take_io_turn_request(&self) -> bool {
+        self.io_turn_requested.replace(false)
+    }
+
+    /// Poll timers and registered system handles once without blocking.
+    ///
+    /// This runs only between task polls, when the scheduler holds no task-map
+    /// borrow: timer wakers may run arbitrary code and newly spawned tasks must
+    /// be free to enter the map.
+    fn poll_io_nonblocking(&self) {
+        // A deferred peer wake normally rides the executor's sleep syscall.
+        // An explicitly requested I/O turn does not sleep, so deliver it the
+        // same way LocalRuntime::wait does when runnable work reappears.
+        if let Some(handle) = self.wake_on_sleep.take() {
+            let _ = moto_sys::SysCpu::wake(handle);
+        }
+
+        self.enqueue_expired_timers();
+        self.merge_incoming();
+
+        // System-handle wakes are latched in the kernel until SysCpu::wait
+        // reports them. A deadline of now makes this a poll, never a sleep.
+        self.wait(Some(Instant::now()), SysHandle::NONE);
+
+        // The syscall and its wakers may have made more work ready.
+        self.enqueue_expired_timers();
+        self.merge_incoming();
     }
 
     fn wait(&self, timeo: Option<Instant>, wake_target: SysHandle) {
@@ -599,21 +638,31 @@ impl LocalRuntime {
                 .local_waker(&local_waker)
                 .build();
 
-            {
-                runtime
-                    .currently_running_task
-                    .set(Some(TaskId::default_root()));
-                let result = f.as_mut().poll(&mut cx);
-                runtime.currently_running_task.set(None);
+            runtime
+                .currently_running_task
+                .set(Some(TaskId::default_root()));
+            let result = f.as_mut().poll(&mut cx);
+            runtime.currently_running_task.set(None);
 
-                if let Poll::Ready(output) = result {
-                    // The runtime exits instead of sleeping: still owes
-                    // the deferred wake, if one is pending.
-                    if let Some(handle) = runtime.wake_on_sleep.take() {
-                        let _ = moto_sys::SysCpu::wake(handle);
-                    }
-                    return output;
+            let io_turn_requested = runtime.take_io_turn_request();
+            if let Poll::Ready(output) = result {
+                debug_assert!(!io_turn_requested);
+                // The runtime exits instead of sleeping: still owes
+                // the deferred wake, if one is pending.
+                if let Some(handle) = runtime.wake_on_sleep.take() {
+                    let _ = moto_sys::SysCpu::wake(handle);
                 }
+                return output;
+            }
+
+            if io_turn_requested {
+                runtime.poll_io_nonblocking();
+                // I/O and timer tasks discovered above are already queued.
+                // Put the hot root future behind them.
+                runtime
+                    .runqueue
+                    .borrow_mut()
+                    .push_back(TaskId::default_root());
             }
 
             loop {
@@ -681,10 +730,19 @@ impl LocalRuntime {
                 }
             }
 
+            let io_turn_requested = inner.take_io_turn_request();
             if poll_result.is_pending() {
-                inner.currently_running_task.set(None);
+                // Timer wakers may run arbitrary code and merge_incoming()
+                // borrows the task map, so release this poll's borrow first.
+                drop(tasks_ref);
+                if io_turn_requested {
+                    inner.poll_io_nonblocking();
+                    // Ready work found above stays ahead of this hot task.
+                    inner.runqueue.borrow_mut().push_back(current_task_id);
+                }
                 continue;
             }
+            debug_assert!(!io_turn_requested);
 
             // The task has completed.
             if let Some(waker_cell) = task.join_handle_waker.upgrade()
@@ -882,6 +940,36 @@ pub async fn yield_now() {
     }
 
     YieldNow { yielded: false }.await
+}
+
+/// Yields execution after asking the runtime to poll I/O and timers once.
+///
+/// Unlike [yield_now], this makes kernel-latched system-handle wakes and
+/// expired timers runnable even when the caller keeps the run queue non-empty.
+/// The poll never sleeps, and the caller is requeued behind work it discovers.
+///
+/// This is more expensive than [yield_now]; use it as the bounded fairness
+/// edge in a hot loop, not on every iteration.
+pub async fn yield_to_io() {
+    struct YieldToIo {
+        yielded: bool,
+    }
+
+    impl Future for YieldToIo {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.yielded {
+                return Poll::Ready(());
+            }
+
+            self.yielded = true;
+            LocalRuntimeInner::current().request_io_turn();
+            Poll::Pending
+        }
+    }
+
+    YieldToIo { yielded: false }.await
 }
 
 #[cfg(debug_assertions)]

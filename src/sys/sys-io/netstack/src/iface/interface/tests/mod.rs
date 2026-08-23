@@ -145,12 +145,6 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
     });
     let dst_addr = ip_repr.dst_addr();
 
-    // Bind the socket to port 68
-    assert_eq!(sockets.udp_bind(socket_handle, 68), Ok(()));
-    let socket = sockets.get_mut::<udp::Socket>(socket_handle);
-    assert!(!socket.can_recv());
-    assert!(socket.can_send());
-
     udp_repr.emit(
         &mut packet,
         &ip_repr.src_addr(),
@@ -159,6 +153,25 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
         |buf| buf.copy_from_slice(&UDP_PAYLOAD),
         &ChecksumCapabilities::default(),
     );
+    drop(packet);
+
+    // An unclaimed multicast/broadcast datagram is silently discarded.
+    assert_eq!(
+        iface.inner.process_udp(
+            &mut sockets,
+            PacketMeta::default(),
+            false,
+            ip_repr.clone(),
+            &udp_bytes,
+        ),
+        None
+    );
+
+    // Bind the socket to port 68.
+    assert_eq!(sockets.udp_bind(socket_handle, 68), Ok(()));
+    let socket = sockets.get_mut::<udp::Socket>(socket_handle);
+    assert!(!socket.can_recv());
+    assert!(socket.can_send());
 
     // Packet should be handled by bound UDP socket
     assert_eq!(
@@ -167,7 +180,7 @@ fn test_handle_udp_broadcast(#[case] medium: Medium) {
             PacketMeta::default(),
             false,
             ip_repr,
-            packet.into_inner(),
+            &udp_bytes,
         ),
         None
     );
@@ -277,5 +290,76 @@ pub fn tcp_not_accepted() {
             &tcp_bytes,
         ),
         None,
+    );
+
+    // TCP never answers a multicast destination with a socketless reset.
+    tcp.emit(
+        &mut TcpPacket::new_unchecked(&mut tcp_bytes),
+        &Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2).into(),
+        &IPV6_LINK_LOCAL_ALL_NODES.into(),
+        &ChecksumCapabilities::default(),
+    );
+    assert_eq!(
+        iface.inner.process_tcp(
+            &mut sockets,
+            PacketMeta::default(),
+            false,
+            IpRepr::Ipv6(Ipv6Repr {
+                src_addr: Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 2),
+                dst_addr: IPV6_LINK_LOCAL_ALL_NODES,
+                next_header: IpProtocol::Tcp,
+                payload_len: tcp.buffer_len(),
+                hop_limit: 64,
+            }),
+            &tcp_bytes,
+        ),
+        None,
+    );
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp", feature = "proto-ipv4"))]
+fn tcp_broadcast_not_accepted() {
+    let (mut iface, mut sockets, _) = setup(Medium::Ip);
+    let src_addr = Ipv4Address::new(192, 168, 1, 2);
+    let dst_addr = Ipv4Address::new(192, 168, 1, 255);
+    let tcp = TcpRepr {
+        src_port: 4242,
+        dst_port: 4243,
+        control: TcpControl::Syn,
+        seq_number: TcpSeqNumber(-10001),
+        ack_number: None,
+        window_len: 256,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None, None, None],
+        timestamp: None,
+        payload: &[],
+    };
+    let mut tcp_bytes = vec![0; tcp.buffer_len()];
+    tcp.emit(
+        &mut TcpPacket::new_unchecked(&mut tcp_bytes),
+        &src_addr.into(),
+        &dst_addr.into(),
+        &ChecksumCapabilities::default(),
+    );
+
+    assert_eq!(
+        iface.inner.process_tcp(
+            &mut sockets,
+            PacketMeta::default(),
+            false,
+            Ipv4Repr {
+                src_addr,
+                dst_addr,
+                next_header: IpProtocol::Tcp,
+                payload_len: tcp.buffer_len(),
+                hop_limit: 64,
+            }
+            .into(),
+            &tcp_bytes,
+        ),
+        None
     );
 }

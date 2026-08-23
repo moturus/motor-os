@@ -85,6 +85,7 @@ pub const TCP_OPTION_LINGER: u64 = 1 << 4;
 // configuration.
 pub const TCP_OPTION_RCVBUF: u64 = 1 << 5;
 pub const TCP_OPTION_SNDBUF: u64 = 1 << 6;
+pub const TCP_OPTION_ONLY_V6: u64 = 1 << 7;
 
 pub const UDP_OPTION_TTL: u64 = 1 << 0;
 

@@ -1,4 +1,5 @@
 mod bridge;
+mod dns;
 mod order;
 
 use std::sync::mpsc;
@@ -57,9 +58,9 @@ fn write_response(
 
 /// One lookup under the destination-ordering policy: answers the node
 /// cannot use rank last, and a combined lookup does not stand on ONLY
-/// such answers -- when the v6 leg produced nothing usable, v4 is asked
-/// once more (one bounded retransmission; mlibc sends a single query per
-/// family) and a still-failing v4 leg's status is the answer.
+/// such answers. The native transport already performs its bounded retry;
+/// when that leaves only unusable v6 answers, one final bounded v4 lookup
+/// decides whether the combined result is useful.
 fn resolve(name: &[u8], family: AddressFamily) -> bridge::Result {
     let mut result = bridge::lookup(name, family);
     if family == AddressFamily::Any
@@ -270,6 +271,7 @@ fn bridge_self_test() {
 }
 
 fn resolver_policy_self_test() {
+    bridge::self_test();
     order::self_test();
 
     let v4 = bridge::Result {
@@ -436,14 +438,15 @@ fn ipc_self_test() {
     assert_v4(&after_bad_request.addresses[0], [192, 0, 2, 2]);
 
     for _ in 0..8 {
-        assert!(matches!(
-            client_resolve_external(
-                &mut client,
-                "motor-os-resolver-does-not-exist.invalid",
-                AddressFamily::V4
-            ),
-            Err(ClientError::Resolver(Status::NotFound))
-        ));
+        let result = client_resolve_external(
+            &mut client,
+            "motor-os-resolver-does-not-exist.invalid",
+            AddressFamily::V4,
+        );
+        assert!(
+            matches!(result, Err(ClientError::Resolver(Status::NotFound))),
+            "unexpected negative lookup result: {result:?}"
+        );
     }
 
     for _ in 0..32 {

@@ -5,7 +5,7 @@ use std::{
     cell::RefCell,
     collections::{HashSet, VecDeque},
     io::ErrorKind,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     rc::Rc,
 };
 
@@ -22,7 +22,7 @@ pub(super) struct TcpListener {
 
     // What the user gave us, with one caveat:
     // - either a fully specified IPADDR:PORT,
-    // - or 0.0.0.0:PORT.
+    // - or a family-specific unspecified address and fixed port.
     // - or, if the user gave us IPADDR:0, this will have IPADDR:EPHEMERAL_PORT.
     socket_addr: SocketAddr,
     client_sender: ClientSender,
@@ -44,6 +44,9 @@ pub(super) struct TcpListener {
 
     // All specific IPs this listener listens on, with their devices.
     listening_on: Vec<(SocketAddr, usize)>,
+
+    // The client-requested starting depth for every address in this listener.
+    initial_pool_size: usize,
 
     // Will be applied to all new sockets.
     ttl: u8,
@@ -86,6 +89,61 @@ impl TcpListener {
 
     pub(super) fn listens_on(&self, socket_addr: SocketAddr, device_idx: usize) -> bool {
         self.listening_on.contains(&(socket_addr, device_idx))
+    }
+
+    fn accepts_address(&self, address: IpAddr) -> bool {
+        let bound = self.socket_addr.ip();
+        (bound.is_unspecified() && bound.is_ipv4() == address.is_ipv4()) || bound == address
+    }
+
+    pub(super) fn add_address(this: &Rc<RefCell<Self>>, address: IpAddr, device_idx: usize) {
+        let (runtime, endpoint, key) = {
+            let mut listener = this.borrow_mut();
+            let endpoint = SocketAddr::new(address, listener.socket_addr.port());
+            if !listener.accepts_address(address)
+                || listener.listening_on.contains(&(endpoint, device_idx))
+            {
+                return;
+            }
+            listener.listening_on.push((endpoint, device_idx));
+            let runtime = listener.runtime.clone();
+            let key = (listener.listener_id, endpoint);
+            runtime.backlog.open(key, listener.initial_pool_size);
+            (runtime, endpoint, key)
+        };
+
+        super::socket::tcp::replenish_pool(runtime, Rc::downgrade(this), device_idx, endpoint, key);
+    }
+
+    pub(super) fn remove_address(this: &Rc<RefCell<Self>>, address: IpAddr, device_idx: usize) {
+        let endpoint = SocketAddr::new(address, this.borrow().socket_addr.port());
+        let (runtime, candidates) = {
+            let mut listener = this.borrow_mut();
+            let Some(position) = listener
+                .listening_on
+                .iter()
+                .position(|entry| *entry == (endpoint, device_idx))
+            else {
+                return;
+            };
+            listener.listening_on.swap_remove(position);
+            let runtime = listener.runtime.clone();
+            runtime.backlog.close((listener.listener_id, endpoint));
+            runtime.inner.borrow_mut().devices[device_idx].disengage_syn_cookies(endpoint);
+            let candidates = listener
+                .listening_sockets
+                .iter()
+                .filter_map(|socket_id| runtime.inner.borrow().sockets.get(socket_id).cloned())
+                .collect::<Vec<_>>();
+            (runtime, candidates)
+        };
+
+        for socket in candidates {
+            MotoSocket::abort_if_listening(&socket, endpoint);
+        }
+        runtime.inner.borrow().devices[device_idx]
+            .device_runtime_notify
+            .notify_one();
     }
 
     // Called on conn drop.
@@ -204,7 +262,12 @@ impl TcpListener {
 
             let mut listening_on = Vec::with_capacity(runtime_mut.ip_addresses.len());
             for (addr, device_idx) in &runtime_mut.ip_addresses {
-                listening_on.push((SocketAddr::new(*addr, socket_addr.port()), *device_idx));
+                if addr.is_ipv4() == ip_addr.is_ipv4() {
+                    listening_on.push((SocketAddr::new(*addr, socket_addr.port()), *device_idx));
+                }
+            }
+            if listening_on.is_empty() {
+                return Err(ErrorKind::InvalidInput.into());
             }
 
             (listening_on, None)
@@ -498,6 +561,7 @@ impl TcpListener {
             listening_sockets: Default::default(),
             ephemeral_tcp_port,
             listening_on,
+            initial_pool_size: num_listeners,
             ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
             buffer_sizes: super::socket::tcp::TcpBufferSizes::from_payload(&msg.payload),
         }));
@@ -652,6 +716,12 @@ impl TcpListener {
             moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
                 resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.tx as u64;
             }
+            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+                if !tcp_listener.borrow().socket_addr.is_ipv6() {
+                    return Err(ErrorKind::Unsupported.into());
+                }
+                resp.payload.args_8_mut()[23] = 1;
+            }
             _ => return Err(ErrorKind::InvalidInput.into()),
         }
         resp.status = moto_rt::E_OK;
@@ -704,6 +774,14 @@ impl TcpListener {
                 let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
                 tcp_listener.borrow_mut().buffer_sizes.tx = bytes;
                 resp.payload.args_64_mut()[1] = bytes as u64;
+            }
+            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+                if msg.payload.args_8()[23] > 1 {
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+                if !tcp_listener.borrow().socket_addr.is_ipv6() || msg.payload.args_8()[23] == 0 {
+                    return Err(ErrorKind::Unsupported.into());
+                }
             }
             _ => return Err(ErrorKind::InvalidInput.into()),
         }

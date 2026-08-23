@@ -973,6 +973,10 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if args.len() == 2 && args[1] == "test-tcp-shutdown-repro" {
+        tcp::test_tcp_shutdown_repro();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
         tcp::test_native_listener_drop_backpressure();
         return;

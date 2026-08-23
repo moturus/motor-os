@@ -220,6 +220,9 @@ const RTTE_MIN_RTO: u32 = 200_000;
 // seconds
 const RTTE_MAX_RTO: u32 = 60_000_000;
 
+/// Linux's default active-open policy: the initial SYN plus six retries.
+const MAX_SYN_RETRANSMISSIONS: u8 = 6;
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct RttEstimator {
@@ -439,6 +442,10 @@ impl RackState {
 /// octet of sequence space) is not acceptable.
 const ORPHAN_RING_FLOOR: usize = 16 * 1024;
 
+/// TIME-WAIT has already consumed the peer's FIN and needs only a nonzero
+/// receive window while it acknowledges duplicates of that FIN.
+const TIME_WAIT_RING_FLOOR: usize = 1;
+
 impl Timer {
     fn new() -> Timer {
         Timer::Idle {
@@ -604,6 +611,12 @@ pub struct Socket<'a> {
     /// other way a socket reaches Closed. The owner reads it through
     /// [`Socket::reset_received`] to report ECONNRESET faithfully.
     rst_received: bool,
+    /// The most recent active open ended because its deadline or retry budget
+    /// expired, rather than because a peer refused it.
+    connect_timed_out: bool,
+    /// SYN retransmissions emitted by the current active open. The initial
+    /// SYN is not included.
+    syn_retransmits: u8,
     /// The local receive half is gone: the owner closed or shut down
     /// reading. New data after our FIN earns an RST (Linux RCV_SHUTDOWN
     /// semantics), and the close-handshake states release the rings.
@@ -647,7 +660,7 @@ pub struct Socket<'a> {
     /// smaller than the configured capacity the scale was chosen for.
     win_shift_override: Option<u8>,
     /// Latched rx capacity target; applies once the connection is
-    /// synchronized and the ring holds no unconsumed bytes.
+    /// synchronized and neither the ring nor assembler holds bytes.
     pending_rx_capacity: Option<usize>,
     /// Latched tx capacity target; applies once the connection is
     /// synchronized and the ring is fully acked and drained.
@@ -800,6 +813,8 @@ impl<'a> Socket<'a> {
             rx_buffer,
             rx_fin_received: false,
             rst_received: false,
+            connect_timed_out: false,
+            syn_retransmits: 0,
             rx_shutdown: false,
             timeout: None,
             keep_alive: None,
@@ -1169,6 +1184,12 @@ impl<'a> Socket<'a> {
         self.rst_received
     }
 
+    /// Whether the current active open ended by exhausting a local bound.
+    #[inline]
+    pub fn connect_timed_out(&self) -> bool {
+        self.connect_timed_out
+    }
+
     fn reset(&mut self) {
         self.state = State::Closed;
         self.timer = Timer::new();
@@ -1180,6 +1201,8 @@ impl<'a> Socket<'a> {
         self.rx_buffer.clear();
         self.rx_fin_received = false;
         self.rst_received = false;
+        self.connect_timed_out = false;
+        self.syn_retransmits = 0;
         self.rx_shutdown = false;
         self.listen_endpoint = IpListenEndpoint::default();
         self.tuple = None;
@@ -1491,6 +1514,14 @@ impl<'a> Socket<'a> {
         self.set_state(State::Closed);
     }
 
+    /// Fail an active open before its SYN reached the peer.
+    pub(crate) fn fail_connect(&mut self) {
+        debug_assert_eq!(self.state, State::SynSent);
+        // There is no peer to reset when neighbor discovery failed, and
+        // retaining the tuple would make CLOSED dispatch try to resolve it.
+        self.reset();
+    }
+
     /// Return whether the socket is passively listening for incoming connections.
     ///
     /// In terms of the TCP state machine, the socket must be in the `LISTEN` state.
@@ -1636,10 +1667,10 @@ impl<'a> Socket<'a> {
     /// The request is clamped to `65535 << shift`, the most the announced
     /// window scale can express; growth never re-announces the shift
     /// (RFC 7323 makes the scale immutable once sent). It applies at the
-    /// first moment the connection is synchronized and the ring holds no
-    /// unconsumed bytes: immediately when both already hold, at the
-    /// ESTABLISHED edge, or when the ring is fully read out. A request at
-    /// or below the current capacity clears any pending growth
+    /// first moment the connection is synchronized and neither the ring nor
+    /// out-of-order assembler holds bytes: immediately if those conditions
+    /// already hold, at the ESTABLISHED edge, or when the ring is fully read
+    /// out. A request at or below the current capacity clears any pending growth
     /// (shrinking is not supported).
     pub fn grow_rx_capacity(&mut self, bytes: usize) {
         let target = bytes.min(65535usize << self.remote_win_shift);
@@ -1666,7 +1697,7 @@ impl<'a> Socket<'a> {
     }
 
     fn apply_pending_rx_growth(&mut self) {
-        if self.growth_deferred() || !self.rx_buffer.is_empty() {
+        if self.growth_deferred() || !self.rx_buffer.is_empty() || !self.assembler.is_empty() {
             return;
         }
         if let Some(target) = self.pending_rx_capacity.take() {
@@ -2062,22 +2093,28 @@ impl<'a> Socket<'a> {
             self.apply_pending_tx_growth();
         }
 
-        // An orphaned socket's rings are dead once our FIN is acked: no
-        // reader ever again, and everything sent is acknowledged. Keep only
-        // the floor for the rest of the handshake. The assembler check
-        // matters: out-of-order octets stashed before the close live in the
-        // ring past the readable region, invisible to `is_empty`.
+        // An orphaned socket's rings are dead once our FIN is acked: no reader
+        // ever again, and everything sent is acknowledged. A small window is
+        // needed through FIN-WAIT-2 so the peer's FIN remains acceptable. Once
+        // that FIN is consumed, TIME-WAIT only acknowledges duplicates. The
+        // assembler check matters: out-of-order octets live in the ring past
+        // the readable region, invisible to `is_empty`.
         if self.rx_shutdown
             && matches!(self.state, State::FinWait2 | State::TimeWait)
             && self.rx_buffer.is_empty()
             && self.assembler.is_empty()
             && self.tx_buffer.is_empty()
         {
-            if self.rx_buffer.capacity() > ORPHAN_RING_FLOOR {
-                self.rx_buffer.release_to(ORPHAN_RING_FLOOR);
+            let floor = if self.state == State::TimeWait {
+                TIME_WAIT_RING_FLOOR
+            } else {
+                ORPHAN_RING_FLOOR
+            };
+            if self.rx_buffer.capacity() > floor {
+                self.rx_buffer.release_to(floor);
             }
-            if self.tx_buffer.capacity() > ORPHAN_RING_FLOOR {
-                self.tx_buffer.release_to(ORPHAN_RING_FLOOR);
+            if self.tx_buffer.capacity() > floor {
+                self.tx_buffer.release_to(floor);
             }
         }
 
@@ -2286,6 +2323,9 @@ impl<'a> Socket<'a> {
         {
             return false;
         }
+        if self.state == State::Listen && ip_repr.src_addr().is_unspecified() {
+            return false;
+        }
 
         if let Some(tuple) = &self.tuple {
             // Reject packets not matching the 4-tuple
@@ -2397,8 +2437,9 @@ impl<'a> Socket<'a> {
             (_, TcpControl::Rst, _) => (),
             // The initial SYN cannot contain an acknowledgement.
             (State::Listen, _, None) => (),
-            // This case is handled in `accepts()`.
-            (State::Listen, _, Some(_)) => unreachable!(),
+            // `accepts()` rejects this; drop it as well if a future demux
+            // regression reaches the state machine directly.
+            (State::Listen, _, Some(_)) => return None,
             // SYN|ACK in the SYN-SENT state must have the exact ACK number.
             (State::SynSent, TcpControl::Syn, Some(ack_number)) => {
                 if ack_number != self.local_seq_no + 1 {
@@ -2523,6 +2564,26 @@ impl<'a> Socket<'a> {
                 );
                 None
             };
+        }
+
+        // Once the sequence check above accepts an RST, it takes precedence
+        // over every other field in the segment. In particular, payload on an
+        // RST must not reach the rx-shutdown data check below and draw a reset
+        // in response.
+        if repr.control == TcpControl::Rst {
+            if self.state == State::SynReceived && self.listen_endpoint.port != 0 {
+                // This SYN-RECEIVED socket came from LISTEN, so a reset returns
+                // it to the listening pool. Simultaneous open has no endpoint.
+                tcp_trace!("received RST");
+                self.tuple = None;
+                self.set_state(State::Listen);
+            } else if self.state != State::Listen {
+                tcp_trace!("received RST");
+                self.rst_received = true;
+                self.set_state(State::Closed);
+                self.tuple = None;
+            }
+            return None;
         }
 
         // RFC 7323 section 5.3, check R1 -- PAWS. A segment whose timestamp
@@ -2745,31 +2806,11 @@ impl<'a> Socket<'a> {
 
         // Validate and update the state.
         match (self.state, control) {
-            // RSTs are not accepted in the LISTEN state.
-            (State::Listen, TcpControl::Rst) => return None,
-
-            // RSTs in SYN-RECEIVED flip the socket back to the LISTEN state.
-            // Here we need to additionally check `listen_endpoint`, because we want to make sure
-            // that SYN-RECEIVED was actually converted from the LISTEN state (another possible
-            // reason is TCP simultaneous open).
-            (State::SynReceived, TcpControl::Rst) if self.listen_endpoint.port != 0 => {
-                tcp_trace!("received RST");
-                self.tuple = None;
-                self.set_state(State::Listen);
-                return None;
-            }
-
-            // RSTs in any other state close the socket.
-            (_, TcpControl::Rst) => {
-                tcp_trace!("received RST");
-                self.rst_received = true;
-                self.set_state(State::Closed);
-                self.tuple = None;
-                return None;
-            }
-
             // SYN packets in the LISTEN state change it to SYN-RECEIVED.
             (State::Listen, TcpControl::Syn) => {
+                if ip_repr.src_addr().is_unspecified() {
+                    return None;
+                }
                 tcp_trace!("received SYN");
                 if let Some(max_seg_size) = repr.max_seg_size {
                     if max_seg_size == 0 {
@@ -3564,9 +3605,18 @@ impl<'a> Socket<'a> {
         }
 
         // Check if any state needs to be changed because of a timer.
-        if self.timed_out(cx.now()) {
+        let syn_retries_exhausted = self.state == State::SynSent
+            && self.syn_retransmits >= MAX_SYN_RETRANSMISSIONS
+            && matches!(
+                self.timer,
+                Timer::Retransmit { expires_at } if cx.now() >= expires_at
+            );
+        if self.timed_out(cx.now()) || syn_retries_exhausted {
             // If a timeout expires, we should abort the connection.
             net_debug!("timeout exceeded");
+            if self.state == State::SynSent {
+                self.connect_timed_out = true;
+            }
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) && self.timer.should_retransmit(cx.now()) {
             // If a retransmit timer expired, we should resend data starting at the last ACK.
@@ -3577,6 +3627,9 @@ impl<'a> Socket<'a> {
             // here applied a multiplicative reduction twice (beta squared,
             // 0.49) per lost segment. Only an expired RTO is news.
             let rto_expired = !matches!(self.timer, Timer::FastRetransmit);
+            if rto_expired && self.state == State::SynSent {
+                self.syn_retransmits += 1;
+            }
 
             let data_state = matches!(
                 self.state,
@@ -3641,7 +3694,8 @@ impl<'a> Socket<'a> {
             self.rtte.on_retransmit();
 
             if rto_expired {
-                self.congestion_controller.on_retransmit(cx.now());
+                self.congestion_controller
+                    .on_retransmission_timeout(cx.now());
             }
         }
 
@@ -3897,6 +3951,7 @@ impl<'a> Socket<'a> {
         ip_repr.set_payload_len(repr.buffer_len());
 
         let mut meta = PacketMeta::default();
+        meta.tcp_reset = repr.control == TcpControl::Rst;
         {
             // Segments larger than the effective MSS exist only when the
             // device advertised TSO (see the sizing above); tell it the
@@ -5054,6 +5109,70 @@ mod test {
     }
 
     #[test]
+    fn test_grow_rx_latches_until_out_of_order_data_is_read() {
+        let mut s = socket_established();
+
+        // Rotate the ring so resetting its read cursor would remap an
+        // out-of-order write to different storage.
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"rotate"[..],
+                ..SEND_TEMPL
+            }
+        );
+        let mut rotated = [0; 6];
+        assert_eq!(s.socket.recv_slice(&mut rotated), Ok(6));
+        assert_eq!(&rotated, b"rotate");
+
+        let next = REMOTE_SEQ + 1 + rotated.len();
+        send!(
+            s,
+            TcpRepr {
+                seq_number: next + 4,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"WXYZ"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(next),
+                ..RECV_TEMPL
+            })
+        );
+        assert!(s.rx_buffer.is_empty());
+        assert!(!s.assembler.is_empty());
+
+        s.socket.grow_rx_capacity(256);
+        assert_eq!(s.recv_capacity(), 64);
+        assert_eq!(s.effective_recv_capacity(), 256);
+
+        send!(
+            s,
+            TcpRepr {
+                seq_number: next,
+                ack_number: Some(LOCAL_SEQ + 1),
+                payload: &b"abcd"[..],
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(next + 8),
+                window_len: 56,
+                ..RECV_TEMPL
+            })
+        );
+
+        let mut data = [0; 8];
+        assert_eq!(s.socket.recv_slice(&mut data), Ok(8));
+        assert_eq!(&data, b"abcdWXYZ");
+        assert_eq!(s.recv_capacity(), 256);
+        assert_eq!(s.effective_recv_capacity(), 256);
+    }
+
+    #[test]
     fn test_grow_tx_latches_until_acked() {
         let mut s = socket_established();
         assert_eq!(s.socket.send_slice(b"abcdef"), Ok(6));
@@ -5135,6 +5254,27 @@ mod test {
             }
         );
         sanity!(s, socket_syn_received());
+    }
+
+    #[test]
+    fn test_listen_rejects_unspecified_remote() {
+        let mut s = socket_listen();
+        let tcp_repr = TcpRepr {
+            control: TcpControl::Syn,
+            seq_number: REMOTE_SEQ,
+            ack_number: None,
+            ..SEND_TEMPL
+        };
+        let ip_repr = IpReprIpvX(IpvXRepr {
+            src_addr: IpvXAddress::UNSPECIFIED,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        });
+
+        assert!(!s.socket.accepts(&mut s.cx, &ip_repr, &tcp_repr));
+        assert_eq!(s.state, State::Listen);
     }
 
     #[test]
@@ -5810,6 +5950,7 @@ mod test {
             }
         );
         assert_eq!(s.state, State::Closed);
+        assert!(!s.connect_timed_out());
     }
 
     #[test]
@@ -7938,6 +8079,27 @@ mod test {
     }
 
     #[test]
+    fn test_rx_shutdown_rst_with_payload_does_not_reply() {
+        let mut s = socket_fin_wait_2();
+        s.set_rx_shutdown();
+
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Rst,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                payload: &b"abc"[..],
+                ..SEND_TEMPL
+            }
+        );
+
+        assert_eq!(s.state, State::Closed);
+        assert!(s.reset_received());
+        assert_eq!(s.tuple, None);
+    }
+
+    #[test]
     fn test_rx_shutdown_old_retransmit_gets_ack_not_rst() {
         let mut s = socket_fin_wait_1();
         send!(
@@ -8013,12 +8175,14 @@ mod test {
             }
         );
         assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.rx_buffer.capacity(), 1);
+        assert_eq!(s.tx_buffer.capacity(), 1);
         recv!(
             s,
             [TcpRepr {
                 seq_number: LOCAL_SEQ + 1 + 1,
                 ack_number: Some(REMOTE_SEQ + 1 + 1),
-                window_len: 16384,
+                window_len: 1,
                 ..RECV_TEMPL
             }]
         );
@@ -12332,6 +12496,41 @@ mod test {
             ..RECV_TEMPL
         }));
         assert_eq!(s.state, State::Closed);
+        assert!(s.connect_timed_out());
+    }
+
+    #[test]
+    fn test_connect_syn_retransmit_limit() {
+        let mut s = socket();
+        s.local_seq_no = LOCAL_SEQ;
+        s.socket
+            .connect(&mut s.cx, REMOTE_END, LOCAL_END.port)
+            .unwrap();
+
+        let syn = TcpRepr {
+            control: TcpControl::Syn,
+            seq_number: LOCAL_SEQ,
+            ack_number: None,
+            max_seg_size: Some(BASE_MSS),
+            window_scale: Some(0),
+            sack_permitted: true,
+            ..RECV_TEMPL
+        };
+        recv!(s, time 0, Ok(syn));
+        for at in [1_000, 3_000, 7_000, 15_000, 31_000, 63_000] {
+            recv!(s, time at, Ok(syn));
+        }
+        assert_eq!(s.state, State::SynSent);
+
+        recv!(s, time 123_000, Ok(TcpRepr {
+            control:    TcpControl::Rst,
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(TcpSeqNumber(0)),
+            window_scale: None,
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.state, State::Closed);
+        assert!(s.connect_timed_out());
     }
 
     #[test]
@@ -12473,6 +12672,22 @@ mod test {
             ..RECV_TEMPL
         }));
         assert_eq!(s.socket.poll_at(&mut s.cx), PollAt::Ingress);
+    }
+
+    #[test]
+    fn test_abort_marks_reset_metadata() {
+        let mut s = socket_established();
+        s.abort();
+
+        let mut observed = None;
+        s.socket
+            .dispatch(&mut s.cx, |_, meta, (_, repr)| {
+                assert_eq!(repr.control, TcpControl::Rst);
+                observed = Some(meta.tcp_reset);
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(observed, Some(true));
     }
 
     // =========================================================================================//
@@ -13815,6 +14030,7 @@ mod test {
         #[test]
         fn test_rto_still_charges_the_controller() {
             let mut s = socket_established_for_congestion_control();
+            s.congestion_controller.set_mss(CC_MSS);
 
             for _ in 0..32 {
                 s.congestion_controller.on_ack(
@@ -13846,9 +14062,9 @@ mod test {
                 .pre_transmit(Instant::from_millis(5010));
 
             let cwnd_after = s.congestion_controller.window();
-            assert!(
-                cwnd_after < cwnd_before,
-                "an RTO left the window uncharged: {cwnd_before} -> {cwnd_after}"
+            assert_eq!(
+                cwnd_after, CC_MSS,
+                "an RTO did not restart at one MSS: {cwnd_before} -> {cwnd_after}"
             );
         }
     }

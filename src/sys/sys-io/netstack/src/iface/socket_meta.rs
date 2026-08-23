@@ -20,6 +20,10 @@ enum NeighborState {
     Waiting {
         neighbor: IpAddress,
         silent_until: Instant,
+        attempts: u8,
+    },
+    Backoff {
+        retry_at: Instant,
     },
 }
 
@@ -66,6 +70,8 @@ impl Meta {
                 socket_poll_at
             }
             NeighborState::Waiting { silent_until, .. } => PollAt::Time(silent_until),
+            NeighborState::Backoff { retry_at } if timestamp >= retry_at => socket_poll_at,
+            NeighborState::Backoff { retry_at } => PollAt::Time(retry_at),
         }
     }
 
@@ -78,6 +84,7 @@ impl Meta {
             NeighborState::Waiting {
                 neighbor,
                 silent_until,
+                ..
             } => {
                 if has_neighbor(neighbor) {
                     net_trace!(
@@ -98,7 +105,78 @@ impl Meta {
                     false
                 }
             }
+            NeighborState::Backoff { retry_at } => {
+                if timestamp >= retry_at {
+                    self.neighbor_state = NeighborState::Active;
+                    true
+                } else {
+                    false
+                }
+            }
         }
+    }
+
+    pub(crate) fn neighbor_resolution_failed<F>(&self, timestamp: Instant, has_neighbor: F) -> bool
+    where
+        F: Fn(IpAddress) -> bool,
+    {
+        matches!(
+            self.neighbor_state,
+            NeighborState::Waiting {
+                neighbor,
+                silent_until,
+                attempts: 3..
+            } if timestamp >= silent_until && !has_neighbor(neighbor)
+        )
+    }
+
+    pub(crate) fn reset_egress(&mut self) {
+        self.neighbor_state = NeighborState::Active;
+    }
+
+    pub(crate) fn defer(&mut self, timestamp: Instant, delay: Duration) {
+        self.neighbor_state = NeighborState::Backoff {
+            retry_at: timestamp + delay,
+        };
+    }
+
+    pub(crate) fn neighbor_deferred(
+        &mut self,
+        timestamp: Instant,
+        neighbor: IpAddress,
+        delay: Duration,
+    ) {
+        let attempts = match self.neighbor_state {
+            NeighborState::Waiting {
+                neighbor: pending,
+                attempts,
+                ..
+            } if pending == neighbor => attempts,
+            _ => 0,
+        };
+        self.neighbor_state = NeighborState::Waiting {
+            neighbor,
+            silent_until: timestamp + delay,
+            attempts,
+        };
+    }
+
+    pub(crate) fn neighbor_hold_down(&mut self, timestamp: Instant, delay: Duration) {
+        let NeighborState::Waiting { neighbor, .. } = self.neighbor_state else {
+            debug_assert!(false, "neighbor hold-down without a pending neighbor");
+            return;
+        };
+        net_trace!(
+            "{}: neighbor {} unresolved, holding discovery until t+{}",
+            self.handle,
+            neighbor,
+            delay
+        );
+        self.neighbor_state = NeighborState::Waiting {
+            neighbor,
+            silent_until: timestamp + delay,
+            attempts: 0,
+        };
     }
 
     pub(crate) fn neighbor_missing(
@@ -107,15 +185,25 @@ impl Meta {
         neighbor: IpAddress,
         delay: Duration,
     ) {
+        let attempts = match self.neighbor_state {
+            NeighborState::Waiting {
+                neighbor: pending,
+                attempts,
+                ..
+            } if pending == neighbor => attempts.saturating_add(1),
+            _ => 1,
+        };
         net_trace!(
-            "{}: neighbor {} missing, silencing until t+{}",
+            "{}: neighbor {} missing after attempt {}, silencing until t+{}",
             self.handle,
             neighbor,
+            attempts,
             delay
         );
         self.neighbor_state = NeighborState::Waiting {
             neighbor,
             silent_until: timestamp + delay,
+            attempts,
         };
     }
 }
@@ -242,5 +330,64 @@ mod tests {
 
         let t_after = Instant::from_millis(2500);
         assert!(m.egress_permitted(t_after, |_| false));
+    }
+
+    #[test]
+    fn neighbor_failure_follows_three_elapsed_attempts() {
+        let mut m = meta();
+        let delay = Duration::from_millis(50);
+
+        for now in [1000, 1050] {
+            m.neighbor_missing(Instant::from_millis(now), NEIGHBOR, delay);
+            assert!(!m.neighbor_resolution_failed(Instant::from_millis(now + 50), |_| false));
+        }
+        m.neighbor_missing(Instant::from_millis(1100), NEIGHBOR, delay);
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1149), |_| false));
+        assert!(m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1150), |_| true));
+    }
+
+    #[test]
+    fn transient_backoff_does_not_become_neighbor_failure() {
+        let mut m = meta();
+        m.defer(Instant::from_millis(1000), Duration::from_millis(50));
+
+        assert_eq!(
+            m.poll_at(PollAt::Now, |_| false, Instant::from_millis(1049)),
+            PollAt::Time(Instant::from_millis(1050))
+        );
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(2000), |_| false));
+        assert!(m.egress_permitted(Instant::from_millis(1050), |_| false));
+    }
+
+    #[test]
+    fn deferred_solicitation_does_not_consume_an_attempt() {
+        let mut m = meta();
+        let delay = Duration::from_millis(50);
+        m.neighbor_missing(Instant::from_millis(1000), NEIGHBOR, delay);
+        m.neighbor_missing(Instant::from_millis(1050), NEIGHBOR, delay);
+        m.neighbor_deferred(Instant::from_millis(1100), NEIGHBOR, delay);
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+
+        m.neighbor_missing(Instant::from_millis(1150), NEIGHBOR, delay);
+        assert!(m.neighbor_resolution_failed(Instant::from_millis(1200), |_| false));
+    }
+
+    #[test]
+    fn hold_down_starts_a_fresh_attempt_batch() {
+        let mut m = meta();
+        let probe_delay = Duration::from_millis(50);
+        for now in [1000, 1050, 1100] {
+            m.neighbor_missing(Instant::from_millis(now), NEIGHBOR, probe_delay);
+        }
+        assert!(m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+
+        m.neighbor_hold_down(Instant::from_millis(1150), Duration::from_millis(1000));
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+        assert!(!m.egress_permitted(Instant::from_millis(2149), |_| false));
+        assert!(m.egress_permitted(Instant::from_millis(2150), |_| false));
+
+        m.neighbor_missing(Instant::from_millis(2150), NEIGHBOR, probe_delay);
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(2200), |_| false));
     }
 }

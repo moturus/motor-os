@@ -273,15 +273,11 @@ impl InterfaceInner {
     ///
     /// [RFC 4291 § 2.7.1]: https://tools.ietf.org/html/rfc4291#section-2.7.1
     pub fn has_solicited_node(&self, addr: Ipv6Address) -> bool {
-        self.ip_addrs.iter().any(|cidr| {
-            match *cidr {
-                IpCidr::Ipv6(cidr) if cidr.address() != Ipv6Address::LOCALHOST => {
-                    // Take the lower order 24 bits of the IPv6 address and
-                    // append those bits to FF02:0:0:0:0:1:FF00::/104.
-                    addr.octets()[14..] == cidr.address().octets()[14..]
-                }
-                _ => false,
+        self.ip_addrs.iter().any(|cidr| match *cidr {
+            IpCidr::Ipv6(cidr) if cidr.address() != Ipv6Address::LOCALHOST => {
+                addr == cidr.address().solicited_node()
             }
+            _ => false,
         })
     }
 
@@ -292,18 +288,6 @@ impl InterfaceInner {
             #[allow(unreachable_patterns)]
             _ => None,
         })
-    }
-
-    #[cfg(feature = "proto-ipv6-fragmentation")]
-    fn accepts_ipv6_fragment_destination(&self, address: Ipv6Address) -> bool {
-        self.has_ip_addr(address)
-            || self.has_multicast_group(address)
-            || address.is_loopback()
-            || (address.x_is_unicast()
-                && self
-                    .routes
-                    .lookup(&IpAddress::Ipv6(address), self.now)
-                    .is_some_and(|router_addr| self.has_ip_addr(router_addr)))
     }
 
     /// Get the first link-local IPv6 address of the interface, if present.
@@ -353,6 +337,31 @@ impl InterfaceInner {
         {
             net_debug!("loopback address on a non-loopback interface");
             self.rx_loopback_dropped = self.rx_loopback_dropped.wrapping_add(1);
+            return None;
+        }
+
+        if !self.has_ip_addr(ipv6_repr.dst_addr)
+            && !self.has_multicast_group(ipv6_repr.dst_addr)
+            && !ipv6_repr.dst_addr.is_loopback()
+        {
+            if !ipv6_repr.dst_addr.x_is_unicast() {
+                net_trace!(
+                    "Rejecting IPv6 packet; {} is not a unicast address",
+                    ipv6_repr.dst_addr
+                );
+                return None;
+            }
+
+            if self
+                .routes
+                .lookup(&IpAddress::Ipv6(ipv6_repr.dst_addr), self.now)
+                .is_none_or(|router_addr| !self.has_ip_addr(router_addr))
+            {
+                net_trace!("Rejecting IPv6 packet; no matching routes");
+                return None;
+            }
+
+            net_trace!("Rejecting IPv6 packet; no assigned address");
             return None;
         }
 
@@ -414,9 +423,6 @@ impl InterfaceInner {
                     meta.with_l4_csum_vouched(false),
                 )
             } else {
-                if !self.accepts_ipv6_fragment_destination(ipv6_repr.dst_addr) {
-                    return None;
-                }
                 let fragments = fragments?;
                 let f = match fragments
                     .assembler
@@ -491,32 +497,6 @@ impl InterfaceInner {
         } else {
             (next_header, ip_payload, meta)
         };
-
-        if !self.has_ip_addr(ipv6_repr.dst_addr)
-            && !self.has_multicast_group(ipv6_repr.dst_addr)
-            && !ipv6_repr.dst_addr.is_loopback()
-        {
-            if !ipv6_repr.dst_addr.x_is_unicast() {
-                net_trace!(
-                    "Rejecting IPv6 packet; {} is not a unicast address",
-                    ipv6_repr.dst_addr
-                );
-                return None;
-            }
-
-            if self
-                .routes
-                .lookup(&IpAddress::Ipv6(ipv6_repr.dst_addr), self.now)
-                .is_none_or(|router_addr| !self.has_ip_addr(router_addr))
-            {
-                net_trace!("Rejecting IPv6 packet; no matching routes");
-
-                return None;
-            }
-
-            net_trace!("Rejecting IPv6 packet; no assigned address");
-            return None;
-        }
 
         #[cfg(feature = "socket-raw")]
         let handled_by_raw_socket = self.raw_socket_filter(sockets, &ipv6_repr.into(), ip_payload);
@@ -855,8 +835,20 @@ impl InterfaceInner {
                 | Icmpv6Repr::TimeExceeded { .. }
                 | Icmpv6Repr::ParamProblem { .. }
         );
-        if is_error && !self.icmp_error_permitted() {
-            return None;
+        if is_error {
+            let multicast_exception = matches!(
+                icmp_repr,
+                Icmpv6Repr::PktTooBig { .. }
+                    | Icmpv6Repr::ParamProblem {
+                        reason: Icmpv6ParamProblem::UnrecognizedOption,
+                        ..
+                    }
+            );
+            if (ipv6_repr.dst_addr.is_multicast() && !multicast_exception)
+                || !self.icmp_error_permitted()
+            {
+                return None;
+            }
         }
         let src_addr = ipv6_repr.dst_addr;
         let dst_addr = ipv6_repr.src_addr;

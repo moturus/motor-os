@@ -114,6 +114,10 @@ mod ids {
     pub const NET_ICMP_ERRORS_SUPPRESSED: u32 = 66;
     pub const NET_UDP_TX_ADMISSION_DROPS: u32 = 67;
     pub const NET_UDP_TX_BUFFER_FULL_DROPS: u32 = 68;
+    pub const NET_DEVICE_TX_ALLOCATION_DROPS: u32 = 69;
+    pub const NET_TCP_ABORT_FAILED: u32 = 70;
+    pub const NET_UDP_TX_UNREACHABLE_DROPS: u32 = 71;
+    pub const NET_NEIGHBOR_SOLICITATION_SUPPRESSED: u32 = 72;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -171,6 +175,12 @@ pub(super) struct NetStats {
     pub device_tx_packets: Cell<u64>,
     /// Bytes in those frames, headers included.
     pub device_tx_bytes: Cell<u64>,
+    /// Frames dropped after admission because no DMA-capable TX buffer could
+    /// be allocated. TCP may recover by retransmitting; UDP does not.
+    pub device_tx_allocation_drops: Cell<u64>,
+    /// Active TCP resets that could not be queued. Socket teardown still
+    /// proceeds; resets are best-effort and are never retransmitted.
+    pub tcp_abort_failed: Cell<u64>,
     /// TcpStreamRx messages (io_pages) sent to clients.
     pub tcp_rx_msgs: Cell<u64>,
     /// Payload bytes in those messages. Page fill ratio =
@@ -199,6 +209,9 @@ pub(super) struct NetStats {
     pub udp_tx_admission_drops: Cell<u64>,
     /// Complete UDP datagrams discarded because the netstack TX ring was full.
     pub udp_tx_buffer_full_drops: Cell<u64>,
+    /// UDP datagrams discarded because their route or next-hop neighbor could
+    /// not be resolved. Dropping the head lets later datagrams proceed.
+    pub udp_tx_unreachable_drops: Cell<u64>,
     /// Receive completions the virtio driver rejected before the netstack saw
     /// them: a used length that cannot hold the virtio-net header or overruns
     /// the buffer we posted, or a header the negotiated feature set cannot
@@ -280,6 +293,10 @@ pub(super) struct NetStats {
     /// either more neighbors than the cache holds or someone trying to flush
     /// it.
     pub neighbor_admission_refused: Cell<u64>,
+    /// ARP and NDP requests held back by the aggregate interface limit. A
+    /// rising count means neighbor churn or spoofed sources are exhausting the
+    /// untrusted share; protected socket work may still use the reserve.
+    pub neighbor_solicitation_suppressed: Cell<u64>,
     /// Frames the netstack dropped because an IPv4 or IPv6 loopback address
     /// arrived on a device that is not loopback. Nothing legitimate produces
     /// one: such a frame is either a peer claiming to be a local process -- the
@@ -374,6 +391,11 @@ impl NetStats {
             MetricEntry::global(ids::NET_DEVICE_RX_BYTES, self.device_rx_bytes.get()),
             MetricEntry::global(ids::NET_DEVICE_TX_PACKETS, self.device_tx_packets.get()),
             MetricEntry::global(ids::NET_DEVICE_TX_BYTES, self.device_tx_bytes.get()),
+            MetricEntry::global(
+                ids::NET_DEVICE_TX_ALLOCATION_DROPS,
+                self.device_tx_allocation_drops.get(),
+            ),
+            MetricEntry::global(ids::NET_TCP_ABORT_FAILED, self.tcp_abort_failed.get()),
             MetricEntry::global(ids::NET_TCP_RX_MSGS, self.tcp_rx_msgs.get()),
             MetricEntry::global(ids::NET_TCP_RX_BYTES, self.tcp_rx_bytes.get()),
             MetricEntry::global(ids::NET_TCP_TX_MSGS, self.tcp_tx_msgs.get()),
@@ -389,6 +411,10 @@ impl NetStats {
             MetricEntry::global(
                 ids::NET_UDP_TX_BUFFER_FULL_DROPS,
                 self.udp_tx_buffer_full_drops.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_UDP_TX_UNREACHABLE_DROPS,
+                self.udp_tx_unreachable_drops.get(),
             ),
             MetricEntry::global(ids::NET_DEVICE_RX_DROPPED, self.device_rx_dropped.get()),
             MetricEntry::global(ids::NET_RX_CSUM_FAILED, self.rx_csum_failed.get()),
@@ -406,6 +432,10 @@ impl NetStats {
             MetricEntry::global(
                 ids::NET_NEIGHBOR_ADMISSION_REFUSED,
                 self.neighbor_admission_refused.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_NEIGHBOR_SOLICITATION_SUPPRESSED,
+                self.neighbor_solicitation_suppressed.get(),
             ),
             MetricEntry::global(ids::NET_RX_LOOPBACK_DROPPED, self.rx_loopback_dropped.get()),
         ];
@@ -527,6 +557,11 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_DEVICE_RX_BYTES, "net.device.rx_bytes"),
         MetricDescWire::new(ids::NET_DEVICE_TX_PACKETS, "net.device.tx_packets"),
         MetricDescWire::new(ids::NET_DEVICE_TX_BYTES, "net.device.tx_bytes"),
+        MetricDescWire::new(
+            ids::NET_DEVICE_TX_ALLOCATION_DROPS,
+            "net.device.tx_allocation_drops",
+        ),
+        MetricDescWire::new(ids::NET_TCP_ABORT_FAILED, "net.tcp.abort_failed"),
         MetricDescWire::new(ids::NET_TCP_RX_MSGS, "net.tcp.rx_msgs"),
         MetricDescWire::new(ids::NET_TCP_RX_BYTES, "net.tcp.rx_bytes"),
         MetricDescWire::new(ids::NET_TCP_TX_MSGS, "net.tcp.tx_msgs"),
@@ -543,6 +578,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             ids::NET_UDP_TX_BUFFER_FULL_DROPS,
             "net.udp.tx_buffer_full_drops",
         ),
+        MetricDescWire::new(
+            ids::NET_UDP_TX_UNREACHABLE_DROPS,
+            "net.udp.tx_unreachable_drops",
+        ),
         MetricDescWire::new(ids::NET_DEVICE_RX_DROPPED, "net.device.rx_dropped"),
         MetricDescWire::new(ids::NET_RX_CSUM_FAILED, "net.rx.csum_failed"),
         MetricDescWire::new(ids::NET_TCP_HALF_OPEN, "net.tcp.half_open"),
@@ -556,6 +595,10 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(
             ids::NET_NEIGHBOR_ADMISSION_REFUSED,
             "net.neighbor.admission_refused",
+        ),
+        MetricDescWire::new(
+            ids::NET_NEIGHBOR_SOLICITATION_SUPPRESSED,
+            "net.neighbor.solicit_suppressed",
         ),
         MetricDescWire::new(ids::NET_RX_LOOPBACK_DROPPED, "net.rx.loopback_dropped"),
     ];

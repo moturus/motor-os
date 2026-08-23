@@ -2,7 +2,7 @@ use ipnetwork::IpNetwork;
 use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use moto_sys::SysHandle;
 use moto_sys_io::api_net::{self, NetCmd};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::{
@@ -86,6 +86,10 @@ struct NetRuntimeInner {
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
 
+    // Resolver servers are kept per device so losing one DHCP lease does not
+    // discard another device's static or leased configuration.
+    dns_servers: Vec<Vec<IpAddr>>,
+
     clients: HashMap<SysHandle, ClientConnection>,
 }
 
@@ -135,8 +139,15 @@ struct NetRuntime {
     // Refuses new memory-growing work while global availability is low.
     pressure: Rc<pressure::Pressure>,
 
+    // Bounds sockets that finish a graceful close after their client exits.
+    orphan_lingers: Rc<Cell<usize>>,
+
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+
+    // A fixed temporary filename is safe only while resolver publications are
+    // serialized; the newest waiter recomputes the aggregate after acquiring.
+    dns_write_lock: Rc<moto_async::LocalMutex<()>>,
 
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
@@ -183,8 +194,17 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let activity =
+                let outcome =
                     this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                if outcome.addresses_changed {
+                    this.rebuild_ip_addresses();
+                }
+                if let Some(servers) = outcome.dns_servers {
+                    this.update_dns_servers(
+                        device_idx,
+                        servers.into_iter().map(IpAddr::V4).collect(),
+                    );
+                }
                 // A poll that refused a connection request has just deepened
                 // that listener's pool; the growth needs a way back.
                 if this.backlog.needs_sweeper() {
@@ -207,8 +227,16 @@ impl NetRuntime {
                         });
                     }
                 }
-                match activity {
+                match outcome.activity {
                     moto_netstack::iface::PollResult::None => {
+                        // A full software TX queue leaves ready sockets at
+                        // PollAt::Now, but repolling cannot make progress. Wait
+                        // for the TX worker to reopen admission (or for RX)
+                        // instead of starving that worker in an immediate loop.
+                        if outcome.tx_exhausted {
+                            notify.notified().await;
+                            continue;
+                        }
                         let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
                         // Note: we cannot move the op from the previous line into the if
                         // condition below, because Rust will keep this.inner borrowed for
@@ -412,12 +440,15 @@ impl NetRuntime {
         // the inline fast path below dispatchable per message.
 
         const MAX_IN_FLIGHT: usize = 64;
+        const INLINE_DATA_YIELD_BUDGET: u8 = 32;
+
         let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
         // Pre-populate.
         for _ in 0..MAX_IN_FLIGHT {
             let _ = ticket_tx.send(()).await;
         }
 
+        let mut inline_data_messages = 0_u8;
         loop {
             match receiver.recv().await {
                 Ok(msg) => {
@@ -433,6 +464,14 @@ impl NetRuntime {
                         || msg.command == (NetCmd::TcpStreamRxAck as u16)
                     {
                         self.on_msg(msg, sender.clone()).await;
+                        inline_data_messages += 1;
+                        if inline_data_messages == INLINE_DATA_YIELD_BUDGET {
+                            inline_data_messages = 0;
+                            // A client can keep this ring permanently ready.
+                            // Poll kernel I/O and put this task behind work
+                            // discovered there before draining another batch.
+                            moto_async::yield_to_io().await;
+                        }
                         continue;
                     }
 
@@ -511,7 +550,8 @@ impl NetRuntime {
         }
         // All listeners should be dropped by now.
 
-        // Then remove sockets. Some may linger.
+        // Then remove sockets. Client death cancels any pending linger and
+        // makes every active TCP socket take the immediate reclaim path.
         let socket_cnt = {
             let mut socket_ids = {
                 let mut inner = self.inner.borrow_mut();
@@ -554,7 +594,7 @@ impl NetRuntime {
                     })
                 };
                 if let Some(moto_socket) = maybe_tcp_socket {
-                    MotoSocket::close_tcp_socket_inner(moto_socket, None).await;
+                    MotoSocket::reclaim_tcp_socket(moto_socket).await;
                 }
             }
 
@@ -596,13 +636,93 @@ impl NetRuntime {
         )
     }
 
+    fn rebuild_ip_addresses(&self) {
+        let (removed, added, listeners) = {
+            let mut inner = self.inner.borrow_mut();
+            let addresses: HashMap<IpAddr, usize> = inner
+                .devices
+                .iter()
+                .enumerate()
+                .flat_map(|(device_idx, device)| {
+                    device
+                        .ip_addesses()
+                        .into_iter()
+                        .map(move |address| (address, device_idx))
+                })
+                .collect();
+            let removed = inner
+                .ip_addresses
+                .iter()
+                .filter(|(address, device_idx)| addresses.get(address) != Some(device_idx))
+                .map(|(address, device_idx)| (*address, *device_idx))
+                .collect::<Vec<_>>();
+            let added = addresses
+                .iter()
+                .filter(|(address, device_idx)| inner.ip_addresses.get(address) != Some(device_idx))
+                .map(|(address, device_idx)| (*address, *device_idx))
+                .collect::<Vec<_>>();
+            inner.ip_addresses = addresses;
+            let listeners = inner.tcp_listeners.values().cloned().collect::<Vec<_>>();
+            (removed, added, listeners)
+        };
+
+        for (address, device_idx) in removed {
+            for listener in &listeners {
+                tcp_listener::TcpListener::remove_address(listener, address, device_idx);
+            }
+        }
+        for (address, device_idx) in added {
+            for listener in &listeners {
+                tcp_listener::TcpListener::add_address(listener, address, device_idx);
+            }
+        }
+    }
+
+    fn update_dns_servers(&self, device_idx: usize, servers: Vec<IpAddr>) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if inner.dns_servers[device_idx] == servers {
+                return;
+            }
+            inner.dns_servers[device_idx] = servers;
+        }
+
+        let this = self.clone();
+        moto_async::LocalRuntime::spawn(async move {
+            let _writer = this.dns_write_lock.lock().await;
+            let servers = {
+                let inner = this.inner.borrow();
+                let mut seen = HashSet::new();
+                inner
+                    .dns_servers
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|server| seen.insert(*server))
+                    .collect::<Vec<_>>()
+            };
+            if let Err(err) = config::write_resolv_conf(&this.fs, &servers).await {
+                log::error!("failed to publish DNS servers: {err:?}");
+            }
+        });
+    }
+
     fn get_ephemeral_tcp_port(
         &self,
         device_idx: usize,
         ip_addr: IpAddr,
+        remote_addr: SocketAddr,
     ) -> Option<Rc<EphemeralTcpPort>> {
-        let local_port = self.inner.borrow_mut().devices[device_idx]
-            .get_ephemeral_tcp_port(&ip_addr, |_| false)?;
+        let mut inner = self.inner.borrow_mut();
+        let NetRuntimeInner {
+            devices, sockets, ..
+        } = &mut *inner;
+        let local_port = devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
+            let local_addr = SocketAddr::new(ip_addr, port);
+            sockets.values().any(|socket| {
+                socket::MotoSocket::occupies_tcp_tuple(socket, device_idx, local_addr, remote_addr)
+            })
+        })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
             port: local_port,
@@ -724,10 +844,13 @@ pub(super) async fn init(
     }
 
     for (device_name, device_cfg) in &config.devices {
-        if let Some(pos) = virtio_devices
-            .iter()
-            .position(|dev| dev.mac() == &device_cfg.mac.raw())
-        {
+        let pos = match &device_cfg.mac {
+            Some(mac) => virtio_devices
+                .iter()
+                .position(|dev| dev.mac() == &mac.raw()),
+            None => (!virtio_devices.is_empty()).then_some(0),
+        };
+        if let Some(pos) = pos {
             let dev = virtio_devices.remove(pos);
             devices.push(device::NetDev::new(
                 device_name,
@@ -736,7 +859,7 @@ pub(super) async fn init(
                 device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
-            log::warn!("Cannot find NET device {device_cfg:?}.");
+            log::warn!("Cannot find NET device for {device_name}: {device_cfg:?}.");
         }
     }
 
@@ -760,6 +883,10 @@ pub(super) async fn init(
         device_idx += 1;
     }
 
+    let dns_servers = devices
+        .iter()
+        .map(|device| device.config().dns_servers.clone())
+        .collect::<Vec<_>>();
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             next_socket_id: 1,
@@ -767,6 +894,7 @@ pub(super) async fn init(
             tcp_listeners: HashMap::new(),
             devices,
             ip_addresses,
+            dns_servers,
             clients: HashMap::new(),
         })),
         stats: net_stats.clone(),
@@ -781,9 +909,24 @@ pub(super) async fn init(
         )),
         completed: Rc::new(completed::CompletedBacklog::new(net_stats.clone())),
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
+        orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.clone(),
+        dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
         channel_budget,
     };
+
+    let initial_dns_servers = {
+        let inner = runtime.inner.borrow();
+        let mut seen = HashSet::new();
+        inner
+            .dns_servers
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|server| seen.insert(*server))
+            .collect::<Vec<_>>()
+    };
+    config::write_resolv_conf(&fs, &initial_dns_servers).await?;
 
     runtime.stats.num_devices.set(device_idx as u64);
     stats::spawn_stats_responder(runtime.clone());
