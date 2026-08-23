@@ -147,7 +147,7 @@ Within each group, order is the suggested pickup order.
   TCP listeners family-correct: `0.0.0.0:P` currently accepts IPv6 peers and
   `[::]:P` then fails with `AddrInUse`, so services that bind both families
   cannot start; implement `IPV6_V6ONLY`.
-- Clamp `SO_LINGER` seconds and reclaim lingering sockets when the client
+- COMPLETED: Clamp `SO_LINGER` seconds and reclaim lingering sockets when the client
   dies. The value is an unbounded `u32`; a lingering socket leaves
   `client.sockets`, so it, its rings, and its ephemeral port outlive the
   process for the whole linger. A few thousand such sockets pin the

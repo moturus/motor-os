@@ -559,7 +559,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         stream.set_linger_async(Some(Duration::MAX)).await.unwrap();
         assert_eq!(
             stream.linger_async().await.unwrap(),
-            Some(Duration::from_secs(u32::MAX as u64))
+            Some(Duration::from_secs(60))
         );
         stream.set_linger_async(None).await.unwrap();
         assert_eq!(stream.linger_async().await.unwrap(), None);
@@ -1220,6 +1220,87 @@ fn test_positive_linger_close_rpc_completes() {
     println!("test_positive_linger_close_rpc_completes() PASS");
 }
 
+/// Once the raw client channel dies, neither a close already waiting in
+/// SO_LINGER nor an active socket may retain its rings and ephemeral port.
+fn test_client_death_reclaims_tcp_sockets() {
+    use moto_sys_io::api_net;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let clients_before = read_sys_io_metric("net.active_clients");
+
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&connection);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+    let page = connection.alloc_page(u64::MAX).unwrap();
+    page.bytes_mut()[0] = b'x';
+    connection
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    let mut byte = [0_u8; 1];
+    peer.read_exact(&mut byte).unwrap();
+
+    let mut set_linger = moto_ipc::io_channel::Msg::new();
+    set_linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
+    set_linger.handle = handle;
+    set_linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+    set_linger.payload.args_32_mut()[2] = 1;
+    set_linger.payload.args_32_mut()[3] = 60;
+    connection.send(set_linger).unwrap();
+    recv_raw_net_response(&connection).status().unwrap();
+
+    let mut close = moto_ipc::io_channel::Msg::new();
+    close.id = 1;
+    close.command = api_net::NetCmd::TcpStreamClose as u16;
+    close.handle = handle;
+    connection.send(close).unwrap();
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    assert!(!sockets_on_addr_released(client_addr));
+
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sockets_released(client_addr);
+    drop(peer);
+
+    // A channel that dies before issuing close must not turn its active
+    // socket into a default 60-second orphan either.
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response(&connection);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let client_addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+    let page = connection.alloc_page(u64::MAX).unwrap();
+    page.bytes_mut()[0] = b'y';
+    connection
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    peer.read_exact(&mut byte).unwrap();
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sockets_released(client_addr);
+
+    drop(peer);
+    drop(listener);
+    wait_for_sockets_released(listener_addr);
+    println!("test_client_death_reclaims_tcp_sockets() PASS");
+}
+
 /// Fill every layer between a writer and a peer that never reads, then let a
 /// positive linger expire. The queued client pages belong to sys-io by then;
 /// dropping the socket must release them instead of tripping its destructor.
@@ -1522,6 +1603,7 @@ pub fn test_native_net_cancellation() {
     test_cancelled_native_bind_releases_addr();
     test_delivered_then_cancelled_native_bind_releases_addr();
     test_positive_linger_timeout_discards_stalled_tx();
+    test_client_death_reclaims_tcp_sockets();
     // Keep the raw connection last: its disconnect accounting is asynchronous
     // and must not perturb the exact client-count baselines above.
     test_positive_linger_close_rpc_completes();

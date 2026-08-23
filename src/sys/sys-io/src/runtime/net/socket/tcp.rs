@@ -102,6 +102,12 @@ use super::SocketState;
 
 /// For how long sockets linger upon close.
 const DEFAULT_LINGER_SECS: u32 = 60;
+/// Bound explicit linger to the same interval as an ordinary close. This is
+/// enforced here, at the service boundary, so every client ABI gets the cap.
+const MAX_LINGER_SECS: u32 = DEFAULT_LINGER_SECS;
+/// At configured buffer caps, eight orphaned sockets retain at most 128 MiB.
+/// Excess dead-client closes reset rather than pinning more memory or ports.
+const MAX_ORPHAN_LINGERS: usize = 8;
 
 /// Six SYN retransmissions with the netstack's 1, 2, 4, 8, 16, 32, then
 /// 60-second RTO schedule exhaust at 123 seconds.
@@ -306,6 +312,9 @@ pub struct TcpState {
     // See SO_LINGER in Linux and TcpStream::set_linger() in Rust.
     linger_secs: Option<u32>,
     lingerer: Option<moto_async::oneshot::Sender<()>>,
+    linger_cancel: Option<moto_async::oneshot::Sender<()>>,
+    orphan_linger: bool,
+    shutdown_waiters: Vec<moto_async::oneshot::Sender<()>>,
 }
 
 impl TcpState {
@@ -319,6 +328,19 @@ impl TcpState {
 }
 
 impl MotoSocket {
+    fn clientless_detach_ready(
+        netstack_socket: &moto_netstack::socket::tcp::Socket<'_>,
+        state: &TcpState,
+    ) -> bool {
+        state.tx_queue.is_empty()
+            && state.lingerer.is_none()
+            && netstack_socket.send_queue() == 0
+            && matches!(
+                netstack_socket.state(),
+                NetstackTcpState::FinWait2 | NetstackTcpState::TimeWait | NetstackTcpState::Closed
+            )
+    }
+
     pub fn set_ttl(moto_socket: &Rc<RefCell<Self>>, ttl: u8) {
         Self::with_tcp_netstack_socket(moto_socket, |_socket_id, netstack_socket, _state| {
             netstack_socket.set_hop_limit(Some(ttl));
@@ -541,6 +563,9 @@ impl MotoSocket {
                 tx_closed: false,
                 linger_secs: None,
                 lingerer: None,
+                linger_cancel: None,
+                orphan_linger: false,
+                shutdown_waiters: Vec::new(),
             }),
         )?;
 
@@ -1394,6 +1419,9 @@ impl MotoSocket {
                         }
                         state.tx_closed = true;
                         state.tx_queue.clear();
+                        for waiter in core::mem::take(&mut state.shutdown_waiters) {
+                            let _ = waiter.send(());
+                        }
                         if let Some(lingerer) = state.lingerer.take() {
                             lingerer.send(());
                         }
@@ -1449,6 +1477,12 @@ impl MotoSocket {
         assert!(state.rx_closed);
         assert!(state.tx_queue.is_empty());
 
+        if state.orphan_linger {
+            let orphan_lingers = base.runtime.orphan_lingers.get();
+            assert!(orphan_lingers > 0);
+            base.runtime.orphan_lingers.set(orphan_lingers - 1);
+        }
+
         base.runtime
             .stats
             .tcp_sockets
@@ -1457,6 +1491,10 @@ impl MotoSocket {
 
     // Drop the socket fully.
     pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
+        Self::drop_tcp_socket_inner(moto_socket, true).await;
+    }
+
+    async fn drop_tcp_socket_inner(moto_socket: Rc<RefCell<Self>>, reset_open: bool) {
         // Abort all ops.
         let (socket_id, aborted) =
             Self::with_tcp_socket_set(&moto_socket, |socket_id, sockets, handle, state| {
@@ -1467,7 +1505,8 @@ impl MotoSocket {
                 // its peer, which is what TIME-WAIT is.
                 let aborted = sockets
                     .get::<moto_netstack::socket::tcp::Socket>(handle)
-                    .is_open();
+                    .is_open()
+                    && reset_open;
                 if aborted {
                     sockets.tcp_abort(handle);
                 }
@@ -1478,6 +1517,9 @@ impl MotoSocket {
                 // is the final owner of the socket, so release those pages
                 // before `on_tcp_socket_drop` checks its teardown invariants.
                 state.tx_queue.clear();
+                for waiter in core::mem::take(&mut state.shutdown_waiters) {
+                    let _ = waiter.send(());
+                }
                 (socket_id, aborted)
             });
         log::debug!("Dropping TCP socket 0x{socket_id:x}.");
@@ -1626,9 +1668,12 @@ impl MotoSocket {
 
         let socket_clone = moto_socket.clone();
         if linger_secs > 0 {
-            let lingerer = {
+            let (linger_cancel, lingerer) = {
                 let mut socket_ref = moto_socket.borrow_mut();
                 socket_ref.base.lingering = true;
+
+                let (cancel_sender, cancel_receiver) = moto_async::oneshot();
+                socket_ref.unwrap_tcp_mut().linger_cancel = Some(cancel_sender);
 
                 // Only a close that still has writes to hand over waits for the
                 // TX task, because only then is the TX task the one that sends
@@ -1644,19 +1689,7 @@ impl MotoSocket {
                     None
                 };
 
-                let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                // Note: if initiated from the client-done handling in net.rs,
-                // the socket won't be in the client hashmap anymore -- and the
-                // client itself may already be gone when a graceful close
-                // races the connection teardown, so tolerate a missing client.
-                if let Some(client) = runtime_ref
-                    .clients
-                    .get_mut(&socket_ref.base.sender().remote_handle())
-                {
-                    client.sockets.remove(&socket_ref.base.socket_id);
-                }
-
-                lingerer
+                (cancel_receiver, lingerer)
             };
 
             let close_req = if delayed_notify {
@@ -1669,7 +1702,8 @@ impl MotoSocket {
             let deadline =
                 moto_async::Instant::now() + std::time::Duration::from_secs(linger_secs as u64);
             moto_async::LocalRuntime::spawn(async move {
-                Self::tcp_linger_task(socket_clone, deadline, lingerer, close_req).await
+                Self::tcp_linger_task(socket_clone, deadline, linger_cancel, lingerer, close_req)
+                    .await
             });
         } else {
             log::debug!("TCP socket 0x{socket_id:x}: not lingering.");
@@ -1690,8 +1724,61 @@ impl MotoSocket {
     async fn tcp_linger_task(
         moto_socket: Rc<RefCell<Self>>,
         deadline: moto_async::Instant,
+        linger_cancel: moto_async::oneshot::Receiver<()>,
         lingerer: Option<moto_async::oneshot::Receiver<()>>,
         close_req: Option<moto_ipc::io_channel::Msg>,
+    ) {
+        use futures::FutureExt;
+
+        let socket_id = moto_socket.borrow().socket_id();
+
+        let client_gone = {
+            let linger_socket = moto_socket.clone();
+            let linger = async move {
+                Self::tcp_linger_inner(linger_socket, deadline, lingerer).await;
+            };
+            futures::pin_mut!(linger);
+            futures::pin_mut!(linger_cancel);
+            futures::select! {
+                _ = linger.fuse() => false,
+                _ = linger_cancel.fuse() => {
+                    log::debug!("Lingering socket 0x{socket_id:x}: client gone.");
+                    true
+                }
+            }
+        };
+
+        // A FIN queued behind payload is not completion: deleting that TCB
+        // silently truncates the stream. Detach without reset only after the
+        // payload and FIN have both been acknowledged by the peer.
+        let reset_open =
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
+                let safe_to_detach = Self::clientless_detach_ready(netstack_socket, state);
+                if state.orphan_linger && safe_to_detach {
+                    false
+                } else if !client_gone {
+                    true
+                } else {
+                    !safe_to_detach
+                }
+            });
+
+        moto_socket.borrow_mut().base.lingering = false;
+        let close_response = close_req.map(|mut resp| {
+            let sender = moto_socket.borrow().base.sender().clone();
+            resp.status = moto_rt::E_OK;
+            (sender, resp)
+        });
+        Self::drop_tcp_socket_inner(moto_socket, reset_open).await;
+        if let Some((sender, resp)) = close_response {
+            let _ = sender.send(resp).await;
+        }
+    }
+
+    async fn tcp_linger_inner(
+        moto_socket: Rc<RefCell<Self>>,
+        deadline: moto_async::Instant,
+        lingerer: Option<moto_async::oneshot::Receiver<()>>,
     ) {
         use futures::FutureExt;
 
@@ -1729,8 +1816,10 @@ impl MotoSocket {
         // would replace the still-blocked TX task's single send waker.
         if tx_task_done {
             let closed = std::future::poll_fn(|cx| {
-                Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, _| {
-                    if netstack_socket.is_open() {
+                Self::with_tcp_netstack_socket(&moto_socket, |_, netstack_socket, state| {
+                    let orphan_done = state.orphan_linger
+                        && Self::clientless_detach_ready(netstack_socket, state);
+                    if netstack_socket.is_open() && !orphan_done {
                         netstack_socket.register_send_waker(cx.waker());
                         Poll::Pending
                     } else {
@@ -1748,16 +1837,56 @@ impl MotoSocket {
             },
             }
         }
+    }
 
-        moto_socket.borrow_mut().base.lingering = false;
-        let close_response = close_req.map(|mut resp| {
-            let sender = moto_socket.borrow().base.sender().clone();
-            resp.status = moto_rt::E_OK;
-            (sender, resp)
-        });
-        Self::drop_tcp_socket(moto_socket).await;
-        if let Some((sender, resp)) = close_response {
-            let _ = sender.send(resp).await;
+    /// Client death is a resource boundary: reclaim active and safely-finished
+    /// sockets immediately, while a small global budget lets committed closes
+    /// preserve their stream before their bounded linger expires.
+    pub async fn reclaim_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
+        let was_lingering = moto_socket.borrow().base.lingering;
+        if !was_lingering {
+            Self::close_tcp_socket_inner(moto_socket.clone(), None).await;
+        }
+
+        if !moto_socket.borrow().base.lingering {
+            return;
+        }
+
+        let (safe_to_detach, can_finish_orphaned) =
+            Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
+                let safe_to_detach = Self::clientless_detach_ready(netstack_socket, state);
+                let can_finish_orphaned =
+                    state.tx_queue.is_empty() && state.lingerer.is_none() && !state.orphan_linger;
+                (safe_to_detach, can_finish_orphaned)
+            });
+
+        // A close that has handed every client page to the netstack may finish
+        // after client exit, but only under a small global cap. This includes
+        // teardown initiating close when channel EOF overtakes the client's
+        // already-queued close task. Staged pages or cap overflow reset.
+        if !safe_to_detach && can_finish_orphaned {
+            let runtime = moto_socket.borrow().base.runtime.clone();
+            let orphan_lingers = runtime.orphan_lingers.get();
+            if orphan_lingers < MAX_ORPHAN_LINGERS {
+                runtime.orphan_lingers.set(orphan_lingers + 1);
+                moto_socket.borrow_mut().unwrap_tcp_mut().orphan_linger = true;
+                log::debug!(
+                    "Lingering socket 0x{:x}: client gone; finishing as orphan {}/{}.",
+                    moto_socket.borrow().socket_id(),
+                    orphan_lingers + 1,
+                    MAX_ORPHAN_LINGERS
+                );
+                return;
+            }
+        }
+
+        let cancel = moto_socket
+            .borrow_mut()
+            .unwrap_tcp_mut()
+            .linger_cancel
+            .take();
+        if let Some(cancel) = cancel {
+            let _ = cancel.send(());
         }
     }
 
@@ -2113,7 +2242,7 @@ impl MotoSocket {
             let linger_secs = if msg.payload.args_32()[2] == 0 {
                 None
             } else {
-                Some(msg.payload.args_32()[3])
+                Some(msg.payload.args_32()[3].min(MAX_LINGER_SECS))
             };
 
             log::debug!("TCP setsockopt LINGER({linger_secs:?}) for socket 0x{socket_id:x}.");
@@ -2167,9 +2296,9 @@ impl MotoSocket {
             log::debug!(
                 "TCP setsockopt SHUTDOWN(rd: {shut_rd}, wr: {shut_wr}) for socket 0x{socket_id:x}."
             );
-            Self::with_tcp_netstack_socket(
+            let shutdown_waiter = Self::with_tcp_netstack_socket(
                 &moto_socket,
-                |_socket_id, netstack_socket, state| -> () {
+                |_socket_id, netstack_socket, state| {
                     if shut_rd {
                         state.rx_closed = true;
                         // Data after our FIN now earns an RST (Linux
@@ -2177,21 +2306,31 @@ impl MotoSocket {
                         // netstack keeps absorbing, as Linux does.
                         netstack_socket.set_rx_shutdown();
                     }
+
                     if shut_wr {
-                        // Close the write half gracefully, applying the same
-                        // linger logic as a full socket close (see
-                        // `close_tcp_socket_inner`): mark TX as closed and wake
-                        // the TX task. Any bytes still queued to send are not
-                        // dropped -- `tcp_write_task` flushes them out to the
-                        // wire first and only then calls `netstack_socket.close()`
-                        // (the FIN). Unlike a full close, the socket itself is
-                        // kept alive (the read half stays open), so no linger
-                        // task / deferred drop is needed here.
                         state.tx_closed = true;
+                        let waiter = if netstack_socket.may_send() {
+                            // A successful shutdown means every accepted page
+                            // is in the netstack send buffer and FIN is queued.
+                            // Always let the TX task establish that boundary:
+                            // even an empty staging queue can be a transient
+                            // observation during its handoff to the netstack.
+                            let (sender, receiver) = moto_async::oneshot();
+                            state.shutdown_waiters.push(sender);
+                            Some(receiver)
+                        } else {
+                            None
+                        };
                         state.tx_queue_notify.notify_one();
+                        waiter
+                    } else {
+                        None
                     }
                 },
             );
+            if let Some(waiter) = shutdown_waiter {
+                let _ = waiter.await;
+            }
         }
 
         let mut resp = msg;

@@ -2,7 +2,7 @@ use ipnetwork::IpNetwork;
 use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use moto_sys::SysHandle;
 use moto_sys_io::api_net::{self, NetCmd};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::{
@@ -134,6 +134,9 @@ struct NetRuntime {
 
     // Refuses new memory-growing work while global availability is low.
     pressure: Rc<pressure::Pressure>,
+
+    // Bounds sockets that finish a graceful close after their client exits.
+    orphan_lingers: Rc<Cell<usize>>,
 
     // Filesystem is used to write log/stats.
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
@@ -522,7 +525,8 @@ impl NetRuntime {
         }
         // All listeners should be dropped by now.
 
-        // Then remove sockets. Some may linger.
+        // Then remove sockets. Client death cancels any pending linger and
+        // makes every active TCP socket take the immediate reclaim path.
         let socket_cnt = {
             let mut socket_ids = {
                 let mut inner = self.inner.borrow_mut();
@@ -565,7 +569,7 @@ impl NetRuntime {
                     })
                 };
                 if let Some(moto_socket) = maybe_tcp_socket {
-                    MotoSocket::close_tcp_socket_inner(moto_socket, None).await;
+                    MotoSocket::reclaim_tcp_socket(moto_socket).await;
                 }
             }
 
@@ -792,6 +796,7 @@ pub(super) async fn init(
         )),
         completed: Rc::new(completed::CompletedBacklog::new(net_stats.clone())),
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
+        orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.clone(),
         channel_budget,
     };
