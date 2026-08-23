@@ -2700,10 +2700,7 @@ fn udp_unreachable_heads_do_not_block_queue() {
         .send_slice(b"lost", IpEndpoint::new(unresolved.into(), 4000))
         .unwrap();
     socket
-        .send_slice(
-            b"dead",
-            IpEndpoint::new(IpAddress::v4(10, 0, 0, 1), 4000),
-        )
+        .send_slice(b"dead", IpEndpoint::new(IpAddress::v4(10, 0, 0, 1), 4000))
         .unwrap();
     socket
         .send_slice(b"sent", IpEndpoint::new(reachable.into(), 4000))
@@ -2714,7 +2711,17 @@ fn udp_unreachable_heads_do_not_block_queue() {
         iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
     }
     iface.poll(Instant::from_millis(149), &mut device, &mut sockets);
-    assert_eq!(device.tx_queue.len(), 3);
+    assert_eq!(
+        device
+            .tx_queue
+            .iter()
+            .filter(|bytes| {
+                EthernetFrame::new_checked(&bytes[..])
+                    .is_ok_and(|frame| frame.ethertype() == EthernetProtocol::Arp)
+            })
+            .count(),
+        3
+    );
     assert_eq!(sockets.get::<udp::Socket>(handle).send_queue(), 12);
     assert_eq!(iface.take_udp_tx_unreachable_drops(), 0);
 
@@ -2746,9 +2753,13 @@ fn udp_unreachable_heads_do_not_block_queue() {
                 assert_eq!(frame.dst_addr(), reachable_hw);
                 let packet = Ipv4Packet::new_checked(frame.payload()).unwrap();
                 assert_eq!(packet.dst_addr(), reachable);
-                assert_eq!(UdpPacket::new_checked(packet.payload()).unwrap().payload(), b"sent");
+                assert_eq!(
+                    UdpPacket::new_checked(packet.payload()).unwrap().payload(),
+                    b"sent"
+                );
                 delivered += 1;
             }
+            EthernetProtocol::Ipv6 => {}
             other => panic!("unexpected Ethernet protocol {other:?}"),
         }
     }
