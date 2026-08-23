@@ -126,7 +126,7 @@ VMM_PID="$!"
 exec 3> "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " " >/dev/null; do
+  motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
@@ -153,14 +153,14 @@ wait_console() {
   fail "the console never wrote '$1' (log: $CONSOLE_LOG)"
 }
 
-# The editor's prompt marker is a width gauge that costs nothing to read: rush
-# opens every prompt with a reverse-video `%` and then a whole row of spaces
-# (zsh's PROMPT_SP, `term.rs`'s `mark_partial_line`), so the run of spaces
-# before the return to column 0 *is* the width it laid that prompt out for.
-# Reads the recording on stdin and prints one width per prompt.
+# Rush synchronizes `$COLUMNS` from the editor's current width immediately
+# after Enter, before it expands the command. Printing it therefore records the
+# width of the prompt where that command was typed without depending on a
+# particular paint strategy. Reads the recording on stdin and prints each
+# recorded width.
 prompt_widths() {
-  LC_ALL=C grep -ao $'\033\\[7m%\033\\[0m *\033\\[1G' |
-    LC_ALL=C awk '{ gsub(/[^ ]/, ""); print length($0) + 1 }' |
+  LC_ALL=C grep -ao 'PROMPT_WIDTH=[0-9][0-9]*' |
+    sed 's/PROMPT_WIDTH=//' |
     tr '\n' ' '
 }
 
@@ -344,6 +344,13 @@ wait_red_bars() {
 echo "-- serial console --"
 wait_console $'\033\\[?2048h'
 
+# Record the first prompt's non-blocking fallback before giving the terminal a
+# real size. The command returns to a fresh prompt and subscription.
+fallback_at="$(wc -c < "$CONSOLE_LOG")"
+printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
+wait_console_since "$fallback_at" 'PROMPT_WIDTH=80'
+wait_console_since "$fallback_at" $'\033\\[?2048h'
+
 # The terminal's side of the handshake: DECRPM says the mode is set, and an
 # enable is answered with the size straight away. The wait is for the client to
 # have read it, so that the byte the quiet window starts at is one no probe
@@ -352,8 +359,9 @@ printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
 sleep 3
 answered_at="$(wc -c < "$CONSOLE_LOG")"
 
-# Enter, for a prompt laid out after the report landed.
-printf '\r' >&3
+# Record a prompt laid out after the report landed, then begin a line at that
+# same width for the resize-redraw check.
+printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
 sleep 3
 printf 'echo RESIZE-ME' >&3
 sleep 3
@@ -373,10 +381,14 @@ sleep 3
 # the console -- sys-tty has no opinion about the size -- so here the shell
 # keeps it as a variable of its own rather than starting to export one nobody
 # asked it to pass on, which is bash's rule and the one `Shell::set` follows.
-printf 'echo COLS=$COLUMNS,$LINES\r' >&3
+printf 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES\r' >&3
 sleep 3
 LC_ALL=C grep -aq 'COLS=60,20' "$CONSOLE_LOG" ||
   fail "the console ran a command at the old size (log: $CONSOLE_LOG)"
+
+# The preceding command returned to one more prompt at the settled size.
+printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
+sleep 3
 
 widths="$(prompt_widths < "$CONSOLE_LOG")"
 [ "$widths" = "80 100 60 60 " ] ||
@@ -496,7 +508,7 @@ sleep 4
 # raises becomes the `window-change` russhd turns into a report.
 echo "-- russhd pty session --"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
@@ -509,11 +521,15 @@ done
 ssh_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2)"
 ssh_keys() {
   sleep 6
+  printf 'echo PROMPT_WIDTH=$COLUMNS\r'
+  sleep 3
   printf 'echo RESIZE-ME'
   sleep 13
   printf '\r'
   sleep 4
-  printf 'echo COLS=$COLUMNS,$LINES\r'
+  printf 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES\r'
+  sleep 4
+  printf 'echo PROMPT_WIDTH=$COLUMNS\r'
   sleep 4
   printf 'exit\r'
   sleep 3

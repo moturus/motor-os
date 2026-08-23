@@ -10,7 +10,6 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox find");
     println!("\tsysbox free");
     println!("\tsysbox help");
-    println!("\tsysbox kill");
     println!("\tsysbox less");
     println!("\tsysbox loop");
     println!("\tsysbox ls");
@@ -20,7 +19,6 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox printenv");
     println!("\tsysbox ps");
     println!("\tsysbox pstat");
-    println!("\tsysbox pwd");
     println!("\tsysbox rm");
     println!("\tsysbox rmdir");
     println!("\tsysbox sleep");
@@ -91,7 +89,6 @@ fn main() {
         "find" => commands::find::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
-        "kill" => commands::kill::do_command(&args[1..]),
         "less" => commands::less::do_command(&args[1..]),
         "loop" => commands::loop_cmd::do_command(&args[1..]),
         "ls" => commands::ls::do_command(&args[1..]),
@@ -101,7 +98,6 @@ fn main() {
         "printenv" => commands::printenv::do_command(&args[1..]),
         "ps" => commands::ps::do_command(&args[1..]),
         "pstat" => commands::pstat::do_command(&args[1..]),
-        "pwd" => commands::pwd::do_command(&args[1..]),
         "rm" => commands::rm::do_command(&args[1..]),
         "rmdir" => commands::rmdir::do_command(&args[1..]),
         "sleep" => commands::sleep::do_command(&args[1..]),

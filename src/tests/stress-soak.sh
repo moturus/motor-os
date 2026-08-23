@@ -237,7 +237,7 @@ for _ in $(seq 1 40); do
     exit 1
   fi
   if timeout 12 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-       motor@"$VM_IP" /system/bin/echo alive >/dev/null 2>&1; then up=1; break; fi
+       motor@"$VM_IP" /system/bin/rush -c true >/dev/null 2>&1; then up=1; break; fi
   sleep 3
 done
 [ "$up" = 1 ] || { STOP_REASON="BOOT-FAILED: VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
@@ -358,7 +358,7 @@ gate_udp_socket_count
 resolver_pid="$(vssh /system/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || gate_fail "could not find dns-resolver"
-gate_ssh 30 "stop DNS resolver" /system/bin/kill "$resolver_pid"
+gate_ssh 30 "stop DNS resolver" "/system/bin/rush -c 'kill $resolver_pid'"
 gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
@@ -684,7 +684,7 @@ while :; do
       capture_forensics "$STOP_REASON"; break 2
     fi
   done
-  if VSSH_TMO=15 vssh /system/bin/echo mon >/dev/null 2>&1; then
+  if VSSH_TMO=15 vssh /system/bin/rush -c true >/dev/null 2>&1; then
     consec_liveness_fail=0
   else
     consec_liveness_fail=$((consec_liveness_fail+1))

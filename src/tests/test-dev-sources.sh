@@ -70,7 +70,7 @@ echo "test-dev-sources: starting a $BUILD developer VM; console log in $CONSOLE_
 "$IMG_DIR/run-qemu.sh" > "$CONSOLE_LOG" 2>&1 &
 VMM_PID="$!"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
   fi

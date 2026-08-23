@@ -285,7 +285,7 @@ start_vm() {
         # A VM leaked by an earlier run keeps answering on the tap, and every
         # ssh below would reach it rather than the guest this run starts --
         # testing an unknown image and reporting the result as this run's.
-        if timeout 2 "${SSH[@]}" /system/bin/echo ready >/dev/null 2>&1; then
+        if timeout 2 "${SSH[@]}" /system/bin/rush -c true >/dev/null 2>&1; then
             fail "a VM is already answering on the tap; stop it before running"
         fi
         MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
@@ -295,7 +295,7 @@ start_vm() {
         VM_STARTED=1
     fi
     local deadline=$((SECONDS + 10))
-    until timeout 2 "${SSH[@]}" /system/bin/echo ready >/dev/null 2>&1; do
+    until timeout 2 "${SSH[@]}" /system/bin/rush -c true >/dev/null 2>&1; do
         [ "$SECONDS" -lt "$deadline" ] || fail "Motor VM was not ready in 10 seconds"
         [ "$VM_STARTED" -eq 0 ] || kill -0 "$VM_PID" 2>/dev/null ||
             fail "Motor VM exited before SSH became ready"

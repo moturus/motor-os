@@ -136,7 +136,7 @@ quality_failures="$SCRATCH/quality-failures"
 
 stop_mock() {
   if [ -n "$REMOTE_MOCK_PID" ] && [ -n "$VMM_PID" ]; then
-    timeout 5s "${SSH[@]}" /system/bin/kill "$REMOTE_MOCK_PID" > /dev/null 2>&1 || true
+    timeout 5s "${SSH[@]}" "/system/bin/rush -c 'kill $REMOTE_MOCK_PID'" > /dev/null 2>&1 || true
   fi
   if [ -n "$MOCK_SSH_PID" ] && kill -0 "$MOCK_SSH_PID" 2>/dev/null; then
     kill "$MOCK_SSH_PID" 2>/dev/null || true
@@ -275,8 +275,8 @@ remote_tree_bytes() {
   local root="$1" value
   value="$("${SSH[@]}" "/system/bin/rush -c 'if [ -d $root ]; then \
     files=\$(/system/bin/find $root -type f); \
-    if [ -n \"\$files\" ]; then /system/bin/wc -c --total=only \$files; else /system/bin/echo 0; fi; \
-    else /system/bin/echo 0; fi'")" || fail "cannot measure Motor tree $root"
+    if [ -n \"\$files\" ]; then /system/bin/wc -c --total=only \$files; else echo 0; fi; \
+    else echo 0; fi'")" || fail "cannot measure Motor tree $root"
   printf '%s' "$value" | tr -d '[:space:]'
 }
 
@@ -394,7 +394,7 @@ echo "gears-test: starting $BUILD Motor VM"
 VMM_PID="$!"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -470,7 +470,7 @@ write_provider_config "$TUI_CONFIG" 19463
 coproc GEARS_TUI_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
     "TMPDIR=/devtools/tmp /system/bin/rush -c '/devtools/bin/gears --config $TUI_CONFIG --workspace $TUI_WORK; \
-    /system/bin/echo gears-tui-restored'" 2>/dev/null
+    echo gears-tui-restored'" 2>/dev/null
 }
 tui_pty_pid="$GEARS_TUI_PTY_PID"
 exec {tui_pty_out}<&"${GEARS_TUI_PTY[0]}"
@@ -508,13 +508,13 @@ echo "gears-test: checking attended Motor TUI tool round"
 TUI_ACTION_WORK="$REMOTE_ROOT/tui-action-work"
 TUI_ACTION_CONFIG="$REMOTE_ROOT/tui-action.toml"
 "${SSH[@]}" /system/bin/mkdir "$TUI_ACTION_WORK"
-"${SSH[@]}" "/system/bin/rush -c '/system/bin/echo attachment fixture bytes >$TUI_ACTION_WORK/context.txt'"
+"${SSH[@]}" "/system/bin/rush -c 'echo attachment fixture bytes >$TUI_ACTION_WORK/context.txt'"
 write_provider_config "$TUI_ACTION_CONFIG" 19464 ask
 start_mock tui-action tool-round 19464
 coproc GEARS_TUI_ACTION_PTY {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
     "TMPDIR=/devtools/tmp /system/bin/rush -c '/devtools/bin/gears --config $TUI_ACTION_CONFIG \
-    --workspace $TUI_ACTION_WORK; /system/bin/echo gears-tui-action-restored'" 2>/dev/null
+    --workspace $TUI_ACTION_WORK; echo gears-tui-action-restored'" 2>/dev/null
 }
 tui_action_pid="$GEARS_TUI_ACTION_PTY_PID"
 exec {tui_action_out}<&"${GEARS_TUI_ACTION_PTY[0]}"
@@ -602,7 +602,7 @@ finish_mock fragmented 1 19443
 echo "gears-test: checking Motor prompt attachment"
 ATTACHMENT_CONFIG="$REMOTE_ROOT/attachment.toml"
 write_provider_config "$ATTACHMENT_CONFIG" 19465
-"${SSH[@]}" "/system/bin/rush -c '/system/bin/echo attachment fixture bytes >$REMOTE_WORK/context.txt'"
+"${SSH[@]}" "/system/bin/rush -c 'echo attachment fixture bytes >$REMOTE_WORK/context.txt'"
 start_mock attachment attachment 19465
 attachment_output="$("${SSH[@]}" "/devtools/bin/gears --ui line --config $ATTACHMENT_CONFIG \
   --workspace $REMOTE_WORK -p 'inspect @context.txt'" 2>&1)" ||

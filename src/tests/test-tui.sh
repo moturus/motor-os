@@ -120,7 +120,7 @@ VMM_PID="$!"
 exec 3> "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " " > /dev/null; do
+  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"

@@ -226,7 +226,7 @@ VMM_PID="$!"
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
 # 600-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " "; do
+  motor@192.168.4.2 /system/bin/rush -c true; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -303,7 +303,7 @@ udp_sockets="$(read_udp_socket_count)"
 resolver_pid="$(vm_ssh /system/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh /system/bin/kill "$resolver_pid"
+vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 

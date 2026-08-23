@@ -486,7 +486,7 @@ settle.
 m9                                    # posix_spawn + waitpid + system tests
 cc /devtools/src/hello.c -o /user/tmp/hello && /user/tmp/hello
 c++ /devtools/src/hello.cpp -o /user/tmp/hellocpp && /user/tmp/hellocpp
-lua -e 'print(os.execute("/system/bin/echo os.execute works"))'
+lua -e 'print(os.execute("echo os.execute works"))'
 ```
 
 (`cc`/`c++` are the Rush launchers for the LLVM multicall.) Regression:

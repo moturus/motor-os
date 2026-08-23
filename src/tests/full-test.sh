@@ -302,7 +302,7 @@ VMM_PID="$!"
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
 # 900-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/echo " "; do
+  motor@192.168.4.2 /system/bin/rush -c true; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -342,7 +342,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
 fi
 [ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
-[ "$(vm_ssh /system/bin/pwd)" = "/user" ] ||
+[ "$(vm_ssh "/system/bin/rush -c 'pwd'")" = "/user" ] ||
   fail "russhd did not start the SSH command in /user"
 [ "$(vm_ssh /system/bin/printenv HOME)" = "HOME=/user" ] ||
   fail "russhd did not set HOME to /user"
@@ -382,7 +382,7 @@ udp_sockets="$(read_udp_socket_count)"
 resolver_pid="$(vm_ssh /system/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh /system/bin/kill "$resolver_pid"
+vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
@@ -482,7 +482,7 @@ echo "ripgrep file-stdio regression PASS"
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
 # docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
 # kill that landed lets `wait` return.
-out="$(vm_ssh "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; /system/bin/kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
+out="$(vm_ssh "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
 bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||

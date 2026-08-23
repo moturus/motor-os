@@ -3,7 +3,6 @@ pub mod cp;
 pub mod date;
 pub mod find;
 pub mod free;
-pub mod kill;
 pub mod less;
 pub mod loop_cmd; // Can't be just 'loop', as it is a keyword.
 pub mod ls;
@@ -13,7 +12,6 @@ pub mod ping;
 pub mod printenv;
 pub mod ps;
 pub mod pstat;
-pub mod pwd;
 pub mod rm;
 pub mod rmdir;
 pub mod sleep;
