@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, fs, path::Path};
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
 
+mod chmod;
 mod util;
 
 const SECTOR_SIZE: u32 = 512;
@@ -332,12 +333,17 @@ fn create_mbr_disk(
     write_partition(&mbr, 3, part3, &mut disk);
 }
 
-fn convert_raw_to_qcow2(raw: &Path, qcow2: &Path) -> io::Result<()> {
+fn convert_image(
+    source_format: &str,
+    destination_format: &str,
+    source: &Path,
+    destination: &Path,
+) -> io::Result<()> {
     let output = Command::new("qemu-img")
-        .args(["convert", "-f", "raw", "-O", "qcow2"])
+        .args(["convert", "-f", source_format, "-O", destination_format])
         .arg("--")
-        .arg(raw)
-        .arg(qcow2)
+        .arg(source)
+        .arg(destination)
         .output()
         .map_err(|err| io::Error::new(err.kind(), format!("failed to run qemu-img: {err}")))?;
     if output.status.success() {
@@ -350,6 +356,14 @@ fn convert_raw_to_qcow2(raw: &Path, qcow2: &Path) -> io::Result<()> {
         output.status,
         stderr.trim()
     )))
+}
+
+fn convert_raw_to_qcow2(raw: &Path, qcow2: &Path) -> io::Result<()> {
+    convert_image("raw", "qcow2", raw, qcow2)
+}
+
+fn convert_qcow2_to_raw(qcow2: &Path, raw: &Path) -> io::Result<()> {
+    convert_image("qcow2", "raw", qcow2, raw)
 }
 
 fn add_dir(
@@ -426,6 +440,7 @@ fn print_usage_and_exit() -> ! {
         "
 Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml>
+    imager chmod MODE VM_IMAGE FILE_PATH
 "
     );
     std::process::exit(1);
@@ -454,6 +469,25 @@ fn main() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "chmod") {
+        if args.len() != 5 {
+            print_usage_and_exit();
+        }
+        let permissions = chmod::parse_mode(&args[2]).unwrap_or_else(|| {
+            eprintln!("imager chmod: invalid mode '{}'", args[2]);
+            print_usage_and_exit();
+        });
+        validate_directories(&[args[4].clone()]).unwrap_or_else(|err| {
+            eprintln!("imager chmod: {err}");
+            std::process::exit(1);
+        });
+        if let Err(err) = chmod::chmod_image(Path::new(&args[3]), Path::new(&args[4]), permissions)
+        {
+            eprintln!("imager chmod: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() != 4 {
         print_usage_and_exit();
     }

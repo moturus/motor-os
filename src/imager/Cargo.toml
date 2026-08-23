@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 async-fs = { path = "../sys/lib/async-fs" }
-motor-fs = { path = "../sys/lib/motor-fs" }
+motor-fs = { path = "../sys/lib/motor-fs", features = ["image-admin"] }
 
 env_logger = "0.11"
 camino     = "1.1.10"
