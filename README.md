@@ -84,8 +84,8 @@ More specifically:
 
 * Filesystem: some operations are missing; undertested
 * Networking:
-  * DHCP not implemented: static IP addresses only at the moment
-  * DNS lookup not implemented yet
+  * IPv4 configuration through DHCP or static addresses; IPv6 is static
+  * DNS lookup through the system resolver service
   * UDP broadcast/multicast not implemented (yet?)
 * The ecosystem outside Rust std:
   * "sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks

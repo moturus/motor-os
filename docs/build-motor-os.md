@@ -102,8 +102,7 @@ The cross sysroot is written to:
 $MOTORH/motor-sysroot/devtools/llvm
 ```
 
-This is also the C SDK used to compile and link the DNS resolver. There is no
-separate downloaded DNS SDK.
+The DNS resolver is pure Rust and does not consume this C SDK.
 
 ### 3. Build native rustc and the final image
 
@@ -115,9 +114,8 @@ then:
 * builds the host and Motor standard libraries together with Clippy;
 * verifies that the registered stage-2 toolchain can compile for both targets;
 * rebuilds `libmoto_rt_cabi.a` with that final toolchain;
-* verifies that its startup and memory fallbacks are weak, then links the DNS
-  resolver without the bootstrap toolchain's duplicate-symbol compatibility
-  option;
+* verifies that its startup and memory fallbacks are weak for later mixed
+  Rust+C links;
 * stages the native Rust compiler and target sysroot;
 * clones or safely fast-forwards the clean Motor ripgrep `master` checkout,
   cross-builds it with the final Motor toolchain, and stages it as `/system/bin/rg`;

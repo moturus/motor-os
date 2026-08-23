@@ -4,182 +4,31 @@ This file tracks only unfinished Motor OS networking work. Historical designs,
 diagnoses, patch sequences, gate transcripts, and measurements remain
 available in git history.
 
-No implementation series is currently selected. Select and review a bounded
-series before changing code; larger work needs a dedicated design round.
+## Current status
 
-Status after the 2026-08-22 full review (six static tracks over `41a18e9f`:
-ledger reconciliation, TCP machine, IP/fragmentation/PMTU/ICMP/neighbor,
-sys-io runtime, client side, production operations). Every item pruned from
-this file since 2026-08-18 has a landed implementation. The earlier statement
-that the shared-L2 deployment prerequisites were complete is withdrawn: the
-review found new ways for a release sys-io to die or wedge from ordinary or
-trivially forged traffic, replies sent with source addresses we do not own,
-TCP lifecycle gaps, and an operational layer (configuration, supervision,
-secrets, DNS) this file had never covered. All findings were traced
-statically; none was reproduced, so re-confirm each at the code before
-designing its fix.
+As of 2026-08-23, we believe Motor OS networking is ready for production
+deployment within its currently supported feature set and deployment model.
+The critical shared-L2, sys-io availability, TCP lifecycle, client-path, and
+deployment-prerequisite findings from the full review are fixed and covered by
+the networking gate. The final gate ran three times each in debug and release.
 
-What is ready today: a development VM on a host tap, which is what the gate
-proves. A static-address server on a trusted LAN is usable once the sys-io
-panics and the client-path items in (a) are fixed, accepting image-per-host
-configuration and console-only diagnostics. A shared or untrusted Ethernet
-segment, an internet-facing service, or a cloud instance needing DHCP each
-wait on the rest of (a).
+The production-ready path includes static IPv4/IPv6 configuration, DHCPv4
+address/default-route/DNS lifecycle, native DNS resolution, TCP and UDP,
+family-correct wildcard listeners, bounded neighbor discovery and queues,
+TCP TIME-WAIT retention, and fail-stop diagnostics if sys-io terminates.
 
-Within each group, order is the suggested pickup order.
+This is not a claim of protocol completeness. In particular, DHCPv6, SLAAC,
+and Router Advertisement address/route configuration are intentionally
+deferred. IPv6 currently requires static addresses and routes. Multicast, raw
+sockets, and general IPv6 extension-header support are also unavailable.
+Production image policy and credential provisioning remain separate pipeline
+work. Deployments with mutually untrusted local processes or an untested VMM
+need a separate review of the quota and platform-gate items below.
 
-## (a) Highest priority: critical for production readiness
+The remaining items are follow-up robustness, completeness, documentation,
+and test work. Within each group, order is the suggested pickup order.
 
-### sys-io dies or wedges
-
-- COMPLETED: Drop IPv4 packets from the unspecified source `0.0.0.0` unless they are
-  DHCP, which is not compiled. `iface/interface/ipv4.rs` admits them; a SYN to
-  any listening port becomes a Listen-state connection whose remote is
-  `0.0.0.0`, and the SYN|ACK hits the release `assert!` on an unspecified
-  destination in `iface/interface/mod.rs` dispatch. Under `panic = "abort"`
-  one forged 60-byte frame stops sys-io; the SYN-cookie path reaches the same
-  assert. Also refuse an unspecified remote in the Listen SYN arm.
-- COMPLETED: Sweep every `assert!`, `debug_assert!`, and `unreachable!` on the
-  ingress-to-dispatch path so none is reachable from network input. Known
-  cases: the Listen-state `unreachable!()` in `netstack/src/socket/tcp.rs`
-  (defense in depth against demux or cookie-restore regressions), and
-  `rst_reply`'s `debug_assert!(control != Rst)`, reached when an RST carrying
-  payload at RCV.NXT arrives on an rx-shutdown FIN-WAIT socket because the
-  rx-shutdown check runs before the RST arm. Debug builds, which the gate
-  runs, panic; release answers an RST with an RST. Move the RST arm first.
-- COMPLETED: Clear a socket's queued client TX pages before the socket is dropped at
-  linger expiry. In `runtime/net/socket/tcp.rs`, a close with unsent pages
-  takes `DrainThenFinish`; when the peer stalls for the whole linger, step 1
-  times out, step 2 registers the linger task on the single-slot send waker
-  (overwriting the TX task's), `drop_tcp_socket` never clears `tx_queue`, and
-  `on_tcp_socket_drop` trips its release `assert!(tx_queue.is_empty())`.
-  Trigger: an application writes more than the 128 KiB ring to a peer that
-  stops reading, then closes or exits. Clear the queue in `drop_tcp_socket`
-  and never let the linger task take a waker the TX task still needs.
-- COMPLETED: Give the inline data path a yield budget. `runtime/net.rs` dispatches
-  `TcpStreamTx` and `TcpStreamRxAck` inline and loops while the ring is
-  non-empty; the executor polls a task until it returns `Pending`. A client
-  that keeps its ring non-empty (two producer threads suffice) starves device
-  polls, timers, every other channel, and the file system on sys-io's only
-  thread.
-- COMPLETED: Bound the netstack-to-device TX queue and make TCP aborts
-  best-effort. TX admission now reserves the largest possible packet against
-  a byte limit derived from the virtio ring, returns `None` when full, and
-  wakes the netstack when dequeueing reopens capacity; TSO super-segments are
-  charged by their actual DMA buffer size. Pooled-buffer allocation failures
-  retain the scratch path required by the device trait but count the dropped
-  frame. `drop_tcp_socket` now waits only for one local `iface.poll()` to
-  attempt the reset, never for device completion, so a wedged host cannot
-  retain the socket. Failed reset admission or allocation increments
-  `net.tcp.abort_failed` before teardown continues.
-- COMPLETED: Finish neighbor-discovery failure reporting and aggregate limiting. sys-io
-  now uses a shared 50 ms ARP/NDP quiet interval. UDP gives a neighbor three
-  probes and their response windows, then drops the blocking datagram and
-  counts `net.udp.tx_unreachable_drops`; `NoRoute` drops immediately, while
-  `FragmenterBusy` has a separate local backoff. An external interface now
-  emits at most 20 aggregate ARP/NS requests per second with a one-second
-  burst; spoofable passive/socketless work cannot spend the last four tokens,
-  and `net.neighbor.solicit_suppressed` counts deferrals. Established TCP and
-  other non-UDP sockets start a fresh three-probe batch after a one-second
-  hold-down instead of re-soliciting every 50 ms forever. An active TCP
-  connect closes after its first exhausted batch and reports Motor OS's
-  existing `E_NOT_CONNECTED`. UDP intentionally exposes no asynchronous
-  socket error: datagrams remain lossy, and the drop metric supplies operator
-  visibility without an ambiguous per-socket error.
-
-### Replies on a shared segment
-
-- COMPLETED: Require the `ff02::1:ff00::/104` prefix and compare 24 bits in the
-  solicited-node check (`iface/interface/ipv6.rs` compares the low 16 bits of
-  any destination; the comment says 24). Today a frame to our MAC or the
-  broadcast MAC with any destination sharing our low 16 bits passes the
-  ownership check, and we answer echo, Parameter Problem, Port Unreachable,
-  and socketless RST with a source address we do not own; wildcard listeners
-  and UDP sockets also see it.
-- COMPLETED: Do not reply for destinations we should ignore: run the destination check
-  before Hop-by-Hop processing (a broadcast frame with a bad option makes
-  every host emit Parameter Problem from a foreign source); send no Port
-  Unreachable or Parameter Problem for multicast destinations (preserving
-  RFC 4443 2.4(e)'s Packet Too Big and unrecognized-option exceptions);
-  discard TCP to broadcast or multicast destinations instead of answering
-  with an RST sourced from that address (RFC 9293 3.10.7.2).
-- COMPLETED: Turn broadcast echo replies off by default. `ipv4.rs` answers echo to the
-  limited and subnet broadcast, `auto_icmp_echo_reply` ships enabled, and
-  echo replies are exempt from the error limiter.
-
-### TCP lifecycle
-
-- COMPLETED: Cap SYN retransmissions and give `connect()` a default timeout. The
-  netstack has no retry counter, only the optional `timeout`; sys-io sets it
-  only when the request carries a deadline, and std and mio pass none. A
-  connect to a black hole retransmits forever with the RTO capped at 60 s,
-  pinning the socket, channel slot, and ephemeral port. Linux fails after
-  about 127 s.
-- COMPLETED: Collapse cwnd after an RTO. `congestion/cubic.rs` shares `on_congestion`
-  between both loss signals, so after a timeout cwnd stays at 0.7x and slow
-  start is never re-entered; with everything written off as lost at RTO, up
-  to 0.7 cwnd of retransmissions bursts out. RFC 5681 and RFC 8312 require one
-  segment.
-- COMPLETED: Check the assembler before growing the receive ring.
-  `apply_pending_rx_growth` tests `rx_buffer.is_empty()` but not the
-  assembler; `grow_to` resets `read_at` to zero, so out-of-order payload
-  already in the ring is mapped to different offsets and a later hole fill
-  publishes stale bytes as stream data. Trigger: an `SO_RCVBUF` raise latched
-  until the ring drains, plus reordering at that drain.
-
-### Client path
-
-- COMPLETED: Detect a refused or dead channel and fail every waiter on it. sys-io's
-  `refuse_client` answers only the first RPC, while the pool hands up to four
-  parked reservers a fresh channel; moto-io has no disconnect detection, so
-  `rx_park` on a dead server handle spins and every parked RPC, read future,
-  and blocking call on that channel hangs forever. The same happens when
-  sys-io dies. Set `exiting`, drop the RPC map, and fail the sockets.
-- COMPLETED: Arm WRITABLE at poll registration when the subchannel's TX pages are
-  exhausted. `rt_tcp.rs` synthesizes WRITABLE only if page space exists and
-  arms nothing otherwise; a subchannel index reused while sys-io still holds
-  the previous occupant's pages (a lingering close to a slow peer) leaves an
-  accepted connection that reads its request and never becomes writable.
-  Same shape as the fixed partial-write bug.
-- COMPLETED: Accept wildcard binds. UDP refuses any unspecified address, not only
-  `0.0.0.0:0`, so no UDP server can start and the idiomatic client bind
-  fails; let sys-io choose the address (and port when zero). Make wildcard
-  TCP listeners family-correct: `0.0.0.0:P` currently accepts IPv6 peers and
-  `[::]:P` then fails with `AddrInUse`, so services that bind both families
-  cannot start; implement `IPV6_V6ONLY`.
-- COMPLETED: Clamp `SO_LINGER` seconds and reclaim lingering sockets when the client
-  dies. The value is an unbounded `u32`; a lingering socket leaves
-  `client.sockets`, so it, its rings, and its ephemeral port outlive the
-  process for the whole linger. A few thousand such sockets pin the
-  ephemeral range for every other process.
-
-### Deployment prerequisites outside the netstack
-
-These are not netstack defects, but no production deployment exists without
-them, so they are tracked here until they have homes of their own.
-
-- Design a per-instance configuration path. `sys-net.toml` is copied into
-  the image and bound to hardware by MAC equality; a mismatch leaves the VM
-  loopback-only with one warning line, and every instance needs its own image
-  build. Options: DHCPv4 in deployed sys-io (lease lifecycle, addresses,
-  routes, DNS), or at minimum MAC-agnostic device selection plus a
-  configuration source outside the image. Cloud networks that offer only
-  DHCP are unusable today.
-- Decide what happens when sys-io dies and make its logs reachable. The
-  kernel halts the VM when sys-io exits; sys-init never waits on or restarts
-  services; headless daemons log only to the kernel log (`sysbox syslog` is
-  unwired; see `future-work.md`). Given the panics above, every failure is a
-  silent outage.
-- Ship no working secrets. `sshd.toml` carries a password and an authorized
-  key whose private half is in its comments, listening on `0.0.0.0:2222`,
-  detected with a warning nobody can read; `ssl-key.pem` is committed. Refuse
-  to start on default secrets and document provisioning.
-- Replace or harden the DNS client. The only backend is mlibc with a constant
-  transaction id, an unconnected socket that accepts any source, no retry or
-  TCP fallback, and a generated `resolv.conf` hard-coded to `8.8.8.8`.
-  Off-path forgery needs only the 16-bit source port; on-path is trivial.
-
-## (b) Medium priority: robustness
+## Medium priority: robustness
 
 ### TCP protocol
 
@@ -188,10 +37,6 @@ them, so they are tracked here until they have homes of their own.
   can run up to 63 ms ahead of our clock; a Linux peer PAWS-discards every
   segment we send until the clock catches up, and the restored socket has no
   RTT sample (TLP disarmed, RTO at the 1 s initial value).
-- Retain TIME-WAIT. The sys-io linger exits on `!is_open()`, which is true
-  in TIME-WAIT, and dropping the socket removes it from the socket set, so the
-  netstack's `CLOSE_DELAY` never runs; a retransmitted peer FIN is answered
-  by the reflector's RST.
 - Floor the send MSS and make the PMTU header subtraction saturating. With
   the IPv4 floor of 68 the `path_mtu - headers` arithmetic underflows (debug
   aborts, release wraps and source-fragments with DF clear); without SACK the
@@ -311,7 +156,7 @@ them, so they are tracked here until they have homes of their own.
   today all gates boot qemu, chv and fc are exercised only against a fake
   VMM, and the only in-VM TLS leg is the dev-image `gears-test.sh`.
 
-## (c) Lower priority: completeness
+## Lower priority: completeness
 
 Within this section, correctness and resource robustness come before protocol
 features, performance work, and cleanup.
@@ -359,22 +204,17 @@ features, performance work, and cleanup.
   listening sockets. They use the 16 KiB-per-direction lazy ring floor, not the
   128 KiB full rings. Measure object/ring costs before retuning the limits and
   account for established sockets separately.
-- Add a `docs/` reference for `sys-net.toml`. Document every key and deployed
+- Expand `docs/networking.md` to document every `sys-net.toml` key and deployed
   feature limit, correct half-open/listener memory figures, and cover
   `auto_icmp_echo_reply`, `loopback`, and completed-connection backlog
-  semantics. Include the deployed-feature support statement (no DHCP, SLAAC,
-  multicast, raw sockets, or general IPv6 extension headers), the reduced RFC
-  6724 source-selection policy, and the capacity figures from (b).
+  semantics. Include the deployed-feature support statement (DHCPv4 but no
+  DHCPv6/SLAAC/Router Advertisement configuration, multicast, raw sockets, or
+  general IPv6 extension headers), the reduced RFC 6724 source-selection
+  policy, and the capacity figures above.
 - Record the accepted non-POSIX exception that a graceful close of a
   connection which never sent a byte is reset rather than FIN-closed
   (`runtime/net/socket/tcp.rs`, in-code rationale), and the mio-test
   expectations widened for it (`close_on_drop.rs`, `poll.rs`).
-- Relocate the performance method record dropped from this file on
-  2026-08-21 (paired same-sitting A/B, launcher pinning, the `ab81c861`
-  reference, the 64-stream scale reference, the receive-coalescing resume
-  notes) to a `docs/` page or state that git history is its home.
-- Update `README.md`: it still says DNS lookup is not implemented and that
-  most pieces are not ready for production use; make it agree with this file.
 - Remove `src/sys/sys-io/Cargo.lock`; Cargo uses the workspace lock at
   `src/sys/Cargo.lock`.
 - Client UDP receive-queue overflow has no reason-specific counter
@@ -382,14 +222,18 @@ features, performance work, and cleanup.
   are fixed constants rather than charged to the channel-page budget. Either
   add the counter and the charge, or amend the intent.
 
+### Deferred IPv6 autoconfiguration
+
+- Defer DHCPv6, SLAAC, and Router Advertisement address/default-route
+  configuration until a later design effort. When resumed, treat them as one
+  lifecycle: Router Advertisements provide the default router, SLAAC may
+  provide addresses, and DHCPv6 may provide addresses or other configuration.
+  Static IPv6 remains supported in the meantime.
+
 ### Protocol and feature work
 
-These need scope/design decisions before implementation. DHCPv4 moved to
-(a) as the per-instance configuration item.
+These need scope/design decisions before implementation.
 
-- Design and enable IPv6 SLAAC. The netstack feature is not in the deployed
-  sys-io closure, so router advertisements currently do not configure
-  addresses.
 - Add multicast support through the netstack, sys-io, moto-io, rt.vdso, and std
   entry points.
 - Decide whether and how to expose raw sockets securely, then enable them if

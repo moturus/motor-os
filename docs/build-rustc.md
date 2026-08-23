@@ -475,8 +475,8 @@ Before staging, `build-rustc.sh` rebuilds `libmoto_rt_cabi.a` in a fresh Cargo
 target directory with the final stage-2 toolchain. It verifies that
 `motor_start`, `memcpy`, `memmove`, `memset`, and `memcmp` are not strong
 definitions in either the target libraries or the rebuilt shim, then refreshes
-the cross sysroot and `img_files/generated/llvm`. This is what permits the
-final DNS resolver link to reject duplicate symbols instead of masking them.
+the cross sysroot and `img_files/generated/llvm`. This keeps later mixed
+Rust+C programs from masking duplicate startup or memory symbols.
 
 ## Stage R6 — stage everything into the image
 
@@ -529,7 +529,7 @@ dev toolchain, so it is poisoned too:
 
 ```sh
 rm -rf $MOTOR/build/obj/release $MOTOR/src/sys/target
-cd $MOTOR && make images BUILD=release MOTOR_DNS_STRICT_LINK=1 -j$(nproc)
+cd $MOTOR && make images BUILD=release -j$(nproc)
 ```
 
 Confirm the output reports successful base, standard, and development images;
