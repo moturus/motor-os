@@ -161,6 +161,24 @@ impl Meta {
         };
     }
 
+    pub(crate) fn neighbor_hold_down(&mut self, timestamp: Instant, delay: Duration) {
+        let NeighborState::Waiting { neighbor, .. } = self.neighbor_state else {
+            debug_assert!(false, "neighbor hold-down without a pending neighbor");
+            return;
+        };
+        net_trace!(
+            "{}: neighbor {} unresolved, holding discovery until t+{}",
+            self.handle,
+            neighbor,
+            delay
+        );
+        self.neighbor_state = NeighborState::Waiting {
+            neighbor,
+            silent_until: timestamp + delay,
+            attempts: 0,
+        };
+    }
+
     pub(crate) fn neighbor_missing(
         &mut self,
         timestamp: Instant,
@@ -353,5 +371,23 @@ mod tests {
 
         m.neighbor_missing(Instant::from_millis(1150), NEIGHBOR, delay);
         assert!(m.neighbor_resolution_failed(Instant::from_millis(1200), |_| false));
+    }
+
+    #[test]
+    fn hold_down_starts_a_fresh_attempt_batch() {
+        let mut m = meta();
+        let probe_delay = Duration::from_millis(50);
+        for now in [1000, 1050, 1100] {
+            m.neighbor_missing(Instant::from_millis(now), NEIGHBOR, probe_delay);
+        }
+        assert!(m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+
+        m.neighbor_hold_down(Instant::from_millis(1150), Duration::from_millis(1000));
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(1150), |_| false));
+        assert!(!m.egress_permitted(Instant::from_millis(2149), |_| false));
+        assert!(m.egress_permitted(Instant::from_millis(2150), |_| false));
+
+        m.neighbor_missing(Instant::from_millis(2150), NEIGHBOR, probe_delay);
+        assert!(!m.neighbor_resolution_failed(Instant::from_millis(2200), |_| false));
     }
 }

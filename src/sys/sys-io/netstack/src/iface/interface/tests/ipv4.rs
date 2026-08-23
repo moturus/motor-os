@@ -2837,6 +2837,67 @@ fn aggregate_throttling_does_not_spend_udp_neighbor_attempts() {
     assert_eq!(requested, vec![noise, unresolved, unresolved, unresolved]);
 }
 
+#[test]
+#[cfg(all(feature = "medium-ethernet", feature = "socket-tcp"))]
+fn tcp_neighbor_failure_enters_hold_down() {
+    use crate::socket::tcp;
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ethernet);
+    iface.inner.discovery_silent_time = Duration::from_millis(50);
+    let remote = Ipv4Address::new(192, 168, 1, 20);
+
+    let socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 64]),
+        tcp::SocketBuffer::new(vec![0; 64]),
+    );
+    let handle = sockets.add(0, socket);
+    sockets
+        .get_mut::<tcp::Socket>(handle)
+        .connect(iface.context(), (IpAddress::Ipv4(remote), 80), 49_500)
+        .unwrap();
+
+    let arp_requests = |device: &crate::tests::TestingDevice| {
+        device
+            .tx_queue
+            .iter()
+            .filter(|bytes| {
+                let Ok(frame) = EthernetFrame::new_checked(&bytes[..]) else {
+                    return false;
+                };
+                let Ok(packet) = ArpPacket::new_checked(frame.payload()) else {
+                    return false;
+                };
+                matches!(
+                    ArpRepr::parse(&packet),
+                    Ok(ArpRepr::EthernetIpv4 {
+                        operation: ArpOperation::Request,
+                        target_protocol_addr,
+                        ..
+                    }) if target_protocol_addr == remote
+                )
+            })
+            .count()
+    };
+
+    for (now, expected) in [(0, 1), (50, 2), (100, 3), (149, 3)] {
+        iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
+        assert_eq!(arp_requests(&device), expected);
+    }
+
+    // The third response window expires at t=150. No fourth request is sent;
+    // the next batch begins only after the one-second hold-down.
+    for now in [150, 1149] {
+        iface.poll(Instant::from_millis(now), &mut device, &mut sockets);
+        assert_eq!(arp_requests(&device), 3);
+    }
+    iface.poll(Instant::from_millis(1150), &mut device, &mut sockets);
+    assert_eq!(arp_requests(&device), 4);
+    assert_eq!(
+        sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::SynSent
+    );
+}
+
 #[rstest]
 #[case(Medium::Ethernet)]
 #[cfg(feature = "medium-ethernet")]

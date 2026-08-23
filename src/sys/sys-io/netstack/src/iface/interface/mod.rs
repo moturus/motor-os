@@ -69,6 +69,8 @@ use crate::time::{Duration, Instant};
 
 use crate::wire::*;
 
+const NEIGHBOR_FAILURE_HOLD_DOWN: Duration = Duration::from_millis(1_000);
+
 #[cfg(feature = "proto-ipv6")]
 fn ipv6_device_eligible(caps: &DeviceCapabilities) -> bool {
     caps.ip_mtu() >= IPV6_MIN_MTU || {
@@ -1478,20 +1480,26 @@ impl Interface {
             let Some(item) = items.get_mut(&id) else {
                 continue;
             };
-            #[cfg(feature = "socket-udp")]
             if item
                 .meta
                 .neighbor_resolution_failed(self.inner.now, |ip_addr| {
                     self.inner.has_neighbor(&ip_addr)
                 })
-                && let Socket::Udp(socket) = &mut item.socket
             {
-                if socket.discard_tx_head() {
-                    self.inner.udp_tx_unreachable_drops =
-                        self.inner.udp_tx_unreachable_drops.wrapping_add(1);
-                    result = PollResult::SocketStateChanged;
+                #[cfg(feature = "socket-udp")]
+                if let Socket::Udp(socket) = &mut item.socket {
+                    if socket.discard_tx_head() {
+                        self.inner.udp_tx_unreachable_drops =
+                            self.inner.udp_tx_unreachable_drops.wrapping_add(1);
+                        result = PollResult::SocketStateChanged;
+                    }
+                    item.meta.reset_egress();
+                    refresh_poll_at(&mut self.inner, poll_index, item);
+                    continue;
                 }
-                item.meta.reset_egress();
+
+                item.meta
+                    .neighbor_hold_down(self.inner.now, NEIGHBOR_FAILURE_HOLD_DOWN);
                 refresh_poll_at(&mut self.inner, poll_index, item);
                 continue;
             }

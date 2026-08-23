@@ -79,8 +79,10 @@ Within each group, order is the suggested pickup order.
   `FragmenterBusy` has a separate local backoff. An external interface now
   emits at most 20 aggregate ARP/NS requests per second with a one-second
   burst; spoofable passive/socketless work cannot spend the last four tokens,
-  and `net.neighbor.solicit_suppressed` counts deferrals. TCP still
-  re-solicits every 50 ms until its timeout, and UDP has no caller-visible
+  and `net.neighbor.solicit_suppressed` counts deferrals. TCP and other
+  non-UDP sockets start a fresh three-probe batch after a one-second hold-down
+  instead of re-soliciting every 50 ms forever. Active TCP connect still has
+  no neighbor-resolution terminal error, and UDP has no caller-visible
   `EHOSTUNREACH`. Decide those terminal/error behaviors.
 
 ### Replies on a shared segment
