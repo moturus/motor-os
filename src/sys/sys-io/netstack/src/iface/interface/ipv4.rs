@@ -672,27 +672,6 @@ impl InterfaceInner {
                 ipv4_reply_repr,
                 IpPayload::Icmpv4(icmp_repr),
             ))
-        } else if self.is_broadcast_v4(ipv4_repr.dst_addr) {
-            // Only reply to broadcasts for echo replies and not other ICMP messages
-            match icmp_repr {
-                Icmpv4Repr::EchoReply { .. } => match self.ipv4_addr() {
-                    Some(src_addr) => {
-                        let ipv4_reply_repr = Ipv4Repr {
-                            src_addr,
-                            dst_addr: ipv4_repr.src_addr,
-                            next_header: IpProtocol::Icmp,
-                            payload_len: icmp_repr.buffer_len(),
-                            hop_limit: 64,
-                        };
-                        Some(Packet::new_ipv4(
-                            ipv4_reply_repr,
-                            IpPayload::Icmpv4(icmp_repr),
-                        ))
-                    }
-                    None => None,
-                },
-                _ => None,
-            }
         } else {
             None
         }

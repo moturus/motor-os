@@ -103,7 +103,7 @@ Within each group, order is the suggested pickup order.
   RFC 4443 2.4(e)'s Packet Too Big and unrecognized-option exceptions);
   discard TCP to broadcast or multicast destinations instead of answering
   with an RST sourced from that address (RFC 9293 3.10.7.2).
-- Turn broadcast echo replies off by default. `ipv4.rs` answers echo to the
+- COMPLETED: Turn broadcast echo replies off by default. `ipv4.rs` answers echo to the
   limited and subnet broadcast, `auto_icmp_echo_reply` ships enabled, and
   echo replies are exempt from the error limiter.
 

@@ -1739,6 +1739,24 @@ fn icmp_echo_reply_policy() {
             .process_icmpv4(&mut sockets, ip_repr, &bytes)
             .is_some()
     );
+
+    for dst_addr in [
+        Ipv4Address::new(255, 255, 255, 255),
+        Ipv4Address::new(192, 168, 1, 255),
+    ] {
+        assert_eq!(
+            iface.inner.process_icmpv4(
+                &mut sockets,
+                Ipv4Repr {
+                    dst_addr,
+                    ..ip_repr
+                },
+                &bytes,
+            ),
+            None
+        );
+    }
+
     iface.inner.auto_icmp_echo_reply = false;
     assert_eq!(
         iface.inner.process_icmpv4(&mut sockets, ip_repr, &bytes),
@@ -2128,7 +2146,6 @@ fn test_handle_ipv4_broadcast(#[case] medium: Medium) {
 
     let (mut iface, mut sockets, _device) = setup(medium);
 
-    let our_ipv4_addr = iface.ipv4_addr().unwrap();
     let src_ipv4_addr = Ipv4Address::new(127, 0, 0, 2);
 
     // ICMPv4 echo request
@@ -2162,22 +2179,6 @@ fn test_handle_ipv4_broadcast(#[case] medium: Medium) {
         Ipv4Packet::new_unchecked(&bytes[..])
     };
 
-    // Expected ICMPv4 echo reply
-    let expected_icmpv4_repr = Icmpv4Repr::EchoReply {
-        ident: 0x1234,
-        seq_no: 0xabcd,
-        data: &icmpv4_data,
-    };
-    let expected_ipv4_repr = Ipv4Repr {
-        src_addr: our_ipv4_addr,
-        dst_addr: src_ipv4_addr,
-        next_header: IpProtocol::Icmp,
-        hop_limit: 64,
-        payload_len: expected_icmpv4_repr.buffer_len(),
-    };
-    let expected_packet =
-        Packet::new_ipv4(expected_ipv4_repr, IpPayload::Icmpv4(expected_icmpv4_repr));
-
     assert_eq!(
         iface.inner.process_ipv4(
             &mut sockets,
@@ -2186,7 +2187,7 @@ fn test_handle_ipv4_broadcast(#[case] medium: Medium) {
             &frame,
             &mut iface.fragments
         ),
-        Some(expected_packet)
+        None
     );
 }
 
