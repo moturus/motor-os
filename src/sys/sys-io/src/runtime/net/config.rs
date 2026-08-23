@@ -94,8 +94,12 @@ pub(super) struct IpRoute {
 
 #[derive(Clone, Deserialize, Debug)]
 pub(super) struct DeviceCfg {
-    pub mac: MacAddress,
+    /// Pin this entry to one NIC. When absent, entries are assigned the
+    /// remaining virtio-net devices in configuration-name order.
+    pub mac: Option<MacAddress>,
+    #[serde(default)]
     pub cidrs: Vec<IpNetwork>,
+    #[serde(default)]
     pub routes: Vec<IpRoute>,
 }
 
@@ -103,7 +107,7 @@ impl DeviceCfg {
     pub fn new(mac: &str) -> Self {
         use std::str::FromStr;
         Self {
-            mac: MacAddress::from_str(mac).unwrap(),
+            mac: Some(MacAddress::from_str(mac).unwrap()),
             cidrs: vec![],
             routes: vec![],
         }
@@ -403,6 +407,10 @@ pub(crate) mod self_test {
             distinguishes_valid_zero_devices_from_invalid_config,
         ),
         (
+            "net::config::device_mac_is_optional",
+            device_mac_is_optional,
+        ),
+        (
             "net::config::route_selection_handles_connected_and_default_routes",
             route_selection_handles_connected_and_default_routes,
         ),
@@ -517,6 +525,26 @@ pub(crate) mod self_test {
         st_assert!(config.devices.is_empty());
 
         st_assert!(parse("auto_icmp_echo_reply = true\nloopback = invalid\n").is_err());
+        Ok(())
+    }
+
+    fn device_mac_is_optional() -> Result<(), String> {
+        let without: NetConfig =
+            toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n")
+                .map_err(|err| err.to_string())?;
+        st_assert!(without.devices["net0"].mac.is_none());
+        st_assert!(without.devices["net0"].cidrs.is_empty());
+        st_assert!(without.devices["net0"].routes.is_empty());
+
+        let with: NetConfig = toml::from_str(
+            "auto_icmp_echo_reply = false\nloopback = true\n[devices.net0]\n\
+             mac = \"02:00:00:00:00:01\"\n",
+        )
+        .map_err(|err| err.to_string())?;
+        st_assert_eq!(
+            with.devices["net0"].mac.as_ref().unwrap().raw(),
+            [2, 0, 0, 0, 0, 1]
+        );
         Ok(())
     }
 

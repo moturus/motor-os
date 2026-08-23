@@ -739,10 +739,13 @@ pub(super) async fn init(
     }
 
     for (device_name, device_cfg) in &config.devices {
-        if let Some(pos) = virtio_devices
-            .iter()
-            .position(|dev| dev.mac() == &device_cfg.mac.raw())
-        {
+        let pos = match &device_cfg.mac {
+            Some(mac) => virtio_devices
+                .iter()
+                .position(|dev| dev.mac() == &mac.raw()),
+            None => (!virtio_devices.is_empty()).then_some(0),
+        };
+        if let Some(pos) = pos {
             let dev = virtio_devices.remove(pos);
             devices.push(device::NetDev::new(
                 device_name,
@@ -751,7 +754,7 @@ pub(super) async fn init(
                 device::NetstackDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
-            log::warn!("Cannot find NET device {device_cfg:?}.");
+            log::warn!("Cannot find NET device for {device_name}: {device_cfg:?}.");
         }
     }
 

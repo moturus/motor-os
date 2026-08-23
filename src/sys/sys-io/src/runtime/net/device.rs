@@ -256,6 +256,10 @@ impl VirtioDevice {
         this
     }
 
+    fn mac(&self) -> &[u8; 6] {
+        self.inner.mac()
+    }
+
     async fn rx_task(
         net_dev: Rc<NetDevice>,
         rx_queue: RxQueue,
@@ -833,8 +837,8 @@ impl<'a> NetDev<'a> {
         mut device: NetstackDevice,
     ) -> Self {
         let hardware_addr = match &device {
-            NetstackDevice::VirtIo(_) => moto_netstack::wire::HardwareAddress::Ethernet(
-                moto_netstack::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
+            NetstackDevice::VirtIo(dev) => moto_netstack::wire::HardwareAddress::Ethernet(
+                moto_netstack::wire::EthernetAddress::from_bytes(dev.mac()),
             ),
             NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
         };
@@ -843,10 +847,7 @@ impl<'a> NetDev<'a> {
         // timestamp and an unoffset one would be this machine's uptime.
         tsval::init();
         let config = iface_config(hardware_addr, net_cfg, external);
-        log::debug!(
-            "Initializing net device {name} with\nmac {:x?}",
-            dev_cfg.mac
-        );
+        log::debug!("Initializing net device {name} with\nmac {hardware_addr:?}");
 
         let (mut iface, notify) = match &mut device {
             NetstackDevice::VirtIo(dev) => (
