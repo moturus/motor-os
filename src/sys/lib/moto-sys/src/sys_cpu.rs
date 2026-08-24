@@ -37,6 +37,10 @@ impl SysCpu {
     // If present, OP_KILL's arg is the PID.
     pub const F_KILL_PID: u32 = 2;
 
+    // If present, OP_KILL interrupts a process with Ctrl+C status.
+    pub const F_KILL_CTRL_C: u32 = 4;
+    pub const CTRL_C_EXIT_STATUS: u64 = 130;
+
     /// Exit the current process. To exit the current thread, call
     /// ```
     ///    let _ = moto_sys::SysObj::put(moto_sys::SysHandle::SELF);
@@ -63,6 +67,27 @@ impl SysCpu {
     pub fn kill(target: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
             pack_nr_ver(SYS_CPU, Self::OP_KILL, 0, 0),
+            target.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Interrupt a child process as if it received Ctrl+C. Unlike `kill`,
+    /// this returns after requesting termination rather than waiting for it.
+    #[cfg(feature = "userspace")]
+    pub fn interrupt(target: SysHandle) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_CPU, Self::OP_KILL, Self::F_KILL_CTRL_C, 0),
             target.as_u64(),
             0,
             0,

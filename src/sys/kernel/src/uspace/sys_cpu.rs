@@ -521,6 +521,19 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
         }
     }
 
+    if args.flags == SysCpu::F_KILL_CTRL_C {
+        let Some(target_obj) = killer.owner().get_object(&target) else {
+            return ResultBuilder::result(moto_rt::E_NOT_FOUND);
+        };
+        let Some(victim) = super::sysobject::object_from_sysobject::<super::process::Process>(
+            &target_obj.sys_object,
+        ) else {
+            return ResultBuilder::result(moto_rt::E_NOT_FOUND);
+        };
+        victim.exit(SysCpu::CTRL_C_EXIT_STATUS);
+        return ResultBuilder::ok();
+    }
+
     if args.flags != 0 {
         log::info!("bad flags: 0x{:x}", args.flags);
         return ResultBuilder::invalid_argument();

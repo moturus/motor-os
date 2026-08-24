@@ -627,7 +627,7 @@ impl Process {
         }
     }
 
-    fn exit(&self, exit_status: u64) {
+    pub(super) fn exit(&self, exit_status: u64) {
         let (target_mut, mut status_lock) = unsafe { self.get_mut() };
 
         if status_lock.is_alive() {

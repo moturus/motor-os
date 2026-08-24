@@ -6,6 +6,61 @@ const SHARED_LISTENER_CHILD: &str = "shared-listener-child";
 const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
 const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
 const CAPS_POLICY_CHILD: &str = "caps-policy-child";
+const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
+
+pub fn is_interrupt_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == INTERRUPT_CHILD
+}
+
+pub fn run_interrupt_child() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+fn spawn_interrupt_child() -> moto_rt::process::SpawnResult {
+    moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec![INTERRUPT_CHILD.to_owned()],
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: moto_rt::process::STDIO_NULL,
+        stdout: moto_rt::process::STDIO_NULL,
+        stderr: moto_rt::process::STDIO_NULL,
+    })
+    .unwrap()
+}
+
+pub fn test_ctrl_c_interrupt() {
+    use moto_sys::{SysCpu, SysHandle, SysObj};
+
+    let child = spawn_interrupt_child();
+    let handle = SysHandle::from_u64(child.handle);
+    SysCpu::interrupt(handle).unwrap();
+    assert_eq!(
+        SysCpu::CTRL_C_EXIT_STATUS as i32,
+        moto_rt::process::wait(child.handle).unwrap()
+    );
+    moto_rt::alloc::release_handle(child.handle).unwrap();
+
+    assert!(SysCpu::interrupt(SysHandle::NONE).is_err());
+    let (ipc_a, ipc_b) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    assert!(SysCpu::interrupt(ipc_a).is_err());
+    assert_eq!(SysCpu::kill_remote(ipc_a), Err(moto_rt::E_NOT_ALLOWED));
+    SysObj::put(ipc_a).unwrap();
+    SysObj::put(ipc_b).unwrap();
+
+    let child = spawn_interrupt_child();
+    SysCpu::kill(SysHandle::from_u64(child.handle)).unwrap();
+    assert_eq!(-1, moto_rt::process::wait(child.handle).unwrap());
+    moto_rt::alloc::release_handle(child.handle).unwrap();
+
+    println!("test_ctrl_c_interrupt PASS");
+}
 
 fn spawn_shared_listener() -> (
     std::process::Child,

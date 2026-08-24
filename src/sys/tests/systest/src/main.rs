@@ -1049,6 +1049,9 @@ fn main() {
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
     }
+    if spawn_wait_kill::is_interrupt_child(&args) {
+        spawn_wait_kill::run_interrupt_child();
+    }
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
@@ -1192,6 +1195,7 @@ fn main() {
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
+    spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
     command_output::run_test();
