@@ -15,13 +15,6 @@ verify() {
     local version
     local copy="$WORK/$family/fixture"
     version=$("$cargo" --version)
-    case "$version" in
-        "cargo $family."*) ;;
-        *)
-            echo "error: expected Cargo $family, got: $version" >&2
-            return 1
-            ;;
-    esac
     mkdir -p -- "$copy"
     cp -R -- "$FIXTURE/." "$copy"
     rm -f -- "$copy/root/Cargo.lock"
@@ -29,10 +22,23 @@ verify() {
         cd -- "$copy/root"
         CARGO_HOME="$WORK/$family/cargo-home" "$cargo" generate-lockfile --offline
     )
-    cmp -- "$FIXTURE/root/Cargo.lock" "$copy/root/Cargo.lock"
+    if ! cmp -s -- "$FIXTURE/root/Cargo.lock" "$copy/root/Cargo.lock"; then
+        case "$version" in
+            "cargo $family."*)
+                echo "error: $version generated a result different from its frozen oracle" >&2
+                ;;
+            *)
+                echo "error: $version is not the expected Cargo $family oracle and generated a different result" >&2
+                ;;
+        esac
+        diff -u --label "Cargo $family oracle/Cargo.lock" \
+            --label "$version/Cargo.lock" \
+            "$FIXTURE/root/Cargo.lock" "$copy/root/Cargo.lock" >&2 || true
+        return 1
+    fi
 }
 
 verify "1.97" "$CARGO_197"
 verify "1.98" "$CARGO_198"
 verify "1.99" "$CARGO_199"
-echo "PASS: Cargo 1.97, 1.98, and 1.99 match the frozen Stage 2 resolution oracle"
+echo "PASS: configured Cargo versions match the frozen Cargo 1.97, 1.98, and 1.99 Stage 2 resolution oracles"
