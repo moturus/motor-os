@@ -17,26 +17,28 @@ pub enum StdioKind {
     Stdin,
     Stdout,
     Stderr,
+    Terminal,
 }
 
 impl StdioKind {
     pub fn is_reader(&self) -> bool {
-        matches!(self, StdioKind::Stdin)
+        matches!(self, StdioKind::Stdin | StdioKind::Terminal)
     }
 
-    fn get(&self) -> Arc<SelfStdio> {
+    fn get(&self) -> Option<Arc<SelfStdio>> {
         let idx = match self {
             Self::Stdin => 0,
             Self::Stdout => 1,
             Self::Stderr => 2,
+            Self::Terminal => 3,
         };
-        SELF_STDIO.lock()[idx].as_ref().unwrap().clone()
+        SELF_STDIO.lock()[idx].clone()
     }
 }
 
-// The process's own stdin/out/err, set in init(). Also in the FD
+// The process's own stdin/out/err/terminal, set in init(). Also in the FD
 // table; this direct reference is for the relay tasks.
-static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 3]> = SpinLock::new([None, None, None]);
+static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 4]> = SpinLock::new([None, None, None, None]);
 struct StdioImpl {
     kind: StdioKind,
     pipe: Arc<StdioPipe>,
@@ -323,7 +325,10 @@ fn prepare_inherited_relay(from: moto_rt::RtFd, to: *const u8) -> InheritedRelay
 
 impl InheritedRelayTask {
     fn spawn(self, group: Arc<crate::stdio_relay::CompletionGroup>) {
-        let stdio = self.from.get();
+        let stdio = self
+            .from
+            .get()
+            .expect("prepared stdio relay source is absent");
         crate::stdio_relay::spawn(move || async move {
             if self.from == StdioKind::Stdin {
                 relay_in(stdio, self.to).await;
@@ -717,7 +722,7 @@ pub fn init() {
         (StdioKind::Stdout, &process_data.stdout),
         (StdioKind::Stderr, &process_data.stderr),
     ];
-    let mut self_stdio = [None, None, None];
+    let mut self_stdio = [None, None, None, None];
     let mut files: Vec<(u64, Arc<crate::rt_fs::File>)> = Vec::new();
 
     for (idx, (kind, data)) in streams.into_iter().enumerate() {
@@ -742,6 +747,13 @@ pub fn init() {
             stdio
         };
         assert_eq!(idx as RtFd, posix::push_file(descriptor));
+    }
+
+    if !process_data.terminal.is_null() {
+        let stdio = SelfStdio::new(StdioKind::Terminal, &process_data.terminal)
+            .expect("invalid terminal bootstrap data");
+        self_stdio[moto_rt::FD_TERMINAL as usize] = Some(stdio.clone());
+        assert_eq!(moto_rt::FD_TERMINAL, posix::push_file(stdio));
     }
     *SELF_STDIO.lock() = self_stdio;
 }
@@ -843,6 +855,7 @@ impl StdioKind {
             Self::Stdin => moto_rt::FD_STDIN,
             Self::Stdout => moto_rt::FD_STDOUT,
             Self::Stderr => moto_rt::FD_STDERR,
+            Self::Terminal => moto_rt::FD_TERMINAL,
         }
     }
 
@@ -851,6 +864,7 @@ impl StdioKind {
             moto_rt::FD_STDIN => Some(Self::Stdin),
             moto_rt::FD_STDOUT => Some(Self::Stdout),
             moto_rt::FD_STDERR => Some(Self::Stderr),
+            moto_rt::FD_TERMINAL => Some(Self::Terminal),
             _ => None,
         }
     }
@@ -1091,6 +1105,7 @@ pub fn create_child_stdio(
         pd.stdin = stdin_theirs;
         pd.stdout = stdout_theirs;
         pd.stderr = stderr_theirs;
+        pd.terminal = StdioData::null();
     }
 
     let pending = file_tasks.len() + inherited_tasks.len();

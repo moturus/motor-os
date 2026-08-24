@@ -934,6 +934,7 @@ pub struct ProcessData {
     pub stdin: StdioData,
     pub stdout: StdioData,
     pub stderr: StdioData,
+    pub terminal: StdioData,
     pub args: u64, // Command line arguments. See impl below.
     pub env: u64,  // Environment variables. See impl below.
 }

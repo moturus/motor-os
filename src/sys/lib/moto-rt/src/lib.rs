@@ -105,6 +105,8 @@ pub const FD_STDIN: RtFd = 0;
 pub const FD_STDOUT: RtFd = 1;
 #[cfg(not(feature = "base"))]
 pub const FD_STDERR: RtFd = 2;
+#[cfg(not(feature = "base"))]
+pub const FD_TERMINAL: RtFd = 3;
 
 #[cfg(not(feature = "base"))]
 pub const RT_VERSION: u64 = 17;

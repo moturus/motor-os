@@ -127,6 +127,14 @@ pub fn run_report_child() -> ! {
     unsafe { std::env::remove_var(key) };
     let mask_unset = self_mask();
 
+    let terminal = moto_rt::fs::is_terminal(moto_rt::FD_TERMINAL) as u32;
+    let first_open = moto_rt::fs::open(
+        std::env::current_exe().unwrap().to_str().unwrap(),
+        moto_rt::fs::O_READ,
+    )
+    .unwrap();
+    moto_rt::fs::close(first_open).unwrap();
+
     // Duplicates share the descriptor's object, so they share its answer,
     // and descriptors above 2 are not special. The duplicate is deliberately
     // left open until exit: closing a SelfStdio descriptor is an
@@ -137,7 +145,8 @@ pub fn run_report_child() -> ! {
 
     println!(
         "self={mask:03b} set={mask_set:03b} unset={mask_unset:03b} \
-         key={key_present} dupfd={dup} duporig={duporig} dupnew={dupnew}"
+         key={key_present} terminal={terminal} firstfd={first_open} \
+         dupfd={dup} duporig={duporig} dupnew={dupnew}"
     );
     std::io::stdout().flush().unwrap();
 
@@ -249,6 +258,12 @@ fn check_report_child(terminal: bool) {
     assert_eq!(field(&report, "set"), own, "in {report:?}");
     assert_eq!(field(&report, "unset"), own, "in {report:?}");
     assert_eq!(field(&report, "key"), "0", "in {report:?}");
+    assert_eq!(field(&report, "terminal"), "0", "in {report:?}");
+    assert_eq!(
+        field(&report, "firstfd").parse::<i32>().unwrap(),
+        moto_rt::FD_TERMINAL,
+        "in {report:?}"
+    );
     let expected = if terminal { "1" } else { "0" };
     assert_eq!(field(&report, "duporig"), expected, "in {report:?}");
     assert_eq!(field(&report, "dupnew"), expected, "in {report:?}");
