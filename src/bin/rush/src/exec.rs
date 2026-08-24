@@ -508,10 +508,22 @@ fn spawn_background(
     shell: &mut Shell,
 ) {
     let cmd = argv.join(" ");
+    #[cfg(target_os = "motor")]
+    let env = {
+        let mut env = env.to_vec();
+        env.retain(|(key, _)| key != moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY);
+        env.push((
+            moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY.to_owned(),
+            "true".to_owned(),
+        ));
+        env
+    };
+    #[cfg(not(target_os = "motor"))]
+    let env = env.to_vec();
     match jobs::spawn(
         program,
         &argv[1..],
-        env,
+        &env,
         child_in(&fds[0], true, sole_use[0]),
         child_out(&fds[1], sole_use[1]),
         child_out(&fds[2], sole_use[2]),
