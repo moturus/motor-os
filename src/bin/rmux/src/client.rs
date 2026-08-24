@@ -226,6 +226,7 @@ fn settle_size(fallback: (u16, u16), queue: &Receiver<Local>) -> ((u16, u16), Ve
 /// wants `?2004h` gets it inside its own emulator (§7.6); this is rmux's own
 /// console.
 fn enter_console() -> std::io::Result<()> {
+    crossterm::event::enable_ctrl_c_events()?;
     enable_raw_mode()?;
     execute!(
         std::io::stdout(),

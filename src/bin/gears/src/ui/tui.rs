@@ -446,6 +446,7 @@ impl<W: Write> Crossterm<W> {
 
 impl<W: Write> Surface for Crossterm<W> {
     fn enter(&mut self) -> io::Result<()> {
+        crossterm::event::enable_ctrl_c_events()?;
         enable_raw_mode()?;
         if let Err(error) = execute!(
             self.out,

@@ -1602,6 +1602,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn control_c_is_reoriginated_normally_but_stays_local_in_copy_mode() {
+        let (mut server, _queue, _outbox, id) = served();
+        match server.decide(id, Key::ctrl('c')) {
+            Act::Forward(bytes) => assert_eq!(bytes, b"\x03"),
+            _ => panic!("an unbound normal-mode C-c was not forwarded"),
+        }
+
+        typed(&mut server, id, "\x01[");
+        assert!(matches!(
+            server.decide(id, Key::ctrl('c')),
+            Act::Mode(Key {
+                code: Code::Char('c'),
+                mods: Key::CTRL,
+            })
+        ));
+    }
+
     /// Everything the panes wrote up to and including `marker`.
     fn echoed(queue: &Receiver<Event>, marker: u8) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(10);

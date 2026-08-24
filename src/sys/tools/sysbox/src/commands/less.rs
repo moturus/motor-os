@@ -124,6 +124,10 @@ fn terminal_size() -> (u16, u16) {
 }
 
 fn page(text: &str, name: &str) {
+    if let Err(err) = event::enable_ctrl_c_events() {
+        eprintln!("less: cannot enable Ctrl+C input: {err:?}.");
+        std::process::exit(1);
+    }
     let _guard = TerminalGuard::new();
     let (cols, rows) = terminal_size();
     let mut pager = Pager::new(name, text, cols, rows);
