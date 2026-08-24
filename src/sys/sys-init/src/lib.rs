@@ -58,4 +58,41 @@ mod tests {
         assert!(process_service_line("0x40:/system/services/example").is_err());
         assert!(process_service_line("64:").is_err());
     }
+
+    #[test]
+    fn legacy_tty_lines_default_to_interactive() {
+        assert_eq!(
+            process_tty_line("/system/services/sys-tty"),
+            Ok((TtyRole::Interactive, "/system/services/sys-tty".to_owned()))
+        );
+    }
+
+    #[test]
+    fn explicit_tty_lines_accept_each_role() {
+        for (name, role) in [
+            ("system", TtyRole::System),
+            ("interactive", TtyRole::Interactive),
+            ("none", TtyRole::None),
+        ] {
+            assert_eq!(
+                process_tty_line(&format!("{name}:/system/services/sys-tty")),
+                Ok((role, "/system/services/sys-tty".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn tty_lines_reject_invalid_roles_and_commands() {
+        for value in [
+            "admin:/system/services/sys-tty",
+            "SYSTEM:/system/services/sys-tty",
+            ":/system/services/sys-tty",
+            "",
+            "system:",
+            "system: /system/services/sys-tty",
+            "system:/system/services/sys-tty --flag",
+        ] {
+            assert!(process_tty_line(value).is_err(), "{value:?}");
+        }
+    }
 }
