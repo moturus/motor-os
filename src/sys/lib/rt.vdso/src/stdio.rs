@@ -139,6 +139,9 @@ struct SelfStdio {
     pipe: Arc<StdioPipe>,
     // None while a stdin relay task owns the reader (design 7.2).
     inner: SpinLock<Option<StdioImpl>>,
+    /// Changes whenever a claim is returned, so claim waiters cannot miss
+    /// the edge between checking `inner` and entering the futex wait.
+    claim_generation: AtomicU32,
     /// Set while a relay owns stdin: those bytes are the child's, not ours.
     relayed: AtomicBool,
     /// Bytes a relay handed back, readable though the pipe itself is empty.
@@ -168,6 +171,7 @@ impl SelfStdio {
             kind,
             pipe,
             inner: SpinLock::new(Some(StdioImpl::new(kind, for_impl))),
+            claim_generation: AtomicU32::new(0),
             relayed: AtomicBool::new(false),
             stashed: AtomicUsize::new(0),
             nonblocking: AtomicBool::new(false),
@@ -187,16 +191,22 @@ impl SelfStdio {
         // read waiting for input), and anyone touching the lock
         // meanwhile would spin through that entire wait.
         let mut owned = loop {
+            let generation = self.claim_generation.load(Ordering::Acquire);
             if let Some(owned) = self.inner.lock().take() {
                 break owned;
             }
-            // Claimed by a stdin relay for a child's lifetime, or by
-            // a concurrent op on this fd; block as before.
-            moto_sys::SysCpu::sched_yield();
+            moto_rt::futex_wait(&self.claim_generation, generation, None);
         };
         let result = f(&mut owned);
-        *self.inner.lock() = Some(owned);
+        self.return_impl(owned);
         result
+    }
+
+    fn return_impl(&self, owned: StdioImpl) {
+        let previous = self.inner.lock().replace(owned);
+        assert!(previous.is_none());
+        self.claim_generation.fetch_add(1, Ordering::Release);
+        moto_rt::futex_wake_all(&self.claim_generation);
     }
 
     /// Whether a read would return now: what a relay handed back, or what the
@@ -448,7 +458,7 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
     // no handle edge behind it, so readiness is reported here rather than
     // waited for.
     stdio.stashed.store(owned.overflow.len(), Ordering::Relaxed);
-    *stdio.inner.lock() = Some(owned);
+    stdio.return_impl(owned);
     stdio.relayed.store(false, Ordering::Release);
     stdio.event_source.check_interests_all();
 }
@@ -496,7 +506,7 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
         };
         let result = owned.pipe.nonblocking_write(buf);
         let handle = owned.pipe.handle();
-        *stdio.inner.lock() = Some(owned);
+        stdio.return_impl(owned);
         match result {
             Ok(written) => {
                 buf = &buf[written..];

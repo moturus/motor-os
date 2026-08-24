@@ -7,6 +7,7 @@ const AFTER_INHERITED_RELAY: &[u8] = b"after-inherited-relay\n";
 const INPUT_RECLAIM_PARENT: &str = "stdio-input-reclaim-parent";
 const INPUT_RECLAIM_IDLE: &str = "stdio-input-reclaim-idle";
 const INPUT_RECLAIM_BYTES: usize = 8 * 1024 + 37;
+const INPUT_CLAIM_WAIT_PARENT: &str = "stdio-input-claim-wait-parent";
 
 pub fn is_inherited_relay_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
@@ -258,6 +259,7 @@ pub fn is_stdio_child(args: &[String]) -> bool {
                 | "self-stdio-close-child"
                 | INPUT_RECLAIM_PARENT
                 | INPUT_RECLAIM_IDLE
+                | INPUT_CLAIM_WAIT_PARENT
         )
     })
 }
@@ -274,6 +276,7 @@ pub fn run_stdio_child(args: &[String]) -> ! {
         "file-stdio-marker-writer" => run_file_stdio_marker_writer(args),
         "self-stdio-close-child" => run_self_stdio_close_child(),
         INPUT_RECLAIM_PARENT => run_input_reclaim_parent(),
+        INPUT_CLAIM_WAIT_PARENT => run_input_claim_wait_parent(),
         INPUT_RECLAIM_IDLE => {
             std::thread::sleep(std::time::Duration::from_millis(50));
             std::process::exit(0)
@@ -284,6 +287,54 @@ pub fn run_stdio_child(args: &[String]) -> ! {
         }
         _ => unreachable!(),
     }
+}
+
+fn run_input_claim_wait_parent() -> ! {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_RECLAIM_IDLE)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let reader = std::thread::spawn(|| {
+        let mut byte = [0];
+        std::io::stdin().read_exact(&mut byte).unwrap();
+        byte
+    });
+    assert!(child.wait().unwrap().success());
+    std::io::stdout()
+        .write_all(&reader.join().unwrap())
+        .unwrap();
+    std::process::exit(0)
+}
+
+fn test_input_claim_waiter_wakes() {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_CLAIM_WAIT_PARENT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"w").unwrap();
+    let mut returned = [0];
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_exact(&mut returned)
+        .unwrap();
+    assert_eq!(&returned, b"w");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    println!("test_input_claim_waiter_wakes PASS");
 }
 
 fn run_input_reclaim_parent() -> ! {
@@ -1409,5 +1460,6 @@ pub fn run_all_tests() {
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();
     test_inherited_input_reclaim_order();
+    test_input_claim_waiter_wakes();
     test_wait_drains_inherited_output();
 }
