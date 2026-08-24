@@ -255,6 +255,97 @@ future provider needs to mark only a subset of newly created streams, the
 plan of record is a three-bit native spawn option, not more environment
 keys.
 
+## Ctrl+C
+
+Ctrl+C is terminal control, not terminal data. Motor still has no signals or
+line discipline: the control state lives in the terminal input pipe, and the
+VDSO that owns a foreground relay applies it to the appropriate process.
+
+### Default and explicit handling
+
+Every process with terminal input begins in **Default**. A terminal Ctrl+C
+terminates a Default process with status 130, including a process that is
+spinning, deadlocked, or never reads stdin. All its threads stop and Rust
+stacks are not unwound. Raw mode, `event::read()`, and `is_terminal()` do not
+change this policy.
+
+A process that wants different behavior registers its one process-lifetime
+handler through `moto_rt::process::ctrl_c_register_handler()` and waits for
+the monotonic event sequence with `ctrl_c_wait(last)`. Registration resolves
+the live terminal fd 0, otherwise terminal fd 3, and a second registration
+fails. There is deliberately no unregister or temporary guard.
+
+Applications normally use one of two adapters instead of the low-level API:
+
+- `ctrlc::set_handler` runs an application callback for every sequence
+  advance. On a process without terminal input it succeeds dormantly, since
+  no event can arrive there.
+- `crossterm::event::enable_ctrl_c_events()` explicitly converts callbacks to
+  `KeyCode::Char('c')` with `KeyModifiers::CONTROL`. On other platforms it is
+  a no-op. On Motor it must be called during TUI setup before the first event
+  wait; merely entering raw mode is not an opt-in.
+
+rmux, interactive rush, Gears, and interactive `sysbox less` opt in only when
+they are about to own terminal input. An application chooses the Crossterm
+adapter or its own callback, not both, because they share the one handler.
+Red will install its own handler in its own change and otherwise needs no
+special treatment here.
+
+### The sole scan point and batch rule
+
+Only the provider-side `ChildStdio::write` for a terminal-hinted, newly made
+stdin scans for byte `0x03`. This is the boundary where sys-tty, russhd, or
+rmux writes terminal input to its child. Relays below it carry a control event
+in the pipe header and never rescan data. Consequently `0x03` in an ordinary
+pipe or file remains an ordinary byte.
+
+For one terminal write containing one or more Ctrl+C bytes:
+
+- each `0x03` is classified once as Default, Handler, or foreground Forward;
+- all bytes through the last `0x03` are consumed and discarded, matching the
+  input-flush behavior of an interrupt; and
+- bytes after the last `0x03` are written normally, with the write reporting
+  the consumed prefix plus however much tail was written.
+
+The event is therefore not delayed by a full child ring, and a partial tail
+cannot make a caller retry the Ctrl+C. Type-ahead after the interrupt remains
+ordered and is returned to the parent if the interrupted child did not read
+it.
+
+### Foreground forwarding
+
+While a VDSO input relay owns the terminal source for a foreground child, it
+temporarily overrides its process's Handler or Default state and forwards
+Ctrl+C to that child. Chains compose: a provider can forward to rmux, rmux to
+a pane's rush, and rush to the foreground leaf. A Default leaf exits 130; a
+leaf with a handler is notified. The parent is neither killed nor called back.
+
+Route teardown intentionally has no lock or drain. If Ctrl+C races the target
+child finishing, that event may be lost; it cannot reach the parent or a later
+child. Each route has a generation, so an event from an old route cannot be
+mistaken for one on the next route.
+
+rmux handles bound `C-c` locally, such as in copy mode. An unbound `C-c` is
+re-originated as `0x03` into the pane's terminal-hinted stdin, where the pane
+boundary performs the normal classification.
+
+### What rush infers
+
+Interactive rush enables the Crossterm adapter for its own prompt. A
+terminal-backed non-interactive rush does not register a handler: it stays
+Default between foreground routes and forwards while a child owns the
+terminal. Background and detached children receive neither terminal fd 3 nor
+a foreground route.
+
+After a foreground wait, rush treats status 130 as Ctrl+C: `$?` stays 130, a
+pending `trap INT` runs once, and the rest of the pipeline, list, or loop is
+abandoned. This intentionally also treats a voluntary `exit(130)` as an
+interrupt; Motor does not retain a separate exit-cause field after collection.
+
+Motor has no process groups and no `SIGTTIN`/`SIGTTOU`. Foreground ownership
+is the VDSO relay route, not a process-group broadcast, and suppressing fd 3
+is what prevents background jobs from stealing terminal input.
+
 ## Stdio redirection
 
 Three of the four spawn modes above give the child a pipe or nothing. The
@@ -410,7 +501,10 @@ authorizes an operation must use an explicit authorization policy.
 - `src/tests/test-tui.sh` validates the real providers end to end: the
   probe (`systest stdio-terminal-report-child`) reports `111` on the serial
   console, in SSH pty sessions, and in rmux panes, and `000` in non-pty SSH
-  sessions and their descendants.
+  sessions and their descendants. It also injects terminal Ctrl+C into
+  Default and handler leaves, verifies fd 0 and fd 3 delivery, foreground
+  route restoration, no parent callback, retained type-ahead, the Crossterm
+  adapter, and a nested rmux → rush → Default-child chain.
 - `src/tests/test-terminal-size.sh` validates the size half of the same
   providers, from the application's end: rush and red laid out for the size
   each terminal last reported, and repainted when it changes with no key
@@ -419,6 +513,12 @@ authorizes an operation must use an explicit authorization policy.
   chain to an editor in a pane.
 
 All three run from `src/tests/full-test.sh`.
+
+`src/sys/tests/systest/src/ctrl_c.rs` provides the focused runtime and
+terminal-chain probes. Lower-level atomic classification, route generation,
+batch scanning, and fixed-status process interruption are covered in their
+own moto-ipc, rt.vdso, moto-rt, and kernel tests, all reached transitively by
+`full-test.sh`.
 
 Redirection has its own set, also run from `full-test.sh`:
 

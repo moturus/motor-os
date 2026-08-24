@@ -1,30 +1,25 @@
 # Paging piped input, and Ctrl+C: terminal input and control through child chains
 
-Nothing is implemented.
+This plan is implemented. The resulting terminal contract is documented in
+`docs/tui.md`.
 
-`sysbox less` pages a *file* on a terminal, in-band-resizable, on crossterm
-like red and rmux. What it cannot do is what `cat file | less` does everywhere
-else: page text that arrived on stdin. Separately, Motor treats Ctrl+C as an
-ordinary byte, so a process that is deadlocked, spinning, or simply not reading
-stdin cannot be interrupted. Both problems sit at the same boundary — passing
-the session's terminal through foreground-child chains. They are related but
-may land in stages:
+Before this work, `sysbox less` paged a *file* on a terminal but could not page
+text that arrived on stdin, and Motor treated Ctrl+C as an ordinary byte. A
+deadlocked, spinning, or non-reading process therefore could not be
+interrupted. Both problems sit at the same boundary — passing the session's
+terminal through foreground-child chains. The implementation has two parts
+that were designed to be independently landable:
 
 - **Part I, stdio:3**, gives a pipeline stage a handle on the session's
   terminal. It needs nothing from Part II; in a Part-I-only world `0x03` keeps
   flowing as a byte and `less` quits on `Ctrl+Char('c')` exactly as it does
-  today on a terminal stdin.
+  on a terminal stdin.
 - **Part II, Ctrl+C**, makes `0x03` from a terminal a control event that
   terminates the foreground leaf unless it explicitly registered a handler.
   A TUI library can use that handler to produce a normal key event; this is not
-  a second runtime subscription. Part II is a system-wide behavior change. It
-  can be reviewed and landed separately after Part I, but depends on Part I to
-  reach a foreground child whose stdin is redirected or piped.
-
-File and function references are current as of `7f85a72e` (2026-08-23). Core
-patches touch `src/sys`; before committing each one, follow `AGENTS.md:23-27`:
-three consistent debug and three consistent release `full-test.sh` runs. Do
-not combine steps into one large patch.
+  a second runtime subscription. Part II is a system-wide behavior change and
+  depends on Part I to reach a foreground child whose stdin is redirected or
+  piped.
 
 ---
 
