@@ -385,9 +385,14 @@ impl PosixFile for SelfStdio {
 struct InheritedRelayTask {
     from: StdioKind,
     to: moto_ipc::stdio_pipe::RawPipeData,
+    ctrl_c_process: Option<moto_sys::syscalls::RaiiHandle>,
 }
 
-fn prepare_inherited_relay(from: moto_rt::RtFd, to: *const u8) -> InheritedRelayTask {
+fn prepare_inherited_relay(
+    from: moto_rt::RtFd,
+    to: *const u8,
+    remote_process: SysHandle,
+) -> Result<InheritedRelayTask, ErrorCode> {
     use moto_ipc::stdio_pipe::RawPipeData;
 
     let from = match from {
@@ -400,8 +405,20 @@ fn prepare_inherited_relay(from: moto_rt::RtFd, to: *const u8) -> InheritedRelay
 
     let to: RawPipeData =
         unsafe { (to as usize as *const RawPipeData).as_ref().unwrap() }.unsafe_copy();
+    let ctrl_c_process =
+        if from.is_reader() && posix::get_file(from.fd()).is_some_and(|file| file.is_terminal()) {
+            Some(moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::dup(
+                remote_process,
+            )?))
+        } else {
+            None
+        };
 
-    InheritedRelayTask { from, to }
+    Ok(InheritedRelayTask {
+        from,
+        to,
+        ctrl_c_process,
+    })
 }
 
 impl InheritedRelayTask {
@@ -412,7 +429,7 @@ impl InheritedRelayTask {
             .expect("prepared stdio relay source is absent");
         crate::stdio_relay::spawn(move || async move {
             if self.from.is_reader() {
-                relay_in(stdio, self.to).await;
+                relay_in(stdio, self.to, self.ctrl_c_process).await;
             } else {
                 // Safety: the pair was made for this process; see make_pair().
                 let dest = unsafe { StdioPipe::new_reader(self.to) };
@@ -423,11 +440,71 @@ impl InheritedRelayTask {
     }
 }
 
+struct CtrlCRelay {
+    source: Arc<StdioPipe>,
+    route: moto_ipc::stdio_pipe::CtrlCForwardRoute,
+    child_process: moto_sys::syscalls::RaiiHandle,
+    seen: u32,
+}
+
+impl CtrlCRelay {
+    fn new(source: Arc<StdioPipe>, child_process: moto_sys::syscalls::RaiiHandle) -> Self {
+        let route = source
+            .ctrl_c_install_forward()
+            .expect("terminal input pipe has no Ctrl+C header");
+        Self {
+            source,
+            route,
+            child_process,
+            seen: 0,
+        }
+    }
+
+    fn service(&mut self, child_input: &StdioPipe) {
+        let count = self
+            .source
+            .ctrl_c_forward_count(self.route)
+            .expect("terminal input pipe has no Ctrl+C header")
+            .expect("Ctrl+C relay route disappeared before teardown");
+        while self.seen < count {
+            raise_child_ctrl_c(child_input, self.child_process.syshandle());
+            self.seen += 1;
+        }
+    }
+}
+
+impl Drop for CtrlCRelay {
+    fn drop(&mut self) {
+        let _ = self.source.ctrl_c_clear_forward(self.route);
+    }
+}
+
+fn raise_child_ctrl_c(child_input: &StdioPipe, child_process: SysHandle) {
+    use moto_ipc::stdio_pipe::CtrlCAction;
+
+    match child_input
+        .ctrl_c_raise()
+        .expect("child input pipe has no Ctrl+C header")
+    {
+        CtrlCAction::Default => {
+            let _ = moto_sys::SysCpu::interrupt(child_process);
+        }
+        CtrlCAction::Handler(..) | CtrlCAction::Forward(..) => {
+            let _ = moto_sys::SysCpu::wake(child_input.handle());
+        }
+        CtrlCAction::Dropped => {}
+    }
+}
+
 /// Relays this process's stdin into an inherited-stdio child, as a
 /// task on the relay runtime. Owns the stdin reader for the child's
 /// lifetime; bytes the child did not consume return to the parent's
 /// stream via the overflow stash.
-async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) {
+async fn relay_in(
+    stdio: Arc<SelfStdio>,
+    to: moto_ipc::stdio_pipe::RawPipeData,
+    ctrl_c_process: Option<moto_sys::syscalls::RaiiHandle>,
+) {
     use futures::future::Either;
     use moto_async::AsFuture;
 
@@ -464,8 +541,13 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
         DestinationGone(Vec<u8>),
     }
 
+    let mut ctrl_c = ctrl_c_process.map(|process| CtrlCRelay::new(owned.pipe.clone(), process));
+    let mut source_alive = true;
     let mut buf = [0_u8; 80];
     let end = 'relay: loop {
+        if let Some(ctrl_c) = ctrl_c.as_mut() {
+            ctrl_c.service(&dest);
+        }
         match owned.read(&mut buf, true) {
             Ok(0) => {
                 let _ = dest.close_writer();
@@ -474,13 +556,28 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
             Ok(sz) => {
                 let mut chunk = &buf[..sz];
                 while !chunk.is_empty() {
+                    if let Some(ctrl_c) = ctrl_c.as_mut() {
+                        ctrl_c.service(&dest);
+                    }
                     match dest.nonblocking_write(chunk) {
                         Ok(written) => {
                             chunk = &chunk[written..];
                             moto_sys::SysCpu::sched_yield();
                         }
                         Err(moto_rt::E_NOT_READY) => {
-                            if dest.handle().as_future().await.is_err() {
+                            if source_alive && ctrl_c.is_some() {
+                                let dest_ready = dest.handle().as_future();
+                                let source_ready = owned.pipe.handle().as_future();
+                                match futures::future::select(dest_ready, source_ready).await {
+                                    Either::Left((result, _)) if result.is_err() => {
+                                        break 'relay RelayEnd::DestinationGone(chunk.to_vec());
+                                    }
+                                    Either::Right((result, _)) if result.is_err() => {
+                                        source_alive = false;
+                                    }
+                                    _ => {}
+                                }
+                            } else if dest.handle().as_future().await.is_err() {
                                 break 'relay RelayEnd::DestinationGone(chunk.to_vec());
                             }
                         }
@@ -511,6 +608,10 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
             Err(_) => break 'relay RelayEnd::SourceDone,
         }
     };
+
+    // Clear the route before the reader claim becomes available to this
+    // process again. An event racing this boundary is intentionally lost.
+    drop(ctrl_c);
 
     if let RelayEnd::DestinationGone(mut unwritten) = end {
         let mut reclaimed = match dest.take_unread() {
@@ -1204,7 +1305,7 @@ pub fn create_child_stdio(
         let (local_data, remote_data) =
             moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
         let pdata = &local_data as *const _ as usize as *const u8;
-        inherited_tasks.push(prepare_inherited_relay(source, pdata));
+        inherited_tasks.push(prepare_inherited_relay(source, pdata, remote_process)?);
         StdioData::pipe(
             remote_data.buf_addr as u64,
             remote_data.buf_size as u64,
@@ -1295,7 +1396,7 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            inherited_tasks.push(prepare_inherited_relay(*source, pdata));
+            inherited_tasks.push(prepare_inherited_relay(*source, pdata, remote_process)?);
 
             // An inherited stream is a terminal iff this process's matching
             // stream is one: the relay extends the same endpoint to the child.

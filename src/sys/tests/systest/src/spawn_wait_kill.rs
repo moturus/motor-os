@@ -40,11 +40,13 @@ pub fn test_ctrl_c_interrupt() {
 
     let child = spawn_interrupt_child();
     let handle = SysHandle::from_u64(child.handle);
-    SysCpu::interrupt(handle).unwrap();
+    let duplicate = SysObj::dup(handle).unwrap();
+    SysCpu::interrupt(duplicate).unwrap();
     assert_eq!(
         SysCpu::CTRL_C_EXIT_STATUS as i32,
         moto_rt::process::wait(child.handle).unwrap()
     );
+    SysObj::put(duplicate).unwrap();
     moto_rt::alloc::release_handle(child.handle).unwrap();
 
     assert!(SysCpu::interrupt(SysHandle::NONE).is_err());

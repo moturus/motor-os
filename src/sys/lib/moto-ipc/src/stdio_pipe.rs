@@ -342,18 +342,24 @@ impl CtrlCHeader {
     }
 
     fn clear_forward(&self, route: CtrlCForwardRoute) -> bool {
-        let state = self.state().load(Ordering::SeqCst);
-        if state & CTRL_C_FORWARD == 0 || self.generation(state) != route.generation {
-            return false;
-        }
-        self.state()
-            .compare_exchange(
+        self.clear_forward_from(route, self.state().load(Ordering::SeqCst))
+    }
+
+    fn clear_forward_from(&self, route: CtrlCForwardRoute, mut state: u64) -> bool {
+        loop {
+            if state & CTRL_C_FORWARD == 0 || self.generation(state) != route.generation {
+                return false;
+            }
+            match self.state().compare_exchange(
                 state,
                 state & !CTRL_C_FORWARD,
                 Ordering::SeqCst,
                 Ordering::SeqCst,
-            )
-            .is_ok()
+            ) {
+                Ok(_) => return true,
+                Err(current) => state = current,
+            }
+        }
     }
 
     fn raise(&self) -> CtrlCAction {
@@ -1043,6 +1049,18 @@ mod tests {
         assert_eq!(header.raise(), CtrlCAction::Forward(first, 3));
         assert_eq!(header.handler_raised().load(Ordering::SeqCst), 0);
         assert!(header.clear_forward(first));
+        assert_eq!(header.raise(), CtrlCAction::Handler(1));
+    }
+
+    #[test]
+    fn ctrl_c_handler_survives_forward_route_teardown() {
+        let mapping = TestMapping::new();
+        let header = ctrl_c_header(&mapping);
+        let route = header.install_forward();
+        let before_handler = header.state().load(Ordering::SeqCst);
+
+        assert_eq!(header.register_handler(), Ok(0));
+        assert!(header.clear_forward_from(route, before_handler));
         assert_eq!(header.raise(), CtrlCAction::Handler(1));
     }
 
