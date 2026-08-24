@@ -467,7 +467,7 @@ pub(super) async fn write_resolv_conf(
     }
     fs.move_entry(async_fs::Role::System, temp, libc, "resolv.conf")
         .await?;
-    log::info!("published {} DNS server(s)", servers.len());
+    log::debug!("published {} DNS server(s)", servers.len());
     Ok(())
 }
 
