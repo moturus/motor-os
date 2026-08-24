@@ -1,28 +1,73 @@
-//! Motor OS backend: process control via moto-sys, and no signals anywhere.
+//! Motor OS backend: native process control and terminal Ctrl+C handling.
 //!
-//! Motor OS cannot deliver a signal to a process; a ^C is an in-band 0x03
-//! byte on stdin. The selected UI's one input owner turns it into cancellation
-//! both at the prompt and during a turn. The process side is real: spawn, kill
-//! and liveness all work. Motor OS has no process groups, so descendant cleanup
-//! walks the process tree one generation at a time.
+//! Line mode explicitly handles Ctrl+C and wakes its one input owner; TUI mode
+//! uses crossterm's adapter instead and never constructs this reader. The
+//! process side is real: spawn, kill and liveness all work. Motor OS has no
+//! process groups, so descendant cleanup walks the process tree one generation
+//! at a time.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
-/// A native readiness registry with stdin as its only source.
+const STDIN_TOKEN: u64 = 0;
+const CTRL_C_TOKEN: u64 = 1;
+
+struct Registry(moto_rt::RtFd);
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let _ = moto_rt::fs::close(self.0);
+    }
+}
+
+#[derive(Clone)]
+struct InputWaker(Arc<Registry>);
+
+impl InputWaker {
+    fn new() -> io::Result<Self> {
+        moto_rt::poll::new()
+            .map(Registry)
+            .map(Arc::new)
+            .map(InputWaker)
+            .map_err(io_error)
+    }
+
+    fn wake(&self) {
+        let _ = moto_rt::poll::wake(self.0.0);
+    }
+}
+
+/// A native readiness registry for stdin and line mode's Ctrl+C callback.
 pub struct TerminalInput {
-    registry: moto_rt::RtFd,
+    registry: Registry,
 }
 
 impl TerminalInput {
     pub fn new() -> io::Result<TerminalInput> {
-        let registry = moto_rt::poll::new().map_err(io_error)?;
-        if let Err(error) =
-            moto_rt::poll::add(registry, moto_rt::FD_STDIN, 0, moto_rt::poll::POLL_READABLE)
-        {
-            let _ = moto_rt::fs::close(registry);
-            return Err(io_error(error));
-        }
+        let registry = Registry(moto_rt::poll::new().map_err(io_error)?);
+        moto_rt::poll::add(
+            registry.0,
+            moto_rt::FD_STDIN,
+            STDIN_TOKEN,
+            moto_rt::poll::POLL_READABLE,
+        )
+        .map_err(io_error)?;
+
+        let waker = InputWaker::new()?;
+        moto_rt::poll::add(
+            registry.0,
+            waker.0.0,
+            CTRL_C_TOKEN,
+            moto_rt::poll::POLL_READABLE,
+        )
+        .map_err(io_error)?;
+        ctrlc::set_handler(move || {
+            super::note_interrupt();
+            waker.wake();
+        })
+        .map_err(io::Error::other)?;
+
         Ok(TerminalInput { registry })
     }
 
@@ -34,9 +79,12 @@ impl TerminalInput {
         let deadline = timeout.map(|left| moto_rt::time::Instant::now() + left);
         let mut event = moto_rt::poll::Event::default();
         let ready =
-            moto_rt::poll::wait(self.registry, &mut event, 1, deadline).map_err(io_error)?;
+            moto_rt::poll::wait(self.registry.0, &mut event, 1, deadline).map_err(io_error)?;
         if ready == 0 {
             return Ok(None);
+        }
+        if event.token == CTRL_C_TOKEN {
+            return Err(io::ErrorKind::Interrupted.into());
         }
         moto_rt::fs::read(moto_rt::FD_STDIN, buffer)
             .map(Some)
@@ -44,19 +92,11 @@ impl TerminalInput {
     }
 }
 
-impl Drop for TerminalInput {
-    fn drop(&mut self) {
-        let _ = moto_rt::fs::close(self.registry);
-    }
-}
-
 fn io_error(error: moto_rt::Error) -> io::Error {
     io::Error::from_raw_os_error(moto_rt::ErrorCode::from(error).into())
 }
 
-/// There is no handler to install, and nothing failed: no signal can arrive
-/// from outside the process. Delivery is the selected UI's stdin reader seeing
-/// 0x03 and raising the shared cancellation token.
+/// The selected UI installs its handler with its own input wake path.
 pub fn install_interrupt_handler() -> bool {
     true
 }

@@ -6,8 +6,8 @@
 //!
 //! Step 0 owned only the interrupt flag; step 5 added process control — how a
 //! command is started so it can be stopped again, and how its end is
-//! described. Step 10 made the Motor backend real (moto-sys process control;
-//! no signals, so the UI delivers in-band ^C — see `motor.rs`).
+//! described. The Motor backend uses native process control and turns an
+//! explicit Ctrl+C handler into the same flag (see `motor.rs`).
 
 #[cfg(unix)]
 mod unix;
@@ -28,8 +28,8 @@ pub use motor::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The one pending-interrupt flag (^C). Delivery only sets it — on the Unix
-/// host from a real SIGINT handler, on Motor OS from the stdin reader seeing
-/// an in-band 0x03 byte — and the REPL consumes it at safe points.
+/// host from a SIGINT handler and on Motor OS from an explicit Ctrl+C handler
+/// — and the REPL consumes it at safe points.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 /// Record an interrupt. Async-signal-safe: an atomic store only.
