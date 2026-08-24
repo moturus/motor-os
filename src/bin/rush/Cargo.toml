@@ -35,6 +35,7 @@ moto-rt = { path = "../../sys/lib/moto-rt" }
 # rest of the tree.
 [patch.crates-io]
 crossterm = { path = "../../../../crossterm" }
+moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]
 panic = "abort"

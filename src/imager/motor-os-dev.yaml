@@ -78,6 +78,10 @@ required_executables:
   - "img_files/generated/rustc/devtools/bin/rustc"
   - "img_files/generated/rustc/devtools/rust/bin/rustc"
 source_dirs:
+  - source: "../crossterm"
+    destination: "/devtools/crossterm"
+  - source: "../rust-ctrlc"
+    destination: "/devtools/rust-ctrlc"
   - source: "src/bin/red"
     destination: "/devtools/src/src/bin/red"
   - source: "src/bin/lorry"
