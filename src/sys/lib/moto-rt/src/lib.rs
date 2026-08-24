@@ -240,6 +240,8 @@ pub struct RtVdsoVtable {
     pub internal_helper: AtomicU64,
     pub current_exe: AtomicU64,
     pub current_pid: AtomicU64,
+    pub ctrl_c_register_handler: AtomicU64,
+    pub ctrl_c_wait: AtomicU64,
     // Keep additions at the end.
 }
 

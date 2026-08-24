@@ -80,6 +80,33 @@ pub extern "C" fn kill(handle: u64) -> moto_rt::ErrorCode {
         Err(err) => err,
     }
 }
+
+pub unsafe extern "C" fn ctrl_c_register_handler(sequence: *mut u64) -> moto_rt::ErrorCode {
+    let Some(sequence) = (unsafe { sequence.as_mut() }) else {
+        return moto_rt::E_INVALID_ARGUMENT;
+    };
+    match crate::stdio::ctrl_c_register_handler() {
+        Ok(value) => {
+            *sequence = value;
+            moto_rt::E_OK
+        }
+        Err(err) => err,
+    }
+}
+
+pub unsafe extern "C" fn ctrl_c_wait(last: u64, sequence: *mut u64) -> moto_rt::ErrorCode {
+    let Some(sequence) = (unsafe { sequence.as_mut() }) else {
+        return moto_rt::E_INVALID_ARGUMENT;
+    };
+    match crate::stdio::ctrl_c_wait(last) {
+        Ok(value) => {
+            *sequence = value;
+            moto_rt::E_OK
+        }
+        Err(err) => err,
+    }
+}
+
 pub extern "C" fn wait(handle: u64) -> moto_rt::ErrorCode {
     loop {
         match moto_sys::SysCpu::wait(

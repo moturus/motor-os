@@ -5,6 +5,7 @@
 mod admission;
 // mod channel_test;
 mod command_output;
+mod ctrl_c;
 mod descriptor_attr;
 mod execute_permissions;
 mod file_locking;
@@ -1052,6 +1053,9 @@ fn main() {
     if spawn_wait_kill::is_interrupt_child(&args) {
         spawn_wait_kill::run_interrupt_child();
     }
+    if ctrl_c::is_helper(&args) {
+        ctrl_c::run_helper(&args);
+    }
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
@@ -1198,6 +1202,7 @@ fn main() {
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
+    ctrl_c::run_tests();
     command_output::run_test();
     sysbox_find::run_test();
     sysbox_less::run_test();

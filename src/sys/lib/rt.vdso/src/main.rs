@@ -424,6 +424,14 @@ pub extern "C" fn motor_start(version: u64) {
         rt_process::current_pid as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.ctrl_c_register_handler.store(
+        rt_process::ctrl_c_register_handler as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.ctrl_c_wait.store(
+        rt_process::ctrl_c_wait as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     vtable
         .num_cpus

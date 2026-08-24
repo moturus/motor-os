@@ -335,6 +335,33 @@ pub fn try_wait(handle: u64) -> Result<i32> {
     Ok(convert_exit_status(status))
 }
 
+/// Register this process's sole, process-lifetime Ctrl+C handler and return
+/// the current event sequence. Registration is permanent and may happen once.
+pub fn ctrl_c_register_handler() -> Result<u64> {
+    let function: extern "C" fn(*mut u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .ctrl_c_register_handler
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+    let mut sequence = 0;
+    into_result(function(&mut sequence))?;
+    Ok(sequence)
+}
+
+/// Wait until the registered handler's event sequence exceeds `last`.
+pub fn ctrl_c_wait(last: u64) -> Result<u64> {
+    let function: extern "C" fn(u64, *mut u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().ctrl_c_wait.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+    let mut sequence = 0;
+    into_result(function(last, &mut sequence))?;
+    Ok(sequence)
+}
+
 pub fn exit(code: i32) -> ! {
     let vdso_exit: extern "C" fn(i32) -> ! = unsafe {
         core::mem::transmute(

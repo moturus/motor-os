@@ -36,14 +36,14 @@ impl StdioKind {
     }
 }
 
+fn live_terminal_pipe(fd: RtFd, expected: StdioKind) -> Option<Arc<StdioPipe>> {
+    let file = posix::get_file(fd)?;
+    let stdio = (file.as_ref() as &dyn Any).downcast_ref::<SelfStdio>()?;
+    (stdio.kind == expected && stdio.terminal).then(|| stdio.pipe.clone())
+}
+
 fn live_terminal_source(fd: RtFd, expected: StdioKind) -> bool {
-    let Some(file) = posix::get_file(fd) else {
-        return false;
-    };
-    let Some(stdio) = (file.as_ref() as &dyn Any).downcast_ref::<SelfStdio>() else {
-        return false;
-    };
-    stdio.kind == expected && stdio.terminal
+    live_terminal_pipe(fd, expected).is_some()
 }
 
 fn terminal_relay_source(
@@ -75,6 +75,40 @@ fn terminal_relay_source(
 // The process's own stdin/out/err/terminal, set in init(). Also in the FD
 // table; this direct reference is for the relay tasks.
 static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 4]> = SpinLock::new([None, None, None, None]);
+static CTRL_C_HANDLER_PIPE: SpinLock<Option<Arc<StdioPipe>>> = SpinLock::new(None);
+
+pub fn ctrl_c_register_handler() -> Result<u64, ErrorCode> {
+    let mut registered = CTRL_C_HANDLER_PIPE.lock();
+    if registered.is_some() {
+        return Err(moto_rt::E_ALREADY_IN_USE);
+    }
+    let pipe = live_terminal_pipe(moto_rt::FD_STDIN, StdioKind::Stdin)
+        .or_else(|| live_terminal_pipe(moto_rt::FD_TERMINAL, StdioKind::Terminal))
+        .ok_or(moto_rt::E_NOT_FOUND)?;
+    let baseline = pipe.ctrl_c_register_handler()?;
+    *registered = Some(pipe);
+    Ok(baseline)
+}
+
+pub fn ctrl_c_wait(last: u64) -> Result<u64, ErrorCode> {
+    let pipe = CTRL_C_HANDLER_PIPE
+        .lock()
+        .clone()
+        .ok_or(moto_rt::E_NOT_FOUND)?;
+    let wait_handle = moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::dup(pipe.handle())?);
+    loop {
+        let sequence = pipe.ctrl_c_handler_sequence()?;
+        if sequence > last {
+            return Ok(sequence);
+        }
+        moto_sys::SysCpu::wait(
+            &mut [wait_handle.syshandle()],
+            moto_sys::SysHandle::NONE,
+            moto_sys::SysHandle::NONE,
+            None,
+        )?;
+    }
+}
 struct StdioImpl {
     kind: StdioKind,
     pipe: Arc<StdioPipe>,

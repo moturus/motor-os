@@ -368,7 +368,7 @@ impl CtrlCHeader {
                 }
                 let sequence = self
                     .handler_raised()
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                         value.checked_add(1)
                     })
                     .expect("Ctrl+C handler sequence exhausted")
