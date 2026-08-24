@@ -36,8 +36,9 @@ fn main() {
         "size" => report_size(),
         "screen" => screen(),
         "panic" => screen_then_panic(),
+        "ctrl-c" => ctrl_c(),
         other => {
-            eprintln!("usage: crossterm-smoke keys|size|screen|panic (got {other:?})");
+            eprintln!("usage: crossterm-smoke keys|size|screen|panic|ctrl-c (got {other:?})");
             std::process::exit(2);
         }
     };
@@ -46,6 +47,18 @@ fn main() {
         eprintln!("crossterm-smoke {command}: {error}");
         std::process::exit(1);
     }
+}
+
+/// Confirms that the explicit adapter claims the process handler exactly once.
+fn ctrl_c() -> io::Result<()> {
+    event::enable_ctrl_c_events()?;
+    println!("ctrl-c=enabled");
+
+    if event::enable_ctrl_c_events().is_ok() {
+        return Err(io::Error::other("a second Ctrl+C handler was accepted"));
+    }
+    println!("ctrl-c=already-enabled");
+    Ok(())
 }
 
 /// Decodes whatever the driver types and prints one line per event.

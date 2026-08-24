@@ -719,6 +719,15 @@ esac
 [ "$(crossterm_readings "$out")" = "key=Char('q')
 end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
 
+# Ctrl+C remains fatal unless a TUI explicitly installs crossterm's adapter.
+# The adapter owns the process handler for life, so a second call must fail.
+out="$(printf '' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke ctrl-c" 2>/dev/null)"
+case "$out" in
+  *"ctrl-c=enabled"*"ctrl-c=already-enabled"*) ;;
+  *) fail "crossterm did not register exactly one Ctrl+C handler: '$out'" ;;
+esac
+
 # The whole chain, end to end, driven the way a user drives it: a terminal on
 # this side, a resize of it, a `window-change` on the wire, and the report
 # russhd writes into the stdin of the child that subscribed. `script` is what
