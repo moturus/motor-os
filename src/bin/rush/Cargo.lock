@@ -85,7 +85,7 @@ checksum = "65d1f9ed092cdfd22e755893d422fec8b90998d726adafc5b09bd43d21f607c1"
 
 [[package]]
 name = "moto-rt"
-version = "0.17.4"
+version = "0.17.5"
 
 [[package]]
 name = "moto-rush"
@@ -93,7 +93,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
- "moto-rt 0.17.4",
+ "moto-rt 0.17.5",
  "moto-sys",
 ]
 
@@ -101,7 +101,7 @@ dependencies = [
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.17.4",
+ "moto-rt 0.17.5",
 ]
 
 [[package]]
