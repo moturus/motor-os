@@ -4,6 +4,9 @@ const INHERITED_RELAY_MIDDLE: &str = "stdio-inherited-relay-middle";
 const INHERITED_RELAY_WRITER: &str = "stdio-inherited-relay-writer";
 const INHERITED_RELAY_BYTES: usize = 64 * 1024 + 13;
 const AFTER_INHERITED_RELAY: &[u8] = b"after-inherited-relay\n";
+const INPUT_RECLAIM_PARENT: &str = "stdio-input-reclaim-parent";
+const INPUT_RECLAIM_IDLE: &str = "stdio-input-reclaim-idle";
+const INPUT_RECLAIM_BYTES: usize = 8 * 1024 + 37;
 
 pub fn is_inherited_relay_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
@@ -253,6 +256,8 @@ pub fn is_stdio_child(args: &[String]) -> bool {
                 | "file-relay-stdio-parent"
                 | "file-stdio-marker-writer"
                 | "self-stdio-close-child"
+                | INPUT_RECLAIM_PARENT
+                | INPUT_RECLAIM_IDLE
         )
     })
 }
@@ -268,12 +273,67 @@ pub fn run_stdio_child(args: &[String]) -> ! {
         "file-relay-stdio-parent" => run_file_relay_stdio_parent(),
         "file-stdio-marker-writer" => run_file_stdio_marker_writer(args),
         "self-stdio-close-child" => run_self_stdio_close_child(),
+        INPUT_RECLAIM_PARENT => run_input_reclaim_parent(),
+        INPUT_RECLAIM_IDLE => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::process::exit(0)
+        }
         "file-relay-input-idle" => {
             std::thread::sleep(std::time::Duration::from_millis(50));
             std::process::exit(0)
         }
         _ => unreachable!(),
     }
+}
+
+fn run_input_reclaim_parent() -> ! {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    for _ in 0..2 {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg(INPUT_RECLAIM_IDLE)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    let mut returned = vec![0; INPUT_RECLAIM_BYTES];
+    std::io::stdin().read_exact(&mut returned).unwrap();
+    std::io::stdout().write_all(&returned).unwrap();
+    std::process::exit(0)
+}
+
+fn test_inherited_input_reclaim_order() {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let expected: Vec<u8> = (0..INPUT_RECLAIM_BYTES)
+        .map(|idx| (idx % 251) as u8)
+        .collect();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_RECLAIM_PARENT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let writer_bytes = expected.clone();
+    let writer = std::thread::spawn(move || stdin.write_all(&writer_bytes).unwrap());
+    let mut returned = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut returned)
+        .unwrap();
+    writer.join().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(returned, expected);
+    println!("test_inherited_input_reclaim_order PASS");
 }
 
 /// Vectored I/O on a descriptor kind with no native vectored path. Only
@@ -1348,5 +1408,6 @@ pub fn run_all_tests() {
     test_stdio_reader_wake_on_writer_drop();
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();
+    test_inherited_input_reclaim_order();
     test_wait_drains_inherited_output();
 }

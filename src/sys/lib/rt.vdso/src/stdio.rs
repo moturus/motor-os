@@ -378,12 +378,17 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
         }
     };
 
+    enum RelayEnd {
+        SourceDone,
+        DestinationGone(Vec<u8>),
+    }
+
     let mut buf = [0_u8; 80];
-    'relay: loop {
+    let end = 'relay: loop {
         match owned.read(&mut buf, true) {
             Ok(0) => {
                 let _ = dest.close_writer();
-                break 'relay;
+                break 'relay RelayEnd::SourceDone;
             }
             Ok(sz) => {
                 let mut chunk = &buf[..sz];
@@ -395,13 +400,11 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
                         }
                         Err(moto_rt::E_NOT_READY) => {
                             if dest.handle().as_future().await.is_err() {
-                                owned.overflow.extend_from_slice(chunk);
-                                break 'relay;
+                                break 'relay RelayEnd::DestinationGone(chunk.to_vec());
                             }
                         }
                         Err(_) => {
-                            owned.overflow.extend_from_slice(chunk);
-                            break 'relay;
+                            break 'relay RelayEnd::DestinationGone(chunk.to_vec());
                         }
                     }
                 }
@@ -414,18 +417,31 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
                 match futures::future::select(stdin_ready, dest_alive).await {
                     Either::Left((result, _)) => {
                         if result.is_err() {
-                            break 'relay;
+                            break 'relay RelayEnd::SourceDone;
                         }
                     }
                     Either::Right((result, _)) => {
                         if result.is_err() {
-                            break 'relay;
+                            break 'relay RelayEnd::DestinationGone(Vec::new());
                         }
                     }
                 }
             }
-            Err(_) => break 'relay,
+            Err(_) => break 'relay RelayEnd::SourceDone,
         }
+    };
+
+    if let RelayEnd::DestinationGone(mut unwritten) = end {
+        let mut reclaimed = match dest.take_unread() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                log::warn!("cannot reclaim child stdin ring: {err}");
+                Vec::new()
+            }
+        };
+        reclaimed.append(&mut unwritten);
+        reclaimed.append(&mut owned.overflow);
+        owned.overflow = reclaimed;
     }
 
     // Return the reader (and any stash) to the parent. A stash arrives with
