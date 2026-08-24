@@ -1029,6 +1029,36 @@ fn test_stdio_pipe_flush() {
     println!("test_stdio_pipe_flush PASS");
 }
 
+fn test_stdio_pipe_take_unread() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use moto_sys::SysHandle;
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+    assert_eq!(writer.write(b"abcdef").unwrap(), 6);
+    let mut prefix = [0; 2];
+    assert_eq!(reader.read(&mut prefix).unwrap(), 2);
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(writer.take_unread().unwrap(), b"cdef");
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let writer_addr = d2.buf_addr;
+    let ring_len = d2.buf_size >> 1;
+    let _reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+    let counter = |offset| unsafe { &*((writer_addr + offset) as *const AtomicUsize) };
+
+    counter(0).store(2, Ordering::SeqCst);
+    counter(64).store(1, Ordering::SeqCst);
+    assert_eq!(writer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
+    counter(0).store(0, Ordering::SeqCst);
+    counter(64).store(ring_len + 1, Ordering::SeqCst);
+    assert_eq!(writer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
+
+    println!("test_stdio_pipe_take_unread PASS");
+}
+
 fn test_stdio_reader_wake_on_writer_drop() {
     use moto_sys::SysHandle;
 
@@ -1313,6 +1343,7 @@ pub fn run_all_tests() {
     poll_stress("read_stress", 4000);
     child_poll_stress(4000);
     test_stdio_pipe_flush();
+    test_stdio_pipe_take_unread();
     crate::stdio_terminal::run_all_tests();
     test_stdio_reader_wake_on_writer_drop();
     test_stdio_reader_drains_after_writer_drop();

@@ -6,6 +6,7 @@
 //!
 //! DO NOT USE outside of rt.vdso.
 
+use alloc::{vec, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use moto_rt::spinlock::SpinLock;
@@ -212,6 +213,25 @@ impl PipeBuffer {
             .store(reader_counter, Ordering::SeqCst);
 
         writer_counter - reader_counter
+    }
+
+    // Assuming the reader is gone, recover and retract its unread bytes.
+    fn take_unread(&mut self) -> Result<Vec<u8>, ErrorCode> {
+        let writer_counter = self.writer_counter().load(Ordering::SeqCst);
+        let reader_counter = self.reader_counter().load(Ordering::SeqCst);
+        let unread = writer_counter
+            .checked_sub(reader_counter)
+            .filter(|unread| *unread <= self.work_buf_len)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+
+        let mut result = vec![0; unread];
+        let reader_offset = reader_counter & (self.work_buf_len - 1);
+        let first = unread.min(self.work_buf_len - reader_offset);
+        result[..first].copy_from_slice(&self.work_buf[reader_offset..reader_offset + first]);
+        result[first..].copy_from_slice(&self.work_buf[..unread - first]);
+        self.writer_counter()
+            .store(reader_counter, Ordering::SeqCst);
+        Ok(result)
     }
 }
 
@@ -541,6 +561,17 @@ impl StdioPipe {
             .ok_or(moto_rt::E_INVALID_ARGUMENT)
     }
 
+    /// Recover bytes that a departed reader left in this writer's ring.
+    pub fn take_unread(&self) -> Result<Vec<u8>, ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Ok(Vec::new());
+        };
+        buffer.lock().take_unread()
+    }
+
     /// Stop the peer adding bytes, without giving up the ones already in the
     /// ring. A reader draining before it disappears -- a file relay flushing at
     /// process exit -- calls this first, so the drain that follows is bounded
@@ -710,6 +741,59 @@ impl StdioPipe {
                 return Ok(written);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use alloc::boxed::Box;
+    use core::mem::ManuallyDrop;
+
+    #[repr(C, align(64))]
+    struct TestMapping([u8; 4096]);
+
+    fn test_buffer() -> (Box<TestMapping>, ManuallyDrop<PipeBuffer>) {
+        let mapping = Box::new(TestMapping([0; 4096]));
+        let buffer = unsafe {
+            PipeBuffer::new(
+                mapping.0.as_ptr() as usize,
+                mapping.0.len(),
+                SysHandle::NONE,
+            )
+        };
+        (mapping, ManuallyDrop::new(buffer))
+    }
+
+    #[test]
+    fn take_unread_returns_only_the_unread_tail() {
+        let (_mapping, mut buffer) = test_buffer();
+        assert_eq!(buffer.write(b"abcdef"), 6);
+        let mut prefix = [0; 2];
+        assert_eq!(buffer.read(&mut prefix), 2);
+        assert_eq!(&prefix, b"ab");
+
+        assert_eq!(buffer.take_unread().unwrap(), b"cdef");
+        assert_eq!(
+            buffer.reader_counter().load(Ordering::SeqCst),
+            buffer.writer_counter().load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn take_unread_rejects_corrupt_counters() {
+        let (_mapping, mut buffer) = test_buffer();
+        buffer.reader_counter().store(2, Ordering::SeqCst);
+        buffer.writer_counter().store(1, Ordering::SeqCst);
+        assert_eq!(buffer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
+
+        buffer.reader_counter().store(0, Ordering::SeqCst);
+        buffer
+            .writer_counter()
+            .store(buffer.work_buf_len + 1, Ordering::SeqCst);
+        assert_eq!(buffer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
     }
 }
 

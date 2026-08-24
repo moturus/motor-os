@@ -380,7 +380,7 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
 
     let mut buf = [0_u8; 80];
     'relay: loop {
-        match owned.pipe.nonblocking_read(&mut buf) {
+        match owned.read(&mut buf, true) {
             Ok(0) => {
                 let _ = dest.close_writer();
                 break 'relay;
