@@ -1,0 +1,27 @@
+input_files:
+  - "/system/services/russhd"
+  - "/system/services/strobe"
+  - "/system/services/sys-init"
+  - "/system/services/sys-tty"
+  - "/system/bin/rush"
+  - "/system/bin/sysbox"
+  - "/user/bin/red"
+  - "/user/bin/rmux"
+directories:
+  - "/system"
+  - "/system/bin"
+  - "/system/cfg"
+  - "/system/logs"
+  - "/system/services"
+  - "/system/tmp"
+  - "/user"
+  - "/user/bin"
+  - "/user/cfg"
+  - "/user/tmp"
+static_dirs:
+  - "img_files/motor-os-base"
+  - "img_files/test-system-tty"
+filesystem: "motor-fs"
+img_name: "motor-os-system-tty.img"
+image_format: "raw"
+data_partition_size_mb: 64
