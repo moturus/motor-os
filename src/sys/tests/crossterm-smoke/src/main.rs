@@ -67,6 +67,7 @@ fn ctrl_c() -> io::Result<()> {
 /// must still be one key, and an escape sequence sent a byte at a time, which
 /// must still be one key rather than `Esc` and its letters.
 fn keys() -> io::Result<()> {
+    event::enable_ctrl_c_events()?;
     // A real application enables raw mode; on Motor OS that changes nothing
     // about the console, but it does change how a bare `\n` is decoded, which is
     // the whole point of the CR LF check below.

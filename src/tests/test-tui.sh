@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Acceptance validation for the per-descriptor is_terminal redesign
-# (docs/tui.md).
+# Acceptance validation for terminal descriptors and Ctrl+C routing
+# (docs/tui.md and docs/plans/less-paging.md).
 #
 # This script boots its own VM: the sys-tty console check needs the serial
 # console's stdin, which full-test.sh never connects. It covers the
@@ -55,9 +55,9 @@ export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = "release" ]; then
-    make -C "$ROOT_DIR" "$IMG_TARGET" systest BUILD=release -j"$(nproc)"
+    make -C "$ROOT_DIR" "$IMG_TARGET" systest crossterm-smoke BUILD=release -j"$(nproc)"
   else
-    make -C "$ROOT_DIR" "$IMG_TARGET" systest -j"$(nproc)"
+    make -C "$ROOT_DIR" "$IMG_TARGET" systest crossterm-smoke -j"$(nproc)"
   fi
 fi
 
@@ -90,6 +90,10 @@ CONSOLE_LOG=/tmp/test-tui.log
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
 TEST_DEVTOOLS_CREATED=0
+PTY_PID=""
+PTY_OUT_FD=""
+PTY_IN_FD=""
+PTY_OUTPUT=""
 
 remove_test_devtools() {
   if [ "$TEST_DEVTOOLS_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
@@ -102,6 +106,16 @@ remove_test_devtools() {
 
 cleanup() {
   set +e
+  if [ -n "$PTY_IN_FD" ]; then
+    exec {PTY_IN_FD}>&-
+  fi
+  if [ -n "$PTY_OUT_FD" ]; then
+    exec {PTY_OUT_FD}<&-
+  fi
+  if [ -n "$PTY_PID" ]; then
+    kill "$PTY_PID" 2>/dev/null
+    wait "$PTY_PID" 2>/dev/null
+  fi
   remove_test_devtools
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -139,7 +153,8 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     'mkdir /devtools' \
     'mkdir /devtools/tests' \
     'mkdir /devtools/tmp' \
-    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" |
+    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
+    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke /devtools/tests/crossterm-smoke" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2
@@ -209,6 +224,64 @@ wait_console() {
     sleep 0.5
   done
   fail "console did not print '$pattern' (log: $CONSOLE_LOG)"
+}
+
+# Run one command behind a forced SSH terminal and interact only after markers
+# from the process under test. Duplicating coproc's descriptors keeps them
+# valid after Bash notices that ssh has exited.
+start_pty() {
+  local command="$1"
+
+  PTY_OUTPUT=""
+  coproc CTRL_C_PTY {
+    ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$command" 2>&1
+  }
+  PTY_PID="$!"
+  exec {PTY_OUT_FD}<&"${CTRL_C_PTY[0]}"
+  exec {PTY_IN_FD}>&"${CTRL_C_PTY[1]}"
+}
+
+wait_pty_output() {
+  local pattern="$1"
+  local label="$2"
+  local byte
+  local deadline=$((SECONDS + 20))
+  local remaining
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if ! IFS= read -r -t "$remaining" -n 1 byte <&"$PTY_OUT_FD"; then
+      break
+    fi
+    PTY_OUTPUT+="$byte"
+    if [[ "$PTY_OUTPUT" == *"$pattern"* ]]; then
+      return
+    fi
+  done
+  fail "$label did not print '$pattern': '$(printf '%s' "$PTY_OUTPUT" | tail -c 800)'"
+}
+
+finish_pty() {
+  local expected="$1"
+  local label="$2"
+  local remainder
+  local read_status
+  local status
+
+  exec {PTY_IN_FD}>&-
+  set +e
+  remainder="$(cat <&"$PTY_OUT_FD")"
+  read_status="$?"
+  wait "$PTY_PID"
+  status="$?"
+  set -e
+  PTY_OUTPUT+="$remainder"
+  exec {PTY_OUT_FD}<&-
+  PTY_PID=""
+
+  [ "$read_status" -eq 0 ] || fail "$label output ended with status $read_status"
+  [ "$status" -eq "$expected" ] ||
+    fail "$label exited with status $status, want $expected: '$(printf '%s' "$PTY_OUTPUT" | tail -c 800)'"
 }
 
 # The console shell is a child of sys-tty, the serial-console terminal
@@ -284,6 +357,62 @@ printf '%s\n' "$out"
   fail "systest stdio-terminal-tests exited with status $status"
 [ "${out##*$'\n'}" = "PASS" ] ||
   fail "systest stdio-terminal-tests did not finish with PASS"
+
+echo "-- Ctrl+C Default and handler leaves --"
+start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child"
+wait_pty_output "CTRL_C_DEFAULT_READY" "terminal-stdin Default leaf"
+printf '\003' >&"$PTY_IN_FD"
+finish_pty 130 "terminal-stdin Default leaf"
+
+# stdin is a pipe, so Ctrl+C reaches the leaf through its reserved terminal fd
+# and a terminal-backed non-interactive rush remains Default between routes.
+start_pty "/system/bin/rush -c 'echo | TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child'"
+wait_pty_output "CTRL_C_DEFAULT_READY" "terminal-fd3 Default leaf"
+printf '\003' >&"$PTY_IN_FD"
+finish_pty 130 "terminal-fd3 Default leaf"
+
+start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-handler-child"
+wait_pty_output "CTRL_C_HANDLER_READY" "handler leaf"
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_HANDLER_CALLED" "handler leaf"
+finish_pty 0 "handler leaf"
+
+echo "-- Ctrl+C forwarding and route teardown --"
+start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-route-parent"
+wait_pty_output "CTRL_C_NORMAL_CHILD_READY" "route normal child"
+printf 'n' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_NORMAL_RESTORED" "route after normal child"
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_PARENT_AFTER_NORMAL" "route parent after normal child"
+wait_pty_output "CTRL_C_SPIN_CHILD_READY" "route spinning child"
+printf '\003x' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_SPIN_STATUS_130" "route interrupted child"
+wait_pty_output "CTRL_C_TYPEAHEAD_X" "route type-ahead"
+wait_pty_output "CTRL_C_KILL_RESTORED" "route after interrupted child"
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_PARENT_AFTER_KILL" "route parent after interrupted child"
+finish_pty 0 "route parent"
+
+echo "-- crossterm Ctrl+C adapter --"
+start_pty "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys"
+wait_pty_output "ready" "crossterm handler"
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "key=Char('c')+KeyModifiers(CONTROL)" "crossterm handler"
+printf 'q' >&"$PTY_IN_FD"
+wait_pty_output "end=quit" "crossterm handler"
+finish_pty 0 "crossterm handler"
+
+echo "-- nested rmux, rush, and Default leaf --"
+start_pty "TMPDIR=$RMUX_TMPDIR /user/bin/rmux new -s test-tui-ctrl-c"
+wait_pty_output "motor-os" "nested rmux shell"
+printf 'TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child\n' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_DEFAULT_READY" "nested Default leaf"
+# The command is type-ahead for rush while Ctrl+C is routed through rmux and
+# rush to the leaf. It must survive teardown and observe the leaf's status.
+printf '\003echo CTRL_C_NESTED_STATUS=$?\n' >&"$PTY_IN_FD"
+wait_pty_output "CTRL_C_NESTED_STATUS=130" "nested rush"
+printf 'exit\n' >&"$PTY_IN_FD"
+finish_pty 0 "nested rmux"
 
 remove_test_devtools
 stop_vm "$VMM_PID"

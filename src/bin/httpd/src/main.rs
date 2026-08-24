@@ -23,26 +23,6 @@ struct Args {
     ssl_key: Option<String>,
 }
 
-// Intercept Ctrl+C ourselves if the OS does not do it for us.
-fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("\ncaught ^C: exiting.");
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
 static ROOT_DIR: Mutex<String> = Mutex::new(String::new());
 static TXT_FILE_CACHE: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
 static IMG_FILE_CACHE: Mutex<Option<HashMap<PathBuf, Vec<u8>>>> = Mutex::new(None);
@@ -522,8 +502,6 @@ impl Drop for ClientConnection {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::thread::spawn(input_listener);
-
     let args = Args::parse();
 
     match std::fs::read_dir(Path::new(&args.dir)) {

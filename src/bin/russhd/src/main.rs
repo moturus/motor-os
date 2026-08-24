@@ -24,35 +24,10 @@ fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
 #[cfg(target_os = "motor")]
 getrandom::register_custom_getrandom!(motor_getrandom);
 
-// Intercept Ctrl+C ourselves if the OS does not do it for us.
-#[cfg(target_os = "motor")]
-fn input_listener() {
-    use std::io::Read;
-
-    if !std::io::stdin().is_terminal() {
-        return;
-    }
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            break;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                log::info!("Got ^C. Bye!");
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     #[cfg(target_os = "motor")]
     if std::io::stdin().is_terminal() {
-        std::thread::spawn(input_listener);
-
         env_logger::builder()
             .filter_level(log::LevelFilter::Info)
             // .filter_level(log::LevelFilter::Debug)

@@ -934,23 +934,6 @@ fn test_liveness() {
     );
 }
 
-fn input_listener() {
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("Caught ^C: exiting.");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
 /// Set by `--under-load`: the harness is running us in a deliberately degraded
 /// environment (vCPUs oversubscribed onto fewer host cores), where wall-clock
 /// SLOs that depend on host scheduling cannot hold. Correctness checks are
@@ -1135,8 +1118,6 @@ fn main() {
         }
         subcommand::run_child(args)
     }
-
-    std::thread::spawn(input_listener);
 
     println!("Systest starting...");
 

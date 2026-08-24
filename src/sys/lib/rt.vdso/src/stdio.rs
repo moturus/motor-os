@@ -1430,7 +1430,7 @@ fn create_stdio_pipes(
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
                 let pipe_fd =
-                    posix::push_file(ChildStdio::from_inner(pipe, remote_process, false)?);
+                    posix::push_file(ChildStdio::from_inner(pipe, remote_process, terminal_hint)?);
                 Ok((
                     pipe_fd,
                     StdioData::pipe(

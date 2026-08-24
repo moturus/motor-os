@@ -7,26 +7,6 @@ pub mod support {
     pub mod mpsc_stream;
 }
 
-// Intercept Ctrl+C ourselves if the OS does not do it for us.
-fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("\ncaught ^C: exiting.");
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
 // Diagnostic mode (tokio wedge round 2): repeatedly create, use, and drop a
 // multi_thread runtime -- test_sleep_from_blocking's cycle with nothing else
 // in the process. Records: docs/plans/networking-step-by-step.md (git
@@ -54,8 +34,6 @@ fn rt_churn(iters: u64) -> ! {
 }
 
 fn main() {
-    std::thread::spawn(input_listener);
-
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some("rt-churn") {
         let iters = args.next().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);

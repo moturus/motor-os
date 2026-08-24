@@ -31,31 +31,6 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     std::process::exit(exit_code);
 }
 
-#[allow(unused)]
-fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("Caught ^C: exiting.");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
-#[allow(unused)]
-fn spawn_generic_input_listener() {
-    std::thread::spawn(input_listener);
-}
-
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1 << 10;
     const MIB: u64 = 1 << 20;

@@ -268,7 +268,8 @@ test_udp_fragmentation
 
 echo "-- bounded TX queue liveness --"
 coproc RNETBENCH_SERVER {
-  "${SSH[@]}" "TMPDIR=/devtools/tmp /devtools/tests/rnetbench --server" 2>&1
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "TMPDIR=/devtools/tmp /devtools/tests/rnetbench --server" 2>&1
 }
 RNETBENCH_SSH_PID="$!"
 RNETBENCH_OUT_FD="${RNETBENCH_SERVER[0]}"
@@ -285,7 +286,7 @@ rnetbench_server_output="$(cat <&"$RNETBENCH_OUT_FD")"
 rnetbench_server_status=0
 wait "$RNETBENCH_SSH_PID" || rnetbench_server_status="$?"
 RNETBENCH_SSH_PID=""
-[ "$rnetbench_server_status" -eq 0 ] ||
+[ "$rnetbench_server_status" -eq 130 ] ||
   fail "rnetbench server exited with status $rnetbench_server_status"
 printf '%s\n' "$rnetbench_banner" "$rnetbench_server_output"
 

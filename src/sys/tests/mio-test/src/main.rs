@@ -14,31 +14,7 @@ mod waker;
 #[macro_use]
 mod util;
 
-fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("Caught ^C: exiting.");
-                std::process::exit(1);
-            }
-        }
-    }
-}
-
 fn main() {
-    std::thread::Builder::new()
-        .name("input_listener".to_string())
-        .spawn(input_listener)
-        .unwrap();
-
     env_logger::init();
 
     simple::test();

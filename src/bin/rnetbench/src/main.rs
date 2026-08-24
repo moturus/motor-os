@@ -111,29 +111,7 @@ fn binary_name() -> String {
         .to_owned()
 }
 
-// Intercept Ctrl+C ourselves if the OS does not do it for us.
-#[cfg(target_os = "motor")]
-fn input_listener(prog: String) {
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
-        }
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("\n{prog}: caught ^C: exiting.");
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
 fn main() {
-    #[cfg(target_os = "motor")]
-    std::thread::spawn(move || input_listener(binary_name()));
-
     let args = Args::parse();
 
     if args.buf_size < MIN_BUF_SIZE || args.buf_size > MAX_BUF_SIZE {
