@@ -7,7 +7,7 @@
 //! DO NOT USE outside of rt.vdso.
 
 use alloc::{vec, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use moto_rt::spinlock::SpinLock;
 use moto_sys::*;
@@ -37,6 +37,8 @@ impl PipeBuffer {
     const VERSION_OFFSET: usize = Self::READER_COUNTER_OFFSET + 16;
     const WRITER_CLOSED_OFFSET: usize = Self::VERSION_OFFSET + 8;
     const READER_CLOSING_OFFSET: usize = Self::WRITER_CLOSED_OFFSET + 8;
+    const CTRL_C_STATE_OFFSET: usize = Self::READER_CLOSING_OFFSET + 8;
+    const CTRL_C_HANDLER_RAISED_OFFSET: usize = Self::CTRL_C_STATE_OFFSET + 8;
 
     unsafe fn new(buf_addr: usize, buf_size: usize, ipc_handle: SysHandle) -> Self {
         assert!(buf_addr & (Self::CACHELINE_SIZE - 1) == 0); // Require cacheline alignment.
@@ -93,6 +95,20 @@ impl PipeBuffer {
         unsafe {
             let addr = buf_addr + Self::READER_CLOSING_OFFSET;
             (addr as *const AtomicUsize).as_ref().unwrap_unchecked()
+        }
+    }
+
+    fn ctrl_c_state_at(buf_addr: usize) -> &'static AtomicU64 {
+        unsafe {
+            let addr = buf_addr + Self::CTRL_C_STATE_OFFSET;
+            (addr as *const AtomicU64).as_ref().unwrap_unchecked()
+        }
+    }
+
+    fn ctrl_c_handler_raised_at(buf_addr: usize) -> &'static AtomicU64 {
+        unsafe {
+            let addr = buf_addr + Self::CTRL_C_HANDLER_RAISED_OFFSET;
+            (addr as *const AtomicU64).as_ref().unwrap_unchecked()
         }
     }
 
@@ -232,6 +248,168 @@ impl PipeBuffer {
         self.writer_counter()
             .store(reader_counter, Ordering::SeqCst);
         Ok(result)
+    }
+}
+
+const CTRL_C_HANDLER: u64 = 1;
+const CTRL_C_FORWARD: u64 = 2;
+const CTRL_C_FIELD_BITS: u32 = 31;
+const CTRL_C_FIELD_MASK: u64 = (1 << CTRL_C_FIELD_BITS) - 1;
+const CTRL_C_GENERATION_SHIFT: u32 = 2;
+const CTRL_C_COUNT_SHIFT: u32 = CTRL_C_GENERATION_SHIFT + CTRL_C_FIELD_BITS;
+const CTRL_C_GENERATION_MASK: u64 = CTRL_C_FIELD_MASK << CTRL_C_GENERATION_SHIFT;
+const CTRL_C_COUNT_MASK: u64 = CTRL_C_FIELD_MASK << CTRL_C_COUNT_SHIFT;
+
+const _: () = assert!(PipeBuffer::CTRL_C_STATE_OFFSET == 40);
+const _: () = assert!(PipeBuffer::CTRL_C_HANDLER_RAISED_OFFSET == 48);
+const _: () = assert!(PipeBuffer::CTRL_C_HANDLER_RAISED_OFFSET + 8 <= PipeBuffer::DATA_OFFSET);
+const _: () = assert!(CTRL_C_HANDLER | CTRL_C_FORWARD == 3);
+const _: () = assert!(CTRL_C_GENERATION_MASK & CTRL_C_COUNT_MASK == 0);
+const _: () = assert!(
+    CTRL_C_HANDLER | CTRL_C_FORWARD | CTRL_C_GENERATION_MASK | CTRL_C_COUNT_MASK == u64::MAX
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CtrlCForwardRoute {
+    generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CtrlCAction {
+    Default,
+    Handler(u64),
+    Forward(CtrlCForwardRoute, u32),
+    Dropped,
+}
+
+#[derive(Clone, Copy)]
+struct CtrlCHeader {
+    buf_addr: usize,
+}
+
+impl CtrlCHeader {
+    fn state(&self) -> &AtomicU64 {
+        PipeBuffer::ctrl_c_state_at(self.buf_addr)
+    }
+
+    fn handler_raised(&self) -> &AtomicU64 {
+        PipeBuffer::ctrl_c_handler_raised_at(self.buf_addr)
+    }
+
+    fn register_handler(&self) -> Result<u64, ErrorCode> {
+        let baseline = self.handler_raised().load(Ordering::SeqCst);
+        let mut state = self.state().load(Ordering::SeqCst);
+        loop {
+            if state & CTRL_C_HANDLER != 0 {
+                return Err(moto_rt::E_ALREADY_IN_USE);
+            }
+            match self.state().compare_exchange(
+                state,
+                state | CTRL_C_HANDLER,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(baseline),
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    fn install_forward(&self) -> CtrlCForwardRoute {
+        let mut state = self.state().load(Ordering::SeqCst);
+        loop {
+            assert_eq!(state & CTRL_C_FORWARD, 0, "Ctrl+C route already installed");
+            let generation = ((state & CTRL_C_GENERATION_MASK) >> CTRL_C_GENERATION_SHIFT)
+                .checked_add(1)
+                .filter(|value| *value <= CTRL_C_FIELD_MASK)
+                .expect("Ctrl+C route generation exhausted");
+            let new_state =
+                (state & CTRL_C_HANDLER) | CTRL_C_FORWARD | (generation << CTRL_C_GENERATION_SHIFT);
+            match self.state().compare_exchange(
+                state,
+                new_state,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return CtrlCForwardRoute {
+                        generation: generation as u32,
+                    };
+                }
+                Err(current) => state = current,
+            }
+        }
+    }
+
+    fn clear_forward(&self, route: CtrlCForwardRoute) -> bool {
+        let state = self.state().load(Ordering::SeqCst);
+        if state & CTRL_C_FORWARD == 0 || self.generation(state) != route.generation {
+            return false;
+        }
+        self.state()
+            .compare_exchange(
+                state,
+                state & !CTRL_C_FORWARD,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    fn raise(&self) -> CtrlCAction {
+        self.raise_from(self.state().load(Ordering::SeqCst))
+    }
+
+    fn raise_from(&self, mut state: u64) -> CtrlCAction {
+        loop {
+            if state & CTRL_C_FORWARD == 0 {
+                if state & CTRL_C_HANDLER == 0 {
+                    return CtrlCAction::Default;
+                }
+                let sequence = self
+                    .handler_raised()
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                        value.checked_add(1)
+                    })
+                    .expect("Ctrl+C handler sequence exhausted")
+                    + 1;
+                return CtrlCAction::Handler(sequence);
+            }
+
+            let generation = self.generation(state);
+            let count = (state & CTRL_C_COUNT_MASK) >> CTRL_C_COUNT_SHIFT;
+            let next = count
+                .checked_add(1)
+                .filter(|value| *value <= CTRL_C_FIELD_MASK)
+                .expect("Ctrl+C forward-event count exhausted");
+            let new_state = (state & !CTRL_C_COUNT_MASK) | (next << CTRL_C_COUNT_SHIFT);
+            match self.state().compare_exchange(
+                state,
+                new_state,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return CtrlCAction::Forward(CtrlCForwardRoute { generation }, next as u32);
+                }
+                Err(current)
+                    if current & CTRL_C_FORWARD != 0 && self.generation(current) == generation =>
+                {
+                    state = current;
+                }
+                Err(_) => return CtrlCAction::Dropped,
+            }
+        }
+    }
+
+    fn generation(&self, state: u64) -> u32 {
+        ((state & CTRL_C_GENERATION_MASK) >> CTRL_C_GENERATION_SHIFT) as u32
+    }
+
+    fn forward_count(&self, route: CtrlCForwardRoute) -> Option<u32> {
+        let state = self.state().load(Ordering::SeqCst);
+        (state & CTRL_C_FORWARD != 0 && self.generation(state) == route.generation)
+            .then_some(((state & CTRL_C_COUNT_MASK) >> CTRL_C_COUNT_SHIFT) as u32)
     }
 }
 
@@ -528,6 +706,41 @@ impl StdioPipe {
         self.handle
     }
 
+    fn ctrl_c_header(&self) -> Result<CtrlCHeader, ErrorCode> {
+        self.counters
+            .map(|counters| CtrlCHeader {
+                buf_addr: counters.buf_addr,
+            })
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)
+    }
+
+    pub fn ctrl_c_register_handler(&self) -> Result<u64, ErrorCode> {
+        self.ctrl_c_header()?.register_handler()
+    }
+
+    pub fn ctrl_c_handler_sequence(&self) -> Result<u64, ErrorCode> {
+        Ok(self
+            .ctrl_c_header()?
+            .handler_raised()
+            .load(Ordering::SeqCst))
+    }
+
+    pub fn ctrl_c_install_forward(&self) -> Result<CtrlCForwardRoute, ErrorCode> {
+        Ok(self.ctrl_c_header()?.install_forward())
+    }
+
+    pub fn ctrl_c_clear_forward(&self, route: CtrlCForwardRoute) -> Result<bool, ErrorCode> {
+        Ok(self.ctrl_c_header()?.clear_forward(route))
+    }
+
+    pub fn ctrl_c_raise(&self) -> Result<CtrlCAction, ErrorCode> {
+        Ok(self.ctrl_c_header()?.raise())
+    }
+
+    pub fn ctrl_c_forward_count(&self, route: CtrlCForwardRoute) -> Result<Option<u32>, ErrorCode> {
+        Ok(self.ctrl_c_header()?.forward_count(route))
+    }
+
     pub fn total_read(&self) -> usize {
         if !self.is_reader {
             return 0;
@@ -765,6 +978,92 @@ mod tests {
             )
         };
         (mapping, ManuallyDrop::new(buffer))
+    }
+
+    fn ctrl_c_header(mapping: &TestMapping) -> CtrlCHeader {
+        CtrlCHeader {
+            buf_addr: mapping.0.as_ptr() as usize,
+        }
+    }
+
+    #[test]
+    fn ctrl_c_default_and_handler_classification() {
+        let (mapping, _buffer) = test_buffer();
+        let header = ctrl_c_header(&mapping);
+        assert_eq!(header.raise(), CtrlCAction::Default);
+
+        assert_eq!(header.register_handler(), Ok(0));
+        assert_eq!(header.register_handler(), Err(moto_rt::E_ALREADY_IN_USE));
+        assert_eq!(header.raise(), CtrlCAction::Handler(1));
+        assert_eq!(header.raise(), CtrlCAction::Handler(2));
+        assert_eq!(header.handler_raised().load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ctrl_c_handler_publication_does_not_lose_a_post_registration_event() {
+        use std::sync::{Arc, Barrier};
+
+        let (mapping, _buffer) = test_buffer();
+        let header = ctrl_c_header(&mapping);
+        let barrier = Arc::new(Barrier::new(2));
+        let (baseline, action) = std::thread::scope(|scope| {
+            let register_barrier = barrier.clone();
+            let register = scope.spawn(move || {
+                register_barrier.wait();
+                header.register_handler().unwrap()
+            });
+            let raise_barrier = barrier.clone();
+            let raise = scope.spawn(move || {
+                raise_barrier.wait();
+                header.raise()
+            });
+            (register.join().unwrap(), raise.join().unwrap())
+        });
+
+        assert_eq!(baseline, 0);
+        assert!(matches!(
+            action,
+            CtrlCAction::Default | CtrlCAction::Handler(1)
+        ));
+        if action == CtrlCAction::Handler(1) {
+            assert!(header.handler_raised().load(Ordering::SeqCst) > baseline);
+        }
+    }
+
+    #[test]
+    fn ctrl_c_forward_counts_are_generation_scoped() {
+        let (mapping, _buffer) = test_buffer();
+        let header = ctrl_c_header(&mapping);
+        let first = header.install_forward();
+        assert_eq!(header.raise(), CtrlCAction::Forward(first, 1));
+        assert_eq!(header.raise(), CtrlCAction::Forward(first, 2));
+        assert_eq!(header.forward_count(first), Some(2));
+
+        assert_eq!(header.register_handler(), Ok(0));
+        assert_eq!(header.raise(), CtrlCAction::Forward(first, 3));
+        assert_eq!(header.handler_raised().load(Ordering::SeqCst), 0);
+        assert!(header.clear_forward(first));
+        assert_eq!(header.raise(), CtrlCAction::Handler(1));
+    }
+
+    #[test]
+    fn ctrl_c_route_boundary_drops_only_stale_writer_snapshots() {
+        let (mapping, _buffer) = test_buffer();
+        let header = ctrl_c_header(&mapping);
+
+        let first = header.install_forward();
+        let before_teardown = header.state().load(Ordering::SeqCst);
+        assert_eq!(
+            header.raise_from(before_teardown),
+            CtrlCAction::Forward(first, 1)
+        );
+        assert!(header.clear_forward(first));
+        assert_eq!(header.raise_from(before_teardown), CtrlCAction::Dropped);
+
+        let second = header.install_forward();
+        assert_ne!(first, second);
+        assert_eq!(header.raise_from(before_teardown), CtrlCAction::Dropped);
+        assert_eq!(header.forward_count(second), Some(0));
     }
 
     #[test]
