@@ -5,17 +5,22 @@ const FD0_CHILD: &str = "ctrl-c-register-fd0-child";
 const FD3_PARENT: &str = "ctrl-c-register-fd3-parent";
 const FD3_CHILD: &str = "ctrl-c-register-fd3-child";
 const NO_TERMINAL_CHILD: &str = "ctrl-c-register-no-terminal-child";
+const EXIT_130_CHILD: &str = "ctrl-c-exit-130";
 
 pub fn is_helper(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
         matches!(
             arg.as_str(),
-            FD0_CHILD | FD3_PARENT | FD3_CHILD | NO_TERMINAL_CHILD
+            FD0_CHILD | FD3_PARENT | FD3_CHILD | NO_TERMINAL_CHILD | EXIT_130_CHILD
         )
     })
 }
 
 pub fn run_helper(args: &[String]) -> ! {
+    if args[1] == EXIT_130_CHILD {
+        std::process::exit(moto_sys::SysCpu::CTRL_C_EXIT_STATUS as i32)
+    }
+
     if args[1] == NO_TERMINAL_CHILD {
         assert_eq!(
             moto_rt::process::ctrl_c_register_handler(),

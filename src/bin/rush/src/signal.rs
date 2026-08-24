@@ -180,8 +180,10 @@ pub fn run_pending_traps(shell: &mut Shell) -> Option<i32> {
             continue; // `trap '' SIG`: ignored.
         }
         let saved = shell.status();
+        let saved_flow = shell.flow();
         exec::run_source(&action, shell);
         shell.set_status(saved);
+        shell.set_flow(saved_flow);
         fired = Some(signo);
     }
     fired

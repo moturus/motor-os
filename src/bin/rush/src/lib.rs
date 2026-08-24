@@ -234,6 +234,16 @@ pub fn execute(inv: Invocation) {
         sh.opts.get(Opt::Interactive) || (inv.mode == Mode::Stdin && (inv.piped || stdin_is_tty));
     sh.set_interactive(interactive);
 
+    #[cfg(target_os = "motor")]
+    if interactive
+        && (moto_rt::fs::is_terminal(moto_rt::FD_STDIN)
+            || moto_rt::fs::is_terminal(moto_rt::FD_TERMINAL))
+        && let Err(error) = crossterm::event::enable_ctrl_c_events()
+    {
+        eprintln!("rush: cannot enable Ctrl+C input: {error}");
+        exit(1);
+    }
+
     if interactive {
         source_startup_files(&mut sh);
     }

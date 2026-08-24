@@ -170,6 +170,10 @@ fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
             Separator::Async => exec_background(&item.and_or, shell, io),
         };
         shell.set_status(status);
+        if shell.flow() == Flow::Interrupt {
+            signal::run_pending_traps(shell);
+            break;
+        }
         // A pending `break`/`continue`/`return` stops the rest of the list.
         if shell.flow() != Flow::Normal {
             break;
@@ -322,6 +326,9 @@ fn exec_operand(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv, is_last: boo
         return status;
     }
     let status = exec_pipeline(pipeline, shell, io);
+    if shell.flow() == Flow::Interrupt {
+        return status;
+    }
     check_errexit(status, shell);
     status
 }
@@ -350,7 +357,7 @@ fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
         cmds => run_pipeline(cmds, shell, io),
     };
     // `! pipeline` inverts the final exit status (0 ⇄ 1).
-    if pipeline.bang {
+    if pipeline.bang && shell.flow() != Flow::Interrupt {
         i32::from(status == 0)
     } else {
         status
@@ -922,6 +929,7 @@ fn exec_function_call(
         // An `exit` is not the function's to catch — it ends the shell, or the
         // emulated subshell standing in for one — so it passes straight through.
         Flow::Exit(n) => n,
+        Flow::Interrupt => status,
         Flow::Normal => status,
     };
 
@@ -1106,7 +1114,7 @@ fn run_shell_script(
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
-    parent: &Shell,
+    parent: &mut Shell,
 ) -> Option<i32> {
     if parent.inproc_script_depth() >= MAX_INPROC_SCRIPT_DEPTH {
         return None;
@@ -1134,9 +1142,13 @@ fn run_shell_script(
     if let Flow::Exit(code) = child.flow() {
         status = code;
     }
+    let interrupted = child.flow() == Flow::Interrupt;
     child.set_status(status);
     fire_subshell_exit_trap(&mut child, &io);
     signal::restore_dispositions(parent, child.changed_traps());
+    if interrupted {
+        parent.set_flow(Flow::Interrupt);
+    }
     Some(status)
 }
 
@@ -1180,6 +1192,10 @@ fn spawn_external(
         }
     };
     child.finish();
+    if status == 128 + signal::SIGINT {
+        crate::sys::note_signal(signal::SIGINT);
+        shell.set_flow(Flow::Interrupt);
+    }
     status
 }
 
@@ -1425,6 +1441,10 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
             }),
         };
 
+        if shell.flow() == Flow::Interrupt {
+            return status;
+        }
+
         prev = next;
         if status != 0 {
             pipefail_status = status;
@@ -1536,10 +1556,15 @@ fn run_inproc_stage(
     let saved_flow = shell.flow();
     shell.enter_subshell();
     let status = body(shell, &sio);
+    let interrupted = shell.flow() == Flow::Interrupt;
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the pipeline-stage subshell
     shell.restore(snapshot);
-    shell.set_flow(saved_flow);
+    shell.set_flow(if interrupted {
+        Flow::Interrupt
+    } else {
+        saved_flow
+    });
     drop(sio); // close the temp-file handles before reading/removing them
 
     if let Some(p) = in_path {
@@ -1616,6 +1641,7 @@ fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let snapshot = shell.snapshot();
     shell.enter_subshell();
     let mut status = exec_list(list, shell, io);
+    let interrupted = shell.flow() == Flow::Interrupt;
     if let Flow::Exit(code) = shell.flow() {
         status = code;
     }
@@ -1623,7 +1649,11 @@ fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the subshell
     shell.restore(snapshot);
-    shell.clear_flow();
+    if interrupted {
+        shell.set_flow(Flow::Interrupt);
+    } else {
+        shell.clear_flow();
+    }
     status
 }
 
@@ -1776,7 +1806,7 @@ fn loop_should_break(shell: &mut Shell) -> bool {
         }
         // Neither is the loop's to act on: leave them pending for the function
         // call / subshell boundary above, and stop iterating.
-        Flow::Return(_) | Flow::Exit(_) => true,
+        Flow::Return(_) | Flow::Exit(_) | Flow::Interrupt => true,
     }
 }
 
@@ -1790,6 +1820,7 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     let saved_flow = shell.flow();
     shell.enter_subshell();
     let output = capture(src, shell);
+    let interrupted = shell.flow() == Flow::Interrupt;
     if let Flow::Exit(code) = shell.flow() {
         // `x=$(exit 7)`: the substitution's shell exited, and its status is what
         // the substitution reports.
@@ -1800,7 +1831,11 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     shell.restore(snapshot);
     // A subshell's control flow does not escape into the parent, but its status
     // does: it becomes `$?` for a command that has no name of its own.
-    shell.set_flow(saved_flow);
+    shell.set_flow(if interrupted {
+        Flow::Interrupt
+    } else {
+        saved_flow
+    });
     shell.set_cmdsub_status(shell.status());
     let trimmed = output.trim_end_matches('\n');
     trimmed.to_string()

@@ -445,6 +445,18 @@ out="$(printf 'relay-smoke\n' | vm_ssh "/system/bin/rush -c 'read X && echo GOT=
 out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
+# A foreground status 130 is rush's v1 interrupt indication. It fires INT once
+# and abandons the rest of the pipeline, loop, and enclosing command list.
+rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
+rush_interrupt_status=0
+if out="$(vm_ssh "$rush_interrupt_cmd")"; then
+  fail "rush foreground status 130 unexpectedly succeeded: '$out'"
+else
+  rush_interrupt_status="$?"
+fi
+[ "$rush_interrupt_status" -eq 130 ] && [ "$out" = "INTERRUPTED" ] ||
+  fail "rush foreground status 130 policy: status $rush_interrupt_status, '$out'"
+
 # Pin rush's transport classifier, not only its final bytes. A fresh simple
 # redirect is a child File; descriptors shared by a group, loop, function, or
 # pipeline remain pipes, and a background job receives null stdin. The helper

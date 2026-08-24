@@ -41,6 +41,9 @@ pub enum Flow {
     Continue(u32),
     /// `return n`: leave the current function (or sourced script) with status `n`.
     Return(i32),
+    /// A foreground child exited with the Ctrl+C status. Propagates through
+    /// lists and emulated child boundaries until the top-level command ends.
+    Interrupt,
     /// `exit n` inside an emulated process: unwind to the subshell or in-process
     /// script boundary that is standing in for a real child process.
     ///

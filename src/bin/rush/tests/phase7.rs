@@ -226,6 +226,22 @@ fn trap_preserves_the_status_around_the_action() {
     );
 }
 
+#[test]
+fn foreground_status_130_aborts_pipeline_loop_and_list() {
+    // Motor cannot distinguish an interrupt exit from a voluntary 130. The v1
+    // policy deliberately treats both as Ctrl+C after a foreground wait.
+    let run = run_c(
+        "trap 'echo caught:$?' INT; \
+         for i in 1 2; do \
+           sh -c 'exit 130' | echo pipeline-tail; \
+           echo loop-tail; \
+         done; \
+         echo list-tail",
+    );
+    assert_eq!(run.stdout, "caught:130\n");
+    assert_eq!(run.code, 130);
+}
+
 // ---- the EXIT trap ----------------------------------------------------------
 
 #[test]
