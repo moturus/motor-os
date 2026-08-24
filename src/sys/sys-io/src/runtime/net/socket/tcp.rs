@@ -1525,6 +1525,9 @@ impl MotoSocket {
                 }
                 state.rx_closed = true;
                 state.tx_closed = true;
+                // A stream can be dropped before its client enables RX. Wake
+                // that pre-I/O gate so its task can observe socket teardown.
+                state.rx_ready.notify_one();
                 // Linger can expire while the TX task still owns client pages
                 // it could not hand to a full netstack send buffer. This drop
                 // is the final owner of the socket, so release those pages

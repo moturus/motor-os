@@ -105,8 +105,12 @@ pub fn run_all_tests() {
         ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
     );
 
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let root = crate::temp_path(&format!(
-        "systest-process-role-fs-{}",
+        "systest-process-role-fs-{}-{started}",
         moto_sys::ProcessStaticPage::get().pid
     ));
     std::fs::create_dir(&root).unwrap();

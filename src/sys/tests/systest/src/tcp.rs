@@ -1006,6 +1006,47 @@ fn test_disconnect_discards_queued_control() {
     println!("test_disconnect_discards_queued_control() PASS");
 }
 
+fn test_disconnect_before_rx_ready_releases_channels() {
+    use moto_sys_io::api_net;
+
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let channels_before = read_sys_io_metric("net.channels");
+    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    listener_connection
+        .send(api_net::bind_tcp_listener_request(&bind_addr, Some(1)))
+        .unwrap();
+    let bind_resp = recv_raw_net_response(&listener_connection);
+    bind_resp.status().unwrap();
+    let listener_id = bind_resp.handle;
+    let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
+
+    let client_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
+    client_connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    recv_raw_net_response(&client_connection).status().unwrap();
+
+    listener_connection
+        .send(api_net::accept_tcp_listener_request(listener_id, 0))
+        .unwrap();
+    recv_raw_net_response(&listener_connection)
+        .status()
+        .unwrap();
+
+    // Deliberately omit TcpStreamRxAck on both raw streams. Their RX tasks are
+    // now waiting at the pre-I/O gate when connection teardown drops the sockets.
+    drop(client_connection);
+    drop(listener_connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.channels", |value| value == channels_before);
+
+    println!("test_disconnect_before_rx_ready_releases_channels() PASS");
+}
+
 fn test_stale_cross_connection_accept_is_requeued() {
     use moto_sys_io::api_net;
 
@@ -1607,6 +1648,7 @@ pub fn test_native_net_cancellation() {
     test_inline_tcp_data_flood_yields_to_other_clients();
     test_resolved_listener_bind_conflicts();
     test_disconnect_discards_queued_control();
+    test_disconnect_before_rx_ready_releases_channels();
     test_stale_cross_connection_accept_is_requeued();
     test_pending_accept_queue_is_bounded_and_canceled();
     test_failed_tcp_setup_rolls_back_socket();

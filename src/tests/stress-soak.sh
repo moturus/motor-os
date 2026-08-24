@@ -596,12 +596,42 @@ w_tui_console() {
   done
 }
 
+# Start the child with stdin open, then send the key only after raw mode is on.
+# Sending it in the ssh pipeline before that point races the child's startup.
+tui_pty_once() {
+  local in_fd out_fd line out="" ready=0 ssh_pid rc
+
+  TUI_PTY_OUT=""
+  TUI_PTY_RC=1
+  coproc TUI_SSH {
+    timeout 90 ssh "${SSH_OPTS[@]}" -tt \
+      motor@"$VM_IP" "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>&1
+  }
+  # Bash owns the descriptors in the coproc array and may close them as soon as
+  # it reaps the child. Keep independent descriptors until all output is read.
+  exec {in_fd}>&"${TUI_SSH[1]}"
+  exec {out_fd}<&"${TUI_SSH[0]}"
+  ssh_pid=$TUI_SSH_PID
+
+  while IFS= read -r line <&"$out_fd"; do
+    out+="$line"$'\n'
+    if [ "$ready" = 0 ] && [[ "$line" == *ready* ]]; then
+      printf 'q' >&"$in_fd" || break
+      ready=1
+    fi
+  done
+  exec {in_fd}>&-
+  exec {out_fd}<&-
+  wait "$ssh_pid"; rc=$?
+  TUI_PTY_OUT="$out"
+  TUI_PTY_RC=$rc
+}
+
 w_tui_pty() {
   local n=0 f=0 rc out
   while :; do
     n=$((n+1))
-    out="$(printf 'q' | timeout 90 ssh "${SSH_OPTS[@]}" -tt \
-      motor@"$VM_IP" "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>&1)"; rc=$?
+    tui_pty_once; out="$TUI_PTY_OUT"; rc="$TUI_PTY_RC"
     case "$out" in
       *"key=Char('q')"*"end=quit"*) ;;
       *) [ "$rc" -ne 0 ] || rc=96 ;;
