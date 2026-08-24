@@ -165,7 +165,8 @@ the descriptor is created. `is_terminal(fd)` (implemented in the VDSO,
 `src/sys/lib/rt.vdso/src/rt_fs.rs`) looks the descriptor up in the process
 descriptor table and asks the object. Consequently:
 
-- stdin, stdout, and stderr are independent: `program > file` has a
+- stdin, stdout, stderr, and the optional terminal stream at fd 3 are
+  independent: `program > file` has a
   terminal stdin and stderr but a non-terminal stdout, exactly as on POSIX
   systems;
 - a duplicated descriptor gives the same answer as its source, because
@@ -181,18 +182,26 @@ pipe. The provider's end (the parent-side `ChildStdio` that rmux or russhd
 reads and writes) answers false; only the child-side endpoint the provider
 created as a terminal (`SelfStdio` with the terminal flag) answers true.
 
-For a command launched by an interactive shell, the resulting per-stream
-mask (stdin/stdout/stderr) is the conventional one:
+Motor reserves fd 3 as `moto_rt::FD_TERMINAL`. It is present exactly when a
+process belongs to a terminal session but its stdin is not that terminal. The
+stream is read-only in v1: keys and in-band size reports arrive on it, writes
+fail, and reads return EOF when the terminal provider goes away. When it is
+absent, fd 3 is unallocated and may be reused by the first ordinary open, so a
+program must probe it before opening or closing descriptors.
 
-| Child setup | stdin | stdout | stderr |
-| --- | :---: | :---: | :---: |
-| no redirection | terminal | terminal | terminal |
-| `program > file` | terminal | not terminal | terminal |
-| `program < file` | not terminal | terminal | terminal |
-| `program 2> file` | terminal | terminal | not terminal |
-| first pipeline stage | terminal | not terminal | terminal |
-| last pipeline stage | not terminal | terminal | terminal |
-| background command with null stdin | not terminal | terminal | terminal |
+For a command launched by an interactive shell, the resulting per-stream
+mask is conventional, with fd 3 carrying terminal input only when stdin
+cannot:
+
+| Child setup | stdin | stdout | stderr | fd 3 |
+| --- | :---: | :---: | :---: | :---: |
+| no redirection | terminal | terminal | terminal | absent |
+| `program > file` | terminal | not terminal | terminal | absent |
+| `program < file` | not terminal | terminal | terminal | terminal |
+| `program 2> file` | terminal | terminal | not terminal | absent |
+| first pipeline stage | terminal | not terminal | terminal | absent |
+| last pipeline stage | not terminal | terminal | terminal | terminal |
+| background command with null stdin | not terminal | terminal | terminal | absent |
 
 ## How the bit is set at spawn
 
@@ -218,6 +227,15 @@ trees with no cooperation from the programs involved: a shell started on
 the console passes its terminal streams to the commands it runs, and a
 pipeline stage whose stdout was captured reports exactly that stream as
 non-terminal.
+
+After preparing the three ordinary streams, the spawning VDSO synthesizes fd
+3 when the live parent still has terminal input and the child's prepared stdin
+is not that terminal. It relays from the parent's fd 3 when present, otherwise
+from terminal fd 0, so terminal-unaware intermediaries propagate the session
+without a spawn ABI change. Detached children do not receive it. A spawner can
+also suppress it with the consumed launch key
+`MOTURUS_STDIO_NO_TERMINAL`; rush does this for background jobs because Motor
+has no `SIGTTIN` to stop them from stealing input.
 
 ## The terminal-launch hint
 
@@ -290,6 +308,14 @@ one live `File`, which advances as bytes reach it.
 Descendants of a relayed child see pipes and keep the normal Motor
 inherited-stdio dependency on their parent's lifetime. The directly transferred
 process still sees a real file.
+
+Terminal-input relays eagerly claim and pump their source. If a child exits
+without reading everything already accepted into its ring, relay teardown
+returns those unread bytes to the source ahead of newer input. The same reclaim
+applies to ordinary inherited stdin, so type-ahead intended for the next
+foreground program is not silently lost. A parent reader waiting behind the
+claim sleeps on a generation futex and wakes when the relay returns it; it does
+not spin for the child's lifetime.
 
 ### Which transport a shell picks
 

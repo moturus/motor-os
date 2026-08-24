@@ -188,12 +188,11 @@ pub fn run_report_child() -> ! {
     moto_rt::fs::close(first_open).unwrap();
 
     // Duplicates share the descriptor's object, so they share its answer,
-    // and descriptors above 2 are not special. The duplicate is deliberately
-    // left open until exit: closing a SelfStdio descriptor is an
-    // unimplemented VDSO path (`SelfStdio::close` is `todo!()`).
+    // and descriptors above 2 are not special.
     let dup = moto_rt::fs::duplicate(moto_rt::FD_STDOUT).unwrap();
     let duporig = moto_rt::fs::is_terminal(moto_rt::FD_STDOUT) as u32;
     let dupnew = moto_rt::fs::is_terminal(dup) as u32;
+    moto_rt::fs::close(dup).unwrap();
 
     println!(
         "self={mask:03b} set={mask_set:03b} unset={mask_unset:03b} \
