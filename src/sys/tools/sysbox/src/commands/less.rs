@@ -5,11 +5,10 @@
 //! that changes shape says so in band, among the keys (docs/tui.md). What is
 //! left here is what a pager does with them.
 //!
-//! Paging needs two terminals: one to paint on, and one to read keys from. The
-//! second is stdin itself — Motor OS has no `/dev/tty`, so a program's terminal
-//! is its own stdin — which a pipeline's last stage does not have: there the
-//! data is on stdin and the keys are nowhere. `cat file | less` therefore
-//! writes the text out as `cat` would rather than paging with no way to quit.
+//! Paging needs two terminal streams: stdout to paint on, and either terminal
+//! stdin or Motor's synthesized fd 3 to read keys from. The latter keeps the
+//! session terminal available when a pipeline or redirect supplies the data on
+//! stdin.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
@@ -47,12 +46,18 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     }
 
+    // Probe fd 3 before opening the document: when absent, an ordinary open is
+    // allowed to reuse that descriptor number.
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let page_output = std::io::stdout().is_terminal()
+        && (stdin_is_terminal || moto_rt::fs::is_terminal(moto_rt::FD_TERMINAL));
+
     let (bytes, name) = match args.first() {
         Some(fname) => (read_file(fname), fname.as_str()),
         None => {
             // A terminal's stdin is a keyboard, not a document: there is
             // nothing to read and no way for the user to end it.
-            if std::io::stdin().is_terminal() {
+            if stdin_is_terminal {
                 eprintln!("less: missing filename.");
                 print_usage_and_exit(1);
             }
@@ -66,7 +71,7 @@ pub fn do_command(args: &[String]) {
         std::process::exit(1);
     };
 
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if page_output {
         page(text, name);
     } else {
         dump(text);
