@@ -36,6 +36,42 @@ impl StdioKind {
     }
 }
 
+fn live_terminal_source(fd: RtFd, expected: StdioKind) -> bool {
+    let Some(file) = posix::get_file(fd) else {
+        return false;
+    };
+    let Some(stdio) = (file.as_ref() as &dyn Any).downcast_ref::<SelfStdio>() else {
+        return false;
+    };
+    stdio.kind == expected && stdio.terminal
+}
+
+fn terminal_relay_source(
+    stdio: &PreparedChildStdio,
+    terminal_hint: bool,
+    detached: bool,
+    no_terminal: bool,
+) -> Option<RtFd> {
+    if detached || no_terminal {
+        return None;
+    }
+    let parent_terminal = if live_terminal_source(moto_rt::FD_TERMINAL, StdioKind::Terminal) {
+        moto_rt::FD_TERMINAL
+    } else if live_terminal_source(moto_rt::FD_STDIN, StdioKind::Stdin) {
+        moto_rt::FD_STDIN
+    } else {
+        return None;
+    };
+    let child_stdin_is_terminal = match &stdio.stdin {
+        PreparedStdio::Inherit(source) => {
+            posix::get_file(*source).is_some_and(|file| file.is_terminal())
+        }
+        PreparedStdio::MakePipe => terminal_hint,
+        PreparedStdio::Null | PreparedStdio::File(_) | PreparedStdio::Relay(_) => false,
+    };
+    (!child_stdin_is_terminal).then_some(parent_terminal)
+}
+
 // The process's own stdin/out/err/terminal, set in init(). Also in the FD
 // table; this direct reference is for the relay tasks.
 static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 4]> = SpinLock::new([None, None, None, None]);
@@ -1082,6 +1118,8 @@ pub fn create_child_stdio(
     remote_process_data: *mut ProcessData,
     stdio: &mut PreparedChildStdio,
     terminal_hint: bool,
+    detached: bool,
+    no_terminal: bool,
 ) -> Result<(RtFd, RtFd, RtFd), ErrorCode> {
     let relay_claims = stdio.file_relays.claims.clone();
     let mut file_tasks = Vec::new();
@@ -1096,6 +1134,9 @@ pub fn create_child_stdio(
     let terminal_hint = terminal_hint
         && !(matches!(stdio.stdin, PreparedStdio::Inherit(_))
             && matches!(stdio.stdout, PreparedStdio::Inherit(_)));
+    // Kept dormant until the terminal-relay activation patch; computing it
+    // here also snapshots the live fd table before child pipes allocate fds.
+    let _terminal_source = terminal_relay_source(stdio, terminal_hint, detached, no_terminal);
 
     // If command has stdin/out/err, take those, otherwise use default.
     let (stdin, stdin_theirs) = create_stdio_pipes(

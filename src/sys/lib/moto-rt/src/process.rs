@@ -42,6 +42,10 @@ pub const STDIO_PARENT_STDERR: RtFd = -((ErrorCode::MAX as RtFd) + 6);
 /// (docs/tui.md).
 pub const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
+/// A launch-only instruction that prevents a child from receiving the
+/// session terminal stream. The VDSO consumes it regardless of value.
+pub const STDIO_NO_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_NO_TERMINAL";
+
 /// Get all commandline args for the current process.
 pub fn args() -> alloc::vec::Vec<String> {
     let vdso_args: extern "C" fn() -> u64 = unsafe {

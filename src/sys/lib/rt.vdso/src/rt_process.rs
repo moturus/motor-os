@@ -653,7 +653,9 @@ fn run_elf(
     // created stdio pipes as terminals. Consumed regardless of value so it
     // cannot become inherited live state (docs/tui.md).
     let mut terminal_hint = false;
-    // Find the MOTOR_OS_CAPS, MOTOR_OS_DETACHED and stdio-terminal env vars.
+    // Whether this spawn explicitly declines the session terminal stream.
+    let mut no_terminal = false;
+    // Find the capability, detached, and stdio launch-only env vars.
     for (k, v) in &mut env {
         if *k == moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY.as_bytes() {
             *k = "".as_bytes(); // Clear the key: see env::create_remote_env().
@@ -671,6 +673,11 @@ fn run_elf(
             *k = "".as_bytes(); // Clear the key so the child never sees it.
             if let Ok(s) = core::str::from_utf8(v) {
                 terminal_hint = s == "true" || s == "TRUE";
+            }
+        } else if *k == moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY.as_bytes() {
+            *k = "".as_bytes(); // Clear the key so the child never sees it.
+            if let Ok(s) = core::str::from_utf8(v) {
+                no_terminal = s == "true" || s == "TRUE";
             }
         }
     }
@@ -709,6 +716,8 @@ fn run_elf(
         remote_process_data,
         stdio,
         terminal_hint,
+        detached,
+        no_terminal,
     )?;
 
     let main_thread = moto_sys::SysObj::get(process.syshandle(), 0, "main_thread").unwrap();

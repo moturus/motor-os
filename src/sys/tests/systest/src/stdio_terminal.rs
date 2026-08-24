@@ -118,6 +118,8 @@ pub fn run_report_child() -> ! {
     // The launch hint is consumed by the spawn path; it must never appear as
     // live environment, whichever way this child was spawned.
     let key_present = std::env::var(key).is_ok() as u32;
+    let no_terminal_key_present =
+        std::env::var(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY).is_ok() as u32;
 
     let mask = self_mask();
     // An existing descriptor's answer must not follow the mutable
@@ -145,7 +147,8 @@ pub fn run_report_child() -> ! {
 
     println!(
         "self={mask:03b} set={mask_set:03b} unset={mask_unset:03b} \
-         key={key_present} terminal={terminal} firstfd={first_open} \
+         key={key_present} nokey={no_terminal_key_present} \
+         terminal={terminal} firstfd={first_open} \
          dupfd={dup} duporig={duporig} dupnew={dupnew}"
     );
     std::io::stdout().flush().unwrap();
@@ -181,7 +184,8 @@ fn spawn_report_child(terminal: bool) -> ReportChild {
     cmd.arg(REPORT_CHILD)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "false");
     if terminal {
         // This test is the child's terminal provider; it does not need to
         // be on a terminal itself to be one.
@@ -258,6 +262,7 @@ fn check_report_child(terminal: bool) {
     assert_eq!(field(&report, "set"), own, "in {report:?}");
     assert_eq!(field(&report, "unset"), own, "in {report:?}");
     assert_eq!(field(&report, "key"), "0", "in {report:?}");
+    assert_eq!(field(&report, "nokey"), "0", "in {report:?}");
     assert_eq!(field(&report, "terminal"), "0", "in {report:?}");
     assert_eq!(
         field(&report, "firstfd").parse::<i32>().unwrap(),
