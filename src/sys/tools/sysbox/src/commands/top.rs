@@ -1,3 +1,4 @@
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use moto_rt::time::Instant;
 use moto_sys::stats::{CpuStatsV1, ProcessInfoV1};
 use std::{
@@ -160,33 +161,34 @@ fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
 }
 
 fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        if sz == 0 {
-            // EOF: stdin is gone; no ^C can ever arrive.
-            return;
+    while let Ok(event) = event::read() {
+        let Event::Key(key) = event else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
         }
-        for b in &input[0..sz] {
-            match *b {
-                3 /* ^C */ | 27 /* esc */ | b'q' | b'Q' =>
-                    { SLEEP.store(2, Ordering::Release);
-                        moto_rt::futex::futex_wake(&SLEEP);
-                    }
-                b' ' => {
-                    match MODE.load(Ordering::Acquire) {
-                        1 => MODE.store(2, Ordering::Release),
-                        2 => MODE.store(3, Ordering::Release),
-                        3 => MODE.store(1, Ordering::Release),
-                        _ => unreachable!()
-                    }
-                    SLEEP.store(1, Ordering::Release);
-                        moto_rt::futex::futex_wake(&SLEEP);
-                }
-                _ => {}
+        let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                SLEEP.store(2, Ordering::Release);
+                moto_rt::futex::futex_wake(&SLEEP);
             }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') if plain => {
+                SLEEP.store(2, Ordering::Release);
+                moto_rt::futex::futex_wake(&SLEEP);
+            }
+            KeyCode::Char(' ') if plain => {
+                match MODE.load(Ordering::Acquire) {
+                    1 => MODE.store(2, Ordering::Release),
+                    2 => MODE.store(3, Ordering::Release),
+                    3 => MODE.store(1, Ordering::Release),
+                    _ => unreachable!(),
+                }
+                SLEEP.store(1, Ordering::Release);
+                moto_rt::futex::futex_wake(&SLEEP);
+            }
+            _ => {}
         }
     }
 }
@@ -411,6 +413,10 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     }
 
+    if let Err(err) = event::enable_ctrl_c_events() {
+        eprintln!("top: cannot enable Ctrl+C input: {err:?}.");
+        std::process::exit(1);
+    }
     std::thread::spawn(input_listener);
     let cmd_cache: HashMap<u64, String> = HashMap::new();
 
