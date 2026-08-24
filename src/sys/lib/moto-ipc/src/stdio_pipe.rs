@@ -288,6 +288,14 @@ struct CtrlCHeader {
 }
 
 impl CtrlCHeader {
+    fn scan(self, buf: &[u8], mut raised: impl FnMut(CtrlCAction)) -> Option<usize> {
+        let last = buf.iter().rposition(|byte| *byte == 0x03)?;
+        for _ in buf[..=last].iter().filter(|byte| **byte == 0x03) {
+            raised(self.raise());
+        }
+        Some(last + 1)
+    }
+
     fn state(&self) -> &AtomicU64 {
         PipeBuffer::ctrl_c_state_at(self.buf_addr)
     }
@@ -743,6 +751,22 @@ impl StdioPipe {
         Ok(self.ctrl_c_header()?.raise())
     }
 
+    /// Classify every Ctrl+C through the last one in `buf`.
+    ///
+    /// Returns the prefix consumed by the control events, or `None` when the
+    /// batch is ordinary data. The caller owns delivery of each action and the
+    /// ordinary write of the unconsumed tail.
+    pub fn ctrl_c_scan(
+        &self,
+        buf: &[u8],
+        raised: impl FnMut(CtrlCAction),
+    ) -> Result<Option<usize>, ErrorCode> {
+        if !buf.contains(&0x03) {
+            return Ok(None);
+        }
+        Ok(self.ctrl_c_header()?.scan(buf, raised))
+    }
+
     pub fn ctrl_c_forward_count(&self, route: CtrlCForwardRoute) -> Result<Option<u32>, ErrorCode> {
         Ok(self.ctrl_c_header()?.forward_count(route))
     }
@@ -1082,6 +1106,44 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(header.raise_from(before_teardown), CtrlCAction::Dropped);
         assert_eq!(header.forward_count(second), Some(0));
+    }
+
+    #[test]
+    fn ctrl_c_scan_discards_through_the_last_event() {
+        let (mapping, _buffer) = test_buffer();
+        let header = ctrl_c_header(&mapping);
+        let batch = b"old\x03middle\x03tail";
+        let mut actions = Vec::new();
+
+        let consumed = header.scan(batch, |action| actions.push(action)).unwrap();
+
+        assert_eq!(actions, [CtrlCAction::Default, CtrlCAction::Default]);
+        assert_eq!(&batch[consumed..], b"tail");
+    }
+
+    #[test]
+    fn ctrl_c_scan_does_not_need_ring_space() {
+        let (mapping, mut buffer) = test_buffer();
+        let full = vec![0; buffer.work_buf_len];
+        assert_eq!(buffer.write(&full), full.len());
+        assert!(!buffer.can_write());
+
+        let mut action = None;
+        assert_eq!(
+            ctrl_c_header(&mapping).scan(b"\x03", |raised| action = Some(raised)),
+            Some(1)
+        );
+        assert_eq!(action, Some(CtrlCAction::Default));
+        assert!(!buffer.can_write());
+    }
+
+    #[test]
+    fn an_unscanned_pipe_keeps_ctrl_c_as_data() {
+        let (_mapping, mut buffer) = test_buffer();
+        assert_eq!(buffer.write(b"a\x03b"), 3);
+        let mut read = [0; 3];
+        assert_eq!(buffer.read(&mut read), 3);
+        assert_eq!(&read, b"a\x03b");
     }
 
     #[test]

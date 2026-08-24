@@ -480,12 +480,20 @@ impl Drop for CtrlCRelay {
 }
 
 fn raise_child_ctrl_c(child_input: &StdioPipe, child_process: SysHandle) {
+    let action = child_input
+        .ctrl_c_raise()
+        .expect("child input pipe has no Ctrl+C header");
+    apply_child_ctrl_c(child_input, child_process, action);
+}
+
+fn apply_child_ctrl_c(
+    child_input: &StdioPipe,
+    child_process: SysHandle,
+    action: moto_ipc::stdio_pipe::CtrlCAction,
+) {
     use moto_ipc::stdio_pipe::CtrlCAction;
 
-    match child_input
-        .ctrl_c_raise()
-        .expect("child input pipe has no Ctrl+C header")
-    {
+    match action {
         CtrlCAction::Default => {
             let _ = moto_sys::SysCpu::interrupt(child_process);
         }
@@ -1421,7 +1429,8 @@ fn create_stdio_pipes(
             // either way: it is the provider's end of the connection.
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
-                let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
+                let pipe_fd =
+                    posix::push_file(ChildStdio::from_inner(pipe, remote_process, false)?);
                 Ok((
                     pipe_fd,
                     StdioData::pipe(
@@ -1433,7 +1442,8 @@ fn create_stdio_pipes(
                 ))
             } else {
                 let pipe = unsafe { StdioPipe::new_reader(local_data) };
-                let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
+                let pipe_fd =
+                    posix::push_file(ChildStdio::from_inner(pipe, remote_process, false)?);
                 Ok((
                     pipe_fd,
                     StdioData::pipe(
@@ -1450,27 +1460,51 @@ fn create_stdio_pipes(
 
 struct ChildStdio {
     inner: StdioPipe,
+    scan_ctrl_c: bool,
+    child_process: moto_sys::syscalls::RaiiHandle,
     nonblocking: AtomicBool,
     event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl ChildStdio {
-    fn from_inner(inner: StdioPipe) -> Arc<Self> {
+    fn from_inner(
+        inner: StdioPipe,
+        remote_process: SysHandle,
+        scan_ctrl_c: bool,
+    ) -> Result<Arc<Self>, ErrorCode> {
         let wait_handle = inner.handle();
+        let child_process = moto_sys::syscalls::RaiiHandle::from(if scan_ctrl_c {
+            moto_sys::SysObj::dup(remote_process)?
+        } else {
+            SysHandle::NONE
+        });
         // Tokio uses both readable and writable by default.
         // We can probably hack it so that it sends only relevant
         // interests, but why complicate things?
         let supported_interests = moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE;
 
-        Arc::new_cyclic(|me| Self {
+        Ok(Arc::new_cyclic(|me| Self {
             inner,
+            scan_ctrl_c,
+            child_process,
             nonblocking: AtomicBool::new(false),
             event_source: super::runtime::EventSourceUnmanaged::new(
                 wait_handle,
                 me.clone() as _,
                 supported_interests,
             ),
-        })
+        }))
+    }
+
+    fn write_data(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        if self.nonblocking.load(Ordering::Acquire) {
+            self.inner.nonblocking_write(buf).inspect_err(|_| {
+                self.event_source
+                    .rearm_interest(moto_rt::poll::POLL_WRITABLE);
+            })
+        } else {
+            self.inner.write(buf)
+        }
     }
 }
 
@@ -1543,14 +1577,18 @@ impl PosixFile for ChildStdio {
             // return Ok(0);
             return Err(moto_rt::E_BAD_HANDLE);
         }
-        if self.nonblocking.load(Ordering::Acquire) {
-            self.inner.nonblocking_write(buf).inspect_err(|_| {
-                self.event_source
-                    .rearm_interest(moto_rt::poll::POLL_WRITABLE);
-            })
-        } else {
-            self.inner.write(buf)
+        if self.scan_ctrl_c
+            && let Some(consumed) = self.inner.ctrl_c_scan(buf, |action| {
+                apply_child_ctrl_c(&self.inner, self.child_process.syshandle(), action)
+            })?
+        {
+            let tail = &buf[consumed..];
+            if tail.is_empty() {
+                return Ok(consumed);
+            }
+            return Ok(consumed + self.write_data(tail).unwrap_or(0));
         }
+        self.write_data(buf)
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {

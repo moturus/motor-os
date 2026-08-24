@@ -119,6 +119,43 @@ fn test_stdio_pipe_basic() {
     println!("test_stdio_pipe_basic PASS");
 }
 
+fn test_stdio_pipe_ctrl_c_scan() {
+    use moto_ipc::stdio_pipe::CtrlCAction;
+    use moto_sys::SysHandle;
+
+    let (reader_data, writer_data) =
+        moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let ring_len = writer_data.buf_size >> 1;
+    let reader = unsafe { StdioPipe::new_reader(reader_data) };
+    let writer = unsafe { StdioPipe::new_writer(writer_data) };
+
+    let full = vec![b'x'; ring_len];
+    assert_eq!(writer.nonblocking_write(&full).unwrap(), ring_len);
+    assert!(!writer.can_write());
+
+    let batch = b"old\x03middle\x03tail";
+    let mut actions = Vec::new();
+    let consumed = writer
+        .ctrl_c_scan(batch, |action| actions.push(action))
+        .unwrap()
+        .unwrap();
+    assert_eq!(actions, [CtrlCAction::Default, CtrlCAction::Default]);
+    assert_eq!(&batch[consumed..], b"tail");
+    assert!(!writer.can_write());
+
+    let mut drained = vec![0; ring_len];
+    assert_eq!(reader.read(&mut drained).unwrap(), ring_len);
+    assert_eq!(drained, full);
+
+    let ordinary = b"a\x03b";
+    assert_eq!(writer.write(ordinary).unwrap(), ordinary.len());
+    let mut read = [0; 3];
+    assert_eq!(reader.read(&mut read).unwrap(), read.len());
+    assert_eq!(&read, ordinary);
+
+    println!("test_stdio_pipe_ctrl_c_scan PASS");
+}
+
 fn test_stdio_pipe_fd() {
     use std::io::Read;
     use std::io::Write;
@@ -1442,6 +1479,7 @@ pub fn child_poll_stress(rounds: usize) {
 
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
+    test_stdio_pipe_ctrl_c_scan();
     test_stdio_pipe_fd();
     test_child_stdout_reader_drop();
     test_pipe_stdio_vectored();
