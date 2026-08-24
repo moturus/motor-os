@@ -3376,6 +3376,168 @@ async fn permissions_authority_test() -> Result<()> {
 }
 
 #[test]
+fn exact_permissions_authority() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(exact_permissions_authority_test()).unwrap();
+}
+
+async fn exact_permissions_authority_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    const FS_TAG: &str = "motor_fs_exact_permissions_authority_test";
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+    let entry = fs
+        .create_entry(
+            Role::System,
+            crate::ROOT_DIR_ID,
+            EntryKind::File,
+            "exact",
+            RolePermissions::all(AccessPermissions::Rwx),
+        )
+        .await?;
+
+    // An Interactive caller may leave System unchanged, narrow itself, and
+    // choose any monotonic value for None in the same atomic request.
+    let interactive = RolePermissions::new(
+        AccessPermissions::Rwx,
+        AccessPermissions::Rx,
+        AccessPermissions::R,
+    );
+    fs.set_all_permissions(Role::Interactive, entry, interactive)
+        .await?;
+    assert_eq!(
+        interactive,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    // Changing a higher role is forbidden. None of the otherwise-authorized
+    // fields may be installed when the complete request is rejected.
+    let higher_role = RolePermissions::new(
+        AccessPermissions::R,
+        AccessPermissions::R,
+        AccessPermissions::None,
+    );
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_all_permissions(Role::Interactive, entry, higher_role)
+            .await
+            .unwrap_err()
+            .kind()
+    );
+    assert_eq!(
+        interactive,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    // System may narrow itself and independently set both lower roles.
+    let sealed = RolePermissions::new(
+        AccessPermissions::Rx,
+        AccessPermissions::R,
+        AccessPermissions::None,
+    );
+    fs.set_all_permissions(Role::System, entry, sealed).await?;
+    assert_eq!(
+        sealed,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    // Lower-role authority cannot bypass whole-state monotonicity, and a
+    // rejected request rolls every field back.
+    let non_monotonic = RolePermissions::new(
+        AccessPermissions::Rx,
+        AccessPermissions::Rw,
+        AccessPermissions::None,
+    );
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_all_permissions(Role::System, entry, non_monotonic)
+            .await
+            .unwrap_err()
+            .kind()
+    );
+    assert_eq!(
+        sealed,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    // Runtime System cannot widen its own byte again.
+    assert_eq!(
+        ErrorKind::PermissionDenied,
+        fs.set_all_permissions(
+            Role::System,
+            entry,
+            RolePermissions::all(AccessPermissions::Rwx),
+        )
+        .await
+        .unwrap_err()
+        .kind()
+    );
+    assert_eq!(
+        sealed,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+    Ok(())
+}
+
+#[cfg(feature = "image-admin")]
+#[test]
+fn image_admin_exact_permissions() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(image_admin_exact_permissions_test()).unwrap();
+}
+
+#[cfg(feature = "image-admin")]
+async fn image_admin_exact_permissions_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    const FS_TAG: &str = "motor_fs_image_admin_exact_permissions_test";
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+    let entry = fs
+        .create_entry(
+            Role::System,
+            crate::ROOT_DIR_ID,
+            EntryKind::File,
+            "admin",
+            RolePermissions::all(AccessPermissions::R),
+        )
+        .await?;
+    let widened = RolePermissions::all(AccessPermissions::Rwx);
+
+    assert!(
+        fs.set_all_permissions(Role::System, entry, widened)
+            .await
+            .is_err()
+    );
+    assert!(
+        fs.set_all_permissions_image_admin(Role::Interactive, entry, widened)
+            .await
+            .is_err()
+    );
+    fs.set_all_permissions_image_admin(Role::System, entry, widened)
+        .await?;
+    assert_eq!(
+        widened,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    let invalid = RolePermissions::new(
+        AccessPermissions::R,
+        AccessPermissions::Rwx,
+        AccessPermissions::R,
+    );
+    assert!(
+        fs.set_all_permissions_image_admin(Role::System, entry, invalid)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        widened,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+    Ok(())
+}
+
+#[test]
 fn permissions_enforcement() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
