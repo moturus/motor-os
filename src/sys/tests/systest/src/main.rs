@@ -1112,6 +1112,9 @@ fn main() {
     if stdio_terminal::is_mask_child(&args) {
         stdio_terminal::run_mask_child(&args);
     }
+    if sysbox_less::is_helper(&args) {
+        sysbox_less::run_helper(&args);
+    }
     if io_channel::is_spawn_read_child(&args) {
         return;
     }

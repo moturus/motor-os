@@ -6,11 +6,14 @@
 //! by `$LINES`/`$COLUMNS`, and then resized in band the way rmux and russhd
 //! resize a program that is already running (docs/tui.md).
 
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 const SYSBOX: &str = "/system/bin/sysbox";
+const RUSH: &str = "/system/bin/rush";
+const TYPEAHEAD_PARENT: &str = "sysbox-less-typeahead-parent";
+const TYPEAHEAD_CHILD: &str = "sysbox-less-typeahead-child";
 
 const TEN_LINES: &str = "line01\nline02\nline03\nline04\nline05\n\
                          line06\nline07\nline08\nline09\nline10\n";
@@ -158,10 +161,15 @@ struct Pager {
     preamble: String,
 }
 
-fn spawn_pager(cwd: &Path, file: &str, rows: usize, cols: usize) -> Pager {
-    let mut child = Command::new(SYSBOX)
-        .arg("less")
-        .arg(file)
+fn spawn_terminal_command(
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    rows: usize,
+    cols: usize,
+) -> Pager {
+    let mut child = Command::new(program)
+        .args(args)
         .current_dir(cwd)
         // This test is the pager's terminal provider; it does not need to be
         // on a terminal itself to be one.
@@ -184,6 +192,14 @@ fn spawn_pager(cwd: &Path, file: &str, rows: usize, cols: usize) -> Pager {
         cols,
         preamble: String::new(),
     }
+}
+
+fn spawn_pager(cwd: &Path, file: &str, rows: usize, cols: usize) -> Pager {
+    spawn_terminal_command(cwd, SYSBOX, &["less", file], rows, cols)
+}
+
+fn spawn_shell_pager(cwd: &Path, command: &str, rows: usize, cols: usize) -> Pager {
+    spawn_terminal_command(cwd, RUSH, &["-c", command], rows, cols)
 }
 
 impl Pager {
@@ -343,6 +359,109 @@ fn test_paging(root: &Path) {
     println!("sysbox_less::test_paging PASS");
 }
 
+/// A provider-backed shell preserves its terminal for a pager whose document
+/// arrives through either a pipeline or an input redirect. Redirecting the
+/// pager's output still selects byte-for-byte dump mode.
+fn test_redirected_input_paging(root: &Path) {
+    let page1 = ["line01", "line02", "line03", "line04", "line05"];
+    let page2 = ["line06", "line07", "line08", "line09", "line10"];
+
+    for command in ["cat ten.txt | less", "less < ten.txt"] {
+        let mut pager = spawn_shell_pager(root, command, 6, 32);
+        let frame = pager.frame();
+        pager.expect(frame, &page1, "(stdin) 5/10 lines (50%)");
+        let frame = pager.press(" ");
+        pager.expect(frame, &page2, "(stdin) (END) 10 lines");
+        pager.quit();
+    }
+
+    let output = Command::new(RUSH)
+        .args(["-c", "cat ten.txt | less > paged.out"])
+        .current_dir(root)
+        .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "redirected less failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("paged.out")).unwrap(),
+        TEN_LINES
+    );
+
+    println!("sysbox_less::test_redirected_input_paging PASS");
+}
+
+pub fn is_helper(args: &[String]) -> bool {
+    args.get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), TYPEAHEAD_PARENT | TYPEAHEAD_CHILD))
+}
+
+pub fn run_helper(args: &[String]) -> ! {
+    if args[1] == TYPEAHEAD_CHILD {
+        println!("TYPEAHEAD_READY");
+        std::io::stdout().flush().unwrap();
+        let gate = Path::new(&args[2]);
+        while !gate.exists() {
+            std::thread::yield_now();
+        }
+        std::process::exit(0)
+    }
+
+    let gate = &args[2];
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([TYPEAHEAD_CHILD, gate])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    let status = Command::new(SYSBOX)
+        .args(["less", "ten.txt"])
+        .status()
+        .unwrap();
+    std::process::exit(status.code().unwrap())
+}
+
+/// Bytes accepted by an uninterested child's synthesized terminal ring return
+/// to the session stream at relay teardown and reach the next foreground app.
+fn test_typeahead_reclaim(root: &Path) {
+    let gate = root.join("typeahead.gate");
+    let gate_arg = gate.to_str().unwrap();
+    let mut pager = spawn_terminal_command(
+        root,
+        std::env::current_exe().unwrap().to_str().unwrap(),
+        &[TYPEAHEAD_PARENT, gate_arg],
+        6,
+        32,
+    );
+
+    let mut ready = String::new();
+    pager.stdout.read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim_end(), "TYPEAHEAD_READY");
+    pager.stdin.write_all(b"q").unwrap();
+    pager.stdin.flush().unwrap();
+    std::fs::write(&gate, b"go").unwrap();
+
+    let mut output = String::new();
+    pager.stdout.read_to_string(&mut output).unwrap();
+    assert!(
+        output.contains("\x1b[?1049h"),
+        "pager did not start: {output:?}"
+    );
+    assert!(
+        output.contains("\x1b[?1049l"),
+        "pager did not quit: {output:?}"
+    );
+    assert!(pager.child.wait().unwrap().success());
+
+    println!("sysbox_less::test_typeahead_reclaim PASS");
+}
+
 /// A file that fits on one screen is still a page: the rest of the screen is
 /// blank, and the status line says so.
 fn test_short_file(root: &Path) {
@@ -463,6 +582,8 @@ pub fn run_test() {
     test_errors(&root);
     test_missing_filename();
     test_paging(&root);
+    test_redirected_input_paging(&root);
+    test_typeahead_reclaim(&root);
     test_short_file(&root);
     test_wrapping(&root);
     test_resize(&root);
