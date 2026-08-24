@@ -22,7 +22,7 @@ libc = "0.2"
 # The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
 # rest of the tree.
 [patch.crates-io]
-crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
+crossterm = { path = "../../../../crossterm" }
 
 [profile.release]
 panic = "abort"

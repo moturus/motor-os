@@ -33,7 +33,7 @@ moto-sys = { path = "../../sys/lib/moto-sys" }
 
 # The shared Motor backend used by red, rmux, and rush; not a Gears fork.
 [patch.crates-io]
-crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
+crossterm = { path = "../../../../crossterm" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]
