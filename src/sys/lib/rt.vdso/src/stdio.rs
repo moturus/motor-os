@@ -360,6 +360,7 @@ fn prepare_inherited_relay(from: moto_rt::RtFd, to: *const u8) -> InheritedRelay
         moto_rt::FD_STDIN => StdioKind::Stdin,
         moto_rt::FD_STDOUT => StdioKind::Stdout,
         moto_rt::FD_STDERR => StdioKind::Stderr,
+        moto_rt::FD_TERMINAL => StdioKind::Terminal,
         _ => panic!("bad stdio FD: {from}"),
     };
 
@@ -376,7 +377,7 @@ impl InheritedRelayTask {
             .get()
             .expect("prepared stdio relay source is absent");
         crate::stdio_relay::spawn(move || async move {
-            if self.from == StdioKind::Stdin {
+            if self.from.is_reader() {
                 relay_in(stdio, self.to).await;
             } else {
                 // Safety: the pair was made for this process; see make_pair().
@@ -1134,9 +1135,8 @@ pub fn create_child_stdio(
     let terminal_hint = terminal_hint
         && !(matches!(stdio.stdin, PreparedStdio::Inherit(_))
             && matches!(stdio.stdout, PreparedStdio::Inherit(_)));
-    // Kept dormant until the terminal-relay activation patch; computing it
-    // here also snapshots the live fd table before child pipes allocate fds.
-    let _terminal_source = terminal_relay_source(stdio, terminal_hint, detached, no_terminal);
+    // Snapshot the live fd table before child pipes allocate descriptors.
+    let terminal_source = terminal_relay_source(stdio, terminal_hint, detached, no_terminal);
 
     // If command has stdin/out/err, take those, otherwise use default.
     let (stdin, stdin_theirs) = create_stdio_pipes(
@@ -1166,13 +1166,27 @@ pub fn create_child_stdio(
         &mut file_tasks,
         &mut inherited_tasks,
     )?;
+    let terminal_theirs = if let Some(source) = terminal_source {
+        let (local_data, remote_data) =
+            moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+        let pdata = &local_data as *const _ as usize as *const u8;
+        inherited_tasks.push(prepare_inherited_relay(source, pdata));
+        StdioData::pipe(
+            remote_data.buf_addr as u64,
+            remote_data.buf_size as u64,
+            remote_data.ipc_handle,
+            true,
+        )
+    } else {
+        StdioData::null()
+    };
 
     unsafe {
         let pd = remote_process_data.as_mut().unwrap();
         pd.stdin = stdin_theirs;
         pd.stdout = stdout_theirs;
         pd.stderr = stderr_theirs;
-        pd.terminal = StdioData::null();
+        pd.terminal = terminal_theirs;
     }
 
     let pending = file_tasks.len() + inherited_tasks.len();

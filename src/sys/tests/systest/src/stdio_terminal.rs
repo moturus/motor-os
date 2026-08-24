@@ -15,6 +15,9 @@ use std::io::{BufRead, BufReader, Write};
 
 const REPORT_CHILD: &str = "stdio-terminal-report-child";
 const MASK_CHILD: &str = "stdio-terminal-mask-child";
+const FILE_RELAY_PARENT: &str = "stdio-terminal-file-relay-parent";
+const CLOSE_STDIN_PARENT: &str = "stdio-terminal-close-stdin-parent";
+const CLOSE_TERMINAL_PARENT: &str = "stdio-terminal-close-terminal-parent";
 
 /// The mask child's exit code is `MASK_EXIT_BASE` plus its 3-bit mask, so a
 /// child whose streams are all captured needs no working stdout to report
@@ -26,7 +29,11 @@ pub fn is_report_child(args: &[String]) -> bool {
 }
 
 pub fn is_mask_child(args: &[String]) -> bool {
-    args.len() == 2 && args[1] == MASK_CHILD
+    args.len() == 2
+        && matches!(
+            args[1].as_str(),
+            MASK_CHILD | FILE_RELAY_PARENT | CLOSE_STDIN_PARENT | CLOSE_TERMINAL_PARENT
+        )
 }
 
 /// stdin/stdout/stderr as bits 2/1/0, so `{:03b}` prints in the order
@@ -47,23 +54,58 @@ fn self_mask() -> u32 {
     mask
 }
 
-pub fn run_mask_child() -> ! {
-    std::process::exit(MASK_EXIT_BASE + self_mask() as i32)
+pub fn run_mask_child(args: &[String]) -> ! {
+    use std::process::{Command, Stdio};
+
+    if args[1] == MASK_CHILD {
+        let terminal = moto_rt::fs::is_terminal(moto_rt::FD_TERMINAL) as i32;
+        std::process::exit(MASK_EXIT_BASE + self_mask() as i32 + terminal * 8)
+    }
+
+    if args[1] == CLOSE_STDIN_PARENT || args[1] == CLOSE_TERMINAL_PARENT {
+        let fd = if args[1] == CLOSE_STDIN_PARENT {
+            moto_rt::FD_STDIN
+        } else {
+            moto_rt::FD_TERMINAL
+        };
+        moto_rt::fs::close(fd).unwrap();
+        let reused = moto_rt::fs::open(
+            std::env::current_exe().unwrap().to_str().unwrap(),
+            moto_rt::fs::O_READ,
+        )
+        .unwrap();
+        assert_eq!(reused, fd);
+    }
+
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.arg(MASK_CHILD)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if args[1] != FILE_RELAY_PARENT {
+        cmd.stdin(Stdio::null());
+    }
+    std::process::exit(cmd.status().unwrap().code().unwrap())
 }
 
 /// Spawns a mask child with one stream redirected, as an interactive shell
 /// would for `> file`, `< file`, `2> file`, or `... &`.
-fn spawn_mask_child(mode: &str) -> u32 {
+fn spawn_mask_child(mode: &str) -> (u32, bool) {
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.arg(MASK_CHILD)
+    let child = match mode {
+        "filerelay" => FILE_RELAY_PARENT,
+        "close0" => CLOSE_STDIN_PARENT,
+        "close3" => CLOSE_TERMINAL_PARENT,
+        _ => MASK_CHILD,
+    };
+    cmd.arg(child)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match mode {
         "inherit" => {}
-        "inpiped" => {
+        "inpiped" | "close3" | "inpiped-no-terminal" => {
             cmd.stdin(Stdio::piped());
         }
         "outpiped" => {
@@ -75,15 +117,23 @@ fn spawn_mask_child(mode: &str) -> u32 {
         "innull" => {
             cmd.stdin(Stdio::null());
         }
+        "infile" | "filerelay" => {
+            cmd.stdin(std::fs::File::open(std::env::current_exe().unwrap()).unwrap());
+        }
+        "close0" => {}
         other => panic!("unknown mask mode {other:?}"),
+    }
+    if mode == "inpiped-no-terminal" {
+        cmd.env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true");
     }
 
     let code = cmd.status().unwrap().code().unwrap();
     assert!(
-        (MASK_EXIT_BASE..MASK_EXIT_BASE + 8).contains(&code),
+        (MASK_EXIT_BASE..MASK_EXIT_BASE + 16).contains(&code),
         "mask child exited with {code}"
     );
-    (code - MASK_EXIT_BASE) as u32
+    let result = (code - MASK_EXIT_BASE) as u32;
+    (result & 0b111, result & 0b1000 != 0)
 }
 
 /// A terminal endpoint's size probe can leave its answer (e.g. `ESC[23;80R`)
@@ -162,7 +212,8 @@ pub fn run_report_child() -> ! {
         let words: Vec<&str> = line.split_ascii_whitespace().collect();
         match words.as_slice() {
             ["mask", mode] => {
-                println!("mask={:03b}", spawn_mask_child(mode));
+                let (mask, terminal) = spawn_mask_child(mode);
+                println!("mask={mask:03b} terminal={}", terminal as u32);
                 std::io::stdout().flush().unwrap();
             }
             ["exit"] => std::process::exit(0),
@@ -211,13 +262,14 @@ impl ReportChild {
         line.trim_end().to_owned()
     }
 
-    fn mask(&mut self, mode: &str) -> String {
+    fn mask(&mut self, mode: &str) -> (String, bool) {
         writeln!(self.stdin, "mask {mode}").unwrap();
         self.stdin.flush().unwrap();
         let line = self.read_line();
-        line.strip_prefix("mask=")
-            .unwrap_or_else(|| panic!("bad mask line {line:?}"))
-            .to_owned()
+        (
+            field(&line, "mask").to_owned(),
+            field(&line, "terminal") == "1",
+        )
     }
 
     fn finish(mut self) {
@@ -238,21 +290,26 @@ fn field<'a>(report: &'a str, key: &str) -> &'a str {
 /// One report child, both self-report and mixed-stdio descendants checked
 /// against the design doc's tables.
 fn check_report_child(terminal: bool) {
-    let (own, descendants): (&str, &[(&str, &str)]) = if terminal {
+    let (own, descendants): (&str, &[(&str, &str, bool)]) = if terminal {
         (
             "111",
             &[
-                ("inherit", "111"),
-                ("outpiped", "101"),
-                ("inpiped", "011"),
-                ("errpiped", "110"),
-                ("innull", "011"),
+                ("inherit", "111", false),
+                ("outpiped", "101", false),
+                ("inpiped", "011", true),
+                ("errpiped", "110", false),
+                ("innull", "011", true),
+                ("infile", "011", true),
+                ("filerelay", "000", true),
+                ("inpiped-no-terminal", "011", false),
+                ("close0", "000", false),
+                ("close3", "000", false),
             ],
         )
     } else {
         // A captured child is not a terminal, and neither is anything that
         // inherits from it.
-        ("000", &[("inherit", "000")])
+        ("000", &[("inherit", "000", false)])
     };
 
     let mut child = spawn_report_child(terminal);
@@ -277,8 +334,10 @@ fn check_report_child(terminal: bool) {
         "in {report:?}"
     );
 
-    for (mode, expected) in descendants {
-        assert_eq!(child.mask(mode), *expected, "descendant {mode}");
+    for (mode, expected_mask, expected_terminal) in descendants {
+        let (mask, terminal) = child.mask(mode);
+        assert_eq!(mask, *expected_mask, "descendant {mode}");
+        assert_eq!(terminal, *expected_terminal, "descendant {mode}");
     }
     child.finish();
 }
@@ -328,10 +387,12 @@ fn direct_spawn_mask(mark_terminal: bool) -> (u32, [bool; 3]) {
     moto_rt::alloc::release_handle(res.handle).unwrap();
 
     assert!(
-        (MASK_EXIT_BASE..MASK_EXIT_BASE + 8).contains(&code),
+        (MASK_EXIT_BASE..MASK_EXIT_BASE + 16).contains(&code),
         "mask child exited with {code}"
     );
-    ((code - MASK_EXIT_BASE) as u32, parent_terminals)
+    let result = (code - MASK_EXIT_BASE) as u32;
+    assert_eq!(result & 0b1000, 0, "direct child unexpectedly got fd 3");
+    (result & 0b111, parent_terminals)
 }
 
 fn test_direct_spawn_hint() {

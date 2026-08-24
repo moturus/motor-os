@@ -1110,7 +1110,7 @@ fn main() {
         stdio_terminal::run_report_child();
     }
     if stdio_terminal::is_mask_child(&args) {
-        stdio_terminal::run_mask_child();
+        stdio_terminal::run_mask_child(&args);
     }
     if io_channel::is_spawn_read_child(&args) {
         return;

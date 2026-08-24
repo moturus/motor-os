@@ -275,8 +275,13 @@ check_report "rmux pane child" "$out" 111 1
 # launch hint, and non-stdio descriptors -- exercising both Rust std and the
 # moto-rt C-ABI query path.
 echo "-- invariant matrix (systest stdio-terminal-tests) --"
+set +e
 out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-tests")"
+status="$?"
+set -e
 printf '%s\n' "$out"
+[ "$status" -eq 0 ] ||
+  fail "systest stdio-terminal-tests exited with status $status"
 [ "${out##*$'\n'}" = "PASS" ] ||
   fail "systest stdio-terminal-tests did not finish with PASS"
 
