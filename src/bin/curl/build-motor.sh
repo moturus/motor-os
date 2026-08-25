@@ -51,7 +51,7 @@ mkdir -p "$MOTO_BIN"
     AR_x86_64_unknown_motor="$MOTOR_ARCHIVER" \
     ARFLAGS_x86_64_unknown_motor="" \
     CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-    cargo "+$MOTOR_TOOLCHAIN" build --locked --target "$MOTOR_TARGET" "${RELEASE[@]}")
+    cargo "+$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET" "${RELEASE[@]}")
 
 strip -o "$MOTO_BIN/curl" \
     "$CARGO_TARGET_DIR/$MOTOR_TARGET/$PROFILE/curl"

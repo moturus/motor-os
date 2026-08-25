@@ -17,7 +17,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#610d8b0f6cf602695208204002dfed120fccc4df"
+source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#1bc2274f52b0ca9b4437d9aeb3dd06f3cdcebf3b"
 dependencies = [
  "bitflags",
  "mio",
@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.6"
+version = "0.17.5"
 
 [[package]]
 name = "parking_lot"

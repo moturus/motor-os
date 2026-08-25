@@ -793,9 +793,8 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 7);
+        assert_eq!(config.source_dirs.len(), 6);
         for (source, destination) in [
-            ("../crossterm", "/devtools/crossterm"),
             ("../rust-ctrlc", "/devtools/rust-ctrlc"),
             ("src/bin/red", "/devtools/src/src/bin/red"),
             ("src/bin/lorry", "/devtools/src/src/bin/lorry"),

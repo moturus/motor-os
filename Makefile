@@ -177,9 +177,9 @@ rnetbench:
 gears:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD) --locked --offline
+		$(DO_BUILD)
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD) --locked --offline --examples
+		$(DO_BUILD) --examples
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
 	strip -o "$(BIN_DIR)/gears-crossterm-frame" \
 		"$(OBJ_DIR)/gears/$(SUB_DIR)/examples/crossterm-frame"
@@ -190,7 +190,7 @@ gears-mock-provider:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/gears-mock-provider && \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/gears-mock-provider" \
-		$(DO_BUILD) --locked --offline
+		$(DO_BUILD)
 	strip -o "$(BIN_DIR)/gears-mock-provider" \
 		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
 
@@ -282,7 +282,7 @@ clippy: vdso
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/bin/gears && $(DO_CLIPPY)
-	cd src/bin/gears-mock-provider && $(DO_CLIPPY) --locked --offline
+	cd src/bin/gears-mock-provider && $(DO_CLIPPY)
 	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && cargo clippy $(CARGO_RELEASE)
 
