@@ -321,3 +321,13 @@ after they are accepted.
     returned by `std::process::Child` in `ProcessInfoV1` still verifies process
     enumeration, the parent relationship, and PID-based killing without
     depending on a diagnostic-name representation.
+12. **The rebased Gears lockfiles keep the locked offline build valid.** The
+    rebase changed Gears from a local crossterm patch to the Git crossterm fork,
+    which removed crossterm's `ctrlc` dependency, while Gears retained its own
+    direct path dependency on the `motor-os-rustc` ctrlc fork. The independent
+    Gears and Gears mock-provider lockfiles retained a stale `moto-rt` edge on
+    that ctrlc package even though the fork has no such dependency, causing
+    `make dev.img` to reject both lockfiles in turn. Removing only those stale
+    edges preserves the documented fork and the `--locked --offline` image
+    build instead of weakening reproducibility or selecting a different
+    dependency checkout.

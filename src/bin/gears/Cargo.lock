@@ -85,7 +85,6 @@ name = "ctrlc"
 version = "3.5.1"
 dependencies = [
  "dispatch2",
- "moto-rt",
  "nix",
  "windows-sys",
 ]
