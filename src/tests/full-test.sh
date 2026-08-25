@@ -353,9 +353,9 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
       -i "$WD/test.key" motor@192.168.4.2
 fi
 
-if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
+vm_ssh /system/bin/mkdir /fs-permissions-root-probe || true
+vm_ssh "[ ! -e /fs-permissions-root-probe ]" ||
   fail "Interactive session created a root-level directory"
-fi
 vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
 vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
@@ -397,12 +397,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
     fail "Interactive session could not edit $editable_script in place"
   vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
     fail "could not restore $editable_script after its write probe"
-  if vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed"; then
+  vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed" || true
+  vm_ssh "[ -e $editable_script ] && [ ! -e $editable_script.renamed ]" ||
     fail "Interactive session renamed $editable_script"
-  fi
-  if vm_ssh /system/bin/rm "$editable_script"; then
+  vm_ssh /system/bin/rm "$editable_script" || true
+  vm_ssh "[ -e $editable_script ]" ||
     fail "Interactive session deleted $editable_script"
-  fi
   vm_ssh /system/bin/rm "$saved_script"
   check_bin_permissions /devtools/bin mutable
 fi

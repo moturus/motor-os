@@ -306,3 +306,10 @@ after they are accepted.
    unnecessary authority. Testing whether the shipped scratch directory
    exists before creating it preserves the role boundary and still supports a
    caller-selected, absent `TMPDIR`.
+10. **Denial acceptance tests assert filesystem postconditions.** The current
+    sysbox `mkdir`, `mv`, and `rm` applets print a permission diagnostic but
+    may still return success. The tests therefore verify that a forbidden root
+    entry or renamed script is absent and that a forbidden deletion leaves the
+    script present. This tests the filesystem authority boundary directly
+    without making this image-policy change depend on the separate applet exit
+    status defect.
