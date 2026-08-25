@@ -26,7 +26,9 @@ use moto_rt::Result;
 use moto_sys_io::api_fs;
 
 use async_fs::BLOCK_SIZE;
-pub use async_fs::{AccessPermissions, EntryId, EntryKind, Metadata, ROOT_ID, Role};
+pub use async_fs::{
+    AccessPermissions, EntryId, EntryKind, Metadata, ROOT_ID, Role, RolePermissions,
+};
 
 pub struct FsClient {
     io_sender: moto_ipc::io_channel::Sender,
@@ -672,6 +674,19 @@ impl FsClient {
         access: AccessPermissions,
     ) -> Result<()> {
         let mut msg = api_fs::set_permissions_msg_encode(entry_id, access);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Atomically set the permissions for all three process roles.
+    pub async fn set_all_permissions(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        let mut msg = api_fs::set_all_permissions_msg_encode(entry_id, permissions);
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;

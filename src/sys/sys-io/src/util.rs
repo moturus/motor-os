@@ -109,7 +109,7 @@ pub async fn create_file(
             dir_id,
             async_fs::EntryKind::File,
             file,
-            [async_fs::AccessPermissions::Rwx; 3],
+            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
         )
         .await
 }

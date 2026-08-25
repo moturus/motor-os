@@ -1,11 +1,12 @@
 use std::process::Stdio;
 
 use moto_sys::*;
-use sys_init::process_service_line;
+use sys_init::{process_service_line, process_tty_line, TtyRole};
 
 #[derive(Debug)]
 struct Config {
     pub tty: String,
+    pub tty_role: TtyRole,
     pub strobe: Option<String>,
     pub services: Vec<(u64, String)>,
 }
@@ -32,8 +33,10 @@ fn process_config() -> Result<Config, String> {
             services.push(process_service_line(cap_cmd).map_err(|reason| {
                 format!("'/system/cfg/sys-init.cfg': bad service at line {curr_line}: {reason}")
             })?);
-        } else if let Some(file) = line.strip_prefix("tty:") {
-            tty = Some(file.to_owned());
+        } else if let Some(value) = line.strip_prefix("tty:") {
+            tty = Some(process_tty_line(value).map_err(|reason| {
+                format!("'/system/cfg/sys-init.cfg': bad tty at line {curr_line}: {reason}")
+            })?);
         } else if let Some(file) = line.strip_prefix("strobe:") {
             strobe = Some(file.to_owned());
         } else if line.as_bytes()[0] == b'#' {
@@ -47,8 +50,10 @@ fn process_config() -> Result<Config, String> {
         return Err("'/system/cfg/sys-init.cfg' must contain 'tty:<filename>' line".to_owned());
     }
 
+    let (tty_role, tty) = tty.unwrap();
     let config = Config {
-        tty: tty.unwrap(),
+        tty,
+        tty_role,
         strobe,
         services,
     };
@@ -117,11 +122,16 @@ fn main() {
         });
     }
 
+    let role_cap = match config.tty_role {
+        TtyRole::System => moto_sys::caps::CAP_SYS,
+        TtyRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
+        TtyRole::None => 0,
+    };
     let tty_caps = moto_sys::caps::CAP_IO_MANAGER
         | moto_sys::caps::CAP_SPAWN
         | moto_sys::caps::CAP_LOG
         | moto_sys::caps::CAP_SPAWN_DETACHED
-        | moto_sys::caps::CAP_INTERACTIVE;
+        | role_cap;
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(
             moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,

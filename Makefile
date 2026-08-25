@@ -34,7 +34,7 @@ user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
-.PHONY: base.img main.img dev.img
+.PHONY: base.img main.img dev.img system-tty.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -228,6 +228,16 @@ main.img: boot core sys user
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
+
+# A small test-only image whose later overlay selects a System serial console.
+system-tty.img: boot core sys-base user-base
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
+	cd src/imager && \
+		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os-system-tty.yaml
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the System-console test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
 
 # The base image alone; what src/build-base.sh produces.
 base.img: boot core sys-base user-base

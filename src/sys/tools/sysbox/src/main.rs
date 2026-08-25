@@ -5,6 +5,7 @@ mod commands;
 fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("sysbox commands:");
     println!("\tsysbox cat");
+    println!("\tsysbox chmod");
     println!("\tsysbox cp");
     println!("\tsysbox date");
     println!("\tsysbox find");
@@ -59,6 +60,7 @@ fn main() {
 
     match args[1].as_str() {
         "cat" => commands::cat::do_command(&args[1..]),
+        "chmod" => commands::chmod::do_command(&args[1..]),
         "cp" => commands::cp::do_command(&args[1..]),
         "date" => commands::date::do_command(&args[1..]),
         "find" => commands::find::do_command(&args[1..]),

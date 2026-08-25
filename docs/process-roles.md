@@ -336,7 +336,9 @@ Semantics:
 - System parent → None child by default; either Interactive or System requires
   an explicit `MOTOR_OS_CAPS` grant. This matters for sys-init services with a
   zero/omitted mask and for all-ones System processes, whose raw word contains
-  the Interactive bit even though their derived role is System.
+  the Interactive bit even though their derived role is System. A System
+  console rush is an explicit session boundary and supplies that grant for
+  ordinary external commands (§7); this does not change the global default.
 - None parent → None child. Intersecting the base default with its caps also
   avoids requesting `CAP_LOG` from a `CAP_SPAWN`-only parent.
 
@@ -425,17 +427,16 @@ The bit's meaning comes from where it is granted. The default spawn rule covers
 ordinary descendants of an Interactive process, but every explicit
 `MOTOR_OS_CAPS` replacement mask makes its role choice deliberately:
 
-1. **sys-init → sys-tty** (`sys-init/src/main.rs`, the tty spawn): uses the
-   explicit
-   `CAP_IO_MANAGER | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED |
-   CAP_INTERACTIVE` mask. `CAP_IO_MANAGER` is required for sys-tty's kernel
-   serial-console handle; the other non-role bits let it start rush and pass
-   rush its intended session capabilities. Omitting `CAP_SYS` makes sys-tty
-   Interactive rather than System.
-2. **sys-tty → console rush** (`sys-tty/src/main.rs:94–101`): includes
-   `CAP_INTERACTIVE` in its
-   `CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED` grant. The console manager and
-   the shell it starts are both Interactive.
+1. **sys-init → sys-tty** (`sys-init/src/main.rs`, the tty spawn): accepts
+   legacy `tty:COMMAND` as Interactive and `tty:ROLE:COMMAND` for `system`,
+   `interactive`, or `none`. Its explicit replacement mask is the fixed
+   `CAP_IO_MANAGER | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED` operational set
+   plus the selected role bit. The config cannot omit an operational bit or
+   provide a numeric mask.
+2. **sys-tty → console rush** (`sys-tty/src/main.rs`): derives its own role and
+   passes the matching role bit with `CAP_SPAWN | CAP_LOG |
+   CAP_SPAWN_DETACHED`. It does not pass `CAP_IO_MANAGER`; the console manager
+   and command have the same role but distinct operational authority.
 3. **russhd → ssh session shell** (`russhd/src/local_session.rs:200–217`):
    includes `CAP_INTERACTIVE` in the intersection mask
    (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE}` ∩ own caps).
@@ -451,26 +452,31 @@ ordinary descendants of an Interactive process, but every explicit
    always sets `MOTOR_OS_CAPS` for a parsed service, including `0`, and rejects
    a missing or malformed mask rather than silently selecting the vdso default.
    This corrects the pre-implementation mismatch noted in §2.
-6. **rush trusted detached spawn** (`rush/src/sys/motor.rs`,
-   `detach_cap_grant`): this path sets `MOTOR_OS_CAPS`, so it does *not* receive
-   the vdso default. It includes `CAP_INTERACTIVE` when the shell's derived role
-   is Interactive. Otherwise a trusted detached user daemon would be silently
-   demoted to None.
+6. **rush command policy** (`rush/src/sys/motor.rs`): a System rush explicitly
+   grants `CAP_SYS | CAP_SPAWN | CAP_LOG` from its own mask to ordinary external
+   commands, because the global spawn default intentionally does not propagate
+   System. An explicit per-command `MOTOR_OS_CAPS` assignment replaces that
+   ordinary grant and may narrow the child. Rush-compatible shebang scripts run
+   in-process and retain the shell's role. **Rush trusted detached spawn**
+   (`detach_cap_grant`) sets `MOTOR_OS_CAPS`, so it does *not* receive
+   the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE` according
+   to the shell's derived role while adding `CAP_SPAWN_DETACHED`; otherwise a
+   trusted session daemon would be silently demoted.
 7. **Tests and scripts with literal masks**: the focused lifetime path in
    `src/tests/full-test.sh` uses `0x6c` to retain the ssh session role. Explicit
    test masks preserve the caller's Interactive bit when testing inheritance,
    or omit it with a comment when deliberate demotion is part of the test. The
    existing `CAP_SYS` escalation test deliberately remains unchanged.
-8. **Unadorned spawns**: no call-site edit; §5.1 carries Interactive only from
-   an Interactive parent. The kernel's all-ones sys-io grant and sys-io's
-   all-ones sys-init grant remain System because `CAP_SYS` wins. The chain
-   deliberately changes role at sys-init → sys-tty through item 1's explicit
-   replacement mask.
+8. **Unadorned spawns outside Rush's System-session boundary**: §5.1 carries
+   Interactive only from an Interactive parent. The kernel's all-ones sys-io
+   grant and sys-io's all-ones sys-init grant remain System because `CAP_SYS`
+   wins. The chain deliberately selects a role at sys-init → sys-tty through
+   item 1's explicit replacement mask.
 
 Detached user daemons (spawned via `MOTOR_OS_DETACHED` + `CAP_SPAWN_DETACHED`)
-keep Interactive after the session ends only when their explicit replacement
-mask includes the bit. That is intended: they continue acting with the logged-
-in user's authority.
+keep the shell's Interactive or System role after the session ends only when
+their explicit replacement mask includes the corresponding bit. That is
+intended: they continue acting with the session's authority.
 
 ### 7.1 Decision: russhd is Interactive for now
 

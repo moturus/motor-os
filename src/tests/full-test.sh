@@ -108,6 +108,15 @@ else
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
 
+# The test-only image changes only sys-init.cfg, through a later static overlay,
+# and proves the opt-in System serial session without changing standard-image
+# role expectations.
+if [ "$BUILD" = "release" ]; then
+  "$WD/test-system-tty.sh" --release
+else
+  "$WD/test-system-tty.sh"
+fi
+
 # The terminal acceptance suite (docs/tui.md) boots its own VM: the sys-tty
 # console check needs the serial console's stdin, which this script never
 # connects. It runs before this script's VM starts, since both use the same
@@ -135,9 +144,9 @@ fi
 # and cargo reads config only from the cwd and its ancestors, so a
 # --manifest-path invocation from elsewhere drops the flag and fails to build.
 if [ "$BUILD" = "release" ]; then
-  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --release)
+  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --release --features image-admin)
 else
-  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet)
+  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
 
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.

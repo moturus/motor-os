@@ -25,7 +25,7 @@ use crate::{
     MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
 use async_fs::{
-    AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, Role, Timestamp,
+    AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, Role, RolePermissions, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -184,7 +184,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         parent_id: EntryIdInternal,
         kind: EntryKind,
         filename: &'a str,
-        perms: [AccessPermissions; 3],
+        permissions: RolePermissions,
     ) -> Result<EntryIdInternal> {
         log::trace!(
             "{}:{} - create entry: {parent_id:?} {kind:?} {filename}",
@@ -200,7 +200,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         let hash = DirEntryBlock::get_hash(&mut txn, parent_id, filename).await?;
 
         let entry_id = Superblock::allocate_block(&mut txn).await?;
-        DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename, perms);
+        DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename, permissions);
         DirEntryBlock::link_child_block(&mut txn, parent_id.block_no, entry_id.block_no, hash)
             .await?;
         DirEntryBlock::increment_dir_size(&mut txn, parent_id).await?;
@@ -901,4 +901,96 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         txn.commit().await
     }
+
+    pub async fn do_set_all_permissions_txn(
+        fs: &'a mut MotorFs<BD>,
+        caller: Role,
+        entry_id: EntryIdInternal,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        Self::do_set_all_permissions_txn_inner(
+            fs,
+            caller,
+            entry_id,
+            permissions,
+            ExactPermissionAuthority::Runtime,
+        )
+        .await
+    }
+
+    #[cfg(all(feature = "image-admin", target_os = "linux"))]
+    pub async fn do_set_all_permissions_image_admin_txn(
+        fs: &'a mut MotorFs<BD>,
+        caller: Role,
+        entry_id: EntryIdInternal,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        Self::do_set_all_permissions_txn_inner(
+            fs,
+            caller,
+            entry_id,
+            permissions,
+            ExactPermissionAuthority::ImageAdmin,
+        )
+        .await
+    }
+
+    async fn do_set_all_permissions_txn_inner(
+        fs: &'a mut MotorFs<BD>,
+        caller: Role,
+        entry_id: EntryIdInternal,
+        permissions: RolePermissions,
+        authority: ExactPermissionAuthority,
+    ) -> Result<()> {
+        let mut txn = Self {
+            fs: FsHandle::Exclusive(fs),
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        let entry_block = txn.get_block(entry_id.block_no).await?.clone();
+        dir_entry!(entry_block).validate_entry(entry_id)?;
+        let old = dir_entry!(entry_block).metadata().permissions()?;
+
+        match authority {
+            ExactPermissionAuthority::Runtime => {
+                for role in [Role::System, Role::Interactive, Role::None] {
+                    let old_access = old.get(role);
+                    let new_access = permissions.get(role);
+                    if old_access != new_access
+                        && !async_fs::may_set(caller, role, old_access, new_access)
+                    {
+                        return Err(ErrorKind::PermissionDenied.into());
+                    }
+                }
+            }
+            #[cfg(all(feature = "image-admin", target_os = "linux"))]
+            ExactPermissionAuthority::ImageAdmin => {
+                if caller != Role::System {
+                    return Err(ErrorKind::PermissionDenied.into());
+                }
+            }
+        }
+        if !async_fs::perms_monotonic(permissions) {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        drop(entry_block);
+
+        let mut entry_block = txn.get_block(entry_id.block_no).await?;
+        let mut entry_ref = entry_block.block_mut();
+        let metadata = DirEntryBlock::from_block_mut(&mut entry_ref).metadata_mut();
+        metadata.set_permissions(permissions);
+        metadata.modified = Timestamp::now();
+        drop(entry_ref);
+        drop(entry_block);
+
+        txn.commit().await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExactPermissionAuthority {
+    Runtime,
+    #[cfg(all(feature = "image-admin", target_os = "linux"))]
+    ImageAdmin,
 }

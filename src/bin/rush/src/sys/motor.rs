@@ -73,8 +73,29 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
 
 // ---- detached spawn --------------------------------------------------------
 
+/// The explicit grant used for an ordinary child of a System shell.
+///
+/// The runtime deliberately does not propagate System by default. Rush is the
+/// session boundary that does so; the caller skips this grant when the command
+/// supplied its own replacement mask.
+pub fn ordinary_child_cap_grant() -> Option<(&'static str, String)> {
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    if !matches!(
+        moto_sys::caps::ProcessRole::from_caps(own),
+        moto_sys::caps::ProcessRole::System
+    ) {
+        return None;
+    }
+    let child =
+        own & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG);
+    Some((
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        format!("0x{child:x}"),
+    ))
+}
+
 /// The env assignment that grants a child `CAP_SPAWN_DETACHED` while preserving
-/// the shell's Interactive role, or `None` if this shell cannot grant detach.
+/// the shell's derived role, or `None` if this shell cannot grant detach.
 ///
 /// Used for the programs the shell is configured to trust with detaching (the
 /// `spawn-detached` list in `/user/cfg/rush.toml`). The capability is granted
@@ -85,11 +106,16 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
     if own & moto_sys::caps::CAP_SPAWN_DETACHED == 0 {
         return None;
     }
+    let role_cap = match moto_sys::caps::ProcessRole::from_caps(own) {
+        moto_sys::caps::ProcessRole::System => moto_sys::caps::CAP_SYS,
+        moto_sys::caps::ProcessRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
+        moto_sys::caps::ProcessRole::None => 0,
+    };
     let child = own
         & (moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_LOG
             | moto_sys::caps::CAP_SPAWN_DETACHED
-            | moto_sys::caps::CAP_INTERACTIVE);
+            | role_cap);
     Some((
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!("0x{child:x}"),

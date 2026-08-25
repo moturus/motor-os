@@ -1,5 +1,10 @@
 # Exact Motor FS permissions with `chmod`
 
+## Status
+
+Complete. All implementation and test steps below were finished and validated
+with three debug and three release runs of `src/tests/full-test.sh`.
+
 ## Goal
 
 Add a Motor-native `chmod` command to sysbox that sets the permissions for all
