@@ -296,8 +296,6 @@ These need scope/design decisions before implementation.
 
 - If external DNS or ping failures remain visible, determine whether both A
   queries were lost or host NAT failed, then revisit resolver/NAT remedies.
-- If `moto_async::test_event_stream` again fails on a legal spurious wake, make
-  its expectation resynchronize instead of requiring strict alternation.
 - If `udp_rebind_after_close_test` recurs, reopen the close/rebind diagnosis.
 - If the debug-VM ssh output freeze recurs often enough to investigate, capture
   stacks and output-path state before changing the harness.

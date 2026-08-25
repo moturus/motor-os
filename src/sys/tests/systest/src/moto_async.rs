@@ -228,20 +228,28 @@ fn test_event_stream() {
 
     let channel_here = Arc::new(AtomicU32::new(0));
     let channel_there = channel_here.clone();
+    // SysCpu waits may return stale or spuriously. The shared counter is the
+    // condition; a handle wake only prompts the waiter to check it again.
 
     let runtime_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
             for step in 0..ITERS {
                 assert_eq!(step * 2, channel_there.fetch_add(1, Ordering::AcqRel));
                 moto_sys::SysCpu::wake(handle_there).unwrap();
-                handle_there.as_future().await.unwrap();
+                let expected = step * 2 + 2;
+                while channel_there.load(Ordering::Acquire) != expected {
+                    handle_there.as_future().await.unwrap();
+                }
             }
         })
     });
 
     for step in 0..ITERS {
-        let mut handles = [handle_here];
-        moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        let expected = step * 2 + 1;
+        while channel_here.load(Ordering::Acquire) != expected {
+            let mut handles = [handle_here];
+            moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        }
         assert_eq!(step * 2 + 1, channel_here.fetch_add(1, Ordering::AcqRel));
         moto_sys::SysCpu::wake(handle_here).unwrap();
     }
