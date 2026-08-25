@@ -423,7 +423,7 @@ wait_pty_output "CTRL_C_NESTED_STATUS=130" "nested rush"
 printf 'exit\n' >&"$PTY_IN_FD"
 finish_pty 0 "nested rmux"
 
-remove_test_devtools
+remove_test_root
 stop_vm "$VMM_PID"
 VMM_PID=""
 

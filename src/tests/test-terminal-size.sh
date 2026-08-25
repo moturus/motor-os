@@ -778,7 +778,7 @@ bars="$(cat "$SCRATCH/rmux-pane-bars")"
 [ "$bars" = "22:80 10:80" ] ||
   fail "rmux pane red frames were '$bars', want '22:80 10:80'"
 
-remove_test_devtools
+remove_test_root
 stop_vm "$VMM_PID"
 VMM_PID=""
 
