@@ -34,7 +34,7 @@ moto-rt = { path = "../../sys/lib/moto-rt" }
 # The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the
 # rest of the tree.
 [patch.crates-io]
-crossterm = { path = "../../../../crossterm" }
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]

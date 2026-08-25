@@ -19,7 +19,7 @@ getrandom = { version = "=0.2.17", features = ["custom"] }
 moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [patch.crates-io]
-crossterm = { path = "../../../../crossterm" }
+crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
 ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
 
