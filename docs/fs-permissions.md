@@ -296,3 +296,13 @@ after they are accepted.
    resolved entry. Guest tests concentrate on executable installation
    boundaries and functional access checks, avoiding a brittle duplicate of
    the complete image manifest.
+9. **`rmux` creates its port directory only when it is absent.** A detached
+   server spawned by a System-role client deliberately receives the default
+   None role. `/user/tmp` permits that role to create the port file, but
+   blindly calling `create_dir_all("/user/tmp")` first asks Motor FS to create
+   the already-existing child of `/user`; Motor FS checks write access to the
+   non-None-writable parent before detecting the existing child. Preserving
+   System authority in the server or making `/user` None-writable would grant
+   unnecessary authority. Testing whether the shipped scratch directory
+   exists before creating it preserves the role boundary and still supports a
+   caller-selected, absent `TMPDIR`.

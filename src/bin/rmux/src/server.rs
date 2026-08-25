@@ -1352,7 +1352,9 @@ pub fn serve() -> std::io::Result<()> {
     // may not exist yet: on Motor rmux makes its own scratch space (`sys`).
     let port_file = crate::sys::port_file();
     if let Some(parent) = port_file.parent() {
-        std::fs::create_dir_all(parent)?;
+        if !parent.is_dir() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     std::fs::write(&port_file, port.to_string())?;
     let _ = std::fs::remove_file(crate::sys::port_file().with_extension("lock"));

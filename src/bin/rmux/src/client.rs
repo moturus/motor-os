@@ -588,7 +588,9 @@ fn connect_or_start() -> std::io::Result<(TcpStream, u16)> {
     // lock lives in it: without this the lock cannot be created either, and a
     // client would read that failure as "somebody else is starting one".
     if let Some(parent) = lock.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if !parent.is_dir() {
+            let _ = std::fs::create_dir_all(parent);
+        }
     }
     let ours = match std::fs::OpenOptions::new()
         .write(true)
