@@ -162,7 +162,15 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
-RMUX_TMPDIR=/devtools/tmp/full-test-rmux
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  MOTOR_TEST_ROOT=/devtools
+else
+  MOTOR_TEST_ROOT=/user/tmp/motor-tests
+fi
+export MOTOR_TEST_ROOT
+TEST_BIN="$MOTOR_TEST_ROOT/tests"
+TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
 
 vm_ssh() {
   "${SSH[@]}" "$@"
@@ -333,16 +341,70 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
   printf '%s\n' \
-    'mkdir /devtools' \
-    'mkdir /devtools/tests' \
-    'mkdir /devtools/tmp' \
-    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
-    "put $ROOT_DIR/build/bin/$BUILD/mio-test /devtools/tests/mio-test" \
-    "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" \
-    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke /devtools/tests/crossterm-smoke" |
+    "mkdir $MOTOR_TEST_ROOT" \
+    "mkdir $TEST_BIN" \
+    "mkdir $TEST_TMP" \
+    "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+    "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
+    "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
+    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2
+fi
+
+if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
+  fail "Interactive session created a root-level directory"
+fi
+vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
+vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  vm_ssh "/system/bin/rush -c 'echo writable >/devtools/src/.fs-permissions-write-probe'"
+  vm_ssh /system/bin/rm /devtools/src/.fs-permissions-write-probe
+fi
+
+check_bin_permissions() {
+  local directory="$1"
+  local policy="$2"
+  local listing
+  local mode
+  local name
+  local rows
+
+  listing="$(vm_ssh /system/bin/ls -l "$directory")" ||
+    fail "cannot list $directory"
+  rows="$(printf '%s\n' "$listing" | awk 'NF { print $1, $NF }')"
+  [ -n "$rows" ] || fail "$directory is empty"
+  while read -r mode name; do
+    case "$policy:$mode" in
+      system:-r-xr-xr-x) ;;
+      mutable:-r-xr-xr-x|mutable:-rwxrwxr-x) ;;
+      *) fail "$directory/$name has unexpected mode '$mode'" ;;
+    esac
+  done <<EOF
+$rows
+EOF
+}
+
+check_bin_permissions /system/bin system
+check_bin_permissions /user/bin mutable
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  check_bin_permissions /devtools/bin mutable
+  editable_script=/devtools/bin/www
+  saved_script="$TEST_TMP/fs-permissions-www.saved"
+  vm_ssh /system/bin/cp "$editable_script" "$saved_script"
+  vm_ssh "/system/bin/rush -c 'echo >>$editable_script'" ||
+    fail "Interactive session could not edit $editable_script in place"
+  vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
+    fail "could not restore $editable_script after its write probe"
+  if vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed"; then
+    fail "Interactive session renamed $editable_script"
+  fi
+  if vm_ssh /system/bin/rm "$editable_script"; then
+    fail "Interactive session deleted $editable_script"
+  fi
+  vm_ssh /system/bin/rm "$saved_script"
+  check_bin_permissions /devtools/bin mutable
 fi
 
 EXPECTED_PATH=/system/bin:/user/bin
@@ -421,7 +483,7 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 |
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -438,7 +500,7 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x6c /devtools/tests/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite" 2>&1)" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
@@ -456,7 +518,7 @@ out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
 
 # A foreground status 130 is rush's v1 interrupt indication. It fires INT once
 # and abandons the rest of the pipeline, loop, and enclosing command list.
-rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
+rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
 rush_interrupt_status=0
 if out="$(vm_ssh "$rush_interrupt_cmd")"; then
   fail "rush foreground status 130 unexpectedly succeeded: '$out'"
@@ -470,12 +532,12 @@ fi
 # redirect is a child File; descriptors shared by a group, loop, function, or
 # pipeline remain pipes, and a background job receives null stdin. The helper
 # exits nonzero if any fd has the wrong kind.
-route_dir=/devtools/tmp/stdio-routes
+route_dir=$TEST_TMP/stdio-routes
 vm_ssh "/system/bin/mkdir $route_dir"
-kind="TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind pipe"
+kind="TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe"
 out="$(vm_ssh "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+out="$(vm_ssh "/system/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
 out="$(vm_ssh "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
@@ -494,7 +556,7 @@ out="$(vm_ssh "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route
 
 # The packaged /system/bin/rg exercises the direct-file identity route through rush
 # and ripgrep together; the in-tree systest above pins the same route directly.
-out="$(vm_ssh "/system/bin/rush -c 'mkdir /devtools/tmp/rg-stdio-e2e; cd /devtools/tmp/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=/devtools/tmp /devtools/tests/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+out="$(vm_ssh "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
 [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
   fail "ripgrep searched its own output file: got '$out'"
 echo "ripgrep file-stdio regression PASS"
@@ -541,18 +603,18 @@ esac
 # non-executable files with the terminal's default color. A pane
 # supplies the terminal that enables colors; the child names do not appear in
 # the command, so they only match ls output.
-vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color
-vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/amber-dir
-vm_ssh /system/bin/mkdir /devtools/tmp/sysbox-ls-color/z-directory
-vm_ssh /system/bin/cp /system/bin/ls /devtools/tmp/sysbox-ls-color/a-file
-vm_ssh /system/bin/cp /system/bin/ls /devtools/tmp/sysbox-ls-color/default-file
+vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
+vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
+vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
+vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
+vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
 check_ls_colors() {
   local option="$1"
   local output
   local prefix
   local style
 
-  output="$(printf '/system/bin/ls %s /devtools/tmp/sysbox-ls-color\nexit\n' "$option" |
+  output="$(printf '/system/bin/ls %s %s/sysbox-ls-color\nexit\n' "$option" "$TEST_TMP" |
     vm_rmux 2>&1)"
   case "$output" in
     *"amber-dir"*"a-file"*) ;;
@@ -584,7 +646,7 @@ check_ls_colors "-l"
 # Directories sort before files in both output modes, with each group sorted by
 # name. The names deliberately put a file before a directory lexically.
 for option in "" "-l"; do
-  sorted_ls="$(vm_ssh /system/bin/ls $option /devtools/tmp/sysbox-ls-color)"
+  sorted_ls="$(vm_ssh /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
     *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
@@ -593,13 +655,13 @@ done
 
 # Long listings use Linux-shaped type/permission fields. The three permission
 # triplets are Motor FS System, Interactive, and None roles, in that order.
-long_ls="$(vm_ssh /system/bin/ls -l /devtools/tmp/sysbox-ls-color)"
+long_ls="$(vm_ssh /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
 case "$long_ls" in
   *"drwxrwxrwx"*"amber-dir"*) ;;
   *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
 esac
 case "$long_ls" in
-  *"-rwxrwxrwx"*"default-file"*) ;;
+  *"-rwxr-xr-x"*"default-file"*) ;;
   *) fail "ls -l did not report file permissions: '$long_ls'" ;;
 esac
 
@@ -658,7 +720,7 @@ crossterm_readings() {
 # (two would be `Enter` and then `Ctrl+J`, since raw mode is on), and a whole
 # escape sequence is the key it spells rather than `Esc` and two letters.
 out="$(printf 'hi\r\n\033[A\003q' | vm_ssh \
-  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
+  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
 [ "$(crossterm_readings "$out")" = "key=Char('h')
 key=Char('i')
 key=Enter
@@ -677,7 +739,7 @@ lone_escape() {
   sleep 1
 }
 out="$(lone_escape | vm_ssh \
-  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
+  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
 [ "$(crossterm_readings "$out")" = "key=Esc
 key=Char('q')
 end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings "$out")'"
@@ -685,12 +747,12 @@ end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings 
 # The alternate screen, in and out again, and the same on the way out of a
 # panic: Motor OS builds abort on panic, so nothing but a panic hook can give
 # the terminal back.
-out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke screen" 2>/dev/null)"
+out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke screen" 2>/dev/null)"
 case "$out" in
   *$'\033'"[?1049h"*$'\033'"[?1049l"*"screen=restored"*) ;;
   *) fail "crossterm did not take and give back the alternate screen: '$out'" ;;
 esac
-if out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke panic" 2>&1)"; then
+if out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke panic" 2>&1)"; then
   fail "crossterm-smoke panic exited successfully"
 fi
 case "$out" in
@@ -703,7 +765,7 @@ esac
 # non-pty ssh session answers false -- and crossterm must emit neither the
 # mode handshake nor a fallback probe; the size stays at its nonblocking
 # fallback and no resize event appears.
-out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke size" 2>/dev/null)"
+out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke size" 2>/dev/null)"
 case "$out" in
   *"size=80x24"*"size-after=80x24"*) ;;
   *) fail "crossterm size over ssh: '$out'" ;;
@@ -728,7 +790,7 @@ esac
 # asks for is zeroes and russhd has none to report. That is the point of the
 # resize check below, which gives it one.
 out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys" 2>/dev/null)"
+  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
 case "$out" in
   *$'\033[?2048'*) fail "russhd passed a mode 2048 sequence to the client: '$out'" ;;
 esac
@@ -743,7 +805,7 @@ end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$ou
 # Ctrl+C remains fatal unless a TUI explicitly installs crossterm's adapter.
 # The adapter owns the process handler for life, so a second call must fail.
 out="$(printf '' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke ctrl-c" 2>/dev/null)"
+  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke ctrl-c" 2>/dev/null)"
 case "$out" in
   *"ctrl-c=enabled"*"ctrl-c=already-enabled"*) ;;
   *) fail "crossterm did not register exactly one Ctrl+C handler: '$out'" ;;
@@ -761,7 +823,7 @@ esac
 # character into the session, and a keystroke nobody pressed has no business in
 # a test of what the terminal reports.
 ssh_pty_keys="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys")"
+  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys")"
 out="$(sleep 8 | script -qc "stty rows 30 cols 100
 $ssh_pty_keys </dev/tty 2>/dev/null &
 sleep 2
@@ -779,7 +841,7 @@ esac
 # a pane's input from the client, and a client that has hung up sends no reply
 # either.
 crossterm_size_in_pane() {
-  printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke size\n'
+  printf 'TMPDIR=%s %s/crossterm-smoke size\n' "$TEST_TMP" "$TEST_BIN"
   sleep 5
   printf 'exit\n'
   sleep 1
@@ -804,8 +866,8 @@ resizes="$(printf '%s\n' "$readings" | grep '^resize=' | sort -u)"
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
 
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/mio-test"
 
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 
 echo "-------- MOTOR OS FULL TEST PASS ---------"

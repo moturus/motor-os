@@ -46,7 +46,16 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
-RMUX_TMPDIR=/devtools/tmp/test-tui-rmux
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  MOTOR_TEST_ROOT=/devtools
+else
+  MOTOR_TEST_ROOT=/user/tmp/motor-tests
+fi
+export MOTOR_TEST_ROOT
+TEST_BIN="$MOTOR_TEST_ROOT/tests"
+TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+RMUX_TMPDIR="$TEST_TMP/test-tui-rmux"
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -89,18 +98,18 @@ fail() {
 CONSOLE_LOG=/tmp/test-tui.log
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
-TEST_DEVTOOLS_CREATED=0
+TEST_ROOT_CREATED=0
 PTY_PID=""
 PTY_OUT_FD=""
 PTY_IN_FD=""
 PTY_OUTPUT=""
 
-remove_test_devtools() {
-  if [ "$TEST_DEVTOOLS_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
+remove_test_root() {
+  if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
     kill -0 "$VMM_PID" 2>/dev/null; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-      motor@192.168.4.2 /system/bin/rm -r /devtools >/dev/null 2>&1
-    TEST_DEVTOOLS_CREATED=0
+      motor@192.168.4.2 /system/bin/rm -r "$MOTOR_TEST_ROOT" >/dev/null 2>&1
+    TEST_ROOT_CREATED=0
   fi
 }
 
@@ -116,7 +125,7 @@ cleanup() {
     kill "$PTY_PID" 2>/dev/null
     wait "$PTY_PID" 2>/dev/null
   fi
-  remove_test_devtools
+  remove_test_root
   stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&-
@@ -148,13 +157,13 @@ done
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
-  TEST_DEVTOOLS_CREATED=1
+  TEST_ROOT_CREATED=1
   printf '%s\n' \
-    'mkdir /devtools' \
-    'mkdir /devtools/tests' \
-    'mkdir /devtools/tmp' \
-    "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
-    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke /devtools/tests/crossterm-smoke" |
+    "mkdir $MOTOR_TEST_ROOT" \
+    "mkdir $TEST_BIN" \
+    "mkdir $TEST_TMP" \
+    "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2
@@ -294,7 +303,7 @@ wait_console "CONSOLE_HOME_"
 if grep -aq "CONSOLE_HOME_BAD" "$CONSOLE_LOG"; then
   fail "sys-tty did not start the console shell with HOME and PWD set to /user"
 fi
-printf 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child\n' >&3
+printf 'TMPDIR=%s %s/systest stdio-terminal-report-child\n' "$TEST_TMP" "$TEST_BIN" >&3
 wait_console "dupnew="
 printf 'exit\n' >&3
 check_report "sys-tty console child" "$(cat "$CONSOLE_LOG")" 111 1
@@ -303,7 +312,7 @@ check_report "sys-tty console child" "$(cat "$CONSOLE_LOG")" 111 1
 # everything it spawns with inherited stdio answers non-terminal.
 echo "-- non-pty ssh session --"
 out="$(printf 'mask inherit\nexit\n' |
-  vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child")"
+  vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-terminal-report-child")"
 check_report "non-pty ssh child" "$out" 000 0
 [ "$(report_field "$out" mask)" = "000" ] ||
   fail "non-pty ssh grandchild is a terminal: '$out'"
@@ -314,7 +323,7 @@ check_report "non-pty ssh child" "$out" 000 0
 echo "-- russhd pty session --"
 out="$(printf 'mask inherit\nmask outpiped\nexit\n' |
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child" 2>/dev/null)"
+    "TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-terminal-report-child" 2>/dev/null)"
 check_report "ssh pty child" "$out" 111 1
 masks="$(printf '%s\n' "$out" | strip_escapes |
   grep -aoE 'mask=[01]+' | sed 's/.*mask=//' | tr '\n' ' ')"
@@ -326,7 +335,7 @@ masks="$(printf '%s\n' "$out" | strip_escapes |
 # full-test.sh's rmux checks; the second "exit" ends the pane's shell.
 echo "-- rmux pane child --"
 rmux_report_keys() {
-  printf 'TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-report-child\n'
+  printf 'TMPDIR=%s %s/systest stdio-terminal-report-child\n' "$TEST_TMP" "$TEST_BIN"
   sleep 5
   printf 'exit\n'
   sleep 2
@@ -349,7 +358,7 @@ check_report "rmux pane child" "$out" 111 1
 # moto-rt C-ABI query path.
 echo "-- invariant matrix (systest stdio-terminal-tests) --"
 set +e
-out="$(vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest stdio-terminal-tests")"
+out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-terminal-tests")"
 status="$?"
 set -e
 printf '%s\n' "$out"
@@ -359,26 +368,26 @@ printf '%s\n' "$out"
   fail "systest stdio-terminal-tests did not finish with PASS"
 
 echo "-- Ctrl+C Default and handler leaves --"
-start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child"
+start_pty "TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child"
 wait_pty_output "CTRL_C_DEFAULT_READY" "terminal-stdin Default leaf"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "terminal-stdin Default leaf"
 
 # stdin is a pipe, so Ctrl+C reaches the leaf through its reserved terminal fd
 # and a terminal-backed non-interactive rush remains Default between routes.
-start_pty "/system/bin/rush -c 'echo | TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child'"
+start_pty "/system/bin/rush -c 'echo | TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child'"
 wait_pty_output "CTRL_C_DEFAULT_READY" "terminal-fd3 Default leaf"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "terminal-fd3 Default leaf"
 
-start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-handler-child"
+start_pty "TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-handler-child"
 wait_pty_output "CTRL_C_HANDLER_READY" "handler leaf"
 printf '\003' >&"$PTY_IN_FD"
 wait_pty_output "CTRL_C_HANDLER_CALLED" "handler leaf"
 finish_pty 0 "handler leaf"
 
 echo "-- Ctrl+C forwarding and route teardown --"
-start_pty "TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-route-parent"
+start_pty "TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-route-parent"
 wait_pty_output "CTRL_C_NORMAL_CHILD_READY" "route normal child"
 printf 'n' >&"$PTY_IN_FD"
 wait_pty_output "CTRL_C_NORMAL_RESTORED" "route after normal child"
@@ -394,7 +403,7 @@ wait_pty_output "CTRL_C_PARENT_AFTER_KILL" "route parent after interrupted child
 finish_pty 0 "route parent"
 
 echo "-- crossterm Ctrl+C adapter --"
-start_pty "TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys"
+start_pty "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys"
 wait_pty_output "ready" "crossterm handler"
 printf '\003' >&"$PTY_IN_FD"
 wait_pty_output "key=Char('c')+KeyModifiers(CONTROL)" "crossterm handler"
@@ -405,7 +414,7 @@ finish_pty 0 "crossterm handler"
 echo "-- nested rmux, rush, and Default leaf --"
 start_pty "TMPDIR=$RMUX_TMPDIR /user/bin/rmux new -s test-tui-ctrl-c"
 wait_pty_output "motor-os" "nested rmux shell"
-printf 'TMPDIR=/devtools/tmp /devtools/tests/systest ctrl-c-default-child\n' >&"$PTY_IN_FD"
+printf 'TMPDIR=%s %s/systest ctrl-c-default-child\n' "$TEST_TMP" "$TEST_BIN" >&"$PTY_IN_FD"
 wait_pty_output "CTRL_C_DEFAULT_READY" "nested Default leaf"
 # The command is type-ahead for rush while Ctrl+C is routed through rmux and
 # rush to the leaf. It must survive teardown and observe the leaf's status.

@@ -76,6 +76,10 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+MOTOR_TEST_ROOT=/user/tmp/motor-tests
+export MOTOR_TEST_ROOT
+TEST_BIN="$MOTOR_TEST_ROOT/tests"
+TEST_TMP="$MOTOR_TEST_ROOT/tmp"
 
 vm_ssh() {
   "${SSH[@]}" "$@"
@@ -246,13 +250,13 @@ fi
 
 vm_ssh "[ ! -e /devtools ]" || fail "standard image unexpectedly packages /devtools"
 printf '%s\n' \
-  'mkdir /devtools' \
-  'mkdir /devtools/tests' \
-  'mkdir /devtools/tmp' \
-  "put $ROOT_DIR/build/bin/$BUILD/systest /devtools/tests/systest" \
-  "put $ROOT_DIR/build/bin/$BUILD/mio-test /devtools/tests/mio-test" \
-  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests /devtools/tests/tokio-tests" \
-  "put $ROOT_DIR/build/bin/$BUILD/rnetbench /devtools/tests/rnetbench" |
+  "mkdir $MOTOR_TEST_ROOT" \
+  "mkdir $TEST_BIN" \
+  "mkdir $TEST_TMP" \
+  "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+  "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
+  "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
+  "put $ROOT_DIR/build/bin/$BUILD/rnetbench $TEST_BIN/rnetbench" |
   sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
@@ -269,7 +273,7 @@ test_udp_fragmentation
 echo "-- bounded TX queue liveness --"
 coproc RNETBENCH_SERVER {
   ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "TMPDIR=/devtools/tmp /devtools/tests/rnetbench --server" 2>&1
+    "TMPDIR=$TEST_TMP $TEST_BIN/rnetbench --server" 2>&1
 }
 RNETBENCH_SSH_PID="$!"
 RNETBENCH_OUT_FD="${RNETBENCH_SERVER[0]}"
@@ -334,7 +338,7 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 |
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -357,8 +361,8 @@ out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
 
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/mio-test"
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/mio-test"
 
-vm_ssh "TMPDIR=/devtools/tmp /devtools/tests/tokio-tests"
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 
 echo "-------- MOTOR OS FULL TEST PASS ---------"

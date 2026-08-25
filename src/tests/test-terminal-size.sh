@@ -54,7 +54,15 @@ if [ "${1:-}" = "--release" ]; then
 fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
-RMUX_TMPDIR=/devtools/tmp/test-terminal-size-rmux
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  MOTOR_TEST_ROOT=/devtools
+else
+  MOTOR_TEST_ROOT=/user/tmp/motor-tests
+fi
+export MOTOR_TEST_ROOT
+TEST_TMP="$MOTOR_TEST_ROOT/tmp"
+RMUX_TMPDIR="$TEST_TMP/test-terminal-size-rmux"
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -95,20 +103,20 @@ CONSOLE_LOG=/tmp/test-terminal-size.log
 # only evidence of what the terminal actually said.
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
-TEST_DEVTOOLS_CREATED=0
+TEST_ROOT_CREATED=0
 
-remove_test_devtools() {
-  if [ "$TEST_DEVTOOLS_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
+remove_test_root() {
+  if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
     kill -0 "$VMM_PID" 2>/dev/null; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-      motor@192.168.4.2 /system/bin/rm -r /devtools >/dev/null 2>&1
-    TEST_DEVTOOLS_CREATED=0
+      motor@192.168.4.2 /system/bin/rm -r "$MOTOR_TEST_ROOT" >/dev/null 2>&1
+    TEST_ROOT_CREATED=0
   fi
 }
 
 cleanup() {
   set +e
-  remove_test_devtools
+  remove_test_root
   stop_vm "$VMM_PID"
   VMM_PID=""
   exec 3>&- 4>&-
@@ -135,12 +143,12 @@ done
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
-  TEST_DEVTOOLS_CREATED=1
+  TEST_ROOT_CREATED=1
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-    "/system/bin/mkdir /devtools; /system/bin/mkdir /devtools/tmp"
+    "/system/bin/mkdir $MOTOR_TEST_ROOT; /system/bin/mkdir $TEST_TMP"
 else
-  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ -d /devtools/tmp ]" ||
-    fail "developer image is missing /devtools/tmp"
+  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ -d $TEST_TMP ]" ||
+    fail "developer image is missing $TEST_TMP"
 fi
 
 wait_console() {

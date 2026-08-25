@@ -12,6 +12,7 @@ stop_udp_fragment_echo() {
 
 test_udp_fragmentation() {
   local echo_bin="$ROOT_DIR/build/host-tests/udp-fragment-echo"
+  local test_binary="${MOTOR_TEST_ROOT:-/devtools}/tests/systest"
   local port
   local status=0
 
@@ -29,8 +30,8 @@ test_udp_fragmentation() {
     ""|*[!0-9]*) fail "host UDP fragmentation echo returned bad port '$port'" ;;
   esac
 
-  vm_ssh "/devtools/tests/systest test-tap-udp-fragmentation 192.168.4.1:$port"
-  vm_ssh "/devtools/tests/systest test-tap-udp-fragmentation [2001:db8::1]:$port"
+  vm_ssh "$test_binary test-tap-udp-fragmentation 192.168.4.1:$port"
+  vm_ssh "$test_binary test-tap-udp-fragmentation [2001:db8::1]:$port"
 
   wait "$UDP_FRAGMENT_ECHO_PROCESS" || status="$?"
   UDP_FRAGMENT_ECHO_PROCESS=""

@@ -25,12 +25,14 @@ fi
 HOST="${RUSSHD_HOST:-192.168.4.2}"
 PORT="${RUSSHD_PORT:-2222}"
 USER="${RUSSHD_USER:-motor}"
+MOTOR_TEST_ROOT="${MOTOR_TEST_ROOT:-/devtools}"
+TEST_TMP="$MOTOR_TEST_ROOT/tmp"
 # Default the key to the one next to this script so it works from src/tests/
 # regardless of the current working directory.
 KEY="${RUSSHD_KEY:-$WD/test.key}"
 REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/system/bin}"
 REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/system/logs/sys-init.log}"
-REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-/devtools/tmp/russhd-sftp-upload-test.bin}"
+REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-$TEST_TMP/russhd-sftp-upload-test.bin}"
 EXPECTED_FILES=(rush sysbox)
 
 SSH_OPTS=(
@@ -43,7 +45,8 @@ SSH_OPTS=(
     -o UserKnownHostsFile=/dev/null
 )
 
-REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-/devtools/tmp/lorry/sftp-prerequisite-$$}"
+REMOTE_PHASE0_PARENT="$TEST_TMP/lorry"
+REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-$REMOTE_PHASE0_PARENT/sftp-prerequisite-$$}"
 
 WORK="$(mktemp -d)"
 
@@ -197,7 +200,7 @@ mkdir -p "$scp_tree/nested"
 printf 'top-level scp file\n' >"$scp_tree/top"
 printf 'nested scp file\n' >"$scp_tree/nested/file"
 
-run_ssh /system/bin/mkdir /devtools/tmp/lorry >/dev/null 2>&1 || true
+run_ssh /system/bin/mkdir "$REMOTE_PHASE0_PARENT" >/dev/null 2>&1 || true
 run_ssh /system/bin/mkdir "$REMOTE_PHASE0_ROOT" ||
     fail "could not create the fixture run root"
 
