@@ -1,7 +1,39 @@
 # Paging piped input, and Ctrl+C: terminal input and control through child chains
 
-This plan is implemented. The resulting terminal contract is documented in
-`docs/tui.md`.
+## Implementation state
+
+The core less-paging and Ctrl+C design is implemented and committed on this
+branch. Part I reserves fd 3 for the session terminal, synthesizes and relays
+that descriptor through foreground child chains, preserves unread input at
+relay teardown, and makes `sysbox less` page redirected terminal input. Part
+II implements fixed-status Default termination (130), the single process
+handler API, atomic foreground forwarding, rush's status-130 propagation,
+rmux forwarding, the crossterm adapter, and the system acceptance coverage.
+The resulting terminal contract is documented in `docs/tui.md`.
+
+The in-tree `moto-rt` is version 0.17.6 but has not been published. Motor OS
+currently points at the local crossterm checkout in `../crossterm`; that fork
+and the `../rust-ctrlc` backend contain the required Motor changes plus local
+`moto-rt` patches and are intentionally uncommitted. Final dependency URLs and
+lockfiles therefore remain publication work.
+
+Every committed implementation patch passed one debug and one release
+`src/tests/full-test.sh`. After the last committed patch, the final core gate
+also passed three consecutive debug and three consecutive release runs. The
+requested three `src/tests/full-test-dev.sh --release` runs were not completed:
+the first reached Gears-specific Ctrl+C behavior after its repository, source,
+and Lorry gates had passed. Gears is about to be substantially refactored, so
+its dedicated test script and its checks in the developer-image scripts have
+now been removed. No tests were run after that removal, by request.
+
+Gears' previously committed handler opt-in remains in the tree, and there are
+uncommitted fixes that keep its internal curl transport from owning the
+terminal route and render line-mode Ctrl+C cancellation. Treat that integration
+as provisional and re-evaluate it during the Gears refactor; it is not part of
+the remaining completion gate. The remaining work for this plan is to publish
+`moto-rt`, finalize and commit the external forks, replace the local dependency
+paths, review the provisional Gears integration, and rerun the desired final
+validation.
 
 Before this work, `sysbox less` paged a *file* on a terminal but could not page
 text that arrived on stdin, and Motor treated Ctrl+C as an ordinary byte. A

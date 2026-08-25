@@ -320,6 +320,12 @@ Ctrl+C to that child. Chains compose: a provider can forward to rmux, rmux to
 a pane's rush, and rush to the foreground leaf. A Default leaf exits 130; a
 leaf with a handler is notified. The parent is neither killed nor called back.
 
+An internal helper that is not a foreground terminal application must opt out
+of synthesized fd 3 with `MOTURUS_STDIO_NO_TERMINAL=true`; otherwise its relay
+would temporarily own Ctrl+C. Gears sets this for its piped `curl` transport,
+so its handler can cancel a provider request rather than reporting that its
+transport exited 130.
+
 Route teardown intentionally has no lock or drain. If Ctrl+C races the target
 child finishing, that event may be lost; it cannot reach the parent or a later
 child. Each route has a generation, so an event from an old route cannot be
