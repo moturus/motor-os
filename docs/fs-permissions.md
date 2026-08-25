@@ -313,3 +313,11 @@ after they are accepted.
     script present. This tests the filesystem authority boundary directly
     without making this image-policy change depend on the separate applet exit
     status defect.
+11. **The PID-kill systest identifies its child by PID.** Process debug names
+    are limited to 32 bytes, and the standard-image test path
+    `/user/tmp/motor-tests/tests/systest` is longer than that limit. The old
+    search for a process whose truncated display name contained `systest`
+    therefore missed the child and waited indefinitely. Looking up the PID
+    returned by `std::process::Child` in `ProcessInfoV1` still verifies process
+    enumeration, the parent relationship, and PID-based killing without
+    depending on a diagnostic-name representation.

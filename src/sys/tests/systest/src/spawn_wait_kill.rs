@@ -439,6 +439,7 @@ pub fn test_spawn_result_pid() {
 
 pub fn test_pid_kill() {
     let mut child = subcommand::spawn();
+    let child_pid = u64::from(child.std_child().id());
 
     const PS_BUF_SIZE: usize = 1024;
 
@@ -463,16 +464,12 @@ pub fn test_pid_kill() {
         return;
     }
 
-    for proc in &processes {
-        if proc.debug_name().contains("systest") {
-            if proc.parent_pid != moto_sys::current_pid() {
-                continue;
-            }
-
-            moto_sys::SysCpu::kill_pid(proc.pid).unwrap();
-            break;
-        }
-    }
+    let child_info = processes[..cnt]
+        .iter()
+        .find(|proc| proc.pid == child_pid)
+        .expect("spawned child missing from process list");
+    assert_eq!(child_info.parent_pid, moto_sys::current_pid());
+    moto_sys::SysCpu::kill_pid(child_info.pid).unwrap();
 
     assert_eq!(-1, child.wait().unwrap().code().unwrap());
 
