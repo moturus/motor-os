@@ -24,3 +24,5 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "$@"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
+
+echo "full-test-dev.sh ALL PASS"
