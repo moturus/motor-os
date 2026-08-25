@@ -95,9 +95,10 @@ Several installed trees deliberately use the default rule:
 - `/devtools/cfg`, `/devtools/llvm`, `/devtools/lorry`, `/devtools/rust`,
   `/devtools/tests`, and `/devtools/www` are installed content. Guest build and
   test writes belong under `/devtools/src` or `/devtools/tmp`.
-- `/devtools/crossterm` and `/devtools/rust-ctrlc` are staged dependency source
-  trees. They are consumed read-only; project build output belongs under
-  `/devtools/src` and scratch output under `/devtools/tmp`.
+- Development source trees staged in `/devtools/src` are consumed in place;
+  project build output belongs under `/devtools/src` and scratch output under
+  `/devtools/tmp`. Git dependencies are fetched by the build tool rather than
+  staged as separate source trees.
 
 ### Exact entries
 
@@ -281,11 +282,10 @@ after they are accepted.
    would make a typo in a secret path indistinguishable from an intentional
    subset omission. Tree rules, which describe optional subtrees, may remain
    unmatched.
-6. **Rebased dependency source trees remain read-only.** The newly staged
-   `/devtools/crossterm` and `/devtools/rust-ctrlc` trees are consumed as build
-   dependencies. Cargo writes project targets below `/devtools/src` and uses
-   `/devtools/tmp` for scratch, so there is no demonstrated need to make these
-   separate dependency roots Interactive-writable.
+6. **Git dependency source trees are not staged separately.** Development
+   projects fetch their reviewed Git dependencies through the build tool.
+   Cargo writes project targets below `/devtools/src` and uses `/devtools/tmp`
+   for scratch.
 7. **Standard test artifacts live under `/user/tmp`, not a newly created
    `/devtools`.** Making `/` Interactive-writable solely to preserve the old
    upload path would also permit replacement of `/system`. The shared

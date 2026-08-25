@@ -28,7 +28,7 @@ libc = "0.2"
 
 # Native process control and terminal-input readiness on Motor OS.
 [target.'cfg(not(unix))'.dependencies]
-ctrlc = { path = "../../../../rust-ctrlc" }
+ctrlc = { git = "https://github.com/moturus/rust-ctrlc.git", branch = "motor-os-rustc" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
 moto-sys = { path = "../../sys/lib/moto-sys" }
 

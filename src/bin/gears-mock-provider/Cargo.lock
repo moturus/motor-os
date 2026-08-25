@@ -93,8 +93,10 @@ dependencies = [
 [[package]]
 name = "ctrlc"
 version = "3.5.1"
+source = "git+https://github.com/moturus/rust-ctrlc.git?branch=motor-os-rustc#39ec5cf4cbf9ec8bc21c4d40c881fa0fa2936b9f"
 dependencies = [
  "dispatch2",
+ "moto-rt",
  "nix",
  "windows-sys 0.61.2",
 ]
