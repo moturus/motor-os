@@ -13,7 +13,7 @@ fn open() -> File {
 }
 
 pub fn run_tests() {
-    std::fs::create_dir_all(std::env::temp_dir()).unwrap();
+    crate::ensure_temp_dir();
     let path = crate::temp_path("systest-file-lock");
     let _ = std::fs::remove_file(&path);
     concurrent_duplicate_lock_test();

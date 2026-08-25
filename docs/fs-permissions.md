@@ -331,3 +331,13 @@ after they are accepted.
     edges preserves the documented fork and the `--locked --offline` image
     build instead of weakening reproducibility or selecting a different
     dependency checkout.
+13. **Systest creates its temporary directory only when it is absent.** The
+    development image ships `/devtools/tmp` writable by every role while its
+    `/devtools` parent remains System-owned. Unconditionally calling
+    `create_dir_all` for that existing directory asks Motor FS for create
+    permission on the sealed parent before it observes the child, so an
+    Interactive systest receives `PermissionDenied`. Making `/devtools`
+    writable would weaken the installation boundary, and changing
+    `create_dir_all` semantics is outside image-policy scope. A shared systest
+    helper therefore skips creation when `TMPDIR` is already a directory and
+    retains creation for standalone runs that select an absent path.

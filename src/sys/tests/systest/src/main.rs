@@ -51,6 +51,13 @@ pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(name)
 }
 
+pub(crate) fn ensure_temp_dir() {
+    let temp_dir = std::env::temp_dir();
+    if !temp_dir.is_dir() {
+        std::fs::create_dir_all(temp_dir).unwrap();
+    }
+}
+
 fn test_syscall() {
     const ITERS: usize = 1_000_000;
     let start = std::time::Instant::now();

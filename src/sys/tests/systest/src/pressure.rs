@@ -291,7 +291,7 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
 
     // The suite creates TMPDIR long before this test runs, but the standalone
     // form can run on a fresh image, where it does not exist yet.
-    std::fs::create_dir_all(std::env::temp_dir()).unwrap();
+    crate::ensure_temp_dir();
 
     // FS state from before the squeeze: an open file for the write hammer, a
     // held lock to release mid-episode, a second handle to probe acquires,
