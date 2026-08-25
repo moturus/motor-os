@@ -17,27 +17,18 @@ use std::io::{BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, PathBuf};
 use std::process::Command;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path};
 
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
 
 mod chmod;
+mod permissions;
 mod util;
 
 const SECTOR_SIZE: u32 = 512;
 
 const SOURCE_TREE_EXCLUDED_DIRS: [&str; 4] = [".git", ".lorry", "__pycache__", "target"];
-
-fn image_file_permissions(source: &Path) -> io::Result<async_fs::RolePermissions> {
-    let executable = fs::metadata(source)?.permissions().mode() & 0o111 != 0;
-    let access = if executable {
-        async_fs::AccessPermissions::Rwx
-    } else {
-        async_fs::AccessPermissions::Rw
-    };
-    Ok(async_fs::RolePermissions::all(access))
-}
 
 #[derive(Debug, Deserialize)]
 struct SourceDirectory {
@@ -47,6 +38,7 @@ struct SourceDirectory {
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    permission_policy: String,
     input_files: Vec<String>,
     directories: Vec<String>,
     static_dirs: Vec<String>,
@@ -67,12 +59,21 @@ enum ImageFormat {
     Qcow2,
 }
 
+#[derive(Debug)]
+struct ImageFile {
+    source: PathBuf,
+    destination: PathBuf,
+    class: permissions::FileClass,
+    permissions: async_fs::RolePermissions,
+}
+
 async fn create_motorfs_partition_async(
     result_path: &Path,
     directories: &[String],
-    files: &BTreeMap<PathBuf, String>,
+    files: &[ImageFile],
+    policy: &permissions::PermissionPolicy,
     data_partition_size_mb: u64,
-) {
+) -> io::Result<()> {
     use async_fs::FileSystem;
 
     let data_partition_size = data_partition_size_mb * 1024 * 1024;
@@ -81,44 +82,52 @@ async fn create_motorfs_partition_async(
         result_path.to_str().unwrap().into(),
         data_partition_size / 4096,
     )
-    .await
-    .unwrap();
-    let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await.unwrap();
+    .await?;
+    let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await?;
     println!("creating Motor FS in {:?}", result_path);
 
+    fs.set_all_permissions_image_admin(
+        async_fs::Role::System,
+        motor_fs::ROOT_DIR_ID,
+        policy.directory_permissions(Path::new("/")),
+    )
+    .await?;
+
     for directory in directories {
-        util::motor_fs_create_dir_all(&mut fs, Path::new(directory))
-            .await
-            .unwrap();
+        util::motor_fs_create_dir_all(&mut fs, Path::new(directory), policy).await?;
     }
 
-    for (src, dst) in files {
-        let target_path = Path::new(dst);
+    for file in files {
+        let target_path = &file.destination;
         let parent = target_path.parent().unwrap();
         let filename = target_path.file_name().unwrap().to_str().unwrap();
-        let permissions = image_file_permissions(src)
-            .unwrap_or_else(|err| panic!("Error reading permissions for file '{src:?}': {err:?}."));
+        let final_permissions = file.permissions;
+        let initial_permissions = if final_permissions.system.can_write() {
+            final_permissions
+        } else {
+            async_fs::RolePermissions::new(
+                async_fs::AccessPermissions::Rw,
+                async_fs::AccessPermissions::None,
+                async_fs::AccessPermissions::None,
+            )
+        };
 
-        let parent_id = util::motor_fs_create_dir_all(&mut fs, parent)
-            .await
-            .unwrap();
+        let parent_id = util::motor_fs_create_dir_all(&mut fs, parent, policy).await?;
         let new_file_id = fs
             .create_entry(
                 async_fs::Role::System,
                 parent_id,
                 async_fs::EntryKind::File,
                 filename,
-                permissions,
+                initial_permissions,
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let bytes = std::fs::read(src)
-            .map_err(|err| panic!("Error reading file '{src:?}': {err:?}."))
-            .unwrap();
+        let bytes = std::fs::read(&file.source)?;
         let hash = util::fnv1a_hash_64(bytes.as_slice());
         println!(
-            "creating file {dst} of size {} and hash 0x{hash:x}.",
+            "creating file {} of size {} and hash 0x{hash:x}.",
+            file.destination.display(),
             bytes.len()
         );
 
@@ -134,30 +143,40 @@ async fn create_motorfs_partition_async(
             assert_eq!(
                 sz,
                 fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz])
-                    .await
-                    .unwrap()
+                    .await?
             );
             offset += sz as u64;
         }
+
+        if initial_permissions != final_permissions {
+            fs.set_all_permissions_image_admin(
+                async_fs::Role::System,
+                new_file_id,
+                final_permissions,
+            )
+            .await?;
+        }
     }
 
-    fs.flush().await.unwrap();
+    fs.flush().await
 }
 
 fn create_motorfs_partition(
     result_path: &Path,
     directories: &[String],
-    files: &BTreeMap<PathBuf, String>,
+    files: &[ImageFile],
+    policy: &permissions::PermissionPolicy,
     data_partition_size_mb: u64,
-) {
+) -> io::Result<()> {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(create_motorfs_partition_async(
         result_path,
         directories,
         files,
+        policy,
         data_partition_size_mb,
-    ));
+    ))
 }
 
 #[repr(C)]
@@ -406,6 +425,84 @@ fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
 
+fn resolve_image_files(
+    files: &BTreeMap<PathBuf, String>,
+    directories: &[String],
+    policy: &permissions::PermissionPolicy,
+) -> Result<Vec<ImageFile>, String> {
+    let mut resolved = Vec::with_capacity(files.len());
+    for (source, destination) in files {
+        validate_directories(std::slice::from_ref(destination))?;
+        let destination = PathBuf::from(destination);
+        let class = permissions::classify_source(source).map_err(|error| {
+            format!(
+                "cannot classify image destination '{}', sourced from '{}': {error}",
+                destination.display(),
+                source.display()
+            )
+        })?;
+        resolved.push(ImageFile {
+            source: source.clone(),
+            permissions: policy.file_permissions(&destination, class),
+            destination,
+            class,
+        });
+    }
+
+    let entries = image_policy_entries(directories, &resolved)?;
+    policy.validate_image(&entries)?;
+    Ok(resolved)
+}
+
+fn image_policy_entries(
+    directories: &[String],
+    files: &[ImageFile],
+) -> Result<Vec<permissions::ImageEntry>, String> {
+    let mut image_directories = BTreeSet::from([PathBuf::from("/")]);
+    for directory in directories {
+        insert_directory_and_parents(&mut image_directories, Path::new(directory));
+    }
+    for file in files {
+        insert_directory_and_parents(
+            &mut image_directories,
+            file.destination.parent().unwrap_or_else(|| Path::new("/")),
+        );
+    }
+
+    let mut entries: Vec<_> = image_directories
+        .iter()
+        .cloned()
+        .map(|path| permissions::ImageEntry {
+            path,
+            kind: permissions::ImageEntryKind::Directory,
+        })
+        .collect();
+    for file in files {
+        if image_directories.contains(&file.destination) {
+            return Err(format!(
+                "image destination '{}' is both a file and a directory",
+                file.destination.display()
+            ));
+        }
+        entries.push(permissions::ImageEntry {
+            path: file.destination.clone(),
+            kind: permissions::ImageEntryKind::File(file.class),
+        });
+    }
+    Ok(entries)
+}
+
+fn insert_directory_and_parents(directories: &mut BTreeSet<PathBuf>, path: &Path) {
+    let mut current = Some(path);
+    while let Some(directory) = current {
+        directories.insert(directory.to_path_buf());
+        if directory == Path::new("/") {
+            break;
+        }
+        current = directory.parent();
+    }
+}
+
 fn validate_directories(directories: &[String]) -> Result<(), String> {
     for directory in directories {
         let path = Path::new(directory);
@@ -509,27 +606,14 @@ fn main() {
     let config: Config = serde_yaml::from_reader(config_file).expect("Failed to parse config file");
     validate_directories(&config.directories).unwrap_or_else(|err| panic!("{err}"));
     validate_static_dirs(motorh, &config.static_dirs).unwrap_or_else(|err| panic!("{err}"));
+    let policy = permissions::PermissionPolicy::load(config_path, &config.permission_policy)
+        .unwrap_or_else(|error| panic!("{error}"));
 
     let bin_dir = motorh.join("build").join("bin").join(deb_rel);
     if !bin_dir.is_dir() {
         eprintln!("'{bin_dir:?}': not a directory.\n");
         print_usage_and_exit()
     }
-
-    let img_dir = motorh.join("vm_images").join(deb_rel);
-
-    let tmp_img_dir = motorh.join("build").join("vm_images").join(deb_rel);
-    clear_dir_or_exit(&tmp_img_dir);
-
-    let initrd = img_dir.join("initrd");
-    create_initrd(
-        &initrd,
-        &bin_dir.join("kloader.bin"),
-        &bin_dir.join("kernel"),
-        &bin_dir.join("sys-io"),
-    );
-
-    std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
 
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
@@ -556,12 +640,32 @@ fn main() {
         let path = motorh.join(&dir.source);
         assert!(path.is_dir(), "source image directory {path:?} is absent");
         let destination = Path::new(&dir.destination);
-        assert!(
-            destination.is_absolute(),
-            "source image destination {destination:?} is not absolute"
-        );
+        validate_directories(std::slice::from_ref(&dir.destination))
+            .unwrap_or_else(|error| panic!("source image destination: {error}"));
         add_source_dir(&mut files, path, destination);
     }
+
+    let files = resolve_image_files(&files, &config.directories, &policy).unwrap_or_else(|error| {
+        panic!(
+            "image config '{}', permission policy '{}': {error}",
+            config_path.display(),
+            config.permission_policy
+        )
+    });
+
+    let img_dir = motorh.join("vm_images").join(deb_rel);
+    let tmp_img_dir = motorh.join("build").join("vm_images").join(deb_rel);
+    clear_dir_or_exit(&tmp_img_dir);
+
+    let initrd = img_dir.join("initrd");
+    create_initrd(
+        &initrd,
+        &bin_dir.join("kloader.bin"),
+        &bin_dir.join("kernel"),
+        &bin_dir.join("sys-io"),
+    );
+
+    std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
 
     let fs_partition = tmp_img_dir.join("fs_part");
     match config.filesystem.as_str() {
@@ -569,8 +673,10 @@ fn main() {
             &fs_partition,
             &config.directories,
             &files,
+            &policy,
             config.data_partition_size_mb,
-        ),
+        )
+        .unwrap_or_else(|error| panic!("failed to create Motor FS partition: {error}")),
         _ => panic!("Unknown filesystem: {}", config.filesystem),
     }
 
@@ -601,26 +707,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn image_files_preserve_the_host_executable_bit() {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let executable = std::env::current_exe().unwrap();
-
-        assert_eq!(
-            image_file_permissions(&source).unwrap(),
-            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rw)
-        );
-        assert_eq!(
-            image_file_permissions(&executable).unwrap(),
-            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx)
-        );
-    }
+    use async_fs::FileSystem;
 
     #[test]
     fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
+        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
         assert_eq!(config.img_name, "motor-os.qcow2");
         assert_eq!(config.image_format, ImageFormat::Qcow2);
         assert_eq!(config.data_partition_size_mb, 256);
@@ -656,6 +749,7 @@ mod tests {
     fn dev_image_requires_the_native_toolchain() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
 
+        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
         assert_eq!(config.img_name, "motor-os-dev.qcow2");
         assert_eq!(config.image_format, ImageFormat::Qcow2);
         assert!(config
@@ -720,6 +814,7 @@ mod tests {
     fn base_image_has_no_dns_or_dev_content() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
 
+        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
         assert_eq!(config.img_name, "motor-os-base.img");
         assert_eq!(config.image_format, ImageFormat::Raw);
         assert_eq!(config.data_partition_size_mb, 64);
@@ -733,6 +828,19 @@ mod tests {
             .iter()
             .filter(|path| path.starts_with("/system/bin/"))
             .all(|path| !path.contains("services")));
+    }
+
+    #[test]
+    fn every_image_config_requires_the_shared_policy() {
+        for yaml in [
+            include_str!("../motor-os-base.yaml"),
+            include_str!("../motor-os.yaml"),
+            include_str!("../motor-os-dev.yaml"),
+            include_str!("../motor-os-system-tty.yaml"),
+        ] {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
+        }
     }
 
     #[test]
@@ -776,6 +884,153 @@ mod tests {
             files.keys().next().unwrap(),
             &root.join("second/system/cfg/rush.cfg")
         );
+
+        let policy_path = root.join("permissions.yaml");
+        fs::write(
+            &policy_path,
+            r#"default:
+  directory: "rwxr-xr-x"
+  file: "rw-r--r--"
+  script: "rwxr-xr-x"
+  elf: "r-xr-xr-x"
+trees: []
+entries: []
+"#,
+        )
+        .unwrap();
+        let policy = permissions::PermissionPolicy::load(
+            &root.join("image.yaml"),
+            policy_path.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        let resolved = resolve_image_files(&files, &[], &policy).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].source, root.join("second/system/cfg/rush.cfg"));
+        assert_eq!(
+            permissions::mode_string(resolved[0].permissions),
+            "rw-r--r--"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn creates_and_reopens_a_policy_constrained_motor_fs() {
+        let root = std::env::temp_dir().join(format!(
+            "motor-imager-policy-fixture-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir(&root).unwrap();
+
+        let policy_path = root.join("permissions.yaml");
+        fs::write(
+            &policy_path,
+            r#"default:
+  directory: "rwxr-xr-x"
+  file: "rw-r--r--"
+  script: "rwxr-xr-x"
+  elf: "r-xr-xr-x"
+trees:
+  - path: "/system/bin"
+    directory: "rwxr-xr-x"
+    file: "rw-r--r--"
+    script: "r-xr-xr-x"
+    elf: "r-xr-xr-x"
+  - path: "/user/bin"
+    directory: "rwxrwxr-x"
+    file: "rw-rw-r--"
+    script: "rwxrwxr-x"
+    elf: "r-xr-xr-x"
+  - path: "/devtools/bin"
+    directory: "rwxr-xr-x"
+    file: "rw-r--r--"
+    script: "rwxrwxr-x"
+    elf: "r-xr-xr-x"
+entries: []
+"#,
+        )
+        .unwrap();
+        let policy = permissions::PermissionPolicy::load(
+            &root.join("image.yaml"),
+            policy_path.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+
+        let system_script = root.join("system-script");
+        fs::write(&system_script, b"#!/system/bin/rush\n").unwrap();
+        let user_elf = root.join("user-elf");
+        let mut elf = [0_u8; 64];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        fs::write(&user_elf, elf).unwrap();
+        let dev_script = root.join("dev-script");
+        fs::write(&dev_script, b"#!/system/bin/rush\n").unwrap();
+        for path in [&system_script, &user_elf, &dev_script] {
+            let mut mode = fs::metadata(path).unwrap().permissions();
+            mode.set_mode(0o755);
+            fs::set_permissions(path, mode).unwrap();
+        }
+
+        let raw_files = BTreeMap::from([
+            (system_script, "/system/bin/script".to_owned()),
+            (user_elf, "/user/bin/elf".to_owned()),
+            (dev_script, "/devtools/bin/script".to_owned()),
+        ]);
+        let directories = vec![
+            "/system/bin".to_owned(),
+            "/user/bin".to_owned(),
+            "/devtools/bin".to_owned(),
+        ];
+        let files = resolve_image_files(&raw_files, &directories, &policy).unwrap();
+        let partition = root.join("partition");
+        create_motorfs_partition(&partition, &directories, &files, &policy, 1).unwrap();
+
+        tokio::runtime::LocalRuntime::new()
+            .unwrap()
+            .block_on(async {
+                let device = async_fs::file_block_device::AsyncFileBlockDevice::open(
+                    camino::Utf8Path::from_path(&partition).unwrap(),
+                )
+                .await?;
+                let fs = motor_fs::MotorFs::open(Box::new(device)).await?;
+
+                async fn entry(
+                    fs: &motor_fs::MotorFs<async_fs::file_block_device::AsyncFileBlockDevice>,
+                    path: &Path,
+                ) -> io::Result<async_fs::EntryId> {
+                    let mut id = motor_fs::ROOT_DIR_ID;
+                    for component in path.components() {
+                        let Component::Normal(name) = component else {
+                            continue;
+                        };
+                        id = fs
+                            .stat(async_fs::Role::System, id, name.to_str().unwrap())
+                            .await?
+                            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+                            .0;
+                    }
+                    Ok(id)
+                }
+
+                for (path, expected) in [
+                    ("/", "rwxr-xr-x"),
+                    ("/system/bin/script", "r-xr-xr-x"),
+                    ("/user/bin/elf", "r-xr-xr-x"),
+                    ("/devtools/bin/script", "rwxrwxr-x"),
+                ] {
+                    let id = entry(&fs, Path::new(path)).await?;
+                    let mode = fs
+                        .metadata(async_fs::Role::System, id)
+                        .await?
+                        .permissions()?;
+                    assert_eq!(permissions::mode_string(mode), expected, "{path}");
+                }
+                Ok::<(), io::Error>(())
+            })
+            .unwrap();
+
         fs::remove_dir_all(root).unwrap();
     }
 

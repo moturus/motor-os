@@ -10,21 +10,21 @@ use motor_fs::MotorFs;
 pub async fn motor_fs_create_dir_all(
     fs: &mut MotorFs<AsyncFileBlockDevice>,
     path: &Path,
+    policy: &crate::permissions::PermissionPolicy,
 ) -> std::io::Result<EntryId> {
     let components: Vec<_> = path.components().collect();
 
     let mut parent_id = motor_fs::ROOT_DIR_ID;
+    let mut destination = std::path::PathBuf::from("/");
 
     for c in components {
         let filename = c.as_os_str().to_str().unwrap();
         if filename.is_empty() || filename == "/" {
             continue;
         }
+        destination.push(filename);
 
-        let stat_result = fs
-            .stat(async_fs::Role::System, parent_id, filename)
-            .await
-            .unwrap_or(None);
+        let stat_result = fs.stat(async_fs::Role::System, parent_id, filename).await?;
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {
@@ -33,10 +33,9 @@ pub async fn motor_fs_create_dir_all(
                 parent_id,
                 async_fs::EntryKind::Directory,
                 filename,
-                async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
+                policy.directory_permissions(&destination),
             )
-            .await
-            .unwrap()
+            .await?
         };
     }
 

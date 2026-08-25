@@ -1,3 +1,4 @@
+permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
   - "/system/services/strobe"
