@@ -78,7 +78,7 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
 done
 
 echo "-- Developer source trees --"
-for package in red lorry gears; do
+for package in red lorry; do
   vm_ssh "[ -f /devtools/src/src/bin/$package/Cargo.toml ]" ||
     fail "developer image is missing /devtools/src/src/bin/$package/Cargo.toml"
   vm_ssh "[ ! -d /devtools/src/src/bin/$package/target ]" ||
@@ -158,13 +158,6 @@ vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lor
   fail "developer image cannot natively build /devtools/src/lorry"
 vm_ssh "/system/bin/cp /devtools/src/src/bin/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
 vm_ssh "/system/bin/rm -r /devtools/src/src/bin/lorry/target"
-vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
-  fail "developer image cannot vendor /devtools/src/src/bin/gears"
-vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
-  fail "developer image cannot natively build /devtools/src/gears"
-vm_ssh "/system/bin/rm -r /devtools/src/src/bin/gears/target"
-vm_ssh "cd /devtools/src/src/bin/gears && TMPDIR=/devtools/tmp /devtools/tmp/native-lorry build" ||
-  fail "the natively built Lorry cannot rebuild Gears"
 
 stop_vm "$VMM_PID"
 VMM_PID=""

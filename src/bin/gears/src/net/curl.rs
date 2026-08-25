@@ -70,6 +70,9 @@ impl CurlTransport {
     /// Spawn curl with the request's argv and environment.
     fn spawn(&self, req: &HttpRequest) -> Result<Child, NetError> {
         let mut cmd = Command::new(&self.program);
+        // The transport helper must not become Gears' foreground terminal child.
+        #[cfg(not(unix))]
+        cmd.env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true");
         if self.verbose_child
             && let Some(flag) = verbosity_flag(self.verbosity)
         {

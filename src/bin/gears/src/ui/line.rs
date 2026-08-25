@@ -139,11 +139,7 @@ impl Editor {
                 Some(Read::Line(text))
             }
             // ^C, said the way the terminal driver would have said it.
-            0x03 => {
-                self.line.clear();
-                echo.extend_from_slice(b"^C\n");
-                Some(Read::Interrupted)
-            }
+            0x03 => Some(self.interrupt(echo)),
             // ^P toggles the scheduling pause without discarding a partially
             // typed future prompt.
             0x10 => {
@@ -185,6 +181,15 @@ impl Editor {
                 None
             }
         }
+    }
+
+    /// Apply a Ctrl+C control event that arrived outside the byte stream.
+    pub(crate) fn interrupt(&mut self, echo: &mut Vec<u8>) -> Read {
+        self.line.clear();
+        self.swallow_lf = false;
+        self.escape = Escape::No;
+        echo.extend_from_slice(b"^C\n");
+        Read::Interrupted
     }
 
     /// Erase the last character: from the line, and from the screen. One
@@ -286,6 +291,16 @@ mod tests {
         assert_eq!(read, Read::Interrupted);
         assert!(echoed.ends_with("^C\n"), "{echoed}");
         // The dropped text is not waiting inside the next line.
+        assert_eq!(typed(&mut editor, b"y\r").0, Read::Line("y".to_string()));
+    }
+
+    #[test]
+    fn ctrl_c_event_interrupts_and_drops_the_line() {
+        let mut editor = Editor::new();
+        let mut echo = Vec::new();
+        assert_eq!(editor.feed(b'x', &mut echo), None);
+        assert_eq!(editor.interrupt(&mut echo), Read::Interrupted);
+        assert_eq!(String::from_utf8(echo).unwrap(), "x^C\n");
         assert_eq!(typed(&mut editor, b"y\r").0, Read::Line("y".to_string()));
     }
 

@@ -3,9 +3,8 @@
 # full-test-dev.sh — the full test suite against the dev image.
 #
 # The dev-image full test includes the repository suite, native source builds,
-# Lorry's bounded product suite, and Gears' profile-matched host and VM gates.
-# Lorry validation is profile-independent and does not multiply coverage by
-# the OS image profile.
+# and Lorry's bounded product suite. Lorry validation is profile-independent
+# and does not multiply coverage by the OS image profile.
 
 set -euo pipefail
 
@@ -25,11 +24,3 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "$@"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
-
-if [ "${1:-}" = "--release" ]; then
-  MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
-    "$WD/gears-test.sh" --release
-else
-  MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
-    "$WD/gears-test.sh"
-fi

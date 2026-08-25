@@ -105,8 +105,19 @@ impl<R: BufRead> Owner<R> {
         }
 
         let mut bytes = [0u8; 2048];
-        let Some(read) = live.source.read(&mut bytes, timeout)? else {
-            return Ok(None);
+        let read = match live.source.read(&mut bytes, timeout) {
+            Ok(Some(read)) => read,
+            Ok(None) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                if let Some(editor) = &mut self.editor {
+                    let mut echo = Vec::new();
+                    editor.interrupt(&mut echo);
+                    renderer.echo(&echo)?;
+                    renderer.user_typed();
+                }
+                return Ok(Some(Action::Cancel));
+            }
+            Err(error) => return Err(error),
         };
         if read == 0 {
             return Ok(Some(Action::End));
