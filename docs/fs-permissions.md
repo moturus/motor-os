@@ -306,13 +306,15 @@ after they are accepted.
    unnecessary authority. Testing whether the shipped scratch directory
    exists before creating it preserves the role boundary and still supports a
    caller-selected, absent `TMPDIR`.
-10. **Denial acceptance tests assert filesystem postconditions.** The current
-    sysbox `mkdir`, `mv`, and `rm` applets print a permission diagnostic but
-    may still return success. The tests therefore verify that a forbidden root
-    entry or renamed script is absent and that a forbidden deletion leaves the
-    script present. This tests the filesystem authority boundary directly
-    without making this image-policy change depend on the separate applet exit
-    status defect.
+10. **Denial acceptance tests assert filesystem postconditions.** During
+    implementation, the sysbox `mkdir` and `mv` applets printed a permission
+    diagnostic but returned success; `rm` already returned failure correctly.
+    `mkdir`, `mv`, and the applet with the same defect, `rmdir`, now return
+    failure when their filesystem operation fails. The tests assert both the
+    command status and the resulting filesystem state: a forbidden root entry
+    or renamed script remains absent, while a forbidden directory or script
+    deletion leaves its target present. The postcondition checks remain as
+    direct verification of the filesystem authority boundary.
 11. **The PID-kill systest identifies its child by PID.** Process debug names
     are limited to 32 bytes, and the standard-image test path
     `/user/tmp/motor-tests/tests/systest` is longer than that limit. The old

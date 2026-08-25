@@ -353,9 +353,16 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
       -i "$WD/test.key" motor@192.168.4.2
 fi
 
-vm_ssh /system/bin/mkdir /fs-permissions-root-probe || true
+if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
+  fail "mkdir returned success after a denied root-level creation"
+fi
 vm_ssh "[ ! -e /fs-permissions-root-probe ]" ||
   fail "Interactive session created a root-level directory"
+if vm_ssh /system/bin/rmdir /system/tmp; then
+  fail "rmdir returned success after a denied system-directory removal"
+fi
+vm_ssh "[ -d /system/tmp ]" ||
+  fail "Interactive session removed /system/tmp"
 vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
 vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
@@ -397,10 +404,14 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
     fail "Interactive session could not edit $editable_script in place"
   vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
     fail "could not restore $editable_script after its write probe"
-  vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed" || true
+  if vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed"; then
+    fail "mv returned success after a denied installed-script rename"
+  fi
   vm_ssh "[ -e $editable_script ] && [ ! -e $editable_script.renamed ]" ||
     fail "Interactive session renamed $editable_script"
-  vm_ssh /system/bin/rm "$editable_script" || true
+  if vm_ssh /system/bin/rm "$editable_script"; then
+    fail "rm returned success after a denied installed-script deletion"
+  fi
   vm_ssh "[ -e $editable_script ]" ||
     fail "Interactive session deleted $editable_script"
   vm_ssh /system/bin/rm "$saved_script"

@@ -44,6 +44,7 @@ pub fn do_command(args: &[String]) {
         new_path.push(fname);
         if let Err(err) = std::fs::rename(old_path, new_path.as_path()) {
             eprintln!("mv failed: {err:?}");
+            std::process::exit(1);
         }
 
         return;
@@ -51,5 +52,6 @@ pub fn do_command(args: &[String]) {
 
     if let Err(err) = std::fs::rename(old_path, std::path::Path::new(new)) {
         eprintln!("mv failed: {err:?}");
+        std::process::exit(1);
     }
 }

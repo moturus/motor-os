@@ -12,5 +12,6 @@ pub fn do_command(args: &[String]) {
 
     if let Err(err) = std::fs::create_dir(std::path::Path::new(&args[1])) {
         eprintln!("mkdir failed: {err:?}");
+        std::process::exit(1);
     }
 }
