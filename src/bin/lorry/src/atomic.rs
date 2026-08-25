@@ -147,12 +147,14 @@ impl AtomicDirectory {
     }
 
     fn create(parent: &Path, mut next_name: impl FnMut() -> String) -> Result<Self> {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::failure(format!(
-                "failed to create output parent `{}`: {error}",
-                parent.display()
-            ))
-        })?;
+        if !parent.is_dir() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::failure(format!(
+                    "failed to create output parent `{}`: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
         for _ in 0..100 {
             let path = parent.join(next_name());
             match create_private_directory(&path) {

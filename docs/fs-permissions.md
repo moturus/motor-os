@@ -341,3 +341,12 @@ after they are accepted.
     `create_dir_all` semantics is outside image-policy scope. A shared systest
     helper therefore skips creation when `TMPDIR` is already a directory and
     retains creation for standalone runs that select an absent path.
+14. **Lorry likewise preserves a sealed parent of an existing staging
+    directory.** Lorry's atomic-output helper used `create_dir_all` on every
+    staging parent, including the existing `/devtools/tmp` used for admission,
+    review, and vendoring scratch. Motor FS consequently required Interactive
+    create permission on `/devtools` before Lorry could create a private child
+    inside the writable scratch directory. The helper now creates the parent
+    only when it is not already a directory. This preserves absent custom
+    staging paths, Lorry's private-child and atomic-publication behavior, and
+    the System-owned `/devtools` boundary.
