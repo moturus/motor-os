@@ -122,6 +122,10 @@ for generated in llvm rustc rg libc; do
 done
 toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "complete assembly was not reused"
+MOTOR_OS_REV=0123456789abcdef0123456789abcdef01234567
+toolchain_claim_assembly
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] ||
+	fail "unkeyed Motor OS revision prevented assembly reuse"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"

@@ -134,6 +134,7 @@ toolchain_validate_assembly_outputs() {
 }
 
 toolchain_render_assembly_manifest() {
+	local producer_motor_os_rev="${1:-$MOTOR_OS_REV}"
 	cat <<EOF
 schema=$MOTOR_GENERATED_MANIFEST_SCHEMA
 toolchain_key=$MOTOR_TOOLCHAIN_KEY
@@ -167,7 +168,7 @@ stdlib_moto_rt_version=$LOCKED_MOTO_RT_VERSION
 stdlib_moto_rt_checksum=$LOCKED_MOTO_RT_CHECKSUM
 stdlib_moto_rt_package_comparison=$MOTO_RT_PACKAGE_COMPARISON
 local_moto_rt_version=$LOCAL_MOTO_RT_VERSION
-motor_os_rev=$MOTOR_OS_REV
+motor_os_rev=$producer_motor_os_rev
 motor_os_runtime_tree=$MOTOR_OS_RUNTIME_TREE
 mlibc_rev=$MOTOR_MLIBC_REV
 mlibc_tree_state=$MOTOR_MLIBC_TREE_STATE
@@ -193,12 +194,20 @@ toolchain_generated_manifest_paths() {
 
 toolchain_validate_assembly_manifest() {
 	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" expected image_manifest
+	local producer_motor_os_rev
 	toolchain_validate_assembly_outputs || return
 	[ -f "$manifest" ] || toolchain_die "assembly manifest is missing: $manifest" || return
 	[ "$(stat -c %a "$manifest")" = 444 ] ||
 		toolchain_die "assembly manifest is writable: $manifest" || return
+	producer_motor_os_rev="$(sed -n 's/^motor_os_rev=//p' "$manifest")"
+	if ! printf '%s\n' "$producer_motor_os_rev" | grep -Eq '^[0-9a-f]{40}$'; then
+		toolchain_die "assembly manifest has an invalid producer Motor OS revision: $manifest"
+		return 1
+	fi
 	expected="$(mktemp)"
-	toolchain_render_assembly_manifest > "$expected"
+	# The root revision is provenance, not an assembly-key input. Preserve the
+	# producer revision when an unchanged runtime closure reuses this assembly.
+	toolchain_render_assembly_manifest "$producer_motor_os_rev" > "$expected"
 	if ! cmp -s "$expected" "$manifest"; then
 		rm -f "$expected"
 		toolchain_die "assembly manifest does not match the selected inputs: $manifest"
