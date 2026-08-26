@@ -160,6 +160,13 @@ libc_config_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells
 EOF
 }
 
+toolchain_generated_manifest_paths() {
+	local root
+	for root in llvm rustc rg libc; do
+		printf '%s/%s\n' "$ASSEMBLY_IMAGE_ROOT/$root" devtools/toolchain/manifest
+	done
+}
+
 toolchain_validate_assembly_manifest() {
 	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" expected image_manifest
 	toolchain_validate_assembly_outputs || return
@@ -174,9 +181,12 @@ toolchain_validate_assembly_manifest() {
 		return 1
 	fi
 	rm -f "$expected"
-	image_manifest="$ASSEMBLY_IMAGE_ROOT/rustc/devtools/toolchain/manifest"
-	[ -f "$image_manifest" ] && cmp -s "$manifest" "$image_manifest" ||
-		toolchain_die "on-image assembly manifest does not match: $image_manifest"
+	while IFS= read -r image_manifest; do
+		[ -f "$image_manifest" ] && cmp -s "$manifest" "$image_manifest" || {
+			toolchain_die "generated-root manifest does not match: $image_manifest"
+			return 1
+		}
+	done < <(toolchain_generated_manifest_paths)
 }
 
 toolchain_claim_assembly() {
@@ -206,10 +216,11 @@ toolchain_complete_assembly() {
 	toolchain_render_assembly_manifest > "$temporary"
 	chmod 0444 "$temporary"
 	mv "$temporary" "$manifest"
-	image_manifest="$ASSEMBLY_IMAGE_ROOT/rustc/devtools/toolchain/manifest"
-	mkdir -p "$(dirname "$image_manifest")"
-	cp "$manifest" "$image_manifest"
-	chmod 0444 "$image_manifest"
+	while IFS= read -r image_manifest; do
+		mkdir -p "$(dirname "$image_manifest")"
+		cp "$manifest" "$image_manifest"
+		chmod 0444 "$image_manifest"
+	done < <(toolchain_generated_manifest_paths)
 	toolchain_validate_assembly_manifest || return
 	rmdir "$lock"
 }

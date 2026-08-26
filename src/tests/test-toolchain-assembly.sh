@@ -96,11 +96,23 @@ printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
 mkdir "${ASSEMBLY_ROOT}.building"
 toolchain_complete_assembly
+for generated in llvm rustc rg libc; do
+	manifest="$ASSEMBLY_IMAGE_ROOT/$generated/devtools/toolchain/manifest"
+	[ -f "$manifest" ] || fail "$generated generated root lacks a manifest"
+	cmp -s "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" "$manifest" ||
+		fail "$generated generated root has the wrong manifest"
+done
 toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "complete assembly was not reused"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"
+fi
+printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+chmod u+w "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
+if toolchain_claim_assembly 2>/dev/null; then
+	fail "assembly with a changed generated-root manifest was accepted"
 fi
 
 echo "test-toolchain-assembly PASS"
