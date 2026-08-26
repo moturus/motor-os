@@ -55,9 +55,12 @@ if [ "${LORRY_TEST_BUDGET_ACTIVE:-0}" -eq 0 ]; then
     exit "$status"
 fi
 
-TOOLCHAIN="nightly-2026-06-19"
-CARGO="$(rustup which cargo --toolchain "$TOOLCHAIN")"
-RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
+"$SCRIPT_DIR/current-toolchain-contract.sh"
+# shellcheck source=current-toolchain.sh
+source "$SCRIPT_DIR/current-toolchain.sh"
+lorry_load_current_toolchain
+CARGO="$LORRY_TEST_CARGO"
+RUSTC="$LORRY_TEST_RUSTC"
 
 echo "== Lorry unit and integration-style Rust tests =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" test \
