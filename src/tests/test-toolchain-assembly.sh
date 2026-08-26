@@ -80,8 +80,26 @@ toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 # A complete keyed assembly is reusable; partial or changed staging is not.
 MOTOR_RUSTUP_TOOLCHAIN=motor-test
 MOTOR_SOURCE_MODE=managed
+SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
+SELECTED_RUST_VERSION="$UPSTREAM_RUST_VERSION"
+SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"
+SELECTED_STAGE0_REV="$UPSTREAM_STAGE0_REV"
+SELECTED_RUST_LLVM_BASE_REV="$RUST_LLVM_BASE_REV"
+SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
+SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
 EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
 EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
+MOTOR_RUST_TREE_STATE=clean
+MOTOR_LLVM_TREE_STATE=clean
+AUTHORING_SOURCE_DIGEST=none
+START_RUST_ROOT_LOCK_SHA256="$MOTOR_RUST_ROOT_LOCK_SHA256"
+START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
+BOOTSTRAP_CONFIG_DIGEST=test-bootstrap
+LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
+LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
+MOTO_RT_PACKAGE_COMPARISON=exact
+VALIDATED_RUSTC_VERBOSE='rustc test verbose'
+VALIDATED_CARGO_VERBOSE='cargo test verbose'
 mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
 	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin" \
@@ -113,6 +131,13 @@ chmod u+w "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with a changed generated-root manifest was accepted"
+fi
+cp "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" \
+	"$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
+chmod 0444 "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
+SELECTED_MOTOR_CARGO_REV=wrong
+if toolchain_claim_assembly 2>/dev/null; then
+	fail "assembly with a changed Cargo identity was accepted"
 fi
 
 echo "test-toolchain-assembly PASS"
