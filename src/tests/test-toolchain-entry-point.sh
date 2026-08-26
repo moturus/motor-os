@@ -27,6 +27,10 @@ esac
 # tests and must not execute provisioning.
 . "$ROOT_DIR/src/build-base.sh"
 declare -F host_networking_ready >/dev/null || fail "private helper was not sourceable"
+declare -F build_rust_toolchain >/dev/null && fail "private helper still builds Rust"
+case "$(declare -f install_rust)" in
+  *'rustup default'*|*'rustup component add'*) fail "host helper changes the Rust selection" ;;
+esac
 . "$ROOT_DIR/src/build-motor-os.sh"
 declare -F prepare_exact_sources >/dev/null || fail "exact source orchestrator is missing"
 
