@@ -231,6 +231,14 @@ pub extern "C" fn moto_rt_is_terminal(fd: i32) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_set_file_perm(fd: i32, perm: u64) -> i32 {
+    match moto_rt::fs::set_file_perm(fd, perm) {
+        Ok(()) => 0,
+        Err(error) => err64(error) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moto_rt_mkdir(path: *const u8, path_len: usize) -> i32 {
     let path = match str_arg(path, path_len) {
         Ok(s) => s,
