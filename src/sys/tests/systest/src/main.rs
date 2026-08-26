@@ -773,8 +773,10 @@ fn test_caps() {
     };
     let sys_tty = active_named("/system/services/sys-tty");
     let russhd = active_named("/system/services/russhd");
+    let strobe = active_named("/system/services/strobe");
     assert_eq!(ProcessRole::Interactive, role_for(sys_tty.pid));
     assert_eq!(ProcessRole::Interactive, role_for(russhd.pid));
+    assert_eq!(ProcessRole::System, role_for(strobe.pid));
 
     let console_shell = processes
         .iter()

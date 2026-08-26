@@ -221,6 +221,19 @@ impl PermissionPolicy {
                     path.display()
                 ));
             }
+
+            if path.starts_with("/system/logs")
+                && matches!(
+                    kind,
+                    ImageEntryKind::File(FileClass::Script | FileClass::Elf)
+                )
+            {
+                return Err(format!(
+                    "permission policy '{}': executable '{}' may not be shipped under /system/logs",
+                    self.source.display(),
+                    path.display()
+                ));
+            }
         }
         Ok(())
     }
@@ -481,6 +494,50 @@ trees:
             ),
             "rw-r-----"
         );
+        assert_eq!(
+            mode_string(policy.directory_permissions(Path::new("/system/logs"))),
+            "rwxr-x---"
+        );
+        assert_eq!(
+            mode_string(
+                policy.file_permissions(Path::new("/system/logs/a.log"), FileClass::Regular)
+            ),
+            "rw-r-----"
+        );
+        assert_eq!(
+            mode_string(policy.file_permissions(Path::new("/system/logs/a"), FileClass::Script)),
+            "r-xr-----"
+        );
+        assert_eq!(
+            mode_string(policy.file_permissions(Path::new("/system/logs/a"), FileClass::Elf)),
+            "r-xr-----"
+        );
+    }
+
+    #[test]
+    fn production_policy_rejects_executables_under_logs() {
+        let policy = parse(include_str!("../motor-os-permissions.yaml")).unwrap();
+        let mut entries = [
+            ImageEntry {
+                path: PathBuf::from("/system/cfg/sshd.toml"),
+                kind: ImageEntryKind::File(FileClass::Regular),
+            },
+            ImageEntry {
+                path: PathBuf::from("/system/cfg/ssl/ssl-key.pem"),
+                kind: ImageEntryKind::File(FileClass::Regular),
+            },
+            ImageEntry {
+                path: PathBuf::from("/system/logs/not-a-log"),
+                kind: ImageEntryKind::File(FileClass::Script),
+            },
+        ];
+        for class in [FileClass::Script, FileClass::Elf] {
+            entries[2].kind = ImageEntryKind::File(class);
+            assert!(policy
+                .validate_image(&entries)
+                .unwrap_err()
+                .contains("may not be shipped under /system/logs"));
+        }
     }
 
     #[test]
