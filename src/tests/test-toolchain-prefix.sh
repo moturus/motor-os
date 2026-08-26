@@ -83,6 +83,9 @@ toolchain)
 which)
   [ -f "$RUSTUP_TEST_STATE" ] || exit 1
   printf '%s/bin/%s\n' "$(cat "$RUSTUP_TEST_STATE")" "$2" ;;
+run)
+  [ -f "$RUSTUP_TEST_STATE" ] || exit 1
+  "$(cat "$RUSTUP_TEST_STATE")/bin/$3" "${@:4}" ;;
 esac
 EOF
 chmod +x "$fake_rustup"

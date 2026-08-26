@@ -121,6 +121,12 @@ toolchain_validate_rustup_link() {
 		[ "$(readlink -f "$resolved")" = "$(readlink -f "$prefix/bin/$binary")" ] ||
 			toolchain_die "rustup resolved $binary outside the keyed prefix" || return
 	done
+	[ "$($rustup run "$MOTOR_RUSTUP_TOOLCHAIN" rustc -vV)" = \
+		"$VALIDATED_RUSTC_VERBOSE" ] ||
+		toolchain_die "rustup execution selected a different rustc" || return
+	[ "$($rustup run "$MOTOR_RUSTUP_TOOLCHAIN" cargo -Vv)" = \
+		"$VALIDATED_CARGO_VERBOSE" ] ||
+		toolchain_die "rustup execution selected a different Cargo" || return
 }
 
 toolchain_register_prefix() {
@@ -142,6 +148,7 @@ toolchain_claim_prefix() {
 		return 0
 	fi
 	[ ! -e "$prefix" ] || toolchain_die "toolchain prefix path is not a directory: $prefix" || return
+	mkdir -p "$(dirname "$prefix")"
 	if ! mkdir "$lock" 2>/dev/null; then
 		toolchain_die "toolchain prefix has an active or abandoned producer lock: $lock"
 		return 1
