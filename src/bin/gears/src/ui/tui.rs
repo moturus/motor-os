@@ -11,10 +11,7 @@ use crossterm::event::{
     KeyEventKind, KeyModifiers,
 };
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
-use crossterm::terminal::{
-    self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-    enable_raw_mode,
-};
+use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use crossterm::{execute, queue};
 
 use crate::runtime::{Approver, Event, Observer, Permission, Runtime, SessionSummary};
@@ -31,40 +28,44 @@ pub fn run(
     interactive: bool,
     models: &[String],
 ) -> Result<(), String> {
-    let _guard = Screen::enter()?;
+    let mut screen = Screen::enter()?;
     let mut app = App::new(runtime);
-    for notice in runtime.take_startup_notices() {
-        app.apply(Event::Notice(notice));
-    }
-    if let Some(prompt) = initial {
-        app.push(Kind::User, prompt.clone(), false);
-        run_turn(runtime, prompt, &mut app)?;
-        if !interactive {
+    let result = (|| {
+        for notice in runtime.take_startup_notices() {
+            app.apply(Event::Notice(notice));
+        }
+        if let Some(prompt) = initial {
+            app.push(Kind::User, prompt.clone(), false);
+            run_turn(runtime, prompt, &mut app)?;
+            if !interactive {
+                app.render()?;
+                return Ok(());
+            }
+        }
+        while !app.quit {
             app.render()?;
-            return Ok(());
-        }
-    }
-    while !app.quit {
-        app.render()?;
-        let input = event::read().map_err(|error| error.to_string())?;
-        let Some(action) = app.edit(input) else {
-            continue;
-        };
-        match action {
-            Action::Quit => app.quit = true,
-            Action::Submit(text) if text.starts_with('/') => {
-                handle_command(runtime, &mut app, &text, models)?
-            }
-            Action::Submit(text) if !text.trim().is_empty() => {
-                app.push(Kind::User, text.clone(), false);
-                if let Err(error) = run_turn(runtime, text, &mut app) {
-                    app.push(Kind::Error, error, false);
+            let input = event::read().map_err(|error| error.to_string())?;
+            let Some(action) = app.edit(input) else {
+                continue;
+            };
+            match action {
+                Action::Quit => app.quit = true,
+                Action::Submit(text) if text.starts_with('/') => {
+                    handle_command(runtime, &mut app, &text, models)?
                 }
+                Action::Submit(text) if !text.trim().is_empty() => {
+                    app.push(Kind::User, text.clone(), false);
+                    if let Err(error) = run_turn(runtime, text, &mut app) {
+                        app.push(Kind::Error, error, false);
+                    }
+                }
+                Action::Submit(_) => {}
             }
-            Action::Submit(_) => {}
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    let leave = screen.leave(&app.session.id);
+    result.and(leave)
 }
 
 enum Action {
@@ -72,31 +73,44 @@ enum Action {
     Quit,
 }
 
-struct Screen;
+struct Screen {
+    left: bool,
+}
 
 impl Screen {
     fn enter() -> Result<Self, String> {
         crossterm::event::enable_ctrl_c_events().map_err(|error| error.to_string())?;
         enable_raw_mode().map_err(|error| error.to_string())?;
-        execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            cursor::Hide
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(Self)
+        if let Err(error) = execute!(io::stdout(), EnableBracketedPaste, cursor::Hide) {
+            let _ = disable_raw_mode();
+            return Err(error.to_string());
+        }
+        Ok(Self { left: false })
+    }
+
+    fn leave(&mut self, session: &str) -> Result<(), String> {
+        let (width, height) = terminal::size().map_err(|error| error.to_string())?;
+        let raw = disable_raw_mode();
+        let output = {
+            let mut output = io::stdout().lock();
+            paint_exit(&mut output, width, height, session).and_then(|()| output.flush())
+        };
+        self.left = true;
+        raw.and(output).map_err(|error| error.to_string())
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        if self.left {
+            return;
+        }
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
+            ResetColor,
             cursor::Show,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
+            DisableBracketedPaste
         );
     }
 }
@@ -459,7 +473,7 @@ impl App {
             let target = &mut frame.lines[layout.editor_start + shown];
             target.push(
                 if self.input_enabled {
-                    Color::Green
+                    STATUS_COLOR
                 } else {
                     Color::DarkGrey
                 },
@@ -542,6 +556,21 @@ fn paint_frame<W: Write>(output: &mut W, previous: Option<&Frame>, next: &Frame)
         None => queue!(output, cursor::Hide)?,
     }
     Ok(())
+}
+
+fn paint_exit<W: Write>(output: &mut W, width: u16, height: u16, session: &str) -> io::Result<()> {
+    let message = single_line(&format!("Motor OS Gears session {session} exited."));
+    queue!(
+        output,
+        cursor::MoveTo(0, height.saturating_sub(1)),
+        Clear(ClearType::CurrentLine),
+        SetForegroundColor(STATUS_COLOR),
+        Print(clipped(&message, usize::from(width))),
+        ResetColor,
+        Print("\r\n\r\n"),
+        cursor::Show,
+        DisableBracketedPaste
+    )
 }
 
 fn paint_line<W: Write>(
@@ -1266,6 +1295,11 @@ mod tests {
                 .all(|cell| cell.color == STATUS_COLOR)
         );
         assert_eq!(STATUS_COLOR, Color::AnsiValue(222));
+        assert!(
+            frame.lines[22].0[..2]
+                .iter()
+                .all(|cell| cell.color == STATUS_COLOR)
+        );
 
         app.input_enabled = false;
         let frame = app.frame(80, 24);
@@ -1274,5 +1308,20 @@ mod tests {
                 .iter()
                 .all(|cell| cell.color == Color::DarkGrey)
         );
+    }
+
+    #[test]
+    fn exit_replaces_only_the_status_row_and_leaves_a_shell_gap() {
+        let mut output = Vec::new();
+        paint_exit(&mut output, 80, 24, "session-42").unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(!output.contains("[2J"), "{output:?}");
+        assert!(
+            output.contains("Motor OS Gears session session-42 exited."),
+            "{output:?}"
+        );
+        assert!(output.contains("\r\n\r\n"), "{output:?}");
+        assert!(!output.contains("?1049"), "{output:?}");
     }
 }
