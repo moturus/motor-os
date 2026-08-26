@@ -1174,10 +1174,16 @@ enter `MOTOR_OS_RUNTIME_TREE` because they affect the shim installed into the C
 sysroot; unrelated lock entries and application locks are recorded in the image
 manifest but do not enter either compiler/runtime key.
 
-Keep the Rust fork's Git patch declarations on named Motor branches so that
-updating the Motor dependencies remains manageable. The lockfiles record the
-exact commits resolved from those branches. Normal build scripts do not run a
-dependency-refresh operation; advancing a branch-selected dependency is an
+Keep the Rust fork's Git patch declarations on reviewed Motor fork sources.
+For the beta tuple, pin `stacker`, `libloading`, and `libc` by full Git
+revision as well as in the lockfile; `ctrlc` remains on its named Motor branch,
+with the lockfile recording the exact resolved commit. The forked `stacker`
+continues to provide Motor's allocation-based stack guard. Give the
+`libloading` and `libc` forks distinct build-metadata versions
+(`0.9.0+motor.1` and `0.2.186+motor.1`) so multi-workspace vendoring cannot
+collide with their crates.io counterparts. Do not change rustc LLVM's existing
+`cc = "=1.2.16"` selection as part of this work. Normal build scripts do not
+run a dependency-refresh operation; advancing any selected dependency is an
 explicit maintenance change.
 
 Rust std continues to depend on published crates.io `moto-rt`; the GitHub Rust
