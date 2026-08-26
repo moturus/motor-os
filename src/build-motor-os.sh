@@ -1139,7 +1139,7 @@ main() {
 	log "stage 1/3: host setup and motor-os-rt-v17 Rust target (build-base.sh)"
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "required build stage is not executable: $base"
-	MOTOR_SKIP_OS_BUILD=1 "$base"
+	MOTOR_BUILD_ORCHESTRATOR=1 MOTOR_SKIP_OS_BUILD=1 "$base"
 	# build-base installs rustup in $HOME/.cargo; bring it onto PATH (the
 	# subprocess above can't export into us).
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"

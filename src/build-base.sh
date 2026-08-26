@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 #
-# build-base.sh — set up a Motor OS development environment from scratch and
-# build the base OS image, following docs/build.md.
+# build-base.sh — private legacy provisioning stage for build-motor-os.sh.
 #
-# USAGE
-#   Run it from a Motor OS checkout (src/build-base.sh), or copy it into an
-#   empty directory and run it there:
+# This file remains sourceable by its offline host-networking test. It may be
+# executed only by build-motor-os.sh while the side-by-side exact toolchain path
+# is prepared; contributors use src/build-motor-os.sh.
 #
-#       ./build-base.sh
-#
-#   From a checkout, the checkout's parent becomes $MOTORH (the Motor OS dev
-#   root); copied out, the directory the script lives in becomes $MOTORH.
-#   MOTORH and MOTOR_OS_DIR override either default (the unified
-#   build-motor-os.sh sets both).
+# MOTORH and MOTOR_OS_DIR are supplied by the unified orchestrator.
 #   MOTOR_SKIP_HOST_NETWORK_SETUP=1 skips the privileged tap/NAT setup when
 #   the caller has independently verified the host network configuration.
 #
@@ -320,5 +314,7 @@ main() {
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	[ "${MOTOR_BUILD_ORCHESTRATOR:-0}" = "1" ] ||
+		die "build-base.sh is private; run src/build-motor-os.sh"
 	main "$@"
 fi
