@@ -1,6 +1,130 @@
+use moto_ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
+use moto_log::implementation::{CMD_LOG, ConnectRequest, ConnectResponse, LogRequest};
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 const LOG_PATH: &str = "/system/logs/systest.log";
+const CHILD: &str = "sys-log-unauthorized-child";
+
+pub fn is_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == CHILD)
+}
+
+fn raw_connection() -> ClientConnection {
+    let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+    conn.connect("sys-log").unwrap();
+    conn
+}
+
+fn rpc_result(conn: &mut ClientConnection) -> u16 {
+    conn.do_rpc(None).unwrap();
+    conn.resp::<ResponseHeader>().result
+}
+
+fn connect_tag(conn: &mut ClientConnection, tag: &str) -> Result<u64, u16> {
+    ConnectRequest::prepare(conn.data_mut(), tag);
+    conn.do_rpc(None)?;
+    ConnectResponse::parse(conn.data())
+}
+
+fn connected_tag(tag: &str) -> (ClientConnection, u64) {
+    let mut conn = raw_connection();
+    let tag_id = connect_tag(&mut conn, tag)
+        .unwrap_or_else(|err| panic!("CONNECT for {tag:?} failed with {err}"));
+    (conn, tag_id)
+}
+
+fn prepare_log(conn: &mut ClientConnection, tag_id: u64, payload: &[u8]) {
+    let req = conn.req::<LogRequest>();
+    req.header.cmd = CMD_LOG;
+    req.header.ver = 0;
+    req.log_level = moto_log::implementation::LOG_LEVEL_INFO;
+    req.payload_size = payload.len() as u32;
+    req.tag_id = tag_id;
+    req.timestamp = moto_rt::time::Instant::now().as_u64();
+    conn.data_mut()[size_of::<LogRequest>()..size_of::<LogRequest>() + payload.len()]
+        .copy_from_slice(payload);
+}
+
+fn expect_error_and_disconnect(mut conn: ClientConnection, expected: u16) {
+    assert_eq!(expected, rpc_result(&mut conn));
+    assert_eq!(Err(moto_rt::E_BAD_HANDLE), conn.do_rpc(None));
+    assert!(!conn.connected());
+}
+
+pub fn run_child() -> ! {
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(conn.data_mut(), "systest-unauthorized");
+    expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
+    std::process::exit(0)
+}
+
+fn protocol_hardening() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(CHILD)
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!(
+                "0x{:x}",
+                moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE
+            ),
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let (mut health, health_id) = connected_tag("systest-proto-health");
+
+    let mut conn = raw_connection();
+    prepare_log(&mut conn, health_id, b"");
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(conn.data_mut(), "systest-proto-version");
+    conn.req::<RequestHeader>().ver = 1;
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(
+        conn.data_mut(),
+        "x".repeat(moto_log::MAX_TAG_LEN + 1).as_str(),
+    );
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, _) = connected_tag("systest-proto-repeat");
+    ConnectRequest::prepare(conn.data_mut(), "systest-proto-repeat");
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag("systest-proto-bad-tag");
+    prepare_log(&mut conn, tag_id + 1, b"bad tag id");
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag("systest-proto-payload");
+    prepare_log(&mut conn, tag_id, b"");
+    conn.req::<LogRequest>().payload_size = u32::MAX;
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag("systest-proto-utf8");
+    prepare_log(&mut conn, tag_id, &[0xff]);
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (first, _) = connected_tag("systest-proto-collision.a");
+    let mut second = raw_connection();
+    assert_eq!(
+        Err(moto_rt::E_ALREADY_IN_USE),
+        connect_tag(&mut second, "systest-proto-collision/a")
+    );
+    assert!(second.connected());
+    connect_tag(&mut second, "systest-proto-collision-b").unwrap();
+    drop(first);
+    let third = connected_tag("systest-proto-collision.a").0;
+    drop((second, third));
+
+    prepare_log(&mut health, health_id, b"protocol tests complete");
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut health));
+    drop(health);
+    println!("logging::protocol_hardening test PASS");
+}
 
 /// Read the log once it holds at least `want` complete lines.
 ///
@@ -61,5 +185,6 @@ fn basic() {
 }
 
 pub fn run_all_tests() {
+    protocol_hardening();
     basic();
 }

@@ -1,12 +1,13 @@
 use crate::io_thread;
 use moto_ipc::sync::*;
-use moto_sys::SysHandle;
-use moto_sys::SysRay;
+use moto_sys::{SysHandle, SysObj};
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 #[derive(Clone)]
 pub struct Connection {
     pub tag: String,
+    pub canonical_tag: String,
     pub tag_id: u64,
     pub handle: SysHandle,
 }
@@ -19,10 +20,66 @@ pub struct LogRecord {
     pub msg: String,
 }
 
+struct Registration {
+    tag_id: u64,
+    canonical_tag: String,
+}
+
+struct RpcOutcome {
+    result: u16,
+    disconnect: bool,
+}
+
+impl RpcOutcome {
+    const fn keep(result: u16) -> Self {
+        Self {
+            result,
+            disconnect: false,
+        }
+    }
+
+    const fn disconnect(result: u16) -> Self {
+        Self {
+            result,
+            disconnect: true,
+        }
+    }
+}
+
 pub struct LogServer {
     ipc_server: LocalServer,
     sender: std::sync::mpsc::SyncSender<io_thread::Msg>,
     next_tag_id: u64,
+    registrations: HashMap<SysHandle, Registration>,
+    active_tags: HashMap<String, SysHandle>,
+    closing: HashSet<SysHandle>,
+}
+
+fn canonicalize_tag(tag: &str) -> String {
+    tag.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn remove_registration(
+    handle: SysHandle,
+    registrations: &mut HashMap<SysHandle, Registration>,
+    active_tags: &mut HashMap<String, SysHandle>,
+    sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
+) {
+    let Some(registration) = registrations.remove(&handle) else {
+        return;
+    };
+    if active_tags.get(&registration.canonical_tag) == Some(&handle) {
+        active_tags.remove(&registration.canonical_tag);
+    }
+    let _ = sender.send(io_thread::Msg::DroppedConnection(handle));
 }
 
 impl LogServer {
@@ -30,75 +87,95 @@ impl LogServer {
         conn: &mut LocalServerConnection,
         sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
         next_tag_id: &mut u64,
-    ) -> Result<(), ()> {
+        registrations: &mut HashMap<SysHandle, Registration>,
+        active_tags: &mut HashMap<String, SysHandle>,
+    ) -> RpcOutcome {
         use moto_log::implementation::*;
-        let req = unsafe {
-            (conn.data().as_ptr() as *const ConnectRequest)
-                .as_ref()
-                .unwrap()
+
+        if registrations.contains_key(&conn.handle()) {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let req = conn.req::<ConnectRequest>();
+        let payload_size = req.payload_size as usize;
+        let Some(payload_end) = size_of::<ConnectRequest>().checked_add(payload_size) else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         };
-        if req.header.cmd != CMD_CONNECT || req.header.ver != 0 {
-            SysRay::log("Bad ConnectRequest.").ok();
-            return Err(());
+        if req.header.ver != 0
+            || payload_size > moto_log::MAX_TAG_LEN
+            || payload_end > conn.channel_size()
+        {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        if (req.payload_size as usize) > moto_log::MAX_TAG_LEN {
-            return Err(());
-        }
-
-        let tag_bytes = &conn.data()[size_of::<ConnectRequest>()
-            ..(size_of::<ConnectRequest>() + (req.payload_size as usize))];
+        let tag_bytes = &conn.data()[size_of::<ConnectRequest>()..payload_end];
         let Ok(tag) = std::str::from_utf8(tag_bytes) else {
-            SysRay::log("Bad tag.").ok();
-            return Err(());
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         };
+        let canonical_tag = canonicalize_tag(tag);
+        if let Some(active_handle) = active_tags.get(&canonical_tag).copied() {
+            match SysObj::get_capabilities(active_handle) {
+                Err(moto_rt::E_BAD_HANDLE) => {
+                    remove_registration(active_handle, registrations, active_tags, sender);
+                }
+                _ => return RpcOutcome::keep(moto_rt::E_ALREADY_IN_USE),
+            }
+        }
 
         let tag_id = *next_tag_id;
-        *next_tag_id += 1;
-
-        let conn_obj = Connection {
+        let Some(following_tag_id) = tag_id.checked_add(1) else {
+            return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);
+        };
+        let connection = Connection {
             tag_id,
             tag: tag.to_owned(),
+            canonical_tag: canonical_tag.clone(),
             handle: conn.handle(),
         };
+        if sender
+            .send(io_thread::Msg::NewConnection(connection))
+            .is_err()
+        {
+            return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);
+        }
 
-        // We offload most processing to a separate IO thread to respond faster.
-        sender
-            .send(io_thread::Msg::NewConnection(conn_obj))
-            .unwrap();
-
-        let resp = unsafe {
-            (conn.data_mut().as_ptr() as *mut ConnectResponse)
-                .as_mut()
-                .unwrap()
-        };
-        resp.tag_id = tag_id;
-        resp.header.result = 0;
-
-        Ok(())
+        *next_tag_id = following_tag_id;
+        active_tags.insert(canonical_tag.clone(), conn.handle());
+        registrations.insert(
+            conn.handle(),
+            Registration {
+                tag_id,
+                canonical_tag,
+            },
+        );
+        conn.resp::<ConnectResponse>().tag_id = tag_id;
+        RpcOutcome::keep(moto_rt::E_OK)
     }
 
     fn process_log_request(
-        conn: &mut LocalServerConnection,
+        conn: &LocalServerConnection,
         sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
-    ) -> Result<(), ()> {
+        registrations: &HashMap<SysHandle, Registration>,
+    ) -> RpcOutcome {
         use moto_log::implementation::*;
 
-        let req = unsafe {
-            (conn.data().as_ptr() as *const LogRequest)
-                .as_ref()
-                .unwrap()
+        let Some(registration) = registrations.get(&conn.handle()) else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         };
-        assert_eq!(req.header.cmd, CMD_LOG);
-
-        if req.header.ver != 0 {
-            return Err(());
+        let req = conn.req::<LogRequest>();
+        let payload_size = req.payload_size as usize;
+        let Some(payload_end) = size_of::<LogRequest>().checked_add(payload_size) else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        };
+        if req.header.ver != 0
+            || req.tag_id != registration.tag_id
+            || payload_end > conn.channel_size()
+        {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         }
-
-        let payload_bytes = &conn.data()
-            [size_of::<LogRequest>()..(size_of::<LogRequest>() + (req.payload_size as usize))];
-
-        let payload = std::str::from_utf8(payload_bytes).map_err(|_| ())?;
+        let Ok(payload) = std::str::from_utf8(&conn.data()[size_of::<LogRequest>()..payload_end])
+        else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        };
 
         let record = LogRecord {
             handle: conn.handle(),
@@ -107,18 +184,10 @@ impl LogServer {
             timestamp: req.timestamp,
             msg: payload.to_owned(),
         };
-
-        // We offload most processing to a separate IO thread to respond faster.
-        sender.send(io_thread::Msg::Record(record)).unwrap();
-
-        let resp = unsafe {
-            (conn.data_mut().as_ptr() as *mut LogResponse)
-                .as_mut()
-                .unwrap()
-        };
-        resp.header.result = 0;
-
-        Ok(())
+        if sender.send(io_thread::Msg::Record(record)).is_err() {
+            return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);
+        }
+        RpcOutcome::keep(moto_rt::E_OK)
     }
 
     fn process_ipc(&mut self, waker: SysHandle) {
@@ -128,29 +197,51 @@ impl LogServer {
             sender,
             ipc_server,
             next_tag_id,
+            registrations,
+            active_tags,
+            closing,
         } = self;
-
-        let conn = ipc_server.get_connection(waker).unwrap();
-        assert!(conn.connected());
-        if !conn.have_req() {
+        if closing.remove(&waker) {
+            remove_registration(waker, registrations, active_tags, sender);
+            if let Some(conn) = ipc_server.get_connection(waker) {
+                conn.disconnect();
+            }
+            return;
+        }
+        let Some(conn) = ipc_server.get_connection(waker) else {
+            return;
+        };
+        if !conn.connected() || !conn.have_req() {
             return;
         }
 
-        let cmd = unsafe { conn.raw_channel().get::<RequestHeader>().cmd };
-
-        let res = match cmd {
-            CMD_LOG => Self::process_log_request(conn, sender),
-            CMD_CONNECT => Self::process_connect_request(conn, sender, next_tag_id),
-            _ => Err(()),
+        let outcome = match SysObj::get_capabilities(conn.handle()) {
+            Ok(caps) if caps & moto_sys::caps::CAP_LOG != 0 => {
+                match conn.req::<RequestHeader>().cmd {
+                    CMD_CONNECT => Self::process_connect_request(
+                        conn,
+                        sender,
+                        next_tag_id,
+                        registrations,
+                        active_tags,
+                    ),
+                    CMD_LOG => Self::process_log_request(conn, sender, registrations),
+                    _ => RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT),
+                }
+            }
+            _ => RpcOutcome::disconnect(moto_rt::E_NOT_ALLOWED),
         };
 
-        if res.is_err() && conn.connected() {
-            unsafe {
-                conn.raw_channel().get_mut::<ResponseHeader>().result = moto_rt::E_INVALID_ARGUMENT
-            };
+        conn.resp::<ResponseHeader>().result = outcome.result;
+        if conn.finish_rpc().is_err() {
+            remove_registration(waker, registrations, active_tags, sender);
+            conn.disconnect();
+        } else if outcome.disconnect {
+            // Keep the endpoint alive until the peer has observed this reply.
+            // Its next request or close only triggers cleanup; it is never
+            // processed as another protocol operation.
+            closing.insert(waker);
         }
-
-        let _ = conn.finish_rpc();
     }
 
     fn run(&mut self) -> ! {
@@ -162,10 +253,14 @@ impl LogServer {
                     }
                 }
                 Err(dropped_conns) => {
-                    for conn in dropped_conns {
-                        self.sender
-                            .send(io_thread::Msg::DroppedConnection(conn))
-                            .unwrap();
+                    for handle in dropped_conns {
+                        self.closing.remove(&handle);
+                        remove_registration(
+                            handle,
+                            &mut self.registrations,
+                            &mut self.active_tags,
+                            &self.sender,
+                        );
                     }
                 }
             }
@@ -173,7 +268,6 @@ impl LogServer {
     }
 
     pub fn start() -> ! {
-        // We offload most processing to a separate IO thread to respond faster.
         let (sender, receiver) = std::sync::mpsc::sync_channel(64);
         crate::io_thread::spawn(receiver);
 
@@ -181,10 +275,13 @@ impl LogServer {
             ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 10, 2).unwrap(),
             next_tag_id: 1,
             sender,
+            registrations: HashMap::new(),
+            active_tags: HashMap::new(),
+            closing: HashSet::new(),
         };
 
         #[cfg(debug_assertions)]
-        SysRay::log("strobe::LogServer started").ok();
+        moto_sys::SysRay::log("strobe::LogServer started").ok();
 
         log_server.run()
     }

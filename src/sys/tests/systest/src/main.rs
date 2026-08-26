@@ -1060,6 +1060,9 @@ fn main() {
     if diagnostics::is_child(&args) {
         diagnostics::run_child(&args);
     }
+    if logging::is_child(&args) {
+        logging::run_child();
+    }
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
