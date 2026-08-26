@@ -25,6 +25,10 @@ fi
 IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 export MOTO_IMAGE=motor-os-dev.qcow2
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
+LORRY_VENDOR_ENV="TMPDIR=/devtools/tmp"
+if [ "$BUILD" = debug ]; then
+  LORRY_VENDOR_ENV="$LORRY_VENDOR_ENV LORRY_CURL_STDERR_SPILL_LIMIT_BYTES=104857600"
+fi
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = release ]; then
@@ -187,7 +191,7 @@ vm_ssh "/devtools/bin/rustc /devtools/tmp/temp-contract.rs -o /devtools/tmp/temp
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
 for package in red; do
-  vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
+  vm_ssh "cd /devtools/src/src/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
     fail "developer image cannot vendor /devtools/src/src/bin/$package"
   vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
     fail "developer image cannot natively build /devtools/src/$package"
@@ -195,7 +199,7 @@ for package in red; do
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
   vm_ssh "/system/bin/rm -r /devtools/src/src/bin/$package/target"
 done
-vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||
+vm_ssh "cd /devtools/src/src/bin/lorry && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
   fail "developer image cannot vendor /devtools/src/src/bin/lorry"
 vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
   fail "developer image cannot natively build /devtools/src/lorry"
