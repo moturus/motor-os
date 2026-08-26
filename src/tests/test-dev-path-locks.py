@@ -12,8 +12,6 @@ ROOT = Path(__file__).resolve().parents[2]
 PROJECTS = (
     ROOT / "src/bin/curl",
     ROOT / "src/bin/lorry",
-    ROOT / "src/bin/gears",
-    ROOT / "src/bin/gears-mock-provider",
 )
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
