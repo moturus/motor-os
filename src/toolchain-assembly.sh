@@ -118,3 +118,98 @@ toolchain_derive_assembly_identity() {
 	ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
 	ASSEMBLY_IMAGE_ROOT="$ASSEMBLY_ROOT/images"
 }
+
+toolchain_validate_assembly_outputs() {
+	local path
+	for path in \
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" \
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a" \
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a" \
+		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
+		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" \
+		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"; do
+		[ -f "$path" ] || toolchain_die "assembly output is missing: $path" || return
+	done
+}
+
+toolchain_render_assembly_manifest() {
+	cat <<EOF
+schema=$MOTOR_GENERATED_MANIFEST_SCHEMA
+toolchain_key=$MOTOR_TOOLCHAIN_KEY
+assembly_key=$MOTOR_ASSEMBLY_KEY
+toolchain_id=$MOTOR_TOOLCHAIN_ID
+rustup_toolchain=$MOTOR_RUSTUP_TOOLCHAIN
+source_mode=$MOTOR_SOURCE_MODE
+assembly_state=$MOTOR_ASSEMBLY_STATE
+motor_os_rev=$MOTOR_OS_REV
+motor_os_runtime_tree=$MOTOR_OS_RUNTIME_TREE
+effective_rust_rev=$EFFECTIVE_MOTOR_RUST_REV
+effective_llvm_rev=$EFFECTIVE_MOTOR_LLVM_REV
+mlibc_rev=$MOTOR_MLIBC_REV
+mlibc_tree_state=$MOTOR_MLIBC_TREE_STATE
+local_moto_rt_version=$LOCAL_MOTO_RT_VERSION
+native_configuration_digest=$NATIVE_CONFIGURATION_DIGEST
+native_rustc_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" | awk '{print $1}')
+native_llvm_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')
+ripgrep_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" | awk '{print $1}')
+libc_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" | awk '{print $1}')
+libcxx_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a" | awk '{print $1}')
+moto_rt_cabi_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a" | awk '{print $1}')
+libc_config_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells" | awk '{print $1}')
+EOF
+}
+
+toolchain_validate_assembly_manifest() {
+	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" expected image_manifest
+	toolchain_validate_assembly_outputs || return
+	[ -f "$manifest" ] || toolchain_die "assembly manifest is missing: $manifest" || return
+	[ "$(stat -c %a "$manifest")" = 444 ] ||
+		toolchain_die "assembly manifest is writable: $manifest" || return
+	expected="$(mktemp)"
+	toolchain_render_assembly_manifest > "$expected"
+	if ! cmp -s "$expected" "$manifest"; then
+		rm -f "$expected"
+		toolchain_die "assembly manifest does not match the selected inputs: $manifest"
+		return 1
+	fi
+	rm -f "$expected"
+	image_manifest="$ASSEMBLY_IMAGE_ROOT/rustc/devtools/toolchain/manifest"
+	[ -f "$image_manifest" ] && cmp -s "$manifest" "$image_manifest" ||
+		toolchain_die "on-image assembly manifest does not match: $image_manifest"
+}
+
+toolchain_claim_assembly() {
+	local lock="${ASSEMBLY_ROOT}.building"
+	if [ -e "$lock" ]; then
+		toolchain_die "assembly has an active or abandoned producer lock: $lock"
+		return 1
+	fi
+	if [ -d "$ASSEMBLY_ROOT" ]; then
+		toolchain_validate_assembly_manifest || return
+		TOOLCHAIN_ASSEMBLY_REUSED=true
+		return 0
+	fi
+	mkdir -p "$(dirname "$ASSEMBLY_ROOT")"
+	mkdir "$lock" || return
+	mkdir "$ASSEMBLY_ROOT" || return
+	TOOLCHAIN_ASSEMBLY_REUSED=false
+}
+
+toolchain_complete_assembly() {
+	local lock="${ASSEMBLY_ROOT}.building"
+	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" image_manifest temporary
+	[ -d "$lock" ] || toolchain_die "assembly producer lock is missing: $lock" || return
+	toolchain_validate_assembly_outputs || return
+	[ ! -e "$manifest" ] || toolchain_die "refusing to replace assembly manifest: $manifest" || return
+	temporary="$(mktemp "${manifest}.tmp.XXXXXX")"
+	toolchain_render_assembly_manifest > "$temporary"
+	chmod 0444 "$temporary"
+	mv "$temporary" "$manifest"
+	image_manifest="$ASSEMBLY_IMAGE_ROOT/rustc/devtools/toolchain/manifest"
+	mkdir -p "$(dirname "$image_manifest")"
+	cp "$manifest" "$image_manifest"
+	chmod 0444 "$image_manifest"
+	toolchain_validate_assembly_manifest || return
+	rmdir "$lock"
+}

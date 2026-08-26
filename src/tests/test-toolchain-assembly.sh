@@ -77,4 +77,30 @@ toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 	fail "runtime edit changed the toolchain key"
 [ "$MOTOR_ASSEMBLY_STATE" = development-dirty ] || fail "runtime edit was not marked dirty"
 
+# A complete keyed assembly is reusable; partial or changed staging is not.
+MOTOR_RUSTUP_TOOLCHAIN=motor-test
+MOTOR_SOURCE_MODE=managed
+EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
+EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
+mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
+	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc"
+printf libc > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
+printf cxx > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
+printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
+printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
+printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
+mkdir "${ASSEMBLY_ROOT}.building"
+toolchain_complete_assembly
+toolchain_claim_assembly
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "complete assembly was not reused"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+if toolchain_claim_assembly 2>/dev/null; then
+	fail "assembly with changed staging was accepted"
+fi
+
 echo "test-toolchain-assembly PASS"
