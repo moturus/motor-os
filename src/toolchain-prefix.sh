@@ -28,6 +28,9 @@ toolchain_validate_prefix() {
 		<<< "$VALIDATED_RUSTC_VERBOSE" ||
 		toolchain_die "installed rustc reports the wrong description" || return
 	VALIDATED_CARGO_VERBOSE="$($prefix/bin/cargo -Vv)" || return
+	grep -Fqx "release: $SELECTED_MOTOR_CARGO_VERSION" \
+		<<< "$VALIDATED_CARGO_VERBOSE" ||
+		toolchain_die "installed Cargo reports the wrong version" || return
 	grep -Fqx "commit-hash: $SELECTED_MOTOR_CARGO_REV" \
 		<<< "$VALIDATED_CARGO_VERBOSE" ||
 		toolchain_die "installed Cargo reports the wrong commit" || return

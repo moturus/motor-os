@@ -21,6 +21,7 @@ done
 EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
 EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
 SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
+SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
 SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
 fake_tool="$temporary/tool"
 cat > "$fake_tool" <<EOF
@@ -39,7 +40,7 @@ rustc)
       shift
     done
   fi ;;
-cargo) printf '%s\n' 'cargo 1.99.0-dev' 'release: 1.99.0' \
+cargo) printf '%s\n' 'cargo 1.99.0-dev' 'release: 1.99.0-dev' \
   'commit-hash: $MOTOR_CARGO_REV' ;;
 *) printf '%s 1.99.0-dev\n' "\$(basename "\$0")" ;;
 esac
