@@ -532,6 +532,35 @@ fn validate_static_dirs(motorh: &Path, static_dirs: &[String]) -> Result<(), Str
     Ok(())
 }
 
+fn use_generated_image_root(config: &mut Config, root: &Path) -> Result<(), String> {
+    let mut components = root.components();
+    if components.next() != Some(Component::RootDir)
+        || components.any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "generated image root '{}' must be a normalized absolute path",
+            root.display()
+        ));
+    }
+
+    for configured_path in config
+        .static_dirs
+        .iter_mut()
+        .chain(config.required_executables.iter_mut())
+    {
+        let path = Path::new(configured_path);
+        let Ok(suffix) = path.strip_prefix("img_files/generated") else {
+            continue;
+        };
+        let replacement = root.join(suffix);
+        *configured_path = replacement
+            .to_str()
+            .ok_or_else(|| "generated image root is not valid UTF-8".to_owned())?
+            .to_owned();
+    }
+    Ok(())
+}
+
 fn print_usage_and_exit() -> ! {
     eprintln!(
         "
@@ -603,7 +632,12 @@ fn main() {
 
     let config_path = Path::new(args[3].as_str());
     let config_file = File::open(config_path).expect("Failed to open config file");
-    let config: Config = serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    let mut config: Config =
+        serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    if let Some(root) = std::env::var_os("MOTOR_GENERATED_IMAGE_ROOT") {
+        use_generated_image_root(&mut config, Path::new(&root))
+            .unwrap_or_else(|err| panic!("MOTOR_GENERATED_IMAGE_ROOT: {err}"));
+    }
     validate_directories(&config.directories).unwrap_or_else(|err| panic!("{err}"));
     validate_static_dirs(motorh, &config.static_dirs).unwrap_or_else(|err| panic!("{err}"));
     let policy = permissions::PermissionPolicy::load(config_path, &config.permission_policy)
@@ -859,6 +893,28 @@ mod tests {
             std::process::id()
         ));
         assert!(validate_static_dirs(&missing, &["not-there".into()]).is_err());
+    }
+
+    #[test]
+    fn generated_image_root_replaces_only_generated_inputs() {
+        let mut config: Config =
+            serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
+        use_generated_image_root(&mut config, Path::new("/assemblies/exact/images")).unwrap();
+
+        assert!(config
+            .static_dirs
+            .iter()
+            .any(|path| path == "/assemblies/exact/images/rustc"));
+        assert!(config
+            .required_executables
+            .iter()
+            .any(|path| path == "/assemblies/exact/images/llvm/devtools/bin/cc"));
+        assert!(config
+            .static_dirs
+            .iter()
+            .any(|path| path == "img_files/motor-os-dev"));
+        assert!(use_generated_image_root(&mut config, Path::new("relative/images")).is_err());
+        assert!(use_generated_image_root(&mut config, Path::new("/images/../other")).is_err());
     }
 
     #[test]
