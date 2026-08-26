@@ -451,6 +451,24 @@ archive beside an old staged `llvm` does not update that executable. A stale
 C-ABI shim can be especially misleading because it may dispatch through an
 older runtime-vtable layout before Clang has a chance to print a diagnostic.
 
+### Executable-permission compatibility set
+
+The first toolchain set that atomically creates writable regular files and
+finalizes successful linker outputs as non-writable executables is pinned to:
+
+- motor-os `fb4d6989` (`moto-rt-cabi` fd-permission wrapper);
+- mlibc `0cece7e5` (`fchmod` and executable permission reporting); and
+- llvm-project `bc769e6e44a4` (Motor linker-output finalization).
+
+After those revisions were built, the refreshed development-image inputs were
+`img_files/generated/llvm/devtools/llvm/bin/llvm`,
+`include/moto_rt.h`, `lib/libc.a`, and `lib/libmoto_rt_cabi.a`. The native LLVM
+binary was relinked against the new archives before stripping and staging, and
+the release development image was rebuilt from the complete set. These
+revisions are mutually dependent: mixing any older shim, libc, or linker
+binary can leave a new output writable or make Cargo's copied build scripts
+non-executable.
+
 ## Stage 7 — Lua
 
 A plain upstream Lua 5.4, cross-compiled against the sysroot — a real,
