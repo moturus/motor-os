@@ -321,6 +321,7 @@ pub fn run_tests() {
     eof_and_growth_tests();
     source_error_and_nested_tests();
     lifetime_and_pipe_counter_tests();
+    post_publish_error_progress_test();
     access_and_null_tests();
     println!("stdio_file_input tests PASS");
 }
@@ -437,7 +438,9 @@ fn lifetime_and_pipe_counter_tests() {
     writer.close_writer().unwrap();
     let mut byte = [0_u8; 1];
     assert_eq!(reader.read(&mut byte).unwrap(), 0);
+}
 
+pub fn post_publish_error_progress_test() {
     let child = spawn(
         &["stdio-file-input-idle"],
         moto_rt::process::STDIO_NULL,
@@ -453,9 +456,18 @@ fn lifetime_and_pipe_counter_tests() {
     let writer = unsafe { moto_ipc::stdio_pipe::StdioPipe::new_writer(local) };
     moto_rt::process::kill(child.handle).unwrap();
     assert_eq!(moto_rt::process::wait(child.handle).unwrap(), -1);
-    assert!(writer.nonblocking_write(b"x").is_err());
-    assert_eq!(writer.total_written(), 1);
+
+    let payload = b"published-on-peer-loss";
+    let (published, result) = writer.nonblocking_write_progress(payload);
+    assert!(result.is_err());
+    assert_eq!(published, payload.len());
+    assert_eq!(writer.total_written(), payload.len());
     assert_eq!(writer.peer_bytes_read().unwrap(), 0);
+
+    let mut recovered = writer.take_unread().unwrap();
+    recovered.extend_from_slice(&payload[published..]);
+    assert_eq!(recovered, payload);
+    println!("post_publish_error_progress_test PASS");
 }
 
 fn privileged_lifetime_tests() {

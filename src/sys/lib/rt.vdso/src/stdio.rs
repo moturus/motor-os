@@ -567,12 +567,13 @@ async fn relay_in(
                     if let Some(ctrl_c) = ctrl_c.as_mut() {
                         ctrl_c.service(&dest);
                     }
-                    match dest.nonblocking_write(chunk) {
-                        Ok(written) => {
-                            chunk = &chunk[written..];
+                    let (published, result) = dest.nonblocking_write_progress(chunk);
+                    match result {
+                        Ok(()) => {
+                            chunk = &chunk[published..];
                             moto_sys::SysCpu::sched_yield();
                         }
-                        Err(moto_rt::E_NOT_READY) => {
+                        Err(moto_rt::E_NOT_READY) if published == 0 => {
                             if source_alive && ctrl_c.is_some() {
                                 let dest_ready = dest.handle().as_future();
                                 let source_ready = owned.pipe.handle().as_future();
@@ -590,7 +591,7 @@ async fn relay_in(
                             }
                         }
                         Err(_) => {
-                            break 'relay RelayEnd::DestinationGone(chunk.to_vec());
+                            break 'relay RelayEnd::DestinationGone(chunk[published..].to_vec());
                         }
                     }
                 }

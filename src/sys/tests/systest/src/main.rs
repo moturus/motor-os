@@ -1068,6 +1068,10 @@ fn main() {
     if stdio_file_direct::is_child(&args) {
         stdio_file_direct::run_child(&args);
     }
+    if args.get(1).map(String::as_str) == Some("stdio-post-publish-error-progress") {
+        stdio_file_input::post_publish_error_progress_test();
+        return;
+    }
     if stdio_file_input::is_child(&args) {
         stdio_file_input::run_child(&args);
     }
