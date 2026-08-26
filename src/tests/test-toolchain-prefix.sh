@@ -63,6 +63,8 @@ MOTO_RT_PACKAGE_COMPARISON=exact
 toolchain_validate_prefix "$prefix"
 toolchain_write_prefix_manifest "$prefix"
 toolchain_validate_prefix_manifest "$prefix"
+[ "$(cat "$prefix/lib/rustlib/MOTOR-TOOLCHAIN-KEY")" = "$MOTOR_TOOLCHAIN_KEY" ] ||
+	fail "prefix key stamp is missing"
 chmod u+w "$prefix/MOTOR-TOOLCHAIN-MANIFEST"
 printf '\n# stale\n' >> "$prefix/MOTOR-TOOLCHAIN-MANIFEST"
 if toolchain_validate_prefix_manifest "$prefix" 2>/dev/null; then

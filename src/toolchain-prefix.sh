@@ -87,7 +87,7 @@ EOF
 }
 
 toolchain_validate_prefix_manifest() {
-	local prefix="$1" manifest expected
+	local prefix="$1" manifest expected stamp
 	manifest="$prefix/MOTOR-TOOLCHAIN-MANIFEST"
 	[ -f "$manifest" ] || toolchain_die "toolchain prefix has no manifest: $prefix" || return
 	[ "$(stat -c %a "$manifest")" = 444 ] ||
@@ -100,16 +100,23 @@ toolchain_validate_prefix_manifest() {
 		return 1
 	fi
 	rm -f "$expected"
+	stamp="$prefix/lib/rustlib/MOTOR-TOOLCHAIN-KEY"
+	[ -f "$stamp" ] && [ "$(cat "$stamp")" = "$MOTOR_TOOLCHAIN_KEY" ] ||
+		toolchain_die "toolchain key stamp does not match: $stamp"
 }
 
 toolchain_write_prefix_manifest() {
-	local prefix="$1" manifest temporary
+	local prefix="$1" manifest temporary stamp
 	manifest="$prefix/MOTOR-TOOLCHAIN-MANIFEST"
 	[ ! -e "$manifest" ] || toolchain_die "refusing to replace prefix manifest: $manifest" || return
 	temporary="$(mktemp "${manifest}.tmp.XXXXXX")"
 	toolchain_render_prefix_manifest > "$temporary"
 	chmod 0444 "$temporary"
 	mv "$temporary" "$manifest"
+	stamp="$prefix/lib/rustlib/MOTOR-TOOLCHAIN-KEY"
+	[ ! -e "$stamp" ] || toolchain_die "refusing to replace toolchain key stamp: $stamp" || return
+	printf '%s\n' "$MOTOR_TOOLCHAIN_KEY" > "$stamp"
+	chmod 0444 "$stamp"
 }
 
 toolchain_validate_rustup_link() {
