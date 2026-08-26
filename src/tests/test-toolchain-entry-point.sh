@@ -33,5 +33,12 @@ case "$(declare -f install_rust)" in
 esac
 . "$ROOT_DIR/src/build-motor-os.sh"
 declare -F prepare_exact_sources >/dev/null || fail "exact source orchestrator is missing"
+parse_options --source-mode authoring --rust-source /tmp/rust \
+  --authoring-base aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+[ "$SOURCE_MODE" = authoring ] && [ "$RUST_SOURCE" = /tmp/rust ] ||
+  fail "authoring options were not parsed"
+if (parse_options --source-mode managed --rust-source /tmp/rust) 2>/dev/null; then
+  fail "managed mode accepted an authoring checkout"
+fi
 
 echo "test-toolchain-entry-point PASS"

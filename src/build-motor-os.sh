@@ -43,10 +43,12 @@ trap 'die "failed at line $LINENO"' ERR
 
 usage() {
 	cat << 'EOF'
-Usage: src/build-motor-os.sh
+Usage: src/build-motor-os.sh [--source-mode managed]
+       src/build-motor-os.sh --source-mode authoring \
+         --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
 Build the complete Motor OS release environment and all three images, including:
-  - the moto-rt v17 Motor Rust target toolchain (via build-base.sh);
+  - the exact key-qualified Rust 1.99 Motor toolchain;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
@@ -60,24 +62,41 @@ Environment:
           Skip build-base.sh's privileged tap/NAT setup after independently
           verifying that host VM networking is already configured.
 
-The build is incremental and safe to rerun. It downloads sources and packages,
+Managed mode is the default. Authoring mode never fetches, switches, resets,
+stashes, cleans, or updates the supplied Rust and LLVM worktrees.
+
+The build is incremental and safe to rerun. It downloads managed sources and packages,
 uses sudo for missing Ubuntu packages and host VM setup, and does not start the
 VM.
 EOF
 }
 
-if [ "$#" -gt 0 ]; then
-	case "$1" in
-		-h|--help)
-			usage
-			exit 0
+parse_options() {
+	SOURCE_MODE=managed
+	RUST_SOURCE=
+	AUTHORING_BASE=
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-h|--help) usage; return 2 ;;
+			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
+			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
+			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
+			*) usage >&2; die "unknown argument: $1" ;;
+		esac
+	done
+	case "$SOURCE_MODE" in
+		managed)
+			[ -z "$RUST_SOURCE$AUTHORING_BASE" ] ||
+				die "managed mode does not accept authoring source options"
 			;;
-		*)
-			usage >&2
-			die "unknown argument: $1"
+		authoring)
+			case "$RUST_SOURCE" in /*) ;; *) die "authoring --rust-source must be absolute" ;; esac
+			[[ "$AUTHORING_BASE" =~ ^[0-9a-f]{40}$ ]] ||
+				die "authoring --authoring-base must be a full lowercase commit"
 			;;
+		*) die "unsupported source mode: $SOURCE_MODE" ;;
 	esac
-fi
+}
 
 # --- paths (same scheme as docs/build-llvm.md and docs/build-rustc.md) -------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -1199,77 +1218,82 @@ build_images() {
 }
 
 main() {
+	local parse_status=0
+	parse_options "$@" || parse_status=$?
+	[ "$parse_status" -eq 0 ] || {
+		[ "$parse_status" -eq 2 ] && return 0
+		return "$parse_status"
+	}
 	log "complete Motor OS build starting"
 	log "Motor OS checkout: $MOTOR"
 	log "development root:  $MOTORH"
 
-	# Install host dependencies and build the Rust target libraries from
-	# motor-os-rt-v17. Skip this otherwise-valid intermediate base image because
-	# the final compiler replaces these outputs before the definitive build.
-	log "stage 1/3: host setup and motor-os-rt-v17 Rust target (build-base.sh)"
+	log "provisioning host packages, rustup, and VM prerequisites"
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "required build stage is not executable: $base"
-	MOTOR_BUILD_ORCHESTRATOR=1 MOTOR_SKIP_OS_BUILD=1 "$base"
-	# build-base installs rustup in $HOME/.cargo; bring it onto PATH (the
-	# subprocess above can't export into us).
+	MOTOR_BUILD_ORCHESTRATOR=1 "$base"
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+	command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
 
-	# Build every C/C++ input, the native LLVM multicall, and Lua, and stage
-	# them into the generated LLVM image root. No intermediate image: the rustc
-	# stage replaces the bootstrap compiler and performs the definitive build.
-	log "stage 2/3: Motor LLVM, mlibc/libc++, native LLVM, and Lua"
-	ensure_meson
-	clone_sources
-	build_cross_toolchain
-	build_shim
-	build_builtins
-	build_mlibc
-	build_cxx_runtimes
-	build_native_llvm
-	build_lua
-	llvm_stage_image
+	log "resolving exact $SOURCE_MODE source tuple"
+	prepare_exact_sources "$SOURCE_MODE" "$RUST_SOURCE" "$AUTHORING_BASE"
+	log "declared Rust:  $MOTOR_RUST_REV"
+	log "effective Rust: $EFFECTIVE_MOTOR_RUST_REV ($MOTOR_RUST_TREE_STATE)"
+	log "declared LLVM:  $MOTOR_LLVM_REV"
+	log "effective LLVM: $EFFECTIVE_MOTOR_LLVM_REV ($MOTOR_LLVM_TREE_STATE)"
+	toolchain_build_selected_host "$RUST" "$AUTHORING_BASE" "$MOTORH/build/toolchain" \
+		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
+		"$MOTOR/src/sys/lib/moto-rt"
+	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 
-	# Build the forked native rustc and both standard libraries, rebuild the C
-	# ABI shim with that final toolchain, stage the native Rust toolchain and
-	# ripgrep, clear stale Cargo outputs, and run the final make for every image.
-	log "stage 3/3: native Motor rustc, ripgrep, and all Motor OS images"
-	rustc_verify_prereqs
-	check_mlibc
-	update_rust
-	write_wrappers
-	write_bootstrap_toml
-	build_rustc
-	build_stds
-	rebuild_shim
-	rustc_stage_image
-	build_ripgrep
+	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
+	activate_exact_assembly_paths
+	toolchain_claim_assembly
+	if [ "$TOOLCHAIN_ASSEMBLY_REUSED" = false ]; then
+		log "building assembly $MOTOR_ASSEMBLY_KEY"
+		toolchain_generate_cross_wrappers "$SYSROOT" "$B"
+		configure_exact_cross_driver
+		ensure_meson
+		build_shim
+		build_builtins
+		build_mlibc
+		build_cxx_runtimes
+		build_native_llvm
+		build_lua
+		llvm_stage_image
+		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE"
+		rustc_stage_image
+		update_ripgrep_source
+		build_ripgrep
+		toolchain_complete_assembly
+	else
+		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
+	fi
+
+	# The tracked selector is deliberately added only by the separately gated
+	# cutover patch after a clean managed provision and the full core test gate.
+	if [ ! -f "$MOTOR/rust-toolchain.toml" ]; then
+		log "exact host and native artifacts are ready; root selector cutover remains gated"
+		return 0
+	fi
+	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
+	export MOTOR_GENERATED_IMAGE_ROOT="$ASSEMBLY_IMAGE_ROOT"
+	log "building Motor OS and all images with $MOTOR_RUSTUP_TOOLCHAIN"
 	build_images
 
 	local required_outputs=(
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
-		"$LLVM_IMG/devtools/bin/cc"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
-		"$RUSTC_IMG/devtools/bin/rustc"
 		"$RG_IMG/system/bin/rg"
-		"$LIBC_IMG/system/cfg/libc/shells"
-		"$MOTOR/build/bin/release/dns-resolver"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
-		"$MOTOR/vm_images/release/motor-os-base.img"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-
 	log "base, standard, and dev release images built successfully"
-	log "image: $MOTOR/vm_images/release/motor-os.qcow2"
-	log "run:   cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
-	log "then, at the Motor OS prompt:"
-	log "  cc /devtools/src/hello.c -o /user/tmp/hello && /user/tmp/hello"
-	log "  c++ /devtools/src/hello.cpp -o /user/tmp/hello2 && /user/tmp/hello2"
-	log "  rustc /devtools/src/hello.rs -o /user/tmp/hello3 && /user/tmp/hello3"
-	log "  rg --version"
+	return 0
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
