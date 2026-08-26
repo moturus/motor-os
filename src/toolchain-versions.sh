@@ -6,7 +6,7 @@
 
 MOTOR_GENERATED_MANIFEST_SCHEMA="motor-toolchain-manifest-v1"
 MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v1"
-MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v1"
+MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v2"
 
 MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.1"
 MOTOR_RUSTUP_TOOLCHAIN_BASE="motor-1.99.0-beta-f47d5bb-dev.1"

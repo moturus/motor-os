@@ -13,6 +13,8 @@ fail() {
 }
 
 toolchain_validate_versions
+[ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v2 ] ||
+  fail "unexpected assembly key schema"
 
 key="$(toolchain_clean_key)"
 [[ "$key" =~ ^[0-9a-f]{64}$ ]] || fail "invalid clean key: $key"
