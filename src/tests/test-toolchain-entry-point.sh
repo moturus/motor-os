@@ -27,5 +27,7 @@ esac
 # tests and must not execute provisioning.
 . "$ROOT_DIR/src/build-base.sh"
 declare -F host_networking_ready >/dev/null || fail "private helper was not sourceable"
+. "$ROOT_DIR/src/build-motor-os.sh"
+declare -F prepare_exact_sources >/dev/null || fail "exact source orchestrator is missing"
 
 echo "test-toolchain-entry-point PASS"

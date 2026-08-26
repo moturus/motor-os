@@ -84,6 +84,10 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -e "$MOTOR/.git" ] ||
 	die "run this script from its Motor OS checkout; .git is missing at $MOTOR"
+. "$SCRIPT_DIR/toolchain-versions.sh"
+. "$SCRIPT_DIR/toolchain-lib.sh"
+. "$SCRIPT_DIR/toolchain-sources.sh"
+toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
 export MOTORH
@@ -92,6 +96,7 @@ export MOTOR_OS_DIR="$MOTOR"
 LLVM="$MOTORH/llvm-project"
 MLIBC="$MOTORH/mlibc"
 RUST="$MOTORH/rust"
+TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
 RIPGREP="$MOTORH/ripgrep"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
@@ -111,6 +116,53 @@ RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
 STAGE2="$RUST/build/$HOST/stage2"
 RUSTLIB_SRC="$STAGE2/lib/rustlib/$TARGET/lib"
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
+
+prepare_exact_sources() {
+	local source_mode="$1" rust_source="${2:-}" authoring_base="${3:-}"
+	MLIBC="$TOOLCHAIN_SRC_ROOT/mlibc"
+	toolchain_managed_checkout "$MOTOR_MLIBC_REPOSITORY" "$MOTOR_MLIBC_REF" \
+		"$MOTOR_MLIBC_REV" "$MLIBC" "$MOTORH/mlibc" || return
+
+	case "$source_mode" in
+		managed)
+			RUST="$TOOLCHAIN_SRC_ROOT/rust"
+			toolchain_managed_checkout "$MOTOR_RUST_REPOSITORY" "$MOTOR_RUST_REF" \
+				"$MOTOR_RUST_REV" "$RUST" "$MOTORH/rust" || return
+			toolchain_managed_submodule "$RUST" src/llvm-project \
+				"$MOTOR_LLVM_REPOSITORY" "$MOTOR_LLVM_REF" "$MOTOR_LLVM_REV" \
+				"$MOTORH/llvm-project" || return
+			toolchain_managed_submodule "$RUST" src/tools/cargo \
+				"$MOTOR_CARGO_REPOSITORY" "$MOTOR_CARGO_REV" "$MOTOR_CARGO_REV" || return
+			toolchain_verify_managed_rust "$RUST" || return
+			MOTOR_SOURCE_MODE=managed
+			SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"
+			SELECTED_RUST_VERSION="$UPSTREAM_RUST_VERSION"
+			SELECTED_STAGE0_REV="$UPSTREAM_STAGE0_REV"
+			SELECTED_RUST_LLVM_BASE_REV="$RUST_LLVM_BASE_REV"
+			SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
+			SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
+			SELECTED_RUSTUP_TOOLCHAIN_BASE="$MOTOR_RUSTUP_TOOLCHAIN_BASE"
+			SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
+			EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
+			EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
+			MOTOR_RUST_TREE_STATE=clean
+			MOTOR_LLVM_TREE_STATE=clean
+			AUTHORING_SOURCE_DIGEST=none
+			MOTOR_ASSEMBLY_STATE=clean
+			;;
+		authoring)
+			[ -n "$rust_source" ] || die "authoring mode requires --rust-source"
+			[ -n "$authoring_base" ] || die "authoring mode requires --authoring-base"
+			RUST="$(readlink -f "$rust_source")"
+			toolchain_authoring_resolve "$RUST" "$authoring_base" || return
+			;;
+		*) die "unsupported source mode: $source_mode" ;;
+	esac
+	LLVM="$RUST/src/llvm-project"
+	RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
+	STAGE2="$RUST/build/$HOST/stage2"
+	RUSTLIB_SRC="$STAGE2/lib/rustlib/$TARGET/lib"
+}
 
 # On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
 # sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
@@ -1202,4 +1254,6 @@ main() {
 	log "  rg --version"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	main "$@"
+fi
