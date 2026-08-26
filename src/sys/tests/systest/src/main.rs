@@ -32,6 +32,7 @@ mod sys_io_self_test;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
+mod sysbox_ls;
 mod sysbox_wc;
 mod tcp;
 mod threads;
@@ -1208,6 +1209,7 @@ fn main() {
     command_output::run_test();
     sysbox_find::run_test();
     sysbox_less::run_test();
+    sysbox_ls::run_test();
     sysbox_wc::run_test();
     test_oom();
     admission::run_all_tests();

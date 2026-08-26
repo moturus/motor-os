@@ -134,7 +134,7 @@ fn read_detailed_entries(dir: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
 }
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
-    eprintln!("usage:\n\tls [$DIR] [-l[h]]\n");
+    eprintln!("usage:\n\tls [-lh] [--] [DIR]\n");
     std::process::exit(exit_code);
 }
 
@@ -145,14 +145,21 @@ pub fn do_command(args: &[String]) {
     let mut list_details = false;
     let mut human_friendly = false;
     let mut dir: Option<&str> = None;
+    let mut parse_options = true;
 
     for arg in &args[1..] {
         if arg.trim().is_empty() {
             continue;
         }
 
-        let bytes = arg.trim().as_bytes();
-        if bytes[0] == b'-' {
+        let arg = arg.trim();
+        if parse_options && arg == "--" {
+            parse_options = false;
+            continue;
+        }
+
+        let bytes = arg.as_bytes();
+        if parse_options && bytes[0] == b'-' {
             for char in &bytes[1..] {
                 match char {
                     b'l' => list_details = true,
@@ -168,7 +175,7 @@ pub fn do_command(args: &[String]) {
             if dir.is_some() {
                 print_usage_and_exit(1);
             }
-            dir = Some(arg.trim());
+            dir = Some(arg);
         }
     }
 
