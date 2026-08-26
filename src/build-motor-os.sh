@@ -171,6 +171,38 @@ prepare_exact_sources() {
 	RUSTLIB_SRC="$STAGE2/lib/rustlib/$TARGET/lib"
 }
 
+activate_exact_assembly_paths() {
+	B="$STANDALONE_LLVM_BIN"
+	SYSROOT="$ASSEMBLY_SYSROOT"
+	CROSS_FILE="$ASSEMBLY_ROOT/motor.cross-file"
+	LLVM_IMG="$ASSEMBLY_IMAGE_ROOT/llvm"
+	RUSTC_IMG="$ASSEMBLY_IMAGE_ROOT/rustc"
+	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
+	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
+	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
+	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
+	MLIBC_HEADERS_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc-headers"
+	MLIBC_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc"
+	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
+	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
+	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
+	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
+}
+
+configure_exact_cross_driver() {
+	cat > "$B/x86_64-unknown-motor.cfg" <<'EOF'
+-fuse-ld=lld
+-static-pie
+-nostdlib
+-Wl,-e,motor_start
+-Wl,--pack-dyn-relocs=none
+-Wl,-z,noexecstack
+EOF
+	CLANG_MAJOR="$("$B/clang" --version |
+		sed -n 's/.*clang version \([0-9]\{1,\}\).*/\1/p' | head -1)"
+	[ -n "$CLANG_MAJOR" ] || die "could not determine clang major version"
+}
+
 # On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
 # sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
 TOOLS="devtools/llvm"              # headers + libraries
@@ -286,8 +318,9 @@ build_shim() {
 	log "stage 2: building the moto-rt-cabi shim"
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
-		&& cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release )
-	cp "$MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
+		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
+		"$MOTOR_CARGO" build --target x86_64-unknown-motor --release )
+	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
 	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
 }
@@ -314,7 +347,7 @@ build_builtins() {
 	# which is the same path taken on a host with no system LLVM. (Pointing at
 	# the freshly built build tree would not help — its exports carry the same
 	# SHARED-imported LTO/Remarks targets.)
-	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$LLVM/build-builtins" -G Ninja \
+	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$BUILTINS_BUILD" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Generic \
 		-DCMAKE_SYSTEM_PROCESSOR=x86_64 \
@@ -328,10 +361,10 @@ build_builtins() {
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
 		-DCOMPILER_RT_BAREMETAL_BUILD=ON \
 		-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON
-	ninja -C "$LLVM/build-builtins"
+	ninja -C "$BUILTINS_BUILD"
 
 	local builtins
-	builtins="$(find "$LLVM/build-builtins" -name 'libclang_rt.builtins*.a' | head -1)"
+	builtins="$(find "$BUILTINS_BUILD" -name 'libclang_rt.builtins*.a' | head -1)"
 	[ -n "$builtins" ] || die "builtins archive not produced"
 
 	# emutls.c must not be present (the shim owns emulated TLS).
@@ -345,7 +378,7 @@ build_builtins() {
 	# Stage a copy in the sysroot and one at the per-target resource-dir path
 	# where both mlibc's build and the clang driver look for it.
 	cp "$builtins" "$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a"
-	local rd="$LLVM/build/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
+	local rd="$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
 	mkdir -p "$rd"
 	cp "$builtins" "$rd/libclang_rt.builtins.a"
 }
