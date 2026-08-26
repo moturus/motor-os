@@ -77,6 +77,18 @@ fn terminal_relay_source(
 static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 4]> = SpinLock::new([None, None, None, None]);
 static CTRL_C_HANDLER_PIPE: SpinLock<Option<Arc<StdioPipe>>> = SpinLock::new(None);
 
+pub(crate) fn stderr_pipe() -> Option<Arc<StdioPipe>> {
+    StdioKind::Stderr.get().map(|stdio| stdio.pipe.clone())
+}
+
+pub(crate) fn with_stderr_claim<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let stderr = StdioKind::Stderr.get()?;
+    let owned = stderr.inner.lock().take()?;
+    let result = f();
+    stderr.return_impl(owned);
+    Some(result)
+}
+
 pub fn ctrl_c_register_handler() -> Result<u64, ErrorCode> {
     let mut registered = CTRL_C_HANDLER_PIPE.lock();
     if registered.is_some() {

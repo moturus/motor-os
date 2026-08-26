@@ -7,6 +7,7 @@ mod admission;
 mod command_output;
 mod ctrl_c;
 mod descriptor_attr;
+mod diagnostics;
 mod execute_permissions;
 mod file_locking;
 mod fs;
@@ -1056,6 +1057,9 @@ fn main() {
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
     }
+    if diagnostics::is_child(&args) {
+        diagnostics::run_child(&args);
+    }
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
@@ -1152,7 +1156,9 @@ fn main() {
             .unwrap()
     );
 
-    // Run the logging test first, as it sets the logger for everything.
+    diagnostics::run_all_tests();
+
+    // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();
 
     pressure::run_all_tests();

@@ -415,18 +415,36 @@ remain server-side `r`/`w`/directory-`x` and the unforgeable role (§1,
 property 1). This matches PERMISSIONS_DESIGN.md, which calls file `x`
 "metadata for an exec-time consumer above the FS".
 
+### 5.4 Process diagnostics use stderr first
+
+rt.vdso's `log` facade and the vtable operation historically named
+`log_to_kernel` both use the process diagnostic sink. The sink clones stderr's
+underlying `StdioPipe` and writes to it directly, bypassing the POSIX descriptor
+table and `SelfStdio` claim. A negative `log_backtrace` descriptor selects the
+same sink. This keeps loader warnings, panic text, backtraces, and debug records
+visible to an ordinary Interactive command after its default loses `CAP_LOG`.
+It does not add another level filter: a debug record admitted by the debug
+rt.vdso logger reaches stderr.
+
+The route is guarded per thread. Same-thread reentry skips stderr; concurrent
+threads serialize rather than losing a record. A missing pipe, a hard write
+failure, or a short write falls back to `SysRay::log` only for a `CAP_LOG`
+holder. Without that bit the record is dropped. The helper never logs a pipe
+failure, so neither failure path can recurse through itself.
+
 ---
 
-## 6. moto-rt: no changes
+## 6. moto-rt ABI unchanged
 
-Deliberately none. The role is enforced server-side (kernel, sys-io) and
-assigned via the existing env-var spawn mechanism, so `std` needs no new API,
-no new error code (`E_NOT_ALLOWED` exists), no vtable slot, and therefore **no
-`RT_VERSION` bump and no toolchain-lag staging** (the published-crate problem
-documented in `docs/plans/networking-remaining-steps.md:41–52`). A program
-that wants its own role reads `ProcessStaticPage` via moto-sys. If a
-`moto_rt::process::role()` getter is ever wanted, it is a compatible
-append-at-end vtable addition.
+The role is enforced server-side (kernel, sys-io) and assigned via the existing
+env-var spawn mechanism, so `std` needs no new API, no new error code
+(`E_NOT_ALLOWED` exists), and no vtable slot. The diagnostic change reuses the
+existing vtable operations; only the `log_backtrace` documentation changes.
+There is therefore **no `RT_VERSION` bump and no toolchain-lag staging** (the
+published-crate problem documented in
+`docs/plans/networking-remaining-steps.md:41–52`). A program that wants its own
+role reads `ProcessStaticPage` via moto-sys. If a `moto_rt::process::role()`
+getter is ever wanted, it is a compatible append-at-end vtable addition.
 
 ---
 
@@ -642,6 +660,12 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
 9. **russhd policy**: cover unauthenticated denial, authenticated shell
    inheritance, in-process SFTP behavior, and detached rmux/rush descendants
    under the chosen Interactive-russhd policy.
+10. **Diagnostics**: an Interactive child without `CAP_LOG` captures ordinary
+    rt.vdso records, debug-build records, panic text, and a complete backtrace
+    on piped stderr, while direct `SysRay::log` is denied. Exercise the route
+    while stderr's normal state is claimed. A dead reader, a short write, and
+    same-thread reentry drop without `CAP_LOG` and use the kernel fallback with
+    it.
 
 ---
 

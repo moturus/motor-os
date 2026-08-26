@@ -496,6 +496,7 @@ pub extern "C" fn vdso_internal_helper(
 ) -> u64 {
     match a0 {
         0 => net::rt_net::vdso_internal_helper(a1, a2, a3, a4, a5),
+        1 => util::logging::internal_test(a1),
         _ => panic!("Unrecognized option {a0}"),
     }
 }

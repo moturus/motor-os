@@ -145,11 +145,11 @@ printf '%s\n' "$console" |
 printf '%s\n' "$console" |
   grep -aqE -- 'drwxr-xr-x[[:space:]]+system-tty-default-dir$' ||
   fail "System-created directory did not use the creator-relative default"
-printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_SCRIPT_V1$' ||
+printf '%s\n' "$console" | grep -aqF 'SYSTEM_TTY_SCRIPT_V1' ||
   fail "the finalized System-role script did not run"
-printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_SCRIPT_V2$' ||
+printf '%s\n' "$console" | grep -aqF 'SYSTEM_TTY_SCRIPT_V2' ||
   fail "the replacement System-role script did not run"
-if printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_EDIT_SUCCEEDED$'; then
+if printf '%s\n' "$console" | grep -aqF 'SYSTEM_TTY_EDIT_SUCCEEDED'; then
   fail "the finalized System-role script remained writable"
 fi
 printf '%s\n' "$console" |
