@@ -6,9 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 MOTOR_TARGET="x86_64-unknown-motor"
-MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
-MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
+if [ -z "${LORRY_TEST_CARGO:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
+MOTOR_LINKER="$LORRY_MOTOR_LINKER"
+MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 REMOTE_BASE="/devtools/tmp/lorry-self"
 
 IMAGE_NAME="motor-os-dev.qcow2"
@@ -222,10 +227,10 @@ prepare_host() {
     local guest_tree="$WORK/guest-source"
     local source="$host_tree/src/bin/lorry"
 
-    cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
+    cargo="$LORRY_TEST_CARGO"
     host_curl="$(type -P curl)"
-    host_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
-    motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
+    host_rustc="$LORRY_TEST_RUSTC"
+    motor_rustc="$LORRY_TEST_RUSTC"
     motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
     [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
     [ -x "$host_curl" ] || fail "host curl is absent"

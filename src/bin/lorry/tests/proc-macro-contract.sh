@@ -11,11 +11,15 @@ LORRY="$(realpath "$1")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 MOTOR_TARGET="x86_64-unknown-motor"
-MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
-MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
-TOOLCHAIN="nightly-2026-06-19"
-NATIVE_RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
+if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
+MOTOR_LINKER="$LORRY_MOTOR_LINKER"
+MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
+NATIVE_RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-proc-macro-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"

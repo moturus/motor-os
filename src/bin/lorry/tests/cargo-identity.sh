@@ -12,10 +12,14 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 FIXTURE="$SCRIPT_DIR/fixtures/cargo-identity"
 LORRY="$(realpath "$1")"
 MOTOR_TARGET="x86_64-unknown-motor"
-MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
-MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
-TOOLCHAIN="nightly-2026-06-19"
+if [ -z "${LORRY_TEST_CARGO:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
+MOTOR_LINKER="$LORRY_MOTOR_LINKER"
+MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 WORK="$(mktemp -d /tmp/lorry-cargo-identity-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 LORRY_HOME="$WORK/home"
@@ -31,9 +35,9 @@ fail() {
     exit 1
 }
 
-NATIVE_RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
-MOTOR_RUSTC="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
-CARGO="$(rustup which cargo --toolchain "$TOOLCHAIN")"
+NATIVE_RUSTC="$LORRY_TEST_RUSTC"
+MOTOR_RUSTC="$LORRY_TEST_RUSTC"
+CARGO="$LORRY_TEST_CARGO"
 [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
 [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
     fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
