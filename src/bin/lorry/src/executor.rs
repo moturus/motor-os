@@ -1052,7 +1052,7 @@ mod tests {
 
     fn actual_toolchain() -> (Toolchain, TargetInfo) {
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         (toolchain, target)

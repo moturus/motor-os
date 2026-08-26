@@ -960,7 +960,7 @@ mod tests {
                 .to_owned(),
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
-            compatibility: CargoCompat::V1_98,
+            compatibility: CargoCompat::V1_99,
         }
     }
 

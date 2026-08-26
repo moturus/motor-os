@@ -78,10 +78,10 @@ impl Toolchain {
         let inferred = infer_compatibility(&release);
         let compatibility = config.cargo_compat.or(inferred).ok_or_else(|| {
             Error::failure(format!(
-                "rustc release `{release}` does not identify a supported Cargo compatibility family"
+                "rustc release `{release}` does not identify the current Motor Cargo compatibility family"
             ))
             .with_help(
-                "set `cargo-compat-version = \"1.97\"`, `\"1.98\"`, or `\"1.99\"` in lorry.toml",
+                "use the current Motor Rust toolchain or set `cargo-compat-version = \"1.99\"` for an equivalent custom toolchain",
             )
         })?;
 
@@ -160,11 +160,7 @@ fn parse_verbose_version(text: &str) -> Result<BTreeMap<String, String>> {
 }
 
 fn infer_compatibility(release: &str) -> Option<CargoCompat> {
-    if release == "1.97.0" || release.starts_with("1.97.0-") {
-        Some(CargoCompat::V1_97)
-    } else if release == "1.98.0" || release.starts_with("1.98.0-") {
-        Some(CargoCompat::V1_98)
-    } else if release == "1.99.0" || release.starts_with("1.99.0-") {
+    if release == "1.99.0" || release.starts_with("1.99.0-") {
         Some(CargoCompat::V1_99)
     } else {
         None
@@ -410,15 +406,16 @@ mod tests {
     #[test]
     fn parses_rustc_verbose_version_and_family() {
         let fields = parse_verbose_version(
-            "rustc 1.98.0-nightly\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-nightly\n",
+            "rustc 1.99.0-dev\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0-dev\n",
         )
         .unwrap();
         assert_eq!(fields["host"], "x86_64-unknown-linux-gnu");
         assert_eq!(
             infer_compatibility(&fields["release"]),
-            Some(CargoCompat::V1_98)
+            Some(CargoCompat::V1_99)
         );
         assert_eq!(infer_compatibility("1.99.0-dev"), Some(CargoCompat::V1_99));
+        assert_eq!(infer_compatibility("1.98.0"), None);
         assert_eq!(infer_compatibility("2.0.0"), None);
     }
 

@@ -3030,7 +3030,7 @@ mod tests {
         let fixture = Fixture::new();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3129,7 +3129,7 @@ mod tests {
         let fixture = Fixture::new();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3175,7 +3175,7 @@ mod tests {
         assert!(select_run_binary(&manifest, Some("missing")).is_err());
 
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3234,7 +3234,7 @@ mod tests {
         let manifest = Manifest::load_selected(&fixture.0, Some("root-bin")).unwrap();
         assert_eq!(manifest, Manifest::load(&member).unwrap());
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3281,7 +3281,7 @@ mod tests {
         fixture.add_root_library();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3345,7 +3345,7 @@ mod tests {
         .unwrap();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -3399,7 +3399,7 @@ mod tests {
         fixture.add_build_script();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         config.policy.rules.insert(
             "local-build-script".to_owned(),
             PolicyRule {
@@ -3469,7 +3469,7 @@ mod tests {
         }
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         config.policy.rules.insert(
             "local-build-script".to_owned(),
             PolicyRule {
@@ -3548,7 +3548,7 @@ mod tests {
         .unwrap();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
@@ -3688,7 +3688,7 @@ mod tests {
         .unwrap();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
@@ -3802,7 +3802,7 @@ mod tests {
         fixture.add_test_targets();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
-        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.cargo_compat = Some(CargoCompat::V1_99);
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
