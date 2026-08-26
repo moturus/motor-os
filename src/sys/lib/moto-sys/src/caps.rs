@@ -10,9 +10,10 @@ pub const CAP_IO_MANAGER: u64 = 1 << 1;
 /// The process can spawn other processes.
 pub const CAP_SPAWN: u64 = 1 << 2;
 
-/// The process can submit records to privileged logging sinks.
+/// The process can submit records to the kernel log and strobe's record channel.
 ///
-/// Unlike most capabilities, a None-role process cannot delegate this bit.
+/// This does not grant direct access to `/system/logs`. Unlike most
+/// capabilities, a None-role process cannot delegate this bit.
 pub const CAP_LOG: u64 = 1 << 3;
 
 /// The process can shut down the system.

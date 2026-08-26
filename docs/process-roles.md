@@ -158,9 +158,9 @@ Role semantics:
 
 | Role | Definition | Meaning | Typical holders |
 |------|------------|---------|-----------------|
-| `System` | `CAP_SYS` set | root-like; unkillable from userspace; unrestricted grant authority at spawn | kernel-spawned sys-io; sys-init |
+| `System` | `CAP_SYS` set | root-like; unkillable from userspace; unrestricted grant authority at spawn | kernel-spawned sys-io; sys-init; strobe |
 | `Interactive` | no `CAP_SYS`, `CAP_INTERACTIVE` set | the logged-in user's authority | sys-tty; russhd; console/ssh shells; commands they run; user daemons (including detached ones) |
-| `None` | neither bit | least privilege | strobe, dns-resolver, other services, deliberately sandboxed children |
+| `None` | neither bit | least privilege | dns-resolver, other services, deliberately sandboxed children |
 
 ### Why derived rather than stored
 
@@ -374,6 +374,12 @@ A present-but-unparsable `MOTOR_OS_CAPS` value fails the spawn with
 `E_INVALID_ARGUMENT` instead of falling back to the default. An explicit mask
 is a policy statement, so the demotion path must not fail open.
 
+`CAP_LOG` admits its holder to both the kernel log syscall and strobe's
+`sys-log` record channel. Strobe checks the connection-bound peer capability
+word before accepting a tag. The bit does not grant access to
+`/system/logs`; lower-role holders submit records through `moto_log` while
+System-role strobe alone creates and rotates the files.
+
 ### 5.2 Client-side permission reporting uses the caller's own role
 
 `rt_fs.rs` reports permissions to `std` using the process's own role:
@@ -473,8 +479,10 @@ ordinary descendants of an Interactive process, but every explicit
 4. **Both shipped sys-init configs**:
    `img_files/motor-os/system/cfg/sys-init.cfg` and
    `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
-   `124` (`60 | 64`). dns-resolver
-   (`svc:8`) and strobe (`CAP_LOG`) stay role None.
+   `124` (`60 | 64`). dns-resolver (`svc:8`) stays role None. sys-init launches
+   strobe separately with `CAP_SYS | CAP_LOG`; this makes strobe the only
+   process that writes and rotates `/system/logs` while leaving its public
+   stats-registry channel available to lower roles.
 5. **sys-init zero-mask semantics** (`sys-init/src/main.rs`, `spawn_service`):
    because the documented `svc:<caps>:<cmd>` grammar requires a mask, sys-init
    always sets `MOTOR_OS_CAPS` for a parsed service, including `0`, and rejects
@@ -640,9 +648,10 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    Callers test fail-closed behavior rather than depending on one error code for
    every invalid-handle shape.
 6. **Reporting**: `ProcessInfoV1.process_role` matches actual caps for each
-   live role. Assert that sys-tty, its console rush, russhd, and an authenticated
-   ssh shell report Interactive. Assert the documented None result for
-   zombie/aggregate/kernel entries and pin `size_of::<ProcessInfoV1>() == 56`.
+   live role. Assert that strobe reports System and that sys-tty, its console
+   rush, russhd, and an authenticated ssh shell report Interactive. Assert the
+   documented None result for zombie/aggregate/kernel entries and pin
+   `size_of::<ProcessInfoV1>() == 56`.
 7. **FS attribution**: create an entry while Interactive, narrow it with public
    chmod, and verify the Interactive and cascaded None bytes change while the
    System byte remains `Rwx`. Verify self-widening fails — including the
@@ -666,6 +675,14 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
     while stderr's normal state is claimed. A dead reader, a short write, and
     same-thread reentry drop without `CAP_LOG` and use the kernel fallback with
     it.
+11. **Logging service**: claim a slot from the fixed eight-tag systest pool and
+    derive every valid protocol-test tag from it. Verify System strobe accepts
+    `CAP_LOG`-bearing Interactive and None clients, rejects unauthorized and
+    malformed peers without losing service, and reports System through
+    process stats. Verify `/system/logs` is `rwxr-x---`, current and rotated
+    logs are `rw-r-----`, Interactive can read but cannot write or delete them,
+    and None cannot read them. Match records with a PID and nonce rather than
+    deleting old files or relying on timestamps.
 
 ---
 
