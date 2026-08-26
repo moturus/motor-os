@@ -23,6 +23,7 @@ EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
 EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
 AUTHORING_SOURCE_DIGEST=none
 TOOLCHAIN_PREFIX="$temporary/prefix"
+TOOLCHAIN_STATE_ROOT="$temporary/state"
 STANDALONE_LLVM_BIN="$temporary/llvm/bin"
 ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
@@ -32,6 +33,7 @@ toolchain_reverify_selected_sources() { :; }
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash
 [ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
+[ "\${PYTHONPYCACHEPREFIX:-}" = '$TOOLCHAIN_STATE_ROOT/python-cache' ] || exit 9
 binary='$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main'
 mkdir -p "\$(dirname "\$binary")"
 printf '%s\n' '$MOTOR_RUST_REV' '$MOTOR_TOOLCHAIN_ID' > "\$binary"

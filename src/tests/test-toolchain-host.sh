@@ -62,6 +62,10 @@ export MOTOR_CMAKE_COMMAND="$fake_cmake" MOTOR_NINJA_COMMAND="$fake_ninja"
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash
 [ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
+case "\${PYTHONPYCACHEPREFIX:-}" in
+  '$MOTORH/toolchain-state/'*/python-cache) ;;
+  *) exit 9 ;;
+esac
 printf x >> '$temporary/xpy-runs'
 [ "\${FAIL_XPY:-0}" != 1 ] || exit 7
 while [ "\$#" -gt 0 ]; do

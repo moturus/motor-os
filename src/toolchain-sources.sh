@@ -90,7 +90,8 @@ toolchain_managed_checkout() {
 toolchain_ignored_path_allowed() {
   local source_kind="$1" path="$2"
   case "$source_kind:$path" in
-    rust:build/|rust:build/*|rust:bootstrap.toml) return 0 ;;
+    rust:build/|rust:build/*|rust:bootstrap.toml|\
+      rust:src/bootstrap/__pycache__/|rust:src/bootstrap/__pycache__/*) return 0 ;;
     *) return 1 ;;
   esac
 }

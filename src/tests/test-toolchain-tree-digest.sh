@@ -15,9 +15,11 @@ TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 repo="$TMP_ROOT/source"
 git init -q -b main "$repo"
-printf 'build/\nbootstrap.toml\nignored/\n' > "$repo/.gitignore"
+printf 'build/\nbootstrap.toml\n__pycache__/\nignored/\n' > "$repo/.gitignore"
 printf 'tracked\n' > "$repo/input"
-git -C "$repo" add .gitignore input
+mkdir -p "$repo/src/bootstrap"
+printf 'bootstrap source\n' > "$repo/src/bootstrap/bootstrap.py"
+git -C "$repo" add .gitignore input src/bootstrap/bootstrap.py
 git -C "$repo" -c user.name=Test -c user.email=test@example.com \
   commit -q -m base
 
@@ -26,8 +28,17 @@ git -C "$repo" -c user.name=Test -c user.email=test@example.com \
 printf 'generated\n' > "$repo/bootstrap.toml"
 mkdir "$repo/build"
 printf 'output\n' > "$repo/build/artifact"
+mkdir -p "$repo/src/bootstrap/__pycache__"
+printf 'bytecode\n' > "$repo/src/bootstrap/__pycache__/bootstrap.pyc"
 [ "$(toolchain_worktree_digest "$repo" rust)" = clean ] ||
   fail "reviewed ignored outputs changed the digest"
+
+mkdir -p "$repo/other/__pycache__"
+printf 'unreviewed bytecode\n' > "$repo/other/__pycache__/other.pyc"
+if toolchain_worktree_digest "$repo" rust >/dev/null 2>&1; then
+  fail "Python cache outside the bootstrap output root was accepted"
+fi
+rm -r "$repo/other"
 
 printf 'changed\n' >> "$repo/input"
 tracked_digest="$(toolchain_worktree_digest "$repo" rust)"

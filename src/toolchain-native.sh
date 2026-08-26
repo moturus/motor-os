@@ -34,6 +34,7 @@ toolchain_build_native_rustc() {
 		"$rust" "$authoring_base" "$expected_digest" || return
 	prefix_before="$(toolchain_content_tree_digest "$TOOLCHAIN_PREFIX" .)" || return
 	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
+		PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache" \
 		./x.py --config "$NATIVE_BOOTSTRAP_CONFIG" build \
 		--stage 2 compiler --host x86_64-unknown-motor \
 		--target x86_64-unknown-motor); then
