@@ -20,6 +20,18 @@ activate_exact_assembly_paths
 	fail "shim Cargo output is not assembly-keyed"
 [ "$MOTOR_CARGO" = "$TOOLCHAIN_PREFIX/bin/cargo" ] ||
 	fail "shim does not select the installed Cargo"
+[ "$MOTOR_RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ] ||
+	fail "assembly does not select the installed rustc"
+[ "$MOTOR_RUSTDOC" = "$TOOLCHAIN_PREFIX/bin/rustdoc" ] ||
+	fail "assembly does not select the installed rustdoc"
+case "$(declare -f run_motor_cargo)" in
+	*'RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" "$MOTOR_CARGO"'*) ;;
+	*) fail "assembly Cargo does not pin its compiler executables" ;;
+esac
+case "$(declare -f main)" in
+	*'export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"'*) ;;
+	*) fail "later repository commands do not select the exact toolchain" ;;
+esac
 case "$(declare -f build_shim)" in
 	*'cargo +dev-x86_64-unknown-motor'*|*'src/sys/target'*)
 		fail "shim still uses a legacy toolchain or target directory" ;;

@@ -985,6 +985,12 @@ leaves the contributor documentation. The build sequence is:
 6. Stage the generated image roots with manifests, build ripgrep and the OS
    with the Motor toolchain, and build the images.
 
+After validating and registering the prefix, export its exact key-qualified
+rustup name for every later repository command. Invoking the installed Cargo
+by absolute path is not sufficient to select its sibling compiler: for every
+direct assembly Cargo invocation, also set `RUSTC` and `RUSTDOC` to the
+absolute executables in that validated prefix.
+
 After the installed host toolchain is validated, all later host and
 cross-target repository commands select it through a root
 `rust-toolchain.toml` (or the explicitly exported authoring name), including

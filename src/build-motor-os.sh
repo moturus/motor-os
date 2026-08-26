@@ -205,7 +205,13 @@ activate_exact_assembly_paths() {
 	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
 	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
 	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
+	MOTOR_RUSTC="$TOOLCHAIN_PREFIX/bin/rustc"
+	MOTOR_RUSTDOC="$TOOLCHAIN_PREFIX/bin/rustdoc"
 	RUSTLIB_SRC="$TOOLCHAIN_PREFIX/lib/rustlib/$TARGET/lib"
+}
+
+run_motor_cargo() {
+	RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" "$MOTOR_CARGO" "$@"
 }
 
 configure_exact_cross_driver() {
@@ -291,7 +297,7 @@ build_shim() {
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
 		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
-		"$MOTOR_CARGO" build --target x86_64-unknown-motor --release )
+		run_motor_cargo build --target x86_64-unknown-motor --release )
 	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
 	for symbol in motor_start memcpy memmove memset memcmp; do
@@ -744,7 +750,7 @@ build_ripgrep() {
 	log "building ripgrep and staging it as /system/bin/rg"
 	( cd "$RIPGREP" && \
 		CARGO_TARGET_DIR="$RIPGREP_TARGET_DIR" \
-			"$MOTOR_CARGO" build \
+			run_motor_cargo build \
 				--target "$TARGET" --release --locked )
 
 	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
@@ -798,6 +804,7 @@ main() {
 		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
 		"$MOTOR/src/sys/lib/moto-rt"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
+	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
 
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths
@@ -829,7 +836,6 @@ main() {
 		log "exact host and native artifacts are ready; root selector cutover remains gated"
 		return 0
 	fi
-	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
 	export MOTOR_GENERATED_IMAGE_ROOT="$ASSEMBLY_IMAGE_ROOT"
 	log "building Motor OS and all images with $MOTOR_RUSTUP_TOOLCHAIN"
 	build_images
