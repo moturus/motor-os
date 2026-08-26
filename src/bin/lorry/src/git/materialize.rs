@@ -317,12 +317,17 @@ pub(super) fn extract_tree(
                     "failed to create Git source file `{relative}`: {error}"
                 ))
             })?;
-        set_file_mode(&file, &path, executable)?;
         file.write_all(&object.data).map_err(|error| {
             Error::failure(format!(
                 "failed to write Git source file `{relative}`: {error}"
             ))
         })?;
+        file.flush().map_err(|error| {
+            Error::failure(format!(
+                "failed to flush Git source file `{relative}`: {error}"
+            ))
+        })?;
+        set_file_mode(&file, &path, executable)?;
     }
     Ok(())
 }
@@ -524,10 +529,11 @@ fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
     #[cfg(target_os = "motor")]
     {
         use std::os::fd::AsRawFd;
-        let mut permissions = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
-        if executable {
-            permissions |= moto_rt::fs::PERM_EXEC;
-        }
+        let permissions = if executable {
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC
+        } else {
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE
+        };
         moto_rt::fs::set_file_perm(_file.as_raw_fd(), permissions).map_err(|error| {
             Error::failure(format!(
                 "failed to set Git file permissions `{}`: {error}",

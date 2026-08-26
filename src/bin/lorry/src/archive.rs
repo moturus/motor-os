@@ -1041,10 +1041,11 @@ fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
     #[cfg(target_os = "motor")]
     {
         use std::os::fd::AsRawFd;
-        let mut permissions = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
-        if executable {
-            permissions |= moto_rt::fs::PERM_EXEC;
-        }
+        let permissions = if executable {
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC
+        } else {
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE
+        };
         moto_rt::fs::set_file_perm(_file.as_raw_fd(), permissions).map_err(|error| {
             Error::failure(format!(
                 "failed to set extracted file permissions `{}`: {error}",
