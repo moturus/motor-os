@@ -422,10 +422,7 @@ EOF
 				if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$cross_hash" ]; then
 					setup_mode=(--reconfigure)
 				else
-					# Meson does not apply changed cross-file built-in options when
-					# reconfiguring. Recreate only this mlibc build directory when
-					# the cross file changes so paths cannot remain stale.
-					setup_mode=(--wipe)
+					die "keyed mlibc build has a mismatched cross-file stamp: $build_dir"
 				fi
 			fi
 			meson setup "${setup_mode[@]}" --cross-file "$CROSS_FILE" \
@@ -434,18 +431,18 @@ EOF
 		}
 
 		# Headers first (validates ABI/meson wiring quickly).
-		setup_mlibc_build build-headers -Dheaders_only=true
-		DESTDIR="$SYSROOT" ninja -C build-headers install
+		setup_mlibc_build "$MLIBC_HEADERS_BUILD" -Dheaders_only=true
+		DESTDIR="$SYSROOT" ninja -C "$MLIBC_HEADERS_BUILD" install
 
 		# The real static build: libc.a, crt1.o, headers, companion stubs.
 		# -Ddebug=false: mlibc's meson.build pins buildtype=debugoptimized
 		# (-O2 -g); the flag keeps -O2 and drops only -g. Without it libc.a is
 		# 18 MB (59% DWARF) and every mlibc-linked binary carries ~6.6 MB of
 		# debug info (see docs/libc_start_redesign.md). .text is byte-identical.
-		setup_mlibc_build build -Ddefault_library=static \
+		setup_mlibc_build "$MLIBC_BUILD" -Ddefault_library=static \
 			-Dbuild_tests=false -Ddebug=false
-		ninja -C build
-		DESTDIR="$SYSROOT" ninja -C build install )
+		ninja -C "$MLIBC_BUILD"
+		DESTDIR="$SYSROOT" ninja -C "$MLIBC_BUILD" install )
 
 	ls "$SYSROOT/$TOOLS/lib/libc.a" "$SYSROOT/$TOOLS/lib/crt1.o" >/dev/null
 }
@@ -453,8 +450,7 @@ EOF
 # --- stage 5: the C++ runtime stack (with exceptions) -----------------------
 build_cxx_runtimes() {
 	log "stage 5: building libunwind + libc++abi + libc++ (exceptions on)"
-	rm -rf "$LLVM/build-motor-cxx"   # stale try_compile results are poison
-	cmake -G Ninja -S "$LLVM/runtimes" -B "$LLVM/build-motor-cxx" \
+	cmake -G Ninja -S "$LLVM/runtimes" -B "$CXX_BUILD" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_C_COMPILER="$B/clang" -DCMAKE_CXX_COMPILER="$B/clang++" \
 		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
@@ -492,8 +488,8 @@ build_cxx_runtimes() {
 		-DLIBCXX_HAS_PTHREAD_LIB=OFF -DLIBCXX_HAS_RT_LIB=OFF \
 		-DLIBCXX_HAS_ATOMIC_LIB=OFF \
 		-DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF
-	ninja -C "$LLVM/build-motor-cxx" unwind cxxabi cxx
-	DESTDIR="$SYSROOT" ninja -C "$LLVM/build-motor-cxx" \
+	ninja -C "$CXX_BUILD" unwind cxxabi cxx
+	DESTDIR="$SYSROOT" ninja -C "$CXX_BUILD" \
 		install-unwind install-cxxabi install-cxx
 
 	ls "$SYSROOT/$TOOLS/lib/libc++.a" "$SYSROOT/$TOOLS/lib/libc++abi.a" \
@@ -507,10 +503,10 @@ build_native_llvm() {
 	# so its __cxa_thread_atexit wins; -lunwind for the EH runtime). Both the C
 	# and C++ groups carry -lc++abi: mlibc is implemented in C++, so even a C link
 	# pulls `operator delete`/`new` from libc.a members (this matches the Motor
-	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). Note: if the
-	# sysroot's *set* of archives ever changes, `rm -rf build-motor-native` first
-	# (the try-compile probe results are cached).
-	cmake -S "$LLVM/llvm" -B "$LLVM/build-motor-native" -G Ninja \
+	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). The
+	# assembly key selects a fresh build directory whenever these inputs change,
+	# so cached try-compile results cannot cross configurations.
+	cmake -S "$LLVM/llvm" -B "$NATIVE_LLVM_BUILD" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Linux \
 		-DCMAKE_C_COMPILER="$B/clang" \
@@ -540,10 +536,7 @@ build_native_llvm() {
 		-DDEFAULT_SYSROOT= \
 		-DCLANG_CONFIG_FILE_SYSTEM_DIR="/$CFG_LLVM"
 
-	# Force the final link so the staged binary reflects the freshly built
-	# sysroot archives (CMAKE_*_STANDARD_LIBRARIES are flags, not tracked deps).
-	rm -f "$LLVM/build-motor-native/bin/llvm"
-	ninja -C "$LLVM/build-motor-native" llvm-driver
+	ninja -C "$NATIVE_LLVM_BUILD" llvm-driver
 }
 
 # --- stage 7: Lua -----------------------------------------------------------

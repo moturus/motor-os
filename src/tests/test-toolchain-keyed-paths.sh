@@ -24,5 +24,11 @@ case "$(declare -f build_shim)" in
 	*'cargo +dev-x86_64-unknown-motor'*|*'src/sys/target'*)
 		fail "shim still uses a legacy toolchain or target directory" ;;
 esac
+for producer in build_mlibc build_cxx_runtimes build_native_llvm; do
+	case "$(declare -f "$producer")" in
+		*'--wipe'*|*'rm -rf'*|*'$LLVM/build-'*)
+			fail "$producer still wipes or uses source-relative build output" ;;
+	esac
+done
 
 echo "test-toolchain-keyed-paths PASS"
