@@ -196,9 +196,12 @@ wait_console_since() {
 # puts it on the row above the message bar, so one bar says both how wide red
 # thinks the terminal is and how tall. Only a bar repainted from column 1 is
 # counted, which a resize produces and a keystroke -- rewriting the columns it
-# changed -- does not. $1 is the SGR the amber ground arrives as.
+# changed -- does not. Match through red's right-hand status too: diagnostics
+# share a PTY with the program and may arrive before the next escape sequence,
+# but are not part of the bar's width. $1 is the SGR the amber ground arrives
+# as.
 red_bars() {
-  LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*' |
+  LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*NORMAL | [0-9][0-9]*:[0-9][0-9]* ' |
     LC_ALL=C awk -F$'\033' '{
       row = $2; sub(/^\[/, "", row); sub(/;.*/, "", row)
       bar = $NF; sub(/^\[[0-9;]*m/, "", bar)
