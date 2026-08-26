@@ -225,7 +225,8 @@ toolchain_stage0_revision() {
 }
 
 toolchain_authoring_resolve() {
-  local rust="$1" base="$2" llvm cargo backtrace rust_head llvm_head cargo_head
+  local rust="$1" base="$2" llvm cargo backtrace book reference
+  local rust_head llvm_head cargo_head
   local effective_llvm_gitlink index_llvm_gitlink index_cargo_gitlink stage0_at_head
   toolchain_require_hex authoring_base "$base" 40 || return
   if ! git -C "$rust" cat-file -e "$base^{commit}" 2>/dev/null; then
@@ -243,6 +244,8 @@ toolchain_authoring_resolve() {
   llvm="$rust/src/llvm-project"
   cargo="$rust/src/tools/cargo"
   backtrace="$rust/library/backtrace"
+  book="$rust/src/doc/book"
+  reference="$rust/src/doc/reference"
   if ! git -C "$llvm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     toolchain_die "LLVM submodule is not initialized: $llvm"
     return 1
@@ -259,6 +262,8 @@ toolchain_authoring_resolve() {
   toolchain_assert_named_remote "$llvm" rust-lang "$RUST_LLVM_REPOSITORY" || return
   toolchain_assert_named_remote "$cargo" origin "$MOTOR_CARGO_REPOSITORY" || return
   toolchain_assert_named_remote "$backtrace" origin "$RUST_BACKTRACE_REPOSITORY" || return
+  toolchain_assert_named_remote "$book" origin "$RUST_BOOK_REPOSITORY" || return
+  toolchain_assert_named_remote "$reference" origin "$RUST_REFERENCE_REPOSITORY" || return
 
   SELECTED_UPSTREAM_RUST_REV="$base"
   SELECTED_RUST_VERSION="$(git -C "$rust" show "$base:src/version")" || return
@@ -331,6 +336,10 @@ toolchain_authoring_resolve() {
   toolchain_validate_ignored_paths "$cargo" cargo || return
   toolchain_verify_exact_submodule "$rust" library/backtrace \
     "$RUST_BACKTRACE_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/doc/book \
+    "$RUST_BOOK_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/doc/reference \
+    "$RUST_REFERENCE_REPOSITORY" || return
 
   MOTOR_RUST_TREE_STATE="$(toolchain_worktree_digest "$rust" rust \
     src/llvm-project src/tools/cargo)" || return
@@ -475,5 +484,9 @@ toolchain_verify_managed_rust() {
   toolchain_assert_clean "$llvm" || return
   toolchain_assert_clean "$rust/src/tools/cargo" || return
   toolchain_verify_exact_submodule "$rust" library/backtrace \
-    "$RUST_BACKTRACE_REPOSITORY"
+    "$RUST_BACKTRACE_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/doc/book \
+    "$RUST_BOOK_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/doc/reference \
+    "$RUST_REFERENCE_REPOSITORY"
 }

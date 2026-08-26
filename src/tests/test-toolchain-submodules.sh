@@ -24,6 +24,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 llvm="$TMP_ROOT/llvm"
 cargo="$TMP_ROOT/cargo"
 backtrace="$TMP_ROOT/backtrace"
+book="$TMP_ROOT/book"
+reference="$TMP_ROOT/reference"
 rust_source="$TMP_ROOT/rust-source"
 
 git init -q -b motor "$llvm"
@@ -37,9 +39,15 @@ cargo_rev="$(commit_all "$cargo" base)"
 git init -q -b main "$backtrace"
 printf 'backtrace\n' > "$backtrace/input"
 backtrace_rev="$(commit_all "$backtrace" base)"
+git init -q -b main "$book"
+printf 'book\n' > "$book/input"
+book_rev="$(commit_all "$book" base)"
+git init -q -b main "$reference"
+printf 'reference\n' > "$reference/input"
+reference_rev="$(commit_all "$reference" base)"
 
 git init -q -b motor "$rust_source"
-mkdir -p "$rust_source/src/tools" "$rust_source/library"
+mkdir -p "$rust_source/src/tools" "$rust_source/src/doc" "$rust_source/library"
 git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
   "$llvm" src/llvm-project
 git -C "$rust_source/src/llvm-project" checkout -q --detach "$llvm_base"
@@ -47,6 +55,10 @@ git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
   "$cargo" src/tools/cargo
 git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
   "$backtrace" library/backtrace
+git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
+  "$book" src/doc/book
+git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
+  "$reference" src/doc/reference
 printf '1.99.0\n' > "$rust_source/src/version"
 printf 'compiler_git_commit_hash=%040d\n' 8 > "$rust_source/src/stage0"
 printf 'root lock\n' > "$rust_source/Cargo.lock"
@@ -64,12 +76,20 @@ toolchain_managed_submodule "$managed" src/tools/cargo "$cargo" \
   "$cargo_rev" "$cargo_rev"
 toolchain_managed_submodule "$managed" library/backtrace "$backtrace" \
   "$backtrace_rev" "$backtrace_rev"
+toolchain_managed_submodule "$managed" src/doc/book "$book" \
+  "$book_rev" "$book_rev"
+toolchain_managed_submodule "$managed" src/doc/reference "$reference" \
+  "$reference_rev" "$reference_rev"
 [ "$(git -C "$managed/src/llvm-project" rev-parse HEAD)" = "$llvm_motor" ] ||
   fail "LLVM submodule revision mismatch"
 [ "$(git -C "$managed/src/tools/cargo" rev-parse HEAD)" = "$cargo_rev" ] ||
   fail "Cargo submodule revision mismatch"
 [ "$(git -C "$managed/library/backtrace" rev-parse HEAD)" = "$backtrace_rev" ] ||
   fail "backtrace submodule revision mismatch"
+[ "$(git -C "$managed/src/doc/book" rev-parse HEAD)" = "$book_rev" ] ||
+  fail "book submodule revision mismatch"
+[ "$(git -C "$managed/src/doc/reference" rev-parse HEAD)" = "$reference_rev" ] ||
+  fail "reference submodule revision mismatch"
 toolchain_assert_ancestor "$managed" "$rust_base" "$rust_motor" Rust
 toolchain_assert_ancestor "$managed/src/llvm-project" "$llvm_base" "$llvm_motor" LLVM
 
