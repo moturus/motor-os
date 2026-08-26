@@ -18,7 +18,12 @@ fail() {
     exit 1
 }
 
-RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
+if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+RUSTC="$LORRY_TEST_RUSTC"
 HOST_CARGO_HOME="${CARGO_HOME:-${HOME:?}/.cargo}"
 PROJECT="$WORK/project"
 HOME_DIR="$WORK/home"
