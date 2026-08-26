@@ -198,6 +198,7 @@ activate_exact_assembly_paths() {
 	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
 	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
 	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
+	MLIBC_SOURCE="$ASSEMBLY_BUILD_ROOT/mlibc-source"
 	MLIBC_HEADERS_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc-headers"
 	MLIBC_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc"
 	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
@@ -371,6 +372,10 @@ build_builtins() {
 # --- stage 4: mlibc ---------------------------------------------------------
 build_mlibc() {
 	log "stage 4: building mlibc"
+	[ ! -e "$MLIBC_SOURCE" ] ||
+		die "mlibc assembly source snapshot already exists: $MLIBC_SOURCE"
+	mkdir -p "$MLIBC_SOURCE"
+	git -C "$MLIBC" archive "$MOTOR_MLIBC_REV" | tar -x -C "$MLIBC_SOURCE"
 	# Meson cross file with this machine's absolute paths (kept out of the repos).
 	# MLIBC_SYSCONFDIR repoints mlibc's runtime config lookups (resolv.conf,
 	# hosts, passwd, ...) from /etc to /system/cfg/libc.
@@ -397,7 +402,7 @@ EOF
 	local cross_hash
 	cross_hash="$(sha256sum "$CROSS_FILE" | cut -d ' ' -f 1)"
 
-	( cd "$MLIBC"
+	( cd "$MLIBC_SOURCE"
 		setup_mlibc_build() {
 			local build_dir="$1"
 			shift

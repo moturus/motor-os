@@ -18,6 +18,8 @@ activate_exact_assembly_paths
 [ "$SYSROOT" = "$ASSEMBLY_ROOT/sysroot" ] || fail "sysroot is not assembly-keyed"
 [ "$SHIM_TARGET_DIR" = "$ASSEMBLY_ROOT/build/moto-rt-cabi" ] ||
 	fail "shim Cargo output is not assembly-keyed"
+[ "$MLIBC_SOURCE" = "$ASSEMBLY_ROOT/build/mlibc-source" ] ||
+	fail "mlibc source snapshot is not assembly-keyed"
 [ "$MOTOR_CARGO" = "$TOOLCHAIN_PREFIX/bin/cargo" ] ||
 	fail "shim does not select the installed Cargo"
 [ "$MOTOR_RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ] ||
@@ -47,6 +49,10 @@ for producer in build_mlibc build_cxx_runtimes build_native_llvm; do
 			fail "$producer still wipes or uses source-relative build output" ;;
 	esac
 done
+case "$(declare -f build_mlibc)" in
+	*'git -C "$MLIBC" archive "$MOTOR_MLIBC_REV"'*'cd "$MLIBC_SOURCE"'*) ;;
+	*) fail "mlibc does not build from an exact isolated source snapshot" ;;
+esac
 case "$(declare -f build_lua llvm_stage_image)" in
 	*'rm -rf'*|*'$MOTORH/lua-$LUA_VER/src/lua'*|*'$LLVM/build-motor-native'*)
 		fail "Lua or image staging still wipes or consumes unkeyed output" ;;

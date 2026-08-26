@@ -1289,6 +1289,12 @@ the manifest records the mapping:
 - the C sysroot, builtins, libc++, native LLVM, Lua, native rustc staging, and
   the generated image roots: `MOTOR_ASSEMBLY_KEY`.
 
+The mlibc producer extracts the tracked tree at `MOTOR_MLIBC_REV` into an
+assembly-keyed source snapshot and runs Meson there. Meson's wrap lock and
+commit-pinned subproject checkouts may populate that snapshot, but never the
+authoritative managed mlibc checkout used to derive and verify the assembly
+identity.
+
 The Rust `build/` tree is owned by `x.py`, which is incremental across
 commits; it is not re-keyed. `src/sys/target` stops being used by the build
 scripts; every Cargo invocation they make sets `CARGO_TARGET_DIR` under the
