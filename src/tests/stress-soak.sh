@@ -388,7 +388,7 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  "TMPDIR=/devtools/tmp /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x4c /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||

@@ -161,10 +161,19 @@ pub fn is_caps_policy_child(args: &[String]) -> bool {
 }
 
 pub fn run_caps_policy_child() -> ! {
-    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SPAWN};
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN};
 
-    assert_eq!(CAP_SPAWN, moto_sys::ProcessStaticPage::get().capabilities);
+    let own = CAP_SPAWN | CAP_LOG;
+    assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
+    assert_eq!(CAP_SPAWN, moto_sys::caps::default_child_capabilities(own));
     assert_eq!(CAP_SPAWN, probe_child_capabilities(None).unwrap());
+    assert_eq!(
+        CAP_SPAWN,
+        probe_child_capabilities(Some(&format!("0x{CAP_SPAWN:x}"))).unwrap()
+    );
+
+    let error = probe_child_capabilities(Some(&format!("0x{own:x}"))).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
 
     let error = probe_child_capabilities(Some(&format!("0x{CAP_INTERACTIVE:x}"))).unwrap_err();
     assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
@@ -176,13 +185,23 @@ pub fn test_default_capability_policy() {
 
     let own = moto_sys::ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
+    let interactive_default = CAP_SPAWN | CAP_INTERACTIVE;
     assert_eq!(
-        moto_sys::caps::default_child_capabilities(own),
-        probe_child_capabilities(None).unwrap()
+        interactive_default,
+        moto_sys::caps::default_child_capabilities(own)
+    );
+    assert_eq!(interactive_default, probe_child_capabilities(None).unwrap());
+    assert_eq!(0, interactive_default & CAP_LOG);
+
+    let explicit = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
+    assert_eq!(
+        explicit,
+        probe_child_capabilities(Some(&format!("0x{explicit:x}"))).unwrap()
     );
 
     let none_mask = CAP_SPAWN | CAP_LOG;
     let demoted = probe_child_capabilities(Some(&format!("0x{none_mask:x}"))).unwrap();
+    assert_eq!(none_mask, demoted);
     assert_eq!(ProcessRole::None, ProcessRole::from_caps(demoted));
 
     let error = probe_child_capabilities(Some("not-hex")).unwrap_err();
@@ -195,7 +214,7 @@ pub fn test_default_capability_policy() {
         .arg(CAPS_POLICY_CHILD)
         .env(
             moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-            format!("0x{CAP_SPAWN:x}"),
+            format!("0x{none_mask:x}"),
         )
         .status()
         .unwrap();

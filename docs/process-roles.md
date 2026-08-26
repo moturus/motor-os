@@ -319,9 +319,11 @@ create a logged-in session. `default_child_capabilities`, used when
 ```rust
 pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
     let role = ProcessRole::from_caps(parent_caps);
-    let mut child_caps = CAP_SPAWN | CAP_LOG;
-    if matches!(role, ProcessRole::Interactive) {
-        child_caps |= CAP_INTERACTIVE;
+    let mut child_caps = CAP_SPAWN;
+    match role {
+        ProcessRole::System => child_caps |= CAP_LOG,
+        ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
+        ProcessRole::None => {}
     }
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
@@ -332,15 +334,22 @@ pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
 
 Semantics:
 
-- Interactive parent → Interactive child (shell → command, command → helper).
+- Interactive parent → Interactive child (shell → command, command → helper),
+  without `CAP_LOG`. An Interactive holder passes `CAP_LOG` only through an
+  explicit replacement mask, and only because the kernel subset rule proves
+  that it already holds the bit.
 - System parent → None child by default; either Interactive or System requires
   an explicit `MOTOR_OS_CAPS` grant. This matters for sys-init services with a
   zero/omitted mask and for all-ones System processes, whose raw word contains
   the Interactive bit even though their derived role is System. A System
   console rush is an explicit session boundary and supplies that grant for
   ordinary external commands (§7); this does not change the global default.
-- None parent → None child. Intersecting the base default with its caps also
-  avoids requesting `CAP_LOG` from a `CAP_SPAWN`-only parent.
+  The default None child does receive `CAP_LOG`, and System may also grant it
+  explicitly regardless of its own raw capability word.
+- None parent → None child without `CAP_LOG`, including when the parent itself
+  holds `CAP_LOG`. The kernel also rejects an explicit `CAP_LOG` grant by a
+  None-role parent. Such a process may use logging authority but is never a
+  grantor.
 
 `MOTOR_OS_CAPS` keeps its replace-wholesale semantics. The two transitions
 that are not produced by the default rule are therefore straightforward:
@@ -351,7 +360,7 @@ that are not produced by the default rule are therefore straightforward:
   points are sys-init → sys-tty and sys-init → russhd (§7).
 - **Interactive → None:** the Interactive parent supplies an explicit
   replacement mask that omits both `CAP_SYS` and `CAP_INTERACTIVE`. The
-  remaining bits must be a subset of the parent's caps; `0` and the usual
+  remaining bits must be a subset of the parent's caps; `0` and an explicit
   `CAP_SPAWN | CAP_LOG` subset are valid examples. This is a deliberate
   demotion/sandboxing operation. An unadorned child instead stays Interactive.
 
@@ -441,7 +450,8 @@ ordinary descendants of an Interactive process, but every explicit
    includes `CAP_INTERACTIVE` in the intersection mask
    (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE}` ∩ own caps).
    Because russhd is not `CAP_SYS`, the subset rule means **russhd itself must
-   hold the bit** to pass it on:
+   hold each bit** to pass it on. This explicit trust-boundary grant is why the
+   shell holds `CAP_LOG`; its unadorned commands do not inherit that bit:
 4. **Both shipped sys-init configs**:
    `img_files/motor-os/system/cfg/sys-init.cfg` and
    `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
@@ -462,11 +472,13 @@ ordinary descendants of an Interactive process, but every explicit
    the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE` according
    to the shell's derived role while adding `CAP_SPAWN_DETACHED`; otherwise a
    trusted session daemon would be silently demoted.
-7. **Tests and scripts with literal masks**: the focused lifetime path in
-   `src/tests/full-test.sh` uses `0x6c` to retain the ssh session role. Explicit
-   test masks preserve the caller's Interactive bit when testing inheritance,
-   or omit it with a comment when deliberate demotion is part of the test. The
-   existing `CAP_SYS` escalation test deliberately remains unchanged.
+7. **Tests and scripts with literal masks**: full systest and soak invocations
+   use `0x4c` (`CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE`) because the suite tests
+   the logging service. The focused lifetime path in `src/tests/full-test.sh`
+   keeps `0x6c` to add detached-spawn authority. Explicit test masks preserve
+   the caller's Interactive bit when testing inheritance, or omit it with a
+   comment when deliberate demotion is part of the test. The existing
+   `CAP_SYS` escalation test deliberately remains unchanged.
 8. **Unadorned spawns outside Rush's System-session boundary**: §5.1 carries
    Interactive only from an Interactive parent. The kernel's all-ones sys-io
    grant and sys-io's all-ones sys-init grant remain System because `CAP_SYS`
@@ -587,16 +599,18 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    `{CAP_SYS, CAP_INTERACTIVE}` (System wins when both set), and safe raw-`u8`
    decoding of 0..=2/rejection of other values.
 2. **Default inheritance**: an Interactive systest spawning with no
-   `MOTOR_OS_CAPS` yields an Interactive child (child asserts via
-   `ProcessStaticPage`); explicit `MOTOR_OS_CAPS` without `CAP_INTERACTIVE`
-   yields a None child (demotion). A present-but-unparsable `MOTOR_OS_CAPS`
+   `MOTOR_OS_CAPS` yields an Interactive child without `CAP_LOG` (child asserts
+   via `ProcessStaticPage`); an explicit mask can preserve its held `CAP_LOG`,
+   while one without `CAP_INTERACTIVE` yields a None child (demotion). A
+   present-but-unparsable `MOTOR_OS_CAPS`
    fails the spawn with `E_INVALID_ARGUMENT` (§5.1) rather than falling back
    to the default. Exercise the default-cap helper with a
    System/all-ones parent and assert the default child is None, not Interactive.
 3. **Default subset correctness**: a `CAP_SPAWN`-only parent can spawn an
-   unadorned None child (the default must not over-request `CAP_LOG`). A None
-   child requesting `CAP_INTERACTIVE` explicitly gets `E_NOT_ALLOWED`; the
-   existing `CAP_SYS` escalation test stays green.
+   unadorned None child. A `CAP_LOG`-holding None parent also creates an
+   unadorned child without that bit and is denied when it requests the bit
+   explicitly. A None child requesting `CAP_INTERACTIVE` explicitly gets
+   `E_NOT_ALLOWED`; the existing `CAP_SYS` escalation test stays green.
 4. **Explicit-mask audit**: a trusted detached child launched through rush
    remains Interactive and detached; a mask intentionally omitting the bit
    produces None. Keep the focused full-test lifetime mask and its comment in

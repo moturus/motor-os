@@ -10,7 +10,9 @@ pub const CAP_IO_MANAGER: u64 = 1 << 1;
 /// The process can spawn other processes.
 pub const CAP_SPAWN: u64 = 1 << 2;
 
-/// The process can use SysRay::OP_LOG.
+/// The process can submit records to privileged logging sinks.
+///
+/// Unlike most capabilities, a None-role process cannot delegate this bit.
 pub const CAP_LOG: u64 = 1 << 3;
 
 /// The process can shut down the system.
@@ -24,8 +26,9 @@ pub const CAP_SHUTDOWN: u64 = 1 << 4;
 /// It is deliberately **not** granted by default (see the default caps in
 /// `rt.vdso`'s spawn path): a process gets it only if an ancestor that holds it
 /// passes it on explicitly via [`MOTOR_OS_CAPS_ENV_KEY`]. Because a non-system
-/// parent may already grant any capability it holds, that pass-on is transitive
-/// without any special kernel rule — the kernel only checks, at a detached
+/// parent may already grant most capabilities it holds, that pass-on is
+/// transitive without any special kernel rule. `CAP_LOG` is the exception: a
+/// None-role parent cannot delegate it. The kernel also checks, at a detached
 /// spawn, that the *spawner* holds this bit.
 pub const CAP_SPAWN_DETACHED: u64 = 1 << 5;
 
@@ -62,13 +65,16 @@ impl ProcessRole {
 /// Returns the capabilities used for a spawn with no explicit capability mask.
 ///
 /// Interactive authority follows an Interactive parent. System authority never
-/// follows implicitly, and defaults from non-System parents are restricted to
-/// capabilities the parent actually holds.
+/// follows implicitly. System grants logging authority by default; lower roles
+/// do not. Defaults from non-System parents are restricted to capabilities the
+/// parent actually holds.
 pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
     let role = ProcessRole::from_caps(parent_caps);
-    let mut child_caps = CAP_SPAWN | CAP_LOG;
-    if matches!(role, ProcessRole::Interactive) {
-        child_caps |= CAP_INTERACTIVE;
+    let mut child_caps = CAP_SPAWN;
+    match role {
+        ProcessRole::System => child_caps |= CAP_LOG,
+        ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
+        ProcessRole::None => {}
     }
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
@@ -105,13 +111,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_child_caps_follow_only_interactive_authority() {
-        let ordinary = CAP_SPAWN | CAP_LOG;
-        assert_eq!(ordinary, default_child_capabilities(u64::MAX));
+    fn default_child_caps_keep_logging_grantor_controlled() {
+        let system_default = CAP_SPAWN | CAP_LOG;
+        assert_eq!(system_default, default_child_capabilities(u64::MAX));
+        assert_eq!(system_default, default_child_capabilities(CAP_SYS));
         assert_eq!(
-            ordinary | CAP_INTERACTIVE,
-            default_child_capabilities(ordinary | CAP_INTERACTIVE)
+            CAP_SPAWN | CAP_INTERACTIVE,
+            default_child_capabilities(CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE)
         );
+        assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN | CAP_LOG));
         assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN));
         assert_eq!(0, default_child_capabilities(0));
     }

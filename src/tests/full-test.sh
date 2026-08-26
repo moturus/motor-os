@@ -494,7 +494,10 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest" 2>&1 |
+# The SSH shell is Interactive, whose unadorned children no longer receive
+# CAP_LOG. The complete suite exercises logging, so grant
+# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE explicitly.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x4c $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
