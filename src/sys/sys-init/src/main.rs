@@ -87,7 +87,7 @@ fn main() {
         let _ = std::process::Command::new(strobe.as_str())
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{:x}", moto_sys::caps::CAP_LOG),
+                format!("0x{:x}", moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_LOG),
             )
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
