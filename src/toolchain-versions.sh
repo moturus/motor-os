@@ -61,7 +61,6 @@ MOTOR_OMIT_GIT_HASH="false"
 # traversed canonically by the assembly implementation.
 MOTOR_OS_RUNTIME_INPUTS=(
   "src/sys/Cargo.toml"
-  "src/sys/Cargo.lock"
   "src/sys/lib/moto-rt"
   "src/sys/lib/moto-sys"
   "src/sys/lib/moto-rt-cabi"
