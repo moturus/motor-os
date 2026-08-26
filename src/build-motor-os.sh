@@ -88,6 +88,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-lib.sh"
 . "$SCRIPT_DIR/toolchain-sources.sh"
 . "$SCRIPT_DIR/toolchain-bootstrap.sh"
+. "$SCRIPT_DIR/toolchain-state.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -843,12 +844,6 @@ update_rust() {
 	grep -q 'set(LLVM_VERSION_MAJOR 23)' "$RUST/src/llvm-project/cmake/Modules/LLVMVersion.cmake" || \
 		die "src/llvm-project is not LLVM 23 — check $LLVM"
 
-	# The [patch.crates-io] deps are moturus git URLs and moto-rt is on
-	# crates.io, so there are no local paths to rewrite. Refresh the lock so the
-	# git patches + moto-rt >= 0.17.0 resolve (no-op if the fork's lock is
-	# already current).
-	( cd "$RUST" && cargo update -p libloading -p stacker -p libc -p ctrlc )
-	( cd "$RUST/library" && cargo update -p moto-rt )
 }
 
 # --- compiler wrappers + bootstrap.toml ---------------------------------------

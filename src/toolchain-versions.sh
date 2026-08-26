@@ -69,11 +69,12 @@ MOTOR_OS_RUNTIME_INPUTS=(
 )
 
 MOTOR_TOOLCHAIN_KEY_FIELDS=(
-  toolchain_id rustup_base source_mode selected_description
+  toolchain_id rustup_base source_mode selected_rustup_base selected_description
   upstream_rust_version upstream_rust_rev stage0_rev rust_llvm_base_rev
   upstream_cargo_rev cargo_version cargo_rev effective_rust_rev effective_llvm_rev
   rust_tree_state llvm_tree_state authoring_source_digest
-  rust_root_lock_sha256 rust_library_lock_sha256 rust_channel build_host
+  rust_root_lock_sha256 rust_library_lock_sha256 bootstrap_config_digest
+  rust_channel build_host
   build_targets build_tools build_extended build_docs build_submodules
   build_locked_deps optimized_compiler_builtins download_ci_llvm llvm_targets
   omit_git_hash declared_rust_rev declared_llvm_rev

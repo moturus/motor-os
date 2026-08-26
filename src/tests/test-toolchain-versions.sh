@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$ROOT_DIR/src/toolchain-versions.sh"
 . "$ROOT_DIR/src/toolchain-lib.sh"
+. "$ROOT_DIR/src/toolchain-bootstrap.sh"
 
 fail() {
   echo "test-toolchain-versions: $*" >&2
