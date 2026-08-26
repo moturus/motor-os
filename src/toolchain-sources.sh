@@ -192,3 +192,157 @@ toolchain_worktree_digest() (
     sha256sum "$record" | awk '{print $1}'
   fi
 )
+
+toolchain_assert_named_remote() {
+  local repo="$1" name="$2" expected="$3" actual
+  if ! actual="$(git -C "$repo" remote get-url "$name" 2>/dev/null)"; then
+    toolchain_die "missing $name remote in $repo"
+    return 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    toolchain_die "wrong $name remote in $repo: expected $expected, found $actual"
+    return 1
+  fi
+}
+
+toolchain_gitlink() {
+  local repo="$1" revision="$2" path="$3" line mode type hash
+  line="$(git -C "$repo" ls-tree "$revision" -- "$path")" || return
+  read -r mode type hash _ <<< "$line"
+  if [ "$mode" != 160000 ] || [ "$type" != commit ] || [ -z "$hash" ]; then
+    toolchain_die "$path is not a gitlink at $revision"
+    return 1
+  fi
+  printf '%s\n' "$hash"
+}
+
+toolchain_stage0_revision() {
+  local repo="$1" revision="$2" value
+  value="$(git -C "$repo" show "$revision:src/stage0" |
+    awk -F= '$1 == "compiler_git_commit_hash" { print $2; exit }')" || return
+  toolchain_require_hex stage0_revision "$value" 40 || return
+  printf '%s\n' "$value"
+}
+
+toolchain_authoring_resolve() {
+  local rust="$1" base="$2" llvm cargo rust_head llvm_head cargo_head
+  local effective_llvm_gitlink index_llvm_gitlink index_cargo_gitlink stage0_at_head
+  toolchain_require_hex authoring_base "$base" 40 || return
+  if ! git -C "$rust" cat-file -e "$base^{commit}" 2>/dev/null; then
+    toolchain_die "authoring base is missing from $rust: $base"
+    return 1
+  fi
+  rust_head="$(git -C "$rust" rev-parse HEAD)" || return
+  if ! git -C "$rust" merge-base --is-ancestor "$base" "$rust_head"; then
+    toolchain_die "authoring base is not an ancestor of Rust HEAD"
+    return 1
+  fi
+
+  toolchain_assert_named_remote "$rust" origin "$MOTOR_RUST_REPOSITORY" || return
+  toolchain_assert_named_remote "$rust" rust-lang "$UPSTREAM_RUST_REPOSITORY" || return
+  llvm="$rust/src/llvm-project"
+  cargo="$rust/src/tools/cargo"
+  if ! git -C "$llvm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    toolchain_die "LLVM submodule is not initialized: $llvm"
+    return 1
+  fi
+  if ! git -C "$cargo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    toolchain_die "Cargo submodule is not initialized: $cargo"
+    return 1
+  fi
+  toolchain_assert_named_remote "$llvm" origin "$MOTOR_LLVM_REPOSITORY" || return
+  toolchain_assert_named_remote "$llvm" rust-lang "$RUST_LLVM_REPOSITORY" || return
+  toolchain_assert_named_remote "$cargo" origin "$MOTOR_CARGO_REPOSITORY" || return
+
+  SELECTED_UPSTREAM_RUST_REV="$base"
+  SELECTED_RUST_VERSION="$(git -C "$rust" show "$base:src/version")" || return
+  SELECTED_STAGE0_REV="$(toolchain_stage0_revision "$rust" "$base")" || return
+  SELECTED_RUST_LLVM_BASE_REV="$(toolchain_gitlink "$rust" "$base" src/llvm-project)" || return
+  SELECTED_MOTOR_CARGO_REV="$(toolchain_gitlink "$rust" "$base" src/tools/cargo)" || return
+  SELECTED_MOTOR_CARGO_VERSION="$SELECTED_RUST_VERSION-$MOTOR_RUST_CHANNEL"
+
+  if [ "$base" = "$UPSTREAM_RUST_REV" ]; then
+    if ! { [ "$SELECTED_RUST_VERSION" = "$UPSTREAM_RUST_VERSION" ] &&
+      [ "$SELECTED_STAGE0_REV" = "$UPSTREAM_STAGE0_REV" ] &&
+      [ "$SELECTED_RUST_LLVM_BASE_REV" = "$RUST_LLVM_BASE_REV" ] &&
+      [ "$SELECTED_MOTOR_CARGO_REV" = "$MOTOR_CARGO_REV" ]; }; then
+      toolchain_die "declared upstream Rust tuple does not match its source"
+      return 1
+    fi
+  fi
+
+  stage0_at_head="$(toolchain_stage0_revision "$rust" "$rust_head")" || return
+  if [ "$stage0_at_head" != "$SELECTED_STAGE0_REV" ]; then
+    toolchain_die "authoring Rust HEAD changes the selected Stage 0"
+    return 1
+  fi
+  if ! git -C "$rust" diff --quiet HEAD -- src/stage0; then
+    toolchain_die "authoring worktree changes src/stage0"
+    return 1
+  fi
+
+  effective_llvm_gitlink="$(toolchain_gitlink "$rust" "$rust_head" src/llvm-project)" || return
+  if [ "$(toolchain_gitlink "$rust" "$rust_head" src/tools/cargo)" != \
+    "$SELECTED_MOTOR_CARGO_REV" ]; then
+    toolchain_die "authoring Rust HEAD changes the selected Cargo gitlink"
+    return 1
+  fi
+  index_llvm_gitlink="$(git -C "$rust" ls-files --stage src/llvm-project | awk '{print $2}')"
+  toolchain_require_hex llvm_index_gitlink "$index_llvm_gitlink" 40 || return
+  index_cargo_gitlink="$(git -C "$rust" ls-files --stage src/tools/cargo | awk '{print $2}')"
+  if [ "$index_cargo_gitlink" != "$SELECTED_MOTOR_CARGO_REV" ]; then
+    toolchain_die "authoring index changes the selected Cargo gitlink"
+    return 1
+  fi
+
+  llvm_head="$(git -C "$llvm" rev-parse HEAD)" || return
+  cargo_head="$(git -C "$cargo" rev-parse HEAD)" || return
+  for revision in "$effective_llvm_gitlink" "$index_llvm_gitlink" "$llvm_head"; do
+    if ! git -C "$llvm" cat-file -e "$revision^{commit}" 2>/dev/null; then
+      toolchain_die "LLVM authoring revision is missing: $revision"
+      return 1
+    fi
+    if ! git -C "$llvm" merge-base --is-ancestor \
+      "$SELECTED_RUST_LLVM_BASE_REV" "$revision"; then
+      toolchain_die "LLVM authoring revision does not descend from its selected base"
+      return 1
+    fi
+  done
+  if ! git -C "$llvm" merge-base --is-ancestor "$effective_llvm_gitlink" "$llvm_head"; then
+    toolchain_die "LLVM worktree is behind the gitlink in Rust HEAD"
+    return 1
+  fi
+  if ! git -C "$llvm" merge-base --is-ancestor "$index_llvm_gitlink" "$llvm_head"; then
+    toolchain_die "LLVM worktree is behind the staged Rust gitlink"
+    return 1
+  fi
+
+  if [ "$cargo_head" != "$SELECTED_MOTOR_CARGO_REV" ]; then
+    toolchain_die "Cargo submodule is not at the selected gitlink"
+    return 1
+  fi
+  toolchain_assert_clean "$cargo" || return
+  toolchain_validate_ignored_paths "$cargo" cargo || return
+
+  MOTOR_RUST_TREE_STATE="$(toolchain_worktree_digest "$rust" rust \
+    src/llvm-project src/tools/cargo)" || return
+  if [ "$index_llvm_gitlink" != "$effective_llvm_gitlink" ]; then
+    MOTOR_RUST_TREE_STATE="$(toolchain_hash_pairs tree "$MOTOR_RUST_TREE_STATE" \
+      llvm_index_gitlink "$index_llvm_gitlink")"
+  fi
+  MOTOR_LLVM_TREE_STATE="$(toolchain_worktree_digest "$llvm" llvm)" || return
+  EFFECTIVE_MOTOR_RUST_REV="$rust_head"
+  EFFECTIVE_MOTOR_LLVM_REV="$llvm_head"
+  MOTOR_SOURCE_MODE=authoring
+  AUTHORING_SOURCE_DIGEST="$(toolchain_hash_pairs \
+    schema motor-authoring-source-v1 selected_base "$base" \
+    rust_rev "$rust_head" rust_tree "$MOTOR_RUST_TREE_STATE" \
+    llvm_rev "$llvm_head" llvm_tree "$MOTOR_LLVM_TREE_STATE")"
+  SELECTED_RUSTUP_TOOLCHAIN_BASE="motor-authoring-$SELECTED_RUST_VERSION-${base:0:12}"
+  SELECTED_TOOLCHAIN_DESCRIPTION="$SELECTED_RUST_VERSION-motor+authoring.$AUTHORING_SOURCE_DIGEST"
+  if [ "$MOTOR_RUST_TREE_STATE" = clean ] && [ "$MOTOR_LLVM_TREE_STATE" = clean ]; then
+    MOTOR_ASSEMBLY_STATE=development-authoring
+  else
+    MOTOR_ASSEMBLY_STATE=development-dirty
+  fi
+}
