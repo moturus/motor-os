@@ -89,6 +89,7 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-sources.sh"
 . "$SCRIPT_DIR/toolchain-bootstrap.sh"
 . "$SCRIPT_DIR/toolchain-state.sh"
+. "$SCRIPT_DIR/toolchain-runtime.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
