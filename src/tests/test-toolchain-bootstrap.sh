@@ -69,6 +69,22 @@ grep -Fqx 'description = "'"$authoring_description"'"' "$authoring" ||
 	"$(toolchain_bootstrap_identity_digest "$authoring_description")" ] ||
 	fail "source-mode descriptions have the same identity"
 
+wrapper_root="$temporary/wrapper-sysroot"
+toolchain_generate_cross_wrappers "$wrapper_root" "$temporary/llvm/bin"
+for wrapper in motor-clang motor-clang++ motor-rust-cc; do
+	[ -x "$wrapper_root/bin/$wrapper" ] || fail "missing executable $wrapper"
+done
+grep -Fq -- '--target=x86_64-unknown-motor' "$wrapper_root/bin/motor-clang" ||
+	fail "C wrapper lacks the Motor target"
+grep -Fq -- '-lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc' \
+	"$wrapper_root/bin/motor-rust-cc" || fail "Rust linker wrapper lacks runtimes"
+toolchain_generate_cross_wrappers "$wrapper_root" "$temporary/llvm/bin"
+printf '\n# stale\n' >> "$wrapper_root/bin/motor-clang"
+if toolchain_generate_cross_wrappers \
+	"$wrapper_root" "$temporary/llvm/bin" 2>/dev/null; then
+	fail "mismatched cross wrapper was accepted"
+fi
+
 # Host locations are placeholders in the identity digest.
 digest="$(toolchain_bootstrap_identity_digest "$MOTOR_TOOLCHAIN_ID")"
 case "$digest" in

@@ -62,12 +62,78 @@ linker = "$sysroot/bin/motor-rust-cc"
 EOF
 }
 
-# Hash the semantic configuration without host paths or the key-derived prefix.
+# Render the wrappers used by Rust bootstrap. The sysroot may still be empty:
+# the first invocation builds Rust std, whose Motor port contains no C.
+toolchain_render_cross_wrapper() {
+	local wrapper="$1" sysroot="$2" llvm_bin="$3"
+	toolchain_bootstrap_absolute_path sysroot "$sysroot" || return
+	toolchain_bootstrap_absolute_path llvm_bin "$llvm_bin" || return
+	case "$wrapper" in
+		motor-clang|motor-clang++)
+			local driver=clang
+			[ "$wrapper" != motor-clang++ ] || driver=clang++
+			cat <<EOF
+#!/bin/sh
+exec "$llvm_bin/$driver" --no-default-config \\
+  --sysroot="$sysroot" -D_GNU_SOURCE -D_DEFAULT_SOURCE \\
+  "\$@" --target=x86_64-unknown-motor
+EOF
+			;;
+		motor-rust-cc)
+			cat <<EOF
+#!/bin/sh
+exec "$llvm_bin/clang" --no-default-config \\
+  --target=x86_64-unknown-motor --sysroot="$sysroot" "\$@" \\
+  -Wl,--start-group \\
+  "$sysroot/devtools/llvm/lib/crt1.o" \\
+  -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 \\
+  -Wl,--end-group
+EOF
+			;;
+		*) toolchain_die "unknown cross wrapper: $wrapper" ;;
+	esac
+}
+
+toolchain_generate_cross_wrappers() {
+	local sysroot="$1" llvm_bin="$2" wrapper output temporary
+	mkdir -p "$sysroot/bin"
+	for wrapper in motor-clang motor-clang++ motor-rust-cc; do
+		output="$sysroot/bin/$wrapper"
+		temporary="$(mktemp "${output}.tmp.XXXXXX")"
+		if ! toolchain_render_cross_wrapper "$wrapper" \
+			"$sysroot" "$llvm_bin" > "$temporary"; then
+			rm -f "$temporary"
+			return 1
+		fi
+		chmod 0755 "$temporary"
+		if [ -e "$output" ]; then
+			if ! cmp -s "$temporary" "$output" || [ ! -x "$output" ]; then
+				rm -f "$temporary"
+				toolchain_die "existing cross wrapper does not match: $output"
+				return 1
+			fi
+			rm -f "$temporary"
+		else
+			mv "$temporary" "$output"
+		fi
+	done
+}
+
+# Hash semantic configuration and wrapper recipes without host paths or the
+# key-derived prefix.
 toolchain_bootstrap_identity_digest() {
-	local description="$1"
-	toolchain_render_bootstrap_config \
+	local description="$1" config_digest wrappers_digest wrapper
+	config_digest="$(toolchain_render_bootstrap_config \
 		/MOTOR_TOOLCHAIN_PREFIX /MOTOR_SYSROOT /MOTOR_LLVM_BIN "$description" |
-		sha256sum | awk '{print $1}'
+		sha256sum | awk '{print $1}')" || return
+	wrappers_digest="$({
+		for wrapper in motor-clang motor-clang++ motor-rust-cc; do
+			toolchain_render_cross_wrapper "$wrapper" \
+				/MOTOR_SYSROOT /MOTOR_LLVM_BIN || return
+		done
+	} | sha256sum | awk '{print $1}')" || return
+	toolchain_hash_pairs schema motor-bootstrap-identity-v1 \
+		config "$config_digest" wrappers "$wrappers_digest"
 }
 
 toolchain_generate_bootstrap_config() {
