@@ -86,6 +86,7 @@ HTTP_AXUM_PORT=8081
 SERVE_DIR=/devtools/www
 
 MON_INTERVAL=20          # monitor tick, seconds
+PROGRESS_INTERVAL=300    # healthy-progress message interval, seconds
 LIVENESS_FAILS_MAX=3     # consecutive ssh liveness failures => vm-unreachable
 
 echo "building host-side rnetbench (release)"
@@ -696,6 +697,7 @@ start_workload http-std http_hammer http-std "$HTTP_STD_PORT" "$FETCH_SIZE_STD"
 start_workload http-axum http_hammer http-axum "$HTTP_AXUM_PORT" "$FETCH_SIZE_AXUM"
 log "workload pids: ${WL_PIDS[*]}"
 SOAK_START=$(date +%s)
+NEXT_PROGRESS=$(( SOAK_START + PROGRESS_INTERVAL ))
 
 # ------------------------------------------------------------------ monitor (foreground)
 declare -A PREV_FAILS=()
@@ -789,6 +791,11 @@ while :; do
     for s in "$OUT"/*.stat; do [ -f "$s" ] && printf '  %-12s %s\n' "$(basename "${s%.stat}")" "$(cat "$s")"; done
     echo "  liveness_fail=$consec_liveness_fail"
   } > "$OUT/status.txt"
+
+  if [ "$now" -ge "$NEXT_PROGRESS" ]; then
+    log "everything is OK; still working; no issues (soak uptime ${up}s / ${DURATION}s)"
+    NEXT_PROGRESS=$(( now + PROGRESS_INTERVAL ))
+  fi
 
   if [ "$up" -ge "$DURATION" ]; then
     SOAK_END=$now
