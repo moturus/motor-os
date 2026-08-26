@@ -113,11 +113,17 @@ printf '%s\n' \
   'echo SYSTEM_TTY_PS_BEGIN; /system/bin/sysbox ps; echo SYSTEM_TTY_PS_END' >&3
 wait_console "SYSTEM_TTY_PS_END"
 printf '%s\n' \
-  'echo shim > /user/tmp/system-tty-shim; chmod rwxr-xr-- /user/tmp/system-tty-shim; /system/bin/ls -l /user/tmp; echo SYSTEM_TTY_SHIM_DONE' >&3
+  'echo shim > /user/tmp/system-tty-shim; chmod r-xr-xr-- /user/tmp/system-tty-shim; /system/bin/ls -l /user/tmp; echo SYSTEM_TTY_SHIM_DONE' >&3
 wait_console "SYSTEM_TTY_SHIM_DONE"
 printf '%s\n' \
-  'echo direct > /user/tmp/system-tty-direct; /system/bin/sysbox chmod rwxr--r-- /user/tmp/system-tty-direct; /system/bin/sysbox ls -l /user/tmp; echo SYSTEM_TTY_CHMOD_DONE' >&3
+  'echo direct > /user/tmp/system-tty-direct; /system/bin/sysbox chmod r-xr--r-- /user/tmp/system-tty-direct; /system/bin/sysbox ls -l /user/tmp; echo SYSTEM_TTY_CHMOD_DONE' >&3
 wait_console "SYSTEM_TTY_CHMOD_DONE"
+printf '%s\n' \
+  'echo default > /user/tmp/system-tty-default-file; /system/bin/mkdir /user/tmp/system-tty-default-dir; /system/bin/ls -l /user/tmp; echo SYSTEM_TTY_DEFAULTS_DONE' >&3
+wait_console "SYSTEM_TTY_DEFAULTS_DONE"
+printf '%s\n' \
+  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo SYSTEM_TTY_SCRIPT_V1' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; echo 'echo SYSTEM_TTY_EDIT_SUCCEEDED' >> /user/tmp/system-tty-script; chmod rw-r--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; /system/bin/ls -l /user/tmp; /system/bin/rm /user/tmp/system-tty-script; echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo SYSTEM_TTY_SCRIPT_V2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; echo SYSTEM_TTY_SCRIPT_DONE" >&3
+wait_console "SYSTEM_TTY_SCRIPT_DONE"
 
 console="$(strip_console < "$CONSOLE_LOG")"
 ps_output="$console"
@@ -128,11 +134,27 @@ printf '%s\n' "$ps_output" | has_system_process /system/bin/rush ||
 printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
   fail "an ordinary external command did not retain System: '$ps_output'"
 printf '%s\n' "$console" |
-  grep -aqE -- '-rwxr-xr--[[:space:]]+[0-9]+[[:space:]]+system-tty-shim$' ||
+  grep -aqE -- '-r-xr-xr--[[:space:]]+[0-9]+[[:space:]]+system-tty-shim$' ||
   fail "the chmod shim did not install the exact mode"
 printf '%s\n' "$console" |
-  grep -aqE -- '-rwxr--r--[[:space:]]+[0-9]+[[:space:]]+system-tty-direct$' ||
+  grep -aqE -- '-r-xr--r--[[:space:]]+[0-9]+[[:space:]]+system-tty-direct$' ||
   fail "sysbox chmod did not install the exact mode"
+printf '%s\n' "$console" |
+  grep -aqE -- '-rw-r--r--[[:space:]]+[0-9]+[[:space:]]+system-tty-default-file$' ||
+  fail "System-created file did not use the creator-relative default"
+printf '%s\n' "$console" |
+  grep -aqE -- 'drwxr-xr-x[[:space:]]+system-tty-default-dir$' ||
+  fail "System-created directory did not use the creator-relative default"
+printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_SCRIPT_V1$' ||
+  fail "the finalized System-role script did not run"
+printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_SCRIPT_V2$' ||
+  fail "the replacement System-role script did not run"
+if printf '%s\n' "$console" | grep -aq '^SYSTEM_TTY_EDIT_SUCCEEDED$'; then
+  fail "the finalized System-role script remained writable"
+fi
+printf '%s\n' "$console" |
+  grep -aqE -- '-r-xr--r--[[:space:]]+[0-9]+[[:space:]]+system-tty-script$' ||
+  fail "the finalized System-role script regained write permission"
 
 # The foreground rmux client remains observable while its detached server and
 # pane are alive. Two rmux processes prove the detached spawn succeeded; the

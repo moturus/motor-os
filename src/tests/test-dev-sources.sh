@@ -50,6 +50,45 @@ vm_ssh() {
   "${SSH[@]}" "$@"
 }
 
+expect_guest_mode() {
+  local directory="$1"
+  local name="$2"
+  local expected="$3"
+  local description="$4"
+  local listing
+
+  listing="$(vm_ssh "/system/bin/ls -l $directory")" ||
+    fail "cannot inspect $description"
+  if ! printf '%s\n' "$listing" | awk -v name="$name" -v expected="$expected" '
+    $NF == name { found = 1; if ($1 != expected) exit 1 }
+    END { if (!found) exit 1 }
+  '; then
+    fail "$description does not have mode $expected: $listing"
+  fi
+}
+
+expect_nested_guest_mode() {
+  local root="$1"
+  local name="$2"
+  local expected="$3"
+  local description="$4"
+  local paths path directory listing
+
+  paths="$(vm_ssh "/system/bin/find $root -type f -name $name")" ||
+    fail "cannot find $description"
+  [ -n "$paths" ] || fail "no $description was produced"
+  while IFS= read -r path; do
+    directory="${path%/*}"
+    listing="$(vm_ssh "/system/bin/ls -l $directory")" ||
+      fail "cannot inspect $description at $path"
+    if printf '%s\n' "$listing" |
+      awk -v name="$name" -v expected="$expected" '$NF == name && $1 == expected { found = 1 } END { exit !found }'; then
+      continue
+    fi
+    fail "$description does not have mode $expected: $listing"
+  done <<< "$paths"
+}
+
 . "$WD/vm-cleanup.sh"
 
 fail() {
@@ -105,13 +144,15 @@ case "$cc_version" in
   *"clang version"*) ;;
   *) fail "native cc --version returned unexpected output: $cc_version" ;;
 esac
+vm_ssh "/devtools/bin/cc /devtools/src/native-fstat.c -o /devtools/tmp/native-fstat"
 vm_ssh "/devtools/bin/cc /devtools/src/hello.c -o /devtools/tmp/hello-c"
+expect_guest_mode /devtools/tmp native-fstat -rwxr-xr-- "freshly linked native-fstat"
+expect_guest_mode /devtools/tmp hello-c -rwxr-xr-- "freshly linked hello-c"
 vm_ssh /devtools/tmp/hello-c
 vm_ssh "/devtools/bin/c++ /devtools/src/hello.cpp -o /devtools/tmp/hello-cpp"
 vm_ssh /devtools/tmp/hello-cpp
 vm_ssh "/devtools/bin/rustc /devtools/src/hello.rs -o /devtools/tmp/hello-rust"
 vm_ssh /devtools/tmp/hello-rust
-vm_ssh "/devtools/bin/cc /devtools/src/native-fstat.c -o /devtools/tmp/native-fstat"
 [ "$(vm_ssh /devtools/tmp/native-fstat)" = "native-fstat PASS" ] ||
   fail "native non-PTY fstat fixture failed"
 pty_fstat="$(ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
@@ -150,6 +191,8 @@ for package in red; do
     fail "developer image cannot vendor /devtools/src/src/bin/$package"
   vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
     fail "developer image cannot natively build /devtools/src/$package"
+  expect_nested_guest_mode "/devtools/src/src/bin/$package/target/lorry/debug/build" \
+    build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
   vm_ssh "/system/bin/rm -r /devtools/src/src/bin/$package/target"
 done
 vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry vendor --accept-all" ||

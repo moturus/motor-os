@@ -721,7 +721,7 @@ async fn on_cmd_create_file(
             parent_id,
             EntryKind::File,
             fname.as_str(),
-            RolePermissions::all(AccessPermissions::Rwx),
+            default_file_permissions(role),
         )
         .await
         .map_err(|err| {
@@ -778,7 +778,7 @@ async fn on_cmd_create_dir(
             parent_id,
             EntryKind::Directory,
             fname.as_str(),
-            RolePermissions::all(AccessPermissions::Rwx),
+            default_directory_permissions(role),
         )
         .await
         .map_err(|err| {
@@ -791,6 +791,42 @@ async fn on_cmd_create_dir(
 
     let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::Directory);
     sender.send(resp).await.map_err(map_native_error)
+}
+
+fn default_file_permissions(role: Role) -> RolePermissions {
+    match role {
+        Role::System => RolePermissions::new(
+            AccessPermissions::Rw,
+            AccessPermissions::R,
+            AccessPermissions::R,
+        ),
+        Role::Interactive => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+            AccessPermissions::R,
+        ),
+        Role::None => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+        ),
+    }
+}
+
+fn default_directory_permissions(role: Role) -> RolePermissions {
+    match role {
+        Role::System => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
+        ),
+        Role::Interactive => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+        ),
+        Role::None => RolePermissions::all(AccessPermissions::Rwx),
+    }
 }
 
 async fn on_cmd_write(

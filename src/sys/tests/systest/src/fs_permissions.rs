@@ -65,7 +65,34 @@ pub fn run_none_child(args: &[String]) -> ! {
             .create_entry(rw_dir, EntryKind::File, "created-by-none")
             .await
             .unwrap();
+        assert_eq!(
+            RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rwx,
+                AccessPermissions::Rw,
+            ),
+            client
+                .metadata(created)
+                .await
+                .unwrap()
+                .permissions()
+                .unwrap()
+        );
+        let created_dir = client
+            .create_entry(rw_dir, EntryKind::Directory, "directory-by-none")
+            .await
+            .unwrap();
+        assert_eq!(
+            RolePermissions::all(AccessPermissions::Rwx),
+            client
+                .metadata(created_dir)
+                .await
+                .unwrap()
+                .permissions()
+                .unwrap()
+        );
         client.delete_entry(created).await.unwrap();
+        client.delete_entry(created_dir).await.unwrap();
 
         expect_denied(
             client
@@ -114,6 +141,45 @@ pub fn run_all_tests() {
         moto_sys::ProcessStaticPage::get().pid
     ));
     std::fs::create_dir(&root).unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (root_id, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
+        else {
+            panic!("test root is not a directory")
+        };
+        assert_eq!(
+            RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rwx,
+                AccessPermissions::Rx,
+            ),
+            client
+                .metadata(root_id)
+                .await
+                .unwrap()
+                .permissions()
+                .unwrap()
+        );
+        let default_file = client
+            .create_entry(root_id, EntryKind::File, "interactive-default")
+            .await
+            .unwrap();
+        assert_eq!(
+            RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rw,
+                AccessPermissions::R,
+            ),
+            client
+                .metadata(default_file)
+                .await
+                .unwrap()
+                .permissions()
+                .unwrap()
+        );
+        client.delete_entry(default_file).await.unwrap();
+    });
 
     // std's readonly API narrows the Interactive byte. It cannot widen it
     // again, so replacement is the recovery mechanism.
@@ -309,7 +375,14 @@ pub fn run_all_tests() {
             .await
             .unwrap();
         client
-            .set_permissions(rw_dir, AccessPermissions::Rw)
+            .set_all_permissions(
+                rw_dir,
+                RolePermissions::new(
+                    AccessPermissions::Rwx,
+                    AccessPermissions::Rw,
+                    AccessPermissions::Rw,
+                ),
+            )
             .await
             .unwrap();
 

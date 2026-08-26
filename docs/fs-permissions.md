@@ -237,11 +237,12 @@ every component grants None traversal; `/user/cfg` would not be suitable.
 
 ## Limits and follow-up work
 
-- Runtime-created files and directories still start as `rwxrwxrwx` in sys-io
-  unless their creator narrows them. Runtime narrowing is a separate,
-  non-atomic operation, so this image policy must not be described as enforcing
-  W^X after boot or across Motor OS. A runtime design must address creation
-  modes, writable handles, uploads, compiler output, and executable loading.
+- Runtime-created regular files start `rw-` for their creator, `rwx` for
+  higher roles, and `r--` for lower roles. Directories start `rwx` for the
+  creator and higher roles and `r-x` for lower roles. Producers finalize
+  executables with the one-way `rw-` → `r-x` self-role transition after all
+  writes succeed; exact-permissions creation is available for entries that
+  must be linked with their final mode.
 - `/system/logs` remains writable by every role because None-role strobe
   rotates logs and Interactive tests write and delete logs. Protecting log
   integrity requires a service or sys-io change.

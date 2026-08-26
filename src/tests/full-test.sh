@@ -668,7 +668,7 @@ done
 # triplets are Motor FS System, Interactive, and None roles, in that order.
 long_ls="$(vm_ssh /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
 case "$long_ls" in
-  *"drwxrwxrwx"*"amber-dir"*) ;;
+  *"drwxrwxr-x"*"amber-dir"*) ;;
   *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
 esac
 case "$long_ls" in

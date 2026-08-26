@@ -370,8 +370,8 @@ pub trait FileSystem {
     ) -> Result<Option<(EntryId, EntryKind)>>;
 
     /// Create a file or directory with the given initial per-role permissions
-    /// in System/Interactive/None order. `RolePermissions::all(Access::Rwx)`
-    /// is the fully-permissive default.
+    /// in System/Interactive/None order. The caller selects the complete mode;
+    /// sys-io computes creator-relative defaults for ordinary client requests.
     async fn create_entry(
         &mut self,
         role: Role,

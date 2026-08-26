@@ -548,16 +548,21 @@ belong to `PERMISSIONS_DESIGN.md`:
   replacing the sealed entry. `std::fs::copy` is not suitable because it
   preserves the source permission byte; delete still needs only
   parent-directory `w` (§10.7).
-- Ordinary client create requests still use `[Rwx; 3]` until the
-  creator-relative defaults are enabled. A distinct
+- Ordinary client create requests use creator-relative defaults: files are
+  `Rw` for the creator, `Rwx` for higher roles, and `R` for lower roles;
+  directories are `Rwx` for the creator and higher roles and `Rx` for lower
+  roles. A distinct
   `create_entry_with_permissions` request carries a complete mode and asks
   Motor FS to validate creation authority and monotonicity before linking the
   entry; rejection is atomic.
 - On Motor OS, `std::fs::copy` preserves the source permission visible to the
-  caller. It stages the destination as `Rw`, copies the contents, and then
-  applies `R`, `Rw`, or `Rx`; a legacy `Rwx` source is finalized as `Rx`.
-  sysbox `cp` relies on that behavior for files and leaves copied directories
-  at their creator-relative default.
+  caller and the source permissions of every lower role the caller controls.
+  Lower bytes are intersected with the finalized caller byte to retain
+  monotonicity. The destination is staged as `Rw` while contents move, then
+  `R`, `Rw`, or `Rx` is restored; a legacy caller-role `Rwx` source is
+  finalized as `Rx`. Higher-role bytes retain their creator-relative defaults
+  because the caller cannot edit them. sysbox `cp` relies on that behavior for
+  files and leaves copied directories at their creator-relative default.
 
 ---
 

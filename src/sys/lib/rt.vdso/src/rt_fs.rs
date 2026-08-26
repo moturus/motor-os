@@ -524,16 +524,28 @@ impl AsyncFsClient {
         })
     }
 
-    fn set_copy_permissions(&self, entry_id: EntryId, access: AccessPermissions) -> Result<()> {
+    fn role_permissions(&self, entry_id: EntryId) -> Result<RolePermissions> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client.metadata(entry_id).await?.permissions()
+        })
+    }
+
+    fn set_copy_permissions(&self, entry_id: EntryId, source: RolePermissions) -> Result<()> {
         self.blocking_run(move |fs_client| async move {
             let mut permissions = fs_client.metadata(entry_id).await?.permissions()?;
             match current_fs_role() {
-                Role::System => permissions = RolePermissions::new(access, access, access),
-                Role::Interactive => {
-                    permissions.interactive = access;
-                    permissions.none = access;
+                Role::System => {
+                    let system = copied_access(source.system);
+                    let interactive = source.interactive.meet(system);
+                    permissions =
+                        RolePermissions::new(system, interactive, source.none.meet(interactive));
                 }
-                Role::None => permissions.none = access,
+                Role::Interactive => {
+                    let interactive = copied_access(source.interactive);
+                    permissions.interactive = interactive;
+                    permissions.none = source.none.meet(interactive);
+                }
+                Role::None => permissions.none = copied_access(source.none),
             }
             fs_client.set_all_permissions(entry_id, permissions).await
         })
@@ -554,11 +566,7 @@ impl AsyncFsClient {
     fn copy(&self, from: &str, to: &str) -> Result<u64> {
         // Open the source: it must exist and be a regular file.
         let src = self.file_open(from, moto_rt::fs::O_READ)?;
-        let source_access = self.metadata(src.entry_id)?.perm;
-        let final_access = match perm_to_access(source_access)? {
-            AccessPermissions::Rwx => AccessPermissions::Rx,
-            access => access,
-        };
+        let source_permissions = self.role_permissions(src.entry_id)?;
 
         // Create the destination, truncating it if it already exists.
         let dst = self.file_open(
@@ -582,7 +590,7 @@ impl AsyncFsClient {
             offset += copied;
         }
 
-        self.set_copy_permissions(dst.entry_id, final_access)?;
+        self.set_copy_permissions(dst.entry_id, source_permissions)?;
         Ok(offset)
     }
 
@@ -1673,6 +1681,13 @@ fn access_to_perm(access: AccessPermissions) -> u64 {
         perm |= moto_rt::fs::PERM_EXEC;
     }
     perm
+}
+
+fn copied_access(access: AccessPermissions) -> AccessPermissions {
+    match access {
+        AccessPermissions::Rwx => AccessPermissions::Rx,
+        access => access,
+    }
 }
 
 fn perm_to_access(perm: u64) -> Result<AccessPermissions> {

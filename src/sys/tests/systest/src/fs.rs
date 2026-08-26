@@ -365,21 +365,34 @@ fn copy_test() {
     assert_eq!(std::fs::metadata(&empty_dst).unwrap().len(), 0);
 
     let expected = [
-        (AccessPermissions::R, moto_rt::fs::PERM_READ),
         (
+            AccessPermissions::R,
+            AccessPermissions::R,
+            AccessPermissions::R,
+            moto_rt::fs::PERM_READ,
+        ),
+        (
+            AccessPermissions::Rw,
+            AccessPermissions::Rw,
             AccessPermissions::Rw,
             moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE,
         ),
         (
             AccessPermissions::Rx,
+            AccessPermissions::Rx,
+            AccessPermissions::R,
             moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
         ),
         (
             AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
             moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
         ),
     ];
-    for (index, (source_access, destination_perm)) in expected.into_iter().enumerate() {
+    for (index, (source_access, final_interactive, final_none, destination_perm)) in
+        expected.into_iter().enumerate()
+    {
         let source = root.join(format!("mode-source-{index}"));
         let destination = root.join(format!("mode-destination-{index}"));
         moto_async::LocalRuntime::new().block_on(async {
@@ -435,17 +448,15 @@ fn copy_test() {
                 panic!("copy destination is not a file")
             };
             let metadata = client.metadata(destination_id).await.unwrap();
-            let final_access = if source_access == AccessPermissions::Rwx {
-                AccessPermissions::Rx
-            } else {
-                source_access
-            };
             assert_eq!(
                 AccessPermissions::Rwx,
                 metadata.access(Role::System).unwrap()
             );
-            assert_eq!(final_access, metadata.access(Role::Interactive).unwrap());
-            assert_eq!(final_access, metadata.access(Role::None).unwrap());
+            assert_eq!(
+                final_interactive,
+                metadata.access(Role::Interactive).unwrap()
+            );
+            assert_eq!(final_none, metadata.access(Role::None).unwrap());
         });
     }
 
@@ -834,7 +845,7 @@ pub fn concurrent_flush_stress_test() {
 fn permissions_vdso_test() {
     use std::os::fd::AsRawFd;
 
-    const RWX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC;
+    const RW: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
     const RX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
 
     let path = crate::temp_path("systest-permissions-vdso");
@@ -842,7 +853,7 @@ fn permissions_vdso_test() {
     let _ = std::fs::remove_file(&path);
     std::fs::write(&path, b"permissions").unwrap();
 
-    assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RWX);
+    assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RW);
     moto_rt::fs::set_perm(path_str, RX).unwrap();
     assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RX);
 

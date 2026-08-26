@@ -31,6 +31,11 @@ pub fn run_all_tests() {
         format!("#!{}\nexit 0\n", interpreter.to_str().unwrap()),
     )
     .unwrap();
+    moto_rt::fs::set_perm(
+        script.to_str().unwrap(),
+        moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+    )
+    .unwrap();
 
     assert_success(&interpreter, &["-c", "exit 0"]);
     assert_success(&script, &[]);

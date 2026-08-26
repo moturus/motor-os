@@ -551,6 +551,11 @@ fn conflict_and_cleanup_tests() {
     let path_str = path.to_str().unwrap();
     std::fs::write(&path, vec![b'x'; 65536]).unwrap();
     std::fs::write(&invalid, b"not an executable").unwrap();
+    moto_rt::fs::set_perm(
+        invalid.to_str().unwrap(),
+        moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+    )
+    .unwrap();
     let shared = moto_rt::fs::open(path_str, moto_rt::fs::O_READ | moto_rt::fs::O_WRITE).unwrap();
     let duplicate = moto_rt::fs::duplicate(shared).unwrap();
     let child = spawn(

@@ -174,12 +174,13 @@ decode through the validating `AccessPermissions::try_from` (§3).
   `perms: [0; 3]` and change `_reserved: [0; 11]` → `_reserved: [0; 8]`.
 - The 128-byte `assert!` must still pass (it will; the repartition is size-neutral).
 
-No changes are needed in `motor-fs/src/layout.rs`: `DirEntryBlock` embeds
-`Metadata` by value, so its layout and the `BLOCK_SIZE == size_of::<DirEntryBlock>()`
-assertion are unaffected. The format path (`Superblock::format`) and
-`DirEntryBlock::init_child_entry` zero the metadata, which now means "all roles
-`Rwx`" — exactly the desired default (but see §6 for setting non-default perms
-at creation).
+No changes are needed to the `DirEntryBlock` layout in
+`motor-fs/src/layout.rs`: it embeds `Metadata` by value, so its layout and the
+`BLOCK_SIZE == size_of::<DirEntryBlock>()` assertion are unaffected. The format
+path (`Superblock::format`) zeroes the root metadata, which means "all roles
+`Rwx`" and preserves the on-disk compatibility rule.
+`DirEntryBlock::init_child_entry` writes the permissions supplied by its
+caller; ordinary runtime creation uses the creator-relative defaults in §6.3.
 
 ---
 
@@ -548,8 +549,22 @@ mean `Rwx`).
 The public `FsClient::create_entry_with_permissions` uses a distinct sys-io
 command carrying the complete `RolePermissions`; validation and insertion are
 one Motor FS transaction, so an unauthorized or non-monotonic request never
-links an entry. Ordinary `FsClient::create_entry` remains the default-producing
-operation.
+links an entry. Ordinary `FsClient::create_entry` asks sys-io to compute these
+defaults from the authenticated connection role:
+
+| Kind / creator | System | Interactive | None |
+|---|---|---|---|
+| File / System | `Rw` | `R` | `R` |
+| File / Interactive | `Rwx` | `Rw` | `R` |
+| File / None | `Rwx` | `Rwx` | `Rw` |
+| Directory / System | `Rwx` | `Rx` | `Rx` |
+| Directory / Interactive | `Rwx` | `Rwx` | `Rx` |
+| Directory / None | `Rwx` | `Rwx` | `Rwx` |
+
+Regular files are writable but not executable by their creator; directories
+are fully accessible to their creator and higher roles, and readable and
+traversable by lower roles. The defaults are passed through the same Motor FS
+creation-authority and monotonicity validation as explicit permissions.
 
 ### 6.4 `metadata()` already carries permissions
 
@@ -593,8 +608,9 @@ Add to `motor-fs/src/tests.rs` (and unit tests in `async-fs` for the pure types)
    every self role, including System, and the reverse fails.
 
 **FS integration tests (`motor-fs`):**
-8. Create an entry with default perms → `metadata().access(role) == Rwx` for all
-   roles; persists across flush + reopen.
+8. Create entries with each creator role through sys-io and verify the complete
+   creator-relative file and directory tables in §6.3. Explicit all-`Rwx`
+   creation still persists across flush + reopen.
 9. Create with restricted (still monotonic) perms as System → values persist
    across reopen; creation with a non-monotonic array is rejected.
 10. `set_permissions` authority: own-byte narrow and `Rw` → `Rx` succeed;
