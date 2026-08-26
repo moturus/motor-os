@@ -86,3 +86,109 @@ toolchain_managed_checkout() {
     toolchain_die "checkout did not select $revision: $destination"
   toolchain_assert_clean "$destination"
 }
+
+toolchain_ignored_path_allowed() {
+  local source_kind="$1" path="$2"
+  case "$source_kind:$path" in
+    rust:build/|rust:build/*|rust:bootstrap.toml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+toolchain_validate_ignored_paths() {
+  local repo="$1" source_kind="$2" path
+  while IFS= read -r -d '' path; do
+    if ! toolchain_ignored_path_allowed "$source_kind" "$path"; then
+      toolchain_die "unsupported ignored authoring path: $repo/$path"
+      return 1
+    fi
+  done < <(git -C "$repo" ls-files --others --ignored --exclude-standard \
+    --directory -z)
+}
+
+toolchain_reject_nested_repositories() {
+  local repo="$1" path
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      */)
+        if [ -e "$repo/$path.git" ]; then
+          toolchain_die "unsupported nested repository: $repo/$path"
+          return 1
+        fi
+        ;;
+    esac
+  done < <(git -C "$repo" ls-files --others --exclude-standard --directory -z)
+}
+
+toolchain_reject_special_files() {
+  local repo="$1" special
+  special="$(find "$repo" -name .git -type d -prune -o \
+    ! -type f ! -type d ! -type l -print -quit)"
+  [ -z "$special" ] || toolchain_die "unsupported authoring file kind: $special"
+}
+
+toolchain_emit_file_field() {
+  local name="$1" file="$2" LC_ALL=C size
+  size="$(wc -c < "$file")"
+  size="${size//[[:space:]]/}"
+  printf '%s:%s%s:' "${#name}" "$name" "$size"
+  command cat "$file"
+}
+
+# Print "clean" or a SHA-256 digest of all non-ignored changes relative to
+# HEAD. Additional arguments are pathspecs excluded from the tracked diff;
+# declared submodules are identified separately by their exact commits.
+toolchain_worktree_digest() (
+  set -euo pipefail
+  local repo="$1" source_kind="$2"
+  shift 2
+  local tmp record tracked untracked path full kind mode content dirty=0
+  local -a pathspec=(.)
+  for path in "$@"; do
+    pathspec+=(":(exclude)$path")
+  done
+
+  toolchain_validate_ignored_paths "$repo" "$source_kind" || exit 1
+  toolchain_reject_nested_repositories "$repo" || exit 1
+  toolchain_reject_special_files "$repo" || exit 1
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  record="$tmp/record"
+  tracked="$tmp/tracked"
+  untracked="$tmp/untracked"
+  toolchain_serialize_pairs schema motor-authoring-tree-v1 > "$record"
+
+  git -C "$repo" -c core.quotePath=true diff --binary --full-index \
+    --no-ext-diff --no-textconv HEAD -- "${pathspec[@]}" > "$tracked" || exit 1
+  if [ -s "$tracked" ]; then
+    dirty=1
+    toolchain_emit_file_field tracked_diff "$tracked" >> "$record"
+  fi
+
+  git -C "$repo" ls-files --others --exclude-standard -z > "$untracked" || exit 1
+  while IFS= read -r -d '' path; do
+    dirty=1
+    full="$repo/$path"
+    content="$tmp/content"
+    if [ -L "$full" ]; then
+      kind=symlink
+      mode=120000
+      readlink -n "$full" > "$content"
+    elif [ -f "$full" ]; then
+      kind=file
+      if [ -x "$full" ]; then mode=100755; else mode=100644; fi
+      content="$full"
+    else
+      toolchain_die "unsupported authoring file kind: $full"
+      exit 1
+    fi
+    toolchain_serialize_pairs path "$path" kind "$kind" mode "$mode" >> "$record"
+    toolchain_emit_file_field content "$content" >> "$record"
+  done < "$untracked"
+
+  if [ "$dirty" -eq 0 ]; then
+    printf 'clean\n'
+  else
+    sha256sum "$record" | awk '{print $1}'
+  fi
+)
