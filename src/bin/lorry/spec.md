@@ -86,10 +86,11 @@ target, profile, native-tool, and host inputs:
   supported.
 - Native-Motor Lorry and Linux-to-Motor Lorry builds must match.
 
-The supported metadata compatibility families are Cargo 1.97, 1.98, and 1.99.
-Lorry must infer the family for conventionally paired Linux toolchains, accept
-`cargo-compat-version` for custom or unpaired toolchains, and reject unknown
-families. Native Motor target units use the logical identity of an explicit
+The sole supported metadata compatibility family is Cargo 1.99, selected by
+the current Motor Rust toolchain. Lorry must infer it from a Rust 1.99
+compiler, accept `cargo-compat-version = "1.99"` for an equivalent custom or
+unpaired toolchain, and reject every other family. Native Motor target units
+use the logical identity of an explicit
 `x86_64-unknown-motor` target even when `--target` was omitted.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
@@ -928,11 +929,9 @@ cannot itself be a procedural-macro crate.
 
 Rustc arguments, environment, Cargo-compatible metadata/extra-filename hashes,
 target search paths, `--extern` paths, lints/check-cfg, profile/LTO behavior,
-and primary output handling must match the selected Cargo compatibility
-family, with one diagnostic-only exception: verbose Lorry builds pass
-`--verbose` to rustc for Cargo 1.97 compatibility even though Cargo 1.97 does
-not. Cargo 1.98 and 1.99 both pass that flag, and the flag does not alter unit
-identity or executable bytes. Default output is isolated below
+and primary output handling must match Cargo compatibility family 1.99.
+Verbose builds pass Cargo 1.99's diagnostic-only `--verbose` flag to rustc;
+the flag does not alter unit identity or executable bytes. Default output is isolated below
 `target/lorry/`, with Cargo-shaped native or explicit-target debug/release
 subdirectories.
 
@@ -1103,8 +1102,8 @@ boundary once and must finish within a hard 30-minute wall-clock budget:
 - focused contracts prove multiple targets, selected workspaces, and
   procedural-macro host execution/cache reuse in Linux-native and
   Linux-to-Motor builds;
-- live Cargo 1.97/1.98/1.99 resolution checks retain the supported lockfile
-  family contract, while a dependency-free fixture proves native and
+- a live check through the exact current Motor Cargo retains the supported
+  lockfile-family contract, while a dependency-free fixture proves native and
   Linux-to-Motor release artifact identity against the paired Cargo;
 - one fresh real registry acquisition followed by one warm reuse proves the
   external download and immutable-publication boundary;

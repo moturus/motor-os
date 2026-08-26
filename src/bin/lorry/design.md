@@ -93,7 +93,7 @@ unchanged version 3 lock byte-for-byte. Lorry renders the complete all-target
 lock graph, then separately computes the union of closures selected for
 configured vendor targets.
 
-Cargo compatibility is an explicit family (`1.97`, `1.98`, or `1.99`), either
+Cargo compatibility is the explicit current Motor family (`1.99`), either
 inferred from a paired rustc or supplied by installation configuration. The
 family selects Cargo-shaped compiler identity behavior and is part of every
 build-cache key. Cargo invocation and the identity/resolution oracles used to
@@ -305,7 +305,7 @@ Compilation units use Cargo's current private per-unit output layout. Direct
 and transitive Rust dependencies are exposed as separate search directories,
 so concurrently executing rustc processes never scan a directory another
 unit is changing. Direct `--extern` arguments still name exact artifacts, and
-the Cargo 1.97--1.99 compatibility selection continues to control unit hashes
+the Cargo 1.99 compatibility selection continues to control unit hashes
 and filenames rather than the output-directory topology.
 
 `cache.rs` stores only verified library/procedural-macro artifacts and
