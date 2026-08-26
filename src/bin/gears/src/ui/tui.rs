@@ -126,6 +126,7 @@ struct App {
     session: SessionSummary,
     approval: Option<Permission>,
     quit: bool,
+    last_frame: Option<Frame>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +137,43 @@ struct Layout {
     editor_start: usize,
     editor_rows: usize,
     status_row: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StyledChar {
+    character: char,
+    color: Color,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StyledLine(Vec<StyledChar>);
+
+impl StyledLine {
+    fn push(&mut self, color: Color, text: &str, width: usize) {
+        let remaining = width.saturating_sub(self.0.len());
+        self.0.extend(
+            text.chars()
+                .take(remaining)
+                .map(|character| StyledChar { character, color }),
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    width: usize,
+    lines: Vec<StyledLine>,
+    cursor: Option<(u16, u16)>,
+}
+
+impl Frame {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            lines: vec![StyledLine::default(); height],
+            cursor: None,
+        }
+    }
 }
 
 fn screen_layout(height: usize, editor_rows: usize, approval: bool) -> Layout {
@@ -171,13 +209,20 @@ impl App {
             session: runtime.summary(),
             approval: None,
             quit: false,
+            last_frame: None,
         }
     }
 
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Text(text) => self.push(Kind::Assistant, text, true),
-            Event::Reasoning(text) => self.push(Kind::Reasoning, text, true),
+            Event::Text(text) => {
+                self.status = "responding".to_string();
+                self.push(Kind::Assistant, text, true);
+            }
+            Event::Reasoning(text) => {
+                self.status = "thinking".to_string();
+                self.push(Kind::Reasoning, text, true);
+            }
             Event::ToolStart { name, detail } => {
                 self.status = format!("running {name}");
                 self.push(Kind::Tool, format!("{name}> {detail}"), false);
@@ -201,7 +246,7 @@ impl App {
                     false,
                 );
             }
-            Event::Permission(_) => {}
+            Event::Permission(_) => self.status = "checking permission".to_string(),
             Event::Notice(text) => self.push(Kind::Notice, text, false),
             Event::Usage(text) => self.status = text,
             Event::ModelChanged(model) => self.model = model,
@@ -344,12 +389,27 @@ impl App {
         self.session = runtime.summary();
     }
 
-    fn render(&self) -> Result<(), String> {
+    fn render(&mut self) -> Result<(), String> {
         let (width, height) = terminal::size().map_err(|error| error.to_string())?;
+        let next = self.frame(width, height);
+        let mut output = io::stdout().lock();
+        paint_frame(&mut output, self.last_frame.as_ref(), &next)
+            .map_err(|error| error.to_string())?;
+        output.flush().map_err(|error| error.to_string())?;
+        self.last_frame = Some(next);
+        Ok(())
+    }
+
+    fn invalidate(&mut self) {
+        self.last_frame = None;
+    }
+
+    fn frame(&self, width: u16, height: u16) -> Frame {
         let width = usize::from(width).max(1);
         let height = usize::from(height);
+        let mut frame = Frame::new(width, height);
         if height == 0 {
-            return Ok(());
+            return frame;
         }
         let editor_width = width.saturating_sub(2).max(1);
         let draft_lines = wrap(self.editor.text(), editor_width);
@@ -360,18 +420,8 @@ impl App {
         let end = lines.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(layout.transcript_rows);
         let transcript_start = layout.transcript_rows.saturating_sub(end - start);
-        let mut output = io::stdout().lock();
-        queue!(output, cursor::MoveTo(0, 0), Clear(ClearType::All))
-            .map_err(|error| error.to_string())?;
         for (index, (kind, line)) in lines[start..end].iter().enumerate() {
-            queue!(
-                output,
-                cursor::MoveTo(0, (transcript_start + index) as u16),
-                SetForegroundColor(color(*kind)),
-                Print(clipped(line, width)),
-                ResetColor
-            )
-            .map_err(|error| error.to_string())?;
+            frame.lines[transcript_start + index].push(color(*kind), line, width);
         }
         if let Some(permission) = &self.approval {
             let approval = [
@@ -387,14 +437,7 @@ impl App {
                 clipped("[y] allow  [n/esc] deny", width),
             ];
             for (index, line) in approval.iter().take(layout.approval_rows).enumerate() {
-                queue!(
-                    output,
-                    cursor::MoveTo(0, (layout.approval_start + index) as u16),
-                    SetForegroundColor(Color::Yellow),
-                    Print(line),
-                    ResetColor
-                )
-                .map_err(|error| error.to_string())?;
+                frame.lines[layout.approval_start + index].push(Color::Yellow, line, width);
             }
         }
         let editor_first = cursor_row
@@ -409,50 +452,28 @@ impl App {
             .enumerate()
         {
             let prefix = if index == 0 { "> " } else { "  " };
-            let prefix = clipped(prefix, width);
-            let text_width = width.saturating_sub(prefix.chars().count());
-            queue!(
-                output,
-                cursor::MoveTo(0, (layout.editor_start + shown) as u16),
-                SetForegroundColor(Color::Green),
-                Print(prefix),
-                ResetColor,
-                Print(clipped(line, text_width))
-            )
-            .map_err(|error| error.to_string())?;
+            let target = &mut frame.lines[layout.editor_start + shown];
+            target.push(Color::Green, prefix, width);
+            target.push(Color::White, line, width);
         }
         let status = single_line(&format!(
-            "gears | {} | {}{} | {}",
+            "gears | {} | {} | {}{}",
+            self.status,
             self.model,
             self.session.name.as_deref().unwrap_or(&self.session.id),
             if self.session.ephemeral {
                 " (ephemeral)"
             } else {
                 ""
-            },
-            self.status
+            }
         ));
-        queue!(
-            output,
-            cursor::MoveTo(0, layout.status_row as u16),
-            SetForegroundColor(Color::Cyan),
-            Print(clipped(&status, width)),
-            ResetColor
-        )
-        .map_err(|error| error.to_string())?;
-        if layout.editor_rows == 0 {
-            queue!(output, cursor::Hide).map_err(|error| error.to_string())?;
-        } else {
+        frame.lines[layout.status_row].push(Color::Cyan, &status, width);
+        if layout.editor_rows != 0 {
             let row = layout.editor_start + cursor_row.saturating_sub(editor_first);
             let column = (cursor_column + 2).min(width.saturating_sub(1));
-            queue!(
-                output,
-                cursor::MoveTo(column as u16, row as u16),
-                cursor::Show
-            )
-            .map_err(|error| error.to_string())?;
+            frame.cursor = Some((column as u16, row as u16));
         }
-        output.flush().map_err(|error| error.to_string())
+        frame
     }
 
     fn transcript_lines(&self, width: usize) -> Vec<(Kind, String)> {
@@ -479,6 +500,69 @@ impl App {
     }
 }
 
+fn paint_frame<W: Write>(output: &mut W, previous: Option<&Frame>, next: &Frame) -> io::Result<()> {
+    let full = previous.is_none_or(|previous| {
+        previous.width != next.width || previous.lines.len() != next.lines.len()
+    });
+    let changed = full
+        || previous.is_some_and(|previous| {
+            previous
+                .lines
+                .iter()
+                .zip(&next.lines)
+                .any(|(old, new)| old != new)
+        });
+    if changed {
+        queue!(output, cursor::Hide)?;
+    }
+    if full {
+        queue!(output, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
+    }
+    for (row, new) in next.lines.iter().enumerate() {
+        let old = (!full).then(|| &previous.expect("non-full frame exists").lines[row]);
+        if old == Some(new) || full && new.0.is_empty() {
+            continue;
+        }
+        paint_line(output, row as u16, old, new)?;
+    }
+    match next.cursor {
+        Some((column, row)) => queue!(output, cursor::MoveTo(column, row), cursor::Show)?,
+        None => queue!(output, cursor::Hide)?,
+    }
+    Ok(())
+}
+
+fn paint_line<W: Write>(
+    output: &mut W,
+    row: u16,
+    previous: Option<&StyledLine>,
+    next: &StyledLine,
+) -> io::Result<()> {
+    let common = previous.map_or(0, |previous| {
+        previous
+            .0
+            .iter()
+            .zip(&next.0)
+            .take_while(|(old, new)| old == new)
+            .count()
+    });
+    queue!(output, cursor::MoveTo(common as u16, row))?;
+    let mut index = common;
+    while index < next.0.len() {
+        let color = next.0[index].color;
+        let mut text = String::new();
+        while index < next.0.len() && next.0[index].color == color {
+            text.push(next.0[index].character);
+            index += 1;
+        }
+        queue!(output, SetForegroundColor(color), Print(text))?;
+    }
+    if previous.is_some_and(|previous| previous.0.len() > next.0.len()) {
+        queue!(output, Clear(ClearType::UntilNewLine))?;
+    }
+    queue!(output, ResetColor)
+}
+
 enum TurnMessage {
     Event(Event),
     Permission(Permission, mpsc::Sender<bool>),
@@ -486,6 +570,8 @@ enum TurnMessage {
 }
 
 fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), String> {
+    app.status = "working".to_string();
+    app.render()?;
     let cancellation = runtime.cancellation();
     let (sender, receiver) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -501,15 +587,27 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
             let _ = sender.send(TurnMessage::Done(result));
         });
         loop {
+            let mut dirty = false;
             loop {
                 match receiver.try_recv() {
                     Ok(message) => match message {
-                        TurnMessage::Event(event) => app.apply(event),
+                        TurnMessage::Event(event) => {
+                            app.apply(event);
+                            dirty = true;
+                        }
                         TurnMessage::Permission(permission, reply) => {
                             app.approval = Some(permission);
+                            app.status = "waiting for permission".to_string();
                             app.render()?;
                             let allowed = permission_input(&cancellation, app)?;
                             app.approval = None;
+                            app.status = if cancellation.cancelled() {
+                                "cancelling"
+                            } else {
+                                "working"
+                            }
+                            .to_string();
+                            app.render()?;
                             let _ = reply.send(allowed);
                         }
                         TurnMessage::Done(result) => {
@@ -523,6 +621,9 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                         return Err("agent worker stopped unexpectedly".to_string());
                     }
                 }
+            }
+            if dirty {
+                app.render()?;
             }
             if event::poll(POLL).map_err(|error| error.to_string())? {
                 match event::read().map_err(|error| error.to_string())? {
@@ -554,6 +655,8 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
 }
 
 fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> Result<(), String> {
+    app.status = "compacting".to_string();
+    app.render()?;
     let cancellation = runtime.cancellation();
     let (sender, receiver) = mpsc::channel();
     std::thread::scope(|scope| {
@@ -566,9 +669,13 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
             let _ = sender.send(TurnMessage::Done(result));
         });
         loop {
+            let mut dirty = false;
             loop {
                 match receiver.try_recv() {
-                    Ok(TurnMessage::Event(event)) => app.apply(event),
+                    Ok(TurnMessage::Event(event)) => {
+                        app.apply(event);
+                        dirty = true;
+                    }
                     Ok(TurnMessage::Done(result)) => {
                         app.status = "idle".to_string();
                         app.render()?;
@@ -582,6 +689,9 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
                         return Err("compaction worker stopped unexpectedly".to_string());
                     }
                 }
+            }
+            if dirty {
+                app.render()?;
             }
             if event::poll(POLL).map_err(|error| error.to_string())? {
                 match event::read().map_err(|error| error.to_string())? {
@@ -853,22 +963,26 @@ fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>,
         return Err("nothing to select".to_string());
     }
     let mut selected = 0;
+    let mut previous = None;
     loop {
-        render_picker(title, items, selected)?;
+        render_picker(title, items, selected, &mut previous)?;
         match event::read().map_err(|error| error.to_string())? {
             InputEvent::Resize(_, _) => {}
             InputEvent::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Up => selected = selected.saturating_sub(1),
                 KeyCode::Down => selected = (selected + 1).min(items.len() - 1),
                 KeyCode::Enter => {
+                    app.invalidate();
                     app.render()?;
                     return Ok(Some(selected));
                 }
                 KeyCode::Esc => {
+                    app.invalidate();
                     app.render()?;
                     return Ok(None);
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.invalidate();
                     app.render()?;
                     return Ok(None);
                 }
@@ -879,39 +993,44 @@ fn picker(app: &mut App, title: &str, items: &[String]) -> Result<Option<usize>,
     }
 }
 
-fn render_picker(title: &str, items: &[String], selected: usize) -> Result<(), String> {
+fn render_picker(
+    title: &str,
+    items: &[String],
+    selected: usize,
+    previous: &mut Option<Frame>,
+) -> Result<(), String> {
     let (width, height) = terminal::size().map_err(|error| error.to_string())?;
-    let visible = usize::from(height).saturating_sub(2).max(1);
+    let next = picker_frame(width, height, title, items, selected);
+    let mut output = io::stdout().lock();
+    paint_frame(&mut output, previous.as_ref(), &next).map_err(|error| error.to_string())?;
+    output.flush().map_err(|error| error.to_string())?;
+    *previous = Some(next);
+    Ok(())
+}
+
+fn picker_frame(width: u16, height: u16, title: &str, items: &[String], selected: usize) -> Frame {
+    let width = usize::from(width).max(1);
+    let height = usize::from(height);
+    let mut frame = Frame::new(width, height);
+    if height == 0 {
+        return frame;
+    }
+    let visible = height.saturating_sub(2).max(1);
     let start = selected.saturating_sub(visible / 2);
     let end = (start + visible).min(items.len());
-    let mut output = io::stdout().lock();
-    queue!(
-        output,
-        cursor::MoveTo(0, 0),
-        Clear(ClearType::All),
-        SetForegroundColor(Color::Cyan),
-        Print(clipped(title, usize::from(width))),
-        ResetColor,
-        Print("\r\n")
-    )
-    .map_err(|error| error.to_string())?;
+    frame.lines[0].push(Color::Cyan, &single_line(title), width);
     for (index, item) in items[start..end].iter().enumerate() {
         let actual = start + index;
-        queue!(
-            output,
-            SetForegroundColor(if actual == selected {
-                Color::Yellow
-            } else {
-                Color::White
-            }),
-            Print(if actual == selected { "> " } else { "  " }),
-            Print(clipped(item, usize::from(width).saturating_sub(2))),
-            ResetColor,
-            Print("\r\n")
-        )
-        .map_err(|error| error.to_string())?;
+        let color = if actual == selected {
+            Color::Yellow
+        } else {
+            Color::White
+        };
+        let line = &mut frame.lines[index + 1];
+        line.push(color, if actual == selected { "> " } else { "  " }, width);
+        line.push(color, &single_line(item), width);
     }
-    output.flush().map_err(|error| error.to_string())
+    frame
 }
 
 fn color(kind: Kind) -> Color {
@@ -1012,6 +1131,27 @@ fn fold(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn app() -> App {
+        App {
+            transcript: VecDeque::new(),
+            bytes: 0,
+            editor: Editor::new(),
+            scroll: 0,
+            status: "working".to_string(),
+            model: "test/model".to_string(),
+            session: SessionSummary {
+                id: "test-session".to_string(),
+                path: None,
+                name: None,
+                entries: 0,
+                ephemeral: true,
+            },
+            approval: None,
+            quit: false,
+            last_frame: None,
+        }
+    }
+
     #[test]
     fn wrapping_and_cursor_agree() {
         assert_eq!(wrap("abcdef", 3), ["abc", "def"]);
@@ -1049,5 +1189,50 @@ mod tests {
                 status_row: 23,
             }
         );
+    }
+
+    #[test]
+    fn incremental_paint_writes_only_the_changed_suffix() {
+        let mut old = Frame::new(10, 3);
+        old.lines[1].push(Color::Green, "> ", 10);
+        old.lines[1].push(Color::White, "a", 10);
+        old.cursor = Some((3, 1));
+        let mut new = old.clone();
+        new.lines[1].push(Color::White, "b", 10);
+        new.cursor = Some((4, 1));
+        let mut output = Vec::new();
+
+        paint_frame(&mut output, Some(&old), &new).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("[2J"), "{output:?}");
+        assert!(output.contains("[2;4H"), "{output:?}");
+        assert!(!output.contains("> a"), "{output:?}");
+        assert!(output.contains('b'), "{output:?}");
+    }
+
+    #[test]
+    fn runtime_events_keep_the_activity_marker_current() {
+        let mut app = app();
+        let status = |app: &App| {
+            app.frame(80, 24).lines[23]
+                .0
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>()
+        };
+
+        assert!(status(&app).starts_with("gears | working |"));
+        app.apply(Event::Reasoning("plan".to_string()));
+        assert!(status(&app).starts_with("gears | thinking |"));
+        app.apply(Event::Text("answer".to_string()));
+        assert!(status(&app).starts_with("gears | responding |"));
+        app.apply(Event::Permission(Permission {
+            tool: "sh".to_string(),
+            detail: "true".to_string(),
+            workspace: "/tmp".into(),
+        }));
+        assert!(status(&app).starts_with("gears | checking permission |"));
+        app.apply(Event::TurnEnd);
+        assert!(status(&app).starts_with("gears | idle |"));
     }
 }
