@@ -81,6 +81,7 @@ toolchain_native_configuration_digest() {
 	toolchain_hash_pairs schema motor-native-config-v1 target x86_64-unknown-motor \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
+		lua_version "$MOTOR_LUA_VERSION" \
 		cc /MOTOR_SYSROOT/bin/motor-clang \
 		cxx /MOTOR_SYSROOT/bin/motor-clang++ \
 		linker /MOTOR_SYSROOT/bin/motor-rust-cc

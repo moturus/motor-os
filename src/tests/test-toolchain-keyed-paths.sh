@@ -30,5 +30,9 @@ for producer in build_mlibc build_cxx_runtimes build_native_llvm; do
 			fail "$producer still wipes or uses source-relative build output" ;;
 	esac
 done
+case "$(declare -f build_lua llvm_stage_image)" in
+	*'rm -rf'*|*'$MOTORH/lua-$LUA_VER/src/lua'*|*'$LLVM/build-motor-native'*)
+		fail "Lua or image staging still wipes or consumes unkeyed output" ;;
+esac
 
 echo "test-toolchain-keyed-paths PASS"

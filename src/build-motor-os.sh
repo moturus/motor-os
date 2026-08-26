@@ -108,7 +108,7 @@ RIPGREP="$MOTORH/ripgrep"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
-LUA_VER="5.4.8"
+LUA_VER="$MOTOR_LUA_VERSION"
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
@@ -547,13 +547,16 @@ build_lua() {
 		[ -d "lua-$LUA_VER" ] || tar xf "lua-$LUA_VER.tar.gz" )
 
 	( cd "$MOTORH/lua-$LUA_VER/src"
+		mkdir -p "$LUA_BUILD"
 		local cflags="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/$TOOLS/include -DLUA_USE_POSIX"
-		local f
-		for f in $(ls ./*.c | grep -v -e 'lua\.c$' -e 'luac\.c$'); do
+		local f object
+		for f in ./*.c; do
+			case "$f" in ./lua.c|./luac.c) continue ;; esac
+			object="$LUA_BUILD/$(basename "${f%.c}").o"
 			# shellcheck disable=SC2086
-			"$B/clang" $cflags -c "$f"
+			"$B/clang" $cflags -c "$f" -o "$object"
 		done
-		"$B/llvm-ar" rcs liblua.a ./*.o
+		"$B/llvm-ar" rcs "$LUA_BUILD/liblua.a" "$LUA_BUILD"/*.o
 		# mlibc is C++ internally (its stdio FILE machinery — cookie_file,
 		# memstream, fmemopen — has C++ destructors that call `operator delete`),
 		# so even this pure-C program pulls libc++abi/libunwind out of libc.a and
@@ -562,7 +565,7 @@ build_lua() {
 		# explicitly. --start-group resolves the libc <-> libc++abi <-> shim
 		# back-references regardless of order.
 		# shellcheck disable=SC2086
-		"$B/clang" $cflags lua.c liblua.a \
+		"$B/clang" $cflags lua.c "$LUA_BUILD/liblua.a" \
 			"$SYSROOT/$TOOLS/lib/crt1.o" \
 			-Wl,--start-group \
 			"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" \
@@ -570,25 +573,24 @@ build_lua() {
 			"$SYSROOT/$TOOLS/lib/libunwind.a" \
 			"$SYSROOT/$TOOLS/lib/libc.a" \
 			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" \
-			-Wl,--end-group -o lua )
+			-Wl,--end-group -o "$LUA_BUILD/lua" )
 }
 
 # --- stage 8: stage the C/C++ toolchain into the image ----------------------
 llvm_stage_image() {
 	log "stage 8: staging the toolchain, sysroot, and Lua into img_files/generated/llvm"
 	local img="$LLVM_IMG"
-	rm -rf "$img" "$LIBC_IMG"
+	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
+		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
 	mkdir -p "$img/devtools/bin" "$img/devtools/src" "$img/$TOOLS/bin" "$img/$TOOLS/lib" \
 		"$img/$CFG_LLVM" "$LIBC_IMG/$CFG_LIBC"
 
-	# Headers: mlibc + libc++'s c++/v1 (rm+copy for a clean, stale-free tree).
-	rm -rf "$img/$TOOLS/include"
+	# Headers: mlibc + libc++'s c++/v1 in the fresh keyed image root.
 	cp -a "$SYSROOT/$TOOLS/include" "$img/$TOOLS/include"
 
 	# Clang's own resource headers (intrinsics, stdarg.h, ...).
-	rm -rf "$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
 	mkdir -p "$img/$TOOLS/lib/clang/$CLANG_MAJOR"
-	cp -a "$LLVM/build/lib/clang/$CLANG_MAJOR/include" \
+	cp -a "$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/include" \
 		"$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
 
 	# Libraries — strip debug info on the way in.
@@ -606,8 +608,8 @@ llvm_stage_image() {
 	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
 	# exe's own path, so the binary works wherever it is placed. Lua is a direct
 	# development executable under /devtools/bin.
-	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$LLVM/build-motor-native/bin/llvm"
-	"$B/llvm-strip" -o "$img/devtools/bin/lua"  "$MOTORH/lua-$LUA_VER/src/lua"
+	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
+	"$B/llvm-strip" -o "$img/devtools/bin/lua" "$LUA_BUILD/lua"
 
 	# /devtools/bin/cc — the C compiler / linker driver: a Rush script (not
 	# a compiled binary) over the llvm multicall's clang. rustc's default linker
