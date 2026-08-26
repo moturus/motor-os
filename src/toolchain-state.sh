@@ -37,15 +37,21 @@ toolchain_mark_prefix_rejected() {
 	mv "$temporary" "$marker"
 }
 
-toolchain_check_postbuild_locks() {
-	local rust="$1" prefix="$2" reason
+toolchain_postbuild_locks_unchanged() {
+	local rust="$1"
 	POST_RUST_ROOT_LOCK_SHA256="$(toolchain_sha256_file "$rust/Cargo.lock")" || return
 	POST_RUST_LIBRARY_LOCK_SHA256="$(toolchain_sha256_file "$rust/library/Cargo.lock")" || return
 	if [ "$START_RUST_ROOT_LOCK_SHA256" = "$POST_RUST_ROOT_LOCK_SHA256" ] &&
 		[ "$START_RUST_LIBRARY_LOCK_SHA256" = "$POST_RUST_LIBRARY_LOCK_SHA256" ]; then
 		return 0
 	fi
-	reason="Rust lockfiles changed during bootstrap; root $START_RUST_ROOT_LOCK_SHA256 -> $POST_RUST_ROOT_LOCK_SHA256; library $START_RUST_LIBRARY_LOCK_SHA256 -> $POST_RUST_LIBRARY_LOCK_SHA256"
-	toolchain_mark_prefix_rejected "$prefix" "$reason" || return
-	toolchain_die "$reason; preserved and rejected $prefix"
+	TOOLCHAIN_LOCK_REWRITE_REASON="Rust lockfiles changed during bootstrap; root $START_RUST_ROOT_LOCK_SHA256 -> $POST_RUST_ROOT_LOCK_SHA256; library $START_RUST_LIBRARY_LOCK_SHA256 -> $POST_RUST_LIBRARY_LOCK_SHA256"
+	toolchain_die "$TOOLCHAIN_LOCK_REWRITE_REASON"
+}
+
+toolchain_check_postbuild_locks() {
+	local rust="$1" prefix="$2"
+	toolchain_postbuild_locks_unchanged "$rust" && return 0
+	toolchain_mark_prefix_rejected "$prefix" "$TOOLCHAIN_LOCK_REWRITE_REASON" || return
+	toolchain_die "$TOOLCHAIN_LOCK_REWRITE_REASON; preserved and rejected $prefix"
 }
