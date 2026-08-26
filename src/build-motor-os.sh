@@ -805,6 +805,8 @@ main() {
 		"$MOTOR/src/sys/lib/moto-rt"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
+	export PYTHONDONTWRITEBYTECODE=1
+	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths

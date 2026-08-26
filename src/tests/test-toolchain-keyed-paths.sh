@@ -32,6 +32,11 @@ case "$(declare -f main)" in
 	*'export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"'*) ;;
 	*) fail "later repository commands do not select the exact toolchain" ;;
 esac
+case "$(declare -f main)" in
+	*'export PYTHONDONTWRITEBYTECODE=1'*\
+*'export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"'*) ;;
+	*) fail "assembly Python processes do not isolate bytecode" ;;
+esac
 case "$(declare -f build_shim)" in
 	*'cargo +dev-x86_64-unknown-motor'*|*'src/sys/target'*)
 		fail "shim still uses a legacy toolchain or target directory" ;;

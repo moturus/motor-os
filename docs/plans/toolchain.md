@@ -880,11 +880,11 @@ Authoring mode:
 Ignored files under the reviewed Rust `build/` and
 `src/bootstrap/__pycache__/` compiler-output roots do not enter the digest,
 and neither does an ignored root `bootstrap.toml`, because the configuration
-passed through `--config` overrides it. Every `x.py` invocation redirects
-Python's cache lookup and output to the keyed toolchain state directory, so a
-source-tree bytecode cache cannot affect the build. Reject any other ignored
-path, rather than assuming it cannot affect the build. Untracked source inputs
-do enter the digest, and the
+passed through `--config` overrides it. Every Python process invoked while
+building Rust, LLVM, or the native assembly redirects cache lookup and output
+to the keyed toolchain state directory, so a source-tree bytecode cache cannot
+affect the build. Reject any other ignored path, rather than assuming it cannot
+affect the build. Untracked source inputs do enter the digest, and the
 authoring allowlist rejects nested repositories other than the declared LLVM
 and Cargo submodules, sockets, devices, and other unsupported file kinds.
 Rust's superproject digest records its `HEAD` gitlink for LLVM, while the
