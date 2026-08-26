@@ -1002,6 +1002,14 @@ fn main() {
         poll::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "mio-accept-pump-repro" {
+        poll::reproduce_mio_accept_pump_stall();
+        return;
+    }
+    if (args.len() == 3 || args.len() == 4) && args[1] == "mio-ping-pong-peer" {
+        poll::run_mio_ping_pong_peer(&args[2], args.get(3).map(String::as_str));
+        return;
+    }
     if args.len() == 2 && args[1] == "test-moto-async" {
         moto_async::run_all_tests();
         return;
