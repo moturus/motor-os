@@ -33,7 +33,8 @@ toolchain_build_native_rustc() {
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || return
 	prefix_before="$(toolchain_content_tree_digest "$TOOLCHAIN_PREFIX" .)" || return
-	if ! (cd "$rust" && ./x.py --config "$NATIVE_BOOTSTRAP_CONFIG" build \
+	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
+		./x.py --config "$NATIVE_BOOTSTRAP_CONFIG" build \
 		--stage 2 compiler --host x86_64-unknown-motor \
 		--target x86_64-unknown-motor); then
 		toolchain_reject_assembly "native Rust bootstrap failed"

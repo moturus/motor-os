@@ -61,6 +61,7 @@ export MOTOR_CMAKE_COMMAND="$fake_cmake" MOTOR_NINJA_COMMAND="$fake_ninja"
 
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash
+[ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
 printf x >> '$temporary/xpy-runs'
 [ "\${FAIL_XPY:-0}" != 1 ] || exit 7
 while [ "\$#" -gt 0 ]; do
@@ -81,7 +82,7 @@ rustc)
   if [ "\${1:-}" = -vV ]; then printf '%s\\n' 'rustc ($MOTOR_TOOLCHAIN_ID)' 'commit-hash: $MOTOR_RUST_REV';
   elif [ "\${1:-}" = --print ]; then dirname "\$(dirname "\$0")";
   else while [ "\$#" -gt 0 ]; do if [ "\$1" = -o ]; then shift; : > "\$1"; fi; shift; done; fi ;;
-cargo) printf '%s\\n' 'cargo' 'commit-hash: $MOTOR_CARGO_REV' ;;
+cargo) printf '%s\\n' 'cargo' 'release: $MOTOR_CARGO_VERSION' 'commit-hash: $MOTOR_CARGO_REV' ;;
 *) printf '%s\\n' version ;;
 esac
 TOOL

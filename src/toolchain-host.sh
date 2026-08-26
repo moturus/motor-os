@@ -32,7 +32,8 @@ toolchain_reject_incomplete_prefix() {
 toolchain_accept_new_prefix() {
 	local rust="$1" authoring_base="$2" expected_digest="$3"
 	local prefix="$4" local_moto_rt="$5" cargo_home="$6"
-	if ! (cd "$rust" && ./x.py --config "$BOOTSTRAP_CONFIG" install --stage 2); then
+	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
+		./x.py --config "$BOOTSTRAP_CONFIG" install --stage 2); then
 		toolchain_reject_incomplete_prefix "$prefix" "Rust bootstrap install failed"
 		return 1
 	fi

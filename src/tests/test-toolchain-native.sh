@@ -31,6 +31,7 @@ toolchain_reverify_selected_sources() { :; }
 
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash
+[ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
 binary='$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main'
 mkdir -p "\$(dirname "\$binary")"
 printf '%s\n' '$MOTOR_RUST_REV' '$MOTOR_TOOLCHAIN_ID' > "\$binary"
