@@ -146,6 +146,10 @@ prepare_exact_sources() {
 				"$MOTORH/llvm-project" || return
 			toolchain_managed_submodule "$RUST" src/tools/cargo \
 				"$MOTOR_CARGO_REPOSITORY" "$MOTOR_CARGO_REV" "$MOTOR_CARGO_REV" || return
+			local backtrace_rev
+			backtrace_rev="$(toolchain_gitlink "$RUST" HEAD library/backtrace)" || return
+			toolchain_managed_submodule "$RUST" library/backtrace \
+				"$RUST_BACKTRACE_REPOSITORY" "$backtrace_rev" "$backtrace_rev" || return
 			toolchain_verify_managed_rust "$RUST" || return
 			MOTOR_SOURCE_MODE=managed
 			SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"

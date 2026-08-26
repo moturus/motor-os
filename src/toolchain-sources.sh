@@ -225,7 +225,7 @@ toolchain_stage0_revision() {
 }
 
 toolchain_authoring_resolve() {
-  local rust="$1" base="$2" llvm cargo rust_head llvm_head cargo_head
+  local rust="$1" base="$2" llvm cargo backtrace rust_head llvm_head cargo_head
   local effective_llvm_gitlink index_llvm_gitlink index_cargo_gitlink stage0_at_head
   toolchain_require_hex authoring_base "$base" 40 || return
   if ! git -C "$rust" cat-file -e "$base^{commit}" 2>/dev/null; then
@@ -242,6 +242,7 @@ toolchain_authoring_resolve() {
   toolchain_assert_named_remote "$rust" rust-lang "$UPSTREAM_RUST_REPOSITORY" || return
   llvm="$rust/src/llvm-project"
   cargo="$rust/src/tools/cargo"
+  backtrace="$rust/library/backtrace"
   if ! git -C "$llvm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     toolchain_die "LLVM submodule is not initialized: $llvm"
     return 1
@@ -250,9 +251,14 @@ toolchain_authoring_resolve() {
     toolchain_die "Cargo submodule is not initialized: $cargo"
     return 1
   fi
+  if ! git -C "$backtrace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    toolchain_die "backtrace submodule is not initialized: $backtrace"
+    return 1
+  fi
   toolchain_assert_named_remote "$llvm" origin "$MOTOR_LLVM_REPOSITORY" || return
   toolchain_assert_named_remote "$llvm" rust-lang "$RUST_LLVM_REPOSITORY" || return
   toolchain_assert_named_remote "$cargo" origin "$MOTOR_CARGO_REPOSITORY" || return
+  toolchain_assert_named_remote "$backtrace" origin "$RUST_BACKTRACE_REPOSITORY" || return
 
   SELECTED_UPSTREAM_RUST_REV="$base"
   SELECTED_RUST_VERSION="$(git -C "$rust" show "$base:src/version")" || return
@@ -323,6 +329,8 @@ toolchain_authoring_resolve() {
   fi
   toolchain_assert_clean "$cargo" || return
   toolchain_validate_ignored_paths "$cargo" cargo || return
+  toolchain_verify_exact_submodule "$rust" library/backtrace \
+    "$RUST_BACKTRACE_REPOSITORY" || return
 
   MOTOR_RUST_TREE_STATE="$(toolchain_worktree_digest "$rust" rust \
     src/llvm-project src/tools/cargo)" || return
@@ -393,6 +401,22 @@ toolchain_managed_submodule() {
   toolchain_assert_clean "$parent"
 }
 
+toolchain_verify_exact_submodule() {
+  local parent="$1" path="$2" repository="$3" destination expected top
+  destination="$parent/$path"
+  expected="$(toolchain_gitlink "$parent" HEAD "$path")" || return
+  top="$(git -C "$destination" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ "$(readlink -f "$top" 2>/dev/null || true)" != \
+    "$(readlink -f "$destination" 2>/dev/null || true)" ]; then
+    toolchain_die "$path submodule is not initialized: $destination"
+    return 1
+  fi
+  toolchain_assert_remote "$destination" "$repository" || return
+  toolchain_expect_equal "$(git -C "$destination" rev-parse HEAD)" \
+    "$expected" "$path submodule HEAD mismatch" || return
+  toolchain_assert_clean "$destination"
+}
+
 toolchain_assert_ancestor() {
   local repo="$1" base="$2" revision="$3" description="$4"
   if ! git -C "$repo" cat-file -e "$base^{commit}" 2>/dev/null; then
@@ -449,5 +473,7 @@ toolchain_verify_managed_rust() {
     "Rust library lock hash mismatch" || return
   toolchain_assert_clean "$rust" || return
   toolchain_assert_clean "$llvm" || return
-  toolchain_assert_clean "$rust/src/tools/cargo"
+  toolchain_assert_clean "$rust/src/tools/cargo" || return
+  toolchain_verify_exact_submodule "$rust" library/backtrace \
+    "$RUST_BACKTRACE_REPOSITORY"
 }
