@@ -7,6 +7,8 @@
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use super::{
     EgressPolicy, HeaderValue, HttpRequest, HttpSink, Method, NetError, ResponseHead, check_request,
@@ -17,6 +19,9 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 
 /// How much of curl's stderr is kept for error messages.
 const MAX_STDERR_BYTES: usize = 8 * 1024;
+
+/// How often a silent response stream checks its turn cancellation signal.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
 
 pub(crate) struct CurlTransport {
     program: String,
@@ -187,13 +192,14 @@ impl CurlTransport {
         });
 
         verbose(self.verbosity, 1, "waiting for curl's response stream");
-        let outcome = self.pump(&mut child, sink);
+        let (outcome, stdout_thread) = self.pump(&mut child, req, sink);
         verbose(
             self.verbosity,
             2,
             "curl stdout closed; waiting for the child",
         );
         let status = child.wait();
+        let _ = stdout_thread.join();
         let stderr = stderr_thread.join().unwrap_or_default();
 
         let head = outcome?;
@@ -214,42 +220,80 @@ impl CurlTransport {
     fn pump(
         &self,
         child: &mut Child,
+        req: &HttpRequest,
         sink: &mut dyn HttpSink,
-    ) -> Result<Option<ResponseHead>, NetError> {
+    ) -> (
+        Result<Option<ResponseHead>, NetError>,
+        std::thread::JoinHandle<()>,
+    ) {
         let mut stdout = child.stdout.take().expect("stdout is piped");
+        let (send, receive) = mpsc::sync_channel::<Result<Vec<u8>, std::io::Error>>(2);
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let chunk = match stdout.read(&mut buf) {
+                    Ok(0) => Ok(Vec::new()),
+                    Ok(count) => Ok(buf[..count].to_vec()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => Err(error),
+                };
+                let at_eof = matches!(&chunk, Ok(bytes) if bytes.is_empty());
+                let failed = chunk.is_err();
+                if send.send(chunk).is_err() || at_eof || failed {
+                    break;
+                }
+            }
+        });
         let mut parser = HeadParser::new();
         let mut head: Option<ResponseHead> = None;
-        let mut buf = [0u8; 16 * 1024];
         let mut read_number = 0usize;
 
-        loop {
+        let outcome = loop {
+            if req
+                .cancellation
+                .as_ref()
+                .is_some_and(|cancellation| cancellation.cancelled())
+            {
+                let _ = child.kill();
+                break Err(NetError::Aborted("turn cancelled".to_string()));
+            }
             read_number += 1;
             verbose(
                 self.verbosity,
                 3,
                 &format!("waiting for curl stdout read {read_number}"),
             );
-            let read = match stdout.read(&mut buf) {
-                Ok(0) => {
+            let chunk = match receive.recv_timeout(CANCEL_POLL) {
+                Ok(Ok(bytes)) if bytes.is_empty() => {
                     verbose(self.verbosity, 2, "curl stdout reached EOF");
-                    return Ok(head);
+                    break Ok(head);
                 }
-                Ok(n) => n,
-                Err(e) => {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(error)) => {
                     let _ = child.kill();
-                    return Err(NetError::Transport(format!("reading from curl: {e}")));
+                    break Err(NetError::Transport(format!("reading from curl: {error}")));
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    break Err(NetError::Transport(
+                        "curl response reader stopped unexpectedly".to_string(),
+                    ));
                 }
             };
-            verbose(self.verbosity, 3, &format!("curl stdout read {read} bytes"));
-            let chunk = &buf[..read];
+            verbose(
+                self.verbosity,
+                3,
+                &format!("curl stdout read {} bytes", chunk.len()),
+            );
 
             let body = match &head {
-                Some(_) => chunk,
-                None => match parser.feed(chunk) {
+                Some(_) => chunk.as_slice(),
+                None => match parser.feed(&chunk) {
                     Ok(None) => continue,
                     Err(e) => {
                         let _ = child.kill();
-                        return Err(e);
+                        break Err(e);
                     }
                     Ok(Some((parsed, consumed))) => {
                         verbose(
@@ -259,7 +303,7 @@ impl CurlTransport {
                         );
                         if let Err(e) = sink.on_head(&parsed) {
                             let _ = child.kill();
-                            return Err(NetError::Aborted(e.to_string()));
+                            break Err(NetError::Aborted(e.to_string()));
                         }
                         head = Some(parsed);
                         &chunk[consumed..]
@@ -277,9 +321,10 @@ impl CurlTransport {
                 && let Err(e) = sink.on_chunk(body)
             {
                 let _ = child.kill();
-                return Err(NetError::Aborted(e.to_string()));
+                break Err(NetError::Aborted(e.to_string()));
             }
-        }
+        };
+        (outcome, reader)
     }
 }
 

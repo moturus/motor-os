@@ -1,370 +1,551 @@
-//! A line editor for a console that is always raw.
-//!
-//! Motor OS has no termios: no cooked mode, no `ICANON`, no `ECHO` (the rush
-//! contract, `rush/src/sys/mod.rs`). A program that reads a line there is
-//! handed the keystrokes themselves, and nothing shows the user what they
-//! typed unless the program writes it back. On the host the terminal driver
-//! does all of this, which is why `BufRead::read_line` is enough there and
-//! why this editor is only switched on where `platform::raw_console()` says
-//! nobody else is doing the job.
-//!
-//! It is the smallest editor that is honest: echo, Backspace, ^U, Enter, and
-//! the control bytes that mean something to the REPL — ^C (the interrupt,
-//! which on Motor OS *only* exists as this in-band 0x03), ^P (pause), and ^D
-//! on an empty line (end of input). CSI and SS3 escape sequences are swallowed whole rather
-//! than smeared across the line as garbage; an incomplete sequence never owns a
-//! later control key. History and cursor movement are rush's department, not
-//! v1's here (plan decision 4 keeps the UI to plain lines).
-//!
-//! The state machine is fed bytes and answers with echoes, so all of it runs
-//! and is tested on the host; nothing in this file is platform-specific.
+//! Plain terminal UI for interactive and one-shot runs.
 
-use std::io::{BufRead, Write};
+use std::collections::VecDeque;
+use std::io::{self, Write};
+use std::sync::mpsc;
+use std::time::Duration;
 
-use crate::ui::repl::Renderer;
+use crate::runtime::{Approver, Event, Observer, Permission, Runtime};
 
-/// What reading one line came to.
-#[derive(Debug, PartialEq)]
-pub enum Read {
-    Line(String),
-    /// The input is over: it closed, or an empty line got ^D.
-    End,
-    /// A ^C. The line it interrupted is gone.
-    Interrupted,
-    Pause,
-}
+const POLL: Duration = Duration::from_millis(25);
 
-/// Where the editor is in an escape sequence.
-enum Escape {
-    No,
-    /// An ESC byte arrived; the next byte says what kind.
-    Esc,
-    /// Inside `ESC [` / `ESC O`, until the final byte (`0x40..=0x7e`).
-    Csi,
-}
-
-impl Default for Editor {
-    fn default() -> Editor {
-        Editor::new()
+pub fn run(
+    runtime: &mut Runtime,
+    initial: Option<String>,
+    interactive: bool,
+    models: &[String],
+) -> Result<(), String> {
+    let mut input = Input::new()?;
+    let mut renderer = Renderer::default();
+    for notice in runtime.take_startup_notices() {
+        renderer.event(Event::Notice(notice))?;
     }
-}
-
-pub struct Editor {
-    /// The line so far, as the UTF-8 bytes that arrived.
-    line: Vec<u8>,
-    /// Enter came as CR, so the LF the console sends on its heels is the same
-    /// keypress, not an empty second line. Kept across reads because the pair
-    /// can split between them — and a swallowed "empty line" is not harmless
-    /// here: at a permission question it would answer "no".
-    swallow_lf: bool,
-    escape: Escape,
-}
-
-impl Editor {
-    pub fn new() -> Editor {
-        Editor {
-            line: Vec::new(),
-            swallow_lf: false,
-            escape: Escape::No,
+    if let Some(prompt) = initial {
+        let result = run_turn(runtime, prompt, interactive, &mut input, &mut renderer);
+        renderer.finish_stream();
+        result?;
+        if !interactive {
+            return Ok(());
         }
     }
+    if !interactive {
+        return Ok(());
+    }
 
-    /// Read one line, echoing as it is typed. The echo goes through the
-    /// renderer's own output so it lands on the same terminal as the prompt,
-    /// and failing to echo is not failing to read.
-    pub fn read<R: BufRead, W: Write>(
-        &mut self,
-        input: &mut R,
-        renderer: &mut Renderer<W>,
-    ) -> Read {
+    loop {
+        let Some(line) = input.read_line("gears> ")? else {
+            renderer.finish_stream();
+            return Ok(());
+        };
+        let line = line.trim_end().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('/') {
+            match command(runtime, &line, models, &mut input, &mut renderer)? {
+                Command::Continue => continue,
+                Command::Quit => return Ok(()),
+                Command::Draft(draft) => {
+                    eprintln!("draft> {draft}");
+                    continue;
+                }
+            }
+        }
+        if let Err(error) = run_turn(runtime, line, true, &mut input, &mut renderer) {
+            renderer.finish_stream();
+            eprintln!("gears: {error}");
+        } else {
+            renderer.finish_stream();
+        }
+    }
+}
+
+enum Command {
+    Continue,
+    Quit,
+    Draft(String),
+}
+
+fn command(
+    runtime: &mut Runtime,
+    line: &str,
+    models: &[String],
+    input: &mut Input,
+    renderer: &mut Renderer,
+) -> Result<Command, String> {
+    let (name, argument) = line[1..]
+        .split_once(char::is_whitespace)
+        .map_or((&line[1..], ""), |(name, rest)| (name, rest.trim()));
+    match name {
+        "quit" | "exit" => Ok(Command::Quit),
+        "help" => {
+            eprintln!("{}", crate::cli::USAGE);
+            Ok(Command::Continue)
+        }
+        "status" => {
+            eprintln!(
+                "model: {}\nusage: {}",
+                runtime.model(),
+                runtime.usage().summary()
+            );
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "session" => {
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "name" => {
+            runtime.set_name(argument)?;
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "new" => {
+            runtime.new_session(argument == "--ephemeral", None)?;
+            show_runtime_notices(runtime, renderer)?;
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "resume" => {
+            let selector = if argument.is_empty() {
+                choose_session(runtime, input)?
+            } else {
+                argument.to_string()
+            };
+            runtime.resume(&selector)?;
+            show_runtime_notices(runtime, renderer)?;
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "label" => {
+            let (entry, label) = argument
+                .split_once(char::is_whitespace)
+                .map_or((argument, ""), |(entry, label)| (entry, label.trim()));
+            if entry.is_empty() {
+                return Err("usage: /label ENTRY [TEXT]".to_string());
+            }
+            runtime.set_label(entry, (!label.is_empty()).then_some(label))?;
+            Ok(Command::Continue)
+        }
+        "tree" => {
+            let id = if argument.is_empty() {
+                choose_tree(runtime, input, false)?
+            } else {
+                argument.to_string()
+            };
+            eprintln!("note: changing the conversation branch does not undo shell side effects");
+            match runtime.select_entry(&id)? {
+                Some(draft) => Ok(Command::Draft(draft)),
+                None => Ok(Command::Continue),
+            }
+        }
+        "fork" => {
+            let id = if argument.is_empty() {
+                choose_tree(runtime, input, true)?
+            } else {
+                argument.to_string()
+            };
+            eprintln!("note: forking the conversation does not undo shell side effects");
+            let draft = runtime.fork_at(&id)?;
+            show_runtime_notices(runtime, renderer)?;
+            show_session(runtime);
+            Ok(Command::Draft(draft))
+        }
+        "clone" => {
+            eprintln!("note: cloning the conversation does not undo shell side effects");
+            runtime.clone_session()?;
+            show_runtime_notices(runtime, renderer)?;
+            show_session(runtime);
+            Ok(Command::Continue)
+        }
+        "compact" => {
+            runtime.compact(
+                (!argument.is_empty()).then(|| argument.to_string()),
+                renderer,
+            )?;
+            Ok(Command::Continue)
+        }
+        "model" => {
+            let model = if argument.is_empty() {
+                choose_model(runtime.model(), models, input)?
+            } else {
+                argument.to_string()
+            };
+            runtime.set_model(model, renderer)?;
+            Ok(Command::Continue)
+        }
+        "" => Ok(Command::Continue),
+        other => Err(format!("unknown command /{other}; try /help")),
+    }
+}
+
+fn show_runtime_notices(runtime: &mut Runtime, renderer: &mut Renderer) -> Result<(), String> {
+    for notice in runtime.take_startup_notices() {
+        renderer.event(Event::Notice(notice))?;
+    }
+    Ok(())
+}
+
+fn show_session(runtime: &Runtime) {
+    let session = runtime.summary();
+    eprintln!("session: {}", session.id);
+    eprintln!(
+        "path: {}",
+        session
+            .path
+            .as_deref()
+            .map_or("<ephemeral>".to_string(), |path| path.display().to_string())
+    );
+    if let Some(name) = session.name {
+        eprintln!("name: {name}");
+    }
+    eprintln!("entries: {}", session.entries);
+}
+
+fn choose_session(runtime: &Runtime, input: &mut Input) -> Result<String, String> {
+    let sessions = runtime.list_sessions()?;
+    if sessions.is_empty() {
+        return Err("no saved sessions for this workspace".to_string());
+    }
+    for (index, session) in sessions.iter().enumerate() {
+        eprintln!(
+            "{:>3}. {}  {}  {} messages",
+            index + 1,
+            session.id,
+            session.name.as_deref().unwrap_or(""),
+            session.messages
+        );
+    }
+    let selected = input
+        .read_line("session number or id> ")?
+        .ok_or("session selection ended")?;
+    if let Ok(index) = selected.trim().parse::<usize>()
+        && let Some(session) = sessions.get(index.saturating_sub(1))
+    {
+        return Ok(session.id.clone());
+    }
+    Ok(selected.trim().to_string())
+}
+
+fn choose_tree(runtime: &Runtime, input: &mut Input, user_only: bool) -> Result<String, String> {
+    let items = runtime.tree();
+    let visible = items
+        .iter()
+        .filter(|item| !user_only || item.user_message)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return Err("the session tree is empty".to_string());
+    }
+    for (index, item) in visible.iter().enumerate() {
+        eprintln!(
+            "{:>3}. {}{} [{}] {}",
+            index + 1,
+            if item.active { "* " } else { "  " },
+            item.id,
+            item.kind,
+            item.summary
+        );
+    }
+    let selected = input
+        .read_line("entry number or id> ")?
+        .ok_or("tree selection ended")?;
+    if let Ok(index) = selected.trim().parse::<usize>()
+        && let Some(item) = visible.get(index.saturating_sub(1))
+    {
+        return Ok(item.id.clone());
+    }
+    Ok(selected.trim().to_string())
+}
+
+fn choose_model(current: &str, models: &[String], input: &mut Input) -> Result<String, String> {
+    let mut choices = vec![current.to_string()];
+    for model in models {
+        if !choices.contains(model) {
+            choices.push(model.clone());
+        }
+    }
+    for (index, model) in choices.iter().enumerate() {
+        eprintln!("{:>3}. {model}", index + 1);
+    }
+    let selected = input
+        .read_line("model number or id> ")?
+        .ok_or("model selection ended")?;
+    if let Ok(index) = selected.trim().parse::<usize>()
+        && let Some(model) = choices.get(index.saturating_sub(1))
+    {
+        return Ok(model.clone());
+    }
+    Ok(selected.trim().to_string())
+}
+
+#[derive(Default)]
+struct Renderer {
+    streaming: bool,
+}
+
+impl Renderer {
+    fn finish_stream(&mut self) {
+        if self.streaming {
+            println!();
+            self.streaming = false;
+        }
+    }
+}
+
+impl Observer for Renderer {
+    fn event(&mut self, event: Event) -> Result<(), String> {
+        match event {
+            Event::Text(text) => {
+                print!("{text}");
+                io::stdout().flush().map_err(|error| error.to_string())?;
+                self.streaming = true;
+            }
+            Event::Reasoning(text) => {
+                eprint!("{text}");
+                io::stderr().flush().map_err(|error| error.to_string())?;
+            }
+            Event::ToolStart { name, detail } => {
+                self.finish_stream();
+                eprintln!("tool {name}> {detail}");
+            }
+            Event::ToolOutput { name, stream, text } => {
+                eprint!("{name} {stream:?}> {text}");
+                io::stderr().flush().map_err(|error| error.to_string())?;
+            }
+            Event::ToolEnd {
+                name,
+                content,
+                is_error,
+            } => {
+                self.finish_stream();
+                let outcome = if is_error { "error" } else { "done" };
+                eprintln!("tool {name} {outcome}> {}", fold(&content));
+            }
+            Event::Permission(_) => {}
+            Event::Notice(notice) => {
+                self.finish_stream();
+                eprintln!("gears: {notice}");
+            }
+            Event::Usage(_) | Event::TurnEnd => {}
+            Event::ModelChanged(model) => eprintln!("model: {model}"),
+            Event::SessionChanged(_) => {}
+        }
+        Ok(())
+    }
+}
+
+enum TurnMessage {
+    Event(Event),
+    Permission(Permission, mpsc::Sender<bool>),
+    Done(Result<(), String>),
+}
+
+struct ChannelObserver {
+    sender: mpsc::Sender<TurnMessage>,
+}
+
+impl Observer for ChannelObserver {
+    fn event(&mut self, event: Event) -> Result<(), String> {
+        self.sender
+            .send(TurnMessage::Event(event))
+            .map_err(|_| "line UI closed".to_string())
+    }
+}
+
+struct ChannelApprover {
+    sender: mpsc::Sender<TurnMessage>,
+    interactive: bool,
+}
+
+impl Approver for ChannelApprover {
+    fn approve(&mut self, request: &Permission) -> bool {
+        if !self.interactive {
+            eprintln!("gears: denied unattended tool call: {}", request.detail);
+            return false;
+        }
+        let (sender, receiver) = mpsc::channel();
+        if self
+            .sender
+            .send(TurnMessage::Permission(request.clone(), sender))
+            .is_err()
+        {
+            return false;
+        }
+        receiver.recv().unwrap_or(false)
+    }
+}
+
+fn run_turn(
+    runtime: &mut Runtime,
+    prompt: String,
+    interactive: bool,
+    input: &mut Input,
+    renderer: &mut Renderer,
+) -> Result<(), String> {
+    let cancellation = runtime.cancellation();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker_sender = sender.clone();
+        scope.spawn(move || {
+            let mut observer = ChannelObserver {
+                sender: worker_sender.clone(),
+            };
+            let mut approver = ChannelApprover {
+                sender: worker_sender,
+                interactive,
+            };
+            let result = runtime.turn(prompt, &mut approver, &mut observer);
+            let _ = sender.send(TurnMessage::Done(result));
+        });
         loop {
-            let mut echo = Vec::new();
-            let mut outcome = None;
-            let mut used = 0;
-            match input.fill_buf() {
-                Ok([]) | Err(_) => return Read::End,
-                Ok(buffered) => {
-                    for &byte in buffered {
-                        used += 1;
-                        if let Some(read) = self.feed(byte, &mut echo) {
-                            outcome = Some(read);
-                            break;
-                        }
+            loop {
+                match receiver.try_recv() {
+                    Ok(TurnMessage::Event(event)) => renderer.event(event)?,
+                    Ok(TurnMessage::Permission(request, reply)) => {
+                        renderer.finish_stream();
+                        eprintln!(
+                            "Allow {} in {}?\n  {}",
+                            request.tool,
+                            request.workspace.display(),
+                            request.detail
+                        );
+                        let allowed = input.read_line("[y/N] ")?.is_some_and(|answer| {
+                            matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
+                        });
+                        let _ = reply.send(allowed);
+                    }
+                    Ok(TurnMessage::Done(result)) => return result,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("agent worker stopped unexpectedly".to_string());
                     }
                 }
             }
-            input.consume(used);
-            let _ = renderer.echo(&echo);
-            if let Some(read) = outcome {
-                return read;
+            if input.poll_interrupt(POLL)? {
+                cancellation.cancel();
             }
+        }
+    })
+}
+
+struct Input {
+    raw: Option<crate::platform::TerminalInput>,
+    queued: VecDeque<u8>,
+}
+
+impl Input {
+    fn new() -> Result<Self, String> {
+        let raw = if crate::platform::raw_console() {
+            Some(crate::platform::TerminalInput::new().map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        Ok(Self {
+            raw,
+            queued: VecDeque::new(),
+        })
+    }
+
+    fn read_line(&mut self, prompt: &str) -> Result<Option<String>, String> {
+        print!("{prompt}");
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        match &mut self.raw {
+            None => {
+                let mut line = String::new();
+                match io::stdin().read_line(&mut line) {
+                    Ok(0) => Ok(None),
+                    Ok(_) => Ok(Some(line.trim_end_matches(['\r', '\n']).to_string())),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            Some(raw) => read_raw_line(raw, &mut self.queued),
         }
     }
 
-    /// One byte in; what to echo out, and the line when this byte ended it.
-    pub(crate) fn feed(&mut self, byte: u8, echo: &mut Vec<u8>) -> Option<Read> {
-        match self.escape {
-            Escape::Esc => {
-                if matches!(byte, b'[' | b'O') {
-                    self.escape = Escape::Csi;
-                    return None;
+    fn poll_interrupt(&mut self, timeout: Duration) -> Result<bool, String> {
+        let Some(raw) = &mut self.raw else {
+            std::thread::sleep(timeout);
+            return Ok(crate::platform::interrupt_pending());
+        };
+        let mut buffer = [0_u8; 256];
+        match raw.read(&mut buffer, Some(timeout)) {
+            Ok(Some(count)) => {
+                let mut interrupted = false;
+                for byte in &buffer[..count] {
+                    if *byte == 3 {
+                        crate::platform::note_interrupt();
+                        interrupted = true;
+                    } else {
+                        self.queued.push_back(*byte);
+                    }
                 }
-                // A standalone Escape is ignored, but it must not steal the
-                // ordinary key which followed it. Process that key below.
-                self.escape = Escape::No;
+                Ok(interrupted || crate::platform::interrupt_pending())
             }
-            Escape::Csi => {
-                if (0x40..=0x7e).contains(&byte) {
-                    self.escape = Escape::No;
-                    return None;
-                }
-                if (0x20..=0x3f).contains(&byte) {
-                    return None;
-                }
-                // A control key or invalid sequence byte cancels an incomplete
-                // sequence and keeps its normal meaning below.
-                self.escape = Escape::No;
-            }
-            Escape::No => {}
+            Ok(None) => Ok(crate::platform::interrupt_pending()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(true),
+            Err(error) => Err(error.to_string()),
         }
-        if std::mem::take(&mut self.swallow_lf) && byte == b'\n' {
-            return None;
-        }
-        match byte {
-            b'\r' | b'\n' => {
-                self.swallow_lf = byte == b'\r';
-                echo.push(b'\n');
-                let text = String::from_utf8_lossy(&self.line).into_owned();
-                self.line.clear();
-                Some(Read::Line(text))
-            }
-            // ^C, said the way the terminal driver would have said it.
-            0x03 => Some(self.interrupt(echo)),
-            // ^P toggles the scheduling pause without discarding a partially
-            // typed future prompt.
-            0x10 => {
-                echo.extend_from_slice(b"^P\n");
-                Some(Read::Pause)
-            }
-            // ^D ends an empty line and does nothing to one with text on it.
-            0x04 if self.line.is_empty() => {
-                echo.push(b'\n');
-                Some(Read::End)
-            }
-            0x1b => {
-                self.escape = Escape::Esc;
-                None
-            }
-            // Backspace, whichever byte the terminal calls it.
-            0x7f | 0x08 => {
-                self.erase_one(echo);
-                None
-            }
-            // ^U: the whole line.
-            0x15 => {
-                while self.erase_one(echo) {}
-                None
-            }
-            // Echo one display cell so erase arithmetic stays exact, but keep
-            // the byte itself: tabs in pasted code may be significant.
-            b'\t' => {
-                self.line.push(b'\t');
-                echo.push(b' ');
-                None
-            }
-            // Every other control byte is a key this editor does not have
-            // (a ^D with text on the line lands here too, and does nothing).
-            0x00..=0x1f => None,
-            _ => {
-                self.line.push(byte);
-                echo.push(byte);
-                None
-            }
-        }
-    }
-
-    /// Apply a Ctrl+C control event that arrived outside the byte stream.
-    pub(crate) fn interrupt(&mut self, echo: &mut Vec<u8>) -> Read {
-        self.line.clear();
-        self.swallow_lf = false;
-        self.escape = Escape::No;
-        echo.extend_from_slice(b"^C\n");
-        Read::Interrupted
-    }
-
-    /// Erase the last character: from the line, and from the screen. One
-    /// backspace-space-backspace per character, which puts the cursor right
-    /// for everything single-width; a double-width glyph leaves its second
-    /// column standing, the price of not owning a width table.
-    fn erase_one(&mut self, echo: &mut Vec<u8>) -> bool {
-        if self.line.is_empty() {
-            return false;
-        }
-        while let Some(byte) = self.line.pop() {
-            // Continuation bytes go with their lead byte: one char, not one byte.
-            if byte & 0xc0 != 0x80 {
-                break;
-            }
-        }
-        echo.extend_from_slice(b"\x08 \x08");
-        true
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn read_raw_line(
+    input: &mut crate::platform::TerminalInput,
+    queued: &mut VecDeque<u8>,
+) -> Result<Option<String>, String> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut buffer = [0_u8; 256];
+        let count = if queued.is_empty() {
+            match input.read(&mut buffer, None) {
+                Ok(Some(0)) => return Ok(None),
+                Ok(Some(count)) => count,
+                Ok(None) => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            let count = queued.len().min(buffer.len());
+            for destination in &mut buffer[..count] {
+                *destination = queued.pop_front().expect("queued byte exists");
+            }
+            count
+        };
+        for byte in &buffer[..count] {
+            match *byte {
+                b'\r' | b'\n' => {
+                    println!();
+                    return Ok(Some(String::from_utf8_lossy(&bytes).into_owned()));
+                }
+                3 => {
+                    crate::platform::note_interrupt();
+                    return Ok(None);
+                }
+                4 if bytes.is_empty() => return Ok(None),
+                8 | 127 if !bytes.is_empty() => {
+                    bytes.pop();
+                    print!("\x08 \x08");
+                    io::stdout().flush().map_err(|error| error.to_string())?;
+                }
+                byte if !byte.is_ascii_control() => {
+                    bytes.push(byte);
+                    print!("{}", char::from(byte));
+                    io::stdout().flush().map_err(|error| error.to_string())?;
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
-    /// Run one read over `input`, returning the outcome and what was echoed.
-    fn typed(editor: &mut Editor, input: &[u8]) -> (Read, String) {
-        let mut renderer = Renderer::new(Vec::new(), true);
-        let read = editor.read(&mut &input[..], &mut renderer);
-        (
-            read,
-            String::from_utf8_lossy(renderer.get_ref()).into_owned(),
+fn fold(text: &str) -> String {
+    let text = text.trim();
+    if text.len() <= 200 && !text.contains('\n') {
+        text.to_string()
+    } else {
+        format!(
+            "{} bytes (use session history for the bounded result)",
+            text.len()
         )
-    }
-
-    #[test]
-    fn typing_is_echoed_and_enter_ends_the_line() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"hi there\r\n");
-        assert_eq!(read, Read::Line("hi there".to_string()));
-        assert_eq!(echoed, "hi there\n");
-    }
-
-    #[test]
-    fn a_bare_lf_is_enter_too() {
-        let mut editor = Editor::new();
-        assert_eq!(typed(&mut editor, b"ok\n").0, Read::Line("ok".to_string()));
-    }
-
-    /// The CR and its LF can arrive in different reads; the LF must not come
-    /// back as an empty line — at a permission question that would be a "no"
-    /// the user never gave.
-    #[test]
-    fn the_lf_after_a_cr_is_the_same_enter_even_across_reads() {
-        let mut editor = Editor::new();
-        assert_eq!(
-            typed(&mut editor, b"yes\r").0,
-            Read::Line("yes".to_string())
-        );
-        assert_eq!(
-            typed(&mut editor, b"\nno\r").0,
-            Read::Line("no".to_string())
-        );
-    }
-
-    #[test]
-    fn backspace_erases_from_line_and_screen() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"ab\x7fc\r");
-        assert_eq!(read, Read::Line("ac".to_string()));
-        assert_eq!(echoed, "ab\x08 \x08c\n");
-
-        // And has nothing to say on an empty line.
-        let (read, echoed) = typed(&mut editor, b"\x08\x7fx\r");
-        assert_eq!(read, Read::Line("x".to_string()));
-        assert_eq!(echoed, "x\n");
-    }
-
-    #[test]
-    fn backspace_takes_a_whole_character_not_a_byte() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, "é\u{7f}ok\r".as_bytes());
-        assert_eq!(read, Read::Line("ok".to_string()));
-        assert_eq!(echoed, "é\x08 \x08ok\n");
-    }
-
-    #[test]
-    fn ctrl_u_erases_the_whole_line() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"abc\x15d\r");
-        assert_eq!(read, Read::Line("d".to_string()));
-        assert_eq!(echoed, "abc\x08 \x08\x08 \x08\x08 \x08d\n");
-    }
-
-    #[test]
-    fn ctrl_c_interrupts_and_drops_the_line() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"half a promp\x03");
-        assert_eq!(read, Read::Interrupted);
-        assert!(echoed.ends_with("^C\n"), "{echoed}");
-        // The dropped text is not waiting inside the next line.
-        assert_eq!(typed(&mut editor, b"y\r").0, Read::Line("y".to_string()));
-    }
-
-    #[test]
-    fn ctrl_c_event_interrupts_and_drops_the_line() {
-        let mut editor = Editor::new();
-        let mut echo = Vec::new();
-        assert_eq!(editor.feed(b'x', &mut echo), None);
-        assert_eq!(editor.interrupt(&mut echo), Read::Interrupted);
-        assert_eq!(String::from_utf8(echo).unwrap(), "x^C\n");
-        assert_eq!(typed(&mut editor, b"y\r").0, Read::Line("y".to_string()));
-    }
-
-    #[test]
-    fn ctrl_p_pauses_without_dropping_the_line() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"half");
-        assert_eq!(read, Read::Pause);
-        assert!(echoed.ends_with("^P\n"), "{echoed}");
-        assert_eq!(
-            typed(&mut editor, b" prompt\r").0,
-            Read::Line("half prompt".to_string())
-        );
-    }
-
-    #[test]
-    fn ctrl_d_ends_an_empty_line_and_spares_a_full_one() {
-        let mut editor = Editor::new();
-        assert_eq!(typed(&mut editor, b"\x04").0, Read::End);
-        let (read, _) = typed(&mut editor, b"keep\x04\r");
-        assert_eq!(read, Read::Line("keep".to_string()));
-    }
-
-    #[test]
-    fn input_closing_is_the_end() {
-        let mut editor = Editor::new();
-        assert_eq!(typed(&mut editor, b"").0, Read::End);
-        // A line the close cut off is lost, as it is under cooked mode too.
-        assert_eq!(typed(&mut editor, b"half").0, Read::End);
-    }
-
-    #[test]
-    fn escape_sequences_are_swallowed_whole() {
-        let mut editor = Editor::new();
-        // Up arrow (CSI and SS3 forms), then a Home with a parameter.
-        let (read, echoed) = typed(&mut editor, b"\x1b[Aa\x1bOBb\x1b[1;5Hc\r");
-        assert_eq!(read, Read::Line("abc".to_string()));
-        assert_eq!(echoed, "abc\n");
-        // A standalone Escape must not steal the ordinary key after it.
-        assert_eq!(
-            typed(&mut editor, b"\x1bxd\r").0,
-            Read::Line("xd".to_string())
-        );
-    }
-
-    #[test]
-    fn an_incomplete_escape_sequence_does_not_own_control_keys() {
-        let mut editor = Editor::new();
-        assert_eq!(
-            typed(&mut editor, b"one\x1b\r").0,
-            Read::Line("one".to_string())
-        );
-        assert_eq!(
-            typed(&mut editor, b"ok\x1b[\r").0,
-            Read::Line("ok".to_string())
-        );
-        assert_eq!(typed(&mut editor, b"no\x1b[\x03").0, Read::Interrupted);
-    }
-
-    #[test]
-    fn a_tab_is_preserved_while_echoing_as_one_space() {
-        let mut editor = Editor::new();
-        let (read, echoed) = typed(&mut editor, b"a\tb\r");
-        assert_eq!(read, Read::Line("a\tb".to_string()));
-        assert_eq!(echoed, "a b\n");
     }
 }

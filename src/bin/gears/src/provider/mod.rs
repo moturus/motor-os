@@ -6,20 +6,20 @@
 //! the blessed default and the only endpoint validated against a real key;
 //! other compatible endpoints are config-only and untested.
 
-pub mod assembler;
+mod assembler;
 pub mod key;
 pub mod openai_compat;
 pub mod types;
 pub mod usage;
+mod wire;
 
 use crate::net::NetError;
 
-pub use assembler::DeltaAssembler;
 pub use key::ApiKey;
 pub use openai_compat::{Endpoint, OpenAiCompat, Quirks, UsageStyle};
 pub use types::{
-    ApiError, ChatMessage, ChatRequest, Completion, Delta, FinishReason, FunctionCall, Role,
-    StreamChunk, ToolCall, ToolSpec, Usage,
+    Completion, ContentBlock, FinishReason, Message, Request, Role, StreamEvent, ToolCall,
+    ToolSpec, Usage,
 };
 pub use usage::UsageMeter;
 
@@ -118,38 +118,32 @@ impl From<NetError> for ProviderError {
 /// renders tokens as they arrive. Returning `Err` cancels the request: the
 /// error travels down to the transport, which drops the connection.
 pub trait EventSink {
-    fn on_content(&mut self, text: &str) -> std::io::Result<()>;
-
-    /// Reasoning text, for endpoints that stream it. Never required: most
-    /// models send none, and a client that ignores it is still correct.
-    fn on_reasoning(&mut self, _text: &str) -> std::io::Result<()> {
-        Ok(())
-    }
+    fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()>;
 }
 
 /// Drops every delta; the completion is still assembled and returned.
 pub struct Discard;
 
 impl EventSink for Discard {
-    fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
+    fn on_event(&mut self, _event: StreamEvent) -> std::io::Result<()> {
         Ok(())
     }
 }
 
-pub trait ModelProvider {
+pub trait Provider: Send + Sync {
     /// Run one completion to the end, streaming deltas to `sink`.
     fn complete(
         &self,
-        req: &ChatRequest,
+        req: &Request,
         sink: &mut dyn EventSink,
     ) -> Result<Completion, ProviderError>;
 }
 
 /// So that a provider can be chosen at run time and handed to a thread.
-impl<P: ModelProvider + ?Sized> ModelProvider for Box<P> {
+impl<P: Provider + ?Sized> Provider for Box<P> {
     fn complete(
         &self,
-        req: &ChatRequest,
+        req: &Request,
         sink: &mut dyn EventSink,
     ) -> Result<Completion, ProviderError> {
         (**self).complete(req, sink)
@@ -159,10 +153,10 @@ impl<P: ModelProvider + ?Sized> ModelProvider for Box<P> {
 /// And so that several agents can share one. A completion takes `&self` and
 /// carries its own connection — the host backend spawns a curl of its own per
 /// request — so sharing one provider is not sharing a conversation.
-impl<P: ModelProvider + ?Sized> ModelProvider for std::sync::Arc<P> {
+impl<P: Provider + ?Sized> Provider for std::sync::Arc<P> {
     fn complete(
         &self,
-        req: &ChatRequest,
+        req: &Request,
         sink: &mut dyn EventSink,
     ) -> Result<Completion, ProviderError> {
         (**self).complete(req, sink)

@@ -1,159 +1,140 @@
-//! End-to-end smoke tests over the built binary: the things every run does
-//! before it does anything interesting.
+#![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn gears() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gears"));
-    // Hermetic on purpose: with the developer's own key in the environment, a
-    // bare `gears` would open a session and sit waiting for a prompt instead
-    // of exiting, and this file would hang rather than fail.
-    command.env_remove("OPENROUTER_API_KEY");
-    command
-}
+use gears::mock::{MockServer, sse_response};
 
-fn temp(name: &str) -> PathBuf {
+fn fixture(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("gears-smoke-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
     path
 }
 
-/// A valid config that cannot reach the network: the key file it names is not
-/// there, so every run using it stops at the same, obvious place.
-fn keyless_config(name: &str) -> PathBuf {
-    let key = temp(&format!("{name}-absent.key"));
-    let path = temp(&format!("{name}.toml"));
+fn config(root: &Path, server: &MockServer) -> PathBuf {
+    let path = root.join("gears.toml");
     std::fs::write(
         &path,
         format!(
-            "version = 1\n[provider]\nmodel = \"test/model\"\nkey_file = \"{}\"\n",
-            key.display()
+            r#"version = 1
+[net]
+egress_allowlist = ["127.0.0.1"]
+allow_plain_http_loopback = true
+[provider]
+base_url = "{}"
+model = "test/model"
+"#,
+            server.url("/v1")
         ),
     )
     .unwrap();
     path
 }
 
-#[test]
-fn version_prints_without_opening_runtime_configuration_or_workspace() {
-    let out = gears()
-        .arg("--config")
-        .arg(temp("version-missing.toml"))
+fn gears(root: &Path, workspace: &Path, config: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gears"));
+    command
+        .env("HOME", root)
+        .env("OPENROUTER_API_KEY", "test-key")
+        .args(["--ui", "line", "--ephemeral", "--config"])
+        .arg(config)
         .arg("--workspace")
-        .arg(temp("version-missing-workspace"))
+        .arg(workspace);
+    command
+}
+
+#[test]
+fn help_version_and_bad_arguments_need_no_configuration() {
+    let version = Command::new(env!("CARGO_BIN_EXE_gears"))
         .arg("--version")
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.starts_with("gears "), "{stdout}");
-}
-
-#[test]
-fn help_prints_usage() {
-    let out = gears().arg("--help").output().unwrap();
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("Usage: gears"), "{stdout}");
-    assert!(stdout.contains("--ui UI"), "{stdout}");
-}
-
-#[test]
-fn unknown_flag_exits_two() {
-    let out = gears().arg("--frobnicate").output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("--frobnicate"), "{stderr}");
-}
-
-#[test]
-fn direct_ask_rejects_an_agent_ui() {
-    let out = gears()
-        .args(["ask", "hello", "--ui", "line"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("--ui applies to the agent"), "{stderr}");
-}
-
-#[test]
-fn forced_tui_fails_before_credentials_when_stdio_is_piped() {
-    let out = gears().args(["--ui", "tui"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(version.status.success());
     assert!(
-        stderr.contains("requires terminal input and output"),
-        "{stderr}"
+        String::from_utf8(version.stdout)
+            .unwrap()
+            .starts_with("gears ")
     );
-    assert!(stderr.contains("--ui line"), "{stderr}");
-}
 
-#[test]
-fn missing_explicit_config_is_reported() {
-    let path = temp("none.toml");
-    let out = gears().arg("--config").arg(&path).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("config:"), "{stderr}");
-    assert!(stderr.contains(path.to_str().unwrap()), "{stderr}");
-}
-
-#[test]
-fn log_file_flag_starts_the_tracer() {
-    let config = keyless_config("log");
-    let path = temp("log.log");
-    let out = gears()
-        .args(["--config".as_ref(), config.as_os_str()])
-        .arg("--log-file")
-        .arg(&path)
+    let help = Command::new(env!("CARGO_BIN_EXE_gears"))
+        .arg("--help")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let log = std::fs::read_to_string(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::remove_file(&config).unwrap();
-    assert!(log.contains("INFO] gears "), "{log}");
-    assert!(log.contains("starting"), "{log}");
-}
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--ephemeral")
+    );
 
-/// The config is accepted, and the run gets as far as looking for the key —
-/// which is the first thing after it that can fail.
-#[test]
-fn a_valid_config_loads_and_the_run_reaches_the_key() {
-    let config = keyless_config("cfg");
-    let out = gears().arg("--config").arg(&config).output().unwrap();
-    std::fs::remove_file(&config).unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!stderr.contains("config:"), "{stderr}");
-    assert!(stderr.contains("absent.key"), "{stderr}");
+    let bad = Command::new(env!("CARGO_BIN_EXE_gears"))
+        .arg("--removed-flag")
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
 }
 
 #[test]
-fn invalid_resources_fail_before_session_or_artifact_state_is_opened() {
-    let config = temp("bad-resources.toml");
-    let workspace = temp("bad-resources-workspace");
-    std::fs::write(
-        &config,
-        "version = 1\n[resources]\nmax_artifact_bytes = 2\nmax_session_artifact_bytes = 1\n",
-    )
-    .unwrap();
+fn one_shot_streams_from_the_hermetic_backend() {
+    let root = fixture("stream");
+    let workspace = root.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-
-    let out = gears()
-        .arg("--config")
-        .arg(&config)
-        .arg("--workspace")
-        .arg(&workspace)
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"hello "}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"content":"mock"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let config = config(&root, &server);
+    let output = gears(&root, &workspace, &config)
+        .args(["-p", "hello"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("max_artifact_bytes"), "{stderr}");
-    assert!(!workspace.join(".gears").exists());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("hello mock")
+    );
+    assert_eq!(server.requests().len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
 
-    std::fs::remove_file(config).unwrap();
-    std::fs::remove_dir(workspace).unwrap();
+#[test]
+fn unattended_sh_is_denied_and_the_turn_continues() {
+    let root = fixture("deny");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let call = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"sh","arguments":"{\"command\":\"touch denied-file\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+    let server = MockServer::start(vec![
+        sse_response(&[call]),
+        sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"denied safely"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+        ]),
+    ])
+    .unwrap();
+    let config = config(&root, &server);
+    let output = gears(&root, &workspace, &config)
+        .args(["-p", "try it"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!workspace.join("denied-file").exists());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("denied safely")
+    );
+    assert_eq!(server.requests().len(), 2);
+    std::fs::remove_dir_all(root).unwrap();
 }

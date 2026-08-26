@@ -66,6 +66,23 @@ impl Editor {
         self.cursor
     }
 
+    pub fn replace(&mut self, text: String) -> Edit {
+        if text.len() > self.limits.draft {
+            return Edit::Full;
+        }
+        if text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        {
+            return Edit::Sanitized;
+        }
+        self.text = text;
+        self.cursor = self.text.len();
+        self.selected = None;
+        self.saved = None;
+        Edit::Changed
+    }
+
     pub fn insert_char(&mut self, character: char) -> Edit {
         if character.is_control() && !matches!(character, '\n' | '\t') {
             return Edit::Sanitized;

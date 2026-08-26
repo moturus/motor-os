@@ -70,9 +70,9 @@ pub fn install_interrupt_handler() -> bool {
 /// gears spawned would leave `rustc` running behind it.
 ///
 /// The cost of the group is that a terminal `^C` no longer reaches the child;
-/// stopping a running tool on demand arrives with step 7's per-agent abort
-/// flags, which have to work on Motor OS too — where there are no signals to
-/// deliver and a tty could not do it anyway.
+/// stopping a running tool on demand arrives through the runtime's
+/// cancellation flag, which also has to work on Motor OS — where there are no
+/// signals to deliver and a tty could not do it anyway.
 pub fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     command.process_group(0).spawn()

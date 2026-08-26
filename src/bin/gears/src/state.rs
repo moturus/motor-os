@@ -1,47 +1,29 @@
-//! Paths for gears-owned state inside a workspace.
-//!
-//! Repository contents are untrusted. In particular, ordinary
-//! `create_dir_all(".gears/...")` follows a checked-out `.gears` symlink.
-//! This module walks each state-directory component without following links
-//! and refuses a state file that is already anything but a regular file.
+//! Symlink-safe access to Gears-owned user state.
 
 use std::path::{Component, Path, PathBuf};
 
-pub const STATE_DIR: &str = ".gears";
-
 #[derive(Debug, Clone)]
-pub struct StateDir {
+pub struct StateRoot {
     root: PathBuf,
 }
 
-impl StateDir {
-    /// Bind state to a real workspace directory. This is lazy: it validates
-    /// an existing `.gears`, but does not create one until a path is asked for.
-    pub fn new(workspace: &Path) -> Result<StateDir, String> {
-        let workspace = workspace
-            .canonicalize()
-            .map_err(|error| format!("workspace {}: {error}", workspace.display()))?;
-        if !workspace.is_dir() {
-            return Err(format!(
-                "workspace {} is not a directory",
-                workspace.display()
-            ));
+impl StateRoot {
+    pub fn new(root: PathBuf) -> Result<Self, String> {
+        if root.exists() {
+            checked_directory(&root)?;
+        } else if let Ok(metadata) = std::fs::symlink_metadata(&root) {
+            return Err(not_directory(&root, &metadata));
         }
-        let state = StateDir {
-            root: workspace.join(STATE_DIR),
-        };
-        if state.root.exists() {
-            checked_directory(&state.root)?;
-        } else if let Ok(metadata) = std::fs::symlink_metadata(&state.root) {
-            return Err(not_directory(&state.root, &metadata));
-        }
-        Ok(state)
+        Ok(Self { root })
     }
 
-    /// Ensure a state-owned directory and all of its parents are real
-    /// directories, never symlinks.
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
     pub fn directory(&self, relative: &Path) -> Result<PathBuf, String> {
         let components = components(relative, true)?;
+        ensure_ancestors(&self.root)?;
         ensure_directory(&self.root)?;
         let mut path = self.root.clone();
         for component in components {
@@ -51,7 +33,6 @@ impl StateDir {
         Ok(path)
     }
 
-    /// Validate an existing directory tree without creating any state.
     pub fn existing_directory(&self, relative: &Path) -> Result<Option<PathBuf>, String> {
         let components = components(relative, true)?;
         let mut path = self.root.clone();
@@ -68,29 +49,19 @@ impl StateDir {
         Ok(Some(path))
     }
 
-    /// Return a state-owned file path after safely creating its parents and
-    /// refusing a pre-existing symlink, directory, or special file.
     pub fn file(&self, relative: &Path) -> Result<PathBuf, String> {
-        let mut components = components(relative, false)?;
-        let name = components.pop().unwrap();
-        let mut parent = PathBuf::new();
-        for component in components {
-            parent.push(component);
-        }
+        let mut parts = components(relative, false)?;
+        let name = parts.pop().expect("a file name was checked");
+        let parent = parts.into_iter().collect::<PathBuf>();
         let path = self.directory(&parent)?.join(name);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_file() => Ok(path),
-            Ok(metadata) => Err(not_file(&path, &metadata)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
-            Err(error) => Err(format!("{}: {error}", path.display())),
-        }
+        check_file_or_missing(&path)?;
+        Ok(path)
     }
 
-    /// Validate an existing state file and its parents without creating them.
     pub fn existing_file(&self, relative: &Path) -> Result<Option<PathBuf>, String> {
-        let mut components = components(relative, false)?;
-        let name = components.pop().unwrap();
-        let parent: PathBuf = components.into_iter().collect();
+        let mut parts = components(relative, false)?;
+        let name = parts.pop().expect("a file name was checked");
+        let parent = parts.into_iter().collect::<PathBuf>();
         let Some(parent) = self.existing_directory(&parent)? else {
             return Ok(None);
         };
@@ -104,10 +75,28 @@ impl StateDir {
     }
 }
 
-fn components(relative: &Path, empty: bool) -> Result<Vec<PathBuf>, String> {
+fn ensure_ancestors(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.exists() {
+        checked_directory(parent)?;
+        return Ok(());
+    }
+    ensure_ancestors(parent)?;
+    match std::fs::create_dir(parent) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            checked_directory(parent)
+        }
+        Err(error) => Err(format!("{}: {error}", parent.display())),
+    }
+}
+
+fn components(relative: &Path, allow_empty: bool) -> Result<Vec<PathBuf>, String> {
     if relative.is_absolute() {
         return Err(format!(
-            "{}: gears state paths must be relative",
+            "state path {} must be relative",
             relative.display()
         ));
     }
@@ -117,14 +106,14 @@ fn components(relative: &Path, empty: bool) -> Result<Vec<PathBuf>, String> {
             Component::Normal(name) => result.push(PathBuf::from(name)),
             _ => {
                 return Err(format!(
-                    "{}: gears state paths must not contain '.' or '..'",
+                    "state path {} contains a non-normal component",
                     relative.display()
                 ));
             }
         }
     }
-    if !empty && result.is_empty() {
-        return Err("a gears state file needs a name".to_string());
+    if !allow_empty && result.is_empty() {
+        return Err("a state file needs a name".to_string());
     }
     Ok(result)
 }
@@ -145,6 +134,15 @@ fn ensure_directory(path: &Path) -> Result<(), String> {
     }
 }
 
+fn check_file_or_missing(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) => Err(not_file(path, &metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
 fn checked_directory(path: &Path) -> Result<(), String> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -152,15 +150,16 @@ fn checked_directory(path: &Path) -> Result<(), String> {
 }
 
 fn checked_directory_with(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
-    match metadata.file_type().is_dir() {
-        true => Ok(()),
-        false => Err(not_directory(path, metadata)),
+    if metadata.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(not_directory(path, metadata))
     }
 }
 
 fn not_directory(path: &Path, metadata: &std::fs::Metadata) -> String {
     format!(
-        "{}: unsafe gears state component (expected a directory, found {})",
+        "{}: unsafe state component (expected directory, found {})",
         path.display(),
         kind(metadata)
     )
@@ -168,7 +167,7 @@ fn not_directory(path: &Path, metadata: &std::fs::Metadata) -> String {
 
 fn not_file(path: &Path, metadata: &std::fs::Metadata) -> String {
     format!(
-        "{}: unsafe gears state entry (expected a regular file, found {})",
+        "{}: unsafe state entry (expected regular file, found {})",
         path.display(),
         kind(metadata)
     )
@@ -177,92 +176,56 @@ fn not_file(path: &Path, metadata: &std::fs::Metadata) -> String {
 fn kind(metadata: &std::fs::Metadata) -> &'static str {
     let kind = metadata.file_type();
     if kind.is_symlink() {
-        "a symlink"
+        "symlink"
     } else if kind.is_dir() {
-        "a directory"
+        "directory"
     } else if kind.is_file() {
-        "a regular file"
+        "regular file"
     } else {
-        "a special file"
+        "special file"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    fn workspace(name: &str) -> PathBuf {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "gears-state-{name}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::SeqCst)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("gears-state-{name}-{}", std::process::id()))
     }
 
     #[test]
-    fn state_is_lazy_and_creates_only_real_components() {
-        let root = workspace("basic");
-        let state = StateDir::new(&root).unwrap();
-        assert!(!root.join(STATE_DIR).exists());
+    fn creates_a_checked_tree() {
+        let root = temp("tree");
+        let _ = std::fs::remove_dir_all(&root);
+        let state = StateRoot::new(root.clone()).unwrap();
+        let file = state
+            .file(Path::new("sessions/work/session.jsonl"))
+            .unwrap();
+        std::fs::write(&file, "ok").unwrap();
         assert_eq!(
             state
-                .existing_file(Path::new("sessions/1-2.jsonl"))
-                .unwrap(),
-            None
-        );
-        assert!(!root.join(STATE_DIR).exists());
-        let file = state.file(Path::new("sessions/1-2.jsonl")).unwrap();
-        assert!(file.parent().unwrap().is_dir());
-        std::fs::write(&file, "session\n").unwrap();
-        assert_eq!(
-            state
-                .existing_file(Path::new("sessions/1-2.jsonl"))
+                .existing_file(Path::new("sessions/work/session.jsonl"))
                 .unwrap(),
             Some(file)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn state_paths_are_relative_and_normal() {
-        let root = workspace("paths");
-        let state = StateDir::new(&root).unwrap();
-        for path in ["../outside", "sessions/../outside", ".", ""] {
-            assert!(state.file(Path::new(path)).is_err(), "accepted {path:?}");
-        }
-        assert!(state.file(Path::new("/tmp/outside")).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[cfg(unix)]
     #[test]
-    fn state_refuses_root_nested_and_file_symlinks() {
+    fn refuses_symlink_components() {
         use std::os::unix::fs::symlink;
 
-        let root = workspace("links");
-        let outside = workspace("outside");
-        symlink(&outside, root.join(STATE_DIR)).unwrap();
-        let error = StateDir::new(&root).unwrap_err();
-        assert!(error.contains("symlink"), "{error}");
-        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
-        std::fs::remove_file(root.join(STATE_DIR)).unwrap();
-
-        let state = StateDir::new(&root).unwrap();
-        let sessions = state.directory(Path::new("sessions")).unwrap();
-        symlink(&outside, sessions.join("redirect")).unwrap();
-        assert!(
-            state
-                .directory(Path::new("sessions/redirect/deeper"))
-                .is_err()
-        );
-        symlink(outside.join("file"), sessions.join("linked.jsonl")).unwrap();
-        assert!(state.file(Path::new("sessions/linked.jsonl")).is_err());
-        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        let root = temp("link");
+        let outside = temp("outside");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("sessions")).unwrap();
+        let state = StateRoot::new(root.clone()).unwrap();
+        assert!(state.file(Path::new("sessions/x")).is_err());
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
     }

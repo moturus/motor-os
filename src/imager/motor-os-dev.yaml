@@ -18,7 +18,6 @@ input_files:
   - "/devtools/bin/mdbg"
   - "/devtools/tests/gears/gears-mock-provider"
   - "/devtools/tests/gears/gears-crossterm-frame"
-  - "/devtools/tests/gears/gears-measure"
   - "/devtools/tests/crossbench"
   - "/devtools/tests/crossterm-smoke"
   - "/devtools/tests/mio-test"
