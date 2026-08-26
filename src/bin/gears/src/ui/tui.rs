@@ -128,6 +128,37 @@ struct App {
     quit: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Layout {
+    transcript_rows: usize,
+    approval_start: usize,
+    approval_rows: usize,
+    editor_start: usize,
+    editor_rows: usize,
+    status_row: usize,
+}
+
+fn screen_layout(height: usize, editor_rows: usize, approval: bool) -> Layout {
+    let status_row = height.saturating_sub(1);
+    let available = status_row;
+    let approval_rows = if approval {
+        3.min(available.saturating_sub(1))
+    } else {
+        0
+    };
+    let editor_rows = editor_rows.min(available.saturating_sub(approval_rows));
+    let editor_start = status_row.saturating_sub(editor_rows);
+    let approval_start = editor_start.saturating_sub(approval_rows);
+    Layout {
+        transcript_rows: approval_start,
+        approval_start,
+        approval_rows,
+        editor_start,
+        editor_rows,
+        status_row,
+    }
+}
+
 impl App {
     fn new(runtime: &Runtime) -> Self {
         Self {
@@ -315,102 +346,112 @@ impl App {
 
     fn render(&self) -> Result<(), String> {
         let (width, height) = terminal::size().map_err(|error| error.to_string())?;
-        let width = usize::from(width.max(20));
-        let editor_lines = wrap(self.editor.text(), width.saturating_sub(2))
-            .len()
-            .max(1);
-        let approval_lines = usize::from(self.approval.is_some()) * 4;
-        let body_height = usize::from(height)
-            .saturating_sub(editor_lines + approval_lines + 3)
-            .max(1);
+        let width = usize::from(width).max(1);
+        let height = usize::from(height);
+        if height == 0 {
+            return Ok(());
+        }
+        let editor_width = width.saturating_sub(2).max(1);
+        let draft_lines = wrap(self.editor.text(), editor_width);
+        let (cursor_row, cursor_column) =
+            editor_cursor(self.editor.text(), self.editor.cursor(), editor_width);
+        let layout = screen_layout(height, draft_lines.len(), self.approval.is_some());
         let lines = self.transcript_lines(width);
         let end = lines.len().saturating_sub(self.scroll);
-        let start = end.saturating_sub(body_height);
+        let start = end.saturating_sub(layout.transcript_rows);
+        let transcript_start = layout.transcript_rows.saturating_sub(end - start);
         let mut output = io::stdout().lock();
-        queue!(
-            output,
-            cursor::MoveTo(0, 0),
-            Clear(ClearType::All),
-            SetForegroundColor(Color::Cyan),
-            Print(clipped(
-                &format!(
-                    "gears | {} | {}{} | {}",
-                    self.model,
-                    self.session.name.as_deref().unwrap_or(&self.session.id),
-                    if self.session.ephemeral {
-                        " (ephemeral)"
-                    } else {
-                        ""
-                    },
-                    self.status
-                ),
-                width
-            )),
-            ResetColor,
-            Print("\r\n")
-        )
-        .map_err(|error| error.to_string())?;
-        for (kind, line) in &lines[start..end] {
-            queue!(
-                output,
-                SetForegroundColor(color(*kind)),
-                Print(line),
-                ResetColor,
-                Print("\r\n")
-            )
+        queue!(output, cursor::MoveTo(0, 0), Clear(ClearType::All))
             .map_err(|error| error.to_string())?;
-        }
-        if let Some(permission) = &self.approval {
+        for (index, (kind, line)) in lines[start..end].iter().enumerate() {
             queue!(
                 output,
-                SetForegroundColor(Color::Yellow),
-                Print(clipped(
-                    &format!(
-                        "Allow {} in {}?",
-                        permission.tool,
-                        permission.workspace.display()
-                    ),
-                    width
-                )),
-                Print("\r\n"),
-                Print(clipped(&permission.detail, width)),
-                Print("\r\n"),
-                Print("[y] allow  [n/esc] deny"),
-                Print("\r\n"),
+                cursor::MoveTo(0, (transcript_start + index) as u16),
+                SetForegroundColor(color(*kind)),
+                Print(clipped(line, width)),
                 ResetColor
             )
             .map_err(|error| error.to_string())?;
         }
-        let draft_lines = wrap(self.editor.text(), width.saturating_sub(2));
-        for (index, line) in draft_lines.iter().enumerate() {
+        if let Some(permission) = &self.approval {
+            let approval = [
+                clipped(
+                    &single_line(&format!(
+                        "Allow {} in {}?",
+                        permission.tool,
+                        permission.workspace.display()
+                    )),
+                    width,
+                ),
+                clipped(&single_line(&permission.detail), width),
+                clipped("[y] allow  [n/esc] deny", width),
+            ];
+            for (index, line) in approval.iter().take(layout.approval_rows).enumerate() {
+                queue!(
+                    output,
+                    cursor::MoveTo(0, (layout.approval_start + index) as u16),
+                    SetForegroundColor(Color::Yellow),
+                    Print(line),
+                    ResetColor
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        let editor_first = cursor_row
+            .saturating_add(1)
+            .saturating_sub(layout.editor_rows)
+            .min(draft_lines.len().saturating_sub(layout.editor_rows));
+        for (shown, (index, line)) in draft_lines
+            .iter()
+            .enumerate()
+            .skip(editor_first)
+            .take(layout.editor_rows)
+            .enumerate()
+        {
+            let prefix = if index == 0 { "> " } else { "  " };
+            let prefix = clipped(prefix, width);
+            let text_width = width.saturating_sub(prefix.chars().count());
             queue!(
                 output,
+                cursor::MoveTo(0, (layout.editor_start + shown) as u16),
                 SetForegroundColor(Color::Green),
-                Print(if index == 0 { "> " } else { "  " }),
+                Print(prefix),
                 ResetColor,
-                Print(line),
-                Print("\r\n")
+                Print(clipped(line, text_width))
             )
             .map_err(|error| error.to_string())?;
         }
-        let (cursor_row, cursor_column) = editor_cursor(
-            self.editor.text(),
-            self.editor.cursor(),
-            width.saturating_sub(2),
-        );
-        let row = usize::from(height)
-            .saturating_sub(editor_lines)
-            .saturating_add(cursor_row)
-            .saturating_sub(1);
+        let status = single_line(&format!(
+            "gears | {} | {}{} | {}",
+            self.model,
+            self.session.name.as_deref().unwrap_or(&self.session.id),
+            if self.session.ephemeral {
+                " (ephemeral)"
+            } else {
+                ""
+            },
+            self.status
+        ));
         queue!(
             output,
-            cursor::MoveTo(
-                u16::try_from(cursor_column + 2).unwrap_or(u16::MAX),
-                u16::try_from(row).unwrap_or(u16::MAX)
-            ),
-            cursor::Show
+            cursor::MoveTo(0, layout.status_row as u16),
+            SetForegroundColor(Color::Cyan),
+            Print(clipped(&status, width)),
+            ResetColor
         )
         .map_err(|error| error.to_string())?;
+        if layout.editor_rows == 0 {
+            queue!(output, cursor::Hide).map_err(|error| error.to_string())?;
+        } else {
+            let row = layout.editor_start + cursor_row.saturating_sub(editor_first);
+            let column = (cursor_column + 2).min(width.saturating_sub(1));
+            queue!(
+                output,
+                cursor::MoveTo(column as u16, row as u16),
+                cursor::Show
+            )
+            .map_err(|error| error.to_string())?;
+        }
         output.flush().map_err(|error| error.to_string())
     }
 
@@ -897,6 +938,10 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
+fn single_line(text: &str) -> String {
+    clean(text).replace('\n', "↵")
+}
+
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut result = Vec::new();
@@ -977,5 +1022,32 @@ mod tests {
     #[test]
     fn controls_are_not_rendered() {
         assert_eq!(clean("a\x1bb"), "a�b");
+        assert_eq!(single_line("a\nb\x1bc"), "a↵b�c");
+    }
+
+    #[test]
+    fn transcript_editor_and_status_are_anchored_from_the_bottom() {
+        assert_eq!(
+            screen_layout(24, 1, false),
+            Layout {
+                transcript_rows: 22,
+                approval_start: 22,
+                approval_rows: 0,
+                editor_start: 22,
+                editor_rows: 1,
+                status_row: 23,
+            }
+        );
+        assert_eq!(
+            screen_layout(24, 1, true),
+            Layout {
+                transcript_rows: 19,
+                approval_start: 19,
+                approval_rows: 3,
+                editor_start: 22,
+                editor_rows: 1,
+                status_row: 23,
+            }
+        );
     }
 }
