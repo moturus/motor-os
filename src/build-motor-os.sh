@@ -186,7 +186,9 @@ activate_exact_assembly_paths() {
 	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
 	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
 	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
+	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
 	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
+	RUSTLIB_SRC="$TOOLCHAIN_PREFIX/lib/rustlib/$TARGET/lib"
 }
 
 configure_exact_cross_driver() {
@@ -1080,13 +1082,11 @@ rebuild_shim() {
 		fi
 	done
 
-	local target_dir="$MOTOR/build/native-toolchain/moto-rt-cabi"
-	rm -rf "$target_dir"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
-		&& CARGO_TARGET_DIR="$target_dir" \
-			cargo +dev-x86_64-unknown-motor build \
+		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
+			"$MOTOR_CARGO" build \
 				--target "$TARGET" --release )
-	local shim="$target_dir/$TARGET/release/libmoto_rt_cabi.a"
+	local shim="$SHIM_TARGET_DIR/$TARGET/release/libmoto_rt_cabi.a"
 	[ -f "$shim" ] || die "final moto-rt-cabi archive was not produced: $shim"
 	for symbol in motor_start memcpy memmove memset memcmp; do
 		if "$B/llvm-nm" --defined-only "$shim" 2>/dev/null |
@@ -1114,10 +1114,8 @@ rebuild_shim() {
 # --- stage rustc + the Rust sysroot into the image ----------------------------
 rustc_stage_image() {
 	log "staging rustc and the Rust sysroot into img_files/generated/rustc"
-	# Remove generated files left in the tracked static root by the old
-	# workflow; duplicate destinations across static roots are invalid.
-	rm -rf "$MOTOR/img_files/motor-os/devtools/rust"
-	rm -rf "$RUSTC_IMG"
+	[ ! -e "$RUSTC_IMG" ] ||
+		die "Rust image staging already exists without validated reuse: $RUSTC_IMG"
 	local rust_img="$RUSTC_IMG/devtools/rust"
 	mkdir -p "$RUSTC_IMG/devtools/bin" "$RUSTC_IMG/devtools/src" "$rust_img/bin" \
 		"$rust_img/lib/rustlib/$TARGET"
@@ -1140,7 +1138,6 @@ EOF
 	# *stubs* (bootstrap uses -Zembed-metadata=no) — the .rmeta siblings and
 	# self-contained/ must come along or rustc fails with "only metadata stub
 	# found for rlib dependency `std`".
-	rm -rf "$rust_img/lib/rustlib/$TARGET/lib"
 	mkdir -p "$rust_img/lib/rustlib/$TARGET/lib"
 	cp -r "$RUSTLIB_SRC"/* "$rust_img/lib/rustlib/$TARGET/lib/"
 	[ -n "$(ls "$rust_img/lib/rustlib/$TARGET/lib"/*.rmeta 2>/dev/null)" ] || \
@@ -1172,15 +1169,15 @@ EOF
 # --- build and stage ripgrep -------------------------------------------------
 build_ripgrep() {
 	log "building ripgrep and staging it as /system/bin/rg"
-	local target_dir="$MOTOR/build/native-toolchain/ripgrep"
 	( cd "$RIPGREP" && \
-		CARGO_TARGET_DIR="$target_dir" \
-			cargo +dev-x86_64-unknown-motor build \
+		CARGO_TARGET_DIR="$RIPGREP_TARGET_DIR" \
+			"$MOTOR_CARGO" build \
 				--target "$TARGET" --release --locked )
 
-	local binary="$target_dir/$TARGET/release/rg"
+	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
 	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
-	rm -rf "$RG_IMG"
+	[ ! -e "$RG_IMG" ] ||
+		die "ripgrep image staging already exists without validated reuse: $RG_IMG"
 	mkdir -p "$RG_IMG/system/bin"
 	"$B/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
 	chmod 755 "$RG_IMG/system/bin/rg"
@@ -1188,15 +1185,6 @@ build_ripgrep() {
 
 # --- rebuild the OS and all three images -------------------------------------
 build_images() {
-	# Two builds of the same rust tree produce byte-different compilers with
-	# identical `rustc -vV`, which is all cargo fingerprints — every cache
-	# built with the previous dev toolchain is silently poisoned (E0463
-	# "can't find crate" for random deps). Clear before rebuilding. src/sys/target
-	# is the workspace target dir the shim stage builds into with the same dev
-	# toolchain, so it is poisoned too.
-	log "clearing the Motor OS cargo caches (stale after the rustc rebuild)"
-	rm -rf "$MOTOR/build/obj/release" "$MOTOR/src/sys/target"
-
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
 	# Keep make's output visible: when a component fails, the compiler diagnostic
 	# is the whole diagnosis, and the log alone is easy to overlook.

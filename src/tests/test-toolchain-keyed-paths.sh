@@ -34,5 +34,9 @@ case "$(declare -f build_lua llvm_stage_image)" in
 	*'rm -rf'*|*'$MOTORH/lua-$LUA_VER/src/lua'*|*'$LLVM/build-motor-native'*)
 		fail "Lua or image staging still wipes or consumes unkeyed output" ;;
 esac
+case "$(declare -f rebuild_shim rustc_stage_image build_ripgrep build_images)" in
+	*'cargo +dev-x86_64-unknown-motor'*|*'rm -rf'*|*'src/sys/target'*|*'build/native-toolchain'*)
+		fail "later producers still wipe or consume legacy Cargo output" ;;
+esac
 
 echo "test-toolchain-keyed-paths PASS"
