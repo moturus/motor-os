@@ -150,13 +150,16 @@ prepare_exact_sources() {
 			backtrace_rev="$(toolchain_gitlink "$RUST" HEAD library/backtrace)" || return
 			toolchain_managed_submodule "$RUST" library/backtrace \
 				"$RUST_BACKTRACE_REPOSITORY" "$backtrace_rev" "$backtrace_rev" || return
-			local book_rev reference_rev
+			local book_rev reference_rev rustc_perf_rev
 			book_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/book)" || return
 			reference_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/reference)" || return
 			toolchain_managed_submodule "$RUST" src/doc/book \
 				"$RUST_BOOK_REPOSITORY" "$book_rev" "$book_rev" || return
 			toolchain_managed_submodule "$RUST" src/doc/reference \
 				"$RUST_REFERENCE_REPOSITORY" "$reference_rev" "$reference_rev" || return
+			rustc_perf_rev="$(toolchain_gitlink "$RUST" HEAD src/tools/rustc-perf)" || return
+			toolchain_managed_submodule "$RUST" src/tools/rustc-perf \
+				"$RUSTC_PERF_REPOSITORY" "$rustc_perf_rev" "$rustc_perf_rev" || return
 			toolchain_verify_managed_rust "$RUST" || return
 			MOTOR_SOURCE_MODE=managed
 			SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"

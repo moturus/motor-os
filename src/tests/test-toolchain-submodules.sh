@@ -26,6 +26,7 @@ cargo="$TMP_ROOT/cargo"
 backtrace="$TMP_ROOT/backtrace"
 book="$TMP_ROOT/book"
 reference="$TMP_ROOT/reference"
+rustc_perf="$TMP_ROOT/rustc-perf"
 rust_source="$TMP_ROOT/rust-source"
 
 git init -q -b motor "$llvm"
@@ -45,6 +46,9 @@ book_rev="$(commit_all "$book" base)"
 git init -q -b main "$reference"
 printf 'reference\n' > "$reference/input"
 reference_rev="$(commit_all "$reference" base)"
+git init -q -b main "$rustc_perf"
+printf 'rustc-perf\n' > "$rustc_perf/input"
+rustc_perf_rev="$(commit_all "$rustc_perf" base)"
 
 git init -q -b motor "$rust_source"
 mkdir -p "$rust_source/src/tools" "$rust_source/src/doc" "$rust_source/library"
@@ -59,6 +63,8 @@ git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
   "$book" src/doc/book
 git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
   "$reference" src/doc/reference
+git -C "$rust_source" -c protocol.file.allow=always submodule add -q \
+  "$rustc_perf" src/tools/rustc-perf
 printf '1.99.0\n' > "$rust_source/src/version"
 printf 'compiler_git_commit_hash=%040d\n' 8 > "$rust_source/src/stage0"
 printf 'root lock\n' > "$rust_source/Cargo.lock"
@@ -80,6 +86,8 @@ toolchain_managed_submodule "$managed" src/doc/book "$book" \
   "$book_rev" "$book_rev"
 toolchain_managed_submodule "$managed" src/doc/reference "$reference" \
   "$reference_rev" "$reference_rev"
+toolchain_managed_submodule "$managed" src/tools/rustc-perf "$rustc_perf" \
+  "$rustc_perf_rev" "$rustc_perf_rev"
 [ "$(git -C "$managed/src/llvm-project" rev-parse HEAD)" = "$llvm_motor" ] ||
   fail "LLVM submodule revision mismatch"
 [ "$(git -C "$managed/src/tools/cargo" rev-parse HEAD)" = "$cargo_rev" ] ||
@@ -90,6 +98,8 @@ toolchain_managed_submodule "$managed" src/doc/reference "$reference" \
   fail "book submodule revision mismatch"
 [ "$(git -C "$managed/src/doc/reference" rev-parse HEAD)" = "$reference_rev" ] ||
   fail "reference submodule revision mismatch"
+[ "$(git -C "$managed/src/tools/rustc-perf" rev-parse HEAD)" = "$rustc_perf_rev" ] ||
+  fail "rustc-perf submodule revision mismatch"
 toolchain_assert_ancestor "$managed" "$rust_base" "$rust_motor" Rust
 toolchain_assert_ancestor "$managed/src/llvm-project" "$llvm_base" "$llvm_motor" LLVM
 

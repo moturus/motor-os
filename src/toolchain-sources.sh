@@ -225,7 +225,7 @@ toolchain_stage0_revision() {
 }
 
 toolchain_authoring_resolve() {
-  local rust="$1" base="$2" llvm cargo backtrace book reference
+  local rust="$1" base="$2" llvm cargo backtrace book reference rustc_perf
   local rust_head llvm_head cargo_head
   local effective_llvm_gitlink index_llvm_gitlink index_cargo_gitlink stage0_at_head
   toolchain_require_hex authoring_base "$base" 40 || return
@@ -246,6 +246,7 @@ toolchain_authoring_resolve() {
   backtrace="$rust/library/backtrace"
   book="$rust/src/doc/book"
   reference="$rust/src/doc/reference"
+  rustc_perf="$rust/src/tools/rustc-perf"
   if ! git -C "$llvm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     toolchain_die "LLVM submodule is not initialized: $llvm"
     return 1
@@ -264,6 +265,7 @@ toolchain_authoring_resolve() {
   toolchain_assert_named_remote "$backtrace" origin "$RUST_BACKTRACE_REPOSITORY" || return
   toolchain_assert_named_remote "$book" origin "$RUST_BOOK_REPOSITORY" || return
   toolchain_assert_named_remote "$reference" origin "$RUST_REFERENCE_REPOSITORY" || return
+  toolchain_assert_named_remote "$rustc_perf" origin "$RUSTC_PERF_REPOSITORY" || return
 
   SELECTED_UPSTREAM_RUST_REV="$base"
   SELECTED_RUST_VERSION="$(git -C "$rust" show "$base:src/version")" || return
@@ -340,6 +342,8 @@ toolchain_authoring_resolve() {
     "$RUST_BOOK_REPOSITORY" || return
   toolchain_verify_exact_submodule "$rust" src/doc/reference \
     "$RUST_REFERENCE_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/tools/rustc-perf \
+    "$RUSTC_PERF_REPOSITORY" || return
 
   MOTOR_RUST_TREE_STATE="$(toolchain_worktree_digest "$rust" rust \
     src/llvm-project src/tools/cargo)" || return
@@ -488,5 +492,7 @@ toolchain_verify_managed_rust() {
   toolchain_verify_exact_submodule "$rust" src/doc/book \
     "$RUST_BOOK_REPOSITORY" || return
   toolchain_verify_exact_submodule "$rust" src/doc/reference \
-    "$RUST_REFERENCE_REPOSITORY"
+    "$RUST_REFERENCE_REPOSITORY" || return
+  toolchain_verify_exact_submodule "$rust" src/tools/rustc-perf \
+    "$RUSTC_PERF_REPOSITORY"
 }

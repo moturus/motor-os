@@ -26,6 +26,7 @@ cargo_source="$TMP_ROOT/cargo-source"
 backtrace_source="$TMP_ROOT/backtrace-source"
 book_source="$TMP_ROOT/book-source"
 reference_source="$TMP_ROOT/reference-source"
+rustc_perf_source="$TMP_ROOT/rustc-perf-source"
 rust="$TMP_ROOT/rust"
 
 git init -q -b main "$llvm_source"
@@ -43,6 +44,9 @@ book_rev="$(commit_all "$book_source" base)"
 git init -q -b main "$reference_source"
 printf 'reference\n' > "$reference_source/input"
 reference_rev="$(commit_all "$reference_source" base)"
+git init -q -b main "$rustc_perf_source"
+printf 'rustc-perf\n' > "$rustc_perf_source/input"
+rustc_perf_rev="$(commit_all "$rustc_perf_source" base)"
 
 git init -q -b main "$rust"
 mkdir -p "$rust/src/tools" "$rust/src/doc" "$rust/library"
@@ -56,6 +60,8 @@ git -C "$rust" -c protocol.file.allow=always submodule add -q \
   "$book_source" src/doc/book
 git -C "$rust" -c protocol.file.allow=always submodule add -q \
   "$reference_source" src/doc/reference
+git -C "$rust" -c protocol.file.allow=always submodule add -q \
+  "$rustc_perf_source" src/tools/rustc-perf
 printf '1.99.0\n' > "$rust/src/version"
 printf 'compiler_git_commit_hash=%040d\n' 8 > "$rust/src/stage0"
 printf 'build/\nbootstrap.toml\n' > "$rust/.gitignore"
@@ -70,6 +76,7 @@ MOTOR_CARGO_REPOSITORY="$cargo_source"
 RUST_BACKTRACE_REPOSITORY="$backtrace_source"
 RUST_BOOK_REPOSITORY="$book_source"
 RUST_REFERENCE_REPOSITORY="$reference_source"
+RUSTC_PERF_REPOSITORY="$rustc_perf_source"
 UPSTREAM_RUST_REV=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MOTOR_RUST_CHANNEL=dev
 git -C "$rust" remote add origin "$MOTOR_RUST_REPOSITORY"
@@ -133,6 +140,13 @@ if toolchain_authoring_resolve "$rust" "$base" >/dev/null 2>&1; then
   fail "changed reference submodule was accepted"
 fi
 git -C "$rust/src/doc/reference" checkout -q --detach "$reference_rev"
+
+git -C "$rust/src/tools/rustc-perf" -c user.name=Test -c user.email=test@example.com \
+  commit -q --allow-empty -m other
+if toolchain_authoring_resolve "$rust" "$base" >/dev/null 2>&1; then
+  fail "changed rustc-perf submodule was accepted"
+fi
+git -C "$rust/src/tools/rustc-perf" checkout -q --detach "$rustc_perf_rev"
 
 printf 'changed-stage0\n' >> "$rust/src/stage0"
 if toolchain_authoring_resolve "$rust" "$base" >/dev/null 2>&1; then
