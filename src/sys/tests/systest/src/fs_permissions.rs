@@ -1,4 +1,4 @@
-use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, Role};
+use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, Role, RolePermissions};
 
 const NONE_CHILD: &str = "fs-permissions-none-child";
 
@@ -174,6 +174,103 @@ pub fn run_all_tests() {
         else {
             panic!("test root is not a directory")
         };
+
+        let exact = RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+            AccessPermissions::R,
+        );
+        let exact_id = client
+            .create_entry_with_permissions(root_id, EntryKind::File, "exact", exact)
+            .await
+            .unwrap();
+        let exact_metadata = client.metadata(exact_id).await.unwrap();
+        assert_eq!(
+            AccessPermissions::Rwx,
+            exact_metadata.access(Role::System).unwrap()
+        );
+        assert_eq!(
+            AccessPermissions::Rw,
+            exact_metadata.access(Role::Interactive).unwrap()
+        );
+        assert_eq!(
+            AccessPermissions::R,
+            exact_metadata.access(Role::None).unwrap()
+        );
+
+        let executable = RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::R,
+        );
+        let executable_id = client
+            .create_entry_with_permissions(root_id, EntryKind::File, "exact-executable", executable)
+            .await
+            .unwrap();
+        expect_denied(client.write(executable_id, 0, b"no").await);
+        expect_denied(client.resize(executable_id, 1).await);
+
+        let unauthorized = RolePermissions::all(AccessPermissions::R);
+        expect_denied(
+            client
+                .create_entry_with_permissions(
+                    root_id,
+                    EntryKind::File,
+                    "exact-unauthorized",
+                    unauthorized,
+                )
+                .await,
+        );
+        assert_eq!(
+            client
+                .stat(&format!("{}/exact-unauthorized", root.display()))
+                .await
+                .unwrap_err(),
+            moto_rt::Error::NotFound
+        );
+
+        let non_monotonic = RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::R,
+            AccessPermissions::Rw,
+        );
+        expect_denied(
+            client
+                .create_entry_with_permissions(
+                    root_id,
+                    EntryKind::File,
+                    "exact-non-monotonic",
+                    non_monotonic,
+                )
+                .await,
+        );
+        assert_eq!(
+            client
+                .stat(&format!("{}/exact-non-monotonic", root.display()))
+                .await
+                .unwrap_err(),
+            moto_rt::Error::NotFound
+        );
+
+        let finalized = create_file(&client, root_id, "self-finalized", b"#!/bin/sh\n").await;
+        client
+            .set_permissions(finalized, AccessPermissions::Rx)
+            .await
+            .unwrap();
+        assert_eq!(
+            AccessPermissions::Rx,
+            client
+                .metadata(finalized)
+                .await
+                .unwrap()
+                .access(Role::Interactive)
+                .unwrap()
+        );
+        expect_denied(
+            client
+                .set_permissions(finalized, AccessPermissions::Rw)
+                .await,
+        );
 
         let no_read = create_file(&client, root_id, "no-read", b"secret").await;
         client

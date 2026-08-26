@@ -27,13 +27,14 @@ pub const CMD_FILE_LOCK: u16 = 15;
 pub const CMD_SET_PERMISSIONS: u16 = 16;
 pub const CMD_MOVE_NOREPLACE: u16 = 17;
 pub const CMD_SET_ALL_PERMISSIONS: u16 = 18;
+pub const CMD_CREATE_WITH_PERMISSIONS: u16 = 19;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
 /// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
 /// unrecognized command is answered `InvalidData` as usual, not counted and
 /// refused as a pressure refusal.
 pub fn known_cmd(cmd: u16) -> bool {
-    (CMD_STAT..=CMD_SET_ALL_PERMISSIONS).contains(&cmd)
+    (CMD_STAT..=CMD_CREATE_WITH_PERMISSIONS).contains(&cmd)
 }
 
 /// The `shared_pages` slot in which a single-page request or response
@@ -129,8 +130,42 @@ pub fn create_entry_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, Strin
     stat_msg_decode(msg, sender)
 }
 
-pub fn create_entry_resp_decode(msg: Msg) -> Result<u128> {
-    msg.status().map(|_| msg.payload.arg_128())
+pub fn create_with_permissions_msg_encode(
+    parent_id: u128,
+    kind: async_fs::EntryKind,
+    name: &str,
+    permissions: async_fs::RolePermissions,
+    io_page: IoPage,
+) -> Msg {
+    let mut msg = stat_msg_encode(parent_id, name, io_page);
+    msg.command = CMD_CREATE_WITH_PERMISSIONS;
+    let bytes = msg.payload.args_8_mut();
+    bytes[16] = kind as u8;
+    bytes[17] = permissions.system as u8;
+    bytes[18] = permissions.interactive as u8;
+    bytes[19] = permissions.none as u8;
+    msg
+}
+
+pub fn create_with_permissions_msg_decode(
+    msg: Msg,
+    sender: &Sender,
+) -> Result<(u128, async_fs::EntryKind, String, [u8; 3])> {
+    let bytes = msg.payload.args_8();
+    let kind = bytes[16]
+        .try_into()
+        .map_err(|_| moto_rt::Error::InvalidData)?;
+    let permissions = [bytes[17], bytes[18], bytes[19]];
+    let (parent_id, name) = stat_msg_decode(msg, sender)?;
+    Ok((parent_id, kind, name, permissions))
+}
+
+pub fn create_entry_resp_decode(msg: Msg, expected_kind: async_fs::EntryKind) -> Result<u128> {
+    let (entry_id, kind) = stat_resp_decode(msg)?;
+    if kind != expected_kind {
+        return Err(moto_rt::Error::InternalError);
+    }
+    Ok(entry_id)
 }
 
 pub fn empty_resp_encode(msg_id: u64, status: Result<()>) -> Msg {
@@ -161,7 +196,12 @@ pub fn release_donated_pages(msg: &Msg, sender: &Sender) {
     };
 
     match msg.command {
-        CMD_STAT | CMD_CREATE_FILE | CMD_CREATE_DIR | CMD_MOVE_ENTRY | CMD_MOVE_NOREPLACE => {
+        CMD_STAT
+        | CMD_CREATE_FILE
+        | CMD_CREATE_DIR
+        | CMD_CREATE_WITH_PERMISSIONS
+        | CMD_MOVE_ENTRY
+        | CMD_MOVE_NOREPLACE => {
             release(msg.payload.shared_pages()[SINGLE_PAGE_SLOT]);
         }
         CMD_WRITE => {

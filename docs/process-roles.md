@@ -529,27 +529,27 @@ belong to `PERMISSIONS_DESIGN.md`:
   remain `Role::System`.
 - The existing `set_permissions` request carries `(entry_id, access)` and is
   interpreted as **target = caller role**. Thus ordinary
-  `std::fs::set_permissions` narrows the caller's own byte; motor-fs cascades a
-  narrowing to lower roles and rejects an attempted self-widen. A future
+  `std::fs::set_permissions` changes the caller's own byte; motor-fs permits a
+  narrowing or the exact `Rw` → `Rx` finalization transition, cascades removed
+  permissions to lower roles, and rejects every other self-widen. A future
   administrative API that explicitly edits a lower role can add a distinct
   command/target field when it has a real consumer; it is not required to make
   chmod work correctly.
 
-  Be explicit about what that deferral means: with target = caller and
-  `may_set` allowing only narrowing of one's own byte, **no client of sys-io —
-  not even a System process — can widen any permission byte back through the
-  public API**. Every public chmod is therefore permanently one-way and
-  cascades downward. A Unix-style `chmod -w` → `chmod +w` round-trip, common
-  in ported software and test suites, fails on the second step with
-  PermissionDenied. This is accepted, not accidental — it is what makes
-  sealing real (PERMISSIONS_DESIGN.md §4a) — but it must be called out in
-  user-facing docs, and the runtime recovery idiom — copy, delete, rename;
-  delete needs only parent-directory `w` — documented and tested alongside it
-  (§10.7).
-- Client create requests still use `[Rwx; 3]`. That array is monotonic and is
-  legal for every caller role under `PERMISSIONS_DESIGN.md` §6.2. Initial
-  restricted creation would require a separate protocol addition; do not mix
-  it into role attribution.
+  Be explicit about what that deferral means: no client of sys-io — not even a
+  System process — can restore `w` or any other removed permission through its
+  own byte. The sole exception adds `x` while permanently dropping `w`.
+  A Unix-style `chmod -w` → `chmod +w` round-trip, common in ported software
+  and test suites, fails on the second step with PermissionDenied. This is
+  accepted, not accidental — it is what makes sealing real
+  (PERMISSIONS_DESIGN.md §4a) — but it must be called out in user-facing docs,
+  and the runtime recovery idiom — copy, delete, rename; delete needs only
+  parent-directory `w` — documented and tested alongside it (§10.7).
+- Ordinary client create requests still use `[Rwx; 3]` until the
+  creator-relative defaults are enabled. A distinct
+  `create_entry_with_permissions` request carries a complete mode and asks
+  Motor FS to validate creation authority and monotonicity before linking the
+  entry; rejection is atomic.
 
 ---
 
