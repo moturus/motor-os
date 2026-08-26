@@ -22,6 +22,8 @@ use crate::ui::tui_editor::{Edit, Editor};
 
 const POLL: Duration = Duration::from_millis(50);
 const TRANSCRIPT_BYTES: usize = 1024 * 1024;
+// rmux `status::AMBER`: keep shared terminal chrome visually consistent.
+const STATUS_COLOR: Color = Color::AnsiValue(222);
 
 pub fn run(
     runtime: &mut Runtime,
@@ -125,6 +127,7 @@ struct App {
     model: String,
     session: SessionSummary,
     approval: Option<Permission>,
+    input_enabled: bool,
     quit: bool,
     last_frame: Option<Frame>,
 }
@@ -208,6 +211,7 @@ impl App {
             model: runtime.model().to_string(),
             session: runtime.summary(),
             approval: None,
+            input_enabled: true,
             quit: false,
             last_frame: None,
         }
@@ -453,7 +457,15 @@ impl App {
         {
             let prefix = if index == 0 { "> " } else { "  " };
             let target = &mut frame.lines[layout.editor_start + shown];
-            target.push(Color::Green, prefix, width);
+            target.push(
+                if self.input_enabled {
+                    Color::Green
+                } else {
+                    Color::DarkGrey
+                },
+                prefix,
+                width,
+            );
             target.push(Color::White, line, width);
         }
         let status = single_line(&format!(
@@ -467,7 +479,7 @@ impl App {
                 ""
             }
         ));
-        frame.lines[layout.status_row].push(Color::Cyan, &status, width);
+        frame.lines[layout.status_row].push(STATUS_COLOR, &status, width);
         if layout.editor_rows != 0 {
             let row = layout.editor_start + cursor_row.saturating_sub(editor_first);
             let column = (cursor_column + 2).min(width.saturating_sub(1));
@@ -570,6 +582,7 @@ enum TurnMessage {
 }
 
 fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), String> {
+    app.input_enabled = false;
     app.status = "working".to_string();
     app.render()?;
     let cancellation = runtime.cancellation();
@@ -611,6 +624,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                             let _ = reply.send(allowed);
                         }
                         TurnMessage::Done(result) => {
+                            app.input_enabled = true;
                             app.status = "idle".to_string();
                             app.render()?;
                             return result;
@@ -618,6 +632,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                     },
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        app.input_enabled = true;
                         return Err("agent worker stopped unexpectedly".to_string());
                     }
                 }
@@ -655,6 +670,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
 }
 
 fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> Result<(), String> {
+    app.input_enabled = false;
     app.status = "compacting".to_string();
     app.render()?;
     let cancellation = runtime.cancellation();
@@ -677,6 +693,7 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
                         dirty = true;
                     }
                     Ok(TurnMessage::Done(result)) => {
+                        app.input_enabled = true;
                         app.status = "idle".to_string();
                         app.render()?;
                         return result;
@@ -686,6 +703,7 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        app.input_enabled = true;
                         return Err("compaction worker stopped unexpectedly".to_string());
                     }
                 }
@@ -1147,6 +1165,7 @@ mod tests {
                 ephemeral: true,
             },
             approval: None,
+            input_enabled: true,
             quit: false,
             last_frame: None,
         }
@@ -1234,5 +1253,26 @@ mod tests {
         assert!(status(&app).starts_with("gears | checking permission |"));
         app.apply(Event::TurnEnd);
         assert!(status(&app).starts_with("gears | idle |"));
+    }
+
+    #[test]
+    fn status_and_disabled_prompt_use_the_chrome_palette() {
+        let mut app = app();
+        let frame = app.frame(80, 24);
+        assert!(
+            frame.lines[23]
+                .0
+                .iter()
+                .all(|cell| cell.color == STATUS_COLOR)
+        );
+        assert_eq!(STATUS_COLOR, Color::AnsiValue(222));
+
+        app.input_enabled = false;
+        let frame = app.frame(80, 24);
+        assert!(
+            frame.lines[22].0[..2]
+                .iter()
+                .all(|cell| cell.color == Color::DarkGrey)
+        );
     }
 }
