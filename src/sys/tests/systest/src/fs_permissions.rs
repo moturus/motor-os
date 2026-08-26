@@ -157,7 +157,8 @@ pub fn run_all_tests() {
     );
 
     let replacement = root.join("replacement");
-    assert_eq!(6, std::fs::copy(&sealed, &replacement).unwrap());
+    let sealed_contents = std::fs::read(&sealed).unwrap();
+    std::fs::write(&replacement, &sealed_contents).unwrap();
     std::fs::remove_file(&sealed).unwrap();
     std::fs::rename(&replacement, &sealed).unwrap();
     std::fs::OpenOptions::new()

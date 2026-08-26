@@ -291,6 +291,8 @@ pub fn move_noreplace_child(args: &[String]) {
 }
 
 fn copy_test() {
+    use moto_io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
+
     let root = temp_dir();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -361,6 +363,91 @@ fn copy_test() {
     let copied = std::fs::copy(&empty_src, &empty_dst).unwrap();
     assert_eq!(copied, 0);
     assert_eq!(std::fs::metadata(&empty_dst).unwrap().len(), 0);
+
+    let expected = [
+        (AccessPermissions::R, moto_rt::fs::PERM_READ),
+        (
+            AccessPermissions::Rw,
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE,
+        ),
+        (
+            AccessPermissions::Rx,
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+        ),
+        (
+            AccessPermissions::Rwx,
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+        ),
+    ];
+    for (index, (source_access, destination_perm)) in expected.into_iter().enumerate() {
+        let source = root.join(format!("mode-source-{index}"));
+        let destination = root.join(format!("mode-destination-{index}"));
+        moto_async::LocalRuntime::new().block_on(async {
+            let client = FsClient::connect().unwrap();
+            let (parent, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
+            else {
+                panic!("copy test root is not a directory")
+            };
+            let staging = if source_access == AccessPermissions::Rwx {
+                AccessPermissions::Rwx
+            } else {
+                AccessPermissions::Rw
+            };
+            let source_id = client
+                .create_entry_with_permissions(
+                    parent,
+                    EntryKind::File,
+                    source.file_name().unwrap().to_str().unwrap(),
+                    RolePermissions::new(AccessPermissions::Rwx, staging, staging),
+                )
+                .await
+                .unwrap();
+            client.write(source_id, 0, b"mode").await.unwrap();
+            if staging != source_access {
+                client
+                    .set_permissions(source_id, source_access)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                source_access,
+                client
+                    .metadata(source_id)
+                    .await
+                    .unwrap()
+                    .access(Role::Interactive)
+                    .unwrap()
+            );
+        });
+
+        assert_eq!(4, std::fs::copy(&source, &destination).unwrap());
+        assert_eq!(
+            destination_perm,
+            moto_rt::fs::stat(destination.to_str().unwrap())
+                .unwrap()
+                .perm
+        );
+        moto_async::LocalRuntime::new().block_on(async {
+            let client = FsClient::connect().unwrap();
+            let (destination_id, EntryKind::File) =
+                client.stat(destination.to_str().unwrap()).await.unwrap()
+            else {
+                panic!("copy destination is not a file")
+            };
+            let metadata = client.metadata(destination_id).await.unwrap();
+            let final_access = if source_access == AccessPermissions::Rwx {
+                AccessPermissions::Rx
+            } else {
+                source_access
+            };
+            assert_eq!(
+                AccessPermissions::Rwx,
+                metadata.access(Role::System).unwrap()
+            );
+            assert_eq!(final_access, metadata.access(Role::Interactive).unwrap());
+            assert_eq!(final_access, metadata.access(Role::None).unwrap());
+        });
+    }
 
     std::fs::remove_dir_all(&root).unwrap();
     assert!(!std::fs::exists(&root).unwrap());

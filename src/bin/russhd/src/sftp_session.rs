@@ -22,6 +22,8 @@ pub struct SftpSession {
 struct OpenFile {
     file: tokio::fs::File,
     path: String,
+    writable: bool,
+    pending_mode: Option<u32>,
 }
 
 impl SftpSession {
@@ -62,6 +64,20 @@ fn permission_mode(attrs: &FileAttributes) -> Result<Option<u32>, StatusCode> {
     Ok(attrs.permissions.map(|mode| mode & 0o777))
 }
 
+fn mapped_file_mode(mode: u32) -> u32 {
+    if mode & 0o111 != 0 {
+        0o555
+    } else if mode & 0o222 != 0 {
+        0o666
+    } else {
+        0o444
+    }
+}
+
+fn mapped_directory_mode(mode: u32) -> u32 {
+    if mode & 0o222 != 0 { 0o777 } else { 0o555 }
+}
+
 #[cfg(unix)]
 async fn set_path_permissions(path: &str, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -70,8 +86,41 @@ async fn set_path_permissions(path: &str, mode: u32) -> std::io::Result<()> {
 
 #[cfg(target_os = "motor")]
 async fn set_path_permissions(path: &str, mode: u32) -> std::io::Result<()> {
-    moto_rt::fs::set_perm(path, motor_permissions(mode))
-        .map_err(|error| std::io::Error::other(error.to_string()))
+    use moto_io::fs::{AccessPermissions, EntryKind, FsClient, Role};
+
+    let access = match mode {
+        0o444 => AccessPermissions::R,
+        0o555 => AccessPermissions::Rx,
+        0o666 => AccessPermissions::Rw,
+        0o777 => AccessPermissions::Rwx,
+        _ => return Err(std::io::Error::other("invalid mapped permissions")),
+    };
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect()?;
+        let (entry_id, _kind): (_, EntryKind) = client.stat(path).await?;
+        let mut permissions = client.metadata(entry_id).await?.permissions()?;
+        let role = match moto_sys::caps::ProcessRole::from_caps(
+            moto_sys::ProcessStaticPage::get().capabilities,
+        ) {
+            moto_sys::caps::ProcessRole::System => Role::System,
+            moto_sys::caps::ProcessRole::Interactive => Role::Interactive,
+            moto_sys::caps::ProcessRole::None => Role::None,
+        };
+        match role {
+            Role::System => {
+                permissions.system = access;
+                permissions.interactive = access;
+                permissions.none = access;
+            }
+            Role::Interactive => {
+                permissions.interactive = access;
+                permissions.none = access;
+            }
+            Role::None => permissions.none = access,
+        }
+        client.set_all_permissions(entry_id, permissions).await
+    })
+    .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -84,23 +133,7 @@ async fn set_file_permissions(file: &OpenFile, mode: u32) -> std::io::Result<()>
 
 #[cfg(target_os = "motor")]
 async fn set_file_permissions(file: &OpenFile, mode: u32) -> std::io::Result<()> {
-    moto_rt::fs::set_perm(&file.path, motor_permissions(mode))
-        .map_err(|error| std::io::Error::other(error.to_string()))
-}
-
-#[cfg(target_os = "motor")]
-fn motor_permissions(mode: u32) -> u64 {
-    let mut permissions = 0;
-    if mode & 0o444 != 0 {
-        permissions |= moto_rt::fs::PERM_READ;
-    }
-    if mode & 0o222 != 0 {
-        permissions |= moto_rt::fs::PERM_WRITE;
-    }
-    if mode & 0o111 != 0 {
-        permissions |= moto_rt::fs::PERM_EXEC;
-    }
-    permissions
+    set_path_permissions(&file.path, mode).await
 }
 
 fn file_attributes(path: &str, metadata: &std::fs::Metadata) -> Result<FileAttributes, StatusCode> {
@@ -166,6 +199,14 @@ impl russh_sftp::server::Handler for SftpSession {
                 log::warn!("close: flush '{handle}' failed: {err:?}");
                 io_status(&err)
             })?;
+            if let Some(mode) = open_file.pending_mode {
+                set_file_permissions(&open_file, mode)
+                    .await
+                    .map_err(|err| {
+                        log::warn!("close: permissions '{handle}' failed: {err:?}");
+                        io_status(&err)
+                    })?;
+            }
             log::info!("close {handle}: Ok");
             Ok(ok_status(id))
         } else if self.open_dirs.remove(&handle).is_some() {
@@ -261,7 +302,7 @@ impl russh_sftp::server::Handler for SftpSession {
         id: u32,
         filename: String,
         pflags: OpenFlags,
-        _attrs: FileAttributes,
+        attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
         if !pflags.intersects(OpenFlags::READ | OpenFlags::WRITE) {
             log::warn!("open: {filename}: missing read/write flag in 0x{pflags:x}");
@@ -270,24 +311,45 @@ impl russh_sftp::server::Handler for SftpSession {
 
         // russh-sftp's conversion implements the SFTP v3 flag semantics,
         // including CREATE|EXCLUDE (create_new), TRUNCATE, and APPEND.
+        let requested_mode = permission_mode(&attrs)?;
+        let writable = pflags.intersects(OpenFlags::WRITE);
         let options: std::fs::OpenOptions = pflags.into();
-        let file = tokio::fs::OpenOptions::from(options)
+        let mut file = OpenFile {
+            file: tokio::fs::OpenOptions::from(options)
             .open(filename.as_str())
             .await
             .map_err(|err| {
                 log::warn!("open: {filename}: Err: {err:?}");
                 io_status(&err)
+            })?,
+            path: filename.clone(),
+            writable,
+            pending_mode: None,
+        };
+
+        if file.writable {
+            set_file_permissions(&file, 0o666).await.map_err(|error| {
+                log::warn!("open: staging permissions {filename}: {error}");
+                io_status(&error)
             })?;
+            file.pending_mode = requested_mode
+                .map(mapped_file_mode)
+                .filter(|mode| *mode != 0o666);
+        } else if let Some(mode) = requested_mode {
+            set_file_permissions(&file, mapped_file_mode(mode))
+                .await
+                .map_err(|error| {
+                    log::warn!("open: permissions {filename}: {error}");
+                    io_status(&error)
+                })?;
+        }
 
         let handle = format!("{:x}", self.new_id());
         assert!(
             self.open_files
                 .insert(
                     handle.clone(),
-                    OpenFile {
-                        file,
-                        path: filename.clone(),
-                    },
+                    file,
                 )
                 .is_none()
         );
@@ -390,6 +452,15 @@ impl russh_sftp::server::Handler for SftpSession {
         let Some(mode) = permission_mode(&attrs)? else {
             return Ok(ok_status(id));
         };
+        let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
+            log::warn!("setstat metadata {path}: {error}");
+            io_status(&error)
+        })?;
+        let mode = if metadata.is_dir() {
+            mapped_directory_mode(mode)
+        } else {
+            mapped_file_mode(mode)
+        };
         set_path_permissions(&path, mode).await.map_err(|error| {
             log::warn!("setstat {path}: {error}");
             io_status(&error)
@@ -403,7 +474,7 @@ impl russh_sftp::server::Handler for SftpSession {
         handle: String,
         mut attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        let Some(file) = self.open_files.get(&handle) else {
+        let Some(file) = self.open_files.get_mut(&handle) else {
             return Err(StatusCode::BadMessage);
         };
         // OpenSSH scp pins each in-place upload to its last acknowledged byte.
@@ -416,10 +487,16 @@ impl russh_sftp::server::Handler for SftpSession {
             })?;
         }
         if let Some(mode) = mode {
-            set_file_permissions(file, mode).await.map_err(|error| {
-                log::warn!("fsetstat permissions {handle}: {error}");
-                io_status(&error)
-            })?;
+            let mapped = mapped_file_mode(mode);
+            if file.writable && mode & 0o111 != 0 {
+                file.pending_mode = Some(mapped);
+            } else {
+                file.pending_mode = None;
+                set_file_permissions(file, mapped).await.map_err(|error| {
+                    log::warn!("fsetstat permissions {handle}: {error}");
+                    io_status(&error)
+                })?;
+            }
         }
         Ok(ok_status(id))
     }
@@ -454,10 +531,12 @@ impl russh_sftp::server::Handler for SftpSession {
             io_status(&error)
         })?;
         if let Some(mode) = mode {
-            set_path_permissions(&path, mode).await.map_err(|error| {
+            set_path_permissions(&path, mapped_directory_mode(mode))
+                .await
+                .map_err(|error| {
                 log::warn!("mkdir permissions {path}: {error}");
                 io_status(&error)
-            })?;
+                })?;
         }
         Ok(ok_status(id))
     }
@@ -704,7 +783,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o640
+                0o666
             );
 
             let opened = session
@@ -712,32 +791,27 @@ mod tests {
                     2,
                     path.to_string_lossy().into_owned(),
                     OpenFlags::WRITE,
-                    FileAttributes::empty(),
+                    attrs(0o750),
                 )
-                .await
-                .unwrap();
-            session
-                .fsetstat(3, opened.handle.clone(), attrs(0o750))
                 .await
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o750
+                0o666
             );
 
             let with_times = FileAttributes {
-                permissions: Some(0o640),
                 atime: Some(1_700_000_000),
                 mtime: Some(1_700_000_001),
                 ..FileAttributes::empty()
             };
             session
-                .fsetstat(4, opened.handle.clone(), with_times)
+                .fsetstat(3, opened.handle.clone(), with_times)
                 .await
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o640
+                0o666
             );
 
             let size = FileAttributes {
@@ -745,7 +819,7 @@ mod tests {
                 ..FileAttributes::empty()
             };
             session
-                .fsetstat(5, opened.handle.clone(), size)
+                .fsetstat(4, opened.handle.clone(), size)
                 .await
                 .unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), b"perm");
@@ -756,15 +830,127 @@ mod tests {
             };
             assert_eq!(
                 session
-                    .fsetstat(6, opened.handle.clone(), unsupported)
+                    .fsetstat(5, opened.handle.clone(), unsupported)
                     .await
                     .unwrap_err(),
                 StatusCode::OpUnsupported
             );
-            session.close(7, opened.handle).await.unwrap();
+            session.close(6, opened.handle).await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
+
+            session
+                .setstat(7, path.to_string_lossy().into_owned(), attrs(0o640))
+                .await
+                .unwrap();
+            let opened = session
+                .open(
+                    8,
+                    path.to_string_lossy().into_owned(),
+                    OpenFlags::WRITE,
+                    attrs(0o750),
+                )
+                .await
+                .unwrap();
+            session
+                .fsetstat(9, opened.handle.clone(), attrs(0o640))
+                .await
+                .unwrap();
+            session.close(10, opened.handle).await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o666
+            );
+
+            let opened = session
+                .open(
+                    11,
+                    path.to_string_lossy().into_owned(),
+                    OpenFlags::READ,
+                    FileAttributes::empty(),
+                )
+                .await
+                .unwrap();
+            session
+                .fsetstat(12, opened.handle.clone(), attrs(0o750))
+                .await
+                .unwrap();
+            session.close(13, opened.handle).await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
         });
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_open_defers_restrictive_modes_until_close() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let attrs = |mode| FileAttributes {
+            permissions: Some(mode),
+            ..FileAttributes::empty()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for (label, requested, final_mode) in [("exec", 0o755, 0o555), ("read", 0o400, 0o444)] {
+            let path = temp_path(label);
+            runtime.block_on(async {
+                let mut session = SftpSession::default();
+                let opened = session
+                    .open(
+                        1,
+                        path.to_string_lossy().into_owned(),
+                        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                        attrs(requested),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o666
+                );
+                session
+                    .write(2, opened.handle.clone(), 0, b"complete".to_vec())
+                    .await
+                    .unwrap();
+                session.close(3, opened.handle).await.unwrap();
+            });
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                final_mode
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+
+        let abandoned = temp_path("abandoned");
+        runtime.block_on(async {
+            let mut session = SftpSession::default();
+            session
+                .open(
+                    1,
+                    abandoned.to_string_lossy().into_owned(),
+                    OpenFlags::WRITE | OpenFlags::CREATE,
+                    attrs(0o755),
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            std::fs::metadata(&abandoned)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o666
+        );
+        std::fs::remove_file(abandoned).unwrap();
     }
 
     #[cfg(unix)]
@@ -795,7 +981,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
-                0o750
+                0o777
             );
 
             std::fs::write(&original, b"contents").unwrap();
@@ -826,12 +1012,27 @@ mod tests {
                 .await
                 .unwrap();
             session
-                .rmdir(7, directory.to_string_lossy().into_owned())
+                .setstat(
+                    7,
+                    directory.to_string_lossy().into_owned(),
+                    FileAttributes {
+                        permissions: Some(0o500),
+                        ..FileAttributes::empty()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o555
+            );
+            session
+                .rmdir(8, directory.to_string_lossy().into_owned())
                 .await
                 .unwrap();
 
             assert_eq!(
-                session.fstat(8, "unknown".to_string()).await.unwrap_err(),
+                session.fstat(9, "unknown".to_string()).await.unwrap_err(),
                 StatusCode::BadMessage
             );
         });

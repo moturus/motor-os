@@ -18,6 +18,8 @@ toml         = "0.8.10"
 [target.'cfg(target_os = "motor")'.dependencies]
 getrandom    = { version = "=0.2.17", features = ["custom"] }
 moto-log     = { path = "../../sys/lib/moto-log" }
+moto-async   = { path = "../../sys/lib/moto-async" }
+moto-io      = { path = "../../sys/lib/moto-io" }
 moto-rt      = { path = "../../sys/lib/moto-rt"  }
 moto-sys     = { path = "../../sys/lib/moto-sys" }
 

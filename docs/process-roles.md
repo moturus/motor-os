@@ -543,13 +543,21 @@ belong to `PERMISSIONS_DESIGN.md`:
   and test suites, fails on the second step with PermissionDenied. This is
   accepted, not accidental — it is what makes sealing real
   (PERMISSIONS_DESIGN.md §4a) — but it must be called out in user-facing docs,
-  and the runtime recovery idiom — copy, delete, rename; delete needs only
-  parent-directory `w` — documented and tested alongside it (§10.7).
+  The recovery idiom is an explicit read/create/write/delete/rename sequence:
+  copying bytes into an ordinarily created writable staging file before
+  replacing the sealed entry. `std::fs::copy` is not suitable because it
+  preserves the source permission byte; delete still needs only
+  parent-directory `w` (§10.7).
 - Ordinary client create requests still use `[Rwx; 3]` until the
   creator-relative defaults are enabled. A distinct
   `create_entry_with_permissions` request carries a complete mode and asks
   Motor FS to validate creation authority and monotonicity before linking the
   entry; rejection is atomic.
+- On Motor OS, `std::fs::copy` preserves the source permission visible to the
+  caller. It stages the destination as `Rw`, copies the contents, and then
+  applies `R`, `Rw`, or `Rx`; a legacy `Rwx` source is finalized as `Rx`.
+  sysbox `cp` relies on that behavior for files and leaves copied directories
+  at their creator-relative default.
 
 ---
 
@@ -602,8 +610,8 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    chmod, and verify the Interactive and cascaded None bytes change while the
    System byte remains `Rwx`. Verify self-widening fails — including the
    Unix-style readonly round-trip (`set_permissions` readonly, then
-   un-readonly fails on the second step) — and exercise the copy → delete →
-   rename recovery idiom (§8). Spawn a None child and
+   un-readonly fails on the second step) — and exercise the explicit
+   read/create/write → delete → rename recovery idiom (§8). Spawn a None child and
    exercise read, write, resize, create/delete, move (both parents), and
    directory traversal/listing denial according to `PERMISSIONS_DESIGN.md`.
    Also verify a newly accepted connection cannot send a request when the peer
