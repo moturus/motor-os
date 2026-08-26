@@ -29,7 +29,6 @@ pub fn write_out(
                 position += 2;
             }
             b'%' if bytes.get(position + 1) == Some(&b'{') => {
-                flush(&mut literal, destination, stdout, stderr)?;
                 let end = bytes[position + 2..]
                     .iter()
                     .position(|byte| *byte == b'}')
@@ -37,28 +36,19 @@ pub fn write_out(
                     .ok_or_else(|| CurlError::usage("unterminated --write-out variable"))?;
                 let name = &format[position + 2..end];
                 match name {
-                    "stderr" => destination = Destination::Stderr,
-                    "response_code" => write_value(
-                        info.response_code.to_string().as_bytes(),
-                        destination,
-                        stdout,
-                        stderr,
-                    )?,
-                    "url_effective" => {
-                        write_value(info.url_effective.as_bytes(), destination, stdout, stderr)?
+                    "stderr" => {
+                        flush(&mut literal, destination, stdout, stderr)?;
+                        destination = Destination::Stderr;
                     }
-                    "redirect_url" => {
-                        write_value(info.redirect_url.as_bytes(), destination, stdout, stderr)?
+                    "response_code" => {
+                        literal.extend_from_slice(info.response_code.to_string().as_bytes())
                     }
-                    "content_type" => {
-                        write_value(info.content_type.as_bytes(), destination, stdout, stderr)?
+                    "url_effective" => literal.extend_from_slice(info.url_effective.as_bytes()),
+                    "redirect_url" => literal.extend_from_slice(info.redirect_url.as_bytes()),
+                    "content_type" => literal.extend_from_slice(info.content_type.as_bytes()),
+                    "size_download" => {
+                        literal.extend_from_slice(info.size_download.to_string().as_bytes())
                     }
-                    "size_download" => write_value(
-                        info.size_download.to_string().as_bytes(),
-                        destination,
-                        stdout,
-                        stderr,
-                    )?,
                     _ => {
                         return Err(CurlError::usage(format!(
                             "unsupported --write-out variable: {name}"
@@ -126,6 +116,20 @@ fn write_value(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingWriter(Vec<Vec<u8>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn info() -> TransferInfo {
         TransferInfo {
             response_code: 302,
@@ -161,5 +165,23 @@ mod tests {
         for format in ["%{unknown}", "%{response_code", "\\q"] {
             assert!(write_out(format, &info(), &mut Vec::new(), &mut Vec::new()).is_err());
         }
+    }
+
+    #[test]
+    fn emits_each_contiguous_destination_once() {
+        let mut stdout = RecordingWriter::default();
+        let mut stderr = RecordingWriter::default();
+        write_out(
+            "prefix%{stderr}status=%{response_code}\nurl=%{url_effective}\n",
+            &info(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(stdout.0, [b"prefix".to_vec()]);
+        assert_eq!(
+            stderr.0,
+            [b"status=302\nurl=https://example.test/old\n".to_vec()]
+        );
     }
 }
