@@ -35,6 +35,7 @@ MOTOR_CARGO_REPOSITORY="https://github.com/rust-lang/cargo.git"
 MOTOR_CARGO_REV="eb98b54bc9f3c74519f43d066cb3fd02ebc88df0"
 MOTOR_RUST_ROOT_LOCK_SHA256="6edfd4b9bf0bd44ef122e3041b272e7d8d24e3ddd952d3c0444cb8f2cdd66176"
 MOTOR_RUST_LIBRARY_LOCK_SHA256="73b0c194b27ba6dd6fd208bcdbd2df2f62caeaa85b485facaa44933ad3c442f3"
+UPSTREAM_CARGO_REV="eb98b54bc9f3c74519f43d066cb3fd02ebc88df0"
 
 MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
 MOTOR_MLIBC_REF="refs/heads/motor-os-rustc"
@@ -70,7 +71,7 @@ MOTOR_OS_RUNTIME_INPUTS=(
 MOTOR_TOOLCHAIN_KEY_FIELDS=(
   toolchain_id rustup_base source_mode selected_description
   upstream_rust_version upstream_rust_rev stage0_rev rust_llvm_base_rev
-  cargo_version cargo_rev effective_rust_rev effective_llvm_rev
+  upstream_cargo_rev cargo_version cargo_rev effective_rust_rev effective_llvm_rev
   rust_tree_state llvm_tree_state authoring_source_digest
   rust_root_lock_sha256 rust_library_lock_sha256 rust_channel build_host
   build_targets build_tools build_extended build_docs build_submodules

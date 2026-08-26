@@ -346,3 +346,108 @@ toolchain_authoring_resolve() {
     MOTOR_ASSEMBLY_STATE=development-dirty
   fi
 }
+
+toolchain_managed_submodule() {
+  local parent="$1" path="$2" repository="$3" ref="$4" revision="$5"
+  local seed="${6:-}" destination expected top
+  destination="$parent/$path"
+  expected="$(toolchain_gitlink "$parent" HEAD "$path")" || return
+  if [ "$expected" != "$revision" ]; then
+    toolchain_die "$path gitlink is $expected, expected $revision"
+    return 1
+  fi
+
+  top="$(git -C "$destination" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ "$(readlink -f "$top" 2>/dev/null || true)" != \
+    "$(readlink -f "$destination" 2>/dev/null || true)" ]; then
+    if [ -d "$destination" ] &&
+      [ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+      rmdir "$destination"
+    elif [ -e "$destination" ]; then
+      toolchain_die "uninitialized submodule path is not empty: $destination"
+      return 1
+    fi
+    toolchain_clone_managed "$repository" "$destination" "$seed" || return
+    if ! git -C "$parent" submodule absorbgitdirs "$path"; then
+      toolchain_die "cannot absorb $path Git metadata"
+      return 1
+    fi
+  fi
+  if ! git -C "$destination" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    toolchain_die "submodule is not initialized: $destination"
+    return 1
+  fi
+  toolchain_assert_independent_checkout "$destination" || return
+  toolchain_assert_remote "$destination" "$repository" || return
+  toolchain_fetch_declared_ref "$destination" "$ref" "$revision" || return
+  toolchain_assert_clean "$destination" || return
+  if ! git -C "$destination" checkout --detach "$revision"; then
+    toolchain_die "cannot detach $path at $revision"
+    return 1
+  fi
+  if [ "$(git -C "$destination" rev-parse HEAD)" != "$revision" ]; then
+    toolchain_die "$path did not select $revision"
+    return 1
+  fi
+  toolchain_assert_clean "$destination" || return
+  toolchain_assert_clean "$parent"
+}
+
+toolchain_assert_ancestor() {
+  local repo="$1" base="$2" revision="$3" description="$4"
+  if ! git -C "$repo" cat-file -e "$base^{commit}" 2>/dev/null; then
+    toolchain_die "$description base is missing: $base"
+    return 1
+  fi
+  if ! git -C "$repo" cat-file -e "$revision^{commit}" 2>/dev/null; then
+    toolchain_die "$description revision is missing: $revision"
+    return 1
+  fi
+  if ! git -C "$repo" merge-base --is-ancestor "$base" "$revision"; then
+    toolchain_die "$description revision does not descend from its base"
+    return 1
+  fi
+}
+
+toolchain_expect_equal() {
+  local actual="$1" expected="$2" description="$3"
+  if [ "$actual" != "$expected" ]; then
+    toolchain_die "$description: expected $expected, found $actual"
+    return 1
+  fi
+}
+
+toolchain_verify_managed_rust() {
+  local rust="$1" llvm="$rust/src/llvm-project" value
+  toolchain_expect_equal "$(git -C "$rust" rev-parse HEAD)" \
+    "$MOTOR_RUST_REV" "managed Rust HEAD mismatch" || return
+  toolchain_assert_ancestor "$rust" "$UPSTREAM_RUST_REV" "$MOTOR_RUST_REV" Rust || return
+  toolchain_assert_ancestor "$llvm" "$RUST_LLVM_BASE_REV" "$MOTOR_LLVM_REV" LLVM || return
+  toolchain_expect_equal \
+    "$(toolchain_gitlink "$rust" "$UPSTREAM_RUST_REV" src/llvm-project)" \
+    "$RUST_LLVM_BASE_REV" "upstream Rust LLVM gitlink mismatch" || return
+  toolchain_expect_equal \
+    "$(toolchain_gitlink "$rust" "$MOTOR_RUST_REV" src/llvm-project)" \
+    "$MOTOR_LLVM_REV" "Motor Rust LLVM gitlink mismatch" || return
+  toolchain_expect_equal \
+    "$(toolchain_gitlink "$rust" "$UPSTREAM_RUST_REV" src/tools/cargo)" \
+    "$UPSTREAM_CARGO_REV" "upstream Rust Cargo gitlink mismatch" || return
+  toolchain_expect_equal \
+    "$(toolchain_gitlink "$rust" "$MOTOR_RUST_REV" src/tools/cargo)" \
+    "$MOTOR_CARGO_REV" "Motor Rust Cargo gitlink mismatch" || return
+  toolchain_expect_equal \
+    "$(toolchain_stage0_revision "$rust" "$UPSTREAM_RUST_REV")" \
+    "$UPSTREAM_STAGE0_REV" "upstream Stage 0 mismatch" || return
+  toolchain_expect_equal \
+    "$(toolchain_stage0_revision "$rust" "$MOTOR_RUST_REV")" \
+    "$UPSTREAM_STAGE0_REV" "Motor Rust Stage 0 mismatch" || return
+  value="$(sha256sum "$rust/Cargo.lock" | awk '{print $1}')"
+  toolchain_expect_equal "$value" "$MOTOR_RUST_ROOT_LOCK_SHA256" \
+    "Rust root lock hash mismatch" || return
+  value="$(sha256sum "$rust/library/Cargo.lock" | awk '{print $1}')"
+  toolchain_expect_equal "$value" "$MOTOR_RUST_LIBRARY_LOCK_SHA256" \
+    "Rust library lock hash mismatch" || return
+  toolchain_assert_clean "$rust" || return
+  toolchain_assert_clean "$llvm" || return
+  toolchain_assert_clean "$rust/src/tools/cargo"
+}
