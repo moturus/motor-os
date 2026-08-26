@@ -4,10 +4,12 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 const LOG_PATH: &str = "/system/logs/systest.log";
-const CHILD: &str = "sys-log-unauthorized-child";
+const UNAUTHORIZED_CHILD: &str = "sys-log-unauthorized-child";
+const FALLBACK_CHILD: &str = "sys-log-fallback-child";
 
 pub fn is_child(args: &[String]) -> bool {
-    args.get(1).is_some_and(|arg| arg == CHILD)
+    args.get(1)
+        .is_some_and(|arg| arg == UNAUTHORIZED_CHILD || arg == FALLBACK_CHILD)
 }
 
 fn raw_connection() -> ClientConnection {
@@ -52,25 +54,36 @@ fn expect_error_and_disconnect(mut conn: ClientConnection, expected: u16) {
     assert!(!conn.connected());
 }
 
-pub fn run_child() -> ! {
-    let mut conn = raw_connection();
-    ConnectRequest::prepare(conn.data_mut(), "systest-unauthorized");
-    expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
+pub fn run_child(args: &[String]) -> ! {
+    match args[1].as_str() {
+        UNAUTHORIZED_CHILD => {
+            let mut conn = raw_connection();
+            ConnectRequest::prepare(conn.data_mut(), "systest-unauthorized");
+            expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
+        }
+        FALLBACK_CHILD => {
+            moto_log::init("systest-fallback").unwrap();
+            moto_log::test_set_tag_id(u64::MAX);
+            log::error!("first failed RPC fallback");
+            assert!(!moto_log::test_rpc_enabled());
+            log::error!("second disabled RPC fallback");
+        }
+        _ => unreachable!(),
+    }
     std::process::exit(0)
 }
 
-fn protocol_hardening() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg(CHILD)
-        .env(
-            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-            format!(
-                "0x{:x}",
-                moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE
-            ),
-        )
+fn child_output(mode: &str, caps: u64) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(mode)
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+fn protocol_hardening() {
+    let interactive = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
+    let output = child_output(UNAUTHORIZED_CHILD, interactive);
     assert!(output.status.success(), "{output:?}");
 
     let (mut health, health_id) = connected_tag("systest-proto-health");
@@ -123,6 +136,15 @@ fn protocol_hardening() {
     prepare_log(&mut health, health_id, b"protocol tests complete");
     assert_eq!(moto_rt::E_OK, rpc_result(&mut health));
     drop(health);
+
+    let output = child_output(FALLBACK_CHILD, interactive | moto_sys::caps::CAP_LOG);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("first failed RPC fallback"), "{stderr:?}");
+    assert!(
+        stderr.contains("second disabled RPC fallback"),
+        "{stderr:?}"
+    );
     println!("logging::protocol_hardening test PASS");
 }
 

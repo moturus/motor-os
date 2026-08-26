@@ -13,3 +13,4 @@ moto-sys = { path = "../../lib/moto-sys" }
 log = "=0.4.28"
 
 [features]
+test-support = []
