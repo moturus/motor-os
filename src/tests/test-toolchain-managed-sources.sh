@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$ROOT_DIR/src/toolchain-lib.sh"
+. "$ROOT_DIR/src/toolchain-sources.sh"
+
+fail() {
+  echo "test-toolchain-managed-sources: $*" >&2
+  exit 1
+}
+
+commit_file() {
+  local repo="$1" value="$2" message="$3"
+  printf '%s\n' "$value" > "$repo/input"
+  git -C "$repo" add input
+  git -C "$repo" -c user.name=Test -c user.email=test@example.com \
+    commit -q -m "$message"
+  git -C "$repo" rev-parse HEAD
+}
+
+TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+remote="$TMP_ROOT/remote"
+git init -q -b development "$remote"
+first="$(commit_file "$remote" one first)"
+git -C "$remote" tag formal "$first"
+second="$(commit_file "$remote" two second)"
+
+managed="$TMP_ROOT/managed"
+toolchain_managed_checkout "$remote" refs/heads/development "$first" "$managed"
+[ "$(git -C "$managed" rev-parse HEAD)" = "$first" ] ||
+  fail "development ref did not retain the pinned ancestor"
+[ -z "$(git -C "$managed" branch --show-current)" ] ||
+  fail "managed checkout is not detached"
+
+printf 'dirty\n' >> "$managed/input"
+before="$(git -C "$managed" rev-parse HEAD)"
+if toolchain_managed_checkout "$remote" refs/heads/development "$second" "$managed" \
+  >/dev/null 2>&1; then
+  fail "dirty checkout was accepted"
+fi
+[ "$(git -C "$managed" rev-parse HEAD)" = "$before" ] ||
+  fail "dirty checkout switched revisions"
+grep -q dirty "$managed/input" || fail "dirty checkout content was changed"
+
+git -C "$managed" checkout -- input
+printf 'untracked\n' > "$managed/local-input"
+if toolchain_managed_checkout "$remote" refs/heads/development "$second" "$managed" \
+  >/dev/null 2>&1; then
+  fail "untracked input was accepted"
+fi
+[ -f "$managed/local-input" ] || fail "untracked input was removed"
+
+wrong="$TMP_ROOT/wrong"
+git clone -q "$remote" "$wrong"
+git -C "$wrong" remote set-url origin "$TMP_ROOT/not-the-remote"
+wrong_head="$(git -C "$wrong" rev-parse HEAD)"
+if toolchain_managed_checkout "$remote" refs/heads/development "$first" "$wrong" \
+  >/dev/null 2>&1; then
+  fail "wrong remote was accepted"
+fi
+[ "$(git -C "$wrong" rev-parse HEAD)" = "$wrong_head" ] ||
+  fail "wrong-remote checkout was changed"
+
+tagged="$TMP_ROOT/tagged"
+toolchain_managed_checkout "$remote" refs/tags/formal "$first" "$tagged"
+git -C "$remote" tag -f formal "$second" >/dev/null
+stale="$TMP_ROOT/stale-tag"
+if toolchain_managed_checkout "$remote" refs/tags/formal "$first" "$stale" \
+  >/dev/null 2>&1; then
+  fail "moved formal tag was accepted"
+fi
+
+missing="$TMP_ROOT/missing"
+if toolchain_managed_checkout "$remote" refs/heads/development \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$missing" >/dev/null 2>&1; then
+  fail "missing revision was accepted"
+fi
+
+git -C "$remote" remote add origin "$remote"
+linked="$TMP_ROOT/linked"
+git -C "$remote" worktree add -q --detach "$linked" "$first"
+if toolchain_managed_checkout "$remote" refs/heads/development "$first" "$linked" \
+  >/dev/null 2>&1; then
+  fail "linked managed worktree was accepted"
+fi
+
+echo "test-toolchain-managed-sources PASS"
