@@ -35,6 +35,7 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
+"$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
 # Keep a local runtime version bump from breaking only the dev-image suite.
