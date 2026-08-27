@@ -64,6 +64,7 @@ run_ssh() {
 }
 
 cleanup() {
+    remove_permission_fixtures
     run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -85,6 +86,17 @@ run_sftp() {
 
 run_scp() {
     scp "${SSH_OPTS[@]}" "$@" >"$WORK/out" 2>"$WORK/err"
+}
+
+# Step 4 leaves an executable (555) and a read-only (444) fixture that a later
+# `put` is refused on, so a rerun against the same VM would fail on its own
+# leftovers. Remove them before step 4 and on exit; `-rm` ignores a missing file.
+remove_permission_fixtures() {
+    run_sftp <<EOF || true
+-rm $REMOTE_UPLOAD_FILE.plain
+-rm $REMOTE_UPLOAD_FILE.exec
+-rm $REMOTE_UPLOAD_FILE.readonly
+EOF
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
@@ -158,6 +170,7 @@ printf '#!/system/bin/rush\nexit 0\n' >"$permission_source"
 chmod 600 "$permission_source"
 
 echo "-- setting and reading back SFTP permissions --"
+remove_permission_fixtures
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "plain SFTP permission update failed"; }
 put $permission_source $remote_plain_permission_file
 chmod 600 $remote_plain_permission_file
