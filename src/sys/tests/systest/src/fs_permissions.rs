@@ -148,6 +148,9 @@ pub fn run_all_tests() {
         );
     });
 
+    // Motor OS permissions are role-based, so the Unix-specific Clippy
+    // concern about making a file world-writable does not apply here.
+    #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     assert_eq!(
         std::io::ErrorKind::PermissionDenied,

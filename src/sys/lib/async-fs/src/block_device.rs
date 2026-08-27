@@ -19,6 +19,7 @@ use moto_tooling::iobuf::IoBuf;
 pub const MAX_IO_RUN: usize = 16;
 
 /// Asynchronous Block Device.
+#[allow(clippy::double_must_use)]
 #[async_trait(?Send)]
 pub trait AsyncBlockDevice {
     type Completion: core::future::Future<Output = (Vec<CheckpointedBlock>, Result<()>)> + 'static;

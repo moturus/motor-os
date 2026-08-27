@@ -38,6 +38,7 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 "$WD/test-toolchain-assembly.sh"
 "$WD/test-toolchain-authoring-sources.sh"
 "$WD/test-toolchain-bootstrap.sh"
+"$WD/test-toolchain-cutover.sh"
 "$WD/test-toolchain-entry-point.sh"
 "$WD/test-toolchain-host.sh"
 "$WD/test-toolchain-keyed-paths.sh"
@@ -114,11 +115,11 @@ fi
 # feature set that differs from sys-io's compiles different code.
 NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-udp"
 if [ "$BUILD" = "release" ]; then
-  cargo +nightly test --release \
+  cargo test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
     --no-default-features --features "$NETSTACK_FEATURES"
 else
-  cargo +nightly test \
+  cargo test \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
     --no-default-features --features "$NETSTACK_FEATURES"
 fi

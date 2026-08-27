@@ -762,6 +762,9 @@ fn test_native_listener_drop_under_backpressure() {
 
     struct DistinctWake;
 
+    // Each iteration needs a waker with a distinct identity to exercise
+    // replacement and cancellation of registered waiters.
+    #[allow(clippy::manual_noop_waker)]
     impl std::task::Wake for DistinctWake {
         fn wake(self: Arc<Self>) {}
     }

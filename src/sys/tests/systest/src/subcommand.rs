@@ -224,7 +224,9 @@ fn do_command(cmd: String) {
                 // There was a bug when calling exit_process() from a non-main thread misbehaved.
                 let _ =
                     std::thread::spawn(move || moto_sys::SysCpu::exit_process(code as u64)).join();
-                loop {}
+                loop {
+                    core::hint::spin_loop();
+                }
             }
         }
         // Poll this process's *own* stdio, which rt.vdso used to offer only

@@ -301,8 +301,7 @@ fn copy_test() {
     // Generate some random source data larger than a single block to exercise
     // the copy loop.
     const LEN: usize = 1024 * 1024 * 3 + 333;
-    let mut bytes = Vec::with_capacity(LEN);
-    bytes.resize(LEN, 0u8);
+    let mut bytes = vec![0_u8; LEN];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
@@ -369,32 +368,31 @@ fn copy_test() {
 }
 
 pub fn smoke_test() {
-    let foo = crate::temp_path("systest-fs-foo");
-    let bar = crate::temp_path("systest-fs-bar");
-    if std::fs::metadata(&foo).is_ok() {
-        std::fs::remove_file(&foo).unwrap();
+    let source_path = crate::temp_path("systest-fs-foo");
+    let target_path = crate::temp_path("systest-fs-bar");
+    if std::fs::metadata(&source_path).is_ok() {
+        std::fs::remove_file(&source_path).unwrap();
     }
-    if std::fs::metadata(&bar).is_ok() {
-        std::fs::remove_file(&bar).unwrap();
+    if std::fs::metadata(&target_path).is_ok() {
+        std::fs::remove_file(&target_path).unwrap();
     }
 
     assert_eq!(
-        std::fs::metadata(&foo).err().unwrap().kind(),
+        std::fs::metadata(&source_path).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        std::fs::metadata(&bar).err().unwrap().kind(),
+        std::fs::metadata(&target_path).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
 
-    std::fs::write(&foo, "bar").expect("async write failed");
-    let bytes = std::fs::read(&foo).expect("async read failed");
+    std::fs::write(&source_path, "bar").expect("async write failed");
+    let bytes = std::fs::read(&source_path).expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
     const LEN: usize = 1024 * 1024 * 19 + 1001;
 
-    let mut bytes = Vec::with_capacity(LEN);
-    bytes.resize(LEN, 0);
+    let mut bytes = vec![0; LEN];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
@@ -409,7 +407,7 @@ pub fn smoke_test() {
 
     // WRITE.
     let ts0 = std::time::Instant::now();
-    std::fs::write(&bar, bytes.as_slice()).unwrap();
+    std::fs::write(&target_path, bytes.as_slice()).unwrap();
     let dur_write = ts0.elapsed();
     let cpu_usage_write = crate::mpmc::get_cpu_usage();
 
@@ -419,7 +417,7 @@ pub fn smoke_test() {
     // READ.
     run_pstat("before");
     let ts1 = std::time::Instant::now();
-    let bytes_back = std::fs::read(&bar).unwrap();
+    let bytes_back = std::fs::read(&target_path).unwrap();
     let dur_read = ts1.elapsed();
     let cpu_usage_read = crate::mpmc::get_cpu_usage();
     run_pstat("after");
@@ -457,19 +455,19 @@ pub fn smoke_test() {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
-    let metadata = std::fs::metadata(&bar).unwrap();
+    let metadata = std::fs::metadata(&target_path).unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.len(), bytes.len() as u64);
 
-    std::fs::remove_file(&foo).unwrap();
-    std::fs::remove_file(&bar).unwrap();
+    std::fs::remove_file(&source_path).unwrap();
+    std::fs::remove_file(&target_path).unwrap();
 
     assert_eq!(
-        std::fs::metadata(&foo).err().unwrap().kind(),
+        std::fs::metadata(&source_path).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        std::fs::metadata(&bar).err().unwrap().kind(),
+        std::fs::metadata(&target_path).err().unwrap().kind(),
         std::io::ErrorKind::NotFound
     );
 
@@ -487,8 +485,7 @@ pub fn hot_cache_read_test() {
     const LEN: usize = 1024 * 1024 + 512 * 1024; // 1.5MB: fits in the block cache.
     const PASSES: usize = 13; // ~19.5MB total, comparable to smoke_test's read.
 
-    let mut bytes = Vec::with_capacity(LEN);
-    bytes.resize(LEN, 0);
+    let mut bytes = vec![0; LEN];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
@@ -602,8 +599,7 @@ fn resize_test() {
     println!("    ---- FS: resize_test starting...");
     const LEN: usize = 1024 * 1024 * 7 + 131;
 
-    let mut bytes = Vec::with_capacity(LEN);
-    bytes.resize(LEN, 0);
+    let mut bytes = vec![0; LEN];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }

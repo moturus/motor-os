@@ -357,6 +357,7 @@ impl Metadata {
 }
 
 /// Filesystem trait.
+#[allow(clippy::double_must_use)]
 #[async_trait(?Send)]
 pub trait FileSystem {
     /// Find a file or directory by its full path.
@@ -392,7 +393,6 @@ pub trait FileSystem {
 
     /// Atomically install an exact complete permission state. Authority is
     /// checked only for fields that differ from their current values.
-    #[allow(clippy::double_must_use)]
     async fn set_all_permissions(
         &mut self,
         caller: Role,

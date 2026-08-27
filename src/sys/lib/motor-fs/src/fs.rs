@@ -769,7 +769,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(Some(id.into()))
     }
 
-    async fn get_parent(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_parent(&self, _role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         let id: EntryIdInternal = entry_id.into();
         if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
@@ -784,7 +784,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn name(&self, role: Role, entry_id: EntryId) -> Result<String> {
+    async fn name(&self, _role: Role, entry_id: EntryId) -> Result<String> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -800,7 +800,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(&self, _role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID

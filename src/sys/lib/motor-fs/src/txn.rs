@@ -976,13 +976,13 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         }
         drop(entry_block);
 
-        let mut entry_block = txn.get_block(entry_id.block_no).await?;
-        let mut entry_ref = entry_block.block_mut();
-        let metadata = DirEntryBlock::from_block_mut(&mut entry_ref).metadata_mut();
-        metadata.set_permissions(permissions);
-        metadata.modified = Timestamp::now();
-        drop(entry_ref);
-        drop(entry_block);
+        {
+            let mut entry_block = txn.get_block(entry_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            let metadata = DirEntryBlock::from_block_mut(&mut entry_ref).metadata_mut();
+            metadata.set_permissions(permissions);
+            metadata.modified = Timestamp::now();
+        }
 
         txn.commit().await
     }

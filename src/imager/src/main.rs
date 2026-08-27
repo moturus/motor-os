@@ -417,8 +417,25 @@ fn add_dir(
     }
 }
 
+#[cfg(test)]
 fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &[]);
+}
+
+fn static_overlay_exclusions(directories: &[String]) -> &'static [&'static str] {
+    const NONE: &[&str] = &[];
+    const DEVTOOLS: &[&str] = &["devtools"];
+
+    let devtools = Path::new("/devtools");
+    if directories
+        .iter()
+        .map(Path::new)
+        .any(|path| path == devtools || path.starts_with(devtools))
+    {
+        NONE
+    } else {
+        DEVTOOLS
+    }
 }
 
 fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
@@ -666,9 +683,10 @@ fn main() {
         files.insert(bin_dir.join(filename), (*prog).clone());
     }
 
+    let static_exclusions = static_overlay_exclusions(&config.directories);
     for dir in &config.static_dirs {
         let path = motorh.join(dir);
-        add_static_dir(&mut files, path, Path::new("/"));
+        add_dir(&mut files, path, Path::new("/"), static_exclusions);
     }
     for dir in &config.source_dirs {
         let path = motorh.join(&dir.source);
@@ -965,6 +983,15 @@ entries: []
             "rw-r--r--"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn static_overlays_cannot_introduce_undeclared_devtools() {
+        assert_eq!(static_overlay_exclusions(&[]), ["devtools"]);
+        assert_eq!(
+            static_overlay_exclusions(&["/devtools/bin".to_owned()]),
+            [] as [&str; 0]
+        );
     }
 
     #[test]
