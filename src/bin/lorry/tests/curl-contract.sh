@@ -44,11 +44,11 @@ BUILT_CURL="$WORK/curl-target/debug/curl"
 "$BUILT_CURL" --version | grep -F "curl 0.2.0 (Motor OS) rustls" >/dev/null ||
     fail "Cargo-built executable did not identify as Motor curl"
 TLS_SERVER=""
-for candidate in "$WORK"/curl-target/debug/deps/https-*; do
-    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+while IFS= read -r candidate; do
     [ -z "$TLS_SERVER" ] || fail "Cargo produced multiple HTTPS test executables"
     TLS_SERVER="$candidate"
-done
+done < <(find "$WORK/curl-target/debug/build/curl" -type f -perm -111 \
+    -name 'https-*' -print)
 [ -n "$TLS_SERVER" ] || fail "Cargo did not produce the HTTPS test executable"
 
 echo "== Running Lorry's production request boundary through that curl =="
