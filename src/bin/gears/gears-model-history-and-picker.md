@@ -115,7 +115,7 @@ of silently claiming that the choice was remembered.
   table, `-m` persistence, `/model`, picker controls, line-mode behavior, and
   the fact that preferences live outside the workspace.
 - Update the command comparison table and any exact help assertions.
-- Run `cargo +nightly fmt`, the complete Gears `cargo test` suite, Clippy for
+- Run `cargo fmt`, the complete Gears `cargo test` suite, Clippy for
   all targets with warnings denied, a release build, and `git diff --check`.
 
 ## Review points

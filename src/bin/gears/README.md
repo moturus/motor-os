@@ -623,7 +623,7 @@ Two further practices, neither of which needs anything from gears:
 
 ```
 cargo test              # everything; never touches the network beyond loopback
-cargo +nightly fmt
+cargo fmt
 cargo clippy --all-targets
 ```
 

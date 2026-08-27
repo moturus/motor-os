@@ -106,7 +106,7 @@ fresh-image acceptance gates contact crates.io and GitHub.
 
 Before handoff:
 
-1. Run `cargo +nightly fmt` for affected Rust sources.
+1. Run `cargo fmt` for affected Rust sources.
 2. Run the complete Lorry component gate, `src/bin/lorry/tests/test-all.sh`.
 3. Build debug and release developer images.
 4. Run `src/tests/full-test-dev.sh` against both images and verify a fresh

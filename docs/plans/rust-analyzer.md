@@ -65,7 +65,7 @@ Two choices require review before implementation:
   GitHub, or another Internet service.
 - Keep each implementation patch near 100-300 lines including its tests.
 - Introduce no compiler or Clippy warnings and format Rust changes with
-  `cargo +nightly fmt`.
+  `cargo fmt`.
 
 ## 2. Non-goals
 
@@ -651,7 +651,7 @@ transitively, as appropriate.
 
 Before each patch:
 
-- run `cargo +nightly fmt` for the changed Rust workspace;
+- run `cargo fmt` for the changed Rust workspace;
 - run its focused tests and Clippy with no new warnings;
 - build the affected dev image when staging changes;
 - run all tests offline.

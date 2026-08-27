@@ -194,7 +194,7 @@ After reviewing and updating any intentional fixture differences, run the
 component gate and warning check:
 
 ```sh
-cargo +nightly fmt --manifest-path src/bin/gears/Cargo.toml
+cargo fmt --manifest-path src/bin/gears/Cargo.toml
 cargo test --manifest-path src/bin/gears/Cargo.toml
 cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets -- -D warnings
 ```
