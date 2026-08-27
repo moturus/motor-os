@@ -194,6 +194,7 @@ fn test_closed_terminal(role: &str) {
 pub fn run_tests() {
     let output = Command::new(std::env::current_exe().unwrap())
         .arg(NO_TERMINAL_CHILD)
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true")
         .stdin(Stdio::null())
         .output()
         .unwrap();

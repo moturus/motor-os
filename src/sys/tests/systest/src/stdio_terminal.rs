@@ -2,10 +2,11 @@
  * Per-descriptor `is_terminal()` tests (docs/tui.md).
  *
  * systest normally runs over a non-pty ssh session, so its own streams are
- * not terminals. The tests therefore provide the terminal themselves: a
- * "report child" is spawned with all three streams captured, with or without
- * the terminal launch hint, and reports what its descriptors answer. For the
- * mixed-stdio rows the report child spawns mask children through
+ * not terminals. These tests also decline any ambient session terminal, so
+ * they exercise the same matrix when run interactively. They provide the
+ * terminal themselves: a "report child" is spawned with all three streams,
+ * with or without the terminal launch hint, and reports what its descriptors
+ * answer. For mixed-stdio rows, the report child spawns mask children through
  * `std::process::Command`, which is what covers the `moto-rt` copy embedded
  * in the installed Rust toolchain; the launch-hint rows also spawn through
  * `moto_rt::process::spawn` directly.
@@ -235,7 +236,7 @@ fn spawn_report_child(terminal: bool) -> ReportChild {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "false");
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true");
     if terminal {
         // This test is the child's terminal provider; it does not need to
         // be on a terminal itself to be one.
@@ -355,6 +356,10 @@ fn test_captured_child_non_terminal() {
 /// captured, optionally marked by the launch hint.
 fn direct_spawn_mask(mark_terminal: bool) -> (u32, [bool; 3]) {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push((
+        moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY.to_owned(),
+        "true".to_owned(),
+    ));
     if mark_terminal {
         env.push((
             moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY.to_owned(),

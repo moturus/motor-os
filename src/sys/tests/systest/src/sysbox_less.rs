@@ -77,10 +77,10 @@ fn test_dump(root: &Path) {
     println!("sysbox_less::test_dump PASS");
 }
 
-/// The shape a pipeline's last stage has: the data on stdin, a terminal on
-/// stdout. Motor OS has no `/dev/tty` — a program's terminal is its own stdin
-/// — so there is no keyboard to page with, and the text comes out whole
-/// rather than one screenful with no way to ask for the next.
+/// The shape a pipeline's last stage has without a session terminal: the data
+/// on stdin and a terminal on stdout. This child explicitly declines the
+/// ambient terminal, so there is no keyboard to page with and the text comes
+/// out whole rather than one screenful with no way to ask for the next.
 fn test_pipeline_shape(root: &Path) {
     let input = std::fs::File::open(root.join("ten.txt")).unwrap();
     let output = Command::new(SYSBOX)
@@ -88,6 +88,7 @@ fn test_pipeline_shape(root: &Path) {
         .stdin(Stdio::from(input))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true")
         .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
         .env("LINES", "6")
         .env("COLUMNS", "32")
