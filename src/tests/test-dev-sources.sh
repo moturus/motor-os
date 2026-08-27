@@ -1,6 +1,8 @@
 #!/bin/bash
 #
 # Native compiler and packaged-source acceptance gate for the developer image.
+# Non-Lorry work runs this gate only with --release. If that work necessarily
+# changes src/bin/lorry, a debug run requires an explicit user decision.
 
 if [ "${TEST_DEV_SOURCES_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export TEST_DEV_SOURCES_TIMEOUT_ACTIVE=1

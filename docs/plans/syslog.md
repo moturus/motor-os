@@ -178,9 +178,9 @@ System-role strobe while preserving the
     execution: under the old permissive default everything runs regardless,
     so assert that a freshly linked output and its uplifted copy read back
     exactly `r-x`, which the finalizer produces by narrowing `rwx` under the
-    old default too. `test-dev-sources.sh` passing at that point shows only
-    that nothing regressed; its pass after the default switch is the real
-    gate.
+    old default too. `test-dev-sources.sh --release` passing at that point
+    shows only that nothing regressed; its pass after the default switch is
+    the real gate.
 - Make `CAP_LOG` a grantor-controlled capability.
 
   Intention: `CAP_LOG` admits a process to the kernel log and, after this
@@ -302,9 +302,9 @@ System-role strobe while preserving the
   editable replacement for an `r--` file. `sysbox cp` of an installed ELF
   yields a runnable `r-x` copy. Exercise the audited Lorry
   archive/materialization and Gears installation paths on Motor OS.
-  `test-dev-sources.sh` must build and run a fresh binary and a Cargo build
-  script produced by the rebuilt toolchain, and both the linked output and its
-  uplifted copy must read back `r-x`.
+  `test-dev-sources.sh --release` must build and run a fresh binary and a Cargo
+  build script produced by the rebuilt toolchain, and both the linked output
+  and its uplifted copy must read back `r-x`.
 - Verify a System spawner grants `CAP_LOG` by default and can grant it
   explicitly; an Interactive spawner that holds it can grant it only with an
   explicit mask; Interactive defaults omit it; a None spawner cannot grant it
@@ -365,8 +365,8 @@ tree between them. Use this dependency order:
 3. Add the minimal moto-rt-cabi permission wrapper, land the pinned external
    mlibc/compiler/linker changes, rebuild the development image artifacts, and
    assert that a freshly linked output and its Cargo-uplifted copy read back
-   exactly `r-x`. `test-dev-sources.sh` must still pass, but under the old
-   default it is not the gate for this step.
+   exactly `r-x`. `test-dev-sources.sh --release` must still pass, but under
+   the old default it is not the gate for this step.
 4. Switch sys-io's ordinary file and directory defaults and run the filesystem,
    copy, execute-permission, SFTP, and development-image tests against them.
 5. Change `CAP_LOG` delegation, vDSO diagnostics, explicit spawn masks, and
@@ -383,7 +383,13 @@ clippy warnings. Before committing each patch that changes anything under
 `src/sys`, pass `src/tests/full-test.sh` three consecutive times in debug and
 three consecutive times in release. Gate non-core component patches with their
 component-specific tests. After the final integration, repeat both full-test
-gates and `test-dev-sources.sh`.
+gates and `test-dev-sources.sh --release`.
+
+This is syslog work, not explicit Lorry work, even though its integration
+changes necessarily touch `src/bin/lorry`. The implementation-time decision is
+to run no debug developer-image gate: use `full-test-dev.sh --release` or its
+`test-dev-sources.sh --release` phase only. The main-image `full-test.sh` debug
+and release gates remain required independently.
 
 ## Documentation
 

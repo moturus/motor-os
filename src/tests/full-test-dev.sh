@@ -5,6 +5,10 @@
 # The dev-image full test includes the repository suite, native source builds,
 # and Lorry's bounded product suite. Lorry validation is profile-independent
 # and does not multiply coverage by the OS image profile.
+#
+# Work that is not explicitly scoped to Lorry runs this suite only with
+# --release. If such work necessarily changes src/bin/lorry, ask before adding
+# a debug run; the path overlap alone does not make it Lorry work.
 
 set -euo pipefail
 
