@@ -6,13 +6,14 @@ from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor 
 
 First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
-Then run
+Create the example below the Motor OS checkout so the repository's exact
+toolchain selector applies:
 
-```
-$ cd ~
-$ cargo new hello
-     Created binary (application) `hello` project
-$ cd hello
+```sh
+cd "$MOTORH/motor-os"
+mkdir -p build/examples
+cargo new build/examples/hello
+cd build/examples/hello
 ```
 
 Replace ```src/main.rs``` with this:
@@ -74,10 +75,8 @@ fn handle_connection(mut stream: TcpStream) {
 This code is the same as in Rust Book, with a single change: instead of
 ```TcpListener::bind("127.0.0.1:7878")``` we call ```TcpListener::bind("0.0.0.0:5542")```.
 
-The port is changed because our ```vm_images/release/run-qemu-full.sh``` script
-forwards port 5542 from inside the VM to the host port 10023. The address is
-changed because we would like to bind the listener not only to the loopback
-address, but also to the IP address that Qemu assigns to the VM.
+The address is changed because the host connects to the VM's TAP address, not
+to the guest loopback interface.
 
 Then create ```src/lib.rs```:
 
@@ -180,22 +179,12 @@ This code is exactly the same as in Rust Book.
 
 Now build the web server for Motor OS:
 
-```
-cargo +dev-x86_64-unknown-motor build --release \
+```sh
+cargo build --release \
   --target x86_64-unknown-motor
 ```
 
-Now add the web server to the Motor OS image:
-
-```
-mkdir $MOTORH/img_files/full/hello
-
-cp ./target/x86_64-unknown-motor/release/hello \
-    $MOTORH/img_files/full/hello/
-
-```
-
-Now add the following two files to the ```$MOTORH/img_files/full/hello```:
+Create the following two files in the project directory.
 
 Filename: ```hello.html```:
 
@@ -229,26 +218,36 @@ Filename: ```404.html```:
 </html>
 ```
 
-Now build a new Motor OS VM image:
+Boot the already-built standard image in one terminal:
 
-```
-cd $MOTORH
-cargo make boot_img_release
-```
-
-Run Motor OS:
-
-```
-$ cd $MOTORH/motor-os/vm_images/release
-$ ./run-qemu-web.sh
+```sh
+cd "$MOTORH/motor-os/vm_images/release"
+./run-qemu.sh
 ```
 
-Inside Motor OS shell:
+In another terminal, upload the executable and its data files:
 
-```
-rush /$: cd hello
-rush /hello$: hello
+```sh
+cd "$MOTORH/motor-os"
+SSH_KEY=src/tests/test.key
+ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
+  motor@192.168.4.2 /system/bin/mkdir /user/tmp/hello
+scp -P 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
+  build/examples/hello/target/x86_64-unknown-motor/release/hello \
+  build/examples/hello/hello.html \
+  build/examples/hello/404.html \
+  motor@192.168.4.2:/user/tmp/hello/
+ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
+  motor@192.168.4.2 /system/bin/chmod 755 /user/tmp/hello/hello
 ```
 
-This will start the hello web server. On your host/desktop, navigate to
-http://localhost:10023, you should see the hello.html from above.
+Start the server through SSH or from a Motor shell:
+
+```sh
+ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
+  motor@192.168.4.2 \
+  /system/bin/rush -c 'cd /user/tmp/hello && ./hello'
+```
+
+On the host, open `http://192.168.4.2:5542/`. The server accepts two requests
+and then exits, as specified by the example's `.take(2)` loop.

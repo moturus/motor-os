@@ -602,10 +602,12 @@ void    moto_rt_thread_yield(void);
 
 ```bash
 cd $MOTOR/src/sys/lib/moto-rt-cabi
-cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release
+CARGO_TARGET_DIR="$MOTOR/build/manual/moto-rt-cabi"
+export CARGO_TARGET_DIR
+cargo build --target x86_64-unknown-motor --release
 
 mkdir -p $SYSROOT/devtools/llvm/lib $SYSROOT/devtools/llvm/include
-cp $MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a $SYSROOT/devtools/llvm/lib/
+cp "$CARGO_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" $SYSROOT/devtools/llvm/lib/
 cp $MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h $SYSROOT/devtools/llvm/include/
 
 # Sanity: the exports are there, exactly once.
