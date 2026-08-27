@@ -1,5 +1,10 @@
 # Building Motor OS
 
+> Historical snapshot: this file records the pre-versioned toolchain workflow
+> and is not current build guidance. Use [build.md](build.md) and
+> [build-motor-os.md](build-motor-os.md). The nightly and `dev-*` selectors
+> below are retained only to explain that retired workflow.
+
 Motor OS is built (cross-compiled) on Linux. There are three steps:
 
 * install build tools on the host Linux (10-20 min)
