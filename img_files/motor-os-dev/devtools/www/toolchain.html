@@ -585,10 +585,11 @@ headers, libc++'s <code>c++/v1</code>, and <code>moto_rt.h</code>; <code>lib</co
 runtime files from <code>/system/cfg/libc</code>.</p>
 
 <h3>Lorry</h3>
-<p>Lorry is the Rust build driver on the image, and a better Cargo for security-sensitive
-environments: a strict, offline, Cargo-compatible package builder that never invokes
-Cargo, admits dependencies once and explicitly with <code>lorry vendor</code>, and then
-builds, runs, and tests packages using
+<p>Lorry is the Rust build driver on the image, and a smaller, stricter Cargo replacement
+for security-sensitive environments: it takes the same <code>Cargo.toml</code> and
+<code>Cargo.lock</code> and aims for byte-identical binaries, never invokes Cargo, admits
+dependencies once and explicitly with <code>lorry vendor</code>, and then builds, runs, and
+tests packages offline using
 <code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
 and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
 It has its own page: <a href="lorry.html">Lorry: the package builder</a>.</p>

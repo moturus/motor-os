@@ -448,10 +448,11 @@ a.card h3 { color: var(--accent); }
     HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
   </a>
   <a class="card" href="lorry.html">
-    <h3>A better Cargo for security-sensitive builds</h3>
-    <p>Lorry builds Rust packages offline, from dependencies that were fetched once, checked,
-    and approved explicitly; build scripts and procedural macros run only with a recorded
-    grant. It builds Motor OS programs on Motor OS.</p>
+    <h3>A smaller, stricter Cargo replacement for security-sensitive builds</h3>
+    <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
+    and aims for byte-identical binaries, but builds offline, from dependencies that were
+    fetched once, checked, and approved explicitly; build scripts and procedural macros
+    run only with a recorded grant.</p>
   </a>
 </div>
 

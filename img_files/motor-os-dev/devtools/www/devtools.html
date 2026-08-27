@@ -477,12 +477,13 @@ flags are needed. What the C library and libc++ support is on the
 are described on the <a href="toolchain.html">Toolchains</a> page.</p>
 
 <h2>Lorry</h2>
-<p>Lorry is Motor OS's Rust package builder and a better Cargo for security-sensitive
-environments: it builds a Cargo-compatible package model offline, from dependencies that
-were fetched once, checked, and approved explicitly by <code>lorry vendor</code>, and code
-that runs at build time (build scripts, procedural macros) needs a recorded grant. It
-never invokes Cargo, and it is the Rust build driver on the developer image, which has
-no Cargo.</p>
+<p>Lorry is Motor OS's Rust package builder: a smaller, stricter Cargo replacement for
+security-sensitive environments. It is Cargo-compatible, taking a package's
+<code>Cargo.toml</code> and <code>Cargo.lock</code> as they are and aiming for byte-identical
+binaries, but it builds offline, from dependencies that were fetched once, checked, and
+approved explicitly by <code>lorry vendor</code>, and code that runs at build time (build
+scripts, procedural macros) needs a recorded grant. It never invokes Cargo, and it is the
+Rust build driver on the developer image, which has no Cargo.</p>
 <pre><code>lorry new hello
 cd hello
 lorry vendor --accept-all   # once, with network access

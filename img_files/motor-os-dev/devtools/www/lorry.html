@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Lorry, the Rust package builder of Motor OS and a better Cargo for security-sensitive environments: offline, Cargo-compatible builds from dependencies that were fetched once, checked, and approved, on Linux and natively on Motor OS.">
+<meta name="description" content="Lorry, the Rust package builder of Motor OS and a smaller, stricter Cargo replacement for security-sensitive environments: offline, Cargo-compatible builds from dependencies that were fetched once, checked, and approved, on Linux and natively on Motor OS.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Lorry: the package builder | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -442,13 +442,42 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">Developing</div>
 <h1>Lorry: the package builder</h1>
-<p class="lead">Lorry is Motor OS's Rust package builder, and a better Cargo for
-security-sensitive environments. It builds the Cargo package model, offline, from
-dependencies that were fetched once, checked, shown to a person, and recorded, and it
-never invokes Cargo. It runs on Linux and on Motor OS, where it is the Rust build driver
-because the developer image has no Cargo.</p>
+<p class="lead">Lorry is Motor OS's Rust package builder: a smaller, stricter Cargo
+replacement for security-sensitive environments. It is Cargo-compatible: it takes a
+package's <code>Cargo.toml</code> and <code>Cargo.lock</code> as they are and aims to produce
+byte-identical binaries. What it changes is how dependencies get in: builds are offline,
+from dependencies that were fetched once, checked, shown to a person, and recorded, and
+Lorry never invokes Cargo. It runs on Linux and on Motor OS, where it is the Rust build
+driver because the developer image has no Cargo.</p>
 
-<h2>Why a better Cargo</h2>
+<h2>Cargo compatibility</h2>
+<p>A Lorry project is a Cargo project. Nothing about the package changes, and Cargo can
+still build it:</p>
+<ul>
+  <li>The inputs are the package's own <code>Cargo.toml</code> and <code>Cargo.lock</code>
+  (lock versions 3 and 4), read as Cargo reads them: dependencies from crates.io, Git,
+  and local paths, renamed and optional dependencies, features, target-conditioned
+  dependencies, patches, profiles, editions 2015 through 2024, and resolvers 1 through 3.
+  <code>lorry vendor</code> resolves versions the way Cargo does and writes the same lock
+  file.</li>
+  <li>The commands mirror Cargo's: <code>lorry new</code>, <code>build</code>, <code>run</code>,
+  <code>test</code>, <code>clean</code>, with <code>--release</code>, <code>--target</code>,
+  <code>-p</code>, <code>--bin</code>, and arguments after <code>--</code> meaning what they
+  mean in Cargo. Output goes to Cargo-shaped <code>debug</code> and <code>release</code>
+  directories under <code>target/lorry</code>.</li>
+  <li>A clean release build is required to be byte-identical whichever tool builds it:
+  Cargo on Linux, Lorry on Linux, or Lorry natively on Motor OS. Lorry's test suite
+  checks this, and compares Lorry's dependency resolution against Cargo's.</li>
+  <li>A configured <code>cargo-compat-version</code> (1.99 on the developer image) says
+  which Cargo's behavior Lorry follows, and <code>--use-cargo-registry</code> can build
+  from an already populated Cargo cache after verifying it.</li>
+</ul>
+<p>The compatibility is with the package model Lorry supports, which is deliberately
+smaller than Cargo's; what is left out is listed under <a href="#model">The package
+model</a>, and anything outside it is rejected with a clear error rather than
+approximated.</p>
+
+<h2>Why a smaller, stricter Cargo replacement</h2>
 <p>In many corporate environments a build tool that goes out to the Internet on its own
 and silently downloads and runs code from hundreds of crates is a weakness, not a
 convenience. That is what <code>cargo build</code> does: the lock file names the crates,
@@ -625,7 +654,7 @@ thiserror, and others).</p>
   OS), runs each payload without a shell, and reports the aggregate result.</li>
 </ul>
 
-<h2>The package model</h2>
+<h2 id="model">The package model</h2>
 <p>Supported: one root package, optionally a member of an explicit workspace chosen
 with <code>-p</code>; at most one library and 64 binaries; top-level
 <code>tests/*.rs</code>; a current <code>Cargo.lock</code> (version 3 or 4); crates.io, Git,

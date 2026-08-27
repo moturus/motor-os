@@ -531,9 +531,10 @@ SSH. The <a href="architecture.html">Architecture</a> page describes each piece.
   <li>A native Clang/LLVM toolchain with mlibc, libc++, and compiler-rt, so
   <code>cc hello.c</code> works inside the VM.</li>
   <li>A native rustc with a full Motor OS sysroot.</li>
-  <li>Lorry, a Cargo-compatible Rust package builder designed for security-sensitive
-  environments: builds are offline, and every dependency is fetched once, checked, and
-  approved before it is built (see <a href="lorry.html">Lorry</a>).</li>
+  <li>Lorry, a smaller, stricter Cargo replacement for security-sensitive environments: it
+  takes the same <code>Cargo.toml</code> and <code>Cargo.lock</code> and aims for byte-identical
+  binaries, but builds offline, with every dependency fetched once, checked, and approved
+  before it is built (see <a href="lorry.html">Lorry</a>).</li>
   <li>Gears, an agent harness for LLM-assisted work, and curl for HTTPS downloads.</li>
   <li>The test suites and mdbg, a stack-dumping debugger. See
   <a href="devtools.html">Developer image</a>.</li>

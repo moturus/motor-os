@@ -81,9 +81,11 @@ What works today:
   kibim editors, an SSH server with SFTP, two static web servers with TLS,
   the usual commands (ls, ps, top, ss, ping, free, ...), and ripgrep.
 * **A self-hosting developer image**: native Clang/LLVM, native rustc, and
-  Lorry, a Cargo-compatible package builder designed for security-sensitive
-  environments (offline builds; every dependency fetched once, checked, and
-  approved before it is built), plus Gears, curl, mdbg, and the test suites.
+  Lorry, a smaller, stricter Cargo replacement for security-sensitive
+  environments (Cargo-compatible: the same `Cargo.toml` and `Cargo.lock`,
+  byte-identical binaries; but offline, with every dependency fetched once,
+  checked, and approved before it is built), plus Gears, curl, mdbg, and the
+  test suites.
 
 ## Status
 
