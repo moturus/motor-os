@@ -176,16 +176,8 @@ vm_ssh() {
   "${SSH[@]}" "$@"
 }
 
-filter_rt_diagnostics() {
-  # russhd currently carries remote stderr in the same SSH data stream as
-  # stdout. Remove complete rt.vdso records where a test parses stdout.
-  LC_ALL=C sed -E $'/^\r?[[:space:]]*[0-9]+:[0-9]{3}: (TRACE|DEBUG|INFO|WARN|ERROR) /d'
-}
-
 vm_ssh_stdout() {
-  vm_ssh "$@" | filter_rt_diagnostics
-  local ssh_status="${PIPESTATUS[0]}"
-  return "$ssh_status"
+  vm_ssh "$@"
 }
 
 vm_rmux() {
@@ -349,6 +341,16 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
 
+ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
+ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
+vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /system/bin/printenv SSH_STDOUT_MARKER; /system/bin/ls /ssh-stderr-separation-probe" \
+  > "$ssh_split_stdout" 2> "$ssh_split_stderr"
+[ "$(cat "$ssh_split_stdout")" = "SSH_STDOUT_MARKER=ssh-stdout-marker" ] ||
+  fail "russhd mixed remote stderr into SSH stdout"
+grep -q "^error reading directory '/ssh-stderr-separation-probe'\.$" "$ssh_split_stderr" ||
+  fail "russhd did not deliver remote stderr as SSH extended data"
+rm -f "$ssh_split_stdout" "$ssh_split_stderr"
+
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
@@ -392,10 +394,7 @@ check_bin_permissions() {
 
   listing="$(vm_ssh /system/bin/ls -l "$directory")" ||
     fail "cannot list $directory"
-  # Debug rt.vdso diagnostics share the SSH output transport on Motor OS.
-  # Select only long-listing records before interpreting their mode and name.
-  rows="$(printf '%s\n' "$listing" |
-    awk '$1 ~ /^[-d][rwx-][rwx-][rwx-][rwx-][rwx-][rwx-][rwx-][rwx-][rwx-]$/ { print $1, $NF }')"
+  rows="$(printf '%s\n' "$listing" | awk 'NF { print $1, $NF }')"
   [ -n "$rows" ] || fail "$directory is empty"
   while read -r mode name; do
     case "$policy:$mode" in
@@ -529,7 +528,7 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"

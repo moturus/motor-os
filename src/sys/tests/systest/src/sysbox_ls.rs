@@ -20,6 +20,8 @@ fn assert_lists(output: Output, marker: &str) {
         "ls failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Debug rt.vdso startup records intentionally use the child's stderr.
+    #[cfg(not(debug_assertions))]
     assert!(output.stderr.is_empty(), "ls diagnostic: {output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
