@@ -71,16 +71,18 @@ cmp "$WORK/lorry-native-helper" "$WORK/cargo-native/release/helper" ||
     fail "native release helper executable differs from Cargo"
 LORRY_NATIVE_TEST="$(find "$PROJECT/target/lorry/release/build/lorry_identity" \
     -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
-CARGO_NATIVE_TEST="$(find "$WORK/cargo-native-test/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
+CARGO_NATIVE_TEST="$(find \
+    "$WORK/cargo-native-test/release/build/lorry_identity" \
+    -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 [ -n "$LORRY_NATIVE_TEST" ] && [ -n "$CARGO_NATIVE_TEST" ] ||
     fail "native test harness is absent"
 cmp "$LORRY_NATIVE_TEST" "$CARGO_NATIVE_TEST" ||
     fail "native release test harness differs from Cargo"
 LORRY_NATIVE_HELPER_TEST="$(find "$PROJECT/target/lorry/release/build/lorry_identity" \
     -type f -perm -111 -name 'helper-*' -print -quit)"
-CARGO_NATIVE_HELPER_TEST="$(find "$WORK/cargo-native-test/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_NATIVE_HELPER_TEST="$(find \
+    "$WORK/cargo-native-test/release/build/lorry_identity" \
+    -type f -perm -111 -name 'helper-*' -print -quit)"
 cmp "$LORRY_NATIVE_HELPER_TEST" "$CARGO_NATIVE_HELPER_TEST" ||
     fail "native release helper test harness differs from Cargo"
 
@@ -128,8 +130,9 @@ cmp "$WORK/lorry-motor-helper" \
 LORRY_MOTOR_TEST="$(find \
     "$PROJECT/target/lorry/$MOTOR_TARGET/release/build/lorry_identity" \
     -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
-CARGO_MOTOR_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
+CARGO_MOTOR_TEST="$(find \
+    "$WORK/cargo-motor-test/$MOTOR_TARGET/release/build/lorry_identity" \
+    -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 [ -n "$LORRY_MOTOR_TEST" ] && [ -n "$CARGO_MOTOR_TEST" ] ||
     fail "Motor test harness is absent"
 cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
@@ -137,8 +140,9 @@ cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
 LORRY_MOTOR_HELPER_TEST="$(find \
     "$PROJECT/target/lorry/$MOTOR_TARGET/release/build/lorry_identity" \
     -type f -perm -111 -name 'helper-*' -print -quit)"
-CARGO_MOTOR_HELPER_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_MOTOR_HELPER_TEST="$(find \
+    "$WORK/cargo-motor-test/$MOTOR_TARGET/release/build/lorry_identity" \
+    -type f -perm -111 -name 'helper-*' -print -quit)"
 cmp "$LORRY_MOTOR_HELPER_TEST" "$CARGO_MOTOR_HELPER_TEST" ||
     fail "Motor release helper test harness differs from Cargo"
 
