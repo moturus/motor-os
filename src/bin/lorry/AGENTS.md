@@ -16,6 +16,10 @@ Motor OS development guidelines.
   Lorry behavior belongs below `src/bin/lorry/tests`; `src/tests/full-test.sh`
   may NOT invoke a Lorry-owned driver.
 - A full system test with lorry is `src/tests/full-test-dev.sh`.
+- A task is explicit Lorry work only when Lorry is part of its requested
+  scope, not merely because a broader change necessarily touches this
+  directory. For non-Lorry work, follow the repository rule: run the
+  developer-image gate with `--release`, and ask before adding a debug run.
 - If a change also touches a system component such as the kernel, `sys-io`, a
   shared system library, image construction outside Lorry, or the repository
   test harness, follow the verification rule for the broadest affected scope;

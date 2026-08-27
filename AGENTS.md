@@ -26,6 +26,13 @@ General guidelines:
   a reasonable effort to root cause the failure, don't just stop.
 * If you work on a non-core OS component (e.g. src/bin/red, src/bin/lorry, etc.) please gate your
   work with tests specific to your component, unless instructed otherwise.
+* For work that is not explicitly Lorry work, run `src/tests/full-test-dev.sh`
+  and its `test-dev-sources.sh` phase only in release mode (`--release`). If
+  such work necessarily changes `src/bin/lorry`, ask the user whether to add a
+  debug developer-image run; touching the Lorry path does not itself make the
+  task explicit Lorry work. Without approval, keep the developer-image gate
+  release-only. This does not change the debug-and-release requirement above
+  for the main-image `src/tests/full-test.sh` gate.
 * Complexity is frowned upon, and is tolerated only when really needed.
 * Boot time latency is very important. Avoid adding any extra boot time work. If unavoidable, please stop for review.
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
@@ -67,3 +74,5 @@ General commands:
 * build (release): `make -j$(nproc) BUILD=release`
 * the full test (debug): `src/tests/full-test.sh`
 * the full test (release): `src/tests/full-test.sh --release`
+* the developer-image full test for non-Lorry work (release only):
+  `src/tests/full-test-dev.sh --release`
