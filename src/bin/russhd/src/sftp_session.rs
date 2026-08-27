@@ -95,32 +95,33 @@ async fn set_path_permissions(path: &str, mode: u32) -> std::io::Result<()> {
         0o777 => AccessPermissions::Rwx,
         _ => return Err(std::io::Error::other("invalid mapped permissions")),
     };
-    moto_async::LocalRuntime::new().block_on(async {
-        let client = FsClient::connect()?;
-        let (entry_id, _kind): (_, EntryKind) = client.stat(path).await?;
-        let mut permissions = client.metadata(entry_id).await?.permissions()?;
-        let role = match moto_sys::caps::ProcessRole::from_caps(
-            moto_sys::ProcessStaticPage::get().capabilities,
-        ) {
-            moto_sys::caps::ProcessRole::System => Role::System,
-            moto_sys::caps::ProcessRole::Interactive => Role::Interactive,
-            moto_sys::caps::ProcessRole::None => Role::None,
-        };
-        match role {
-            Role::System => {
-                permissions.system = access;
-                permissions.interactive = access;
-                permissions.none = access;
+    moto_async::LocalRuntime::new()
+        .block_on(async {
+            let client = FsClient::connect()?;
+            let (entry_id, _kind): (_, EntryKind) = client.stat(path).await?;
+            let mut permissions = client.metadata(entry_id).await?.permissions()?;
+            let role = match moto_sys::caps::ProcessRole::from_caps(
+                moto_sys::ProcessStaticPage::get().capabilities,
+            ) {
+                moto_sys::caps::ProcessRole::System => Role::System,
+                moto_sys::caps::ProcessRole::Interactive => Role::Interactive,
+                moto_sys::caps::ProcessRole::None => Role::None,
+            };
+            match role {
+                Role::System => {
+                    permissions.system = access;
+                    permissions.interactive = access;
+                    permissions.none = access;
+                }
+                Role::Interactive => {
+                    permissions.interactive = access;
+                    permissions.none = access;
+                }
+                Role::None => permissions.none = access,
             }
-            Role::Interactive => {
-                permissions.interactive = access;
-                permissions.none = access;
-            }
-            Role::None => permissions.none = access,
-        }
-        client.set_all_permissions(entry_id, permissions).await
-    })
-    .map_err(|error| std::io::Error::other(error.to_string()))
+            client.set_all_permissions(entry_id, permissions).await
+        })
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -316,12 +317,12 @@ impl russh_sftp::server::Handler for SftpSession {
         let options: std::fs::OpenOptions = pflags.into();
         let mut file = OpenFile {
             file: tokio::fs::OpenOptions::from(options)
-            .open(filename.as_str())
-            .await
-            .map_err(|err| {
-                log::warn!("open: {filename}: Err: {err:?}");
-                io_status(&err)
-            })?,
+                .open(filename.as_str())
+                .await
+                .map_err(|err| {
+                    log::warn!("open: {filename}: Err: {err:?}");
+                    io_status(&err)
+                })?,
             path: filename.clone(),
             writable,
             pending_mode: None,
@@ -345,14 +346,7 @@ impl russh_sftp::server::Handler for SftpSession {
         }
 
         let handle = format!("{:x}", self.new_id());
-        assert!(
-            self.open_files
-                .insert(
-                    handle.clone(),
-                    file,
-                )
-                .is_none()
-        );
+        assert!(self.open_files.insert(handle.clone(), file,).is_none());
 
         log::info!("open: {filename}: Ok {handle}");
         Ok(Handle { id, handle })
@@ -534,8 +528,8 @@ impl russh_sftp::server::Handler for SftpSession {
             set_path_permissions(&path, mapped_directory_mode(mode))
                 .await
                 .map_err(|error| {
-                log::warn!("mkdir permissions {path}: {error}");
-                io_status(&error)
+                    log::warn!("mkdir permissions {path}: {error}");
+                    io_status(&error)
                 })?;
         }
         Ok(ok_status(id))
@@ -943,11 +937,7 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(
-            std::fs::metadata(&abandoned)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            std::fs::metadata(&abandoned).unwrap().permissions().mode() & 0o777,
             0o666
         );
         std::fs::remove_file(abandoned).unwrap();
