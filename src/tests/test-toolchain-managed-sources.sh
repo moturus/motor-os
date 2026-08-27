@@ -88,4 +88,13 @@ if toolchain_managed_checkout "$remote" refs/heads/development "$first" "$linked
   fail "linked managed worktree was accepted"
 fi
 
+# Exercise the verifier under nounset before constructing its full Rust fixture.
+# It must reach the expected missing-LLVM diagnostic, not abort while deriving
+# the LLVM path from its first local variable.
+MOTOR_RUST_REV="$second" UPSTREAM_RUST_REV="$first" \
+RUST_LLVM_BASE_REV="$first" MOTOR_LLVM_REV="$second" \
+  toolchain_verify_managed_rust "$remote" 2> "$TMP_ROOT/verify-error" || true
+grep -q 'LLVM base is missing' "$TMP_ROOT/verify-error" ||
+  fail "managed Rust verifier did not initialize its source paths"
+
 echo "test-toolchain-managed-sources PASS"

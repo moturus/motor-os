@@ -456,7 +456,8 @@ toolchain_expect_equal() {
 }
 
 toolchain_verify_managed_rust() {
-  local rust="$1" llvm="$rust/src/llvm-project" value
+	local rust="$1" llvm value
+	llvm="$rust/src/llvm-project"
   toolchain_expect_equal "$(git -C "$rust" rev-parse HEAD)" \
     "$MOTOR_RUST_REV" "managed Rust HEAD mismatch" || return
   toolchain_assert_ancestor "$rust" "$UPSTREAM_RUST_REV" "$MOTOR_RUST_REV" Rust || return
