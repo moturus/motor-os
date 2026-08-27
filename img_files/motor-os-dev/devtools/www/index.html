@@ -1,46 +1,508 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Motor OS is a simple, fast, and secure operating system for the cloud, built entirely in Rust for virtual machines.">
+<meta name="theme-color" content="#0a0a0a">
 <title>Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
-  @font-face {
-      font-family: 'RobotoMono';
-      src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
-           url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
-      font-weight: normal;
-      font-style: normal;
-  }
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 
-  .main-body {
-    height: 160px;   
-    text-align: left;
-    line-height: 1.4;
-    font-size: 16px;
-    padding: 0 10px;
-    margin: 50px auto;
-    max-width: 900px;
-    font-family:'RobotoMono',monospace;
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2rem;
+  align-items: center;
+  padding: 1.5rem 0 2.5rem;
+}
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero img { width: 230px; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
   }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
+  .hero img { width: 170px; justify-self: center; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
 </style>
 </head>
-
 <body>
-<div class="main-body">
-<p align="right">Motor OS | <a href="what.html">What</a> | <a href="why.html">Why</a> | <a href="https://github.com/moturus/motor-os" target="_blank">GitHub</a></p>
-<h1>Motor OS</h1>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html">Docs</a>
+      <a href="changelog.html">Changelog</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap home">
+<article class="content">
+<section class="hero">
+  <div>
+    <div class="hero-tag">An operating system for virtual machines</div>
+    <h1>Motor OS</h1>
+    <p class="lead">A simple, fast, and secure operating system built for the cloud.
+    Motor OS targets virtualized workloads such as web serving, serverless computing,
+    and edge caching, and avoids the overhead a general-purpose OS carries when it
+    runs inside a VM.</p>
+    <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
+    system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
+    Cloud Hypervisor, Firecracker, and Alioth.</p>
+    <div class="actions">
+      <a class="btn" href="what.html">What it is</a>
+      <a class="btn ghost" href="docs.html">Documentation</a>
+      <a class="btn ghost" href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+  <img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="256" height="240">
+</section>
 
-<p>Motor OS is a simple, fast, and secure operating system built for the cloud.
-Designed specifically for virtualized workloads such as web serving, serverless computing,
-and edge caching, it addresses inefficiencies found in traditional operating systems
-like Linux when running in virtual environments.</p>
-
-<p>Motor OS is built entirely in Rust. It supports x64 KVM-based virtual machines
-and can run on Qemu, Cloud Hypervisor, or Alioth VMMs. The system, including
-its libraries and syscalls, is implemented in Rust and optimized for Rust-based client applications.</p>
-
+<div class="facts">
+  <div class="fact"><b>Rust</b><span>kernel, runtime, services, and applications; no C in the system</span></div>
+  <div class="fact"><b>Microkernel</b><span>drivers, filesystem, and networking run in userspace</span></div>
+  <div class="fact"><b>100&ndash;200 ms</b><span>to boot the kernel and start userspace</span></div>
+  <div class="fact"><b>~10 Gbps</b><span>host-to-guest TCP throughput</span></div>
+  <div class="fact"><b>Tier-3</b><span>Rust target <code>x86_64-unknown-motor</code></span></div>
 </div>
 
+<h2>What you get</h2>
+<div class="cards">
+  <a class="card" href="architecture.html">
+    <h3>A small kernel, everything else in userspace</h3>
+    <p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
+    VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
+  </a>
+  <a class="card" href="rust.html">
+    <h3>Rust's standard library, ported</h3>
+    <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
+    and run. Tokio, mio, hyper, axum, rustls, and russh work.</p>
+  </a>
+  <a class="card" href="networking.html">
+    <h3>A native networking stack</h3>
+    <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
+    resolver service, and configuration from one TOML file.</p>
+  </a>
+  <a class="card" href="processes.html">
+    <h3>Capabilities instead of users</h3>
+    <p>Every process carries an immutable capability word. Three roles, System, Interactive,
+    and None, drive filesystem permissions. There is no root account.</p>
+  </a>
+  <a class="card" href="commands.html">
+    <h3>A working shell and tools</h3>
+    <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
+    HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
+  </a>
+  <a class="card" href="devtools.html">
+    <h3>A self-hosting developer image</h3>
+    <p>Native Clang/LLVM, a C library, native rustc, and Lorry, an offline Rust package
+    builder. Motor OS programs can be built on Motor OS.</p>
+  </a>
+</div>
+
+<h2>Status</h2>
+<p>Motor OS is under active development and has not had a security audit; do not use it for
+sensitive workloads. It is ready for trials, experiments, and research. This website is
+served from Motor OS VMs, and the networking stack has run host-to-guest benchmarks
+for a week at a time. See <a href="what.html">What is Motor OS</a> for a detailed
+list of what works and what does not.</p>
+
+<div class="two-col">
+  <div>
+    <h3>Recent changes</h3>
+    <ul>
+      <li><strong>2026-08</strong>: rmux, a terminal multiplexer; a crossterm port; low-memory
+      admission control; a terminal design document.</li>
+      <li><strong>2026-07</strong>: a C library port (mlibc), native LLVM and rustc, DNS lookup,
+      ping, the red editor, Lorry, curl, Gears.</li>
+      <li><strong>2026-06</strong>: Motor FS became the default filesystem; sys-io became
+      fully asynchronous.</li>
+      <li><strong>2025-10</strong>: Motor OS became a Tier-3 Rust target.</li>
+    </ul>
+    <p><a href="changelog.html">Full changelog</a></p>
+  </div>
+  <div>
+    <h3>Get involved</h3>
+    <p>The source is on <a href="https://github.com/moturus/motor-os">GitHub</a>, dual-licensed
+    under MIT and Apache 2.0. Questions and ideas go to
+    <a href="https://github.com/moturus/motor-os/discussions">Discussions</a>; bugs go to
+    <a href="https://github.com/moturus/motor-os/issues">Issues</a>. Small, focused pull requests
+    are welcome; see <a href="contributing.html">Contributing</a>.</p>
+    <p>Build instructions are being reworked together with the toolchain and will be
+    published when that work lands; see <a href="build.html">Building Motor OS</a>.</p>
+  </div>
+</div>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+  </div>
+</footer>
 </body>
 </html>

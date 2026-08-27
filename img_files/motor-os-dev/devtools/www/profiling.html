@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="A recipe: instrument a Motor OS program with the tracing crate and turn the trace into a flame graph on the host.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Profiling | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -441,7 +441,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
-    <li><a href="profiling.html">Profiling</a></li>
+    <li><a href="profiling.html" class="current">Profiling</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -454,59 +454,56 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Developing</div>
+<h1>Profiling</h1>
+<p class="lead">Most standard profilers do not work with Motor OS yet, but a Motor OS
+program can be instrumented with the <code>tracing</code> crate and its trace turned into
+a flame graph on the host, which is enough to find, for example, the causes of high CPU
+contention.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Instrument the code</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Add <code>tracing</code> to the crates you want to instrument:
+  <code>tracing = { version = "0.1", default-features = false, features = ["attributes"] }</code>.</li>
+  <li>Add <code>use tracing::instrument;</code> to the modules and put
+  <code>#[instrument(skip_all)]</code> on the functions you want to see
+  (<a href="https://docs.rs/tracing/latest/tracing/attr.instrument.html">docs</a>).</li>
+  <li>Wrap code blocks inside functions with
+  <code>tracing::trace_span!("name").in_scope(|| { /* ... */ });</code>
+  (<a href="https://docs.rs/tracing/latest/tracing/struct.Span.html#method.in_scope">docs</a>).</li>
+  <li>Add to the binary's <code>Cargo.toml</code>:
+<pre><code>tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-flame = "0.2"</code></pre></li>
+  <li>In the binary, wrap the region you want to profile. Write the trace somewhere an
+  interactive program may create files, such as <code>/user/tmp</code>:
+<pre><code>use tracing_flame::FlameLayer;
+use tracing_subscriber::prelude::*;
+
+const FNAME: &amp;str = "/user/tmp/profile.folded";
+let (flame_layer, guard) = FlameLayer::with_file(FNAME).unwrap();
+tracing_subscriber::registry().with(flame_layer).init();
+
+tracing::info_span!("profiling_root").in_scope(|| {
+    /* the code you want to profile */
+});
+core::mem::drop(guard); // writes the trace to the file</code></pre></li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
+<h2>Collect and visualize</h2>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
+  <li>Run the binary in Motor OS.</li>
+  <li>Copy the profile to the Linux host:
+  <code>scp -P 2222 -o IdentitiesOnly=yes -i test.key motor@192.168.4.2:/user/tmp/profile.folded .</code></li>
+  <li><code>cargo install inferno</code></li>
+  <li><code>cat profile.folded | inferno-flamegraph &gt; profile.svg</code></li>
 </ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<p><code>profile.svg</code> is the CPU profile flame graph. <code>profile.folded</code> is a
+text file; you may need to edit it by hand or adjust inferno's options to make the graph
+readable.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="hello.html"><span>Previous</span>Hello Motor OS</a>
+<a class="pager-next" href="changelog.html"><span>Next</span>Changelog</a>
 </nav>
 </article>
 </main>

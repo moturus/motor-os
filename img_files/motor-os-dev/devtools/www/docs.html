@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Motor OS documentation: getting started, system design, userspace programs, and developing for Motor OS.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Documentation | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -405,9 +405,9 @@ a.card h3 { color: var(--accent); }
 <div class="nav-group">
   <div class="nav-title">Getting started</div>
   <ul>
-    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="docs.html" class="current">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -455,58 +455,56 @@ a.card h3 { color: var(--accent); }
 </aside>
 <article class="content">
 <div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<h1>Documentation</h1>
+<p class="lead">These pages describe Motor OS as it is today. The source of truth is the
+<a href="https://github.com/moturus/motor-os">repository</a>, and most of what is here is
+also in its <code>docs/</code> directory and in the README files next to the code.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<h2>Getting started</h2>
+<div class="cards">
+  <a class="card" href="what.html"><h3>What is Motor OS</h3><p>The shape of the system, what works, and what does not.</p></a>
+  <a class="card" href="why.html"><h3>Why Motor OS</h3><p>The reasoning behind a new OS for virtual machines.</p></a>
+  <a class="card" href="build.html"><h3>Building Motor OS</h3><p>To be written: the build is being reworked together with the toolchain.</p></a>
+  <a class="card" href="running.html"><h3>Running Motor OS</h3><p>The four images, the VM scripts, the console, and SSH access.</p></a>
+</div>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>System</h2>
+<div class="cards">
+  <a class="card" href="architecture.html"><h3>Architecture</h3><p>The kernel, sys-io, the services, and the per-process runtime.</p></a>
+  <a class="card" href="processes.html"><h3>Processes and roles</h3><p>Capabilities, the three roles, spawning, and what replaces users.</p></a>
+  <a class="card" href="memory.html"><h3>Memory</h3><p>Pages, stacks, and low-memory admission control.</p></a>
+  <a class="card" href="filesystem.html"><h3>Filesystem</h3><p>Motor FS, the image layout, and per-role permissions.</p></a>
+  <a class="card" href="networking.html"><h3>Networking</h3><p>Configuration, the stack's features, limits, and diagnostics.</p></a>
+  <a class="card" href="dns.html"><h3>DNS resolver</h3><p>How names are resolved and validated.</p></a>
+  <a class="card" href="terminals.html"><h3>Terminals</h3><p>Terminal programs without a pty: size, Ctrl+C, and redirection.</p></a>
+  <a class="card" href="diagnostics.html"><h3>Logs and diagnostics</h3><p>The console, service logs, metrics, and stack dumps.</p></a>
+</div>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
+<h2>Userspace</h2>
+<div class="cards">
+  <a class="card" href="commands.html"><h3>Commands</h3><p>Everything in /system/bin and /user/bin.</p></a>
+  <a class="card" href="rush.html"><h3>rush</h3><p>The shell: what it supports and where it differs.</p></a>
+  <a class="card" href="rmux.html"><h3>rmux</h3><p>The terminal multiplexer and its keys.</p></a>
+  <a class="card" href="editors.html"><h3>Editors</h3><p>red, a vi-like editor, and kibim.</p></a>
+  <a class="card" href="devtools.html"><h3>Developer image</h3><p>Lorry, Gears, mdbg, the test suites, and the native toolchain.</p></a>
+  <a class="card" href="toolchain.html"><h3>Native toolchain</h3><p>To be written: Clang/LLVM, mlibc, and rustc on Motor OS.</p></a>
+</div>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Developing for Motor OS</h2>
+<div class="cards">
+  <a class="card" href="rust.html"><h3>Rust on Motor OS</h3><p>The target, what std supports, ported crates, and porting notes.</p></a>
+  <a class="card" href="hello.html"><h3>Hello Motor OS</h3><p>Compile a small web server and run it in a Motor OS VM.</p></a>
+  <a class="card" href="profiling.html"><h3>Profiling</h3><p>Flame graphs from a Motor OS binary with the tracing crate.</p></a>
+</div>
+
+<h2>Project</h2>
+<div class="cards">
+  <a class="card" href="changelog.html"><h3>Changelog</h3><p>Notable changes, newest first.</p></a>
+  <a class="card" href="contributing.html"><h3>Contributing</h3><p>How to get involved, the development rules, and the license.</p></a>
+</div>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<span></span>
+<a class="pager-next" href="what.html"><span>Next</span>What is Motor OS</a>
 </nav>
 </article>
 </main>

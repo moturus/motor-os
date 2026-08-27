@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="The commands and programs available inside a Motor OS VM: sysbox applets, the shell, editors, servers, and where they live.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Commands | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -428,7 +428,7 @@ a.card h3 { color: var(--accent); }
 <div class="nav-group">
   <div class="nav-title">Userspace</div>
   <ul>
-    <li><a href="commands.html">Commands</a></li>
+    <li><a href="commands.html" class="current">Commands</a></li>
     <li><a href="rush.html">rush: the shell</a></li>
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
@@ -454,59 +454,74 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Userspace</div>
+<h1>Commands</h1>
+<p class="lead">Motor OS boots into <a href="rush.html">rush</a>, a POSIX-style shell.
+<code>PATH</code> is <code>/system/bin:/user/bin</code>, plus <code>/devtools/bin</code> on
+the developer image. <code>ls /system/bin</code> and <code>ls /user/bin</code> list what is
+installed.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<h2>sysbox</h2>
+<p>Most everyday commands are applets of one program, <code>/system/bin/sysbox</code>.
+Motor OS has no symbolic links, so each applet also has a two-line rush script of the
+same name in <code>/system/bin</code> that forwards to it; <code>sysbox help</code> lists
+them.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Applet</th><th>What it does</th></tr>
+  <tr><td><code>cat</code>, <code>less</code>, <code>wc</code></td><td>Print, page, and count files. <code>less</code> is a full pager built on the crossterm port.</td></tr>
+  <tr><td><code>ls</code>, <code>find</code></td><td>List and search directories.</td></tr>
+  <tr><td><code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>rmdir</code></td><td>Copy (preserving permissions), move, and delete files and directories. A denied operation fails with a nonzero status.</td></tr>
+  <tr><td><code>chmod MODE PATH...</code></td><td>Set permissions; MODE is nine characters in System, Interactive, None order (see <a href="filesystem.html">Filesystem</a>).</td></tr>
+  <tr><td><code>ps</code>, <code>pstat</code>, <code>top</code>, <code>free</code>, <code>uptime</code>, <code>stats</code></td><td>Processes (with role markers <code>*</code> System and <code>+</code> Interactive), CPU usage, memory, and any metric (see <a href="diagnostics.html">Logs and diagnostics</a>).</td></tr>
+  <tr><td><code>ss</code></td><td>TCP sockets known to sys-io.</td></tr>
+  <tr><td><code>ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION</code></td><td>ICMP echo to an IPv4 or IPv6 address, <code>localhost</code>, or a DNS name.</td></tr>
+  <tr><td><code>date</code>, <code>time</code>, <code>sleep</code></td><td>The current time, timing a command, and pausing.</td></tr>
+  <tr><td><code>printenv</code></td><td>The environment.</td></tr>
+  <tr><td><code>loop</code></td><td>Run a command repeatedly.</td></tr>
+</table>
+</div>
+<p>A few names in <code>/system/bin</code> are scripts without a sysbox applet behind
+them: <code>df</code> (over <code>stats</code>), <code>uname</code> (prints "Motor OS"),
+<code>sh</code> (forwards to rush, so C library <code>system()</code> and
+<code>popen()</code> work), and <code>exit</code> (so that <code>ssh host exit 5</code>,
+which looks for an executable, works). <code>kill</code>, <code>cd</code>,
+<code>history</code>, <code>clear</code>, and the other shell builtins are part of rush.
+<code>rg</code> is ripgrep, a real binary, on the standard and developer images.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Programs</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Program</th><th>Where</th><th>What it is</th></tr>
+  <tr><td><a href="rush.html">rush</a></td><td><code>/system/bin</code></td><td>The shell, on the console and over SSH.</td></tr>
+  <tr><td><a href="rmux.html">rmux</a></td><td><code>/user/bin</code></td><td>A tmux-like terminal multiplexer with detachable sessions.</td></tr>
+  <tr><td><a href="editors.html">red</a></td><td><code>/user/bin</code></td><td>A vi-like editor with syntax highlighting.</td></tr>
+  <tr><td><a href="editors.html">kibim</a></td><td><code>/user/bin</code></td><td>A small kilo-style editor; standard and developer images.</td></tr>
+  <tr><td>httpd</td><td><code>/user/bin</code></td><td>A small static-file HTTP server with optional TLS: <code>httpd -a ADDR:PORT -d DIR [--ssl-cert PEM --ssl-key PEM]</code>.</td></tr>
+  <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
+  <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
+  <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates.</td></tr>
+  <tr><td>lua</td><td><code>/devtools/bin</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
+</table>
+</div>
+<p>The developer image adds Lorry, Gears, mdbg, the native compilers, and the test
+suites; see <a href="devtools.html">Developer image</a>.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Configuration files</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>File</th><th>Used by</th></tr>
+  <tr><td><code>/system/cfg/sys-init.cfg</code></td><td>sys-init: the console program and role, strobe, and the services with their capability masks.</td></tr>
+  <tr><td><code>/system/cfg/sys-net.toml</code></td><td>sys-io: network devices, addresses, routes, DNS servers, and limits.</td></tr>
+  <tr><td><code>/system/cfg/sshd.toml</code></td><td>russhd: listen address, host key, users, passwords, and authorized keys.</td></tr>
+  <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/system/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
+  <tr><td><code>/system/cfg/libc/hosts</code>, <code>resolv.conf</code></td><td>The DNS resolver and the C library. <code>resolv.conf</code> is written by sys-io.</td></tr>
+  <tr><td><code>/user/cfg/red.toml</code>, <code>rmux.toml</code>, <code>kibim/</code>, <code>gears.toml</code>, <code>lorry/</code></td><td>Per-program settings, all optional.</td></tr>
+</table>
+</div>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="diagnostics.html"><span>Previous</span>Logs and diagnostics</a>
+<a class="pager-next" href="rush.html"><span>Next</span>rush: the shell</a>
 </nav>
 </article>
 </main>

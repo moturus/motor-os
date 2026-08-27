@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Where Motor OS logs go, how to read metrics, and how to get stack traces from a hung process.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Logs and diagnostics | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -422,7 +422,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="networking.html">Networking</a></li>
     <li><a href="dns.html">DNS resolver</a></li>
     <li><a href="terminals.html">Terminals</a></li>
-    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+    <li><a href="diagnostics.html" class="current">Logs and diagnostics</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -454,59 +454,84 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Logs and diagnostics</h1>
+<p class="lead">There are three places to look: the serial console, the service logs
+under <code>/system/logs</code>, and the metrics that <code>sysbox stats</code>,
+<code>ps</code>, <code>top</code>, <code>free</code>, and <code>ss</code> read. For a
+process that is stuck, <code>mdbg</code> dumps its stacks.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<h2>The serial console</h2>
+<p>The kernel writes its log to the serial port as
+<code>seconds:millis cpu LEVEL target:line - message</code>, at level Info by default. Once
+sys-tty has started, kernel output is forwarded through it so that kernel and user output
+do not interleave. Boot messages, the status of sys-io if it ever exits, panics, and the
+output of headless services all end up here, which is why the console is the only
+diagnostic channel when networking or sys-io itself has failed. Keep it: with
+<code>run-qemu.sh</code> the console is the terminal you started the VM from, so redirect
+stdout and stderr to a file for long runs, and enable serial console capture on a cloud
+provider before first boot.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Service logs</h2>
+<p>Services log through <code>moto-log</code>, a <code>log</code>-crate facade that sends
+records over IPC to <code>strobe</code>. strobe writes one file per registered tag,
+<code>/system/logs/TAG.log</code>, and rotates it to <code>TAG.log.prev</code>. The
+directory is <code>rwxr-x---</code> and the files <code>rw-r-----</code>: strobe, running
+as System, alone creates and rotates them; an Interactive session can list and read them;
+a None-role process cannot enter the directory. Sending a record requires
+<code>CAP_LOG</code>, which is checked against the sender's kernel-reported capabilities,
+not against anything the sender claims.</p>
+<p>Ordinary programs do not log this way. A panic message, a backtrace, and the runtime's
+own warnings go to the process's stderr first, so they reach the terminal or the file
+that captured it; the kernel log is a fallback used only when that write fails and the
+process holds <code>CAP_LOG</code>. This is what keeps diagnostics visible for an
+interactive command, which by default has no logging capability.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
+<h2>Metrics</h2>
+<p>Metrics are federated and discovered at run time, with no hardcoded list. A metric is
+identified by provider, name, and scope (a PID or global). The kernel's catalog is
+self-describing and read with a syscall; userspace providers such as sys-io register with
+the registry that strobe hosts, and a collector lists the registry and then asks each
+provider to describe and report its metrics. This avoids both a syscall-only interface,
+which cannot see userspace producers, and a procfs, which would create a cycle since the
+filesystem is itself a userspace service.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Command</th><th>Shows</th></tr>
+  <tr><td><code>stats</code></td><td>Any metric from any provider; <code>df</code> is a script over <code>stats get</code>.</td></tr>
+  <tr><td><code>free</code></td><td>Memory totals from the kernel.</td></tr>
+  <tr><td><code>ps</code>, <code>pstat PID</code></td><td>Processes with their parent and role marker (<code>ps -H</code> as a tree); the kernel's statistics for one process.</td></tr>
+  <tr><td><code>top</code></td><td>CPU usage by process and by CPU, live.</td></tr>
+  <tr><td><code>ss</code></td><td>TCP sockets from sys-io.</td></tr>
+  <tr><td><code>uptime</code></td><td>Time since boot.</td></tr>
+</table>
+</div>
+<p>Names worth knowing: the kernel's <code>mem.*</code> admission counters and low-water
+marks (see <a href="memory.html">Memory</a>); sys-io's <code>net.*</code> family (device
+packets, bytes, and drops, socket and listener counts, half-open and backlog counts, SYN
+cookie counters, suppressed RSTs and ICMP errors, reassembly outcomes, pressure counters)
+and <code>fs.*</code> family (capacity and available bytes, cache hits and misses, read
+and write counts and latencies, readahead, device I/O, channels).</p>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Stack traces from a running process</h2>
+<p>There is no source-level debugger. <code>mdbg print-stacks PID</code> (on the developer
+image, under <code>/devtools/bin</code>) pauses the process through the kernel's debug
+interface, walks each thread's stack, and prints raw addresses, marking frames that are
+inside the runtime. Symbolize them on the host with <code>addr2line</code> against the
+unstripped binary from the build tree, for example
+<code>build/obj/sys-io/x86_64-unknown-motor/debug/sys-io</code>, and against
+<code>build/obj/vdso/x86_64-unknown-motor/debug/rt</code> for runtime frames. This is the
+first thing to reach for when a process hangs: it distinguishes a lost wakeup from a
+deadlock in a minute. When a program cannot be reached over SSH, drive mdbg from the
+serial console.</p>
+
+<h2>When sys-io stops</h2>
+<p>sys-io owns live filesystem and network state that cannot be rebuilt safely in a
+replacement, so if it exits or is killed the kernel logs its status on the console and
+halts the VM. Do not expect the machine to recover on its own; read the console.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="terminals.html"><span>Previous</span>Terminals</a>
+<a class="pager-next" href="commands.html"><span>Next</span>Commands</a>
 </nav>
 </article>
 </main>

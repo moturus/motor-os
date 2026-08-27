@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Motor FS, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Filesystem | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -418,7 +418,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
     <li><a href="memory.html">Memory</a></li>
-    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="filesystem.html" class="current">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
     <li><a href="dns.html">DNS resolver</a></li>
     <li><a href="terminals.html">Terminals</a></li>
@@ -454,59 +454,137 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Filesystem</h1>
+<p class="lead">Motor FS is the default filesystem since June 2026. It is a journaling
+filesystem served by sys-io, with three-role permissions on every entry, advisory locks,
+and no notion of users, links, or numeric Unix modes.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Motor FS</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li><strong>Journaling.</strong> Writes are batched into transactions, committed to an
+  on-disk redo log, and then checkpointed into the main block area. The design assumes
+  that a block write is atomic and defends against power loss, not against on-disk
+  corruption.</li>
+  <li><strong>On-disk structures.</strong> 4 KiB blocks, B+ trees for directories and
+  file data, and inline data for small files (up to 3,640 bytes live in the entry
+  itself). The partition type is <code>0x2e</code>.</li>
+  <li><strong>Block cache</strong> of 4,096 blocks (16 MiB) with readahead and a
+  hit/miss/dedup-wait counter set exposed as metrics.</li>
+  <li><strong>Operations.</strong> stat, create (optionally with an explicit permission
+  set), delete, read, write, resize and truncate, rename with and without replacing the
+  target, directory iteration, parent lookup, permission changes, copy-file-range,
+  flush, and shared or exclusive advisory file locks with per-connection queueing.
+  Entries carry created, modified, and accessed timestamps.</li>
+  <li><strong>Limits.</strong> File names up to 255 bytes; paths up to 1,024 bytes. File
+  sizes are 64-bit.</li>
+  <li><strong>Not there.</strong> Symbolic links, hard links, users, groups, ownership,
+  ACLs, sticky directories, numeric modes, and recursive chmod.</li>
+</ul>
+<p>The implementation is <code>src/sys/lib/motor-fs</code> (about 10,000 lines) on top
+of <code>async-fs</code>, an abstraction that also runs on a Linux host so that images
+can be built and tested there. Rust's <code>std::fs</code> works as expected on top of it,
+with the permission model below showing through <code>Permissions</code>.</p>
+
+<h2>Image layout</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Directory</th><th>Purpose</th></tr>
+  <tr><td><code>/system/bin</code></td><td>System commands: rush, sysbox and its command scripts, ripgrep, curl (developer image). Never writable.</td></tr>
+  <tr><td><code>/system/services</code></td><td>sys-init, sys-tty, strobe, russhd, dns-resolver.</td></tr>
+  <tr><td><code>/system/cfg</code></td><td>Configuration: <code>sys-init.cfg</code>, <code>sys-net.toml</code>, <code>sshd.toml</code>, <code>rush.cfg</code>, <code>libc/</code> (hosts, resolv.conf), <code>ssl/</code>.</td></tr>
+  <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
+  <tr><td><code>/system/tmp</code></td><td>Scratch space for every role.</td></tr>
+  <tr><td><code>/user/bin</code></td><td>User programs: red, rmux, kibim, httpd, httpd-axum. Interactive may install programs here.</td></tr>
+  <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, gears, lorry). Hidden from None.</td></tr>
+  <tr><td><code>/user/tmp</code></td><td>Scratch for every role and the default <code>TMPDIR</code>.</td></tr>
+  <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> and <code>tmp</code> trees.</td></tr>
+</table>
+</div>
+
+<h2>Permissions</h2>
+<p>A Motor FS mode is three permission triplets in <strong>System, Interactive, None</strong>
+order; <code>rw-r-----</code> gives System read and write, Interactive read, and None
+nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</code>,
+<code>r--</code>, or <code>---</code>, and permissions are monotonic across roles:</p>
+<pre><code>None &sube; Interactive &sube; System</code></pre>
+<ul>
+  <li>On a directory, <code>x</code> controls listing, traversal, and lookup, and
+  <code>w</code> controls creating, deleting, and renaming children. A non-writable file
+  can therefore still be replaced when its parent directory is writable; directory modes
+  are what make a tree read-only.</li>
+  <li>On a file, <code>x</code> is a hint enforced by the program loader, which refuses
+  to run a file the caller's role cannot execute. It is enforced cooperatively: a process
+  with <code>CAP_SPAWN</code> could build a child by hand from a readable file. The
+  boundaries that hold against a hostile process are read, write, and directory
+  traversal, which sys-io enforces, and the unforgeable role.</li>
+  <li>W^X for executables: an installed ELF is never writable by any role. Scripts are
+  text interpreted by an executable and may be writable where the policy says so.</li>
+</ul>
+<p>sys-io learns the role of each client once, when the client connects, by asking the
+kernel for the peer's capabilities; it never trusts a role sent by the client.</p>
+
+<h3>What an image ships with</h3>
+<p>Images are built with a declarative policy, <code>src/imager/motor-os-permissions.yaml</code>,
+that assigns a mode to every destination by the longest matching tree, with exact entries
+for two secrets. Smaller images omit trees; they never relax a mode. The main rules:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Tree</th><th>Directories</th><th>Files</th><th>Scripts</th><th>ELF</th></tr>
+  <tr><td>default</td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/system/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>r-xr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/system/logs</code></td><td><code>rwxr-x---</code></td><td><code>rw-r-----</code></td><td><code>r-xr-----</code></td><td><code>r-xr-----</code></td></tr>
+  <tr><td><code>/system/tmp</code>, <code>/user/tmp</code>, <code>/devtools/tmp</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools/src</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/user/cfg</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+</table>
+</div>
+<p><code>/system/cfg/sshd.toml</code> and <code>/system/cfg/ssl/ssl-key.pem</code> are
+<code>rw-r-----</code>: readable by the Interactive services that need them, invisible to
+None. Consequences worth knowing: Interactive cannot create a new top-level directory or
+replace <code>/system</code>; it can edit a launcher script in <code>/devtools/bin</code>
+in place but not add or remove entries there; only System can create or rotate files in
+<code>/system/logs</code>.</p>
+<p>The imager classifies each source file by its host execute bit (a host-executable file
+must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
+every mode before it creates the image, and creates non-writable files through a
+staging step so that a shipped ELF is never writable and executable at the same time,
+even during image construction. An image description that does not name a policy does
+not parse.</p>
+
+<h3>Files created at run time</h3>
+<ul>
+  <li>A new regular file starts <code>rw-</code> for its creator's role, <code>rwx</code>
+  for higher roles, and <code>r--</code> for lower roles. A new directory starts
+  <code>rwx</code> for the creator and higher roles and <code>r-x</code> for lower
+  roles.</li>
+  <li>A process can narrow its own role's permissions on an entry, and lower roles are
+  narrowed with it. The one widening allowed is the one-way <code>rw-</code> to
+  <code>r-x</code> transition that turns a freshly written program into an executable.
+  A creation call that specifies the complete mode up front also exists, for files that
+  must be linked with their final mode.</li>
+  <li><strong>Write permission cannot be restored.</strong> A Unix-style
+  <code>chmod -w</code> followed by <code>chmod +w</code> fails on the second step with
+  PermissionDenied, for every role. This is what makes a read-only file genuinely
+  read-only. To replace such a file, read it, create a new writable file, write the bytes,
+  delete the read-only entry (which needs only <code>w</code> on the parent directory), and
+  rename the new file into place. <code>std::fs::copy</code> is not a substitute, because it preserves the
+  source permissions.</li>
+  <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
+  Interactive, None order; <code>cp</code> preserves file permissions.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Locks</h2>
+<p>Advisory file locks (<code>std::fs::File::lock</code>, <code>lock_shared</code>,
+<code>try_lock</code>, <code>unlock</code>) are served by a lock manager in sys-io,
+keyed by connection, with at most 64 queued waiters per connection. A lock is released
+when the file is closed or when its owner's connection to sys-io goes away. Under memory pressure, releasing
+a lock is the one filesystem request that is still served, so that waiters queued before
+an episode are not stranded.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="memory.html"><span>Previous</span>Memory</a>
+<a class="pager-next" href="networking.html"><span>Next</span>Networking</a>
 </nav>
 </article>
 </main>

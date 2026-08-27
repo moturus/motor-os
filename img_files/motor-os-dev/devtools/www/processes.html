@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="The Motor OS process model: capabilities, the System, Interactive, and None roles, spawning, and detached processes.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Processes and roles | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -416,7 +416,7 @@ a.card h3 { color: var(--accent); }
   <div class="nav-title">System</div>
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
-    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="processes.html" class="current">Processes and roles</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -454,59 +454,125 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Processes and roles</h1>
+<p class="lead">Motor OS has no users, no groups, and no root account. A process's
+authority is a capability word fixed at creation, and three roles derived from that word
+decide what it may do with files.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Capabilities</h2>
+<p>Every process carries an immutable 64-bit capability word, set when the process is
+created and readable by the process itself without a syscall (it is in a read-only page
+the kernel maps into every process). The defined bits:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Capability</th><th>Meaning</th></tr>
+  <tr><td><code>CAP_SYS</code></td><td>System authority: root-like, unkillable from userspace, may grant any capability to a child.</td></tr>
+  <tr><td><code>CAP_IO_MANAGER</code></td><td>May map device memory and contiguous physical memory; held by sys-io.</td></tr>
+  <tr><td><code>CAP_SPAWN</code></td><td>May create processes.</td></tr>
+  <tr><td><code>CAP_LOG</code></td><td>May write records to the kernel log and to the logging service.</td></tr>
+  <tr><td><code>CAP_SHUTDOWN</code></td><td>May halt the machine.</td></tr>
+  <tr><td><code>CAP_SPAWN_DETACHED</code></td><td>May create detached children that outlive the parent.</td></tr>
+  <tr><td><code>CAP_INTERACTIVE</code></td><td>Acts with the authority of the logged-in user.</td></tr>
+</table>
+</div>
+<p>The kernel enforces one rule at spawn: a parent without <code>CAP_SYS</code> may only
+grant a subset of its own capabilities, and never <code>CAP_SYS</code> or
+<code>CAP_IO_MANAGER</code>. A <code>CAP_SYS</code> parent may grant anything. Because a
+capability can never be gained after creation, a process cannot escalate.</p>
+
+<h2>The three roles</h2>
+<p>A role is derived from the capability word: <code>CAP_SYS</code> means
+<strong>System</strong>; otherwise <code>CAP_INTERACTIVE</code> means
+<strong>Interactive</strong>; otherwise the role is <strong>None</strong>. The roles are
+ordered, System above Interactive above None, and they are the only identity the
+filesystem knows about: every file and directory stores one permission byte per role.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Role</th><th>Meaning</th><th>Typical holders</th></tr>
+  <tr><td>System</td><td>The OS itself; owns installed content and system logs.</td><td>sys-io, sys-init, strobe</td></tr>
+  <tr><td>Interactive</td><td>The logged-in user's authority: may read and run installed programs, and owns <code>/user</code>.</td><td>sys-tty, russhd, console and SSH shells, the commands they run, user daemons</td></tr>
+  <tr><td>None</td><td>Least privilege: public read and execute, writes only to shared scratch directories.</td><td>dns-resolver, other services, deliberately sandboxed children</td></tr>
+</table>
+</div>
+<p>A server that wants to know who it is talking to asks the kernel for the capabilities
+of the process at the other end of a connection; the answer comes from the kernel, not
+from the client, so it cannot be forged. sys-io does this once per filesystem connection
+and uses the result for every permission check on that connection. If the query fails,
+the connection is dropped rather than given a default role.</p>
+
+<h2>Spawning</h2>
+<p>There is no <code>fork</code> and no <code>exec</code>. <code>std::process::Command</code>
+works, and behind it the runtime in the parent builds the child directly: it creates an
+address space, loads the ELF executable into it, maps the runtime, writes the arguments
+and environment, sets up stdio, creates the process object with the chosen capabilities,
+and wakes the main thread. The program file's execute permission for the parent's role is
+checked before loading; a script needs both the script and its interpreter to be
+executable.</p>
+<p>The child's capabilities come from an environment key that the parent's runtime
+consumes at spawn time and the child never sees:</p>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li><code>MOTOR_OS_CAPS=&lt;hex mask&gt;</code> replaces the default outright. It is the way
+  to demote a child (for example, a shell running an untrusted binary as None) and the way
+  an explicit session boundary is created. An unparsable value fails the spawn rather than
+  falling back to the default.</li>
+  <li><code>MOTOR_OS_DETACHED</code> makes the child detached: it is owned by the kernel
+  and survives its parent, which is how rmux's server outlives the SSH session that
+  started it. The parent needs <code>CAP_SPAWN_DETACHED</code>. An ordinary child is
+  killed when its parent is reaped.</li>
 </ul>
+<p>Without <code>MOTOR_OS_CAPS</code> the default depends on the parent's role. An
+Interactive parent gets an Interactive child (a shell and the commands it runs), without
+<code>CAP_LOG</code>. A System parent gets a <strong>None</strong> child by default: a
+system service must say explicitly when it is creating a user session, so that a
+logged-in session cannot appear by accident. A None parent gets a None child. In every
+case the default is intersected with what the parent holds, and <code>CAP_SPAWN</code> is
+included so that children can have children.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h3>How a session gets its role</h3>
+<p>The chain is explicit at every step. sys-init starts sys-tty and russhd with a mask
+that includes <code>CAP_INTERACTIVE</code>; sys-tty starts the console shell with the
+same role it has itself; russhd gives each authenticated session shell the Interactive
+bit; and from there the default rule carries Interactive down to every command. The
+shipped <code>sys-init.cfg</code> gives russhd the mask 124
+(<code>CAP_SPAWN | CAP_LOG | CAP_SHUTDOWN | CAP_SPAWN_DETACHED | CAP_INTERACTIVE</code>)
+and the DNS resolver the mask 8 (<code>CAP_LOG</code> only). A test image variant runs the
+serial console as System instead, using <code>tty:system:</code> in the configuration.</p>
+<p>russhd itself runs as Interactive, including its pre-authentication code and its
+in-process SFTP implementation. This is an explicit interim choice: a non-System parent
+cannot pass on a capability it does not hold, and SFTP needs filesystem authority. The
+authentication boundary protects that authority; a future change may keep the network
+front end at None and hand each authenticated session to an Interactive worker.</p>
 
-<h2>What Motor OS does differently</h2>
+<h2>What roles mean day to day</h2>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
+  <li><code>ps</code> marks each process's role: <code>*</code> System, <code>+</code>
+  Interactive, blank for None.</li>
+  <li>Interactive can install programs and edit configuration under <code>/user</code>,
+  and edit sources under <code>/devtools/src</code> on the developer image, but cannot
+  replace anything in <code>/system</code>.</li>
+  <li>None can read and run public installed content and write only to
+  <code>/system/tmp</code>, <code>/user/tmp</code>, and <code>/devtools/tmp</code>; it
+  cannot even list <code>/user/cfg</code> or <code>/system/logs</code>.</li>
+  <li>A runtime diagnostic (a panic message, a backtrace) goes to the process's stderr,
+  so an ordinary command sees it even though it has no <code>CAP_LOG</code>.</li>
 </ul>
+<p>The permission bits themselves, and the policy that assigns them when an image is
+built, are described under <a href="filesystem.html">Filesystem</a>. The design documents
+are <code>docs/process-roles.md</code> and
+<code>src/sys/lib/motor-fs/PERMISSIONS_DESIGN.md</code> in the repository.</p>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Threads, killing, and exit</h2>
+<p>Threads are kernel objects created with a syscall; the runtime implements
+<code>std::thread</code>, thread-local storage, and futex-based synchronization on top.
+A parent can kill its child (<code>Child::kill</code>) and wait for it; there is no
+signal to catch, so a killed process simply stops. Ctrl+C from a terminal terminates a
+process with status 130 unless it registered a handler; see
+<a href="terminals.html">Terminals</a>. Exit codes are reported to the parent as on other
+systems, and <code>rush</code> treats 130 as an interrupt.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="architecture.html"><span>Previous</span>Architecture</a>
+<a class="pager-next" href="memory.html"><span>Next</span>Memory</a>
 </nav>
 </article>
 </main>

@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="How Motor OS is put together: the kernel, sys-io, the services, and the per-process runtime rt.vdso.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Architecture | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2rem;
+  align-items: center;
+  padding: 1.5rem 0 2.5rem;
+}
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero img { width: 230px; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
+  .hero img { width: 170px; justify-self: center; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="changelog.html">Changelog</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">What is Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building Motor OS</a></li>
+    <li><a href="running.html">Running Motor OS</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html" class="current">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+    <li><a href="toolchain.html">Native toolchain</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="hello.html">Hello Motor OS</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Project</div>
+  <ul>
+    <li><a href="changelog.html">Changelog</a></li>
+    <li><a href="contributing.html">Contributing</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">System</div>
+<h1>Architecture</h1>
+<p class="lead">Motor OS is a microkernel system. The kernel manages memory, threads,
+scheduling, capabilities, and wait/wake objects. One userspace process, sys-io, owns
+the devices, the filesystem, and the network stack. A per-process runtime object,
+rt.vdso, implements the system interface that Rust's standard library calls.</p>
+
+<pre><code>  +----------------------------------------------------------------------+
+  |  programs: rush, russhd, httpd, red, rmux, your code ...              |
+  |     Rust std  -&gt;  moto-rt  -&gt;  rt.vdso (allocator, fs and net clients,|
+  |                                 spawn, threads, futex, poll, stdio)   |
+  +----------------------------------------------------------------------+
+        | io_channel (shared memory rings)        | bounded IPC
+        v                                         v
+  +----------------------------+   +-----------+  +--------------+  +--------+
+  | sys-io                     |   | sys-init  |  | dns-resolver |  | strobe |
+  |  virtio-blk  virtio-net    |   | sys-tty   |  +--------------+  +--------+
+  |  Motor FS    moto-netstack |   +-----------+
+  +----------------------------+
+        | syscalls (4 of them)
+        v
+  +----------------------------------------------------------------------+
+  |  kernel: address spaces, paging, threads, scheduler, capabilities,    |
+  |          wait/wake objects, shared memory, IRQ routing, serial log    |
+  +----------------------------------------------------------------------+</code></pre>
+
+<h2>Boot</h2>
+<p>Under QEMU the VM boots from an MBR boot sector; under Cloud Hypervisor, Firecracker,
+and Alioth it boots via PVH. Either way a small loader brings the CPUs up in 64-bit mode
+and loads the kernel from the initrd into high memory (hence "himem kernel"), at a fixed
+address with no address randomization. The initrd also carries <code>sys-io</code>; the
+kernel loads it as the first process, with every capability, and halts the machine if it
+ever exits. sys-io initializes the VirtIO devices, mounts the filesystem, and starts
+<code>sys-init</code>, which reads <code>/system/cfg/sys-init.cfg</code> and starts
+strobe, the configured services, and the console.</p>
+
+<h2>The kernel</h2>
+<p>The kernel is about 18,600 lines of <code>no_std</code> Rust for x86-64, under
+<code>src/sys/kernel</code>. It contains no drivers other than the serial port, no
+filesystem, no network code, and no program loader. What it does:</p>
+<ul>
+  <li><strong>Address spaces and paging.</strong> 4 KiB pages for ordinary userspace;
+  eager mappings by default, lazy heap segments on request, always-lazy guarded stacks,
+  shared memory between two processes, and cross-address-space mappings that the loader
+  uses to build a new process. W^X is enforced per mapping.</li>
+  <li><strong>Scheduling.</strong> In-kernel scheduling is cooperative: the kernel never
+  blocks except in the wait syscall, so it does not need to be preemptible. Userspace is
+  preemptible on a 10 ms timer tick. Round-robin SMP with per-CPU ready queues and one
+  global queue for stealing; no priorities today. An idle CPU other than the boot CPU
+  stops its tick. Two fast
+  paths matter for I/O latency: an interrupt can return straight to the interrupted thread
+  when nothing else is runnable, and a wake can hand the CPU directly to the woken
+  thread.</li>
+  <li><strong>Processes and threads</strong> as kernel objects, with an immutable capability
+  word per process (see <a href="processes.html">Processes and roles</a>).</li>
+  <li><strong>Wait/wake objects.</strong> Every kernel object a process holds a handle to
+  can be waited on. A wake is queued on a lock-free list that the scheduler drains, and a
+  missed wake is latched per handle so a waiter cannot lose it. Userspace futexes, pipes,
+  and the I/O channels are built on this.</li>
+  <li><strong>Admission control</strong> for memory, so that no unprivileged process can
+  exhaust physical memory (see <a href="memory.html">Memory</a>).</li>
+  <li><strong>Interrupt routing</strong> to userspace: a driver waits on an
+  <code>irq_wait</code> handle.</li>
+  <li><strong>Timekeeping, metrics, and debugging</strong>: a self-describing metrics
+  catalog, a per-CPU trace ring, and a debug interface that can pause a process and read
+  its threads' registers and memory.</li>
+</ul>
+
+<h3>The syscalls</h3>
+<p>There are four syscalls, each with a small set of operations selected by an argument.
+Userspace names kernel objects with a <code>SysHandle</code>; a few handles are
+predefined (<code>SELF</code>, <code>PARENT</code>, <code>KERNEL</code>, and so on).</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Syscall</th><th>Operations</th></tr>
+  <tr><td><code>SysObj</code></td><td>Create an object from a URL (<code>address_space</code>,
+    <code>process</code>, <code>shared</code> memory, <code>ipc_pair</code>, <code>irq_wait</code>,
+    <code>serial_console</code>); look up or connect to an object; drop or duplicate a handle;
+    query a handle (is it waitable, is the peer connected, the peer's PID and
+    capabilities).</td></tr>
+  <tr><td><code>SysMem</code></td><td>Map and unmap memory: heap, reservations, shared and
+    cross-address-space mappings, and, for the I/O manager only, MMIO and physically
+    contiguous memory; query memory and admission statistics.</td></tr>
+  <tr><td><code>SysCpu</code></td><td>Wait on up to N handles with an optional deadline; wake
+    a handle or a thread; spawn a thread; exit; kill a child; query per-CPU usage; set
+    thread affinity.</td></tr>
+  <tr><td><code>SysRay</code></td><td>Observability: list processes, describe and read
+    metrics, write a log record (needs <code>CAP_LOG</code>), and the debugger
+    interface.</td></tr>
+</table>
+</div>
+<p>The Rust definitions are in <code>src/sys/lib/moto-sys</code>. Most programs never see
+them: they use Rust's standard library, and the runtime below it makes the calls.</p>
+
+<h2>sys-io</h2>
+<p><code>sys-io</code> is the I/O manager. It is one process that owns every VirtIO
+device, provides the filesystem service, and provides the network service. All of its
+work runs as tasks on a single-threaded asynchronous runtime, <code>moto-async</code>, on
+one thread pinned to CPU 0, where the device interrupts are routed; there are no locks in
+its hot paths. Two small helper threads answer synchronous statistics queries.</p>
+<ul>
+  <li><strong>Drivers</strong> (<code>src/sys/lib/virtio-async</code>): modern VirtIO over
+  PCI with MSI-X. virtio-blk uses 4 KiB blocks and batched multi-block requests;
+  virtio-net negotiates checksum offload and TSO on transmit and passes per-frame checksum
+  verdicts up to the stack. Exactly one block device and any number of network devices
+  are expected.</li>
+  <li><strong>Motor FS</strong>, the journaling filesystem, with a 16 MiB block cache,
+  readahead, and a lock manager for advisory locks (see
+  <a href="filesystem.html">Filesystem</a>).</li>
+  <li><strong>moto-netstack</strong>, the networking stack, which grew out of smoltcp but
+  has diverged far enough (congestion control, SACK and RACK-TLP loss recovery, timestamps,
+  admission and safety hardening) that it no longer tracks upstream (see
+  <a href="networking.html">Networking</a>).</li>
+</ul>
+<p>Programs talk to sys-io over <code>io_channel</code>, a shared-memory channel inspired
+by io_uring: a submission ring and a completion ring of 64 entries each, with 64 pages of
+buffer space per direction split into four sub-channels, and kernel wait handles for
+cross-process wakeups. The wire definitions live in <code>moto-sys-io</code>; the native
+client library is <code>moto-io</code>, and rt.vdso uses them on behalf of std. Because
+the kernel allows a process at most 1024 wait handles, sys-io serves at most 960
+channels, at most 896 per kind (filesystem or network); at four sub-channels per network
+channel that is roughly 3,500 concurrent sockets per machine.</p>
+<p>If a client misbehaves on its channel, sys-io drops that client. If sys-io itself
+exits or is killed, the kernel logs its status and halts the VM: sys-io holds live
+filesystem and network state that cannot be rebuilt safely by a replacement, so a clear
+stop is preferred over a partial restart.</p>
+
+<h2>The services</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Service</th><th>Role</th></tr>
+  <tr><td><code>sys-init</code></td><td>Reads <code>/system/cfg/sys-init.cfg</code>: a <code>tty:</code>
+    line (required) names the console program and its role, <code>strobe:</code> names the logging
+    service, and <code>svc:CAPS:COMMAND</code> lines start services with an explicit capability
+    mask. It starts strobe first, then the services, then the console.</td></tr>
+  <tr><td><code>sys-tty</code></td><td>The serial console: a polled 16550 UART, driven as a byte pump.
+    It starts the console shell (rush) with the environment from <code>/system/cfg/sys-tty.cfg</code>.</td></tr>
+  <tr><td><code>strobe</code></td><td>Logging and the metrics registry. Services send log records
+    over IPC through <code>moto-log</code>; strobe writes <code>/system/logs/TAG.log</code> and rotates
+    to <code>.prev</code>. Userspace metric providers register with it so that collectors such as
+    <code>sysbox stats</code> can find them.</td></tr>
+  <tr><td><code>dns-resolver</code></td><td>A bounded IPC service that resolves names over UDP with
+    TCP fallback; runs with the None role (see <a href="dns.html">DNS resolver</a>).</td></tr>
+  <tr><td><code>russhd</code></td><td>The SSH server: password and public-key authentication,
+    shells, command execution, and SFTP; runs with the Interactive role.</td></tr>
+</table>
+</div>
+
+<h2>rt.vdso and moto-rt</h2>
+<p>Motor OS has no dynamic linking, but it does have one shared component. The runtime,
+<code>rt.vdso</code>, is a position-independent ELF object that the spawning process maps
+into every new process at a fixed address, together with a one-page table of function
+pointers. Rust's standard library on Motor OS is deliberately thin: it calls
+<code>moto-rt</code>, a small crate that mostly forwards to that table. The runtime can
+therefore be updated with the OS, and already-compiled programs pick up the new version
+on their next start. The table is versioned (<code>RT_VERSION</code>, currently 17,
+matching moto-rt 0.17.x).</p>
+<p>rt.vdso is where most of what a Unix kernel would do in system calls actually happens:</p>
+<ul>
+  <li>the heap allocator (frusa, a small no-std allocator written for Motor OS);</li>
+  <li>process spawning: the ELF loader, argument and environment passing, capability
+  assignment, stdio setup, and detached processes (there is no <code>fork</code> or
+  <code>exec</code>; spawn builds the child address space directly);</li>
+  <li>threads, thread-local storage, futexes, sleeping, and time;</li>
+  <li>the filesystem client (about thirty entry points over io_channel);</li>
+  <li>the network client: TCP, UDP, socket options, name resolution through the DNS
+  service, and an edge-triggered readiness interface (<code>poll</code>) that mio and
+  Tokio are built on;</li>
+  <li>stdio, including the pipe relays that connect a child to its parent's terminal or to
+  a file;</li>
+  <li>panic output, backtraces, and Ctrl+C delivery.</li>
+</ul>
+<p>Programs are statically linked x86-64 ELF executables with no interpreter and no ELF
+TLS segment; thread-local storage is provided by the runtime. Anything that needs a
+Motor-specific interface, for example a service that wants to know a peer's
+capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
+
+<h2>Where things are in the source tree</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Contents</th></tr>
+  <tr><td><code>src/boot</code></td><td>MBR boot sector, second-stage loader, and the kernel loader.</td></tr>
+  <tr><td><code>src/sys/kernel</code></td><td>The kernel.</td></tr>
+  <tr><td><code>src/sys/sys-io</code></td><td>The I/O manager; <code>netstack/</code> is the networking stack.</td></tr>
+  <tr><td><code>src/sys/sys-init</code>, <code>sys-tty</code>, <code>strobe</code>, <code>dns-resolver</code></td><td>The services.</td></tr>
+  <tr><td><code>src/sys/lib</code></td><td>System libraries: <code>moto-sys</code> (syscalls), <code>moto-rt</code>
+    and <code>rt.vdso</code> (the runtime), <code>moto-ipc</code> (io_channel, pipes), <code>moto-io</code> and
+    <code>moto-sys-io</code> (sys-io clients and wire formats), <code>motor-fs</code> and <code>async-fs</code>,
+    <code>virtio-async</code>, <code>moto-async</code>, <code>moto-dns</code>, <code>moto-log</code>,
+    <code>moto-stats</code>, <code>moto-mpmc</code>, <code>frusa</code>, <code>moto-rt-cabi</code> (the C ABI
+    shim under the C library).</td></tr>
+  <tr><td><code>src/sys/tools</code></td><td><code>sysbox</code> (the commands) and <code>mdbg</code>.</td></tr>
+  <tr><td><code>src/sys/tests</code></td><td>The in-VM test suites.</td></tr>
+  <tr><td><code>src/bin</code></td><td>User programs: rush, rmux, red, kibim, russhd, httpd, httpd-axum,
+    curl, lorry, gears, rnetbench.</td></tr>
+  <tr><td><code>src/imager</code></td><td>The image builder and the image descriptions.</td></tr>
+  <tr><td><code>src/vm_scripts</code></td><td>Scripts to run VMs; copied next to the images.</td></tr>
+  <tr><td><code>src/tests</code></td><td>The host-driven test scripts, including <code>full-test.sh</code>.</td></tr>
+  <tr><td><code>img_files</code></td><td>Static files placed into the images: configuration, scripts, this website.</td></tr>
+  <tr><td><code>docs</code></td><td>Design documents, plans, and recipes.</td></tr>
+</table>
+</div>
+
+<h3>Size</h3>
+<p>Lines of Rust, including tests, as of August 2026: the kernel about 18,600; rt.vdso
+about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; Motor FS about
+10,300; the VirtIO drivers about 3,400; moto-async about 2,800.</p>
+<nav class="pager">
+<a class="pager-prev" href="running.html"><span>Previous</span>Running Motor OS</a>
+<a class="pager-next" href="processes.html"><span>Next</span>Processes and roles</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+  </div>
+</footer>
+</body>
+</html>

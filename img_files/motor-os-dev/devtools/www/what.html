@@ -1,122 +1,603 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>What is Motor OS</title>
-
+<meta name="description" content="What Motor OS is, what works today, and what does not work yet.">
+<meta name="theme-color" content="#0a0a0a">
+<title>What is Motor OS | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
-  @font-face {
-      font-family: 'RobotoMono';
-      src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
-           url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
-      font-weight: normal;
-      font-style: normal;
-  }
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
 
-  .main-body {
-    height: 160px;
-    text-align: left;
-    line-height: 1.4;
-    font-size: 16px;
-    padding: 0 10px;
-    margin: 50px auto;
-    max-width: 900px;
-    font-family:'RobotoMono',monospace;
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2rem;
+  align-items: center;
+  padding: 1.5rem 0 2.5rem;
+}
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero img { width: 230px; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
   }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
+  .hero img { width: 170px; justify-self: center; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
 </style>
 </head>
-
 <body>
-<div class="main-body">
-<p align="right"><a href="/">Motor OS</a> | What | <a href="why.html">Why</a> | <a href="https://github.com/moturus/motor-os" target="_blank">GitHub</a></p>
-<h1>What is Motor OS</h1>
-
-<p><b>TL;DR:</b> static HTTP(s) serving works "out of the box". Other things are work-in-progress.</p>
-
-<p>
-Motor OS is a microkernel-based operating system, built in Rust, that targets virtualized workloads exclusively.
-It currently supports x64 KVM-based virtual machines, and can run in Qemu, Cloud Hypervisor, or Alioth VMMs.
-</p><p>
-Rust is the language of Motor OS: not only it is implemented in Rust, it also exposes its ABI in Rust, not C.
-</p>
-<h2>What works</h2>
-<p>
-Motor OS is under active development, and should not be used for sensitive workloads.
-It is, however, ready for trials/experiments/research. In fact, <a href="https://motor-os.org">Motor OS</a>
-web site is served from inside a couple of Motor OS VMs (proxied via Cloudflare).</p>
-
-<p>
-More specifically, these things work:
-</p>
-
- <ul>
-  <li>boots via MBR (Qemu) or PVH (Alioth, Cloud Hypervisor) in 100ms (Alioth) or 200ms (CHV, Qemu)</li>
-  <li>himem micro-kernel</li>
-  <li>scheduling:</li>
-	<ul>
-	   <li>a simple multi-processor round robin (SMP)</li>
-	   <li>in-kernel scheduling is cooperative:
-		   the kernel is very small and does not block, so does not need to be preemptible</li>
-	   <li>the userspace is preemptible</li>
-	</ul>
-  <li>memory management:</li>
-	<ul>
-	   <li>only 4K pages at the moment</li>
-	   <li>stacks are guarded</li>
-	   <li>page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)</li>
-	</ul>
-  <li>I/O subsystem (in the userspace)</li>
-	<ul>
-	   <li>VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a></li>
-       <li>a <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/motor-fs">journaling filesystem</a></li>
-	   <li><a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking</li>
-      <ul><li>max host-guest TCP throughput is about 10Gbps at the moment</li></ul>
-	</ul>
-  <li>the userspace:</li>
-	<ul>
-	   <li>multiple processes, with preemption</li>
-	   <li>threads, thread local storage</li>
-	   <li>Rust's standard library mostly ported</li>
-		<ul>
-		   <li>Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or Windows FFI,
-      will cross-compile for Motor OS and run, subject to "what does not work" below</li>
-		</ul>
-       <li>Tokio Runtime is working</li>
-       <li>Tokio/MIO async TCP/UDP APIs are working</li>
-       <li><a href="https://github.com/moturus/motor-os/tree/main/src/bin/russhd">SSH server</a></li>
-	   <li>a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided</li>
-	   <li>an axum/tokio-based TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> is also provided</li>
-	   <li>a simple unix-like <a href="https://github.com/moturus/rush">shell</a> in the serial console</li>
-	   <li>a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a></li>
-     <li>basic commands like free, ps, ls, top, cat, ss, etc. (do `ls bin` to list all commands)</li>
-	</ul>
-</ul> 
-
-
-<h2>What does not work</h2>
-<p>
-Most pieces are not yet ready for production use. No security audit has been made.
-More specifically:</p>
-
-<ul>
-<li>Filesystem: some operations are missing yet; undertested</li>
-<li>Networking:</li>
-   <ul>
-      <li>DHCP not implemented: static IP addresses only at the moment</li>
-      <li>DNS lookup not implemented yet</li>
-      <li>UDP multicast/broadcast not implemented (yet?)</li>
-   </ul>
-<li>The ecosystem outside Rust std:</li>
-   <ul>
-      <li>"sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks</li>
-      <li>async Rust: Tokio is only partially ported, so most crates won't work without some refactoring</li>
-      <li>crates that are wrappers around native Linux or Windows APIs will not work, obviously</li>
-   </ul>
-</ul>
-<center>
-<img src="motor-os-256.png" alt="Metal Bear on Motorbike">
-</center>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html" class="current">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html">Docs</a>
+      <a href="changelog.html">Changelog</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html" class="current">What is Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building Motor OS</a></li>
+    <li><a href="running.html">Running Motor OS</a></li>
+  </ul>
 </div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+    <li><a href="toolchain.html">Native toolchain</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="hello.html">Hello Motor OS</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Project</div>
+  <ul>
+    <li><a href="changelog.html">Changelog</a></li>
+    <li><a href="contributing.html">Contributing</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Getting started</div>
+<h1>What is Motor OS</h1>
+<p class="lead">Motor OS is a microkernel-based operating system, written in Rust, that
+targets virtualized workloads exclusively. It runs in x86-64 KVM virtual machines under
+QEMU, Cloud Hypervisor, Firecracker, and Alioth.</p>
+
+<p><strong>In short:</strong> serving static HTTP and HTTPS works out of the box, SSH and
+SFTP work, Rust programs built on the standard library and on Tokio run, and the
+developer image can compile C, C++, and Rust programs natively. Motor OS is under active
+development and has had no security audit, so it should not be used for sensitive
+workloads, but it is ready for trials, experiments, and research. This website is served
+from inside Motor OS VMs.</p>
+
+<h2>The shape of the system</h2>
+<p>Rust is the language of Motor OS. The kernel, the runtime, the services, and the
+programs are Rust, and the system interface that programs use is Rust as well: a
+per-process runtime object, <code>rt.vdso</code>, exposes a versioned table of functions,
+and Rust's standard library calls into it through the small <code>moto-rt</code> crate.
+There is no C ABI at the system boundary and no dynamic linking; a C library exists for
+ported C and C++ code, and it sits on top of the same runtime.</p>
+
+<p>The kernel is small and lives in high memory. It manages address spaces, threads,
+scheduling, capabilities, and wait/wake objects. Everything that touches hardware or
+implements a service runs in userspace: <code>sys-io</code> owns the VirtIO block and
+network devices, the filesystem, and the TCP/IP stack; <code>sys-init</code> starts
+services; <code>sys-tty</code> drives the serial console; <code>strobe</code> collects
+logs and metrics; <code>dns-resolver</code> resolves names; <code>russhd</code> serves
+SSH. The <a href="architecture.html">Architecture</a> page describes each piece.</p>
+
+<h2>What works</h2>
+
+<h3>Boot and kernel</h3>
+<ul>
+  <li>Boots via MBR (QEMU) or PVH (Cloud Hypervisor, Firecracker, Alioth) in about 100 ms
+  on Alioth and about 200 ms on Cloud Hypervisor and QEMU.</li>
+  <li>A high-memory microkernel with four syscalls, cooperative in-kernel scheduling
+  (the kernel never blocks, so it does not need to be preemptible), and preemptive
+  userspace scheduling with a 10 ms tick.</li>
+  <li>SMP with per-CPU ready queues and work stealing, up to 16 vCPUs.</li>
+  <li>4 KiB pages, guarded lazily-allocated stacks, page faults handled in userspace
+  mappings, and admission control that keeps the machine out of physical memory
+  exhaustion (see <a href="memory.html">Memory</a>).</li>
+</ul>
+
+<h3>I/O, in userspace</h3>
+<ul>
+  <li>VirtIO block and network drivers (modern VirtIO over PCI, MSI-X), with checksum
+  and TSO offload on transmit.</li>
+  <li>Motor FS, a journaling filesystem with per-role permissions and advisory file
+  locks (see <a href="filesystem.html">Filesystem</a>).</li>
+  <li>moto-netstack, the Motor OS networking stack: IPv4 and IPv6, DHCPv4, ARP and
+  neighbor discovery, TCP with CUBIC congestion control, SACK, RACK-TLP loss recovery,
+  timestamps and window scaling, SYN cookies, and rate limits; UDP; ICMP echo. Host-to-guest
+  TCP throughput is about 10 Gbps (see <a href="networking.html">Networking</a>).</li>
+  <li>A DNS resolver service with hosts-file and resolv.conf support, UDP with TCP
+  fallback, and strict response validation (see <a href="dns.html">DNS resolver</a>).</li>
+</ul>
+
+<h3>Userspace and Rust</h3>
+<ul>
+  <li>Multiple processes with preemption, threads, and thread-local storage.</li>
+  <li>Rust's standard library is ported: programs that use <code>std</code> and do not
+  depend, directly or indirectly, on Unix or Windows APIs cross-compile for
+  <code>x86_64-unknown-motor</code> and run, subject to the list below.</li>
+  <li>The Tokio runtime, and the Tokio and mio asynchronous TCP and UDP APIs, work,
+  including asynchronous child processes and stdio.</li>
+  <li>rustls (with ring), hyper, axum, and russh have been ported or work with small
+  patches; TLS serving and SSH serving are built on them.</li>
+  <li>A C library (mlibc), so C and C++ programs can be compiled for Motor OS; Lua runs
+  on it.</li>
+</ul>
+
+<h3>Programs</h3>
+<ul>
+  <li><a href="rush.html">rush</a>, a POSIX-style shell, on the serial console and over SSH.</li>
+  <li><a href="rmux.html">rmux</a>, a tmux-like terminal multiplexer.</li>
+  <li>Two editors: <a href="editors.html">red</a>, which behaves like vi, and kibim, a small
+  and simple one.</li>
+  <li>An SSH server, russhd, with password and public-key authentication, interactive
+  shells, command execution, and SFTP.</li>
+  <li>Two static web servers with TLS: httpd, a small hand-written one, and httpd-axum,
+  built on axum and Tokio.</li>
+  <li>The usual commands: ls, cat, cp, mv, rm, find, wc, less, ps, top, free, ss, ping,
+  stats, and more (see <a href="commands.html">Commands</a>), plus ripgrep.</li>
+</ul>
+
+<h3>The developer image</h3>
+<ul>
+  <li>A native Clang/LLVM toolchain with mlibc, libc++, and compiler-rt, so
+  <code>cc hello.c</code> works inside the VM.</li>
+  <li>A native rustc with a full Motor OS sysroot.</li>
+  <li>Lorry, an offline, Cargo-compatible Rust package builder that vendors and reviews
+  dependencies before it builds them.</li>
+  <li>Gears, an agent harness for LLM-assisted work, and curl for HTTPS downloads.</li>
+  <li>The test suites and mdbg, a stack-dumping debugger. See
+  <a href="devtools.html">Developer image</a>.</li>
+</ul>
+
+<h2>What does not work yet</h2>
+<p>Most pieces are not ready for production use, and there has been no security audit.
+More specifically:</p>
+<ul>
+  <li><strong>Filesystem</strong>: no symbolic or hard links, no users or groups, no
+  ownership. A file whose write permission has been removed cannot get it back through
+  the same permission byte; this is deliberate, and the way to replace such a file is
+  described under <a href="filesystem.html">Filesystem</a>.</li>
+  <li><strong>Networking</strong>: IPv6 addresses and routes are static only (no DHCPv6,
+  SLAAC, or router advertisements); no UDP multicast or broadcast; no raw sockets;
+  IPv6 extension headers are not generally supported; <code>SO_KEEPALIVE</code> is always
+  on and not yet configurable.</li>
+  <li><strong>Process model</strong>: there is no <code>fork</code>, no signals, no
+  process groups, no pseudo-terminals, and no termios. Programs that need them must be
+  adapted; see <a href="terminals.html">Terminals</a> for how terminal programs work
+  without them.</li>
+  <li><strong>The Rust ecosystem outside std</strong>: sans-io crates and crates such as
+  rand or rustls compile and work, sometimes with minor tweaks; Tokio is ported but not
+  every Tokio feature is, so some async crates need refactoring; crates that wrap native
+  Linux or Windows APIs will not work.</li>
+  <li><strong>Debugging</strong>: there is no source-level debugger. mdbg can dump the
+  stacks of a running process, which are then symbolized on the host.</li>
+</ul>
+
+<h2>What is next</h2>
+<p>The build system and the toolchain are being reworked into a versioned, reproducible
+Motor toolchain based on a stable Rust release; the <a href="build.html">Building</a> and
+<a href="toolchain.html">Native toolchain</a> pages will be filled in when that work is
+merged. The networking stack has a list of follow-up robustness and completeness items
+recorded in the repository under <code>docs/plans/</code>.</p>
+
+<p style="text-align:center;margin-top:2.5rem">
+<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
+</p>
+<nav class="pager">
+<a class="pager-prev" href="docs.html"><span>Previous</span>Documentation</a>
+<a class="pager-next" href="why.html"><span>Next</span>Why Motor OS</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+  </div>
+</footer>
 </body>
 </html>

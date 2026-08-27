@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Notable changes to Motor OS, newest first.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Changelog | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,9 +391,9 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
+      <a href="why.html">Why</a>
       <a href="docs.html">Docs</a>
-      <a href="changelog.html">Changelog</a>
+      <a href="changelog.html" class="current">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -447,66 +447,106 @@ a.card h3 { color: var(--accent); }
 <div class="nav-group">
   <div class="nav-title">Project</div>
   <ul>
-    <li><a href="changelog.html">Changelog</a></li>
+    <li><a href="changelog.html" class="current">Changelog</a></li>
     <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Project</div>
+<h1>Changelog</h1>
+<p class="lead">Notable changes, newest first. The full history is in
+<a href="https://github.com/moturus/motor-os/commits/main">git</a>.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>2026-08</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li><a href="rmux.html">rmux</a>, a terminal multiplexer.</li>
+  <li>A crossterm port with a Motor OS backend.</li>
+  <li>Low-memory admission control and pressure mode (see <a href="memory.html">Memory</a>).</li>
+  <li>The terminal design document, <code>docs/tui.md</code> (see <a href="terminals.html">Terminals</a>).</li>
+  <li>Also this month: three process roles and per-role filesystem permissions applied to
+  every image; protected system logs; a networking review with its fixes; DHCPv4; SYN
+  cookies and egress rate limits; the Motor toolchain plan.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
+<h2>2026-07</h2>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
+  <li>A C library port (mlibc).</li>
+  <li>Native LLVM and native rustc on the developer image.</li>
+  <li>DNS lookup and <code>ping</code>.</li>
+  <li><a href="editors.html">red</a>, a text editor that behaves like vim.</li>
+  <li>Lorry, curl, and Gears (see <a href="devtools.html">Developer image</a>).</li>
 </ul>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>2026-06-17</h2>
+<ul>
+  <li>Motor OS now uses Motor FS by default.</li>
+  <li>The sys-io runtime is now fully asynchronous.</li>
+</ul>
+
+<h2>2025-10-17</h2>
+<p>Motor OS is now a
+<a href="https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html">Tier-3 target
+in Rust</a>.</p>
+
+<h2>2025-05-26</h2>
+<ul>
+  <li>The Tokio process feature works: async children, async stdio.</li>
+  <li>The SSH server, russhd, works: password and public-key authentication and an
+  interactive shell (command execution came later).</li>
+</ul>
+
+<h2>2025-04-22</h2>
+<p>UDP works, excluding multicast and broadcast, in both <code>std::net</code> and mio/Tokio.</p>
+
+<h2>2025-04-08</h2>
+<ul>
+  <li>The Tokio runtime and the Tokio and mio async TCP APIs work.</li>
+  <li>Motor OS rebased onto the 2025-04-05 Rust nightly.</li>
+</ul>
+
+<h2>2025-02-17</h2>
+<p>The Rust Motor OS target rebased onto the 2025-02-16 nightly. Two main changes: all
+Motor OS binaries are now position independent, and rt.vdso is now built with the Motor
+OS target rather than a custom JSON target.</p>
+
+<h2>2025-01-20</h2>
+<p>Tokio's mio is more or less ported, except UDP.</p>
+
+<h2>2024-11-12</h2>
+<p>The migration from moto-runtime to moto-rt and rt.vdso is complete.</p>
+
+<h2>2024-09-02</h2>
+<p>The Motor OS runtime library, moto-rt, and rt.vdso are now live and already do memory
+allocation for the Rust standard library. The plan is to move everything from
+moto-runtime into moto-rt and rt.vdso to make the standard library integration stable;
+having a runtime VDSO object also enables interesting features on the OS side.</p>
+
+<h2>2024-07-06</h2>
+<p>The Motor OS website is now served from inside a couple of Motor OS VMs, proxied via
+Cloudflare.</p>
+
+<h2>2024-07-04</h2>
+<p>TLS/HTTPS serving implemented.</p>
+
+<h2>2024-06-30</h2>
+<p><code>ss</code> implemented.</p>
+
+<h2>2024-05-08</h2>
+<p>The serving side of the TCP stack seems robust: the rnetbench multithreaded
+host-to-guest test with the guest serving has been running for a week. Throughput is
+about 10 Gbps in Alioth and Cloud Hypervisor, a bit less in QEMU.</p>
+
+<h2>2024-04-30</h2>
+<p><code>top</code> implemented.</p>
+
+<h2>2024-04-13</h2>
+<p>The throughput of a single TCP stream is now about 300 MiB/s, roughly twenty times what
+it was in January 2024.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="profiling.html"><span>Previous</span>Profiling</a>
+<a class="pager-next" href="contributing.html"><span>Next</span>Contributing</a>
 </nav>
 </article>
 </main>

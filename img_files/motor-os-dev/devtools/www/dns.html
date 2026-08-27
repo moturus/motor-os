@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="The Motor OS DNS resolver service: request path, configuration, transport, validation, and the result contract.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>DNS resolver | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -420,7 +420,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
-    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="dns.html" class="current">DNS resolver</a></li>
     <li><a href="terminals.html">Terminals</a></li>
     <li><a href="diagnostics.html">Logs and diagnostics</a></li>
   </ul>
@@ -454,59 +454,79 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>DNS resolver</h1>
+<p class="lead">Name resolution is a standalone service, <code>dns-resolver</code>, reached
+over bounded synchronous IPC. Its backend is native Rust and depends only on Motor OS
+networking and filesystem APIs. It runs with the None role.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Request path</h2>
+<pre><code>Rust application (std::net::ToSocketAddrs, TcpStream::connect("host:port"), ...)
+  -&gt; rt.vdso lookup_host
+  -&gt; moto-dns: bounded synchronous IPC
+  -&gt; dns-resolver service
+  -&gt; connected UDP, with TCP fallback
+  -&gt; sys-io</code></pre>
+<p>Numeric addresses and <code>localhost</code> are answered in the runtime without
+contacting the service. Other names use a fresh client connection per lookup, so a dead
+resolver connection is never cached and a restarted service is found by the next call.
+The service keeps four fixed workers and a versioned, pointer-free request and response
+format defined in the <code>moto-dns</code> crate (names up to 253 bytes, up to 16
+addresses per answer). Because each lookup takes one IPC connection into four workers,
+more than 32 concurrent lookups are refused with <code>NotConnected</code>; raising this
+is on the follow-up list.</p>
+
+<h2>Configuration</h2>
+<p>The service reads <code>/system/cfg/libc/hosts</code> first and
+<code>/system/cfg/libc/resolv.conf</code> second. sys-io owns <code>resolv.conf</code>:
+before starting services it publishes the DNS servers from the active static device
+configuration atomically, and it republishes the aggregate whenever a DHCP lease changes.
+Static servers are declared with <code>dns_servers</code> in <code>sys-net.toml</code>;
+DHCP-configured devices use the servers from their leases. At most the first two unique
+nameservers are queried, which keeps one-family lookup latency inside the IPC deadline
+when both are unavailable.</p>
+
+<h2>Transport and validation</h2>
+<p>Each UDP attempt:</p>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>creates a fresh socket, and with it a freshly randomized ephemeral source port;</li>
+  <li>connects it to the selected nameserver, so packets from other sources are discarded
+  by the socket;</li>
+  <li>generates a fresh random 16-bit transaction ID;</li>
+  <li>sends one recursive A or AAAA question;</li>
+  <li>applies a one-second receive deadline;</li>
+  <li>validates the transaction ID, the response bit, the opcode, the single echoed
+  question, the canonical question name, type, and class, the response code, record
+  bounds, and compression pointers;</li>
+  <li>accepts address records only for the question name or a previously validated CNAME
+  target;</li>
+  <li>removes duplicate addresses.</li>
 </ul>
+<p>UDP delivery is unreliable, so the backend performs one bounded retransmission, on a
+new socket with a new transaction ID. NXDOMAIN is final and is not retried. A response
+with the truncated bit set is repeated over a connected DNS-over-TCP stream using the
+same query and the same strict parser.</p>
+<p>There is no cache. Correct caching requires honoring each record's TTL and a
+negative-cache policy; an arbitrary service-wide TTL would trade a small speedup for
+stale answers.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Result contract</h2>
+<p>The resolver reports one of: success, not found, temporary failure, timeout, out of
+memory, unsupported family, system failure, resolver failure, invalid request, or busy.
+The runtime maps these to stable Motor error codes, which surface through
+<code>std::io::Error</code>. Combined lookups collect IPv4 before IPv6 and then apply the
+destination-ordering policy: usable addresses first, with an unusable global IPv6 range
+ranked last so that a VM without IPv6 connectivity does not wait on it.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Testing</h2>
+<p><code>dns-resolver --self-test</code> covers numeric and hosts-file lookups, malformed
+requests, result ordering, restart behavior, live external resolution, and a deterministic
+loopback DNS fixture that drops the first UDP query, answers the retransmission with a
+truncated response, and completes the lookup over TCP. The regular test suites never go
+out to the Internet; only this explicitly separate live check does.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="networking.html"><span>Previous</span>Networking</a>
+<a class="pager-next" href="terminals.html"><span>Next</span>Terminals</a>
 </nav>
 </article>
 </main>

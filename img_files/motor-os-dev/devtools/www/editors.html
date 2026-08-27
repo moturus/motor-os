@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="The text editors that ship with Motor OS: red, a vi-like editor written with Rust std only, and kibim, a small kilo-style editor.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Editors | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -431,7 +431,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="commands.html">Commands</a></li>
     <li><a href="rush.html">rush: the shell</a></li>
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
-    <li><a href="editors.html">Editors</a></li>
+    <li><a href="editors.html" class="current">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
     <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
@@ -454,59 +454,67 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Userspace</div>
+<h1>Editors</h1>
+<p class="lead">Two editors ship in <code>/user/bin</code>: <strong>red</strong>, which
+behaves like vi and is on every image, and <strong>kibim</strong>, a small kilo-style
+editor on the standard and developer images.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<h2>red</h2>
+<p>red is a terminal editor written from scratch with only the Rust standard library:
+no crossterm, no libc. It renders each frame into an in-memory grid of cells and diffs it
+against the previous frame, so typing rewrites only the edited line from the first
+changed column and a cursor move rewrites only the digits in the status bar. It runs in
+the alternate screen, restores the terminal on exit and on panic, decodes UTF-8, renders
+tabs at configurable stops, and writes files with POSIX line termination (a file that had
+no final newline gains one; an untouched file saves byte-for-byte identical).</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h3>Modes and keys</h3>
+<p>Five modes, as in vim: NORMAL, INSERT, VISUAL (<kbd>v</kbd>), VISUAL LINE
+(<kbd>V</kbd>), and COMMAND (<kbd>:</kbd>).</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Normal mode</th><th>Action</th></tr>
+  <tr><td><kbd>i</kbd> <kbd>a</kbd> <kbd>o</kbd> <kbd>O</kbd></td><td>insert at or after the cursor; open a line below or above</td></tr>
+  <tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, arrows, <kbd>0</kbd> <kbd>$</kbd> <kbd>g</kbd> <kbd>G</kbd></td><td>move; start and end of line; first and last line</td></tr>
+  <tr><td><kbd>Ctrl-F</kbd> <kbd>Ctrl-B</kbd>, PageDown, PageUp</td><td>page down and up</td></tr>
+  <tr><td><kbd>/</kbd> <kbd>?</kbd> <kbd>n</kbd> <kbd>N</kbd></td><td>search forward and backward, next and previous match</td></tr>
+  <tr><td><kbd>x</kbd> <kbd>p</kbd> <kbd>J</kbd></td><td>delete a character, paste, join lines</td></tr>
+  <tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>previous and next buffer (in normal mode)</td></tr>
+</table>
+</div>
+<div class="table-wrap">
+<table>
+  <tr><th>Command</th><th>Action</th></tr>
+  <tr><td><code>:w</code>, <code>:w name</code>, <code>:q</code>, <code>:q!</code>, <code>:wq</code>, <code>:x</code></td><td>save, save as, quit, force quit, save and quit</td></tr>
+  <tr><td><code>:N</code></td><td>go to line N</td></tr>
+  <tr><td><code>:set nu</code> / <code>nonu</code>, <code>:set wrap</code> / <code>nowrap</code></td><td>line numbers and soft wrapping (both on by default)</td></tr>
+  <tr><td><code>:e file</code>, <code>:ls</code>, <code>:bn</code>, <code>:bp</code>, <code>:b N</code>, <code>:b name</code>, <code>:bd</code></td><td>open a file in a new buffer, list buffers, switch, close (add <code>!</code> to discard changes)</td></tr>
+</table>
+</div>
+<p>In visual modes, <kbd>y</kbd> yanks and <kbd>d</kbd>, <kbd>x</kbd>, or Delete cuts the
+selection; the normal-mode motions extend it. Insert mode has Backspace, Delete, Enter,
+Tab (spaces to the next tab stop unless <code>expandtab</code> is off), and arrows.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
+<h3>Configuration and highlighting</h3>
+<p>red reads an optional <code>/user/cfg/red.toml</code> (<code>$HOME/.config/red.toml</code>
+on Linux) with two options named after their vim equivalents: <code>tabstop</code>
+(default 4) and <code>expandtab</code> (default true). Syntax highlighting is incremental
+and cascades block state (a multi-line comment) down only as far as it changes, for Rust,
+Bash, C and C++, and TOML.</p>
+<p>On Motor OS red gets its size from the terminal-size protocol described under
+<a href="terminals.html">Terminals</a>, so it lays itself out correctly on the console,
+in an SSH session, and in an rmux pane, and repaints when the size changes.</p>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>kibim</h2>
+<p>kibim is Motor OS's build of <a href="https://github.com/ilai-deutel/kibi">kibi</a>, a
+small editor in the tradition of kilo: modeless editing with a status bar, incremental
+search, and syntax highlighting defined by INI files. The highlighting definitions for
+about thirty languages live under <code>/user/cfg/kibim/syntax.d/</code>, and the
+editor's own settings in <code>/user/cfg/kibim/</code>.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="rmux.html"><span>Previous</span>rmux: the multiplexer</a>
+<a class="pager-next" href="devtools.html"><span>Next</span>Developer image</a>
 </nav>
 </article>
 </main>

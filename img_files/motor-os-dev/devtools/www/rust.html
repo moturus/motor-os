@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Writing Rust for Motor OS: the x86_64-unknown-motor target, what the standard library supports, ported crates, and porting notes.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Rust on Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -439,7 +439,7 @@ a.card h3 { color: var(--accent); }
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
-    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="rust.html" class="current">Rust on Motor OS</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
   </ul>
@@ -454,59 +454,115 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Developing</div>
+<h1>Rust on Motor OS</h1>
+<p class="lead">Motor OS is a Tier-3 Rust target, <code>x86_64-unknown-motor</code>. A
+program that uses the standard library and does not depend, directly or through its
+crates, on Unix or Windows APIs cross-compiles and runs. This page says what "the
+standard library works" means in practice and how Motor OS differs from Unix for a
+program that is being ported.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>The target</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Static executables with no dynamic linking, <code>panic=abort</code>, and no ELF TLS;
+  thread-local storage is provided by the runtime.</li>
+  <li>The standard library's Motor OS layer is deliberately thin: it calls
+  <code>moto-rt</code>, which forwards to the per-process runtime <code>rt.vdso</code>
+  through a versioned function table. The runtime is part of the OS image, so a compiled
+  program picks up runtime fixes when the image is updated.</li>
+  <li>The target is documented in the
+  <a href="https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html">Rust platform
+  support pages</a>. Building for it currently needs the Motor toolchain from the Motor
+  OS build; see <a href="build.html">Building Motor OS</a>.</li>
+</ul>
+<p>Cross-compiling on Linux, with the toolchain produced by the current build:</p>
+<pre><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code></pre>
+<p>The binary goes into the VM with <code>scp</code> (see
+<a href="hello.html">Hello Motor OS</a>). On the developer image the same program can be
+built natively with <code>rustc</code> or with Lorry.</p>
+
+<h2>What std supports</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Module</th><th>Status</th></tr>
+  <tr><td><code>std::thread</code>, <code>sync</code></td><td>Threads, thread-local storage, mutexes, condition variables, channels, futex-based parking.</td></tr>
+  <tr><td><code>std::fs</code></td><td>Files, directories, metadata with timestamps, rename, truncate, permissions in the three-role model, advisory file locks. No symbolic or hard links.</td></tr>
+  <tr><td><code>std::net</code></td><td>TCP and UDP, IPv4 and IPv6, name resolution, nonblocking mode, timeouts, <code>TCP_NODELAY</code>, TTL, linger, buffer sizes. No multicast or broadcast.</td></tr>
+  <tr><td><code>std::process</code></td><td><code>Command</code> with arguments, environment, and stdio piping; kill, wait, and try_wait; exit codes. No <code>fork</code>, no signals, no process groups.</td></tr>
+  <tr><td><code>std::io</code></td><td>Stdio, pipes, <code>IsTerminal</code>; see <a href="terminals.html">Terminals</a> for what a terminal is.</td></tr>
+  <tr><td><code>std::env</code>, <code>time</code>, <code>alloc</code></td><td>Arguments, environment, current directory, <code>current_exe</code>; system and monotonic time; the frusa allocator.</td></tr>
+  <tr><td><code>std::os::unix</code></td><td>Not available. Motor-specific extensions come from <code>moto-rt</code> and <code>moto-sys</code>.</td></tr>
+</table>
+</div>
+
+<h2>Ported crates and what works on top of them</h2>
+<ul>
+  <li><strong>mio and Tokio</strong>: Motor OS forks (<code>moturus/mio</code>,
+  <code>moturus/tokio</code>) backed by the runtime's edge-triggered readiness interface.
+  The runtime, async TCP and UDP, async child processes, and async stdio work; not every
+  Tokio feature is ported.</li>
+  <li><strong>hyper, axum, tower-http</strong>: httpd-axum serves this site with them.</li>
+  <li><strong>rustls with ring</strong> (<code>moturus/ring</code>): TLS on both the client
+  (curl, Gears) and server (httpd, httpd-axum) side.</li>
+  <li><strong>russh</strong> (<code>moturus/russh</code>) and russh-sftp: the SSH server.</li>
+  <li><strong>crossterm</strong> (<code>moturus/crossterm</code>): a Motor backend that
+  handles terminal size and Ctrl+C the Motor way, so a crossterm program needs no
+  Motor-specific code.</li>
+  <li><strong>ctrlc</strong>: a fork whose handler is the process's Ctrl+C handler.</li>
+  <li><strong>tracing</strong> and friends compile unchanged; see
+  <a href="profiling.html">Profiling</a>.</li>
+  <li><strong>ripgrep</strong>: a fork that ships as <code>rg</code>.</li>
+</ul>
+<p>As a rule, sans-io crates and crates such as rand or rustls compile and work, sometimes
+with minor tweaks; async crates that assume Tokio features which are not ported need
+refactoring; and crates that wrap native Linux or Windows APIs will not work.</p>
+
+<h2>Porting notes</h2>
+<ul>
+  <li><strong>No fork or exec.</strong> Use <code>std::process::Command</code>; the parent's
+  runtime builds the child directly. Programs that fork to daemonize should instead spawn
+  themselves detached, which needs <code>CAP_SPAWN_DETACHED</code> and the
+  <code>MOTOR_OS_DETACHED</code> spawn key; rmux's server is the in-tree example.</li>
+  <li><strong>No signals.</strong> Ctrl+C terminates a process with status 130 unless it
+  registers a handler, through the <code>ctrlc</code> crate or crossterm's
+  <code>enable_ctrl_c_events()</code>. There is nothing to catch for termination; a killed
+  process just stops.</li>
+  <li><strong>No users.</strong> A process's authority is its capability word, and files
+  carry per-role permissions. Write permission on a file cannot be given back once removed;
+  see <a href="filesystem.html">Filesystem</a> for how to replace such a file. <code>~</code> is
+  not a home directory in the Unix sense; per-program configuration goes under
+  <code>/user/cfg</code>, and temporary files under <code>/user/tmp</code>
+  (<code>TMPDIR</code>). Interactive programs cannot create top-level directories.</li>
+  <li><strong>No pty.</strong> A terminal is a pipe whose far end behaves like one.
+  <code>IsTerminal</code> works; raw mode is a property of the provider, not of the
+  descriptor, and the terminal size arrives in the byte stream. Use crossterm, or read
+  <a href="terminals.html">Terminals</a> if you handle escape sequences yourself.</li>
+  <li><strong>Error codes.</strong> Motor OS error codes map to <code>io::ErrorKind</code>
+  where the toolchain's std knows them; a reset connection is <code>ConnectionReset</code>,
+  while a few network conditions still surface as <code>NotConnected</code>. A new code
+  needs both a moto-rt release and a toolchain std that knows it.</li>
+  <li><strong>Memory.</strong> An allocation that would push the machine below the safety
+  floor fails before it starts, and spawning is refused under memory pressure with a
+  recoverable error; a page fault on lazy memory below the floor kills the process. See
+  <a href="memory.html">Memory</a>.</li>
+  <li><strong>Motor-specific APIs.</strong> <code>moto-rt</code> exposes the runtime
+  (process capabilities and roles, the Ctrl+C handler, the terminal descriptor, file
+  permission updates); <code>moto-sys</code> exposes the syscalls and shared pages
+  (memory pressure, per-process statistics, peer capabilities on a connection);
+  <code>moto-ipc</code>, <code>moto-io</code>, <code>moto-log</code>, and
+  <code>moto-stats</code> are the IPC, native I/O, logging, and metrics libraries. Services
+  in the tree use them; ordinary programs rarely need to.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>C and C++</h2>
+<p>A C library, mlibc, is ported and sits on a C ABI shim over the same runtime
+(<code>moto-rt-cabi</code>), with libc++ on top. On the developer image, <code>cc</code>
+and <code>c++</code> compile C and C++ for Motor OS, and Lua and ripgrep's C dependencies
+are built that way. Thread-local storage uses emulated TLS throughout. Details will be on
+the <a href="toolchain.html">Native toolchain</a> page.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="toolchain.html"><span>Previous</span>Native toolchain</a>
+<a class="pager-next" href="hello.html"><span>Next</span>Hello Motor OS</a>
 </nav>
 </article>
 </main>

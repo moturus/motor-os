@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="How to contribute to Motor OS: where to discuss, the development rules, how to build and test, and the license.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Contributing | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -448,65 +448,72 @@ a.card h3 { color: var(--accent); }
   <div class="nav-title">Project</div>
   <ul>
     <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
+    <li><a href="contributing.html" class="current">Contributing</a></li>
   </ul>
 </div>
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Project</div>
+<h1>Contributing</h1>
+<p class="lead">Contributions are welcome. Post to GitHub
+<a href="https://github.com/moturus/motor-os/discussions">Discussions</a> or
+<a href="https://github.com/moturus/motor-os/issues">Issues</a> to talk about what you
+would like to do, unless it is a simple quick fix, in which case a pull request is quite
+enough.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Development rules</h2>
+<p>The repository's <code>AGENTS.md</code> states the rules, which apply to human and AI
+contributors alike. Motor OS is Rust-first: work uses standard Rust and the native Motor
+OS APIs under <code>src/sys/lib</code> unless there is a reason not to. In order of
+preference: secure code, then correctness, then simple and clean code. Complexity is
+tolerated only when really needed.</p>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Split work into small patches, about 100&ndash;300 lines including tests. Make a
+  larger patch only when a smaller one is genuinely hard.</li>
+  <li>Comment sparingly: about one line of comments per five lines of code on average.</li>
+  <li>Make sure new tests are run by <code>src/tests/full-test.sh</code>, directly or
+  through something it calls.</li>
+  <li>Work on a core component (anything under <code>src/sys</code>) must pass
+  <code>full-test.sh</code> consistently, as both debug and release builds, at least
+  three times each before it is committed. If it fails, make a reasonable effort to find
+  the root cause rather than stopping.</li>
+  <li>Work on a non-core component (under <code>src/bin</code>) is checked with that
+  component's own tests.</li>
+  <li>Do not add retries, longer timeouts, ignored failures, or other workarounds that can
+  hide a defect or make a failing test look reliable. Diagnose and fix the underlying
+  issue. A bounded retry is acceptable only where an operation is explicitly designed to
+  tolerate a documented transient external failure.</li>
+  <li>Regular tests must not go out to the Internet; it makes them flaky and can burden
+  the external resource. Only rare, explicitly agreed integration tests for
+  Internet-facing services do.</li>
+  <li>Boot time matters. Avoid adding boot-time work; if it is unavoidable, ask for
+  review.</li>
+  <li>Do not introduce compiler or clippy warnings; format with
+  <code>cargo +nightly fmt</code>; watch for performance regressions.</li>
+  <li>Changes to the standard library's Motor OS port and to <code>moto-rt</code> are
+  discussed and vetted first: std should mostly just call moto-rt, and moto-rt mostly just
+  calls rt.vdso.</li>
+  <li>For larger tasks, write a plan under <code>docs/plans/</code> first and ask for
+  review before changing code.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Building and testing</h2>
+<pre><code>make -j$(nproc)                       # debug build
+make -j$(nproc) BUILD=release         # release build
+src/tests/full-test.sh                # the full test, debug
+src/tests/full-test.sh --release      # the full test, release
+src/tests/full-test-dev.sh --release  # the developer-image test</code></pre>
+<p>The toolchain setup that these commands assume is being reworked; see
+<a href="build.html">Building Motor OS</a>.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
-</ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>License</h2>
+<p>Motor OS is licensed under either of the Apache License, Version 2.0, or the MIT
+license, at your option. Any contribution submitted for inclusion is dual-licensed the
+same way, without additional terms or conditions.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="changelog.html"><span>Previous</span>Changelog</a>
+<span></span>
 </nav>
 </article>
 </main>

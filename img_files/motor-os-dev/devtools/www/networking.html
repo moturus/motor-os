@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Motor OS networking: configuring interfaces, DHCP, routes, and limits in sys-net.toml; what the stack supports; capacity; and diagnostics.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Networking | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -419,7 +419,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="processes.html">Processes and roles</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
-    <li><a href="networking.html">Networking</a></li>
+    <li><a href="networking.html" class="current">Networking</a></li>
     <li><a href="dns.html">DNS resolver</a></li>
     <li><a href="terminals.html">Terminals</a></li>
     <li><a href="diagnostics.html">Logs and diagnostics</a></li>
@@ -454,59 +454,150 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Networking</h1>
+<p class="lead">Networking lives in sys-io, on moto-netstack, the Motor OS networking
+stack. It is configured from one file, <code>/system/cfg/sys-net.toml</code>, read when
+sys-io starts. As of August 2026 it is considered ready for production use within its
+supported feature set: static IPv4 and IPv6, DHCPv4, TCP and UDP, native DNS, and
+fail-stop diagnostics.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Configuration</h2>
+<p>A malformed file prevents sys-io from starting. A valid file that matches no network
+device deliberately leaves only loopback and logs the unmatched devices. The file is an
+image input, so use DHCP for one reusable cloud image, or provision a distinct file into
+each static-address image.</p>
+
+<h3>Interfaces</h3>
+<p><code>loopback</code> enables the built-in <code>127.0.0.1/8</code> and
+<code>::1/128</code> interface. <code>auto_icmp_echo_reply</code> controls automatic echo
+replies; it does not bypass the rules that suppress multicast, broadcast, and
+foreign-destination replies.</p>
+<p>Each <code>[devices.NAME]</code> table consumes one virtio-net device. With
+<code>mac</code>, the entry selects that exact hardware address; without it, entries
+consume the remaining devices in table-name order. Unmatched entries and unconfigured
+devices are logged. A static device looks like this:</p>
+<pre><code>[devices.net0]
+cidrs = ["192.0.2.10/24", "2001:db8::10/64"]
+dns_servers = ["192.0.2.53", "2001:db8::53"]
+
+[[devices.net0.routes]]
+ip_network = "0.0.0.0/0"
+gateway = "192.0.2.1"
+
+[[devices.net0.routes]]
+ip_network = "::/0"
+gateway = "2001:db8::1"</code></pre>
+<p><code>dns_servers</code> supplies resolver addresses for a static device. Each route's
+gateway must be reachable through a CIDR on the same device. Route selection uses the
+longest matching prefix and prefers a connected route over an equally specific gateway
+route.</p>
+<p>For a reusable DHCPv4 image:</p>
+<pre><code>[devices.net0]
+dhcp = true</code></pre>
+<p>DHCP owns the device's IPv4 address, default route, and advertised DNS servers. Static
+IPv4 CIDRs, routes, or DNS servers on the same device are rejected, while static IPv6
+configuration may coexist. On renewal, replacement, or lease loss, sys-io updates the
+address and route and atomically republishes the aggregate active DNS server list in
+<code>/system/cfg/libc/resolv.conf</code>. Wildcard TCP listeners begin accepting on an
+address when a lease installs it and stop accepting new connections when the address
+disappears; established connections are not aborted only because a lease was lost, and
+applications must still handle the ordinary I/O failure that follows when the old address
+is no longer usable.</p>
+
+<h3>Admission limits</h3>
+<p><code>max_half_open_global</code> and <code>max_half_open_per_listener</code> (defaults
+128 and 32) bound sockets in SYN-RECEIVED. <code>max_backlog_global</code> and
+<code>max_backlog_per_listener</code> (defaults 128 and 32) bound the pools of listening
+sockets behind listeners: a pool starts at the size the program asked for, 4 by default,
+and doubles whenever a burst of simultaneous connections empties it, because a
+connection that finds no listening socket is refused rather than queued. All four must be
+nonzero. Each socket reserves receive and transmit rings, so large values have a direct
+memory cost; lower them on a small VM, raise them for a server that meets large
+connection bursts or many slow, distant clients.</p>
+
+<h3>Response rate limits</h3>
+<p><code>max_icmp_error_rate</code>, <code>max_rst_rate</code>, and
+<code>max_syn_cookie_rate</code> (defaults 200, 200, and 1000 per second, with a
+one-second burst) limit, per external device, the replies that go wherever a packet's
+source address points: automatic ICMP errors, resets answering traffic at closed ports,
+and the stateless SYN|ACKs a flooded listener answers with once SYN cookies engage. That
+source address is the sender's to forge, so an unlimited rate would let anyone use the
+machine as a reflector. A suppressed reply is simply not sent; loopback is exempt. Zero is
+rejected; omit a key to keep its default.</p>
+
+<h2>What the stack supports</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Area</th><th>Supported</th><th>Not supported</th></tr>
+  <tr><td>IPv4</td><td>Static addresses, DHCPv4, ARP, fragmentation and reassembly, path MTU discovery, longest-prefix routing.</td><td></td></tr>
+  <tr><td>IPv6</td><td>Static addresses and routes, neighbor discovery, fragmentation, a bounded 64-entry neighbor cache, a reduced source-address selection policy.</td><td>DHCPv6, SLAAC, router advertisements, and general extension-header support.</td></tr>
+  <tr><td>TCP</td><td>CUBIC congestion control with a 10-segment initial window; SACK; RACK-TLP loss recovery (RFC 8985); RFC 7323 timestamps and window scaling; SYN cookies under flood; keepalive; zero-window probing; TIME-WAIT retention; per-connection linger on close; family-correct wildcard listeners.</td><td><code>SO_KEEPALIVE</code> is always on and not yet configurable.</td></tr>
+  <tr><td>UDP</td><td>Unicast, connected and unconnected, IPv4 and IPv6, with bounded receive queues.</td><td>Multicast and broadcast.</td></tr>
+  <tr><td>ICMP</td><td>Echo request and reply (<code>ping</code>), with automatic replies configurable; incoming errors are validated before they affect a flow.</td><td>Raw sockets.</td></tr>
+  <tr><td>Names</td><td>The <a href="dns.html">DNS resolver service</a>, a hosts file, and <code>resolv.conf</code> maintained by sys-io.</td><td></td></tr>
+</table>
+</div>
+<p>Socket options exposed to programs: <code>TCP_NODELAY</code>, TTL, <code>SO_LINGER</code>,
+receive and send buffer sizes, <code>IPV6_V6ONLY</code>, and shutdown of either direction.
+TCP buffers default to 128 KiB per direction and can be set between 16 KiB and 8 MiB. A
+graceful close of a connection that never sent a byte is reset rather than FIN-closed;
+this is an accepted non-POSIX exception.</p>
+
+<h2>Capacity and performance</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Host-to-guest TCP throughput is about 10 Gbps under Cloud Hypervisor and Alioth and
+  somewhat less under QEMU. The transmit path uses checksum and TSO offload; receive
+  coalescing and jumbo frames are deliberately not used yet.</li>
+  <li>sys-io serves at most 896 network channels, each with four sub-channels, which is
+  roughly 3,500 concurrent sockets per machine, and one 64 KiB-stack client thread per
+  channel. There is no per-process quota yet: one process can hold every channel, and any
+  role can bind any port.</li>
+  <li>Under memory pressure, new listeners, connects, UDP binds, echo requests, and
+  client connections are refused until memory is available again (see
+  <a href="memory.html">Memory</a>).</li>
+  <li>The MTU comes from the device (<code>VIRTIO_NET_F_MTU</code>) or is 1500. Link status
+  changes are not yet tracked.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>From a program's point of view</h2>
+<p><code>std::net</code> works: <code>TcpListener</code>, <code>TcpStream</code>,
+<code>UdpSocket</code>, name resolution, nonblocking mode, timeouts, and shutdown. The
+Motor OS ports of mio and Tokio sit on an edge-triggered readiness interface in the
+runtime, so Tokio and everything built on it (hyper, axum, russh) works. Programs on
+Motor OS get real error kinds for a reset connection; a few conditions (refused,
+unreachable, broken pipe) still surface as <code>NotConnected</code>, and giving them
+their own codes is on the follow-up list. A connect through <code>std</code> currently
+tries only the first resolved address.</p>
 
-<h2>What Motor OS does differently</h2>
+<h2>Failure and diagnostics</h2>
+<p>sys-io owns live filesystem and networking state that cannot be reconstructed safely
+in a replacement process, so Motor OS uses a fail-stop policy: if sys-io exits or is
+killed, the kernel logs its status and halts the VM instead of attempting an unsafe
+partial restart.</p>
+<p>Configure the hypervisor to retain the VM's serial console. Kernel, sys-io, sys-init,
+and headless service logs are emitted there, and it remains the only diagnostic channel
+when networking or sys-io itself has failed. For QEMU, <code>run-qemu.sh</code> uses
+<code>-nographic</code>, so redirect its stdout and stderr to a retained log; cloud
+deployments should enable their provider's serial-console capture before first boot.
+<code>ss</code> lists TCP sockets and <code>stats</code> reads the <code>net.*</code>
+counters (packets, drops, half-open and backlog counts, SYN cookie and suppression
+counters, reassembly outcomes); see <a href="diagnostics.html">Logs and diagnostics</a>.</p>
+
+<h2>What is deliberately accepted</h2>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
+  <li>ARP and NDP spoofing on the local link is accepted as Linux parity: an unsolicited
+  request or advertisement can rewrite a cached neighbor entry. Static neighbor entries
+  for gateways are a possible future option.</li>
+  <li>Deployments with mutually untrusted local processes, or on an untested hypervisor,
+  need a separate review of the per-process quota and platform items on the follow-up
+  list.</li>
 </ul>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<p>The remaining networking work, about fifty robustness, completeness, and test items,
+is tracked in <code>docs/plans/networking-remaining-steps.md</code> in the repository.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="filesystem.html"><span>Previous</span>Filesystem</a>
+<a class="pager-next" href="dns.html"><span>Next</span>DNS resolver</a>
 </nav>
 </article>
 </main>

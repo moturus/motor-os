@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="Memory management in Motor OS: pages, stacks, shared memory, and the low-memory admission control that replaces an OOM killer.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Memory | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -391,8 +391,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -407,7 +407,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">What is Motor OS</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building Motor OS</a></li>
     <li><a href="running.html">Running Motor OS</a></li>
   </ul>
@@ -417,7 +417,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
-    <li><a href="memory.html">Memory</a></li>
+    <li><a href="memory.html" class="current">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
     <li><a href="dns.html">DNS resolver</a></li>
@@ -454,59 +454,132 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Memory</h1>
+<p class="lead">Motor OS uses 4 KiB pages, eager mappings by default, and guarded lazy
+stacks. Instead of an OOM killer it has admission control: a memory-growing operation
+is refused before it starts if it would push the machine below a safety floor, and a
+shared "memory pressure" flag lets sys-io shed load before it runs out.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>Pages and mappings</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Ordinary userspace memory is mapped in 4 KiB pages. 2 MiB pages exist for the I/O
+  manager's device memory only.</li>
+  <li>Mappings are eager by default. A process can ask for a lazy heap segment, which is
+  backed on first touch. Stacks are always lazy and guarded, so a stack overflow faults
+  instead of corrupting a neighbor.</li>
+  <li>Shared memory between two processes is created by URL and is the basis of the
+  I/O channels; a spawning process also maps pages into a child's address space directly
+  while loading it.</li>
+  <li>Writable and executable is never granted together for one mapping.</li>
+  <li>A per-process memory limit exists in the kernel but is not exposed yet and is
+  unlimited by default.</li>
 </ul>
+<p>The heap allocator in every process is <code>frusa</code>, a small no-std allocator
+written for Motor OS that can grow and give memory back on demand.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Why admission control</h2>
+<p>Allocating N pages of data also costs page descriptors, page tables, and occasionally a
+new slab for kernel bookkeeping, about 2&ndash;2.5% on top of the data in measurements.
+Before admission control the kernel's low-memory check counted only the requested data
+pages and was separate from the allocation, so concurrent requests could all pass it, and
+one unprivileged process could empty the physical page pool and panic the kernel. Admission
+control is a stability mechanism, not a fairness policy: it does not pick a victim,
+does not promise that every lazy page will get backing, and does not attribute shared
+kernel objects to processes.</p>
 
-<h2>What Motor OS does differently</h2>
+<h2>Floors</h2>
+<p>Two compile-time low-water marks over free small pages divide memory into zones:</p>
+<pre><code>available above USER_FLOOR (256 pages, 1 MiB):
+    any process may start a memory-growing operation
+
+SYS_IO_FLOOR (128 pages, 512 KiB) &lt; available &lt;= USER_FLOOR:
+    only sys-io may
+
+available &lt;= SYS_IO_FLOOR:
+    nobody may; what is left is for kernel work already in flight</code></pre>
+<p>The floors are constants, not configuration: an operator must not be able to configure
+the machine back into physical exhaustion. If measurements ever show they are too
+small, the floors are raised rather than a new allocation class added.</p>
+
+<h2>How an operation is admitted</h2>
+<p>Every userspace operation that grows memory (eager, lazy, shared, and contiguous
+mappings, page faults on lazy memory, stacks, address-space, process, and thread creation,
+kernel objects, IPC) is charged a conservative worst case, and a reservation for that
+charge is published in a global counter before the operation runs:</p>
+<pre><code>charge  = data_pages + ceil((data_pages + descriptors) / 32) + 64
+admit iff (available - reservations) - charge &gt;= floor</code></pre>
+<p>The reservation is held until the operation completes, which double-counts pages the
+operation has already allocated; that can refuse a request slightly early but can never
+admit too much. Fixed charges: a process 256 pages, a thread 64, a kernel object or IPC
+16. A remote operation (sys-io loading a program into a new process) is charged against
+the target process's class, so a privileged loader does not widen an ordinary process's
+allowance.</p>
+<p>What a refusal means:</p>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots to a shell in 100&ndash;200 ms;
-  boot-time work is treated as a cost that needs justification.</li>
+  <li>A syscall returns <code>E_OUT_OF_MEMORY</code> before anything happens; there are no
+  side effects, and the caller can back off.</li>
+  <li>A refused page fault on lazy memory cannot return an error to the faulting
+  instruction, so the faulting thread is killed, which kills its process. This is the
+  accepted cost of having no OOM killer: the victim is whichever process faults while
+  availability is below its floor.</li>
 </ul>
+<p>Admission costs nothing measurable: in a release A/B test, eager 16-page
+allocate-and-free and warm lazy faults were within noise of the pre-admission build, and
+boot time was unchanged.</p>
 
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<h2>Pressure mode</h2>
+<p>The floors alone cannot keep sys-io alive, because sys-io's heap grows through the
+same allocator and a failed allocation aborts the process. Pressure mode stops sys-io's
+demand before the kernel has to refuse it. The kernel maintains a
+<code>memory_pressure</code> flag in a read-only page mapped into every process, with
+hysteresis so a single allocation or free cannot flip service on and off:</p>
+<pre><code>raise when free-for-admission &lt;= 512 pages (2 MiB)
+clear when free-for-admission &gt;= 768 pages (3 MiB)</code></pre>
+<p>Any process can read the flag with one memory load. While it is up:</p>
+<ul>
+  <li>the runtime refuses to spawn new processes; the parent gets a recoverable
+  <code>E_OUT_OF_MEMORY</code> before any work is done;</li>
+  <li>sys-io refuses new TCP listeners, outbound connects, UDP binds, and ICMP echo;</li>
+  <li>sys-io refuses every filesystem request except releasing a lock (reads and stats
+  too, because they walk the block cache and allocate on a miss), and frees the pages
+  the refused request had donated;</li>
+  <li>sys-io drops new client connections at accept, for both the filesystem and the
+  network service: a new client is exactly the load being shed;</li>
+  <li>listener pools stop refilling; a recovery task re-arms them after the flag
+  clears.</li>
+</ul>
+<p>Nothing that must run during an episode may allocate; the refusal paths are
+allocation-free by construction. Established TCP connections keep working, because
+serving them allocates nothing. The flag clears from the page-free path as well, so it
+drops when the process that caused the pressure exits even if nobody else allocates.</p>
+
+<h2>Observability</h2>
+<p>Kernel metrics: <code>mem.admission_refused_user</code>,
+<code>mem.admission_refused_sys_io</code>, <code>mem.admission_reserved_pages</code>,
+<code>mem.small_pages_low_water</code>, <code>mem.phys_small_pages_low_water</code>, and
+the two floor gauges. sys-io metrics: <code>net.pressure_active</code>,
+<code>net.pressure_entries</code>, <code>net.pressure_refused</code>,
+<code>net.pressure_refused_clients</code>, <code>net.pressure_deferred_replenish</code>,
+<code>fs.pressure_refused</code>, and <code>fs.pressure_refused_clients</code>. A single
+syscall (<code>F_QUERY_ADMISSION_STATS</code>) reports availability, reservations, floors,
+and watermarks in one call. See <a href="diagnostics.html">Logs and diagnostics</a> for
+how to read metrics.</p>
+
+<h2>Deliberately not built</h2>
+<ul>
+  <li>An OOM killer, or any recovery class that may allocate the pool to zero.</li>
+  <li>Exact per-process attribution of page tables and shared kernel objects.</li>
+  <li>A configurable kernel reserve.</li>
+  <li>Retrying refused allocations. An actual allocator failure is always a defect in a
+  charge or in a bounded-work assumption, and production code must not paper over it with
+  a retry or a longer timeout.</li>
+</ul>
+<p>The full argument, including the measurements that validated the floors, is in
+<code>docs/oom-handling.md</code> in the repository.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>What is Motor OS</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building Motor OS</a>
+<a class="pager-prev" href="processes.html"><span>Previous</span>Processes and roles</a>
+<a class="pager-next" href="filesystem.html"><span>Next</span>Filesystem</a>
 </nav>
 </article>
 </main>
