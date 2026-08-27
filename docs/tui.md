@@ -12,7 +12,8 @@ providers are:
 - **`russhd`**, for SSH sessions in which the client requested a pty. Its size
   comes from the SSH client, in `pty-req` at the start and `window-change`
   afterwards. A session without `pty-req` — plain `ssh host command` — is not a
-  terminal, gets no terminal flag, and its bytes pass through untouched.
+  terminal, gets no terminal flag, and preserves stdout and stderr as separate
+  SSH streams. Their bytes pass through untouched.
 - **`rmux`**, which emulates a terminal for each pane, sized by the geometry it
   computes for that pane.
 

@@ -240,7 +240,7 @@ images use their shipped `/devtools`, while standard-image uploads use
 absent. The standard root is reachable by None-role test children because
 every component grants None traversal; `/user/cfg` would not be suitable.
 
-## Limits and follow-up work
+## Runtime behavior and remaining limits
 
 - Runtime-created regular files start `rw-` for their creator, `rwx` for
   higher roles, and `r--` for lower roles. Directories start `rwx` for the
