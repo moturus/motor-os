@@ -697,8 +697,9 @@ The complete list of deletions in `build-motor-os.sh` today:
   plus a comment instructing the user to `rm -rf build-motor-native` when the
   sysroot's set of archives changes;
 - `llvm_stage_image` and `rustc_stage_image`: the generated image roots
-  `img_files/generated/{llvm,libc,rustc}` and the legacy
-  `img_files/motor-os/devtools/rust`; `build_ripgrep`: `img_files/generated/rg`.
+  `$MOTORH/assemblies/<assembly-key>/images/{llvm,libc,rustc}` and the former
+  unkeyed Rust overlay; `build_ripgrep`:
+  `$MOTORH/assemblies/<assembly-key>/images/rg`.
 
 The replacement is not to reuse incompatible artifacts. Reusable directories
 are keyed by a digest of the inputs that determine them (section 5.5). An

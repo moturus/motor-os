@@ -36,6 +36,7 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
 "$WD/test-toolchain-assembly.sh"
+"$WD/test-toolchain-assembly-selection.sh"
 "$WD/test-toolchain-authoring-sources.sh"
 "$WD/test-toolchain-bootstrap.sh"
 "$WD/test-toolchain-cutover.sh"

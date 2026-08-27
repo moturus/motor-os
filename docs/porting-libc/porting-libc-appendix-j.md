@@ -39,10 +39,10 @@ milestone:
 | # | Piece | Where |
 |---|---|---|
 | 1 | Cross build dir for native tools (clang+lld, X86-only, multicall) | `~/motorh/llvm-project/build-motor-native` |
-| 2 | `llvm` multicall binary (static-PIE, stripped) staged | `img_files/generated/llvm/devtools/llvm/bin/llvm` |
-| 3 | On-image sysroot: mlibc + C++ headers, crt1.o, all archives, clang resource headers | `img_files/generated/llvm/devtools/llvm/{include,lib}` |
-| 4 | Driver config file for native use | `img_files/generated/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg` |
-| 5 | `hello.c` (+ `hello.cpp` secondary) staged as compile fodder | `img_files/generated/llvm/devtools/src/` |
+| 2 | `llvm` multicall binary (static-PIE, stripped) staged | `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/llvm/bin/llvm` |
+| 3 | On-image sysroot: mlibc + C++ headers, crt1.o, all archives, clang resource headers | `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/llvm/{include,lib}` |
+| 4 | Driver config file for native use | `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg` |
+| 5 | `hello.c` (+ `hello.cpp` secondary) staged as compile fodder | `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/src/` |
 | 6 | LLVM patch #7 (`getMainExecutable` for `__motor__`) | llvm-project branch `motor` |
 | 7 | This appendix updated with pitfalls + final sizes | docs |
 
@@ -187,8 +187,8 @@ builtins 0.2 MB, clang resource headers ~3 MB.
 2. Configure + build `build-motor-native` (J.4): `LLVM_ENABLE_PROJECTS=
    "clang;lld"`, multicall driver ON, X86 only, everything optional OFF.
 3. Strip and stage `bin/llvm`; stage the on-image sysroot under
-   `img_files/generated/llvm/devtools/llvm/` and the cfg under
-   `img_files/generated/llvm/devtools/cfg/llvm/`
+   `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/llvm/` and the cfg
+   under its sibling `devtools/cfg/llvm/` directory
    (J.6). Note this **breaks the "never had /usr on the image" seal** the
    same way M7 added `/etc` — same mechanism, `img_files` passthrough.
 4. Gate test in the VM (J.7): two commands + run the output.
@@ -324,7 +324,7 @@ ownership-based paths directly. `/user/tmp` is application scratch, while the
 compiler launchers force private intermediates into `/devtools/tmp`.
 
 ```
-img_files/generated/llvm/
+$MOTORH/assemblies/<assembly-key>/images/llvm/
   devtools/bin/{cc,c++,lua}     # PATH launchers and native Lua
   devtools/cfg/llvm/x86_64-unknown-motor.cfg
   devtools/llvm/bin/llvm        # multicall clang+lld, stripped, static-PIE
@@ -332,7 +332,7 @@ img_files/generated/llvm/
   devtools/llvm/lib/...         # CRT, libraries, and resource headers
   devtools/src/hello.{c,cpp}
 
-img_files/generated/libc/
+$MOTORH/assemblies/<assembly-key>/images/libc/
   system/cfg/libc/...           # hosts, resolver/services, and shells
 ```
 

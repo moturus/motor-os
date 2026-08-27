@@ -211,10 +211,11 @@ grow modestly (currently 2.1M + 544K pre-strip). The rebuilt native
    audit (`no PT_TLS`, RELATIVE-only relocs — LSDA/typeinfo pointers land
    as `R_X86_64_RELATIVE` in `.data.rel.ro`), stage as `bin/m10`.
 6. Rebuild the native multicall `llvm` (`ninja -C build-motor-native
-   llvm`), **verify freshness before staging** (`[ build-motor-native/bin/
-   llvm -nt img_files/.../devtools/llvm/bin/llvm ]` — we staged stale binaries twice at
-   M9), strip, stage.
-7. Stage: new stripped archives into `img_files/generated/llvm/devtools/llvm/lib/`
+   llvm`), **verify freshness before staging** against the keyed assembly's
+   `images/llvm/devtools/llvm/bin/llvm` — we staged stale binaries twice at M9.
+   Then strip and stage.
+7. Stage: new stripped archives into the keyed LLVM overlay's
+   `devtools/llvm/lib/`
    (libc++.a, libc++abi.a, **libunwind.a**), cfg without
    `-fno-exceptions`, `m10.cpp` at `usr/src/m10.cpp`, `bin/m10`.
 8. User runs the K.8 VM gate. Debug loop as usual (kernel
@@ -355,8 +356,9 @@ findings beyond the recipe fixes already folded into K.4:
 
 Not patches, but coupled config changes:
 
-- `img_files/generated/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg`: delete the
-  `-fno-exceptions` line + its comment block.
+- In the keyed LLVM overlay's
+  `devtools/cfg/llvm/x86_64-unknown-motor.cfg`, delete the `-fno-exceptions`
+  line and its comment block.
 - Host cfg (`build/bin/x86_64-unknown-motor.cfg`, appendix A.5 is source
   of truth) never had `-fno-exceptions` — **no change**; the M8-era
   *recipes* passed it per-command, and K.6 simply stops doing that.
@@ -455,7 +457,7 @@ Audit before staging, as always: `llvm-readelf -l` → no `PT_TLS`;
 
 ## K.7 Image staging
 
-Generated toolchain files live under `img_files/generated/llvm/`; native
+Generated toolchain files live under `$MOTORH/assemblies/<assembly-key>/images/llvm/`; native
 compile fixtures live in the development image overlay:
 
 | Path on image | Source | Notes |

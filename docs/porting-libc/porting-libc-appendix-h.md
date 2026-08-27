@@ -50,7 +50,7 @@ All facts below verified against the in-tree VDSO/moto-rt and mlibc `368a00fa`.
 | 4 | Sysdeps: `Sigaction`, `Sigprocmask`, `Kill`, `GetPid` | `sysdeps/motor/generic/signals.cpp` (new) |
 | 5 | Listener arming for poll + blocking-`accept` emulation | `socket.cpp` |
 | 6 | `m7.c` — poll/select/signal/format regression test | `src/tests/libc/` |
-| 7 | Lua 5.4 built, staged, passing an acceptance script | `img_files/generated/llvm/devtools/bin/lua`; `img_files/motor-os-dev/devtools/tests/m7.lua` |
+| 7 | Lua 5.4 built, staged, passing an acceptance script | `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/bin/lua`; `img_files/motor-os-dev/devtools/tests/m7.lua` |
 
 ## H.2 Ground truth: Motor's poll API
 
@@ -425,7 +425,7 @@ via `moto_rt_is_terminal`) and `sigaction`-based SIGINT setup (our new sysdep).
 If it drags in something unexpected, fall back to the plain ANSI build
 (`lua_stdin_is_tty()` hardcodes 1 — fine on the console). Run the usual audit:
 no `PT_TLS`, 0 non-RELATIVE relocs. Stage the executable as
-`img_files/generated/llvm/devtools/bin/lua` and the acceptance script as
+`$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/bin/lua` and the acceptance script as
 `img_files/motor-os-dev/devtools/tests/m7.lua`.
 
 ### Acceptance script `m7.lua` (staged next to the binary)
@@ -533,7 +533,7 @@ Order: (1) VDSO hardening + shim v6 → rebuild vdso + cabi, reinstall
 `meson.build` → `ninja && DESTDIR=$SYSROOT ninja install`; (3) `m7.c` build +
 relink m2–m6 against the fresh `libc.a`; (4) Lua build; (5) stage `m7` and
 `m7.lua` in `img_files/motor-os-dev/devtools/tests/`, and stage `lua` in
-`img_files/generated/llvm/devtools/bin/`; user runs `make dev.img` + VM.
+`$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/bin/`; user runs `make dev.img` + VM.
 
 Exit criteria — all on Motor OS in a VM, user-run:
 
@@ -550,7 +550,7 @@ Exit criteria — all on Motor OS in a VM, user-run:
 - [~] (Optional) `m7 dns <name>` — **deferred, environmental**: the host has
       no external connectivity right now (`ping 8.8.8.8` fails on the host),
       so the VM can't reach any resolver. The pieces are in place for later:
-      `img_files/generated/libc/system/cfg/libc/resolv.conf` staged (nameserver 8.8.8.8; only
+      `$MOTORH/assemblies/<assembly-key>/images/libc/system/cfg/libc/resolv.conf` staged (nameserver 8.8.8.8; only
       the first line is honored — see the H.8 inventory of mlibc's hardcoded
       `/etc` paths, added after `m7 dns google.com` hit "could not resolve
       DNS service" on an image with no `/etc` at all). Re-run when the host

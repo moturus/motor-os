@@ -124,10 +124,6 @@ CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
 TARGET=x86_64-unknown-motor
-LLVM_IMG="$MOTOR/img_files/generated/llvm"
-RUSTC_IMG="$MOTOR/img_files/generated/rustc"
-RG_IMG="$MOTOR/img_files/generated/rg"
-LIBC_IMG="$MOTOR/img_files/generated/libc"
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
 
 prepare_exact_sources() {
@@ -237,7 +233,7 @@ CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 
 # ============================================================================
 # LLVM stage: the Motor OS native LLVM/Clang toolchain, the C/C++ sysroot
-# (mlibc + libc++ stack), and Lua, staged into img_files/generated/llvm.
+# (mlibc + libc++ stack), and Lua, staged into the assembly image root.
 # See docs/build-llvm.md for the prose walkthrough behind each numbered stage.
 # ============================================================================
 
@@ -568,7 +564,7 @@ build_lua() {
 
 # --- stage 8: stage the C/C++ toolchain into the image ----------------------
 llvm_stage_image() {
-	log "stage 8: staging the toolchain, sysroot, and Lua into img_files/generated/llvm"
+	log "stage 8: staging the toolchain, sysroot, and Lua into the assembly image root"
 	local img="$LLVM_IMG"
 	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
 		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
@@ -697,7 +693,7 @@ EOF
 
 # --- stage rustc + the Rust sysroot into the image ----------------------------
 rustc_stage_image() {
-	log "staging rustc and the Rust sysroot into img_files/generated/rustc"
+	log "staging rustc and the Rust sysroot into the assembly image root"
 	[ ! -e "$RUSTC_IMG" ] ||
 		die "Rust image staging already exists without validated reuse: $RUSTC_IMG"
 	local rust_img="$RUSTC_IMG/devtools/rust"
@@ -836,6 +832,7 @@ main() {
 	else
 		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
 	fi
+	"$MOTOR/src/select-toolchain-assembly.sh" --pin "$ASSEMBLY_ROOT"
 
 	# The tracked selector is deliberately added only by the separately gated
 	# cutover patch after a clean managed provision and the full core test gate.
@@ -843,7 +840,6 @@ main() {
 		log "exact host and native artifacts are ready; root selector cutover remains gated"
 		return 0
 	fi
-	export MOTOR_GENERATED_IMAGE_ROOT="$ASSEMBLY_IMAGE_ROOT"
 	log "building Motor OS and all images with $MOTOR_RUSTUP_TOOLCHAIN"
 	build_images
 

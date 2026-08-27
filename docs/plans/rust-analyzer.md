@@ -89,8 +89,8 @@ The initial series does not:
 ```text
 HOST=x86_64-unknown-linux-gnu
 TARGET=x86_64-unknown-motor
-LLVM_IMG=img_files/generated/llvm
-RUSTC_IMG=img_files/generated/rustc
+LLVM_IMG=$MOTORH/assemblies/<assembly-key>/images/llvm
+RUSTC_IMG=$MOTORH/assemblies/<assembly-key>/images/rustc
 ```
 
 The relevant pipeline is:
@@ -102,7 +102,7 @@ The relevant pipeline is:
 4. In one final `x.py` invocation, build Clippy and the standard libraries for
    both Motor and Linux.
 5. Stage stripped rustc plus Motor `.rlib`, `.rmeta`, and self-contained
-   runtime files into `img_files/generated/rustc`.
+   runtime files into `$MOTORH/assemblies/<assembly-key>/images/rustc`.
 
 The single final `x.py` invocation is load-bearing. Rust bootstrap removes the
 whole Stage 2 sysroot at the start of later sysroot builds. A separate
@@ -320,7 +320,7 @@ they must not silently download dependencies.
 Stage only into a new root, for example:
 
 ```text
-img_files/generated/rust-analyzer/
+$MOTORH/assemblies/<assembly-key>/images/rust-analyzer/
   devtools/rust/bin/rust-analyzer
   devtools/rust/lib/rustlib/src/rust/library/...
 ```

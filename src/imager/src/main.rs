@@ -45,6 +45,10 @@ struct Config {
     #[serde(default)]
     required_executables: Vec<String>,
     #[serde(default)]
+    assembly_dirs: Vec<String>,
+    #[serde(default)]
+    assembly_required_executables: Vec<String>,
+    #[serde(default)]
     source_dirs: Vec<SourceDirectory>,
     filesystem: String,
     data_partition_size_mb: u64,
@@ -549,32 +553,55 @@ fn validate_static_dirs(motorh: &Path, static_dirs: &[String]) -> Result<(), Str
     Ok(())
 }
 
-fn use_generated_image_root(config: &mut Config, root: &Path) -> Result<(), String> {
+fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(), String> {
+    if config.assembly_dirs.is_empty() && config.assembly_required_executables.is_empty() {
+        return Ok(());
+    }
+    let root = root.ok_or_else(|| {
+        "image configuration requires an assembly; run src/select-toolchain-assembly.sh --resolve"
+            .to_owned()
+    })?;
     let mut components = root.components();
     if components.next() != Some(Component::RootDir)
         || components.any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(format!(
-            "generated image root '{}' must be a normalized absolute path",
+            "assembly image root '{}' must be a normalized absolute path",
             root.display()
         ));
     }
 
-    for configured_path in config
-        .static_dirs
-        .iter_mut()
-        .chain(config.required_executables.iter_mut())
-    {
-        let path = Path::new(configured_path);
-        let Ok(suffix) = path.strip_prefix("img_files/generated") else {
-            continue;
-        };
-        let replacement = root.join(suffix);
-        *configured_path = replacement
+    fn resolve(root: &Path, relative: &str) -> Result<String, String> {
+        if relative.is_empty()
+            || relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(format!(
+                "assembly input '{relative}' must be a normalized relative path"
+            ));
+        }
+        root.join(relative)
             .to_str()
-            .ok_or_else(|| "generated image root is not valid UTF-8".to_owned())?
-            .to_owned();
+            .map(str::to_owned)
+            .ok_or_else(|| "assembly image input is not valid UTF-8".to_owned())
     }
+
+    config.static_dirs.extend(
+        config
+            .assembly_dirs
+            .iter()
+            .map(|path| resolve(root, path))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    config.required_executables.extend(
+        config
+            .assembly_required_executables
+            .iter()
+            .map(|path| resolve(root, path))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     Ok(())
 }
 
@@ -651,10 +678,9 @@ fn main() {
     let config_file = File::open(config_path).expect("Failed to open config file");
     let mut config: Config =
         serde_yaml::from_reader(config_file).expect("Failed to parse config file");
-    if let Some(root) = std::env::var_os("MOTOR_GENERATED_IMAGE_ROOT") {
-        use_generated_image_root(&mut config, Path::new(&root))
-            .unwrap_or_else(|err| panic!("MOTOR_GENERATED_IMAGE_ROOT: {err}"));
-    }
+    let assembly_root = std::env::var_os("MOTOR_ASSEMBLY_IMAGE_ROOT");
+    use_assembly_image_root(&mut config, assembly_root.as_deref().map(Path::new))
+        .unwrap_or_else(|err| panic!("MOTOR_ASSEMBLY_IMAGE_ROOT: {err}"));
     validate_directories(&config.directories).unwrap_or_else(|err| panic!("{err}"));
     validate_static_dirs(motorh, &config.static_dirs).unwrap_or_else(|err| panic!("{err}"));
     let policy = permissions::PermissionPolicy::load(config_path, &config.permission_policy)
@@ -771,17 +797,10 @@ mod tests {
         assert_eq!(config.data_partition_size_mb, 256);
         assert_eq!(
             config.static_dirs,
-            [
-                "img_files/motor-os-base",
-                "img_files/motor-os",
-                "img_files/generated/libc",
-                "img_files/generated/rg"
-            ]
+            ["img_files/motor-os-base", "img_files/motor-os"]
         );
-        assert_eq!(
-            config.required_executables,
-            ["img_files/generated/rg/system/bin/rg"]
-        );
+        assert_eq!(config.assembly_dirs, ["libc", "rg"]);
+        assert_eq!(config.assembly_required_executables, ["rg/system/bin/rg"]);
         assert!(config
             .directories
             .iter()
@@ -821,20 +840,17 @@ mod tests {
             [
                 "img_files/motor-os-base",
                 "img_files/motor-os",
-                "img_files/generated/libc",
-                "img_files/generated/rg",
-                "img_files/motor-os-dev",
-                "img_files/generated/llvm",
-                "img_files/generated/rustc"
+                "img_files/motor-os-dev"
             ]
         );
-        assert_eq!(config.required_executables.len(), 6);
+        assert_eq!(config.assembly_dirs, ["libc", "rg", "llvm", "rustc"]);
+        assert_eq!(config.assembly_required_executables.len(), 6);
         assert!(config
-            .required_executables
+            .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rustc")));
         assert!(config
-            .required_executables
+            .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rg")));
         assert!(config
@@ -914,10 +930,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_image_root_replaces_only_generated_inputs() {
+    fn assembly_image_root_resolves_only_assembly_inputs() {
         let mut config: Config =
             serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
-        use_generated_image_root(&mut config, Path::new("/assemblies/exact/images")).unwrap();
+        use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images"))).unwrap();
 
         assert!(config
             .static_dirs
@@ -931,8 +947,27 @@ mod tests {
             .static_dirs
             .iter()
             .any(|path| path == "img_files/motor-os-dev"));
-        assert!(use_generated_image_root(&mut config, Path::new("relative/images")).is_err());
-        assert!(use_generated_image_root(&mut config, Path::new("/images/../other")).is_err());
+        assert!(use_assembly_image_root(&mut config, Some(Path::new("relative/images"))).is_err());
+        assert!(use_assembly_image_root(&mut config, Some(Path::new("/images/../other"))).is_err());
+    }
+
+    #[test]
+    fn assembly_inputs_require_a_root_and_normalized_relative_paths() {
+        let mut config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+        assert!(use_assembly_image_root(&mut config, None).is_err());
+        for invalid in ["", "/rg", "rg//bin", "rg/../bin", "rg/./bin"] {
+            let mut config: Config =
+                serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+            config.assembly_dirs = vec![invalid.to_owned()];
+            assert!(
+                use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images")))
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+
+        let mut base: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
+        assert!(use_assembly_image_root(&mut base, None).is_ok());
     }
 
     #[test]

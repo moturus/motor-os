@@ -157,6 +157,18 @@ The manifests record declared and effective Rust/LLVM revisions, Cargo
 identity, Stage 0, lock hashes, runtime identities, source state, both keys,
 and hashes of the native compiler and sysroot products.
 
+The build also pins its validated assembly for later commands in this checkout.
+Inspect or change that host-local selection with:
+
+```sh
+src/select-toolchain-assembly.sh --show
+src/select-toolchain-assembly.sh --list
+src/select-toolchain-assembly.sh --pin ASSEMBLY_KEY
+```
+
+See [Selecting a toolchain assembly](assembly-selection.md) for discovery,
+validation, noninteractive behavior, and recovery details.
+
 ## Re-running and failures
 
 Re-run the same command after a failure. A completed matching prefix or

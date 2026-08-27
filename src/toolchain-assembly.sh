@@ -96,14 +96,19 @@ toolchain_assembly_key() {
 		native_configuration_digest "$NATIVE_CONFIGURATION_DIGEST"
 }
 
-toolchain_derive_assembly_identity() {
-	local root="$1" mlibc="$2" cargo="$3" closure content lock_state
+toolchain_derive_runtime_identity() {
+	local root="$1" cargo="$2" closure content lock_state
 	closure="$(toolchain_runtime_closure "$cargo" "$root")" || return
 	content="$(toolchain_content_tree_digest "$root" \
 		"${MOTOR_OS_RUNTIME_INPUTS[@]}")" || return
 	lock_state="$(toolchain_selected_lock_digest "$root/src/sys/Cargo.lock")" || return
 	MOTOR_OS_RUNTIME_TREE="$(toolchain_hash_pairs schema motor-os-runtime-v1 \
 		closure "$closure" content "$content" selected_lock "$lock_state")"
+}
+
+toolchain_derive_assembly_identity() {
+	local root="$1" mlibc="$2" cargo="$3"
+	toolchain_derive_runtime_identity "$root" "$cargo" || return
 	MOTOR_OS_REV="$(git -C "$root" rev-parse HEAD)" || return
 	MOTOR_MLIBC_TREE_STATE="$(toolchain_worktree_digest "$mlibc" mlibc)" || return
 	if [ -n "$(git -C "$root" status --porcelain=v1 -- \
@@ -117,6 +122,29 @@ toolchain_derive_assembly_identity() {
 	ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
 	ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
 	ASSEMBLY_IMAGE_ROOT="$ASSEMBLY_ROOT/images"
+}
+
+# Derive the only assembly compatible with an ordinary checkout build. Managed
+# mlibc inputs are immutable at the declared revision; a dirty mlibc checkout
+# is accepted only by the producer path above and never by a later consumer.
+toolchain_derive_consumed_assembly_identity() {
+	local root="$1" cargo="$2" toolchain_key="$3"
+	MOTOR_TOOLCHAIN_KEY="$toolchain_key"
+	MOTOR_MLIBC_TREE_STATE=clean
+	toolchain_derive_runtime_identity "$root" "$cargo" || return
+	NATIVE_CONFIGURATION_DIGEST="$(toolchain_native_configuration_digest)"
+	MOTOR_ASSEMBLY_KEY="$(toolchain_assembly_key)"
+}
+
+toolchain_manifest_value() {
+	local manifest="$1" wanted="$2"
+	awk -v wanted="$wanted" '
+		index($0, wanted "=") == 1 {
+			print substr($0, length(wanted) + 2)
+			found++
+		}
+		END { if (found != 1) exit 1 }
+	' "$manifest"
 }
 
 toolchain_validate_assembly_outputs() {
@@ -191,6 +219,101 @@ toolchain_generated_manifest_paths() {
 		printf '%s/%s\n' "$ASSEMBLY_IMAGE_ROOT/$root" devtools/toolchain/manifest
 	done
 }
+
+# Validate an immutable assembly without needing the Rust/LLVM authoring
+# checkouts used by its producer. The expected identity globals are populated
+# by toolchain_derive_consumed_assembly_identity.
+toolchain_validate_consumed_assembly() (
+	set -euo pipefail
+	local root="$1" manifest image_manifest field expected actual path
+	local -a fields expected_values hash_fields hash_paths
+	case "$root" in /*) ;; *) toolchain_die "assembly root is not absolute: $root"; exit 1 ;; esac
+	[[ "$root" != *$'\n'* ]] || {
+		toolchain_die "assembly root contains a newline"
+		exit 1
+	}
+	[ ! -L "$root" ] && [ -d "$root" ] &&
+		[ "$(readlink -f "$root")" = "$root" ] || {
+		toolchain_die "assembly root is absent, linked, or non-canonical: $root"
+		exit 1
+	}
+	[ ! -e "${root}.building" ] || {
+		toolchain_die "assembly has an active or abandoned producer lock: ${root}.building"
+		exit 1
+	}
+	[ ! -e "$root/MOTOR-ASSEMBLY-REJECTED" ] || {
+		toolchain_die "assembly is rejected: $root"
+		exit 1
+	}
+	[ "${root##*/}" = "$MOTOR_ASSEMBLY_KEY" ] || {
+		toolchain_die "assembly directory does not match the expected key: $root"
+		exit 1
+	}
+
+	ASSEMBLY_ROOT="$root"
+	ASSEMBLY_SYSROOT="$root/sysroot"
+	ASSEMBLY_IMAGE_ROOT="$root/images"
+	manifest="$root/MOTOR-ASSEMBLY-MANIFEST"
+	[ -f "$manifest" ] && [ ! -L "$manifest" ] || {
+		toolchain_die "assembly manifest is absent or linked: $manifest"
+		exit 1
+	}
+	[ "$(stat -c %a "$manifest")" = 444 ] || {
+		toolchain_die "assembly manifest is writable: $manifest"
+		exit 1
+	}
+
+	fields=(schema toolchain_key assembly_key motor_os_runtime_tree mlibc_rev
+		mlibc_tree_state local_moto_rt_version native_configuration_digest)
+	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
+		"$MOTOR_ASSEMBLY_KEY" "$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean
+		"$LOCAL_MOTO_RT_VERSION" "$NATIVE_CONFIGURATION_DIGEST")
+	for ((field = 0; field < ${#fields[@]}; field++)); do
+		expected="${expected_values[$field]}"
+		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {
+			toolchain_die "assembly manifest lacks one unique ${fields[$field]} field: $manifest"
+			exit 1
+		}
+		[ "$actual" = "$expected" ] || {
+			toolchain_die "assembly manifest ${fields[$field]} is '$actual', expected '$expected'"
+			exit 1
+		}
+	done
+
+	toolchain_validate_assembly_outputs || exit
+	hash_fields=(native_rustc_sha256 native_llvm_sha256 ripgrep_sha256
+		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
+	hash_paths=(
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
+		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
+		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
+		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
+	)
+	for ((field = 0; field < ${#hash_fields[@]}; field++)); do
+		path="${hash_paths[$field]}"
+		expected="$(toolchain_manifest_value "$manifest" "${hash_fields[$field]}")" || {
+			toolchain_die "assembly manifest lacks one unique ${hash_fields[$field]} field"
+			exit 1
+		}
+		actual="$(sha256sum "$path" | awk '{print $1}')"
+		[ "$actual" = "$expected" ] || {
+			toolchain_die "assembly output digest does not match: $path"
+			exit 1
+		}
+	done
+
+	while IFS= read -r image_manifest; do
+		[ -f "$image_manifest" ] && [ ! -L "$image_manifest" ] &&
+			[ "$(stat -c %a "$image_manifest")" = 444 ] &&
+			cmp -s "$manifest" "$image_manifest" || {
+			toolchain_die "assembly overlay manifest does not match: $image_manifest"
+			exit 1
+		}
+	done < <(toolchain_generated_manifest_paths)
+)
 
 toolchain_validate_assembly_manifest() {
 	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" expected image_manifest

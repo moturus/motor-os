@@ -28,10 +28,11 @@ directories:
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/motor-os"
-  - "img_files/generated/libc"
-  - "img_files/generated/rg"
-required_executables:
-  - "img_files/generated/rg/system/bin/rg"
+assembly_dirs:
+  - "libc"
+  - "rg"
+assembly_required_executables:
+  - "rg/system/bin/rg"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"
 image_format: "qcow2"

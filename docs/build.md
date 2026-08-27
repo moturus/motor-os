@@ -43,6 +43,8 @@ For the source layout, authoring mode, generated manifests, and update policy,
 see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and
 native Rust components are described in [build-llvm.md](build-llvm.md) and
 [build-rustc.md](build-rustc.md); they are not separate build entry points.
+Persistent host selection and recovery commands are documented in
+[Selecting a toolchain assembly](assembly-selection.md).
 
 ## Run Motor OS
 
