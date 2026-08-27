@@ -188,6 +188,19 @@ struct Attached {
 /// user wants is on it and shallow enough that nothing has to prune it.
 const BUFFERS: usize = 10;
 
+/// Observe an asynchronous shell-to-command pty handoff without polling while
+/// rmux is otherwise idle. The backoff keeps an Enter on a builtin cheap; the
+/// bound keeps it finite when no process-group change will happen at all.
+const FOREGROUND_HANDOFF_FIRST: Duration = Duration::from_millis(20);
+const FOREGROUND_HANDOFF_MAX: Duration = Duration::from_millis(250);
+const FOREGROUND_HANDOFF_LIMIT: Duration = Duration::from_secs(2);
+
+struct Retitle {
+    at: Instant,
+    until: Instant,
+    delay: Duration,
+}
+
 pub struct Server {
     sessions: Sessions,
     clients: Vec<Attached>,
@@ -209,6 +222,10 @@ pub struct Server {
     /// The writer threads of clients that have left the list, still owing the
     /// wire whatever was last queued for them. See [`Server::run`].
     farewells: Vec<JoinHandle<()>>,
+    /// A bounded series of name checks after a line enters a pane. A pty echoes
+    /// Enter before a shell hands it to the command, and a silent command sends
+    /// no output event on which to notice that later transition.
+    retitle: Option<Retitle>,
     /// When a client first had a half-arrived key sequence in hand, so that
     /// `ESCAPE_TIME` is measured against a clock rather than against however
     /// many times a wait happened to return. See [`Server::run`].
@@ -236,6 +253,7 @@ impl Server {
             ever_had_a_session: false,
             ever_had_a_client: false,
             farewells: Vec::new(),
+            retitle: None,
             greeting: (!complaints.is_empty())
                 .then(|| format!("rmux.toml: {}", complaints.join("; "))),
         }
@@ -266,12 +284,26 @@ impl Server {
     /// waiting for company that is never coming.
     pub fn run(&mut self, queue: Receiver<Event>) {
         loop {
-            // This blocks, and an idle server costs nothing at all. Nothing here
-            // is on a clock any more: a key arrives decoded, so the `escape-time`
-            // that used to hold a half-arrived sequence is spent in the client's
-            // terminal layer, where the bytes are (`keys`).
-            let Ok(mut event) = queue.recv() else {
-                break;
+            // This blocks, and an idle server costs nothing at all. The only
+            // deadlines are the bounded foreground-command checks armed by
+            // Enter; key decoding's `escape-time` lives in the client terminal
+            // layer, where the bytes are (`keys`).
+            let mut event = match self.retitle.as_ref().map(|retitle| retitle.at) {
+                Some(at) => {
+                    match queue.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                        Ok(event) => event,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            self.poll_foreground_handoff();
+                            self.render();
+                            continue;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                None => match queue.recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
             };
             loop {
                 self.handle(event);
@@ -281,7 +313,9 @@ impl Server {
                 }
             }
 
-            self.track_titles();
+            if self.track_titles() {
+                self.retitle = None;
+            }
             self.track_copy();
             self.render();
             let nothing_to_serve = self.sessions.is_empty()
@@ -355,7 +389,8 @@ impl Server {
                 }
             }
             // A window's name follows what is running in it until a user says
-            // otherwise (`window`), and its title arrives as output.
+            // otherwise (`window`). Its explicit title arrives as output and
+            // its foreground command is read from the pane's terminal.
             Event::Drained { pane } => {
                 let code = self
                     .sessions
@@ -589,6 +624,19 @@ impl Server {
             && let Some(pane) = self.sessions.get_mut(session).and_then(Session::pane_mut)
         {
             let _ = pane.write(bytes);
+            if crate::sys::HAS_FOREGROUND_COMMAND
+                && bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+            {
+                // Observe the shell transferring the pty's foreground process
+                // group. The checks stop at the transition or their bound;
+                // they are not an idle status clock.
+                let now = Instant::now();
+                self.retitle = Some(Retitle {
+                    at: now + FOREGROUND_HANDOFF_FIRST,
+                    until: now + FOREGROUND_HANDOFF_LIMIT,
+                    delay: FOREGROUND_HANDOFF_FIRST,
+                });
+            }
         }
     }
 
@@ -1154,13 +1202,32 @@ impl Server {
     }
 
     /// Let every window's name catch up with what is running in it, which is
-    /// what the status line shows (`window`, §5.2's OSC 0/2).
-    fn track_titles(&mut self) {
+    /// what the status line shows (`window`).
+    fn track_titles(&mut self) -> bool {
+        let mut changed = false;
         for session in self.sessions.iter_ids() {
             if let Some(session) = self.sessions.get_mut(session) {
-                session.windows_mut().track_titles();
+                changed |= session.windows_mut().track_titles();
             }
         }
+        changed
+    }
+
+    fn poll_foreground_handoff(&mut self) {
+        let Some(mut retitle) = self.retitle.take() else {
+            return;
+        };
+        if self.track_titles() {
+            return;
+        }
+
+        let now = Instant::now();
+        if now >= retitle.until {
+            return;
+        }
+        retitle.delay = (retitle.delay * 2).min(FOREGROUND_HANDOFF_MAX);
+        retitle.at = (now + retitle.delay).min(retitle.until);
+        self.retitle = Some(retitle);
     }
 
     /// How many rows of the console rmux keeps for itself.

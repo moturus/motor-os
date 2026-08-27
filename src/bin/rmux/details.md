@@ -463,10 +463,10 @@ the only thing one process may do to another is terminate it. So:
   half regardless, and deliberately does not wait for the pane's *pumps*: a
   grandchild holding the pipes open would make that a hang (§4.5).
 - Killing a pane is `Child::kill()` — unconditional, uncatchable.
-- `Child::id()` returns 0 on Motor and `std::process::id()` *panics*
-  (`rush/src/sys/mod.rs:174`). rmux therefore keys panes by its own `PaneId`
-  allocated from a counter, and never by pid. rush learned this the same way
-  (`jobs.rs:10-22`).
+- Motor now gives both `Child::id()` and `std::process::id()` real process ids.
+  rmux still keys panes by its own `PaneId` allocated from a counter: a pane's
+  identity is local to rmux and should not inherit a kernel id's lifetime or
+  reuse semantics.
 
 ---
 
@@ -1452,10 +1452,13 @@ which the config sets, and then the list compacts. Both behaviours are one
 function apart, and confusing them means `prefix 2` silently selecting somebody
 else's shell. A new window takes the lowest free number, as tmux does.
 
-A window's name follows what runs in it — the pane's `OSC 0`/`2` title, which
-§5.2 was already collecting — until `prefix ,` takes it over for good. The flag
-that remembers a rename is the whole difference between a status line that
-tracks reality and one that argues with the user.
+A window's name follows what runs in it — an explicit `OSC 0`/`2` title, which
+§5.2 was already collecting, or the foreground command Linux exposes through
+the pane's pty and `/proc` — until `prefix ,` takes it over for good. Rush emits
+the same title transitions when it is the interactive shell in a Motor pane;
+the process tree alone cannot tell its foreground children from `command &`.
+The flag that remembers a rename is the whole difference between a status line
+that tracks reality and one that argues with the user.
 
 `prefix ,`, `prefix $` and `prefix s` are **modes**: while one is up it owns
 every key, prefix included, and nothing reaches a pane. The prompt borrows the

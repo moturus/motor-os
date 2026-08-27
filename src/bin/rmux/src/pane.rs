@@ -21,9 +21,9 @@
 //! pipes empty rather than when the child dies; a grandchild holding them open
 //! delays both, and delayed either way.
 //!
-//! Panes are keyed by [`PaneId`] from rmux's own counter, never by pid: Motor
-//! has no pid to key on here, since `Child::id()` returns 0 and
-//! `std::process::id()` panics (§3.6).
+//! Panes are keyed by [`PaneId`] from rmux's own counter, never by pid. Motor
+//! has real process ids now, but a pane's identity belongs to rmux: it must not
+//! be coupled to a kernel id's lifetime or reuse (§3.6).
 //!
 //! **Writing has a thread of its own too**, and the platforms want it for
 //! opposite reasons. A pane's input on Motor is a 2 KiB ring that blocks its
@@ -90,6 +90,9 @@ pub struct Pane {
     /// How to tell the child's terminal it has changed size, where the platform
     /// has a way to say so (`sys::TellSize`).
     tell_size: crate::sys::TellSize,
+    /// How to identify the program currently holding the terminal, where the
+    /// platform exposes that information (`sys::ForegroundCommand`).
+    foreground_command: crate::sys::ForegroundCommand,
     child: Child,
     /// Kept so [`Pane::join`] can wait for it. An `Option` because [`Drop`] and
     /// a method that consumes `self` cannot both move it — and `Drop` must not
@@ -136,6 +139,7 @@ impl Pane {
             parser: Parser::new(),
             grid,
             tell_size: io.tell_size,
+            foreground_command: io.foreground_command,
             child: io.child,
             reaper: Some(reaper),
             collected: false,
@@ -154,6 +158,11 @@ impl Pane {
     /// What this pane's child has painted.
     pub fn grid(&self) -> &Grid {
         &self.grid
+    }
+
+    /// The executable currently in the terminal's foreground process group.
+    pub fn foreground_command(&mut self) -> Option<String> {
+        (self.foreground_command)()
     }
 
     /// Resize this pane's screen, and its child's terminal with it.

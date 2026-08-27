@@ -89,8 +89,9 @@ quietly fixed or quietly introduced.
   geometric pane selection, zoom, and kill. Geometry is a function of the tree
   rather than stored, so a pane's box cannot drift out of step with it.
 - **Windows**: new, next, previous, select by number, rename, kill, and
-  `renumber-windows`. A window's name follows the `OSC 0`/`2` title of what is
-  running in it until a rename takes it over.
+  `renumber-windows`. A window's name follows an explicit `OSC 0`/`2` title or,
+  on Linux, the foreground command until a rename takes it over. Rush emits
+  those titles for foreground commands in Motor panes.
 - **Sessions**: real and multiple, named or auto-numbered, with detach and
   re-attach, `prefix-(`/`)` to move between them and `prefix-s` to pick from a
   list. `aggressive-resize` sizes a window to the smallest client watching it.

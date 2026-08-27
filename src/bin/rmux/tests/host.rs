@@ -1156,6 +1156,47 @@ fn an_outer_terminal_title_hook_does_not_rename_a_bash_window() {
 }
 
 #[test]
+fn a_bash_window_follows_its_foreground_command() {
+    let dir = private_tmpdir();
+    std::fs::create_dir_all(dir.join(".config")).unwrap();
+    std::fs::write(dir.join(".config/rmux.toml"), "default-shell = \"bash\"\n").unwrap();
+    std::fs::write(dir.join(".bashrc"), "PS1='rmux-test$ '\n").unwrap();
+
+    let mut pty = Pty::spawn(&dir, &[]);
+    assert!(pty.wait_for(PROMPT), "no Bash prompt: {:?}", pty.seen);
+    pty.send(b"sleep 30\r");
+    if !pty.wait_painted("0:sleep*") {
+        let processes = Command::new("ps")
+            .args(["-eo", "pid,ppid,pgrp,sid,tpgid,etimes,stat,args"])
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| {
+                        line.contains("target/debug/rmux")
+                            || line.contains(" bash")
+                            || line.contains("sleep 30")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|error| format!("ps failed: {error}"));
+        panic!(
+            "the foreground command did not rename the window:\n{}\nprocesses:\n{}",
+            pty.picture(),
+            processes
+        );
+    }
+
+    pty.send(b"\x03");
+    assert!(
+        pty.wait_painted("0:bash*"),
+        "the shell did not take its window name back:\n{}",
+        pty.picture()
+    );
+}
+
+#[test]
 fn a_session_can_be_renamed_and_the_status_line_says_so() {
     // `prefix $` (§7.3). A session's name is what `rmux attach -t` takes, so
     // this is a rename of the thing itself and not of a label.

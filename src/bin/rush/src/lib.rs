@@ -28,6 +28,7 @@ mod history;
 mod jobs;
 mod lexer;
 mod options;
+mod pane_title;
 mod parser;
 mod shell;
 mod signal;

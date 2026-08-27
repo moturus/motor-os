@@ -289,10 +289,23 @@ read_udp_socket_count() {
 
 DNS_RESOLVER_SSH_PID=""
 VMM_PID=""
+RMUX_TITLE_SSH_PID=""
+RMUX_TITLE_IN_FD=""
+RMUX_TITLE_OUT_FD=""
 
 # cleanup routine
 stop_vmm() {
   set +e
+  if [ -n "$RMUX_TITLE_IN_FD" ]; then
+    exec {RMUX_TITLE_IN_FD}>&-
+  fi
+  if [ -n "$RMUX_TITLE_OUT_FD" ]; then
+    exec {RMUX_TITLE_OUT_FD}<&-
+  fi
+  if [ -n "$RMUX_TITLE_SSH_PID" ]; then
+    kill "$RMUX_TITLE_SSH_PID" 2>/dev/null
+    wait "$RMUX_TITLE_SSH_PID" 2>/dev/null
+  fi
   stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -626,6 +639,105 @@ case "$out" in
   *$'\033'"[?1049l"*) ;;
   *) fail "rmux did not give the console back" ;;
 esac
+
+# Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
+# 2 around a foreground external command, while `command &` leaves the shell's
+# title in place. Drive a live client so this also covers rmux's launch marker,
+# OSC parser, auto-name policy, and status renderer.
+#
+# Synchronization is state-based. `ps` proves the uniquely long sleep is alive
+# before `refresh-client` forces a complete frame; an echo marker proves Rush
+# has regained control before the restored title is checked. No settling delay
+# is involved, which is important in this suite's heavily loaded TUI runs.
+RMUX_TITLE_OUTPUT=""
+coproc RMUX_TITLE_CLIENT {
+  vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-title" /user/bin/rmux 2>&1
+}
+RMUX_TITLE_SSH_PID="$!"
+exec {RMUX_TITLE_OUT_FD}<&"${RMUX_TITLE_CLIENT[0]}"
+exec {RMUX_TITLE_IN_FD}>&"${RMUX_TITLE_CLIENT[1]}"
+
+wait_rmux_title_output() {
+  local pattern="$1"
+  local label="$2"
+  local byte
+  local deadline=$((SECONDS + 20))
+  local remaining
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if ! IFS= read -r -t "$remaining" -n 1 byte <&"$RMUX_TITLE_OUT_FD"; then
+      break
+    fi
+    RMUX_TITLE_OUTPUT+="$byte"
+    if [[ "$RMUX_TITLE_OUTPUT" == *"$pattern"* ]]; then
+      return
+    fi
+  done
+  fail "$label did not paint '$pattern': '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
+}
+
+wait_motor_process() {
+  local name="$1"
+  local presence="$2"
+  local label="$3"
+  local deadline=$((SECONDS + 20))
+  local processes=""
+  local found
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    processes="$(vm_ssh /system/bin/ps)"
+    found=0
+    printf '%s\n' "$processes" | grep -Fq "$name" && found=1
+    if { [ "$presence" = present ] && [ "$found" = 1 ]; } ||
+      { [ "$presence" = absent ] && [ "$found" = 0 ]; }; then
+      return
+    fi
+    sleep 0.2
+  done
+  fail "$label did not become $presence: '$processes'"
+}
+
+printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 314159" present "rmux foreground command"
+RMUX_TITLE_OUTPUT=""
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:sleep*" "rmux foreground title"
+
+printf '\003' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 314159" absent "interrupted rmux command"
+RMUX_TITLE_OUTPUT=""
+printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
+RMUX_TITLE_OUTPUT=""
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:rush*" "restored Rush title"
+
+RMUX_TITLE_OUTPUT=""
+printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 271828" present "rmux background command"
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:rush*" "background Rush title"
+case "$RMUX_TITLE_OUTPUT" in
+  *"0:sleep*"*) fail "a background command took rmux's title" ;;
+esac
+
+printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"
+exec {RMUX_TITLE_IN_FD}>&-
+RMUX_TITLE_IN_FD=""
+set +e
+RMUX_TITLE_OUTPUT+="$(cat <&"$RMUX_TITLE_OUT_FD")"
+rmux_title_read_status="$?"
+wait "$RMUX_TITLE_SSH_PID"
+rmux_title_status="$?"
+set -e
+exec {RMUX_TITLE_OUT_FD}<&-
+RMUX_TITLE_OUT_FD=""
+RMUX_TITLE_SSH_PID=""
+[ "$rmux_title_read_status" -eq 0 ] ||
+  fail "rmux title output ended with status $rmux_title_read_status"
+[ "$rmux_title_status" -eq 0 ] ||
+  fail "rmux title client exited with status $rmux_title_status: '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
 
 # sysbox ls colors directory names orange, executable files bright red, and
 # non-executable files with the terminal's default color. A pane

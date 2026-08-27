@@ -419,6 +419,39 @@ fn a_prompt_never_asks_for_the_cursor_position() {
 }
 
 #[test]
+fn rmux_titles_follow_foreground_external_commands_only() {
+    let mut ordinary = Pty::spawn(80, &[]);
+    ordinary.await_prompt();
+    ordinary.send(b"/bin/true\r");
+    assert!(
+        !ordinary.read_output().contains("\x1b]2;"),
+        "Rush announced a title outside rmux: {:?}",
+        ordinary.seen
+    );
+
+    let mut pty = Pty::spawn(80, &[("RMUX_PANE", "1")]);
+    pty.await_prompt();
+    pty.send(b"/bin/true\r");
+    let foreground = pty.read_output();
+    let command_at = foreground
+        .find("\x1b]2;true\x07")
+        .unwrap_or_else(|| panic!("no foreground title in {foreground:?}"));
+    let shell_at = foreground
+        .find("\x1b]2;rush\x07")
+        .unwrap_or_else(|| panic!("no restored shell title in {foreground:?}"));
+    assert!(command_at < shell_at, "title order in {foreground:?}");
+
+    pty.send(b"sleep 30 &\r");
+    let background = pty.read_output();
+    assert!(
+        !background.contains("\x1b]2;sleep\x07"),
+        "a background job took the pane title: {background:?}"
+    );
+    pty.send(b"kill $!\rwait\rexit 0\r");
+    assert_eq!(pty.wait(), 0);
+}
+
+#[test]
 fn editing_keys_move_and_change_the_line() {
     // Type `echo XY`, then: Home, Right×5 (after "echo "), delete the X.
     let rows = typed(b"echo XY\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C\x1b[3~", 80);
