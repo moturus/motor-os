@@ -326,8 +326,8 @@ echo ""
 
 # FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
-# Do not forward the guest's terminal queries: tmux answers them on the pane's
-# input, where the replies would be left for the shell after this run.
+# Do not forward the guest's terminal-size controls: a host terminal may answer
+# or retain them, leaving reports queued for the shell after this run.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
   > >(filter_vm_console | tee /tmp/full-test.log) 2>&1 &
 VMM_PID="$!"
