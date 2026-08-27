@@ -1,10 +1,10 @@
 # Versioned and reproducible Motor OS toolchain
 
-2026-08-13, updated 2026-08-26. Investigation and implementation plan for
-defining, building, and reporting a meaningfully versioned Motor OS LLVM and
-Rust toolchain, with exact source resolution enforcing that version policy.
-This document is for review before implementation. No build scripts or source
-code were changed during the investigation or during the 2026-08-25 review.
+2026-08-13, updated 2026-08-26. Investigation, implementation plan, and record
+for defining, building, and reporting a meaningfully versioned Motor OS LLVM
+and Rust toolchain, with exact source resolution enforcing that version policy.
+No build scripts or source code were changed during the investigation or the
+2026-08-25 review; implementation began after the reviewed plan was approved.
 
 The 2026-08-25 review checked every claim below against `src/build-base.sh`,
 `src/build-motor-os.sh`, the Makefile and test scripts, the sibling Rust, LLVM,
@@ -41,6 +41,30 @@ managed mode as well, so no separate LLVM checkout has to agree with it; the
 committed Rust lock hashes are declared so a clean managed key and the
 key-qualified `rust-toolchain.toml` name are computable offline; and the cost
 of the side-by-side migration is stated.
+
+## Implementation status (2026-08-26)
+
+Items 1-14 in section 7 are implemented on the beta development line:
+
+- the Motor Rust and LLVM branches were replayed on the exact beta bases,
+  dependency selections were disambiguated and pinned, and all four required
+  source branches are published;
+- managed and authoring source resolution, deterministic bootstrap inputs,
+  immutable key-qualified host prefixes, keyed assemblies, native tools, and
+  complete manifests are implemented and covered by the offline toolchain
+  tests;
+- the repository has cut over atomically to its exact root toolchain, keyed
+  per-component outputs, keyed generated image roots, and bare Cargo commands;
+- the core cutover passed `src/tests/full-test.sh` three times each in debug and
+  release before commit; and
+- Lorry supports only the current Motor Cargo 1.99 family and passes its full
+  host, oracle, registry, curl, and native self-hosting product suite.
+
+Items 15 and 16 are intentionally deferred. Upstream Rust 1.99.0 is scheduled
+for 2026-10-01 and does not yet have a stable tag. The beta artifacts and refs
+must not be renamed or published as `1.99.0-motor.1`; section 8.1 remains the
+required stable rebase, full rebuild, validation, and immutable source-tag
+procedure after that upstream release exists.
 
 ## 0. Decision summary
 
@@ -1638,6 +1662,11 @@ path that selects a current local `HEAD`, and it records that `HEAD` plus the
 tree digest in a non-release generated manifest.
 
 ## 9. Completion criteria
+
+The beta implementation satisfies the applicable criteria below. Criteria
+that require the upstream stable tag, formal Motor source tags, or
+`1.99.0-motor.1` publication belong to deferred items 15 and 16 and cannot be
+completed from the beta baseline.
 
 - The first published compiler source tags are based on the exact upstream Rust
   `1.99.0` stable tag, not a beta commit or binaries built from beta.
