@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -532,22 +518,6 @@ continue return</code>. Regular: <code>cd pwd echo printf test [ read true false
 command type hash alias unalias umask wait jobs fg bg kill</code>. Extensions:
 <code>history</code>, <code>clear</code>, and <code>quit</code>.</p>
 
-<h2>Not yet working</h2>
-<ul>
-  <li>Interactive job control: <kbd>^Z</kbd>, resuming with <code>bg</code>, and
-  foreground-group handoff. Motor OS cannot support it: there is no termios and no tty
-  signals. <code>&amp;</code> on a builtin or compound command gives isolation but not
-  concurrency, because there is no <code>fork</code>.</li>
-  <li>Redirections to descriptors above 2 (<code>exec 3&gt;file</code>,
-  <code>&gt;&amp;3</code>): a Motor child receives only inherit, null, pipe, or a
-  transferred file as its stdio.</li>
-  <li><code>umask</code> affecting file creation and <code>times</code> accounting (both
-  display only); the <code>monitor</code>, <code>notify</code>, <code>vi</code>,
-  <code>nolog</code>, <code>hashall</code>, and <code>ignoreeof</code> options are accepted but
-  do nothing; <code>~user</code> (there is no user database); <code>fc</code>; and history
-  expansion (<code>!!</code>), a bash-ism that was skipped on purpose.</li>
-</ul>
-
 <h2>Deliberate differences from dash</h2>
 <p><code>set -o pipefail</code> exists (POSIX.1-2024 added it). <code>-h</code> is accepted
 as an inert option. <code>$-</code> lists options in a fixed order. <code>set -v</code>
@@ -566,7 +536,9 @@ commands inherit Interactive by the default rule. A per-command
 child. Programs on rush's detached-spawn list, such as rmux, are started with
 <code>CAP_SPAWN_DETACHED</code> so that they can leave a server running after the session
 ends. Background jobs are started without the terminal input stream, since Motor has no
-<code>SIGTTIN</code> to stop them from stealing keystrokes. rush re-exports
+<code>SIGTTIN</code> to stop them from stealing keystrokes, and for the same reason there is
+no interactive job control (<kbd>^Z</kbd>, <code>bg</code>): a foreground command runs until
+it exits or is interrupted. rush re-exports
 <code>$COLUMNS</code> and <code>$LINES</code> before every command so that a full-screen
 program starts at the right size, and it sets the rmux window title to the foreground
 command's name.</p>
@@ -580,7 +552,7 @@ command's name.</p>
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

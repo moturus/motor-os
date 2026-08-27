@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="What Motor OS is, what works today, and what does not work yet.">
+<meta name="description" content="What Motor OS is and what works today.">
 <meta name="theme-color" content="#0a0a0a">
 <title>What is Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html" class="current">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -458,14 +444,14 @@ a.card h3 { color: var(--accent); }
 <h1>What is Motor OS</h1>
 <p class="lead">Motor OS is a microkernel-based operating system, written in Rust, that
 targets virtualized workloads exclusively. It runs in x86-64 KVM virtual machines under
-QEMU, Cloud Hypervisor, Firecracker, and Alioth.</p>
+QEMU, Cloud Hypervisor, and Firecracker.</p>
 
 <p><strong>In short:</strong> serving static HTTP and HTTPS works out of the box, SSH and
 SFTP work, Rust programs built on the standard library and on Tokio run, and the
-developer image can compile C, C++, and Rust programs natively. Motor OS is under active
-development and has had no security audit, so it should not be used for sensitive
-workloads, but it is ready for trials, experiments, and research. This website is served
-from inside Motor OS VMs.</p>
+developer image can compile C, C++, and Rust programs natively. Motor OS is beta quality:
+under active development, hardened over weeks of systematic review in 2026 (the
+networking stack above all), and used to serve this website from inside Motor OS
+VMs.</p>
 
 <h2>The shape of the system</h2>
 <p>Rust is the language of Motor OS. The kernel, the runtime, the services, and the
@@ -487,8 +473,7 @@ SSH. The <a href="architecture.html">Architecture</a> page describes each piece.
 
 <h3>Boot and kernel</h3>
 <ul>
-  <li>Boots via MBR (QEMU) or PVH (Cloud Hypervisor, Firecracker, Alioth) in about 100 ms
-  on Alioth and about 200 ms on Cloud Hypervisor and QEMU.</li>
+  <li>Boots via MBR (QEMU) or PVH (Cloud Hypervisor, Firecracker) in about 200 ms.</li>
   <li>A high-memory microkernel with four syscalls, cooperative in-kernel scheduling
   (the kernel never blocks, so it does not need to be preemptible), and preemptive
   userspace scheduling with a 10 ms tick.</li>
@@ -517,13 +502,14 @@ SSH. The <a href="architecture.html">Architecture</a> page describes each piece.
   <li>Multiple processes with preemption, threads, and thread-local storage.</li>
   <li>Rust's standard library is ported: programs that use <code>std</code> and do not
   depend, directly or indirectly, on Unix or Windows APIs cross-compile for
-  <code>x86_64-unknown-motor</code> and run, subject to the list below.</li>
+  <code>x86_64-unknown-motor</code> and run (see <a href="rust.html">Rust on Motor OS</a>).</li>
   <li>The Tokio runtime, and the Tokio and mio asynchronous TCP and UDP APIs, work,
   including asynchronous child processes and stdio.</li>
   <li>rustls (with ring), hyper, axum, and russh have been ported or work with small
   patches; TLS serving and SSH serving are built on them.</li>
-  <li>A C library (mlibc), so C and C++ programs can be compiled for Motor OS; Lua runs
-  on it.</li>
+  <li>A C library (mlibc) and a Clang/LLVM toolchain that targets Motor OS directly, so C
+  and C++ are supported as well; Lua ships on the developer image (see
+  <a href="c-cpp.html">C/C++ on Motor OS</a>).</li>
 </ul>
 
 <h3>Programs</h3>
@@ -545,47 +531,20 @@ SSH. The <a href="architecture.html">Architecture</a> page describes each piece.
   <li>A native Clang/LLVM toolchain with mlibc, libc++, and compiler-rt, so
   <code>cc hello.c</code> works inside the VM.</li>
   <li>A native rustc with a full Motor OS sysroot.</li>
-  <li>Lorry, an offline, Cargo-compatible Rust package builder that vendors and reviews
-  dependencies before it builds them.</li>
+  <li>Lorry, a Cargo-compatible Rust package builder designed for security-sensitive
+  environments: builds are offline, and every dependency is fetched once, checked, and
+  approved before it is built (see <a href="lorry.html">Lorry</a>).</li>
   <li>Gears, an agent harness for LLM-assisted work, and curl for HTTPS downloads.</li>
   <li>The test suites and mdbg, a stack-dumping debugger. See
   <a href="devtools.html">Developer image</a>.</li>
 </ul>
 
-<h2>What does not work yet</h2>
-<p>Most pieces are not ready for production use, and there has been no security audit.
-More specifically:</p>
-<ul>
-  <li><strong>Filesystem</strong>: no symbolic or hard links, no users or groups, no
-  ownership. A file whose write permission has been removed cannot get it back through
-  the same permission byte; this is deliberate, and the way to replace such a file is
-  described under <a href="filesystem.html">Filesystem</a>.</li>
-  <li><strong>Networking</strong>: IPv6 addresses and routes are static only (no DHCPv6,
-  SLAAC, or router advertisements); no UDP multicast or broadcast; no raw sockets;
-  IPv6 extension headers are not generally supported; <code>SO_KEEPALIVE</code> is always
-  on and not yet configurable.</li>
-  <li><strong>Process model</strong>: there is no <code>fork</code>, no signals, no
-  process groups, no pseudo-terminals, and no termios. Programs that need them must be
-  adapted; see <a href="terminals.html">Terminals</a> for how terminal programs work
-  without them.</li>
-  <li><strong>The Rust ecosystem outside std</strong>: sans-io crates and crates such as
-  rand or rustls compile and work, sometimes with minor tweaks; Tokio is ported but not
-  every Tokio feature is, so some async crates need refactoring; crates that wrap native
-  Linux or Windows APIs will not work.</li>
-  <li><strong>Debugging</strong>: there is no source-level debugger. mdbg can dump the
-  stacks of a running process, which are then symbolized on the host.</li>
-</ul>
-
 <h2>What is next</h2>
-<p>The build system and the toolchain are being reworked into a versioned, reproducible
-Motor toolchain based on a stable Rust release; the <a href="build.html">Building</a> and
-<a href="toolchain.html">Native toolchain</a> pages will be filled in when that work is
-merged. The networking stack has a list of follow-up robustness and completeness items
-recorded in the repository under <code>docs/plans/</code>.</p>
-
-<p style="text-align:center;margin-top:2.5rem">
-<img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="200">
-</p>
+<p>The way the toolchains are built is being reworked into a versioned, reproducible
+Motor toolchain based on a stable Rust release (see <a href="toolchain.html">Toolchains</a>);
+the <a href="build.html">Building</a> page will be filled in when that work is merged. The
+networking stack has a list of follow-up robustness and completeness items recorded in
+the repository under <code>docs/plans/</code>.</p>
 <nav class="pager">
 <a class="pager-prev" href="docs.html"><span>Previous</span>Documentation</a>
 <a class="pager-next" href="why.html"><span>Next</span>Why Motor OS</a>
@@ -596,7 +555,7 @@ recorded in the repository under <code>docs/plans/</code>.</p>
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

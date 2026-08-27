@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -481,8 +467,8 @@ rt.vdso, implements the system interface that Rust's standard library calls.</p>
   +----------------------------------------------------------------------+</code></pre>
 
 <h2>Boot</h2>
-<p>Under QEMU the VM boots from an MBR boot sector; under Cloud Hypervisor, Firecracker,
-and Alioth it boots via PVH. Either way a small loader brings the CPUs up in 64-bit mode
+<p>Under QEMU the VM boots from an MBR boot sector; under Cloud Hypervisor and
+Firecracker it boots via PVH. Either way a small loader brings the CPUs up in 64-bit mode
 and loads the kernel from the initrd into high memory (hence "himem kernel"), at a fixed
 address with no address randomization. The initrd also carries <code>sys-io</code>; the
 kernel loads it as the first process, with every capability, and halts the machine if it
@@ -671,7 +657,7 @@ about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; Mot
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Lorry, the Rust package builder of Motor OS and a better Cargo for security-sensitive environments: offline, Cargo-compatible builds from dependencies that were fetched once, checked, and approved, on Linux and natively on Motor OS.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Lorry: the package builder | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">What is Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building Motor OS</a></li>
+    <li><a href="running.html">Running Motor OS</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html" class="current">Lorry: the package builder</a></li>
+    <li><a href="hello.html">Hello Motor OS</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Developing</div>
+<h1>Lorry: the package builder</h1>
+<p class="lead">Lorry is Motor OS's Rust package builder, and a better Cargo for
+security-sensitive environments. It builds the Cargo package model, offline, from
+dependencies that were fetched once, checked, shown to a person, and recorded, and it
+never invokes Cargo. It runs on Linux and on Motor OS, where it is the Rust build driver
+because the developer image has no Cargo.</p>
+
+<h2>Why a better Cargo</h2>
+<p>In many corporate environments a build tool that goes out to the Internet on its own
+and silently downloads and runs code from hundreds of crates is a weakness, not a
+convenience. That is what <code>cargo build</code> does: the lock file names the crates,
+Cargo fetches them, runs their build scripts, and loads their procedural macros into the
+compiler, and nothing in that sequence asks anyone anything. Lorry is designed for the
+environments where that is not acceptable:</p>
+<ul>
+  <li><strong>Network access is one explicit step.</strong> Only <code>lorry vendor</code>
+  talks to the network. Every other command is offline and fails rather than fetching.</li>
+  <li><strong>Every package is admitted individually.</strong> Vendoring shows each new
+  package with its exact version, checksum, license, size, whether it has a build script
+  or is a procedural macro, and the dependency edges it adds, and asks before accepting
+  it. The result is a review document that can be read, diffed, and checked into version
+  control, and a record that later builds verify.</li>
+  <li><strong>Code that runs at build time needs a grant.</strong> A build script or a
+  procedural macro runs only for a package named in the policy at an exact version and
+  checksum. Build scripts run in a sandbox on Linux; procedural macros run in a separate
+  process on Motor OS.</li>
+  <li><strong>Fetching is locked down.</strong> HTTPS only, through a small curl-compatible
+  client run without a shell, with proxies and credentials stripped, no redirects unless
+  the site is on your list, and Git served by an embedded client rather than a
+  <code>git</code> executable.</li>
+  <li><strong>Limits are explicit</strong>: how many packages, how deep, how large, and how
+  long a build script may run.</li>
+  <li><strong>Unsupported means rejected.</strong> Cargo behavior that Lorry does not
+  implement is refused explicitly, never approximated, so a build cannot quietly do
+  something the reviewer did not see.</li>
+  <li><strong>The same tool everywhere.</strong> Lorry runs on Linux and natively on Motor
+  OS, and a clean release build of a package is required to be byte-identical whichever
+  of the three builds it: Cargo on Linux, Lorry on Linux, or Lorry on Motor OS.</li>
+</ul>
+<p>Lorry does not replace reading the code you depend on; it makes sure that nothing
+enters a build without having been seen, and nothing runs during a build without having
+been allowed.</p>
+
+<h2>Commands</h2>
+<pre><code>lorry new hello                  # a package with an edition-2024 binary and a lock file
+cd hello
+lorry build [--release]          # build, offline
+lorry run [-- args...]           # build and run the binary, forwarding arguments
+lorry test [--no-run] [-- args]  # build and run the library, binary, and integration tests
+lorry clean
+lorry vendor [--accept-all]      # fetch, check, and record dependencies (the only networked command)
+lorry vendor upgrade PKG[@OLD] --to VERSION
+lorry review                     # print the canonical review of the dependency set
+lorry cache clean</code></pre>
+<div class="table-wrap">
+<table>
+  <tr><th>Option</th><th>Meaning</th></tr>
+  <tr><td><code>+toolchain</code></td><td>On Linux, a rustup toolchain selector, as with Cargo. On Motor OS the compiler is <code>/devtools/bin/rustc</code>.</td></tr>
+  <tr><td><code>-p NAME</code></td><td>Select a member of an explicit workspace.</td></tr>
+  <tr><td><code>--bin NAME</code>, <code>--test NAME</code></td><td>Choose a binary or an integration test. <code>run</code> otherwise takes <code>package.default-run</code> or the sole binary.</td></tr>
+  <tr><td><code>--release</code></td><td>The release profile: <code>lto</code>, <code>strip</code>, and <code>codegen-units</code> are honored in addition to the dev profile's settings.</td></tr>
+  <tr><td><code>--target TRIPLE</code></td><td>An installed target; custom JSON targets are rejected.</td></tr>
+  <tr><td><code>--bundle</code></td><td>Package the test harnesses and the binary into one self-extracting executable for the target, to run on another machine.</td></tr>
+  <tr><td><code>--strict-validation</code></td><td>Stricter checks for build, run, and test.</td></tr>
+  <tr><td><code>--use-cargo-registry</code></td><td>Build from an already populated local Cargo cache instead of a Lorry repository, after verifying it (Linux).</td></tr>
+  <tr><td><code>-q</code>, <code>-v</code>, <code>--color</code></td><td>Output control.</td></tr>
+</table>
+</div>
+<p><code>lorry run</code> executes the program directly, without a shell, and returns its
+exit status. <code>lorry test</code> builds separate harnesses for the library, the binary,
+and each <code>tests/*.rs</code> file and runs them in Cargo's order, stopping at the first
+failure; arguments after <code>--</code> go to every harness. Usage errors exit 1; build,
+vendoring, policy, and operational failures exit 101; an interrupted run exits 130. There
+is no <code>lorry clippy</code>.</p>
+
+<h2>Where things live</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>On Motor OS</th><th>Purpose</th></tr>
+  <tr><td><code>/devtools/cfg/lorry.toml</code></td><td>System configuration: the Cargo compatibility version (1.99), the curl program and CA bundle, vendor targets, policy limits, native C tools, and the reviewed grants for build scripts and procedural macros.</td></tr>
+  <tr><td><code>/user/cfg/lorry.toml</code></td><td>User configuration; on the image it names the user repository.</td></tr>
+  <tr><td><code>/user/cfg/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code> and <code>objects/seeded-git/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
+  <tr><td><code>/user/cfg/lorry/cache</code></td><td>The cache of compiled dependency units, shared between projects.</td></tr>
+  <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
+  <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
+  <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for the root package.</td></tr>
+</table>
+</div>
+<p>Configuration files are merged in order: the system file, the user file, and the
+nearest <code>lorry.toml</code> above the project. Every file declares
+<code>config-version = 1</code>, and an unknown key is an error. On Linux the user file is
+<code>$HOME/.config/lorry/lorry.toml</code> and the cache is <code>$HOME/.cache/lorry</code>.
+Repositories come in three roles, <code>system</code> (read-only), <code>user</code>, and
+<code>local</code>; lookup goes local, then user, then system, and vendoring writes to the
+local repository if one is configured, otherwise to the user's.</p>
+
+<h2>Vendoring and admission</h2>
+<p><code>lorry vendor</code> is the only command that touches the network. It reads the
+package's <code>Cargo.toml</code> and <code>Cargo.lock</code>, resolves what is missing from
+the repositories, and for each new package fetches it over HTTPS, checks the checksum
+and the archive structure, applies the policy, and asks for approval, showing the exact
+version, checksum, license, whether the package has a build script or is a procedural
+macro, its size, and the dependency edges it adds. <code>--accept-all</code> answers yes
+to those questions after all checks have passed; it cannot bypass an integrity failure,
+a policy denial, the redirect list, or a native-tool restriction, and it cannot change an
+existing admission record. Approved objects are written with fsync and published
+atomically; an object is never replaced. <code>Cargo.lock</code> is committed last.</p>
+<ul>
+  <li>Sources are the crates.io sparse index, the only supported registry, and Git over
+  smart HTTP. Git is handled by an embedded client, never a <code>git</code> executable:
+  anonymous HTTPS, shallow, with credentials, proxies, hooks, and filters disabled.</li>
+  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor's own
+  curl-compatible client) is run directly, never through a shell, restricted to HTTPS,
+  without following redirects, and with proxy and credential settings stripped from the
+  environment. A redirect is followed only for a site you have allowed in the redirect
+  list.</li>
+  <li>Dependencies are vendored for every configured target, by default
+  <code>x86_64-unknown-motor</code> and <code>x86_64-unknown-linux-musl</code> plus the host,
+  so that one review covers cross-compiling on Linux and building natively.</li>
+  <li>The result is recorded in <code>.lorry/dependencies-v2.toml</code> with a checksum
+  of the canonical review and one entry per reviewed host-and-target pair. A later
+  <code>build</code>, <code>run</code>, or <code>test</code> requires its own pair to be
+  present and re-verifies every recorded pair, which is why a Motor-capable rustc is
+  needed even for a host-only build. <code>lorry review</code> regenerates the canonical
+  review offline so that it can be read, diffed, and checked into version control.</li>
+</ul>
+
+<h3>Policy</h3>
+<p>The policy in <code>lorry.toml</code> decides what may be admitted. It has a default
+action, optional path roots, limits (on the developer image: at most 192 packages, a
+dependency depth of 16, 16 MiB per package archive and 128 MiB extracted, 256 MiB per
+transaction and 1 GiB extracted, a build script limited to 300 seconds and 8 MiB of
+output), and per-package rules. A rule names the package, its exact version, its source,
+and its checksum, and it is the only way to grant the two things that run code at build
+time:</p>
+<pre><code>[policy.rules.serde_derive-1_0_229]
+action = "allow"
+name = "serde_derive"
+version = "=1.0.229"
+source = "crates.io"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+allow-proc-macro = true
+
+[policy.rules.libc-0_2_189]
+action = "allow"
+name = "libc"
+version = "=0.2.189"
+source = "crates.io"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+allow-build-script = true</code></pre>
+<p><code>allow-build-script</code> and <code>allow-proc-macro</code> are independent grants,
+required even when the default action is <code>allow</code>. A build script that needs a C
+compiler or an archiver uses the tools declared under
+<code>[native-tools."x86_64-unknown-motor"]</code>, which on the image are
+<code>/devtools/bin/cc</code> and <code>/devtools/llvm/bin/llvm ar</code>, and only with the
+build-script grant. The developer image ships grants for the common crates that the
+in-tree programs need (serde and its derive macro, libc, proc-macro2, quote, rustls,
+thiserror, and others).</p>
+
+<h2>Building</h2>
+<ul>
+  <li><strong>Profiles</strong> are Cargo's dev and release, honoring <code>panic</code>,
+  <code>lto</code>, <code>strip</code>, and <code>codegen-units</code>. Output goes under
+  <code>target/lorry</code>; <code>CARGO_TARGET_DIR</code> is an error.</li>
+  <li><strong>Caching.</strong> Immutable dependency units are compiled once into the shared
+  cache and reused across projects; the root package and path dependencies are built
+  incrementally under <code>target/lorry/.incremental/</code>. The first miss on the shared
+  cache prints <code>Rebuilding global dependency cache</code> once. Dependency units are
+  compiled in parallel.</li>
+  <li><strong>Procedural macros</strong> are compiled for the machine that runs the
+  compiler. On Linux they load as ordinary dynamic libraries. Motor OS has no dynamic
+  loading, so on Motor a procedural macro is a static executable, and rustc talks to it
+  over the compiler's own proc-macro bridge protocol, carried in bounded, versioned frames
+  on the child's stdin and stdout. This gives process separation, not a sandbox.</li>
+  <li><strong>Build scripts</strong> of dependencies run on Linux in a mandatory sandbox: no
+  network, read-only inputs, writes only to <code>OUT_DIR</code> and a private temporary
+  directory, a cleared environment, and only approved child tools. On Motor OS they run
+  without isolation, and Lorry prints a warning every time it applies one.</li>
+  <li><strong>Bundles.</strong> <code>--bundle</code> produces one self-extracting executable
+  for the target that carries the test harnesses and the binary, verifies its payload
+  table, extracts under a private root (<code>/user/tmp/lorry/test-extraction</code> on Motor
+  OS), runs each payload without a shell, and reports the aggregate result.</li>
+</ul>
+
+<h2>The package model</h2>
+<p>Supported: one root package, optionally a member of an explicit workspace chosen
+with <code>-p</code>; at most one library and 64 binaries; top-level
+<code>tests/*.rs</code>; a current <code>Cargo.lock</code> (version 3 or 4); crates.io, Git,
+and path dependencies, including renamed and optional ones, default and forwarded
+features, target-conditioned dependencies, dependency build scripts, procedural-macro
+dependencies, and required local patches; editions 2015 through 2024; resolvers 1
+through 3; <code>rust-version</code>, <code>autobins</code>, <code>default-run</code>, and
+<code>[lints.rust]</code>.</p>
+<p>Not supported, by decision: root build scripts and root build-dependencies, root
+dev-dependencies selected for the build target, workspace-wide commands and workspace
+inheritance, <code>--manifest-path</code> and parent-directory discovery, alternative
+registries, a procedural-macro package as the root, examples, benches, explicit
+<code>[[test]]</code> targets, feature selection on the command line, custom JSON targets
+and build-std, and rustc wrappers. One known defect is stated in Lorry's own
+documentation: a dependency-free root <code>build.rs</code> is accepted by the parser but
+never run, so such a package should not be built with Lorry until that is fixed.</p>
+
+<h2>Self-hosting</h2>
+<p>Lorry builds Motor OS programs on Motor OS. The developer-image test vendors and
+builds red and then Lorry itself natively in a VM, from the source snapshots under
+<code>/devtools/src</code>, and checks that the freshly linked build-script and program
+files carry the expected permissions. Replacing the repository's Cargo-driven build of
+every component with Lorry is not there yet; Lorry's <code>full-native-build.md</code>
+records what remains: the root <code>build.rs</code> defect above, a few Cargo features the
+in-tree packages use (lock version 3, a profile override through the environment, root
+feature flags), the kernel's custom target and its build-std needs, the imager's Linux-only
+dependencies, and the absence of a native Clippy.</p>
+
+<h2>Tests</h2>
+<p><code>src/bin/lorry/tests/test-all.sh</code> runs Lorry's whole suite within a fixed
+time budget: the unit and integration tests offline, a dependency-resolution oracle
+that compares Lorry's resolution with Cargo's, contract scripts for the review format,
+Cargo identity, workspaces, procedural macros, the registry protocol, and curl, and a
+native leg that boots a Motor OS VM and proves that the cross-built Lorry rebuilds itself
+there byte-identically and reuses its incremental state across two builds. The
+developer-image test run (<code>src/tests/full-test-dev.sh</code>) includes it; the main
+<code>full-test.sh</code> does not. Lorry's own README, specification, and design
+document are under <code>src/bin/lorry/</code> in the repository.</p>
+<nav class="pager">
+<a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
+<a class="pager-next" href="hello.html"><span>Next</span>Hello Motor OS</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

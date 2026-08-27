@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html" class="current">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -486,37 +472,25 @@ c++ hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp
 rustc hello.rs -o /devtools/tmp/hello-rs && /devtools/tmp/hello-rs</code></pre>
 <p>The compilers target <code>x86_64-unknown-motor</code>, a real Clang target whose
 defaults are emulated TLS and static position-independent executables, so no special
-flags are needed. The details of the toolchain and how it is built are on the
-<a href="toolchain.html">Native toolchain</a> page, once the toolchain rework is merged.</p>
+flags are needed. What the C library and libc++ support is on the
+<a href="c-cpp.html">C/C++ on Motor OS</a> page; the compilers, their sysroots, and Lorry
+are described on the <a href="toolchain.html">Toolchains</a> page.</p>
 
 <h2>Lorry</h2>
-<p>Lorry is Motor OS's small, strict Rust package builder. It creates, vendors, builds,
-runs, and tests a deliberately limited Cargo-compatible package model, on Linux and on
-Motor OS, and it never invokes Cargo. Builds are offline and use only verified sources
-already present in configured Lorry repositories; unsupported Cargo behavior is rejected
-explicitly rather than approximated.</p>
+<p>Lorry is Motor OS's Rust package builder and a better Cargo for security-sensitive
+environments: it builds a Cargo-compatible package model offline, from dependencies that
+were fetched once, checked, and approved explicitly by <code>lorry vendor</code>, and code
+that runs at build time (build scripts, procedural macros) needs a recorded grant. It
+never invokes Cargo, and it is the Rust build driver on the developer image, which has
+no Cargo.</p>
 <pre><code>lorry new hello
 cd hello
-lorry run                 # build with the dev profile and run
+lorry vendor --accept-all   # once, with network access
 lorry build --release
-lorry test
-lorry vendor              # fetch and review dependencies, once, with network access
-lorry review              # a canonical, diffable review document of the dependency set</code></pre>
-<p>What makes it different from Cargo is admission: <code>lorry vendor</code> fetches
-crates from the sparse registry and Git over <code>curl</code>, stores them
-content-addressed and immutable, asks for approval (or takes <code>--accept-all</code>),
-and records the reviewed set with checksums in a commitment file in the project. Build
-scripts and procedural macros need explicit grants. Build, run, and test then consume
-that verified local state with no network. On Linux, dependency build scripts run in a
-sandbox; on Motor OS they run unsandboxed with a printed warning.</p>
-<p>A supported package has one root package (optionally in an explicit workspace), at
-most one library and 64 binaries, optional integration tests, a current
-<code>Cargo.lock</code>, and crates.io, Git, or path dependencies, including renamed and
-optional ones, features, target-conditioned dependencies, dependency build scripts, and
-procedural macros. Root build scripts, alternative registries, examples, benches, and
-CLI feature selection are not supported. Lorry's own README, spec, and design documents
-are under <code>src/bin/lorry/</code>. The developer-image test run builds red, Lorry, and
-Gears natively with Lorry inside the VM, including Lorry building itself.</p>
+lorry run</code></pre>
+<p>The full description, including the admission policy, the configuration files, and
+how procedural macros and build scripts run on Motor OS, is on the
+<a href="lorry.html">Lorry</a> page.</p>
 
 <h2>Gears</h2>
 <p>Gears is a small, extensible agent harness for working with a language model from
@@ -569,7 +543,7 @@ shipped test certificate, serving <code>/devtools/www</code>, the directory thes
 live in. Edit the script to serve plain HTTP with <code>httpd</code> instead.</p>
 <nav class="pager">
 <a class="pager-prev" href="editors.html"><span>Previous</span>Editors</a>
-<a class="pager-next" href="toolchain.html"><span>Next</span>Native toolchain</a>
+<a class="pager-next" href="toolchain.html"><span>Next</span>Toolchains</a>
 </nav>
 </article>
 </main>
@@ -577,7 +551,7 @@ live in. Edit the script to serve plain HTTP with <code>httpd</code> instead.</p
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

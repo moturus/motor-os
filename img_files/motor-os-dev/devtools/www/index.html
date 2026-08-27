@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -411,20 +402,19 @@ a.card h3 { color: var(--accent); }
     runs inside a VM.</p>
     <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
     system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-    Cloud Hypervisor, Firecracker, and Alioth.</p>
+    Cloud Hypervisor, and Firecracker.</p>
     <div class="actions">
       <a class="btn" href="what.html">What it is</a>
       <a class="btn ghost" href="docs.html">Documentation</a>
       <a class="btn ghost" href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </div>
   </div>
-  <img src="motor-os-256.png" alt="A metal bear riding a motorbike, the Motor OS mascot" width="256" height="240">
 </section>
 
 <div class="facts">
   <div class="fact"><b>Rust</b><span>kernel, runtime, services, and applications; no C in the system</span></div>
   <div class="fact"><b>Microkernel</b><span>drivers, filesystem, and networking run in userspace</span></div>
-  <div class="fact"><b>100&ndash;200 ms</b><span>to boot the kernel and start userspace</span></div>
+  <div class="fact"><b>~200 ms</b><span>to boot the kernel and start userspace</span></div>
   <div class="fact"><b>~10 Gbps</b><span>host-to-guest TCP throughput</span></div>
   <div class="fact"><b>Tier-3</b><span>Rust target <code>x86_64-unknown-motor</code></span></div>
 </div>
@@ -439,7 +429,8 @@ a.card h3 { color: var(--accent); }
   <a class="card" href="rust.html">
     <h3>Rust's standard library, ported</h3>
     <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
-    and run. Tokio, mio, hyper, axum, rustls, and russh work.</p>
+    and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
+    Rust, C, and C++ natively.</p>
   </a>
   <a class="card" href="networking.html">
     <h3>A native networking stack</h3>
@@ -456,52 +447,30 @@ a.card h3 { color: var(--accent); }
     <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
     HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
   </a>
-  <a class="card" href="devtools.html">
-    <h3>A self-hosting developer image</h3>
-    <p>Native Clang/LLVM, a C library, native rustc, and Lorry, an offline Rust package
-    builder. Motor OS programs can be built on Motor OS.</p>
+  <a class="card" href="lorry.html">
+    <h3>A better Cargo for security-sensitive builds</h3>
+    <p>Lorry builds Rust packages offline, from dependencies that were fetched once, checked,
+    and approved explicitly; build scripts and procedural macros run only with a recorded
+    grant. It builds Motor OS programs on Motor OS.</p>
   </a>
 </div>
 
 <h2>Status</h2>
-<p>Motor OS is under active development and has not had a security audit; do not use it for
-sensitive workloads. It is ready for trials, experiments, and research. This website is
-served from Motor OS VMs, and the networking stack has run host-to-guest benchmarks
-for a week at a time. See <a href="what.html">What is Motor OS</a> for a detailed
-list of what works and what does not.</p>
-
-<div class="two-col">
-  <div>
-    <h3>Recent changes</h3>
-    <ul>
-      <li><strong>2026-08</strong>: rmux, a terminal multiplexer; a crossterm port; low-memory
-      admission control; a terminal design document.</li>
-      <li><strong>2026-07</strong>: a C library port (mlibc), native LLVM and rustc, DNS lookup,
-      ping, the red editor, Lorry, curl, Gears.</li>
-      <li><strong>2026-06</strong>: Motor FS became the default filesystem; sys-io became
-      fully asynchronous.</li>
-      <li><strong>2025-10</strong>: Motor OS became a Tier-3 Rust target.</li>
-    </ul>
-    <p><a href="changelog.html">Full changelog</a></p>
-  </div>
-  <div>
-    <h3>Get involved</h3>
-    <p>The source is on <a href="https://github.com/moturus/motor-os">GitHub</a>, dual-licensed
-    under MIT and Apache 2.0. Questions and ideas go to
-    <a href="https://github.com/moturus/motor-os/discussions">Discussions</a>; bugs go to
-    <a href="https://github.com/moturus/motor-os/issues">Issues</a>. Small, focused pull requests
-    are welcome; see <a href="contributing.html">Contributing</a>.</p>
-    <p>Build instructions are being reworked together with the toolchain and will be
-    published when that work lands; see <a href="build.html">Building Motor OS</a>.</p>
-  </div>
-</div>
+<p>Motor OS is beta quality. It is under active development, and in 2026 it went through
+weeks of systematic review and hardening, of the networking stack above all, with AI
+coding systems (Anthropic's Claude Fable and OpenAI's SOL) doing much of that work
+against the test suites. Networking is considered ready for production use within its
+supported feature set; the rest of the system is exercised daily by the full test suite,
+by long soak runs, and by this website, which is served from Motor OS VMs. There has been
+no independent security audit yet. See <a href="what.html">What is Motor OS</a> for a
+detailed list of what works.</p>
 </article>
 </main>
 <footer class="foot">
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

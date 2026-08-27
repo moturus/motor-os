@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html" class="current">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -472,14 +458,17 @@ program that is being ported.</p>
   program picks up runtime fixes when the image is updated.</li>
   <li>The target is documented in the
   <a href="https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html">Rust platform
-  support pages</a>. Building for it currently needs the Motor toolchain from the Motor
-  OS build; see <a href="build.html">Building Motor OS</a>.</li>
+  support pages</a>. Building for it needs the Motor toolchain, described on the
+  <a href="toolchain.html">Toolchains</a> page.</li>
 </ul>
-<p>Cross-compiling on Linux, with the toolchain produced by the current build:</p>
+<p>Cross-compiling on Linux, with the toolchain as the current build registers it:</p>
 <pre><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code></pre>
-<p>The binary goes into the VM with <code>scp</code> (see
-<a href="hello.html">Hello Motor OS</a>). On the developer image the same program can be
-built natively with <code>rustc</code> or with Lorry.</p>
+<p>The toolchain rework replaces the <code>+dev-...</code> selector with a versioned
+toolchain chosen by the repository's <code>rust-toolchain.toml</code>, so the command becomes
+plain <code>cargo build --release --target x86_64-unknown-motor</code>. Either way the binary
+goes into the VM with <code>scp</code> (see <a href="hello.html">Hello Motor OS</a>). On
+the developer image the same program can be built natively with <code>rustc</code> or
+with <a href="lorry.html">Lorry</a>.</p>
 
 <h2>What std supports</h2>
 <div class="table-wrap">
@@ -497,22 +486,35 @@ built natively with <code>rustc</code> or with Lorry.</p>
 
 <h2>Ported crates and what works on top of them</h2>
 <ul>
-  <li><strong>mio and Tokio</strong>: Motor OS forks (<code>moturus/mio</code>,
-  <code>moturus/tokio</code>) backed by the runtime's edge-triggered readiness interface.
-  The runtime, async TCP and UDP, async child processes, and async stdio work; not every
-  Tokio feature is ported.</li>
+  <li><strong>mio and Tokio</strong>: Motor OS forks backed by the runtime's edge-triggered
+  readiness interface. The runtime, async TCP and UDP, async child processes, and async
+  stdio work; not every Tokio feature is ported.</li>
   <li><strong>hyper, axum, tower-http</strong>: httpd-axum serves this site with them.</li>
-  <li><strong>rustls with ring</strong> (<code>moturus/ring</code>): TLS on both the client
-  (curl, Gears) and server (httpd, httpd-axum) side.</li>
-  <li><strong>russh</strong> (<code>moturus/russh</code>) and russh-sftp: the SSH server.</li>
-  <li><strong>crossterm</strong> (<code>moturus/crossterm</code>): a Motor backend that
-  handles terminal size and Ctrl+C the Motor way, so a crossterm program needs no
-  Motor-specific code.</li>
+  <li><strong>rustls with ring</strong>: TLS on both the client (curl, Gears) and server
+  (httpd, httpd-axum) side.</li>
+  <li><strong>russh</strong> and russh-sftp: the SSH server.</li>
+  <li><strong>crossterm</strong>: a Motor backend that handles terminal size and Ctrl+C the
+  Motor way, so a crossterm program needs no Motor-specific code.</li>
   <li><strong>ctrlc</strong>: a fork whose handler is the process's Ctrl+C handler.</li>
   <li><strong>tracing</strong> and friends compile unchanged; see
   <a href="profiling.html">Profiling</a>.</li>
   <li><strong>ripgrep</strong>: a fork that ships as <code>rg</code>.</li>
 </ul>
+<p>The forks are ordinary Git dependencies, added to a program's <code>Cargo.toml</code>
+under <code>[patch.crates-io]</code> (or as a direct dependency, for russh and ctrlc), as
+the in-tree programs do:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Crate</th><th>Repository</th><th>Branch or tag</th></tr>
+  <tr><td>tokio</td><td><code>https://github.com/moturus/tokio.git</code></td><td><code>tokio-motor-1.47.1_2025-10-07</code></td></tr>
+  <tr><td>mio</td><td><code>https://github.com/moturus/mio.git</code></td><td><code>mio-motor-v1.0.4_2025-10-07</code></td></tr>
+  <tr><td>ring</td><td><code>https://github.com/moturus/ring.git</code></td><td><code>motor-os-0.17.14</code></td></tr>
+  <tr><td>crossterm</td><td><code>https://github.com/moturus/crossterm.git</code></td><td><code>motor-os-support</code></td></tr>
+  <tr><td>russh</td><td><code>https://github.com/moturus/russh.git</code></td><td>default branch</td></tr>
+  <tr><td>ctrlc</td><td><code>https://github.com/moturus/rust-ctrlc.git</code></td><td><code>motor-os-rustc</code></td></tr>
+  <tr><td>cc (for crates that compile C)</td><td><code>https://github.com/moturus/cc-rs.git</code></td><td><code>main</code></td></tr>
+</table>
+</div>
 <p>As a rule, sans-io crates and crates such as rand or rustls compile and work, sometimes
 with minor tweaks; async crates that assume Tokio features which are not ported need
 refactoring; and crates that wrap native Linux or Windows APIs will not work.</p>
@@ -555,14 +557,13 @@ refactoring; and crates that wrap native Linux or Windows APIs will not work.</p
 </ul>
 
 <h2>C and C++</h2>
-<p>A C library, mlibc, is ported and sits on a C ABI shim over the same runtime
-(<code>moto-rt-cabi</code>), with libc++ on top. On the developer image, <code>cc</code>
-and <code>c++</code> compile C and C++ for Motor OS, and Lua and ripgrep's C dependencies
-are built that way. Thread-local storage uses emulated TLS throughout. Details will be on
-the <a href="toolchain.html">Native toolchain</a> page.</p>
+<p>Rust is the preferred language on Motor OS, but C and C++ are fully supported: a C
+library, mlibc, sits on a C ABI shim over the same runtime, libc++ sits on top of it, and
+Clang/LLVM targets Motor OS directly, on the developer image and as a cross-compiler on
+Linux. See <a href="c-cpp.html">C/C++ on Motor OS</a>.</p>
 <nav class="pager">
-<a class="pager-prev" href="toolchain.html"><span>Previous</span>Native toolchain</a>
-<a class="pager-next" href="hello.html"><span>Next</span>Hello Motor OS</a>
+<a class="pager-prev" href="toolchain.html"><span>Previous</span>Toolchains</a>
+<a class="pager-next" href="c-cpp.html"><span>Next</span>C/C++ on Motor OS</a>
 </nav>
 </article>
 </main>
@@ -570,7 +571,7 @@ the <a href="toolchain.html">Native toolchain</a> page.</p>
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

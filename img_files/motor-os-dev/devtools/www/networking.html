@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -529,7 +515,7 @@ rejected; omit a key to keep its default.</p>
 <h2>What the stack supports</h2>
 <div class="table-wrap">
 <table>
-  <tr><th>Area</th><th>Supported</th><th>Not supported</th></tr>
+  <tr><th>Area</th><th>Supported</th><th>Not supported yet</th></tr>
   <tr><td>IPv4</td><td>Static addresses, DHCPv4, ARP, fragmentation and reassembly, path MTU discovery, longest-prefix routing.</td><td></td></tr>
   <tr><td>IPv6</td><td>Static addresses and routes, neighbor discovery, fragmentation, a bounded 64-entry neighbor cache, a reduced source-address selection policy.</td><td>DHCPv6, SLAAC, router advertisements, and general extension-header support.</td></tr>
   <tr><td>TCP</td><td>CUBIC congestion control with a 10-segment initial window; SACK; RACK-TLP loss recovery (RFC 8985); RFC 7323 timestamps and window scaling; SYN cookies under flood; keepalive; zero-window probing; TIME-WAIT retention; per-connection linger on close; family-correct wildcard listeners.</td><td><code>SO_KEEPALIVE</code> is always on and not yet configurable.</td></tr>
@@ -546,8 +532,8 @@ this is an accepted non-POSIX exception.</p>
 
 <h2>Capacity and performance</h2>
 <ul>
-  <li>Host-to-guest TCP throughput is about 10 Gbps under Cloud Hypervisor and Alioth and
-  somewhat less under QEMU. The transmit path uses checksum and TSO offload; receive
+  <li>Host-to-guest TCP throughput is about 10 Gbps under Cloud Hypervisor and somewhat
+  less under QEMU. The transmit path uses checksum and TSO offload; receive
   coalescing and jumbo frames are deliberately not used yet.</li>
   <li>sys-io serves at most 896 network channels, each with four sub-channels, which is
   roughly 3,500 concurrent sockets per machine, and one 64 KiB-stack client thread per
@@ -605,7 +591,7 @@ is tracked in <code>docs/plans/networking-remaining-steps.md</code> in the repos
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>

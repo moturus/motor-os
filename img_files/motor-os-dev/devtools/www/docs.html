@@ -280,16 +280,9 @@ a.card h3 { color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
 
 /* Home page */
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2rem;
-  align-items: center;
-  padding: 1.5rem 0 2.5rem;
-}
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
 .hero .lead { max-width: 40rem; font-size: 1.2rem; }
-.hero img { width: 230px; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -375,8 +368,7 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { grid-template-columns: 1fr; text-align: left; padding-bottom: 1.5rem; }
-  .hero img { width: 170px; justify-self: center; }
+  .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
@@ -393,7 +385,6 @@ a.card h3 { color: var(--accent); }
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
       <a href="docs.html" class="current">Docs</a>
-      <a href="changelog.html">Changelog</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -433,22 +424,17 @@ a.card h3 { color: var(--accent); }
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
-    <li><a href="toolchain.html">Native toolchain</a></li>
   </ul>
 </div>
 <div class="nav-group">
   <div class="nav-title">Developing</div>
   <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package builder</a></li>
     <li><a href="hello.html">Hello Motor OS</a></li>
     <li><a href="profiling.html">Profiling</a></li>
-  </ul>
-</div>
-<div class="nav-group">
-  <div class="nav-title">Project</div>
-  <ul>
-    <li><a href="changelog.html">Changelog</a></li>
-    <li><a href="contributing.html">Contributing</a></li>
   </ul>
 </div>
 </nav>
@@ -462,7 +448,7 @@ also in its <code>docs/</code> directory and in the README files next to the cod
 
 <h2>Getting started</h2>
 <div class="cards">
-  <a class="card" href="what.html"><h3>What is Motor OS</h3><p>The shape of the system, what works, and what does not.</p></a>
+  <a class="card" href="what.html"><h3>What is Motor OS</h3><p>The shape of the system and what works today.</p></a>
   <a class="card" href="why.html"><h3>Why Motor OS</h3><p>The reasoning behind a new OS for virtual machines.</p></a>
   <a class="card" href="build.html"><h3>Building Motor OS</h3><p>To be written: the build is being reworked together with the toolchain.</p></a>
   <a class="card" href="running.html"><h3>Running Motor OS</h3><p>The four images, the VM scripts, the console, and SSH access.</p></a>
@@ -487,20 +473,16 @@ also in its <code>docs/</code> directory and in the README files next to the cod
   <a class="card" href="rmux.html"><h3>rmux</h3><p>The terminal multiplexer and its keys.</p></a>
   <a class="card" href="editors.html"><h3>Editors</h3><p>red, a vi-like editor, and kibim.</p></a>
   <a class="card" href="devtools.html"><h3>Developer image</h3><p>Lorry, Gears, mdbg, the test suites, and the native toolchain.</p></a>
-  <a class="card" href="toolchain.html"><h3>Native toolchain</h3><p>To be written: Clang/LLVM, mlibc, and rustc on Motor OS.</p></a>
 </div>
 
 <h2>Developing for Motor OS</h2>
 <div class="cards">
+  <a class="card" href="toolchain.html"><h3>Toolchains</h3><p>The cross-compiling toolchain on Linux, the native toolchain on the developer image, and the workflow for each.</p></a>
   <a class="card" href="rust.html"><h3>Rust on Motor OS</h3><p>The target, what std supports, ported crates, and porting notes.</p></a>
+  <a class="card" href="c-cpp.html"><h3>C/C++ on Motor OS</h3><p>A C library and native Clang/LLVM: what is supported, how to build, and Lua.</p></a>
+  <a class="card" href="lorry.html"><h3>Lorry</h3><p>A better Cargo for security-sensitive builds: offline, with every dependency fetched once, checked, approved, and recorded before it is built.</p></a>
   <a class="card" href="hello.html"><h3>Hello Motor OS</h3><p>Compile a small web server and run it in a Motor OS VM.</p></a>
   <a class="card" href="profiling.html"><h3>Profiling</h3><p>Flame graphs from a Motor OS binary with the tracing crate.</p></a>
-</div>
-
-<h2>Project</h2>
-<div class="cards">
-  <a class="card" href="changelog.html"><h3>Changelog</h3><p>Notable changes, newest first.</p></a>
-  <a class="card" href="contributing.html"><h3>Contributing</h3><p>How to get involved, the development rules, and the license.</p></a>
 </div>
 <nav class="pager">
 <span></span>
@@ -512,7 +494,7 @@ also in its <code>docs/</code> directory and in the README files next to the cod
   <div class="wrap">
     <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
     This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
-    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a> &middot; <a href="https://github.com/moturus/motor-os/discussions">Discussions</a> &middot; <a href="https://github.com/moturus/motor-os/issues">Issues</a></p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
   </div>
 </footer>
 </body>
