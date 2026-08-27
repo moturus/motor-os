@@ -428,6 +428,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_pane_identifies_the_terminal_it_provides() {
+        let (out, code) = pane_run("printf %s \"$TERM\"", b"");
+        assert_eq!(out, "screen-256color");
+        assert_eq!(code, Some(0));
+    }
+
+    #[test]
     fn a_pane_told_its_input_is_over_sees_the_end_of_it() {
         // Two platforms, two mechanisms, one meaning (`sys::END_OF_INPUT`):
         // `cat` ends when its input does, whether that is a closed pipe or the

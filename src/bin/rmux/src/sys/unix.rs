@@ -52,6 +52,11 @@ pub const ENTER: &[u8] = b"\r";
 pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo> {
     let (master, slave) = open_pty(size)?;
 
+    // A pane is the terminal here, not the terminal rmux is running on. Match
+    // tmux's terminal family so shells do not install hooks meant for the
+    // outer xterm and turn its title into the window name at every prompt.
+    cmd.env("TERM", "screen-256color");
+
     // SAFETY: `pre_exec` runs between fork and exec, so it may call only
     // async-signal-safe functions; `setsid` and `ioctl` are both on that list.
     // Each `Stdio` owns the descriptor it is given, hence a dup apiece.

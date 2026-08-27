@@ -89,6 +89,7 @@ impl Pty {
     /// size and a screen replayed at it.
     fn spawn_sized(tmpdir: &std::path::Path, args: &[&str], rows: u16, cols: u16) -> Pty {
         let (master, slave) = open_pty_sized(rows, cols);
+        pin_test_shell(tmpdir);
         // rmux talks to the slave on all three descriptors, so it believes it
         // is on a terminal for the same reason its own panes will. `PS1` is
         // inherited straight through rmux into the pane's shell, which is what
@@ -102,7 +103,7 @@ impl Pty {
                 .env("TMPDIR", tmpdir)
                 // The server reads `$HOME/.config/rmux.toml` (§2.2), so a test
                 // that wants a config of its own needs a home of its own --
-                // and every other test needs one it knows is empty.
+                // and every other test needs the pinned shell below.
                 .env("HOME", tmpdir)
                 .args(args)
                 .stdin(Stdio::from_raw_fd(dup(slave)))
@@ -315,6 +316,27 @@ impl Pty {
             self.pump();
         }
         false
+    }
+}
+
+/// Keep these tests about rmux rather than the host's preferred shell.
+///
+/// Dash honours an inherited `PS1`; Bash replaces it. Tests that supply other
+/// settings keep them, with only the shell added when they did not choose one.
+fn pin_test_shell(tmpdir: &std::path::Path) {
+    let dir = tmpdir.join(".config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rmux.toml");
+    let mut config = std::fs::read_to_string(&path).unwrap_or_default();
+    if !config
+        .lines()
+        .any(|line| line.trim_start().starts_with("default-shell"))
+    {
+        if !config.is_empty() && !config.ends_with('\n') {
+            config.push('\n');
+        }
+        config.push_str("default-shell = \"sh\"\n");
+        std::fs::write(path, config).unwrap();
     }
 }
 
@@ -1109,6 +1131,27 @@ fn a_window_can_be_renamed_and_the_status_line_says_so() {
         pty.wait_for("0:build*"),
         "the rename did not reach the status line: {:?}",
         pty.seen
+    );
+}
+
+#[test]
+fn an_outer_terminal_title_hook_does_not_rename_a_bash_window() {
+    let dir = private_tmpdir();
+    std::fs::create_dir_all(dir.join(".config")).unwrap();
+    std::fs::write(dir.join(".config/rmux.toml"), "default-shell = \"bash\"\n").unwrap();
+    std::fs::write(
+        dir.join(".bashrc"),
+        "case \"$TERM\" in xterm*) printf '\x1b]0;user@host: cwd\x07';; esac\n\
+         PS1='rmux-test$ '\n",
+    )
+    .unwrap();
+
+    let mut pty = Pty::spawn(&dir, &[]);
+    assert!(pty.wait_for(PROMPT), "no Bash prompt: {:?}", pty.seen);
+    assert!(
+        pty.wait_painted("0:bash*"),
+        "the outer terminal hook renamed the window:\n{}",
+        pty.picture()
     );
 }
 
