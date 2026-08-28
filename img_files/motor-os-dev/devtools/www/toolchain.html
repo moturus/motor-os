@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="The Motor OS toolchains: the cross-compiling Rust and Clang toolchain on Linux, the native rustc, LLVM, and Lorry on the developer image, and the workflow for each.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Toolchains | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html" class="current">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Developing</div>
+<h1>Toolchains</h1>
+<p class="lead">Motor OS has one compilation target, <code>x86_64-unknown-motor</code>, and
+two toolchains for it. On Linux, a cross toolchain (Rust with Cargo, and Clang) builds
+Motor OS itself and any program for it. On the developer image, a native toolchain
+(rustc with a full sysroot, Clang/LLVM with a C and C++ sysroot, and Lorry as the build
+driver) builds programs on Motor OS. Both come from the same forks of Rust, LLVM, and
+mlibc.</p>
+
+<div class="note">
+  <div class="callout-title">What is changing</div>
+  <p>The way the toolchains are <em>built and versioned</em> is being reworked; the
+  direction is summarized at the <a href="#versioning">end of this page</a>. What they
+  contain, where they live on the developer image, and how programs are compiled with
+  them stay as described here, with one visible difference: the <code>+dev-x86_64-unknown-motor</code>
+  selector in Cargo commands goes away in favor of a versioned toolchain that the
+  repository selects itself.</p>
+</div>
+
+<h2>Components and lineage</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Component</th><th>Source</th><th>What Motor OS adds</th></tr>
+  <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches. Two branches: one carries the library side (<code>motor-os-rt-v17</code>, matched to moto-rt 0.17), the other the compiler patches (<code>motor-os-rustc</code>).</td></tr>
+  <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing; they run on Linux only.</td></tr>
+  <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
+  <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. It sits on <code>moto-rt-cabi</code>, a C ABI over the Motor runtime (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
+  <tr><td>Small crate forks</td><td><code>moturus/libc</code>, <code>moturus/stacker</code>, <code>moturus/rust_libloading</code>, <code>moturus/rust-ctrlc</code></td><td>Patched into the Rust fork's own dependency graph; Cargo fetches them, nothing is cloned by hand.</td></tr>
+  <tr><td>Lua, ripgrep</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code></td><td>Built with the toolchain as the first real C program and the first large Rust program; shipped as <code>/devtools/bin/lua</code> and <code>/system/bin/rg</code>.</td></tr>
+</table>
+</div>
+
+<h3>The target</h3>
+<p>The target specification in the Rust fork describes what every Motor OS program
+looks like: a static position-independent executable, linked self-contained (no
+dynamic linking, no system linker libraries), <code>panic = abort</code>, entry point
+<code>motor_start</code>, thread-locals provided by the runtime rather than ELF TLS, and
+full RELRO. Clang's Motor target applies the same rules to C and C++: emulated TLS,
+<code>-static-pie</code>, lld, and a link line that adds <code>crt1.o</code>, the runtime shim,
+libc++abi, libunwind, libc, and the compiler builtins. A program built by either compiler
+runs on any Motor OS image, because it carries everything it needs except the runtime
+object that the OS maps into every process.</p>
+
+<h2>The cross toolchain on Linux</h2>
+
+<h3>Rust</h3>
+<p>The Motor OS build registers the Rust fork's stage-2 output as a rustup toolchain
+named <code>dev-x86_64-unknown-motor</code>. It contains <code>rustc</code>, Clippy, the
+standard library for the Linux host, the standard library for
+<code>x86_64-unknown-motor</code> under <code>lib/rustlib/x86_64-unknown-motor</code>, and
+the library sources. It does not contain a Cargo of its own: rustup borrows one from
+whatever channel is installed, which is a known reproducibility gap and one of the things
+the rework fixes. Everything in the repository is built with</p>
+<pre><code>cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor [--release]</code></pre>
+<p>and nothing more: the standard library is prebuilt, so ordinary programs do not use
+<code>-Zbuild-std</code>. Only the bare-metal pieces, the kernel and the boot stages, use
+custom JSON targets and build <code>core</code> and <code>alloc</code> themselves. The
+Makefile applies the same command to every component, keeps each crate's Cargo output
+under <code>build/obj/</code>, and copies stripped binaries into
+<code>build/bin/debug</code> or <code>build/bin/release</code> for the imager;
+<code>make -j$(nproc)</code> builds the debug tree and <code>BUILD=release</code> the release
+tree.</p>
+<p>A pure-Rust program needs no linker configuration: rustc links it with its bundled
+lld. A crate that compiles C code (curl, Lorry) points Cargo at the Motor Clang instead,
+with <code>CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER</code> set to <code>motor-clang</code>
+and <code>CC_x86_64_unknown_motor</code> to the same compiler, so that the C parts are built
+against the Motor sysroot.</p>
+
+<h4>Cross-compiling your own program</h4>
+<ol>
+  <li><code>cargo new hello</code>, and write the program against the standard library, as
+  on any other platform.</li>
+  <li>If it uses Tokio, mio, rustls with ring, crossterm, or the ctrlc crate, add the Motor
+  OS forks to <code>[patch.crates-io]</code> in <code>Cargo.toml</code>, as the in-tree
+  programs do; the table in <a href="rust.html">Rust on Motor OS</a> lists them.</li>
+  <li><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code>.
+  The result is <code>target/x86_64-unknown-motor/release/hello</code>.</li>
+  <li>Copy it into a running VM with <code>scp</code> and run it; see
+  <a href="hello.html">Hello Motor OS</a> for the whole sequence.</li>
+</ol>
+
+<h3>C and C++</h3>
+<p>The host Clang is the LLVM fork's own build, with a configuration file next to it
+that turns every link for <code>x86_64-unknown-motor</code> into a raw static-PIE link
+(<code>-fuse-ld=lld -static-pie -nostdlib -Wl,-e,motor_start</code>); that raw form is what
+the build uses to construct the sysroot itself. For compiling programs, the build also
+produces a sysroot directory with mlibc's headers and the static libraries, and three
+small wrappers next to it:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Wrapper</th><th>What it does</th></tr>
+  <tr><td><code>motor-clang</code></td><td>Runs the host Clang with <code>--target=x86_64-unknown-motor</code> and the sysroot, letting the driver's Motor target add the runtime link line; <code>motor-clang -O2 prog.c -o prog</code> is a complete build.</td></tr>
+  <tr><td><code>motor-clang++</code></td><td>The same for C++, with libc++.</td></tr>
+  <tr><td><code>motor-rust-cc</code></td><td>The linker Cargo uses for Rust crates with C parts: adds the runtime group (<code>crt1.o</code>, the shim, libc++, libc++abi, libunwind, libc, the builtins) to a rustc-driven link.</td></tr>
+</table>
+</div>
+<p>A C program cross-compiled this way is the same static executable the native
+compiler produces, and runs on any image. What the C library and libc++ support is on
+the <a href="c-cpp.html">C/C++ on Motor OS</a> page.</p>
+
+<h2>The native toolchain on the developer image</h2>
+<p>Nothing on the developer image compiles itself into existence: the native compilers
+are cross-built on Linux and staged into the image. Once there, they compile Motor OS
+programs on Motor OS, with no host involved.</p>
+
+<h3>rustc</h3>
+<p><code>/devtools/rust/bin/rustc</code> is the Rust fork's compiler built with Motor OS as
+the host (<code>x.py build --stage 2 compiler --host x86_64-unknown-motor</code>): a single
+static executable of about 100 MB with its own LLVM inside. Its sysroot,
+<code>/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib</code>, is the complete set of
+prebuilt crates: <code>std</code>, <code>core</code>, <code>alloc</code>,
+<code>proc_macro</code>, <code>test</code>, <code>panic_abort</code>, the compiler builtins,
+<code>moto_rt</code>, and their dependencies, each as an <code>.rlib</code> with its
+metadata. <code>/devtools/bin/rustc</code>, the command on <code>PATH</code>, is a two-line
+script that sets <code>TMPDIR=/devtools/tmp</code> and runs it.</p>
+<pre><code>rustc -O hello.rs -o /devtools/tmp/hello && /devtools/tmp/hello</code></pre>
+<p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
+the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
+no Cargo, Clippy, rustfmt, or rustdoc on the image; packages with dependencies are built
+with Lorry, below, which also runs procedural macros as separate static executables
+because Motor OS has no dynamic loading.</p>
+
+<h3>Clang/LLVM</h3>
+<p><code>/devtools/llvm/bin/llvm</code> is one static executable of about 107 MB that
+contains the whole LLVM toolchain as subcommands: <code>clang</code>, <code>clang++</code>,
+<code>lld</code> (and its <code>ld.lld</code> flavor), <code>ar</code>, <code>ranlib</code>,
+<code>nm</code>, <code>objcopy</code>, <code>strip</code>, <code>objdump</code>,
+<code>readelf</code>, <code>size</code>, <code>addr2line</code>, <code>cxxfilt</code>,
+<code>dwp</code>, and more, invoked as <code>llvm clang ...</code> or <code>llvm ar ...</code>.
+It was configured with Motor OS as its host and default target, lld as the default linker,
+compiler-rt as the runtime library, libc++ as the C++ standard library, and
+<code>/devtools/cfg/llvm</code> as its configuration directory, where
+<code>x86_64-unknown-motor.cfg</code> points it at its resource directory,
+<code>/devtools/llvm/lib/clang/23</code>. <code>/devtools/bin/cc</code> and
+<code>/devtools/bin/c++</code> are two-line scripts over it.</p>
+<p>The sysroot is under <code>/devtools/llvm</code>: <code>include</code> holds mlibc's
+headers, libc++'s <code>c++/v1</code>, and <code>moto_rt.h</code>; <code>lib</code> holds
+<code>crt1.o</code>, <code>libc.a</code>, <code>libc++.a</code>, <code>libc++abi.a</code>,
+<code>libunwind.a</code>, <code>libmoto_rt_cabi.a</code>, the compiler-rt builtins, and empty
+<code>libm</code>, <code>libpthread</code>, <code>libdl</code>, <code>librt</code>,
+<code>libresolv</code>, <code>libutil</code>, and <code>libssp</code> archives so that
+<code>-lm</code> and friends in existing build systems link. The C library reads its
+runtime files from <code>/system/cfg/libc</code>.</p>
+
+<h3>Lorry</h3>
+<p>Lorry is the Rust build driver on the image, and a smaller, stricter Cargo replacement
+for security-sensitive environments: it takes the same <code>Cargo.toml</code> and
+<code>Cargo.lock</code> and aims for byte-identical binaries, never invokes Cargo, admits
+dependencies once and explicitly with <code>lorry vendor</code>, and then builds, runs, and
+tests packages offline using
+<code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
+and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
+It has its own page: <a href="lorry.html">Lorry: the package manager</a>.</p>
+<pre><code>lorry new hello && cd hello
+lorry vendor --accept-all      # once, with network access
+lorry build --release
+lorry run</code></pre>
+
+<h3>Also on the image</h3>
+<p><code>/devtools/bin/lua</code> (Lua 5.4.8), <code>/system/bin/curl</code> (the HTTPS
+client Lorry fetches with), <code>/devtools/bin/mdbg</code>, the test suites under
+<code>/devtools/tests</code>, and source snapshots under <code>/devtools/src</code>; see
+<a href="devtools.html">Developer image</a>.</p>
+
+<h2>How the pieces are produced</h2>
+<p>The current build script (<code>src/build-motor-os.sh</code>) produces everything
+above in a fixed order, on Ubuntu, in one to two hours. The order matters because each
+layer is built with the one before it:</p>
+<ol>
+  <li>The Rust fork's library branch is bootstrapped with <code>x.py</code> and registered as
+  the cross toolchain, which every later step and every Motor OS component needs.</li>
+  <li>The host Clang and lld are built from the LLVM fork.</li>
+  <li>The runtime shim (<code>moto-rt-cabi</code>) is built with the cross toolchain, then the
+  compiler-rt builtins, then mlibc against the shim, then libunwind, libc++abi, and libc++
+  against mlibc.</li>
+  <li>The native LLVM multicall binary is built for Motor OS against that sysroot, and Lua
+  is cross-compiled against the same sysroot as a check that a real C program links and
+  runs.</li>
+  <li>The Rust fork's compiler branch produces the native rustc with Motor OS as host,
+  followed by a rebuild of the standard libraries for both hosts.</li>
+  <li>The results are staged into <code>img_files/generated/</code>, from which the imager
+  places them into the developer image.</li>
+</ol>
+<p>This is the part that is being reworked; the steps are listed so the relationships
+are clear, not as instructions. The user-facing procedure will be on the
+<a href="build.html">Building Motor OS</a> page when the rework is merged.</p>
+
+<h2 id="versioning">Versioning, and what the rework changes</h2>
+<p>Today the compilers report a development version and no commit hash, the toolchain
+is selected by the name <code>dev-x86_64-unknown-motor</code>, Cargo comes from whichever
+channel rustup finds, and the image carries no record of which sources built it. The
+rework, in progress on the <code>toolchain-1.99.0-beta</code> branch of the repository,
+replaces this with one versioned Motor toolchain:</p>
+<ul>
+  <li><strong>One toolchain, one name.</strong> rustc, Cargo, Clippy, rustfmt, rustdoc, the
+  library sources, and both standard libraries live in one rustup toolchain, built from
+  one Rust revision, with no host nightly involved. A <code>rust-toolchain.toml</code> in the
+  repository selects it, so the command becomes plain
+  <code>cargo build --target x86_64-unknown-motor</code>, and the Makefile refuses to run with
+  a toolchain that is not a stamped Motor toolchain.</li>
+  <li><strong>Exact lineage.</strong> A central manifest records the upstream Rust release and
+  commit, the LLVM commit that release uses, the Motor Rust and LLVM commits on top of
+  them, the Cargo and mlibc commits, the moto-rt version, and the lock-file hashes. The
+  toolchain's identifier carries the upstream version and commit (for example
+  <code>1.99.0-beta-f47d5bb-motor.dev.1</code> during the beta), and the same manifest is
+  written into the developer image as <code>/devtools/toolchain/manifest</code>.</li>
+  <li><strong>Reproducible inputs.</strong> Sources are checked out at exact commits and
+  verified before building; a normal build never advances a branch, runs
+  <code>cargo update</code>, or changes the rustup default.</li>
+  <li><strong>The same C wrappers.</strong> <code>motor-clang</code>, <code>motor-clang++</code>,
+  and <code>motor-rust-cc</code> keep their names and are generated into the versioned
+  sysroot.</li>
+  <li><strong>A stable baseline.</strong> The first release is planned on the exact Rust
+  1.99.0 tag once it ships (scheduled for October 2026), rebased from the beta used to
+  develop it, as <code>1.99.0-motor.1</code>.</li>
+</ul>
+<p>The target, the two-phase bootstrap, and the developer image's layout
+(<code>/devtools/rust</code>, <code>/devtools/llvm</code>, <code>/devtools/bin</code>) do not
+change.</p>
+<nav class="pager">
+<a class="pager-prev" href="devtools.html"><span>Previous</span>Developer image</a>
+<a class="pager-next" href="rust.html"><span>Next</span>Rust on Motor OS</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

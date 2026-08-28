@@ -1,101 +1,105 @@
 # Motor OS
 
-Motor OS is a simple,
-fast, and secure operating system built for the cloud.
-Designed specifically for virtualized workloads such as web serving, serverless computing,
-and edge caching, it addresses inefficiencies found in traditional operating systems
-like Linux when running in virtual environments.
+Motor OS is a simple, fast, and secure operating system built for the cloud.
+It targets virtualized workloads such as web serving, serverless computing,
+and edge caching, and avoids the overhead a general-purpose OS carries when
+it runs inside a VM.
 
-[Motor OS](https://motor-os.org) is built entirely in Rust. It supports x64 KVM-based virtual machines
-and can run on Qemu, Cloud Hypervisor, or Alioth VMMs. The system, including
-its libraries and syscalls, is implemented in Rust and optimized for Rust-based client applications.
+It is written entirely in Rust, from the kernel to the shell, and its system
+interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU, Cloud
+Hypervisor, and Firecracker.
 
-## Why?
+This README is a summary. The details are on the website,
+[motor-os.org](https://motor-os.org): the architecture, the process model,
+the filesystem, networking, terminals, the commands and programs, the
+toolchains, and how to develop for Motor OS in Rust and in C/C++.
 
-At the moment, most virtualized production workloads run Linux.
-While Linux has many advanced features that in many
-situations mean it is the only reasonable OS choice, there are
-several complications that make it not ideal, in theory,
-for some virtualized workloads:
+## Why
 
-* Linux is optimized for baremetal, which leads to inefficiencies
-when it is used inside a VM that is running on a Linux host:
-  * duplicate block caches
-  * duplicate page table walks
-  * the host scheduler can preempt the VCPU holding a spinlock in the VM's kernel
-* Linux is difficult to use:
-  * Docker, Nix OS, "serverless", etc. all exist because of Linux's complexity
-* Linux has, historically, not been very secure
+At the moment, most virtualized production workloads run Linux. Linux has
+many advanced features that in many situations make it the only reasonable
+choice, but several things make it less than ideal, in theory, for some
+virtualized workloads:
 
-A new operating system built from ground-up with the focus
-on virtualized workloads can be made much simpler and more
-secure than Linux, while matching or exceeding its 
-performance and/or efficiency.
+* Linux is optimized for bare metal, which leads to duplicated work when it
+  runs inside a VM on a Linux host: duplicate block caches, duplicate page
+  table walks, and a host scheduler that can preempt a vCPU while it holds a
+  spinlock in the guest kernel.
+* Linux is difficult to use: Docker, NixOS, "serverless" platforms, and
+  similar projects all exist because of Linux's complexity.
+* Linux has, historically, not been very secure.
 
-## What?
+A new operating system built from the ground up with a focus on virtualized
+workloads can be made much simpler and more secure than Linux, while matching
+or exceeding its performance and efficiency.
 
-Motor OS is a microkernel-based operating system, built in Rust, that targets virtualized workloads exclusively.
-It currently supports x64 KVM-based virtual machines, and can run in Qemu, Cloud Hypervisor, or Alioth VMMs.
+What Motor OS does differently:
 
-Rust is the language of Motor OS: not only it is implemented in Rust, it also exposes its ABI in Rust, not C.
+* **Only VirtIO.** Motor OS runs inside a VM, so it needs drivers for VirtIO
+  block and network devices and nothing else.
+* **A microkernel.** The kernel manages memory, threads, and IPC, and never
+  blocks. Drivers, the filesystem, and the network stack are one userspace
+  process; if that process dies, the machine halts with a clear log rather
+  than limping on.
+* **Rust all the way down.** Memory safety in the kernel, the runtime, and the
+  services; a Rust system interface instead of a C one; no dynamic linking.
+* **A small process model.** No `fork`, no signals, no pseudo-terminals, no
+  users. Processes carry an immutable capability word, and three roles derived
+  from it (System, Interactive, None) drive filesystem permissions.
+* **Configuration is part of the image.** Services, networking, and
+  permissions are declared in a few files and a declarative image policy.
+* **Boot time matters.** Motor OS boots in about 200 ms.
 
-### What works
+## What
 
-Motor OS is under active development, and should not be used for sensitive workloads.
-It is, however, ready for trials/experiments/research. In fact, Motor OS
-[web site](https://motor-os.org) is served from inside a couple of Motor OS VMs (proxied via Cloudflare).</p>
+Motor OS is a microkernel-based operating system. The kernel, about 18,600
+lines of `no_std` Rust with four syscalls, manages address spaces, threads,
+scheduling, capabilities, and wait/wake objects. Everything else runs in
+userspace: `sys-io` owns the VirtIO block and network devices, the journaling
+filesystem (Motor FS), and the networking stack (moto-netstack); `sys-init`
+starts services; `sys-tty` drives the serial console; `strobe` collects logs
+and metrics; `dns-resolver` resolves names; `russhd` serves SSH. A per-process
+runtime object, `rt.vdso`, implements the system interface that Rust's
+standard library calls through the small `moto-rt` crate.
 
-More specifically, these things work:
+What works today:
 
-* boots via MBR (Qemu) or PVH (Alioth, Cloud Hypervisor) in 100ms (Alioth) or 200ms (CHV, Qemu)
-* himem micro-kernel
-* scheduling:
-  * a simple multi-processor round robin (SMP)
-  * in-kernel scheduling is cooperative:
-  * the kernel is very small and does not block, so does not need to be preemptible
-  * the userspace is preemptible
-* memory management:
-  * only 4K pages at the moment
-  * * stacks are guarded
-  * * page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)
-* I/O subsystem (in the userspace)
-  * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a>
-  * a <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/motor-fs">journaling filesystem</a>
-  * a native <a href="https://github.com/moturus/motor-os/tree/main/src/sys/sys-io/netstack">TCP/IP stack</a> (moto-netstack, grown out of smoltcp)
-    * max host-guest TCP throughput is about 10Gbps at the moment
-* the userspace:
-  * multiple processes, with preemption
-  * threads, thread local storage
-  * Rust's standard library mostly ported
-    * Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or Windows FFI,
-      will cross-compile for Motor OS and run, subject to "what does not work" below
-  * Tokio runtime and tokio/mio async TCP/UDP APIs are working
-  * <a href="https://github.com/moturus/motor-os/tree/main/src/bin/russhd">SSH server</a>
-  * a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided
-  * an axum/tokio-based TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> s also provided
-  * a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console
-  * a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a>
-  * basic commands like free, ps, ls, top, cat, ss, etc. (do `ls bin` to list all commands)
+* **Boot and kernel**: MBR (QEMU) or PVH (Cloud Hypervisor, Firecracker) boot
+  in about 200 ms; cooperative in-kernel scheduling with preemptive userspace;
+  SMP up to 16 vCPUs; guarded lazy stacks; admission control that keeps the
+  machine out of physical memory exhaustion instead of an OOM killer.
+* **I/O in userspace**: VirtIO block and network drivers with checksum and TSO
+  offload; Motor FS with per-role permissions and advisory locks; moto-netstack
+  with IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, RACK-TLP, timestamps, and
+  SYN cookies, UDP, and ICMP echo, at about 10 Gbps host-to-guest; a DNS
+  resolver service.
+* **Rust**: the standard library is ported (`x86_64-unknown-motor` is a Tier-3
+  Rust target); Tokio and mio, rustls, hyper, axum, and russh work.
+* **C and C++**: a C library (mlibc), the LLVM C++ runtime, and a Clang target
+  for Motor OS; Rust is preferred, C and C++ are fully supported; Lua runs.
+* **Programs**: the rush shell, the rmux terminal multiplexer, the red and
+  kibim editors, an SSH server with SFTP, two static web servers with TLS,
+  the usual commands (ls, ps, top, ss, ping, free, ...), and ripgrep.
+* **A self-hosting developer image**: native Clang/LLVM, native rustc, and
+  Lorry, a smaller, stricter Cargo replacement for security-sensitive
+  environments (Cargo-compatible: the same `Cargo.toml` and `Cargo.lock`,
+  byte-identical binaries; but offline, with every dependency fetched once,
+  checked, and approved before it is built), plus Gears, curl, mdbg, and the
+  test suites.
 
-### What does not work
+## Status
 
-Most pieces are not yet ready for production use. No security audit has been made.
-More specifically:
+Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went
+through weeks of systematic AI-assisted review and hardening, of the networking stack
+in particular. Networking is considered ready for production use within its
+supported feature set; the rest of the system is exercised daily by the full
+test suite, by long soak runs, and by the website, which is served from Motor
+OS VMs. There has been no independent security audit yet.
 
-* Filesystem: some operations are missing; undertested
-* Networking:
-  * IPv4 configuration through DHCP or static addresses; IPv6 is static
-  * DNS lookup through the system resolver service
-  * UDP broadcast/multicast not implemented (yet?)
-* The ecosystem outside Rust std:
-  * "sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks
-  * async Rust: Tokio is only partially ported, so most crates won't work without some refactoring
-  * crates that are wrappers around native Linux or Windows APIs will not work, obviously
+## Building, running, developing
 
-## How can I build/run it?
-
-See [docs/build.md](docs/build.md) and [docs/tools.md](docs/tools.md).
-
-## Examples and recipes
-
-see [docs/recipes/index.md](docs/recipes/index.md).
+See [docs/build.md](docs/build.md) for the current build instructions (the
+way the toolchains are built is being reworked), [docs/tools.md](docs/tools.md)
+for the VM scripts and the tools inside the VM, and
+[docs/recipes/index.md](docs/recipes/index.md) for examples. The website
+covers all of this in more detail, including the toolchains and Lorry.

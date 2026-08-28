@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="A recipe: compile the Rust Book's multithreaded web server for Motor OS, copy it into a VM, and open it from the host.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Hello Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -383,8 +383,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">Overview</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
   </ul>
@@ -433,62 +433,236 @@ a.card h3 { color: var(--accent); }
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
     <li><a href="lorry.html">Lorry: the package manager</a></li>
-    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="hello.html" class="current">Hello, world</a></li>
     <li><a href="profiling.html">Profiling</a></li>
   </ul>
 </div>
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Developing</div>
+<h1>Hello Motor OS</h1>
+<p class="lead">In this example we compile the final project of the
+<a href="https://doc.rust-lang.org/book/title-page.html">Rust Book</a>,
+<a href="https://doc.rust-lang.org/book/ch21-00-final-project-a-web-server.html">a
+multithreaded web server</a>, for Motor OS, with one small change, copy it into a running
+Motor OS VM, and open it from the host.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<p>You need a Motor OS build with its toolchain and a VM started with
+<code>run-qemu.sh</code>; see <a href="build.html">Building Motor OS</a> and
+<a href="running.html">Running Motor OS</a>.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>The program</h2>
+<pre><code>cargo new hello
+cd hello</code></pre>
+<p>Replace <code>src/main.rs</code> with this:</p>
+<pre><code>use hello::ThreadPool;
+use std::fs;
+use std::io::prelude::*;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::thread;
+use std::time::Duration;
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots in about 200 ms; boot-time work
-  is treated as a cost that needs justification.</li>
-</ul>
+fn main() {
+    let listener = TcpListener::bind("0.0.0.0:5542").unwrap();
+    let pool = ThreadPool::new(4);
+
+    for stream in listener.incoming().take(2) {
+        let stream = stream.unwrap();
+
+        pool.execute(|| {
+            handle_connection(stream);
+        });
+    }
+
+    println!("Shutting down.");
+}
+
+fn handle_connection(mut stream: TcpStream) {
+    let mut buffer = [0; 1024];
+    stream.read(&amp;mut buffer).unwrap();
+
+    let get = b"GET / HTTP/1.1\r\n";
+    let sleep = b"GET /sleep HTTP/1.1\r\n";
+
+    let (status_line, filename) = if buffer.starts_with(get) {
+        ("HTTP/1.1 200 OK", "hello.html")
+    } else if buffer.starts_with(sleep) {
+        thread::sleep(Duration::from_secs(5));
+        ("HTTP/1.1 200 OK", "hello.html")
+    } else {
+        ("HTTP/1.1 404 NOT FOUND", "404.html")
+    };
+
+    let contents = fs::read_to_string(filename).unwrap();
+
+    let response = format!(
+        "{}\r\nContent-Length: {}\r\n\r\n{}",
+        status_line,
+        contents.len(),
+        contents
+    );
+
+    stream.write_all(response.as_bytes()).unwrap();
+    stream.flush().unwrap();
+}</code></pre>
+<p>This is the Rust Book's code with a single change: instead of
+<code>TcpListener::bind("127.0.0.1:7878")</code> we call
+<code>TcpListener::bind("0.0.0.0:5542")</code>, so that the listener is reachable on the
+VM's network address, not only on loopback.</p>
+<p>Then create <code>src/lib.rs</code>, exactly as in the Rust Book:</p>
+<pre><code>use std::{
+    sync::{mpsc, Arc, Mutex},
+    thread,
+};
+
+pub struct ThreadPool {
+    workers: Vec&lt;Worker&gt;,
+    sender: Option&lt;mpsc::Sender&lt;Job&gt;&gt;,
+}
+
+type Job = Box&lt;dyn FnOnce() + Send + 'static&gt;;
+
+impl ThreadPool {
+    /// Create a new ThreadPool.
+    ///
+    /// The size is the number of threads in the pool.
+    ///
+    /// # Panics
+    ///
+    /// The `new` function will panic if the size is zero.
+    pub fn new(size: usize) -&gt; ThreadPool {
+        assert!(size &gt; 0);
+
+        let (sender, receiver) = mpsc::channel();
+
+        let receiver = Arc::new(Mutex::new(receiver));
+
+        let mut workers = Vec::with_capacity(size);
+
+        for id in 0..size {
+            workers.push(Worker::new(id, Arc::clone(&amp;receiver)));
+        }
+
+        ThreadPool {
+            workers,
+            sender: Some(sender),
+        }
+    }
+
+    pub fn execute&lt;F&gt;(&amp;self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let job = Box::new(f);
+
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&amp;mut self) {
+        drop(self.sender.take());
+
+        for worker in &amp;mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
+
+struct Worker {
+    id: usize,
+    thread: Option&lt;thread::JoinHandle&lt;()&gt;&gt;,
+}
+
+impl Worker {
+    fn new(id: usize, receiver: Arc&lt;Mutex&lt;mpsc::Receiver&lt;Job&gt;&gt;&gt;) -&gt; Worker {
+        let thread = thread::spawn(move || loop {
+            let message = receiver.lock().unwrap().recv();
+
+            match message {
+                Ok(job) =&gt; {
+                    println!("Worker {id} got a job; executing.");
+
+                    job();
+                }
+                Err(_) =&gt; {
+                    println!("Worker {id} disconnected; shutting down.");
+                    break;
+                }
+            }
+        });
+
+        Worker {
+            id,
+            thread: Some(thread),
+        }
+    }
+}</code></pre>
+<p>And the two pages the server reads, next to <code>Cargo.toml</code>.
+<code>hello.html</code>:</p>
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html lang="en"&gt;
+  &lt;head&gt;
+    &lt;meta charset="utf-8"&gt;
+    &lt;title&gt;Hello!&lt;/title&gt;
+  &lt;/head&gt;
+  &lt;body&gt;
+    &lt;h1&gt;Hello!&lt;/h1&gt;
+    &lt;p&gt;Hi from Motor OS&lt;/p&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+<p><code>404.html</code>:</p>
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html lang="en"&gt;
+  &lt;head&gt;
+    &lt;meta charset="utf-8"&gt;
+    &lt;title&gt;Hello!&lt;/title&gt;
+  &lt;/head&gt;
+  &lt;body&gt;
+    &lt;h1&gt;Oops!&lt;/h1&gt;
+    &lt;p&gt;Sorry, I don't know what you're asking for.&lt;/p&gt;
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<h2>Build it for Motor OS</h2>
+<pre><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code></pre>
+<p>The <code>+dev-x86_64-unknown-motor</code> selector is the name under which the
+current build registers the toolchain; the toolchain rework replaces it with a
+versioned toolchain selected by the repository, after which the command is plain
+<code>cargo build --release --target x86_64-unknown-motor</code>. See
+<a href="toolchain.html">Toolchains</a>.</p>
+
+<h2>Copy it into the VM</h2>
+<p>With the VM running, use SFTP through the SSH server. <code>/user/bin</code> is where
+an interactive session may install programs, and <code>/user/tmp</code> is scratch space:</p>
+<pre><code>scp -P 2222 -o IdentitiesOnly=yes -i test.key \
+    target/x86_64-unknown-motor/release/hello hello.html 404.html \
+    motor@192.168.4.2:/user/tmp/</code></pre>
+<p><code>test.key</code> is in the image directory next to <code>run-qemu.sh</code>. The
+executable bit is preserved by the transfer, so the binary is ready to run.</p>
+
+<h2>Run it</h2>
+<p>On the VM's console, or over <code>ssh-into-motor-os-vm.sh</code>:</p>
+<pre><code>rush:/$ cd /user/tmp
+rush:/user/tmp$ ./hello</code></pre>
+<p>On the host, open <a href="http://192.168.4.2:5542">http://192.168.4.2:5542</a>. You
+should see the <code>hello.html</code> page above, served from Motor OS. A request to
+<code>/sleep</code> is answered after five seconds. As in the book, the server accepts two
+connections and then shuts down its pool and exits; a browser may open more than one
+connection per page, so it can exit sooner than you expect.</p>
+
+<p>To ship a program with an image instead of copying it in, add the files to the image
+description in <code>src/imager/</code> (or to a directory under <code>img_files/</code> that
+the description already includes) and rebuild the image.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>Overview</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building from source</a>
+<a class="pager-prev" href="lorry.html"><span>Previous</span>Lorry: the package manager</a>
+<a class="pager-next" href="profiling.html"><span>Next</span>Profiling</a>
 </nav>
 </article>
 </main>

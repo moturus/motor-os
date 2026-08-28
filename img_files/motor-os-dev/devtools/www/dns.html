@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Motor OS is a simple, fast, and secure operating system for the cloud, built entirely in Rust for virtual machines.">
+<meta name="description" content="The Motor OS DNS resolver service: request path, configuration, transport, validation, and the result contract.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Motor OS</title>
+<title>DNS resolver | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -232,7 +232,7 @@ table.plain td code { white-space: normal; }
 /* Cards and pills */
 .cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 1rem;
   margin: 1.2rem 0 1.5rem;
 }
@@ -262,10 +262,27 @@ a.card h3 { color: var(--accent); }
 }
 .pill.dim { border-color: var(--line); color: var(--fg-2); }
 
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
 /* Home page */
-.hero { padding: 1.5rem 0 2.5rem; text-align: center; }
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
-.hero .lead { max-width: 40rem; margin-left: auto; margin-right: auto; font-size: 1.2rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -275,6 +292,32 @@ a.card h3 { color: var(--accent); }
   margin-bottom: 1rem;
 }
 .home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
 
 /* Pager and footer */
 .pager {
@@ -327,13 +370,9 @@ a.card h3 { color: var(--accent); }
   .sidebar li a.current { border-color: var(--accent); }
   .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
   pre { font-size: .82rem; }
-}
-@media (max-width: 560px) {
-  .cards { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -345,70 +384,136 @@ a.card h3 { color: var(--accent); }
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </header>
 <div id="content"></div>
-<main class="wrap home">
-<article class="content">
-<section class="hero">
-  <div class="hero-tag">An operating system for virtual machines</div>
-  <h1>Motor OS</h1>
-  <p class="lead">A simple, fast, and secure operating system built for the cloud.
-  Motor OS targets virtualized workloads such as web serving, serverless computing,
-  and edge caching, and avoids the overhead a general-purpose OS carries when it
-  runs inside a VM.</p>
-  <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
-  system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-  Cloud Hypervisor, and Firecracker.</p>
-</section>
-
-<div class="cards">
-  <a class="card" href="architecture.html">
-    <h3>A small kernel, everything else in userspace</h3>
-    <p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
-    VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
-  </a>
-  <a class="card" href="rust.html">
-    <h3>Rust's standard library</h3>
-    <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
-    and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
-    Rust, C, and C++ natively.</p>
-  </a>
-  <a class="card" href="networking.html">
-    <h3>A native networking stack</h3>
-    <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
-    resolver service, and configuration from one TOML file.</p>
-  </a>
-  <a class="card" href="processes.html">
-    <h3>Capability-based security</h3>
-    <p>Every process carries an immutable capability word. Three roles, System, Interactive,
-    and None, drive filesystem permissions. There is no root account.</p>
-  </a>
-  <a class="card" href="commands.html">
-    <h3>A working shell and tools</h3>
-    <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
-    HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
-  </a>
-  <a class="card" href="lorry.html">
-    <h3>A native Rust package manager</h3>
-    <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
-    and aims for byte-identical binaries, but builds offline, from dependencies that were
-    fetched once, checked, and approved explicitly; build scripts and procedural macros
-    run only with a recorded grant.</p>
-  </a>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+  </ul>
 </div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html" class="current">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">System</div>
+<h1>DNS resolver</h1>
+<p class="lead">Name resolution is a standalone service, <code>dns-resolver</code>, reached
+over bounded synchronous IPC. Its backend is native Rust and depends only on Motor OS
+networking and filesystem APIs. It runs with the None role.</p>
 
-<h2>Status</h2>
-<p>Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went through
-weeks of systematic AI-assisted review and hardening, of the networking stack in particular.
-Networking is considered ready for production use within its
-supported feature set; the rest of the system is exercised daily by the full test suite,
-by long soak runs, and by this website, which is served from Motor OS VMs. There has been
-no independent security audit yet. See <a href="what.html">What is Motor OS</a> for a
-detailed list of what works.</p>
+<h2>Request path</h2>
+<pre><code>Rust application (std::net::ToSocketAddrs, TcpStream::connect("host:port"), ...)
+  -&gt; rt.vdso lookup_host
+  -&gt; moto-dns: bounded synchronous IPC
+  -&gt; dns-resolver service
+  -&gt; connected UDP, with TCP fallback
+  -&gt; sys-io</code></pre>
+<p>Numeric addresses and <code>localhost</code> are answered in the runtime without
+contacting the service. Other names use a fresh client connection per lookup, so a dead
+resolver connection is never cached and a restarted service is found by the next call.
+The service keeps four fixed workers and a versioned, pointer-free request and response
+format defined in the <code>moto-dns</code> crate (names up to 253 bytes, up to 16
+addresses per answer). Because each lookup takes one IPC connection into four workers,
+more than 32 concurrent lookups are refused with <code>NotConnected</code>; raising this
+is on the follow-up list.</p>
+
+<h2>Configuration</h2>
+<p>The service reads <code>/system/cfg/libc/hosts</code> first and
+<code>/system/cfg/libc/resolv.conf</code> second. sys-io owns <code>resolv.conf</code>:
+before starting services it publishes the DNS servers from the active static device
+configuration atomically, and it republishes the aggregate whenever a DHCP lease changes.
+Static servers are declared with <code>dns_servers</code> in <code>sys-net.toml</code>;
+DHCP-configured devices use the servers from their leases. At most the first two unique
+nameservers are queried, which keeps one-family lookup latency inside the IPC deadline
+when both are unavailable.</p>
+
+<h2>Transport and validation</h2>
+<p>Each UDP attempt:</p>
+<ul>
+  <li>creates a fresh socket, and with it a freshly randomized ephemeral source port;</li>
+  <li>connects it to the selected nameserver, so packets from other sources are discarded
+  by the socket;</li>
+  <li>generates a fresh random 16-bit transaction ID;</li>
+  <li>sends one recursive A or AAAA question;</li>
+  <li>applies a one-second receive deadline;</li>
+  <li>validates the transaction ID, the response bit, the opcode, the single echoed
+  question, the canonical question name, type, and class, the response code, record
+  bounds, and compression pointers;</li>
+  <li>accepts address records only for the question name or a previously validated CNAME
+  target;</li>
+  <li>removes duplicate addresses.</li>
+</ul>
+<p>UDP delivery is unreliable, so the backend performs one bounded retransmission, on a
+new socket with a new transaction ID. NXDOMAIN is final and is not retried. A response
+with the truncated bit set is repeated over a connected DNS-over-TCP stream using the
+same query and the same strict parser.</p>
+<p>There is no cache. Correct caching requires honoring each record's TTL and a
+negative-cache policy; an arbitrary service-wide TTL would trade a small speedup for
+stale answers.</p>
+
+<h2>Result contract</h2>
+<p>The resolver reports one of: success, not found, temporary failure, timeout, out of
+memory, unsupported family, system failure, resolver failure, invalid request, or busy.
+The runtime maps these to stable Motor error codes, which surface through
+<code>std::io::Error</code>. Combined lookups collect IPv4 before IPv6 and then apply the
+destination-ordering policy: usable addresses first, with an unusable global IPv6 range
+ranked last so that a VM without IPv6 connectivity does not wait on it.</p>
+
+<h2>Testing</h2>
+<p><code>dns-resolver --self-test</code> covers numeric and hosts-file lookups, malformed
+requests, result ordering, restart behavior, live external resolution, and a deterministic
+loopback DNS fixture that drops the first UDP query, answers the retransmission with a
+truncated response, and completes the lookup over TCP. The regular test suites never go
+out to the Internet; only this explicitly separate live check does.</p>
+<nav class="pager">
+<a class="pager-prev" href="networking.html"><span>Previous</span>Networking</a>
+<a class="pager-next" href="terminals.html"><span>Next</span>Terminals</a>
+</nav>
 </article>
 </main>
 <footer class="foot">

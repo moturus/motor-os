@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Motor OS is a simple, fast, and secure operating system for the cloud, built entirely in Rust for virtual machines.">
+<meta name="description" content="Motor OS documentation: getting started, system design, userspace programs, and developing for Motor OS.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Motor OS</title>
+<title>Documentation | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -232,7 +232,7 @@ table.plain td code { white-space: normal; }
 /* Cards and pills */
 .cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 1rem;
   margin: 1.2rem 0 1.5rem;
 }
@@ -262,10 +262,27 @@ a.card h3 { color: var(--accent); }
 }
 .pill.dim { border-color: var(--line); color: var(--fg-2); }
 
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
 /* Home page */
-.hero { padding: 1.5rem 0 2.5rem; text-align: center; }
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
-.hero .lead { max-width: 40rem; margin-left: auto; margin-right: auto; font-size: 1.2rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -275,6 +292,32 @@ a.card h3 { color: var(--accent); }
   margin-bottom: 1rem;
 }
 .home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
 
 /* Pager and footer */
 .pager {
@@ -327,13 +370,9 @@ a.card h3 { color: var(--accent); }
   .sidebar li a.current { border-color: var(--accent); }
   .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
   pre { font-size: .82rem; }
-}
-@media (max-width: 560px) {
-  .cards { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -345,70 +384,110 @@ a.card h3 { color: var(--accent); }
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </header>
 <div id="content"></div>
-<main class="wrap home">
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html" class="current">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
 <article class="content">
-<section class="hero">
-  <div class="hero-tag">An operating system for virtual machines</div>
-  <h1>Motor OS</h1>
-  <p class="lead">A simple, fast, and secure operating system built for the cloud.
-  Motor OS targets virtualized workloads such as web serving, serverless computing,
-  and edge caching, and avoids the overhead a general-purpose OS carries when it
-  runs inside a VM.</p>
-  <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
-  system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-  Cloud Hypervisor, and Firecracker.</p>
-</section>
+<div class="eyebrow">Getting started</div>
+<h1>Documentation</h1>
+<p class="lead">These pages describe Motor OS as it is today. The source of truth is the
+<a href="https://github.com/moturus/motor-os">repository</a>, and most of what is here is
+also in its <code>docs/</code> directory and in the README files next to the code.</p>
 
+<h2>Getting started</h2>
 <div class="cards">
-  <a class="card" href="architecture.html">
-    <h3>A small kernel, everything else in userspace</h3>
-    <p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
-    VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
-  </a>
-  <a class="card" href="rust.html">
-    <h3>Rust's standard library</h3>
-    <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
-    and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
-    Rust, C, and C++ natively.</p>
-  </a>
-  <a class="card" href="networking.html">
-    <h3>A native networking stack</h3>
-    <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
-    resolver service, and configuration from one TOML file.</p>
-  </a>
-  <a class="card" href="processes.html">
-    <h3>Capability-based security</h3>
-    <p>Every process carries an immutable capability word. Three roles, System, Interactive,
-    and None, drive filesystem permissions. There is no root account.</p>
-  </a>
-  <a class="card" href="commands.html">
-    <h3>A working shell and tools</h3>
-    <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
-    HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
-  </a>
-  <a class="card" href="lorry.html">
-    <h3>A native Rust package manager</h3>
-    <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
-    and aims for byte-identical binaries, but builds offline, from dependencies that were
-    fetched once, checked, and approved explicitly; build scripts and procedural macros
-    run only with a recorded grant.</p>
-  </a>
+  <a class="card" href="what.html"><h3>What is Motor OS</h3><p>The shape of the system and what works today.</p></a>
+  <a class="card" href="why.html"><h3>Why Motor OS</h3><p>The reasoning behind a new OS for virtual machines.</p></a>
+  <a class="card" href="build.html"><h3>Building Motor OS</h3><p>To be written: the build is being reworked together with the toolchain.</p></a>
+  <a class="card" href="running.html"><h3>Running Motor OS</h3><p>The four images, the VM scripts, the console, and SSH access.</p></a>
 </div>
 
-<h2>Status</h2>
-<p>Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went through
-weeks of systematic AI-assisted review and hardening, of the networking stack in particular.
-Networking is considered ready for production use within its
-supported feature set; the rest of the system is exercised daily by the full test suite,
-by long soak runs, and by this website, which is served from Motor OS VMs. There has been
-no independent security audit yet. See <a href="what.html">What is Motor OS</a> for a
-detailed list of what works.</p>
+<h2>System</h2>
+<div class="cards">
+  <a class="card" href="architecture.html"><h3>Architecture</h3><p>The kernel, sys-io, the services, and the per-process runtime.</p></a>
+  <a class="card" href="processes.html"><h3>Processes and roles</h3><p>Capabilities, the three roles, spawning, and what replaces users.</p></a>
+  <a class="card" href="memory.html"><h3>Memory</h3><p>Pages, stacks, and low-memory admission control.</p></a>
+  <a class="card" href="filesystem.html"><h3>Filesystem</h3><p>Motor FS, the image layout, and per-role permissions.</p></a>
+  <a class="card" href="networking.html"><h3>Networking</h3><p>Configuration, the stack's features, limits, and diagnostics.</p></a>
+  <a class="card" href="dns.html"><h3>DNS resolver</h3><p>How names are resolved and validated.</p></a>
+  <a class="card" href="terminals.html"><h3>Terminals</h3><p>Terminal programs without a pty: size, Ctrl+C, and redirection.</p></a>
+  <a class="card" href="diagnostics.html"><h3>Logs and diagnostics</h3><p>The console, service logs, metrics, and stack dumps.</p></a>
+</div>
+
+<h2>Userspace</h2>
+<div class="cards">
+  <a class="card" href="commands.html"><h3>Commands</h3><p>Everything in /system/bin and /user/bin.</p></a>
+  <a class="card" href="rush.html"><h3>rush</h3><p>The shell: what it supports and where it differs.</p></a>
+  <a class="card" href="rmux.html"><h3>rmux</h3><p>The terminal multiplexer and its keys.</p></a>
+  <a class="card" href="editors.html"><h3>Editors</h3><p>red, a vi-like editor, and kibim.</p></a>
+  <a class="card" href="devtools.html"><h3>Developer image</h3><p>Lorry, Gears, mdbg, the test suites, and the native toolchain.</p></a>
+</div>
+
+<h2>Developing for Motor OS</h2>
+<div class="cards">
+  <a class="card" href="toolchain.html"><h3>Toolchains</h3><p>The cross-compiling toolchain on Linux, the native toolchain on the developer image, and the workflow for each.</p></a>
+  <a class="card" href="rust.html"><h3>Rust on Motor OS</h3><p>The target, what std supports, ported crates, and porting notes.</p></a>
+  <a class="card" href="c-cpp.html"><h3>C/C++ on Motor OS</h3><p>A C library and native Clang/LLVM: what is supported, how to build, and Lua.</p></a>
+  <a class="card" href="lorry.html"><h3>Lorry</h3><p>A smaller, stricter Cargo replacement for security-sensitive builds: the same Cargo.toml and Cargo.lock and byte-identical binaries, but offline, with every dependency fetched once, checked, approved, and recorded before it is built.</p></a>
+  <a class="card" href="hello.html"><h3>Hello Motor OS</h3><p>Compile a small web server and run it in a Motor OS VM.</p></a>
+  <a class="card" href="profiling.html"><h3>Profiling</h3><p>Flame graphs from a Motor OS binary with the tracing crate.</p></a>
+</div>
+<nav class="pager">
+<span></span>
+<a class="pager-next" href="what.html"><span>Next</span>Overview</a>
+</nav>
 </article>
 </main>
 <footer class="foot">

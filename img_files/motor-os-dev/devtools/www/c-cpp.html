@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="C and C++ on Motor OS: the mlibc C library, the LLVM C++ runtime, the Clang target, what is supported, how to build, and Lua.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>C/C++ on Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -383,8 +383,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">Overview</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
   </ul>
@@ -431,7 +431,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
-    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="c-cpp.html" class="current">C/C++ on Motor OS</a></li>
     <li><a href="lorry.html">Lorry: the package manager</a></li>
     <li><a href="hello.html">Hello, world</a></li>
     <li><a href="profiling.html">Profiling</a></li>
@@ -440,55 +440,133 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Developing</div>
+<h1>C/C++ on Motor OS</h1>
+<p class="lead">Rust is the preferred language on Motor OS, but C and C++ are fully
+supported. Motor OS has a working C library (mlibc), the LLVM C++ runtime (libc++,
+libc++abi, libunwind), and a Clang/LLVM toolchain that targets Motor OS directly. The
+developer image compiles C and C++ natively, the same toolchain cross-compiles on Linux,
+and Lua ships on the developer image as a stock C program built with it.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<h2>How it fits together</h2>
+<pre><code>C or C++ program
+  libc++ / libc++abi / libunwind          (C++ only)
+  mlibc: stdio, malloc, pthreads, sockets, dirent, poll, locale, ...
+    Motor OS sysdeps                       (mlibc's OS layer, written for Motor)
+      libmoto_rt_cabi: a C ABI over the Motor runtime   (&lt;moto_rt.h&gt;)
+        rt.vdso  -&gt;  kernel / sys-io</code></pre>
+<p>mlibc is a portable C library also used by managarm and other operating systems. It
+was chosen because it already provides what real programs and compilers need,
+pthreads, a POSIX-shaped filesystem API, <code>posix_spawn</code>, sockets, and locales,
+so the port consists of an OS layer for Motor and a C ABI shim over the same runtime that
+Rust's standard library uses. The C library is built with mlibc's ANSI and POSIX option
+groups. Its runtime configuration, <code>resolv.conf</code> and <code>hosts</code>, lives in
+<code>/system/cfg/libc</code>, which sys-io maintains and which every image carries, so a
+C program runs on the standard image too, not only on the developer image.</p>
+
+<h2>The target</h2>
+<p><code>x86_64-unknown-motor</code> is a real Clang target, not a set of flags to remember:</p>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Programs are static position-independent executables. There is no dynamic linking
+  on Motor OS, so there is no <code>dlopen</code>; <code>-lm</code>, <code>-lpthread</code>,
+  <code>-lrt</code>, <code>-ldl</code>, and similar link names are accepted for compatibility
+  with existing build systems, and the code is in the one static <code>libc.a</code>.</li>
+  <li>Thread-local storage is emulated TLS, on by default, implemented over the runtime's
+  TLS API. <code>thread_local</code> variables and their destructors work.</li>
+  <li>The linker is lld, the builtins come from compiler-rt, and the C++ standard library
+  is libc++. The Clang driver owns the link line (<code>crt1.o</code>, the runtime shim,
+  libc++abi, libunwind, libc, the builtins), so <code>cc hello.c</code> needs no options;
+  <code>-nostartfiles</code> and <code>-nodefaultlibs</code> are honored for code that wants
+  to bring its own.</li>
+  <li>The only platform macros are <code>__motor__</code> and <code>__ELF__</code>. There is
+  no <code>__linux__</code> and no <code>__unix__</code>, so code that dispatches on them
+  takes its generic POSIX branch, which is usually the right one.</li>
+</ul>
+<p>mlibc is implemented in C++ internally, so even a pure C program links libc++abi and
+libunwind; the driver does this automatically.</p>
+
+<h2>What is supported</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Area</th><th>Supported</th></tr>
+  <tr><td>C standard library</td><td>stdio including memory streams, printf/scanf with correct float round trips, stdlib, string, math, locale, wide characters, <code>setjmp</code>/<code>longjmp</code>, <code>abort</code> (exit status 134), <code>atexit</code>.</td></tr>
+  <tr><td>Memory</td><td><code>malloc</code> and friends, <code>aligned_alloc</code>, <code>posix_memalign</code>, anonymous <code>mmap</code>.</td></tr>
+  <tr><td>Files and directories</td><td><code>open</code>, <code>read</code>, <code>write</code>, <code>lseek</code>, <code>stat</code>/<code>fstat</code>, <code>dirent</code>, <code>getcwd</code>/<code>chdir</code>, <code>mkdir</code>, <code>rename</code>, <code>unlink</code>, <code>ftruncate</code>, <code>fsync</code>, temporary files and directories, <code>isatty</code>. Permissions follow the three-role model (see <a href="filesystem.html">Filesystem</a>).</td></tr>
+  <tr><td>Threads</td><td>pthreads: threads, mutexes, condition variables, read-write locks, <code>pthread_once</code>, keys with destructors; thread-local storage.</td></tr>
+  <tr><td>Networking</td><td>BSD sockets over TCP and UDP, IPv4 and IPv6; <code>getaddrinfo</code> using the same <code>resolv.conf</code> and <code>hosts</code> files as the Motor DNS service; <code>poll</code> and <code>select</code>, bridged onto the runtime's readiness interface.</td></tr>
+  <tr><td>Processes</td><td><code>posix_spawn</code>, <code>waitpid</code>, <code>system</code> and <code>popen</code> (through <code>/system/bin/sh</code>, which is rush), <code>getenv</code>, <code>getpid</code>, exit codes.</td></tr>
+  <tr><td>Signals</td><td>Synchronous only: <code>signal</code>, <code>sigaction</code>, and <code>sigprocmask</code> record dispositions, <code>raise</code> runs the handler in the calling thread, <code>kill</code> terminates a child. Nothing is delivered asynchronously; Ctrl+C is handled as described under <a href="terminals.html">Terminals</a>.</td></tr>
+  <tr><td>Time</td><td><code>clock_gettime</code> with real-time and monotonic clocks, <code>nanosleep</code>, <code>strftime</code>.</td></tr>
+  <tr><td>C++</td><td>libc++ with exceptions and RTTI on; <code>&lt;iostream&gt;</code>, containers, <code>&lt;thread&gt;</code>, <code>&lt;filesystem&gt;</code>, <code>&lt;random&gt;</code>, <code>&lt;chrono&gt;</code>, locales, wide characters, aligned <code>new</code>, static constructors and destructors in the right order.</td></tr>
+  <tr><td>Motor-specific calls</td><td><code>&lt;moto_rt.h&gt;</code> exposes the runtime's C ABI (files, sockets, memory, futexes, arguments and environment, random bytes, logging, terminal status) for programs that need something POSIX does not express.</td></tr>
+</table>
+</div>
+
+<h2>Differences from Unix, by design</h2>
+<p>Motor OS is not Unix, and the C library does not pretend otherwise. The differences
+below are deliberate properties of the system, described in detail on the
+<a href="processes.html">Processes</a>, <a href="filesystem.html">Filesystem</a>, and
+<a href="terminals.html">Terminals</a> pages; for a C program they mean:</p>
+<ul>
+  <li>There is no <code>fork</code>. Start children with <code>posix_spawn</code>,
+  <code>system</code>, or <code>popen</code>.</li>
+  <li>Signals are not delivered asynchronously; there are no process groups and no
+  <code>SIGCHLD</code>. Use <code>waitpid</code> and <code>poll</code>.</li>
+  <li>There are no symbolic or hard links, no users or groups (<code>getuid</code> and
+  friends are not meaningful), and file permissions are per role rather than per
+  owner.</li>
+  <li>There is no file-backed <code>mmap</code>; read the file. Anonymous mappings work.</li>
+  <li>A terminal is a pipe whose far end behaves like one: <code>isatty</code> works,
+  but there is no termios and no <code>ioctl</code>. Raw mode and the terminal size are
+  handled by the terminal provider, as described under <a href="terminals.html">Terminals</a>.</li>
+  <li>Everything is statically linked; there is no <code>dlopen</code>.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Building</h2>
+<h3>On the developer image</h3>
+<p><code>cc</code> and <code>c++</code> in <code>/devtools/bin</code> are short scripts over
+the LLVM multicall binary in <code>/devtools/llvm/bin</code>; headers are under
+<code>/devtools/llvm/include</code> and the libraries under <code>/devtools/llvm/lib</code>.
+The samples in <code>/devtools/src</code> build like this:</p>
+<pre><code>cd /devtools/src
+cc -O2 hello.c -o /devtools/tmp/hello && /devtools/tmp/hello
+c++ -O2 hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp</code></pre>
+<p>A freshly linked program is executable by its creator and by higher roles, so it can
+be run at once. The developer image has no <code>make</code>; small projects are built from
+a rush script or by listing the sources on one <code>cc</code> line. Compiler temporary
+files go to <code>/devtools/tmp</code>.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots in about 200 ms; boot-time work
-  is treated as a cost that needs justification.</li>
-</ul>
+<h3>On Linux</h3>
+<p>The Motor OS build produces the same Clang for the Linux host together with a
+sysroot and two wrappers, <code>motor-clang</code> and <code>motor-clang++</code>, that
+run it with <code>--target=x86_64-unknown-motor</code> and the sysroot:</p>
+<pre><code>motor-clang -O2 hello.c -o hello
+motor-clang++ -O2 hello.cpp -o hello-cpp</code></pre>
+<p>Because the result is static, it runs on any Motor OS image; copy it in with
+<code>scp</code> as in <a href="hello.html">Hello Motor OS</a>. The host toolchain and the
+wrappers are described on the <a href="toolchain.html">Toolchains</a> page.</p>
+
+<h2>Lua</h2>
+<p>Lua 5.4.8 ships on the developer image as <code>/devtools/bin/lua</code>: the
+interpreter and its interactive REPL, built with the Motor toolchain from the unmodified
+upstream sources, with no source patches, using Lua's POSIX configuration. It was the
+first real C program brought up on the C library, and its acceptance script is part of
+the libc test suite.</p>
+<pre><code>lua -e 'print(_VERSION)'
+lua script.lua</code></pre>
+
+<h2>How it is tested</h2>
+<p>The C library was brought up milestone by milestone, with a test program for each:
+toolchain, the runtime shim, mlibc bring-up, stdio and malloc, the filesystem, threads
+and TLS, sockets, poll/select and signals with Lua as the real program, and the C++
+stack. The plan and the record of each step are in <code>docs/porting-libc/</code> in the
+repository. The developer-image test run (<code>src/tests/full-test-dev.sh</code>) compiles
+and runs the shipped C and C++ samples natively in a VM, including a check that
+<code>fstat</code> answers correctly for files, sockets, and terminal descriptors and that
+the temporary-directory contract holds for both C and <code>std::filesystem</code>.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>Overview</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building from source</a>
+<a class="pager-prev" href="rust.html"><span>Previous</span>Rust on Motor OS</a>
+<a class="pager-next" href="lorry.html"><span>Next</span>Lorry: the package manager</a>
 </nav>
 </article>
 </main>

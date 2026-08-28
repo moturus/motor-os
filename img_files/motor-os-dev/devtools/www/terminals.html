@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="How terminal programs work on Motor OS without a pty, termios, or signals: terminal status, size reports, Ctrl+C, and stdio redirection.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Terminals | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -383,8 +383,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">Overview</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
   </ul>
@@ -412,7 +412,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
     <li><a href="dns.html">DNS resolver</a></li>
-    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="terminals.html" class="current">Terminals</a></li>
     <li><a href="diagnostics.html">Logs and diagnostics</a></li>
   </ul>
 </div>
@@ -440,55 +440,149 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">System</div>
+<h1>Terminals</h1>
+<p class="lead">Motor OS has no kernel pty, no termios, no line discipline, and no
+signals. A "terminal" is an ordinary userspace program that provides terminal behavior,
+ANSI interpretation, interactive input, and the size protocol below, over plain stdio
+pipes. Nothing in the kernel knows what a terminal is.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<p>The in-tree terminal providers are:</p>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li><strong>sys-tty</strong>, the serial console. It is a byte pump: the terminal a console
+  program talks to is whatever is at the far end of the serial line, and sys-tty has no
+  opinion about its size.</li>
+  <li><strong>russhd</strong>, for SSH sessions that requested a pty. Its size comes from the
+  SSH client. A session without a pty request (<code>ssh host command</code>) is not a
+  terminal: its stdout and stderr stay separate SSH streams and pass through untouched.</li>
+  <li><strong>rmux</strong>, which emulates a terminal for each pane, sized by the geometry it
+  computes for that pane.</li>
 </ul>
+<p>Nesting composes with no special cases: rush inside rmux inside SSH, each hop a
+terminal to the next. Programs built on <code>std::io::IsTerminal</code>, C
+<code>isatty</code>, or crossterm work unmodified: what they see is a stdio pipe whose far
+end behaves like a terminal, and <code>is_terminal()</code> tells them whether it does.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
+<h2>What <code>is_terminal()</code> means</h2>
+<p>Terminal status is immutable metadata on a descriptor, fixed when the descriptor is
+created. A provider marks the pipes it creates for a child by putting
+<code>MOTURUS_STDIO_IS_TERMINAL=true</code> in the child's spawn environment; the runtime
+consumes the key during spawn and it never becomes process state. Consequently:</p>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots in about 200 ms; boot-time work
-  is treated as a cost that needs justification.</li>
+  <li>stdin, stdout, and stderr are independent: <code>program &gt; file</code> has a
+  terminal stdin and stderr but a non-terminal stdout, as on POSIX systems;</li>
+  <li>a duplicated descriptor answers the same as its source; regular files, sockets,
+  null streams, and ordinary pipes answer false;</li>
+  <li>changing the environment of a running process changes nothing.</li>
 </ul>
+<p>Motor reserves descriptor 3 as the terminal stream (<code>moto_rt::FD_TERMINAL</code>).
+It is present exactly when a process belongs to a terminal session but its stdin is not
+that terminal, for example the last stage of a pipeline, or <code>program &lt; file</code>.
+Keys and size reports arrive on it; it is read-only. The spawning runtime creates it
+automatically, so a full-screen program at the end of a pipeline still gets its keys.
+Background jobs do not get it, because Motor has no way to stop them from stealing
+input, and a spawner can suppress it with <code>MOTURUS_STDIO_NO_TERMINAL</code>.</p>
+
+<h2>Terminal size</h2>
+<p>On Linux the kernel stores a per-tty window size and delivers <code>SIGWINCH</code>
+when it changes. Motor OS keeps the useful half of that split, discovery happens once at
+the component that owns the terminal and applications get a first size and a change
+event, but with no signal available the change event travels in the byte stream the
+program is already reading.</p>
+<p>The carrier is DEC private mode 2048, an emerging convention that foot, Ghostty,
+iTerm2, and kitty also implement:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Sequence</th><th>Direction</th><th>Meaning</th></tr>
+  <tr><td><code>CSI ? 2048 h</code></td><td>app to terminal</td><td>subscribe; answered at once with a report</td></tr>
+  <tr><td><code>CSI ? 2048 l</code></td><td>app to terminal</td><td>unsubscribe</td></tr>
+  <tr><td><code>CSI ? 2048 $ p</code></td><td>app to terminal</td><td>do you support this?</td></tr>
+  <tr><td><code>CSI ? 2048 ; 1 $ y</code> / <code>; 2 $ y</code></td><td>terminal to app</td><td>subscribed / not subscribed</td></tr>
+  <tr><td><code>CSI 48 ; rows ; cols ; h_px ; w_px t</code></td><td>terminal to app</td><td>the report (rows before columns)</td></tr>
+</table>
+</div>
+<p>A report cannot arrive early enough for a program's first frame, so an owner that
+already knows the size, rmux for a pane or russhd for a pty session, puts it in
+<code>$COLUMNS</code> and <code>$LINES</code> when it spawns the child, and rush re-exports
+them before every command. Only the physical console lacks this, because nobody there
+knows the size in advance: a full-screen program on the console paints its first frame at
+80x24 and repaints when the first report arrives.</p>
+<p>Most host terminals do not implement mode 2048, so a client tries three methods in
+order and falls back only while the better one goes unanswered: the subscription; the
+one-shot <code>CSI 18 t</code> question; and finally the cursor-position probe in the
+bottom-right corner. Polling backs off from 250 ms to ten seconds and then thirty, and a
+confirmed subscription silences polling entirely. russhd answers the sequences itself and
+swallows them, because a sequence passed through would be answered a second time by the
+user's own terminal with a different size. crossterm's Motor backend does all of this for
+every TUI program, turning a report into <code>Event::Resize</code>, so red, rush, and the
+rmux client need no Motor-specific code.</p>
+
+<h2>Ctrl+C</h2>
+<p>Ctrl+C is terminal control, not terminal data. The provider that writes terminal
+input into a child's stdin scans for byte <code>0x03</code> at that one point; relays
+below it carry the event in the pipe and never rescan data, so <code>0x03</code> in an
+ordinary pipe or file stays an ordinary byte.</p>
+<ul>
+  <li>Every process with terminal input starts in the <strong>Default</strong> state, in
+  which Ctrl+C terminates it with status 130, even if it is spinning, deadlocked, or never
+  reads stdin. All its threads stop; Rust stacks are not unwound.</li>
+  <li>A process that wants something else registers one process-lifetime handler through
+  <code>moto_rt::process::ctrl_c_register_handler()</code> and waits for the event
+  sequence. Applications normally use the <code>ctrlc</code> crate's
+  <code>set_handler</code>, or crossterm's <code>enable_ctrl_c_events()</code>, which turns
+  events into <kbd>Ctrl</kbd>+<kbd>C</kbd> key events; the two share the one handler, so a
+  program picks one.</li>
+  <li>While a shell is waiting for a foreground child, Ctrl+C is forwarded to that child:
+  a Default child exits 130, a child with a handler is notified, and the shell itself is
+  neither killed nor called back. Chains compose: SSH to rmux to a pane's rush to the
+  foreground program.</li>
+  <li>Bytes up to and including the last <code>0x03</code> in one write are discarded,
+  matching the input flush of an interrupt; type-ahead after it is kept in order.</li>
+</ul>
+<p>rush treats an exit status of 130 as an interrupt: <code>$?</code> stays 130, a pending
+<code>trap INT</code> runs once, and the rest of the pipeline, list, or loop is
+abandoned. Motor has no process groups, so foreground ownership is the relay route, not
+a group broadcast.</p>
+
+<h2>Stdio redirection</h2>
+<p>A child can be given a pipe, nothing, an inherited descriptor, or a real file. The last
+case has two implementations, and which one a program gets is decided by the shell:</p>
+<div class="table-wrap">
+<table>
+  <tr><th></th><th>Direct transfer</th><th>Relay</th></tr>
+  <tr><td>what the child gets</td><td>a real file descriptor of its own</td><td>a pipe</td></tr>
+  <tr><td>who owns the offset</td><td>the child, independently</td><td>the parent's live file</td></tr>
+  <tr><td>chosen when</td><td>a fresh redirect to a regular file on a single command</td><td>a file-backed stream is inherited, or shared by several commands</td></tr>
+  <tr><td>file identity visible to the child</td><td>yes</td><td>no</td></tr>
+</table>
+</div>
+<p>The direct route exists because a program may need to know what its stdout is:
+ripgrep refuses to search the file it is writing, and with a pipe it cannot tell, so
+<code>rg alpha . &gt;&gt; results.txt</code> would find <code>alpha</code> in its own output.
+The relay exists because a snapshot of an offset is safe exactly once: sequential
+grandchildren inheriting a file must share one live offset or they would overwrite each
+other. In rush, <code>cmd &gt; f</code>, <code>cmd &gt; f &amp;</code>, and
+<code>cmd 1&gt; f 2&gt;&amp;1</code> use the direct route; compound commands, functions,
+pipelines, and builtins with a redirect use a pipe.</p>
+<p><code>wait()</code> includes the completion of a child's file relays, so a shell cannot
+start the next command while the previous one's output is still in flight. When a parent
+with live relays exits, bytes a child was told were written are never dropped. Measured
+on a 64 MiB payload, the direct route ran at 376 MiB/s and the relay at 524 MiB/s with a
+few megabytes of memory each, against 130 MiB/s and 203 MiB for the old approach of
+capturing the child's output and writing the file afterwards.</p>
+
+<h2>Security properties</h2>
+<p><code>is_terminal()</code> guarantees descriptor consistency, nothing more. It does not
+prove a human is present, identify the peer, or grant authority; a process creator can
+always construct an endpoint that claims terminal behavior, on Motor as on systems with
+ptys. Programs may use it to decide whether prompting, colors, or raw-mode editing are
+practical; code that authorizes an operation must use an explicit policy.</p>
+
+<p>The full design, including the tests that check each rule, is
+<code>docs/tui.md</code> in the repository.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>Overview</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building from source</a>
+<a class="pager-prev" href="dns.html"><span>Previous</span>DNS resolver</a>
+<a class="pager-next" href="diagnostics.html"><span>Next</span>Logs and diagnostics</a>
 </nav>
 </article>
 </main>

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Motor OS is a simple, fast, and secure operating system for the cloud, built entirely in Rust for virtual machines.">
+<meta name="description" content="The text editors that ship with Motor OS: red, a vi-like editor written with Rust std only, and kibim, a small kilo-style editor.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Motor OS</title>
+<title>Editors | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -232,7 +232,7 @@ table.plain td code { white-space: normal; }
 /* Cards and pills */
 .cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 1rem;
   margin: 1.2rem 0 1.5rem;
 }
@@ -262,10 +262,27 @@ a.card h3 { color: var(--accent); }
 }
 .pill.dim { border-color: var(--line); color: var(--fg-2); }
 
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
 /* Home page */
-.hero { padding: 1.5rem 0 2.5rem; text-align: center; }
+.hero { padding: 1.5rem 0 2.5rem; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
-.hero .lead { max-width: 40rem; margin-left: auto; margin-right: auto; font-size: 1.2rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -275,6 +292,32 @@ a.card h3 { color: var(--accent); }
   margin-bottom: 1rem;
 }
 .home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
 
 /* Pager and footer */
 .pager {
@@ -327,13 +370,9 @@ a.card h3 { color: var(--accent); }
   .sidebar li a.current { border-color: var(--accent); }
   .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
   pre { font-size: .82rem; }
-}
-@media (max-width: 560px) {
-  .cards { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -345,70 +384,124 @@ a.card h3 { color: var(--accent); }
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
       <a href="why.html">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
 </header>
 <div id="content"></div>
-<main class="wrap home">
-<article class="content">
-<section class="hero">
-  <div class="hero-tag">An operating system for virtual machines</div>
-  <h1>Motor OS</h1>
-  <p class="lead">A simple, fast, and secure operating system built for the cloud.
-  Motor OS targets virtualized workloads such as web serving, serverless computing,
-  and edge caching, and avoids the overhead a general-purpose OS carries when it
-  runs inside a VM.</p>
-  <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
-  system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-  Cloud Hypervisor, and Firecracker.</p>
-</section>
-
-<div class="cards">
-  <a class="card" href="architecture.html">
-    <h3>A small kernel, everything else in userspace</h3>
-    <p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
-    VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
-  </a>
-  <a class="card" href="rust.html">
-    <h3>Rust's standard library</h3>
-    <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
-    and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
-    Rust, C, and C++ natively.</p>
-  </a>
-  <a class="card" href="networking.html">
-    <h3>A native networking stack</h3>
-    <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
-    resolver service, and configuration from one TOML file.</p>
-  </a>
-  <a class="card" href="processes.html">
-    <h3>Capability-based security</h3>
-    <p>Every process carries an immutable capability word. Three roles, System, Interactive,
-    and None, drive filesystem permissions. There is no root account.</p>
-  </a>
-  <a class="card" href="commands.html">
-    <h3>A working shell and tools</h3>
-    <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
-    HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
-  </a>
-  <a class="card" href="lorry.html">
-    <h3>A native Rust package manager</h3>
-    <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
-    and aims for byte-identical binaries, but builds offline, from dependencies that were
-    fetched once, checked, and approved explicitly; build scripts and procedural macros
-    run only with a recorded grant.</p>
-  </a>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+  </ul>
 </div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html" class="current">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Userspace</div>
+<h1>Editors</h1>
+<p class="lead">Two editors ship in <code>/user/bin</code>: <strong>red</strong>, which
+behaves like vi and is on every image, and <strong>kibim</strong>, a small kilo-style
+editor on the standard and developer images.</p>
 
-<h2>Status</h2>
-<p>Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went through
-weeks of systematic AI-assisted review and hardening, of the networking stack in particular.
-Networking is considered ready for production use within its
-supported feature set; the rest of the system is exercised daily by the full test suite,
-by long soak runs, and by this website, which is served from Motor OS VMs. There has been
-no independent security audit yet. See <a href="what.html">What is Motor OS</a> for a
-detailed list of what works.</p>
+<h2>red</h2>
+<p>red is a terminal editor written from scratch with only the Rust standard library:
+no crossterm, no libc. It renders each frame into an in-memory grid of cells and diffs it
+against the previous frame, so typing rewrites only the edited line from the first
+changed column and a cursor move rewrites only the digits in the status bar. It runs in
+the alternate screen, restores the terminal on exit and on panic, decodes UTF-8, renders
+tabs at configurable stops, and writes files with POSIX line termination (a file that had
+no final newline gains one; an untouched file saves byte-for-byte identical).</p>
+
+<h3>Modes and keys</h3>
+<p>Five modes, as in vim: NORMAL, INSERT, VISUAL (<kbd>v</kbd>), VISUAL LINE
+(<kbd>V</kbd>), and COMMAND (<kbd>:</kbd>).</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Normal mode</th><th>Action</th></tr>
+  <tr><td><kbd>i</kbd> <kbd>a</kbd> <kbd>o</kbd> <kbd>O</kbd></td><td>insert at or after the cursor; open a line below or above</td></tr>
+  <tr><td><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, arrows, <kbd>0</kbd> <kbd>$</kbd> <kbd>g</kbd> <kbd>G</kbd></td><td>move; start and end of line; first and last line</td></tr>
+  <tr><td><kbd>Ctrl-F</kbd> <kbd>Ctrl-B</kbd>, PageDown, PageUp</td><td>page down and up</td></tr>
+  <tr><td><kbd>/</kbd> <kbd>?</kbd> <kbd>n</kbd> <kbd>N</kbd></td><td>search forward and backward, next and previous match</td></tr>
+  <tr><td><kbd>x</kbd> <kbd>p</kbd> <kbd>J</kbd></td><td>delete a character, paste, join lines</td></tr>
+  <tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>previous and next buffer (in normal mode)</td></tr>
+</table>
+</div>
+<div class="table-wrap">
+<table>
+  <tr><th>Command</th><th>Action</th></tr>
+  <tr><td><code>:w</code>, <code>:w name</code>, <code>:q</code>, <code>:q!</code>, <code>:wq</code>, <code>:x</code></td><td>save, save as, quit, force quit, save and quit</td></tr>
+  <tr><td><code>:N</code></td><td>go to line N</td></tr>
+  <tr><td><code>:set nu</code> / <code>nonu</code>, <code>:set wrap</code> / <code>nowrap</code></td><td>line numbers and soft wrapping (both on by default)</td></tr>
+  <tr><td><code>:e file</code>, <code>:ls</code>, <code>:bn</code>, <code>:bp</code>, <code>:b N</code>, <code>:b name</code>, <code>:bd</code></td><td>open a file in a new buffer, list buffers, switch, close (add <code>!</code> to discard changes)</td></tr>
+</table>
+</div>
+<p>In visual modes, <kbd>y</kbd> yanks and <kbd>d</kbd>, <kbd>x</kbd>, or Delete cuts the
+selection; the normal-mode motions extend it. Insert mode has Backspace, Delete, Enter,
+Tab (spaces to the next tab stop unless <code>expandtab</code> is off), and arrows.</p>
+
+<h3>Configuration and highlighting</h3>
+<p>red reads an optional <code>/user/cfg/red.toml</code> (<code>$HOME/.config/red.toml</code>
+on Linux) with two options named after their vim equivalents: <code>tabstop</code>
+(default 4) and <code>expandtab</code> (default true). Syntax highlighting is incremental
+and cascades block state (a multi-line comment) down only as far as it changes, for Rust,
+Bash, C and C++, and TOML.</p>
+<p>On Motor OS red gets its size from the terminal-size protocol described under
+<a href="terminals.html">Terminals</a>, so it lays itself out correctly on the console,
+in an SSH session, and in an rmux pane, and repaints when the size changes.</p>
+
+<h2>kibim</h2>
+<p>kibim is Motor OS's build of <a href="https://github.com/ilai-deutel/kibi">kibi</a>, a
+small editor in the tradition of kilo: modeless editing with a status bar, incremental
+search, and syntax highlighting defined by INI files. The highlighting definitions for
+about thirty languages live under <code>/user/cfg/kibim/syntax.d/</code>, and the
+editor's own settings in <code>/user/cfg/kibim/</code>.</p>
+<nav class="pager">
+<a class="pager-prev" href="rmux.html"><span>Previous</span>rmux: the multiplexer</a>
+<a class="pager-next" href="devtools.html"><span>Next</span>Developer image</a>
+</nav>
 </article>
 </main>
 <footer class="foot">

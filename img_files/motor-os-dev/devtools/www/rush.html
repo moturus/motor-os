@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="rush, the POSIX-style shell of Motor OS: what it supports, its builtins, and where it deliberately differs from dash.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>rush: the shell | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -383,8 +383,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">Overview</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
   </ul>
@@ -420,7 +420,7 @@ a.card h3 { color: var(--accent); }
   <div class="nav-title">Userspace</div>
   <ul>
     <li><a href="commands.html">Commands</a></li>
-    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rush.html" class="current">rush: the shell</a></li>
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
     <li><a href="devtools.html">Developer image</a></li>
@@ -440,55 +440,111 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Userspace</div>
+<h1>rush: the shell</h1>
+<p class="lead">rush ("RUst SHell") is a POSIX-style shell written in Rust with minimal
+dependencies, so that it ports to an operating system that is not Unix. It is the
+console shell and the SSH login shell of Motor OS, and it also builds and runs on
+Linux.</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
+<p>Conformance is measured rather than asserted: a corpus of POSIX snippets is run
+through both rush and <code>dash</code>, and the two must agree on stdout and exit
+status. The deliberate differences are listed in the test file, and each is itself
+tested, so a difference cannot be quietly introduced or quietly fixed.</p>
+
+<h2>Interactive use</h2>
 <ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
+  <li>Line editing with arrows, Home and End, and the usual emacs keys
+  (<kbd>^A</kbd> <kbd>^E</kbd> <kbd>^B</kbd> <kbd>^F</kbd> <kbd>^K</kbd> <kbd>^U</kbd>
+  <kbd>^W</kbd> <kbd>^Y</kbd> <kbd>^T</kbd> <kbd>^L</kbd> <kbd>^D</kbd>, <kbd>M-b</kbd>,
+  <kbd>M-f</kbd>, <kbd>M-d</kbd>, word-wise Ctrl and Alt arrows); UTF-8 edited by character,
+  including double-width characters; lines that wrap across rows. The editor repaints
+  only what changed, so a slow serial console does not flicker.</li>
+  <li>Tab completion of commands (builtins, functions, aliases, <code>$PATH</code>),
+  file names, and <code>$variables</code>, quoting-aware in both directions.</li>
+  <li>History: Up and Down, reverse search with <kbd>^R</kbd>, the <code>history</code>
+  builtin, and persistence through <code>$HISTFILE</code> and <code>$HISTSIZE</code>; a
+  multi-line command is one history entry.</li>
+  <li><kbd>^C</kbd> abandons the line and <kbd>^D</kbd> ends the session with
+  <code>$?</code>.</li>
+  <li>The prompt is the colored <code>rush:$PWD$ </code> by default; <code>PS1</code>,
+  <code>PS2</code>, and <code>PS4</code> are ordinary expanded variables. An interactive
+  shell sources <code>$ENV</code>; a login shell also reads <code>/etc/profile</code> and
+  <code>~/.profile</code>. On Motor OS, sys-tty sets <code>ENV=/system/cfg/rush.cfg</code>.</li>
 </ul>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
-
-<h2>What Motor OS does differently</h2>
+<h2>The language</h2>
 <ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots in about 200 ms; boot-time work
-  is treated as a cost that needs justification.</li>
+  <li>External commands and multi-stage pipelines, including builtins, compound
+  commands, and functions as pipeline stages (<code>cmd | while read x; do ...; done</code>).</li>
+  <li><code>;</code>, <code>&amp;&amp;</code>, <code>||</code>, pipeline <code>!</code>, and
+  <code>\</code> line continuation.</li>
+  <li><code>if</code>/<code>elif</code>/<code>else</code>, <code>for</code>,
+  <code>while</code>/<code>until</code>, <code>case</code> with <code>|</code> alternation and
+  glob patterns, brace groups, subshells, and functions with <code>return</code>,
+  <code>break n</code>, and <code>continue n</code>.</li>
+  <li>Variables, <code>$?</code>, <code>$#</code>, <code>$@</code>, <code>$*</code>,
+  positional parameters, <code>export</code>, and inline <code>VAR=value command</code>.</li>
+  <li>Word expansion: <code>${var:-default}</code> and the other <code>:=</code>,
+  <code>:?</code>, <code>:+</code>, <code>${#x}</code>, <code>#</code>, <code>##</code>,
+  <code>%</code>, <code>%%</code> forms; command substitution with <code>$(...)</code> and
+  backticks; arithmetic <code>$((...))</code>; tilde; field splitting on <code>IFS</code>;
+  pathname globbing.</li>
+  <li>Redirections <code>&lt;</code>, <code>&gt;</code>, <code>&gt;&gt;</code>,
+  <code>2&gt;</code>, <code>2&gt;&amp;1</code>, <code>&lt;&gt;</code>, and here-documents,
+  on simple commands, compound commands, and builtins. Which redirections hand a child a
+  real file and which use a pipe is described under
+  <a href="terminals.html">Terminals</a>.</li>
+  <li><code>trap</code> on <code>EXIT</code> and on signal names or numbers, even though
+  Motor OS has no signals: <kbd>^C</kbd> at the prompt raises <code>INT</code> because rush
+  detects the byte itself, and a foreground child that exits 130 is treated as
+  interrupted.</li>
+  <li>Background jobs with <code>cmd &amp;</code>, <code>$!</code>, <code>wait</code>,
+  <code>jobs</code>, and <code>fg</code>; <code>kill</code> with <code>-s</code>,
+  <code>-NAME</code>, <code>-N</code>, <code>%job</code>, <code>-l</code>, and
+  <code>-0</code>. On Motor OS, <code>kill</code> can only terminate.</li>
+  <li>Shell options, enforced: <code>set -e</code> (with the POSIX condition-context rules),
+  <code>-u</code>, <code>-x</code> via <code>PS4</code>, <code>-n</code>, <code>-f</code>,
+  <code>-C</code> with <code>&gt;|</code>, <code>-a</code>, <code>-v</code>,
+  <code>-o pipefail</code>, and <code>$-</code>.</li>
+  <li>POSIX invocation: <code>rush [options] script [args...]</code>,
+  <code>-c string</code>, <code>-s</code>, clustered and <code>+</code>-form options,
+  <code>--</code>.</li>
 </ul>
+
+<h3>Builtins</h3>
+<p>Special: <code>: . eval exec exit export readonly set shift unset times trap break
+continue return</code>. Regular: <code>cd pwd echo printf test [ read true false getopts
+command type hash alias unalias umask wait jobs fg bg kill</code>. Extensions:
+<code>history</code>, <code>clear</code>, and <code>quit</code>.</p>
+
+<h2>Deliberate differences from dash</h2>
+<p><code>set -o pipefail</code> exists (POSIX.1-2024 added it). <code>-h</code> is accepted
+as an inert option. <code>$-</code> lists options in a fixed order. <code>set -v</code>
+echoes a script in one piece, since rush reads a whole script before parsing it. The
+default prompt is colored (<code>PS1='$ '</code> restores dash's). <code>history</code>,
+<code>clear</code>, and <code>quit</code> are builtins; <code>clear</code> is one the Motor OS
+image needs because it ships no external <code>clear</code>. Aliases expand at execution
+rather than parse time, so <code>alias e=echo; e hi</code> works in a single
+<code>-c</code> string.</p>
+
+<h2>Motor OS specifics</h2>
+<p>A System-role console shell explicitly grants <code>CAP_SYS</code> to the commands it
+runs, because the default spawn rule never propagates System; an Interactive shell's
+commands inherit Interactive by the default rule. A per-command
+<code>MOTOR_OS_CAPS=... command</code> assignment replaces that grant and can narrow the
+child. Programs on rush's detached-spawn list, such as rmux, are started with
+<code>CAP_SPAWN_DETACHED</code> so that they can leave a server running after the session
+ends. Background jobs are started without the terminal input stream, since Motor has no
+<code>SIGTTIN</code> to stop them from stealing keystrokes, and for the same reason there is
+no interactive job control (<kbd>^Z</kbd>, <code>bg</code>): a foreground command runs until
+it exits or is interrupted. rush re-exports
+<code>$COLUMNS</code> and <code>$LINES</code> before every command so that a full-screen
+program starts at the right size, and it sets the rmux window title to the foreground
+command's name.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>Overview</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building from source</a>
+<a class="pager-prev" href="commands.html"><span>Previous</span>Commands</a>
+<a class="pager-next" href="rmux.html"><span>Next</span>rmux: the multiplexer</a>
 </nav>
 </article>
 </main>

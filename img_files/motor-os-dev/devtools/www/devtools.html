@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Why a new operating system for virtual machines, and what Motor OS does differently.">
+<meta name="description" content="What the Motor OS developer image adds: Lorry, Gears, mdbg, the native toolchain, curl, Lua, and the test suites.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Why Motor OS | Motor OS</title>
+<title>Developer image | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -383,8 +383,8 @@ a.card h3 { color: var(--accent); }
     <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
     <nav class="top-nav" aria-label="Site">
       <a href="what.html">What</a>
-      <a href="why.html" class="current">Why</a>
-      <a href="docs.html">Docs</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
     </nav>
   </div>
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="docs.html">Documentation</a></li>
     <li><a href="what.html">Overview</a></li>
-    <li><a href="why.html" class="current">Why Motor OS</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
   </ul>
@@ -423,7 +423,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="rush.html">rush: the shell</a></li>
     <li><a href="rmux.html">rmux: the multiplexer</a></li>
     <li><a href="editors.html">Editors</a></li>
-    <li><a href="devtools.html">Developer image</a></li>
+    <li><a href="devtools.html" class="current">Developer image</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -440,55 +440,111 @@ a.card h3 { color: var(--accent); }
 </nav>
 </aside>
 <article class="content">
-<div class="eyebrow">Getting started</div>
-<h1>Why Motor OS</h1>
-<p class="lead">At the moment, most virtualized production workloads run Linux. Linux has
-many advanced features that in many situations make it the only reasonable choice, but
-several things make it less than ideal, in theory, for some virtualized workloads.</p>
+<div class="eyebrow">Userspace</div>
+<h1>Developer image</h1>
+<p class="lead"><code>motor-os-dev.qcow2</code> is the standard image plus everything
+needed to build and test programs inside the VM: native C, C++, and Rust compilers, Lorry,
+Gears, curl, Lua, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
+started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 
-<h2>The problem with a general-purpose OS in a VM</h2>
-<ul>
-  <li><strong>Linux is optimized for bare metal.</strong> Inside a VM running on a Linux
-  host, this leads to duplicated work:
-    <ul>
-      <li>duplicate block caches, in the guest and in the host;</li>
-      <li>duplicate page table walks;</li>
-      <li>the host scheduler can preempt a vCPU while it holds a spinlock in the guest
-      kernel, stalling every other vCPU that wants the lock.</li>
-    </ul>
-  </li>
-  <li><strong>Linux is difficult to use.</strong> Docker, NixOS, "serverless" platforms,
-  and similar projects all exist because of Linux's complexity.</li>
-  <li><strong>Linux has, historically, not been very secure.</strong></li>
-</ul>
+<h2>Layout</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Path</th><th>Contents</th></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
+  <tr><td><code>/devtools/rust</code></td><td>Native rustc with a full <code>x86_64-unknown-motor</code> sysroot. There is no cargo on the image; Lorry is the build driver.</td></tr>
+  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources (<code>hello.c</code>, <code>hello.cpp</code>, <code>hello.rs</code>) and snapshots of red, lorry, gears, moto-rt, and moto-sys, so that those can be rebuilt natively.</td></tr>
+  <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>, and <code>gears/gears-mock-provider</code>.</td></tr>
+  <tr><td><code>/devtools/tmp</code></td><td>Build and test scratch, writable by every role.</td></tr>
+  <tr><td><code>/devtools/cfg</code>, <code>/devtools/lorry</code></td><td>Clang driver configuration and Lorry's installed state.</td></tr>
+  <tr><td><code>/system/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
+</table>
+</div>
+<p><code>/devtools</code> itself is System-owned; Interactive sessions write under
+<code>/devtools/src</code> and <code>/devtools/tmp</code>, and may edit the launcher
+scripts in <code>/devtools/bin</code> in place but not add or remove entries there.</p>
 
-<p>A new operating system built from the ground up with a focus on virtualized workloads
-can be made much simpler and more secure than Linux, while matching or exceeding its
-performance and efficiency.</p>
+<h2>Compiling natively</h2>
+<pre><code>cd /devtools/src
+cc hello.c -o /devtools/tmp/hello && /devtools/tmp/hello
+c++ hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp
+rustc hello.rs -o /devtools/tmp/hello-rs && /devtools/tmp/hello-rs</code></pre>
+<p>The compilers target <code>x86_64-unknown-motor</code>, a real Clang target whose
+defaults are emulated TLS and static position-independent executables, so no special
+flags are needed. What the C library and libc++ support is on the
+<a href="c-cpp.html">C/C++ on Motor OS</a> page; the compilers, their sysroots, and Lorry
+are described on the <a href="toolchain.html">Toolchains</a> page.</p>
 
-<h2>What Motor OS does differently</h2>
-<ul>
-  <li><strong>Only VirtIO.</strong> Motor OS runs inside a VM, so it needs drivers for VirtIO
-  block and network devices and nothing else. There is no device model to maintain.</li>
-  <li><strong>A microkernel.</strong> The kernel manages memory, threads, and IPC, and never
-  blocks. Drivers, the filesystem, and the network stack are one userspace process; a
-  bug there cannot corrupt the kernel, and if that process dies the machine halts with a
-  clear log rather than limping on.</li>
-  <li><strong>Rust all the way down.</strong> Memory safety in the kernel, in the runtime,
-  and in the services; a Rust system interface instead of a C one; no dynamic linking.</li>
-  <li><strong>A small process model.</strong> No <code>fork</code>, no signals, no
-  pseudo-terminals, no users. Processes carry an immutable capability word, and three
-  roles derived from it drive filesystem permissions. This removes whole classes of
-  problems that a Unix-like system has to manage.</li>
-  <li><strong>Configuration is part of the image.</strong> Services, networking, and
-  permissions are declared in a few files and in a declarative image policy, so an image
-  is reproducible and inspectable.</li>
-  <li><strong>Boot time matters.</strong> Motor OS boots in about 200 ms; boot-time work
-  is treated as a cost that needs justification.</li>
-</ul>
+<h2>Lorry</h2>
+<p>Lorry is Motor OS's Rust package manager: a smaller, stricter Cargo replacement for
+security-sensitive environments. It is Cargo-compatible, taking a package's
+<code>Cargo.toml</code> and <code>Cargo.lock</code> as they are and aiming for byte-identical
+binaries, but it builds offline, from dependencies that were fetched once, checked, and
+approved explicitly by <code>lorry vendor</code>, and code that runs at build time (build
+scripts, procedural macros) needs a recorded grant. It never invokes Cargo, and it is the
+Rust build driver on the developer image, which has no Cargo.</p>
+<pre><code>lorry new hello
+cd hello
+lorry vendor --accept-all   # once, with network access
+lorry build --release
+lorry run</code></pre>
+<p>The full description, including the admission policy, the configuration files, and
+how procedural macros and build scripts run on Motor OS, is on the
+<a href="lorry.html">Lorry</a> page.</p>
+
+<h2>Gears</h2>
+<p>Gears is a small, extensible agent harness for working with a language model from
+the terminal, on Linux and on Motor OS. Its core owns provider streaming, one agent loop,
+cancellation, sessions, a full-screen and a line-mode UI, command hooks, and one
+built-in tool, <code>sh</code>, which runs a command through <code>/system/bin/rush -c</code>
+in the selected workspace. It does not prescribe a coding workflow.</p>
+<pre><code>gears --model provider/model
+gears -p "answer once" --model provider/model</code></pre>
+<p>Configuration is <code>/user/cfg/gears.toml</code>: an OpenAI-compatible
+<code>base_url</code> (OpenRouter by default), the model, a key file, an optional egress
+allowlist, timeouts, and context-window limits. Permission hooks run before every tool
+call; any deny wins, then any allow, otherwise an attended session asks. The
+<code>sh</code> tool is not a sandbox: an approved command has the same filesystem authority
+as Gears. Sessions are append-only JSONL trees under <code>/user/cfg/gears/sessions/</code>,
+with <code>--continue</code>, <code>--resume</code>, <code>--fork</code>, and in-session
+<code>/new</code>, <code>/resume</code>, <code>/fork</code>, <code>/tree</code>, and
+<code>/compact</code>. <code>gears-mock-provider</code>, installed under
+<code>/devtools/tests/gears/</code>, is a deterministic local TLS provider so that Gears can
+be tested without an Internet provider.</p>
+
+<h2>mdbg</h2>
+<p><code>mdbg print-stacks PID</code> pauses a process through the kernel's debug interface
+and prints the stack of every thread as raw addresses, to be symbolized on the host with
+<code>addr2line</code>. It is not a breakpoint or source-level debugger; it is the tool for
+finding out where a hung process is. See <a href="diagnostics.html">Logs and
+diagnostics</a>.</p>
+
+<h2>Test suites</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Binary</th><th>Covers</th></tr>
+  <tr><td><code>systest</code></td><td>The main acceptance suite, about forty modules: filesystem and permissions, locks, TCP, UDP, ICMP, TLS, DNS, I/O channels, threads and channels, poll, stats, logging, Ctrl+C, spawn/wait/kill, stdio and terminal behavior, the sysbox applets, memory admission and pressure. Ends with <code>systest: ALL PASS</code>.</td></tr>
+  <tr><td><code>mio-test</code></td><td>The mio port: TCP, UDP, poll, and wakers.</td></tr>
+  <tr><td><code>tokio-tests</code></td><td>The Tokio runtime and process tests.</td></tr>
+  <tr><td><code>crossterm-smoke</code></td><td>The crossterm backend: keys, screen, and panic restore, under rmux and over plain SSH.</td></tr>
+  <tr><td><code>crossbench</code></td><td>A filesystem read benchmark.</td></tr>
+  <tr><td><code>rnetbench</code></td><td>A TCP throughput benchmark: <code>rnetbench -s -p PORT</code> in the VM, <code>rnetbench -c host:port</code> on the host.</td></tr>
+</table>
+</div>
+<p>On the host, <code>src/tests/full-test.sh</code> builds the images, runs the host-side
+unit tests, boots VMs for the console and terminal legs, and then drives the suites above
+over SSH in one QEMU VM; <code>full-test-dev.sh</code> does the same against the developer
+image and adds the native-toolchain and Lorry legs. <code>stress-soak.sh</code> keeps one
+VM busy with concurrent looping workloads and collects forensics if something stalls.</p>
+
+<h2>Serving this website</h2>
+<p><code>/devtools/bin/www</code> starts <code>httpd-axum</code> on port 443 with the
+shipped test certificate, serving <code>/devtools/www</code>, the directory these pages
+live in. Edit the script to serve plain HTTP with <code>httpd</code> instead.</p>
 <nav class="pager">
-<a class="pager-prev" href="what.html"><span>Previous</span>Overview</a>
-<a class="pager-next" href="build.html"><span>Next</span>Building from source</a>
+<a class="pager-prev" href="editors.html"><span>Previous</span>Editors</a>
+<a class="pager-next" href="toolchain.html"><span>Next</span>Toolchains</a>
 </nav>
 </article>
 </main>
