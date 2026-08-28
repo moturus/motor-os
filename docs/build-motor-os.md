@@ -87,7 +87,8 @@ The workflow performs these stages:
 5. Register that prefix under its exact rustup name and validate every
    component, source commit, sysroot, lock hash, and both host/target compile
    probes.
-6. Derive an assembly key and build the C-ABI shim, compiler-rt builtins, mlibc,
+6. Fetch the locked `src/sys` workspace dependencies, derive an assembly key,
+   and build the C-ABI shim, compiler-rt builtins, mlibc,
    libc++/libc++abi/libunwind, native LLVM, Lua, native rustc, and ripgrep in
    that assembly's private directories.
 7. Write immutable host and assembly manifests, then build the base, standard,

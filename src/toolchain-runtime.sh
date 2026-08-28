@@ -204,7 +204,10 @@ toolchain_verify_moto_rt_package() {
 	archive="$(toolchain_cached_crate "$cargo_home" \
 		"moto-rt-$LOCKED_MOTO_RT_VERSION.crate" "$LOCKED_MOTO_RT_CHECKSUM")" || return
 	unpacked="$(toolchain_unpack_moto_rt_archive "$archive" "$LOCKED_MOTO_RT_VERSION")" || return
-	if ! "$cargo" package --list --allow-dirty --offline \
+	# Listing with the lock file makes Cargo resolve the whole src/sys
+	# workspace, whose git-patched forks a fresh Cargo home lacks; the
+	# comparison drops Cargo.lock anyway.
+	if ! "$cargo" package --list --allow-dirty --offline --exclude-lockfile \
 		--manifest-path "$local_package/Cargo.toml" > "$unpacked/local.list"; then
 		rm -rf "$unpacked"
 		toolchain_die "cannot list the local moto-rt package" || return

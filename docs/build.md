@@ -15,7 +15,7 @@ The script installs missing host packages and rustup, configures the VM host,
 checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
 `src/toolchain-versions.sh`, builds the complete host and native toolchains,
 and creates all three release images. Package installation and VM networking
-setup use `sudo`; managed source acquisition uses the network.
+setup use `sudo`; managed source and dependency acquisition uses the network.
 
 The repository's `rust-toolchain.toml` selects the exact, key-qualified Motor
 toolchain. After the unified build succeeds, ordinary repository commands use

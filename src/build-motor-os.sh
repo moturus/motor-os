@@ -763,6 +763,17 @@ build_ripgrep() {
 	chmod 755 "$RG_IMG/system/bin/rg"
 }
 
+# --- fetch the locked workspace sources --------------------------------------
+# The src/sys lock pins git forks (crossterm, mio, tokio) and registry crates
+# that the Rust bootstrap never fetches; the assembly identity reads that
+# workspace with `cargo tree --offline`, so a fresh Cargo home is filled first.
+fetch_workspace_sources() {
+	log "fetching the locked src/sys workspace sources"
+	RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" "$TOOLCHAIN_PREFIX/bin/cargo" fetch \
+		--locked --manifest-path "$MOTOR/src/sys/Cargo.toml" ||
+		die "cannot fetch the locked src/sys workspace sources"
+}
+
 # --- rebuild the OS and all three images -------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
@@ -809,6 +820,7 @@ main() {
 	export PYTHONDONTWRITEBYTECODE=1
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
+	fetch_workspace_sources
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths
 	toolchain_claim_assembly

@@ -8,6 +8,8 @@ toolchain_runtime_closure() {
 		--format '{p}' --manifest-path \
 		"$root/src/sys/lib/moto-rt-cabi/Cargo.toml" > "$output"; then
 		rm -f "$output"
+		toolchain_die "cannot read the locked src/sys dependency tree offline" \
+			"(src/build-motor-os.sh fetches its sources)"
 		return 1
 	fi
 	packages="$(sed -n 's/^\([^ ]*\) v.*/\1/p' "$output" | LC_ALL=C sort -u)"
