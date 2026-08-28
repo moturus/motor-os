@@ -1597,27 +1597,35 @@ impl<const ORDER: usize> Node<ORDER> {
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
     ) -> Result<()> {
-        let node_block = txn.get_block(node_block_no).await?;
-        let node_block_ref = node_block.block();
-        let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
+        let children = {
+            let node_block = txn.get_block(node_block_no).await?;
+            let node_block_ref = node_block.block();
+            let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        let mut output = format!(
-            "\nnode {}: num_keys: {} is_root: {} is_leaf: {}\n",
-            node_block_no.as_u64(),
-            node.num_keys,
-            node.is_root(),
-            node.is_leaf()
-        );
+            let mut output = format!(
+                "\nnode {}: num_keys: {} is_root: {} is_leaf: {}\n",
+                node_block_no.as_u64(),
+                node.num_keys,
+                node.is_root(),
+                node.is_leaf()
+            );
 
-        for kv in &node.kv[..(node.num_keys as usize)] {
-            output.push_str(format!("{}:{} ", kv.key, kv.child_block_no.as_u64()).as_str());
-        }
-
-        log::info!("{}", output);
-
-        if !node.is_leaf() {
             for kv in &node.kv[..(node.num_keys as usize)] {
-                Box::pin(NonRootNode::test_log_tree(txn, kv.child_block_no)).await?;
+                output.push_str(format!("{}:{} ", kv.key, kv.child_block_no.as_u64()).as_str());
+            }
+
+            log::info!("{}", output);
+            (!node.is_leaf()).then(|| {
+                node.kv[..(node.num_keys as usize)]
+                    .iter()
+                    .map(|kv| kv.child_block_no)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        if let Some(children) = children {
+            for child_block_no in children {
+                Box::pin(NonRootNode::test_log_tree(txn, child_block_no)).await?;
             }
         }
 

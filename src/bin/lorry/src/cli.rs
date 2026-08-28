@@ -95,7 +95,7 @@ impl Cli {
                 if value.len() == 1 {
                     return Err(Error::usage(
                         "toolchain selector `+` is empty",
-                        "use `+stable`, `+nightly`, or another installed toolchain name",
+                        "use the exact installed Motor toolchain name after `+`",
                     ));
                 }
                 let value = value[1..].to_owned();
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn parses_build_with_toolchain_and_globals() {
         let cli = parse(&[
-            "+nightly",
+            "+motor-current",
             "--verbose",
             "--color=always",
             "--use-cargo-registry",
@@ -533,7 +533,7 @@ mod tests {
             "--strict-validation",
         ])
         .unwrap();
-        assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
+        assert_eq!(cli.toolchain.as_deref(), Some("motor-current"));
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
         assert!(cli.use_cargo_registry);
@@ -670,8 +670,8 @@ mod tests {
 
     #[test]
     fn parses_offline_review_surface() {
-        let cli = parse(&["+nightly", "--quiet", "--color=never", "review"]).unwrap();
-        assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
+        let cli = parse(&["+motor-current", "--quiet", "--color=never", "review"]).unwrap();
+        assert_eq!(cli.toolchain.as_deref(), Some("motor-current"));
         assert_eq!(cli.verbosity, Verbosity::Quiet);
         assert_eq!(cli.color, Color::Never);
         assert_eq!(cli.command, Command::Review);
@@ -702,7 +702,7 @@ mod tests {
     fn rejects_misplaced_and_unknown_syntax() {
         for input in [
             &[][..],
-            &["build", "+nightly"],
+            &["build", "+motor-current"],
             &["build", "--quiet"],
             &["build", "--"],
             &["frobnicate"],

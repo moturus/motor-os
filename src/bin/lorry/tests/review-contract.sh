@@ -8,8 +8,14 @@ if [ "$#" -ne 1 ]; then
 fi
 
 LORRY="$(realpath "$1")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
 export RUSTC
-RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
+RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-review-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 PROJECT="$WORK/project"

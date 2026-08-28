@@ -5,7 +5,6 @@
 #![feature(stmt_expr_attributes)]
 #![feature(core_intrinsics)]
 #![feature(maybe_uninit_array_assume_init)]
-#![feature(atomic_from_mut)]
 #![no_main]
 
 mod acpi;

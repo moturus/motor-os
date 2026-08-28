@@ -105,7 +105,7 @@ identity; a change produces one notice.
 
 Automated tests never use an Internet provider:
 
-    cargo +nightly fmt --manifest-path src/bin/gears/Cargo.toml -- --check
+    cargo fmt --manifest-path src/bin/gears/Cargo.toml -- --check
     cargo test --manifest-path src/bin/gears/Cargo.toml
     cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets
     cargo test --manifest-path src/bin/gears-mock-provider/Cargo.toml

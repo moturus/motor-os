@@ -1,219 +1,205 @@
-# Building all of Motor OS
+# Building the complete Motor OS toolchain
 
-Motor OS is cross-compiled on Linux. The complete build includes:
+`src/build-motor-os.sh` is the single supported entry point for building the
+Motor OS compiler/runtime assembly and all release images. It builds Linux-host
+Rust tools, standalone LLVM/Clang, the C/C++ sysroot, native Motor LLVM and
+rustc, and the OS from one reviewed source tuple.
 
-* the Rust target toolchain used to build Motor OS;
-* the Motor C and C++ sysroot based on mlibc;
-* host LLVM/Clang tools that cross-compile for Motor OS;
-* LLVM/Clang and rustc binaries that run natively on Motor OS;
-* Lua, ripgrep (`/system/bin/rg`), and the native compiler sample programs;
-* all Motor OS services and utilities, including the DNS resolver;
-* the final bootable release image.
+The current development tuple is the exact Rust 1.99 beta baseline declared in
+`src/toolchain-versions.sh`. The Motor fork uses Rust's `dev` channel, so its
+Cargo reports `1.99.0-dev`; this is a beta development assembly, not the final
+`1.99.0-motor.1` source release.
 
-The first complete build takes several hours because it builds LLVM twice and
-also builds a native Rust compiler. Re-running the build is incremental.
-A fast SSD and at least 100 GB of free disk space are recommended.
+## Quick start
 
-## Install the initial host tools
-
-The build requires an x86-64 Linux host with KVM. The automated workflow is
-written for Ubuntu 24.04, including Ubuntu 24.04 under WSL2.
-
-Install Git so the Motor OS repository can be cloned:
+On Ubuntu 24.04 or 26.04:
 
 ```sh
-sudo apt update
-sudo apt install git
-```
-
-The build script installs any other missing packages, including the compiler
-tools, Meson, Ninja, QEMU, and development libraries. It also installs rustup
-when necessary. Those setup steps use `sudo` and require network access.
-
-## Create the Motor OS development directory
-
-All source repositories and cross-build outputs use one common parent
-directory:
-
-```text
-$MOTORH/
-  motor-os/
-  rust/
-  llvm-project/
-  mlibc/
-  ripgrep/
-  motor-sysroot/
-  lua-5.4.8/
-```
-
-Create that directory and clone Motor OS:
-
-```sh
-export MOTORH=$HOME/motorh
-mkdir -p "$MOTORH"
-cd "$MOTORH"
+mkdir motor-dev
+cd motor-dev
 git clone https://github.com/moturus/motor-os.git
 cd motor-os
+src/build-motor-os.sh
 ```
 
-`MOTORH` defaults to the parent of the Motor OS checkout, so exporting it is
-optional when using the layout above.
-
-## Build everything
-
-Run the unified build:
+`MOTORH` defaults to the parent of the Motor OS checkout. Set it before running
+the script only when the development root should live elsewhere:
 
 ```sh
-cd "$MOTORH/motor-os"
-./src/build-motor-os.sh
+export MOTORH=/absolute/path/to/motor-dev
+src/build-motor-os.sh --source-mode managed
 ```
 
-The workflow performs the following stages in order.
+The script installs missing host packages and rustup, so initial provisioning
+uses `sudo` and the network. It also configures TAP/KVM prerequisites. Set
+`MOTOR_SKIP_HOST_NETWORK_SETUP=1` only after independently verifying that the
+required VM networking is already configured.
 
-### 1. Build the moto-rt v17 Motor Rust target
+## Source modes
 
-The script:
-
-* installs the required Ubuntu packages;
-* installs the pinned `nightly-2026-06-19` Rust toolchain and `rust-src`;
-* clones `moturus/rust` branch `motor-os-rt-v17` when it is absent;
-* builds the stage-2 `x86_64-unknown-motor` target libraries and Clippy;
-* registers them as the `dev-x86_64-unknown-motor` rustup toolchain;
-* configures the `moto-tap` interface and `/dev/kvm` access.
-
-The standalone base workflow can build its image at this point. The unified
-build deliberately skips that intermediate image because the final compiler
-replaces these outputs before all three definitive images are built.
-
-### 2. Build LLVM, mlibc, and the C/C++ sysroot
-
-The script clones the `motor-os-rustc` branches of the Motor mlibc and LLVM
-forks, then builds:
-
-* host Clang, LLD, and LLVM utilities targeting `x86_64-unknown-motor`;
-* `libmoto_rt_cabi.a`, compiler-rt builtins, mlibc, and `crt1.o`;
-* libunwind, libc++abi, and libc++;
-* the LLVM multicall binary that runs natively on Motor OS;
-* Lua for Motor OS.
-
-The cross sysroot is written to:
+Managed mode is the default. It resolves the full commits and repository URLs
+from `src/toolchain-versions.sh` into private build checkouts:
 
 ```text
-$MOTORH/motor-sysroot/devtools/llvm
+$MOTORH/toolchain-src/rust/
+  src/llvm-project/       Motor LLVM at the Rust gitlink
+  src/tools/cargo/        upstream Cargo at the declared gitlink
+$MOTORH/toolchain-src/mlibc/
 ```
 
-The DNS resolver is pure Rust and does not consume this C SDK.
+Managed inputs must exactly match the declaration. A wrong remote, missing or
+unreachable commit, incorrect gitlink, dirty file, or untracked file is an
+error. The build never advances a branch, runs `cargo update`, or silently
+changes a dependency selection.
 
-### 3. Build native rustc and the final image
+Rust and LLVM development uses explicit authoring mode instead of editing the
+managed checkout:
 
-The Rust checkout is switched from `motor-os-rt-v17` to the Motor
-compiler-only `motor-os-rustc` branch. The script
-then:
+```sh
+src/build-motor-os.sh \
+  --source-mode authoring \
+  --rust-source /absolute/path/to/rust \
+  --authoring-base FULL_40_CHARACTER_BASE_COMMIT
+```
 
-* builds a Rust compiler that runs on `x86_64-unknown-motor`;
-* builds the host and Motor standard libraries together with Clippy;
-* verifies that the registered stage-2 toolchain can compile for both targets;
-* rebuilds `libmoto_rt_cabi.a` with that final toolchain;
-* verifies that its startup and memory fallbacks are weak for later mixed
-  Rust+C links;
-* stages the native Rust compiler and target sysroot;
-* clones or safely fast-forwards the clean Motor ripgrep `master` checkout,
-  cross-builds it with the final Motor toolchain, and stages it as `/system/bin/rg`;
-* clears Cargo outputs made by the replaced bootstrap compiler;
-* runs `make images BUILD=release`, which builds the base, standard, and
-  development images with their exact component closures.
+The supplied Rust checkout owns its `src/llvm-project` submodule. Local and
+unpushed commits, modified files, and untracked files in both trees become
+content-addressed authoring inputs. The build reads them without fetching,
+switching, resetting, stashing, cleaning, or updating either worktree. An
+authoring toolchain has a distinct non-release description and key and cannot
+replace the checked-in managed selector or satisfy source-publication checks.
+
+This separation is what permits work on Motor's Rust and LLVM patches without
+weakening the clean managed-build policy.
+
+## Build order and outputs
+
+The workflow performs these stages:
+
+1. Provision host packages, rustup, and VM prerequisites. No global rustup
+   default is selected or changed.
+2. Resolve and verify the exact Rust, LLVM, Cargo, and mlibc inputs. Hash the
+   starting Rust root and library lockfiles.
+3. Build standalone host LLVM from the same effective LLVM tree used by rustc.
+4. Run Rust bootstrap once to install Linux-host rustc/rustdoc, Cargo, host and
+   Motor std, Clippy, rustfmt/`cargo-fmt`, and `rust-src` into an immutable
+   key-qualified prefix.
+5. Register that prefix under its exact rustup name and validate every
+   component, source commit, sysroot, lock hash, and both host/target compile
+   probes.
+6. Derive an assembly key and build the C-ABI shim, compiler-rt builtins, mlibc,
+   libc++/libc++abi/libunwind, native LLVM, Lua, native rustc, and ripgrep in
+   that assembly's private directories.
+7. Write immutable host and assembly manifests, then build the base, standard,
+   and development images with the exact generated roots.
+
+The two identity levels deliberately differ:
+
+```text
+$MOTORH/toolchains/<exact-rustup-name>/
+    immutable host compiler prefix, keyed by compiler inputs
+
+$MOTORH/assemblies/<assembly-key>/
+    build/       component build trees
+    sysroot/     C/C++ cross sysroot and linker wrappers
+    images/      generated libc, rg, LLVM, and rustc image overlays
+```
+
+A local `moto-rt` or mlibc change selects a new assembly without pretending to
+be a different compiler lineage. A Rust, LLVM, Cargo, bootstrap configuration,
+or Rust lock selection change selects a new host toolchain prefix as well.
+Motor OS component outputs are further isolated under
+`build/obj/<toolchain-key>/<profile>/<component>`.
 
 The final images are:
 
 ```text
-$MOTORH/motor-os/vm_images/release/motor-os-base.img
-$MOTORH/motor-os/vm_images/release/motor-os.qcow2
-$MOTORH/motor-os/vm_images/release/motor-os-dev.qcow2
+vm_images/release/motor-os-base.img
+vm_images/release/motor-os.qcow2
+vm_images/release/motor-os-dev.qcow2
 ```
 
-## Generated image inputs
+The standard image includes generated libc configuration and ripgrep. The
+development image additionally includes LLVM/Clang, the native Rust toolchain,
+headers, libraries, and the complete assembly manifest under
+`/devtools/toolchain/manifest`. Generated `/devtools` content is never allowed
+to leak into the base or standard image.
 
-Files stored in Git are cumulative static overlays under:
+## Inspecting the selected tuple
+
+The root `rust-toolchain.toml` names the exact managed toolchain. Bare commands
+from the repository therefore select its Cargo and compiler:
+
+```sh
+rustc -vV
+cargo -Vv
+rustc --print sysroot
+rustup which cargo
+```
+
+The selected sysroot contains:
 
 ```text
-img_files/motor-os-base/
-img_files/motor-os/
-img_files/motor-os-dev/
+MOTOR-TOOLCHAIN-MANIFEST
+lib/rustlib/MOTOR-TOOLCHAIN-KEY
 ```
 
-Native compiler artifacts are generated separately:
-
-```text
-img_files/generated/llvm/
-img_files/generated/rustc/
-img_files/generated/rg/
-img_files/generated/libc/
-```
-
-These generated directories are ignored by Git. The standard image combines
-the base and standard static overlays with generated libc configuration and
-ripgrep. The development image adds its static overlay and the LLVM and Rust
-trees. This keeps large compiler outputs, generated headers, libraries, and
-configuration files separate from the repository's static image content.
-
-`make all` builds the standard image and therefore requires the generated libc
-and ripgrep overlays. It does not consume LLVM or rustc. `make dev.img`
-requires all generated roots and fails rather than silently producing a
-partial development image. The unified build populates every generated root
-before its final image build.
-
-## Re-running and diagnosing the build
-
-The build scripts reuse existing source checkouts and incremental compiler
-outputs. Re-run the same command after a failure:
+Each completed assembly contains `MOTOR-ASSEMBLY-MANIFEST`; the same content is
+copied into every generated overlay. To list local assemblies without guessing
+a key:
 
 ```sh
-./src/build-motor-os.sh
+find "$MOTORH/assemblies" -mindepth 2 -maxdepth 2 \
+  -name MOTOR-ASSEMBLY-MANIFEST -print
 ```
 
-Ripgrep is the narrow exception to the other source checkouts' clone-once
-behavior: each run fetches the Motor fork's current `master` and fast-forwards
-an existing clean `master` checkout. The script refuses to overwrite a dirty,
-detached, locally-ahead, or diverged ripgrep checkout and asks for manual
-resolution instead.
+The manifests record declared and effective Rust/LLVM revisions, Cargo
+identity, Stage 0, lock hashes, runtime identities, source state, both keys,
+and hashes of the native compiler and sysroot products.
 
-The native Rust stage intentionally clears Motor OS Cargo outputs after
-replacing the compiler. Cargo identifies two locally built compilers with the
-same version too coarsely to safely reuse those artifacts.
-
-Detailed standalone recipes and troubleshooting notes remain in
-[build-llvm.md](build-llvm.md) and [build-rustc.md](build-rustc.md).
-
-## Run Motor OS
-
-If the build completed successfully, boot the development image to exercise
-the native toolchains:
+The build also pins its validated assembly for later commands in this checkout.
+Inspect or change that host-local selection with:
 
 ```sh
-cd "$MOTORH/motor-os/vm_images/release"
-MOTO_IMAGE=motor-os-dev.qcow2 ./run-qemu.sh
+src/select-toolchain-assembly.sh --show
+src/select-toolchain-assembly.sh --list
+src/select-toolchain-assembly.sh --pin ASSEMBLY_KEY
 ```
 
-In another terminal, connect over SSH:
+See [Selecting a toolchain assembly](assembly-selection.md) for discovery,
+validation, noninteractive behavior, and recovery details.
+
+## Re-running and failures
+
+Re-run the same command after a failure. A completed matching prefix or
+assembly is reused only after full manifest and artifact validation. Older
+keys are retained so invalidation mistakes remain visible; the workflow does
+not broadly clear Cargo, LLVM, mlibc, or image build directories.
+
+An adjacent `.building` directory means a producer is active or a previous run
+was interrupted. A `MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED`
+marker preserves an invalid result for diagnosis. Resolve the underlying
+source, lockfile, or build defect before removing any marker or output.
+
+If Rust bootstrap rewrites a lockfile, that run's prefix is rejected because
+its starting key no longer describes the produced artifact. Review and commit
+the visible lockfile change in the Rust fork; the next run derives a new key.
+
+## Building and testing the repository
+
+After the managed build, the root selector drives ordinary commands:
 
 ```sh
-cd "$MOTORH/motor-os"
-./ssh-into-motor-os-vm.sh
+make -j"$(nproc)"
+make -j"$(nproc)" BUILD=release
+cargo fmt --manifest-path src/sys/Cargo.toml --all --check
+src/tests/full-test.sh
+src/tests/full-test.sh --release
 ```
 
-The native tools can then be checked inside Motor OS:
+Do not add explicit `+nightly`, `+stable`, or legacy `+dev-*` selectors. Rust's
+Stage 0 compiler is used only internally by `x.py`.
 
-```sh
-/devtools/llvm/bin/llvm clang --version
-/devtools/bin/rustc --version
-rg --version
-ping google.com
-```
-
-To build the release image and run the complete VM integration suite, including
-DNS resolution, use:
-
-```sh
-cd "$MOTORH/motor-os"
-./src/tests/full-test.sh --release
-```
+The final stable-release rebase and immutable source tags are intentionally
+deferred until upstream Rust 1.99.0 is published. See
+`docs/plans/toolchain.md` for that reviewed release procedure.

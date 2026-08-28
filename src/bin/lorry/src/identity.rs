@@ -487,7 +487,7 @@ mod tests {
                 .to_owned(),
             release: "1.98.0-nightly".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
-            compatibility: CargoCompat::V1_98,
+            compatibility: CargoCompat::V1_99,
         }
     }
 
@@ -504,7 +504,7 @@ mod tests {
                 .to_owned(),
             release: "1.98.0-dev".to_owned(),
             host: "x86_64-unknown-linux-gnu".to_owned(),
-            compatibility: CargoCompat::V1_98,
+            compatibility: CargoCompat::V1_99,
         }
     }
 
@@ -864,9 +864,8 @@ mod tests {
     }
 
     #[test]
-    fn matches_cargo_1_97_through_1_99_release_dependency_unit_oracle() {
-        // Captured from clean Cargo 1.97 through 1.99 builds using the same
-        // compilers. All three Cargo families produced these identities.
+    fn matches_cargo_1_99_release_dependency_unit_oracle() {
+        // Captured from Cargo 1.99 builds using the same compiler identity.
         let release = release_profile();
         let build = build_profile();
         let cfg_if = registry_library(

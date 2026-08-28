@@ -167,7 +167,7 @@ impl<T: Slabbable> Slab4096<T> {
         // says the slab is partial, and spin until the reserving CPU runs.
         if self
             .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 ((used as usize) < Self::NUM_ELEMENTS).then_some(used + 1)
             })
             .is_err()

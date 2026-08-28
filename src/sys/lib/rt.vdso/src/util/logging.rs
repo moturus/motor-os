@@ -199,6 +199,11 @@ fn get_backtrace() -> [u64; BT_DEPTH] {
     backtrace
 }
 
+/// Log a backtrace to `rt_fd`.
+///
+/// A negative descriptor selects the process diagnostic sink: stderr first,
+/// with a kernel-log fallback only when stderr fails and the process holds
+/// `CAP_LOG`.
 pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
     use core::fmt::Write;
     let mut writer = alloc::string::String::with_capacity(256);

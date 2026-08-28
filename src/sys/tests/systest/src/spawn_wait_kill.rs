@@ -183,6 +183,9 @@ pub fn run_caps_policy_child() -> ! {
 pub fn test_default_capability_policy() {
     use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, ProcessRole};
 
+    if crate::skip_without_cap_log("test_default_capability_policy") {
+        return;
+    }
     let own = moto_sys::ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
     let interactive_default = CAP_SPAWN | CAP_INTERACTIVE;

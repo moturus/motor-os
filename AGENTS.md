@@ -40,7 +40,7 @@ General guidelines:
 * Quite often the workflow implies no commits, only local changes. If unclear, ask for clarification.
 * Make sure your code does not introduce any new compiler or clippy warnings. Warnings in crates/packages
   outside of core Motor OS repo are tolerated (this file is in the root of the core Motor OS repo).
-* Format your changes with `cargo +nightly fmt`.
+* Format your changes with `cargo fmt` from the repository-selected toolchain.
 * Be careful not to introduce performance regressions.
 * Regular tests must not go out to the Internet, as this introduces flakiness to our tests and
   potentially destabilize (DDOS) the external resource. Only rare integration tests for internet-facing

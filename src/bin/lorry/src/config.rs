@@ -11,8 +11,6 @@ use crate::toml::Document;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CargoCompat {
-    V1_97,
-    V1_98,
     V1_99,
 }
 
@@ -478,15 +476,13 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
     }
     if let Some(item) = document.root().get("cargo-compat-version") {
         config.cargo_compat = Some(match item.as_str() {
-            Some("1.97") => CargoCompat::V1_97,
-            Some("1.98") => CargoCompat::V1_98,
             Some("1.99") => CargoCompat::V1_99,
             Some(value) => {
                 return Err(Error::at(
                     path,
                     document.line_of_item(item),
                     format!("unsupported Cargo compatibility family `{value}`"),
-                    "choose `1.97`, `1.98`, or `1.99`",
+                    "use `1.99`, the compatibility family of the current Motor Cargo",
                 ));
             }
             None => {
@@ -2099,6 +2095,20 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_the_current_cargo_compatibility_family() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        fs::write(
+            &path,
+            "config-version = 1\ncargo-compat-version = \"1.98\"\n",
+        )
+        .unwrap();
+        let error =
+            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        assert!(error.render().contains("current Motor Cargo"));
+    }
+
+    #[test]
     fn global_cache_defaults_follow_the_host_platform() {
         let environment = BTreeMap::from([("HOME".to_owned(), "/home/test".to_owned())]);
         assert_eq!(
@@ -2167,7 +2177,7 @@ mod tests {
         fs::write(
             home.join(".config/lorry/lorry.toml"),
             format!(
-                "config-version = 1\ncargo-compat-version = \"1.97\"\n\
+                "config-version = 1\ncargo-compat-version = \"1.99\"\n\
                  [toolchain]\nrustc = \"/base/rustc\"\n\
                  [cache]\ndirectory = \"{}\"\n\
                  [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n\
@@ -2207,7 +2217,7 @@ mod tests {
         let environment =
             BTreeMap::from([("HOME".to_owned(), home.to_string_lossy().into_owned())]);
         let global = Config::load_global_with_environment(&environment).unwrap();
-        assert_eq!(global.cargo_compat, Some(CargoCompat::V1_97));
+        assert_eq!(global.cargo_compat, Some(CargoCompat::V1_99));
         assert_eq!(global.cache.directory, Some(temp.0.join("cache")));
 
         let config = Config::load_with_environment(&package, &environment).unwrap();
@@ -2271,7 +2281,7 @@ mod tests {
         let source = format!(
             r#"
 config-version = 1
-cargo-compat-version = "1.98"
+cargo-compat-version = "1.99"
 
 [repositories]
 system = "{}"

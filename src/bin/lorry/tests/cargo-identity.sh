@@ -12,10 +12,14 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 FIXTURE="$SCRIPT_DIR/fixtures/cargo-identity"
 LORRY="$(realpath "$1")"
 MOTOR_TARGET="x86_64-unknown-motor"
-MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
-MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
-MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/devtools/rust}"
-TOOLCHAIN="nightly-2026-06-19"
+if [ -z "${LORRY_TEST_CARGO:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
+MOTOR_LINKER="$LORRY_MOTOR_LINKER"
+MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
 WORK="$(mktemp -d /tmp/lorry-cargo-identity-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 LORRY_HOME="$WORK/home"
@@ -31,9 +35,9 @@ fail() {
     exit 1
 }
 
-NATIVE_RUSTC="$(rustup which rustc --toolchain "$TOOLCHAIN")"
-MOTOR_RUSTC="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
-CARGO="$(rustup which cargo --toolchain "$TOOLCHAIN")"
+NATIVE_RUSTC="$LORRY_TEST_RUSTC"
+MOTOR_RUSTC="$LORRY_TEST_RUSTC"
+CARGO="$LORRY_TEST_CARGO"
 [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
 [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
     fail "Motor sysroot '$MOTOR_SYSROOT' is incomplete"
@@ -67,16 +71,18 @@ cmp "$WORK/lorry-native-helper" "$WORK/cargo-native/release/helper" ||
     fail "native release helper executable differs from Cargo"
 LORRY_NATIVE_TEST="$(find "$PROJECT/target/lorry/release/build/lorry_identity" \
     -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
-CARGO_NATIVE_TEST="$(find "$WORK/cargo-native-test/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
+CARGO_NATIVE_TEST="$(find \
+    "$WORK/cargo-native-test/release/build/lorry_identity" \
+    -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 [ -n "$LORRY_NATIVE_TEST" ] && [ -n "$CARGO_NATIVE_TEST" ] ||
     fail "native test harness is absent"
 cmp "$LORRY_NATIVE_TEST" "$CARGO_NATIVE_TEST" ||
     fail "native release test harness differs from Cargo"
 LORRY_NATIVE_HELPER_TEST="$(find "$PROJECT/target/lorry/release/build/lorry_identity" \
     -type f -perm -111 -name 'helper-*' -print -quit)"
-CARGO_NATIVE_HELPER_TEST="$(find "$WORK/cargo-native-test/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_NATIVE_HELPER_TEST="$(find \
+    "$WORK/cargo-native-test/release/build/lorry_identity" \
+    -type f -perm -111 -name 'helper-*' -print -quit)"
 cmp "$LORRY_NATIVE_HELPER_TEST" "$CARGO_NATIVE_HELPER_TEST" ||
     fail "native release helper test harness differs from Cargo"
 
@@ -124,8 +130,9 @@ cmp "$WORK/lorry-motor-helper" \
 LORRY_MOTOR_TEST="$(find \
     "$PROJECT/target/lorry/$MOTOR_TARGET/release/build/lorry_identity" \
     -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
-CARGO_MOTOR_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
+CARGO_MOTOR_TEST="$(find \
+    "$WORK/cargo-motor-test/$MOTOR_TARGET/release/build/lorry_identity" \
+    -type f -perm -111 -name 'lorry_identity-*' -print -quit)"
 [ -n "$LORRY_MOTOR_TEST" ] && [ -n "$CARGO_MOTOR_TEST" ] ||
     fail "Motor test harness is absent"
 cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
@@ -133,8 +140,9 @@ cmp "$LORRY_MOTOR_TEST" "$CARGO_MOTOR_TEST" ||
 LORRY_MOTOR_HELPER_TEST="$(find \
     "$PROJECT/target/lorry/$MOTOR_TARGET/release/build/lorry_identity" \
     -type f -perm -111 -name 'helper-*' -print -quit)"
-CARGO_MOTOR_HELPER_TEST="$(find "$WORK/cargo-motor-test/$MOTOR_TARGET/release/deps" \
-    -maxdepth 1 -type f -perm -111 -name 'helper-*' -print -quit)"
+CARGO_MOTOR_HELPER_TEST="$(find \
+    "$WORK/cargo-motor-test/$MOTOR_TARGET/release/build/lorry_identity" \
+    -type f -perm -111 -name 'helper-*' -print -quit)"
 cmp "$LORRY_MOTOR_HELPER_TEST" "$CARGO_MOTOR_HELPER_TEST" ||
     fail "Motor release helper test harness differs from Cargo"
 

@@ -3,22 +3,15 @@
 # build-motor-os.sh — build the complete Motor OS release environment and the
 # base, standard, and development VM images.
 #
-# This is the single entry point for everything past build-base.sh: it runs
-# build-base.sh first (host setup + the motor-os-rt-v17 Rust target), then
-# builds the Motor LLVM/Clang toolchains and the mlibc/libc++ sysroot, Lua,
-# the native Motor rustc, and finally all three images. It absorbs the former
-# build-llvm.sh and build-rustc.sh stage scripts; docs/build-llvm.md and
-# docs/build-rustc.md remain the prose walkthroughs behind the two stages.
+# This is the single entry point for the exact toolchain pipeline: it provisions
+# the host, resolves the declared Rust/LLVM source tuple, builds and validates a
+# key-qualified host toolchain, then assembles the matching native development
+# toolchain and images.
 #
 # Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, ripgrep, sysroot,
 # and Lua sources/builds live under $MOTORH (the checkout's parent by default).
 #
-# Generated image inputs are staged under:
-#
-#   img_files/generated/llvm
-#   img_files/generated/rustc
-#   img_files/generated/rg
-#   img_files/generated/libc
+# Generated image inputs are staged beneath a key-qualified assembly directory.
 #
 # The tracked img_files directories remain source-only. The standard imager
 # consumes the libc and rg roots; the development imager additionally consumes
@@ -29,9 +22,7 @@
 # mlibc's config files under /system/cfg/libc, and the Rust toolchain at
 # /devtools/rust — not the classic /usr and /etc.
 #
-# RE-RUNNING is safe: clones, apt packages, and toolchain setup are detected
-# and skipped; the compiles run again (incrementally). A first run is long
-# (~2-3 h: three LLVM builds + the compiler crates).
+# Re-running validates and reuses only complete outputs with the same exact key.
 
 set -euo pipefail
 
@@ -43,10 +34,12 @@ trap 'die "failed at line $LINENO"' ERR
 
 usage() {
 	cat << 'EOF'
-Usage: src/build-motor-os.sh
+Usage: src/build-motor-os.sh [--source-mode managed]
+       src/build-motor-os.sh --source-mode authoring \
+         --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
 
 Build the complete Motor OS release environment and all three images, including:
-  - the moto-rt v17 Motor Rust target toolchain (via build-base.sh);
+  - the exact key-qualified Rust 1.99 Motor toolchain;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
@@ -60,30 +53,59 @@ Environment:
           Skip build-base.sh's privileged tap/NAT setup after independently
           verifying that host VM networking is already configured.
 
-The build is incremental and safe to rerun. It downloads sources and packages,
+Managed mode is the default. Authoring mode never fetches, switches, resets,
+stashes, cleans, or updates the supplied Rust and LLVM worktrees.
+
+The build is incremental and safe to rerun. It downloads managed sources and packages,
 uses sudo for missing Ubuntu packages and host VM setup, and does not start the
 VM.
 EOF
 }
 
-if [ "$#" -gt 0 ]; then
-	case "$1" in
-		-h|--help)
-			usage
-			exit 0
+parse_options() {
+	SOURCE_MODE=managed
+	RUST_SOURCE=
+	AUTHORING_BASE=
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			-h|--help) usage; return 2 ;;
+			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
+			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
+			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
+			*) usage >&2; die "unknown argument: $1" ;;
+		esac
+	done
+	case "$SOURCE_MODE" in
+		managed)
+			[ -z "$RUST_SOURCE$AUTHORING_BASE" ] ||
+				die "managed mode does not accept authoring source options"
 			;;
-		*)
-			usage >&2
-			die "unknown argument: $1"
+		authoring)
+			case "$RUST_SOURCE" in /*) ;; *) die "authoring --rust-source must be absolute" ;; esac
+			[[ "$AUTHORING_BASE" =~ ^[0-9a-f]{40}$ ]] ||
+				die "authoring --authoring-base must be a full lowercase commit"
 			;;
+		*) die "unsupported source mode: $SOURCE_MODE" ;;
 	esac
-fi
+}
 
 # --- paths (same scheme as docs/build-llvm.md and docs/build-rustc.md) -------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -e "$MOTOR/.git" ] ||
 	die "run this script from its Motor OS checkout; .git is missing at $MOTOR"
+. "$SCRIPT_DIR/toolchain-versions.sh"
+. "$SCRIPT_DIR/toolchain-lib.sh"
+. "$SCRIPT_DIR/toolchain-sources.sh"
+. "$SCRIPT_DIR/toolchain-bootstrap.sh"
+. "$SCRIPT_DIR/toolchain-state.sh"
+. "$SCRIPT_DIR/toolchain-runtime.sh"
+. "$SCRIPT_DIR/toolchain-prefix.sh"
+. "$SCRIPT_DIR/toolchain-llvm.sh"
+. "$SCRIPT_DIR/toolchain-host.sh"
+. "$SCRIPT_DIR/toolchain-assembly.sh"
+. "$SCRIPT_DIR/toolchain-native.sh"
+toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
 export MOTORH
@@ -92,25 +114,116 @@ export MOTOR_OS_DIR="$MOTOR"
 LLVM="$MOTORH/llvm-project"
 MLIBC="$MOTORH/mlibc"
 RUST="$MOTORH/rust"
+TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
 RIPGREP="$MOTORH/ripgrep"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
-LUA_VER="5.4.8"
+LUA_VER="$MOTOR_LUA_VERSION"
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
 TARGET=x86_64-unknown-motor
-LLVM_IMG="$MOTOR/img_files/generated/llvm"
-RUSTC_IMG="$MOTOR/img_files/generated/rustc"
-RG_IMG="$MOTOR/img_files/generated/rg"
-LIBC_IMG="$MOTOR/img_files/generated/libc"
-RUSTC_BRANCH=motor-os-rustc
-
-RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
-STAGE2="$RUST/build/$HOST/stage2"
-RUSTLIB_SRC="$STAGE2/lib/rustlib/$TARGET/lib"
 MAKE_LOG="$MOTORH/build-motor-os-make.log"
+
+prepare_exact_sources() {
+	local source_mode="$1" rust_source="${2:-}" authoring_base="${3:-}"
+	MLIBC="$TOOLCHAIN_SRC_ROOT/mlibc"
+	toolchain_managed_checkout "$MOTOR_MLIBC_REPOSITORY" "$MOTOR_MLIBC_REF" \
+		"$MOTOR_MLIBC_REV" "$MLIBC" "$MOTORH/mlibc" || return
+
+	case "$source_mode" in
+		managed)
+			RUST="$TOOLCHAIN_SRC_ROOT/rust"
+			toolchain_managed_checkout "$MOTOR_RUST_REPOSITORY" "$MOTOR_RUST_REF" \
+				"$MOTOR_RUST_REV" "$RUST" "$MOTORH/rust" || return
+			toolchain_managed_submodule "$RUST" src/llvm-project \
+				"$MOTOR_LLVM_REPOSITORY" "$MOTOR_LLVM_REF" "$MOTOR_LLVM_REV" \
+				"$MOTORH/llvm-project" || return
+			toolchain_managed_submodule "$RUST" src/tools/cargo \
+				"$MOTOR_CARGO_REPOSITORY" "$MOTOR_CARGO_REV" "$MOTOR_CARGO_REV" || return
+			local backtrace_rev
+			backtrace_rev="$(toolchain_gitlink "$RUST" HEAD library/backtrace)" || return
+			toolchain_managed_submodule "$RUST" library/backtrace \
+				"$RUST_BACKTRACE_REPOSITORY" "$backtrace_rev" "$backtrace_rev" || return
+			local book_rev reference_rev rustc_perf_rev
+			book_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/book)" || return
+			reference_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/reference)" || return
+			toolchain_managed_submodule "$RUST" src/doc/book \
+				"$RUST_BOOK_REPOSITORY" "$book_rev" "$book_rev" || return
+			toolchain_managed_submodule "$RUST" src/doc/reference \
+				"$RUST_REFERENCE_REPOSITORY" "$reference_rev" "$reference_rev" || return
+			rustc_perf_rev="$(toolchain_gitlink "$RUST" HEAD src/tools/rustc-perf)" || return
+			toolchain_managed_submodule "$RUST" src/tools/rustc-perf \
+				"$RUSTC_PERF_REPOSITORY" "$rustc_perf_rev" "$rustc_perf_rev" || return
+			toolchain_verify_managed_rust "$RUST" || return
+			MOTOR_SOURCE_MODE=managed
+			SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"
+			SELECTED_RUST_VERSION="$UPSTREAM_RUST_VERSION"
+			SELECTED_STAGE0_REV="$UPSTREAM_STAGE0_REV"
+			SELECTED_RUST_LLVM_BASE_REV="$RUST_LLVM_BASE_REV"
+			SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
+			SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
+			SELECTED_RUSTUP_TOOLCHAIN_BASE="$MOTOR_RUSTUP_TOOLCHAIN_BASE"
+			SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
+			EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
+			EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
+			MOTOR_RUST_TREE_STATE=clean
+			MOTOR_LLVM_TREE_STATE=clean
+			AUTHORING_SOURCE_DIGEST=none
+			MOTOR_ASSEMBLY_STATE=clean
+			;;
+		authoring)
+			[ -n "$rust_source" ] || die "authoring mode requires --rust-source"
+			[ -n "$authoring_base" ] || die "authoring mode requires --authoring-base"
+			RUST="$(readlink -f "$rust_source")"
+			toolchain_authoring_resolve "$RUST" "$authoring_base" || return
+			;;
+		*) die "unsupported source mode: $source_mode" ;;
+	esac
+	LLVM="$RUST/src/llvm-project"
+}
+
+activate_exact_assembly_paths() {
+	B="$STANDALONE_LLVM_BIN"
+	SYSROOT="$ASSEMBLY_SYSROOT"
+	CROSS_FILE="$ASSEMBLY_ROOT/motor.cross-file"
+	LLVM_IMG="$ASSEMBLY_IMAGE_ROOT/llvm"
+	RUSTC_IMG="$ASSEMBLY_IMAGE_ROOT/rustc"
+	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
+	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
+	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
+	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
+	MLIBC_SOURCE="$ASSEMBLY_BUILD_ROOT/mlibc-source"
+	MLIBC_HEADERS_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc-headers"
+	MLIBC_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc"
+	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
+	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
+	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
+	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
+	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
+	MOTOR_RUSTC="$TOOLCHAIN_PREFIX/bin/rustc"
+	MOTOR_RUSTDOC="$TOOLCHAIN_PREFIX/bin/rustdoc"
+	RUSTLIB_SRC="$TOOLCHAIN_PREFIX/lib/rustlib/$TARGET/lib"
+}
+
+run_motor_cargo() {
+	RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" "$MOTOR_CARGO" "$@"
+}
+
+configure_exact_cross_driver() {
+	cat > "$B/x86_64-unknown-motor.cfg" <<'EOF'
+-fuse-ld=lld
+-static-pie
+-nostdlib
+-Wl,-e,motor_start
+-Wl,--pack-dyn-relocs=none
+-Wl,-z,noexecstack
+EOF
+	CLANG_MAJOR="$("$B/clang" --version |
+		sed -n 's/.*clang version \([0-9]\{1,\}\).*/\1/p' | head -1)"
+	[ -n "$CLANG_MAJOR" ] || die "could not determine clang major version"
+}
 
 # On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
 # sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
@@ -120,7 +233,7 @@ CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 
 # ============================================================================
 # LLVM stage: the Motor OS native LLVM/Clang toolchain, the C/C++ sysroot
-# (mlibc + libc++ stack), and Lua, staged into img_files/generated/llvm.
+# (mlibc + libc++ stack), and Lua, staged into the assembly image root.
 # See docs/build-llvm.md for the prose walkthrough behind each numbered stage.
 # ============================================================================
 
@@ -139,18 +252,7 @@ ensure_meson() {
 	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install meson
 }
 
-# --- clone mlibc + llvm-project, both @ motor-os-rustc ----------------------
-clone_repo() {  # url dir branch
-	local url="$1" dir="$2" branch="$3"
-	if [ -d "$dir/.git" ]; then
-		skip "$(basename "$dir") already cloned"
-	else
-		log "cloning $(basename "$dir") ($branch)"
-		git clone "$url" "$dir"
-		git -C "$dir" checkout "$branch"
-	fi
-}
-
+# --- ancillary source checkout ---------------------------------------------
 update_ripgrep_source() {
 	local url="https://github.com/moturus/ripgrep.git" branch="master"
 	if [ ! -e "$RIPGREP" ]; then
@@ -179,57 +281,29 @@ update_ripgrep_source() {
 	git -C "$RIPGREP" merge --ff-only "$remote"
 }
 
-clone_sources() {
-	# Everything on one branch, motor-os-rustc, so the rustc stage reuses these
-	# same checkouts without switching branches. mlibc motor-os-rustc is a
-	# superset of the old `motor` branch (extra lazy-TCB + operator-delete
-	# guard, harmless for C/C++). llvm-project motor-os-rustc is the LLVM 23
-	# line with the Clang Motor ToolChain; rustc builds its *own* copy of this
-	# same LLVM from its submodule (see build-rustc.md), so there is one LLVM
-	# repo and version across both builds.
-	clone_repo https://github.com/moturus/mlibc.git        "$MLIBC" "$RUSTC_BRANCH"
-	clone_repo https://github.com/moturus/llvm-project.git "$LLVM"  "$RUSTC_BRANCH"
-	update_ripgrep_source
-}
-
-# --- stage 1: the cross toolchain (host clang/lld/llvm-*) -------------------
-build_cross_toolchain() {
-	log "stage 1: building the host cross toolchain (clang/lld/llvm-*)"
-	cmake -S "$LLVM/llvm" -B "$LLVM/build" -G Ninja \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DLLVM_ENABLE_ASSERTIONS=ON \
-		-DLLVM_ENABLE_PROJECTS="clang;lld" \
-		-DLLVM_TARGETS_TO_BUILD=X86 \
-		-DLLVM_INCLUDE_TESTS=OFF \
-		-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-	ninja -C "$LLVM/build" \
-		clang lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy
-
-	# Host-side auto-loaded config: makes every cross link a raw -static-pie
-	# -nostdlib link, so meson's compiler probes and the explicit recipes below
-	# succeed. (Distinct from the image cfg written in stage 8.)
-	cat > "$B/x86_64-unknown-motor.cfg" << 'EOF'
--fuse-ld=lld
--static-pie
--nostdlib
--Wl,-e,motor_start
--Wl,--pack-dyn-relocs=none
--Wl,-z,noexecstack
-EOF
-
-	CLANG_MAJOR="$("$B/clang" --version | sed -n 's/.*clang version \([0-9]\{1,\}\).*/\1/p' | head -1)"
-	[ -n "$CLANG_MAJOR" ] || die "could not determine clang major version"
-	log "clang major version: $CLANG_MAJOR"
-}
-
 # --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
 build_shim() {
 	log "stage 2: building the moto-rt-cabi shim"
+	local rustlibs=("$RUSTLIB_SRC"/*.rlib) symbol
+	for symbol in motor_start memcpy memmove memset memcmp; do
+		if "$B/llvm-nm" --defined-only "${rustlibs[@]}" 2>/dev/null |
+				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
+			die "Motor target libraries define strong $symbol; mixed Rust+C links are unsafe"
+		fi
+	done
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
-		&& cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release )
-	cp "$MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
+		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
+		run_motor_cargo build --target x86_64-unknown-motor --release )
+	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
+	for symbol in motor_start memcpy memmove memset memcmp; do
+		if "$B/llvm-nm" --defined-only \
+				"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
+				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
+			die "moto-rt-cabi defines strong $symbol; mixed Rust+C links are unsafe"
+		fi
+	done
 	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
 }
 
@@ -255,7 +329,7 @@ build_builtins() {
 	# which is the same path taken on a host with no system LLVM. (Pointing at
 	# the freshly built build tree would not help — its exports carry the same
 	# SHARED-imported LTO/Remarks targets.)
-	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$LLVM/build-builtins" -G Ninja \
+	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$BUILTINS_BUILD" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Generic \
 		-DCMAKE_SYSTEM_PROCESSOR=x86_64 \
@@ -269,10 +343,10 @@ build_builtins() {
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
 		-DCOMPILER_RT_BAREMETAL_BUILD=ON \
 		-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON
-	ninja -C "$LLVM/build-builtins"
+	ninja -C "$BUILTINS_BUILD"
 
 	local builtins
-	builtins="$(find "$LLVM/build-builtins" -name 'libclang_rt.builtins*.a' | head -1)"
+	builtins="$(find "$BUILTINS_BUILD" -name 'libclang_rt.builtins*.a' | head -1)"
 	[ -n "$builtins" ] || die "builtins archive not produced"
 
 	# emutls.c must not be present (the shim owns emulated TLS).
@@ -286,7 +360,7 @@ build_builtins() {
 	# Stage a copy in the sysroot and one at the per-target resource-dir path
 	# where both mlibc's build and the clang driver look for it.
 	cp "$builtins" "$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a"
-	local rd="$LLVM/build/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
+	local rd="$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
 	mkdir -p "$rd"
 	cp "$builtins" "$rd/libclang_rt.builtins.a"
 }
@@ -294,6 +368,10 @@ build_builtins() {
 # --- stage 4: mlibc ---------------------------------------------------------
 build_mlibc() {
 	log "stage 4: building mlibc"
+	[ ! -e "$MLIBC_SOURCE" ] ||
+		die "mlibc assembly source snapshot already exists: $MLIBC_SOURCE"
+	mkdir -p "$MLIBC_SOURCE"
+	git -C "$MLIBC" archive "$MOTOR_MLIBC_REV" | tar -x -C "$MLIBC_SOURCE"
 	# Meson cross file with this machine's absolute paths (kept out of the repos).
 	# MLIBC_SYSCONFDIR repoints mlibc's runtime config lookups (resolv.conf,
 	# hosts, passwd, ...) from /etc to /system/cfg/libc.
@@ -320,7 +398,7 @@ EOF
 	local cross_hash
 	cross_hash="$(sha256sum "$CROSS_FILE" | cut -d ' ' -f 1)"
 
-	( cd "$MLIBC"
+	( cd "$MLIBC_SOURCE"
 		setup_mlibc_build() {
 			local build_dir="$1"
 			shift
@@ -330,10 +408,7 @@ EOF
 				if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$cross_hash" ]; then
 					setup_mode=(--reconfigure)
 				else
-					# Meson does not apply changed cross-file built-in options when
-					# reconfiguring. Recreate only this mlibc build directory when
-					# the cross file changes so paths cannot remain stale.
-					setup_mode=(--wipe)
+					die "keyed mlibc build has a mismatched cross-file stamp: $build_dir"
 				fi
 			fi
 			meson setup "${setup_mode[@]}" --cross-file "$CROSS_FILE" \
@@ -342,18 +417,18 @@ EOF
 		}
 
 		# Headers first (validates ABI/meson wiring quickly).
-		setup_mlibc_build build-headers -Dheaders_only=true
-		DESTDIR="$SYSROOT" ninja -C build-headers install
+		setup_mlibc_build "$MLIBC_HEADERS_BUILD" -Dheaders_only=true
+		DESTDIR="$SYSROOT" ninja -C "$MLIBC_HEADERS_BUILD" install
 
 		# The real static build: libc.a, crt1.o, headers, companion stubs.
 		# -Ddebug=false: mlibc's meson.build pins buildtype=debugoptimized
 		# (-O2 -g); the flag keeps -O2 and drops only -g. Without it libc.a is
 		# 18 MB (59% DWARF) and every mlibc-linked binary carries ~6.6 MB of
 		# debug info (see docs/libc_start_redesign.md). .text is byte-identical.
-		setup_mlibc_build build -Ddefault_library=static \
+		setup_mlibc_build "$MLIBC_BUILD" -Ddefault_library=static \
 			-Dbuild_tests=false -Ddebug=false
-		ninja -C build
-		DESTDIR="$SYSROOT" ninja -C build install )
+		ninja -C "$MLIBC_BUILD"
+		DESTDIR="$SYSROOT" ninja -C "$MLIBC_BUILD" install )
 
 	ls "$SYSROOT/$TOOLS/lib/libc.a" "$SYSROOT/$TOOLS/lib/crt1.o" >/dev/null
 }
@@ -361,8 +436,7 @@ EOF
 # --- stage 5: the C++ runtime stack (with exceptions) -----------------------
 build_cxx_runtimes() {
 	log "stage 5: building libunwind + libc++abi + libc++ (exceptions on)"
-	rm -rf "$LLVM/build-motor-cxx"   # stale try_compile results are poison
-	cmake -G Ninja -S "$LLVM/runtimes" -B "$LLVM/build-motor-cxx" \
+	cmake -G Ninja -S "$LLVM/runtimes" -B "$CXX_BUILD" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_C_COMPILER="$B/clang" -DCMAKE_CXX_COMPILER="$B/clang++" \
 		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
@@ -400,8 +474,8 @@ build_cxx_runtimes() {
 		-DLIBCXX_HAS_PTHREAD_LIB=OFF -DLIBCXX_HAS_RT_LIB=OFF \
 		-DLIBCXX_HAS_ATOMIC_LIB=OFF \
 		-DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF
-	ninja -C "$LLVM/build-motor-cxx" unwind cxxabi cxx
-	DESTDIR="$SYSROOT" ninja -C "$LLVM/build-motor-cxx" \
+	ninja -C "$CXX_BUILD" unwind cxxabi cxx
+	DESTDIR="$SYSROOT" ninja -C "$CXX_BUILD" \
 		install-unwind install-cxxabi install-cxx
 
 	ls "$SYSROOT/$TOOLS/lib/libc++.a" "$SYSROOT/$TOOLS/lib/libc++abi.a" \
@@ -415,10 +489,10 @@ build_native_llvm() {
 	# so its __cxa_thread_atexit wins; -lunwind for the EH runtime). Both the C
 	# and C++ groups carry -lc++abi: mlibc is implemented in C++, so even a C link
 	# pulls `operator delete`/`new` from libc.a members (this matches the Motor
-	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). Note: if the
-	# sysroot's *set* of archives ever changes, `rm -rf build-motor-native` first
-	# (the try-compile probe results are cached).
-	cmake -S "$LLVM/llvm" -B "$LLVM/build-motor-native" -G Ninja \
+	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). The
+	# assembly key selects a fresh build directory whenever these inputs change,
+	# so cached try-compile results cannot cross configurations.
+	cmake -S "$LLVM/llvm" -B "$NATIVE_LLVM_BUILD" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Linux \
 		-DCMAKE_C_COMPILER="$B/clang" \
@@ -448,10 +522,7 @@ build_native_llvm() {
 		-DDEFAULT_SYSROOT= \
 		-DCLANG_CONFIG_FILE_SYSTEM_DIR="/$CFG_LLVM"
 
-	# Force the final link so the staged binary reflects the freshly built
-	# sysroot archives (CMAKE_*_STANDARD_LIBRARIES are flags, not tracked deps).
-	rm -f "$LLVM/build-motor-native/bin/llvm"
-	ninja -C "$LLVM/build-motor-native" llvm-driver
+	ninja -C "$NATIVE_LLVM_BUILD" llvm-driver
 }
 
 # --- stage 7: Lua -----------------------------------------------------------
@@ -462,13 +533,16 @@ build_lua() {
 		[ -d "lua-$LUA_VER" ] || tar xf "lua-$LUA_VER.tar.gz" )
 
 	( cd "$MOTORH/lua-$LUA_VER/src"
+		mkdir -p "$LUA_BUILD"
 		local cflags="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/$TOOLS/include -DLUA_USE_POSIX"
-		local f
-		for f in $(ls ./*.c | grep -v -e 'lua\.c$' -e 'luac\.c$'); do
+		local f object
+		for f in ./*.c; do
+			case "$f" in ./lua.c|./luac.c) continue ;; esac
+			object="$LUA_BUILD/$(basename "${f%.c}").o"
 			# shellcheck disable=SC2086
-			"$B/clang" $cflags -c "$f"
+			"$B/clang" $cflags -c "$f" -o "$object"
 		done
-		"$B/llvm-ar" rcs liblua.a ./*.o
+		"$B/llvm-ar" rcs "$LUA_BUILD/liblua.a" "$LUA_BUILD"/*.o
 		# mlibc is C++ internally (its stdio FILE machinery — cookie_file,
 		# memstream, fmemopen — has C++ destructors that call `operator delete`),
 		# so even this pure-C program pulls libc++abi/libunwind out of libc.a and
@@ -477,7 +551,7 @@ build_lua() {
 		# explicitly. --start-group resolves the libc <-> libc++abi <-> shim
 		# back-references regardless of order.
 		# shellcheck disable=SC2086
-		"$B/clang" $cflags lua.c liblua.a \
+		"$B/clang" $cflags lua.c "$LUA_BUILD/liblua.a" \
 			"$SYSROOT/$TOOLS/lib/crt1.o" \
 			-Wl,--start-group \
 			"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" \
@@ -485,25 +559,24 @@ build_lua() {
 			"$SYSROOT/$TOOLS/lib/libunwind.a" \
 			"$SYSROOT/$TOOLS/lib/libc.a" \
 			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" \
-			-Wl,--end-group -o lua )
+			-Wl,--end-group -o "$LUA_BUILD/lua" )
 }
 
 # --- stage 8: stage the C/C++ toolchain into the image ----------------------
 llvm_stage_image() {
-	log "stage 8: staging the toolchain, sysroot, and Lua into img_files/generated/llvm"
+	log "stage 8: staging the toolchain, sysroot, and Lua into the assembly image root"
 	local img="$LLVM_IMG"
-	rm -rf "$img" "$LIBC_IMG"
+	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
+		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
 	mkdir -p "$img/devtools/bin" "$img/devtools/src" "$img/$TOOLS/bin" "$img/$TOOLS/lib" \
 		"$img/$CFG_LLVM" "$LIBC_IMG/$CFG_LIBC"
 
-	# Headers: mlibc + libc++'s c++/v1 (rm+copy for a clean, stale-free tree).
-	rm -rf "$img/$TOOLS/include"
+	# Headers: mlibc + libc++'s c++/v1 in the fresh keyed image root.
 	cp -a "$SYSROOT/$TOOLS/include" "$img/$TOOLS/include"
 
 	# Clang's own resource headers (intrinsics, stdarg.h, ...).
-	rm -rf "$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
 	mkdir -p "$img/$TOOLS/lib/clang/$CLANG_MAJOR"
-	cp -a "$LLVM/build/lib/clang/$CLANG_MAJOR/include" \
+	cp -a "$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/include" \
 		"$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
 
 	# Libraries — strip debug info on the way in.
@@ -521,8 +594,8 @@ llvm_stage_image() {
 	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
 	# exe's own path, so the binary works wherever it is placed. Lua is a direct
 	# development executable under /devtools/bin.
-	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$LLVM/build-motor-native/bin/llvm"
-	"$B/llvm-strip" -o "$img/devtools/bin/lua"  "$MOTORH/lua-$LUA_VER/src/lua"
+	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
+	"$B/llvm-strip" -o "$img/devtools/bin/lua" "$LUA_BUILD/lua"
 
 	# /devtools/bin/cc — the C compiler / linker driver: a Rush script (not
 	# a compiled binary) over the llvm multicall's clang. rustc's default linker
@@ -611,418 +684,6 @@ EOF
 	cp "$MOTOR/src/sys/tests/native-temp.cpp" "$img/devtools/src/native-temp.cpp"
 }
 
-# ============================================================================
-# rustc stage: a native rustc for Motor OS (rustc + Rust sysroot), staged into
-# img_files/generated/rustc. The linker driver rustc uses (`cc`) and the
-# LLVM multicall it fronts are produced by the LLVM stage above.
-#
-# The base build leaves the Rust fork on `motor-os-rt-v17`. This stage switches
-# it to `motor-os-rustc`, the short compiler-only series based on that branch.
-# The LLVM stage already checked out mlibc and llvm-project (LLVM 23) on their
-# `motor-os-rustc` branches, so Rust's src/llvm-project submodule is seeded from
-# that same llvm-project (same LLVM 23 commit, objects shared). The four
-# dependency forks are [patch.crates-io] git URLs cargo fetches — not cloned —
-# and moto-rt comes from crates.io. No patches of its own.
-#
-# NOTE: $MOTORH/rust is also what build-base.sh registered the
-# dev-x86_64-unknown-motor toolchain against, and the final make builds every
-# Motor OS component with that toolchain. So switching to the compiler branch
-# hands the whole Motor OS build over to the fork's compiler and std, and
-# everything built with the toolchain beforehand — cargo caches, the clippy
-# binaries in stage2 — goes stale. See "This build repurposes the dev
-# toolchain" in docs/build-rustc.md, which also holds the pitfall list this
-# stage encodes.
-# ============================================================================
-
-# --- prerequisites ------------------------------------------------------------
-rustc_verify_prereqs() {
-	log "verifying the base/LLVM stage outputs the rustc stage needs"
-	[ -x "$B/clang" ] || die "host cross clang not found at $B/clang — the LLVM stage did not complete"
-	[ -d "$RUST/.git" ] || die "rust checkout not found at $RUST — the base stage did not complete"
-	local f
-	for f in libc.a crt1.o libc++.a libc++abi.a libunwind.a libmoto_rt_cabi.a; do
-		[ -f "$SYSROOT/devtools/llvm/lib/$f" ] || \
-			die "sysroot incomplete ($f missing) — the LLVM stage did not complete"
-	done
-	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-	rustup toolchain list | grep -q '^dev-x86_64-unknown-motor' || \
-		die "dev-x86_64-unknown-motor toolchain not registered — the base stage did not complete"
-	# rustc's default linker is the bare name `cc`, resolved on the image's PATH
-	# through the dev PATH, and that script fronts the llvm multicall. Both are the LLVM
-	# stage's staging, and this stage only adds the Rust half on top. Without
-	# them the image ships a rustc that cannot link anything, and nothing here
-	# would notice — the failure would surface only in the VM, at the end of a
-	# 2 h build.
-	[ -f "$LLVM_IMG/devtools/bin/cc" ] || \
-		die "$LLVM_IMG/devtools/bin/cc is missing — the LLVM stage stages the linker driver rustc needs"
-	[ -f "$LLVM_IMG/devtools/llvm/bin/llvm" ] || \
-		die "$LLVM_IMG/devtools/llvm/bin/llvm is missing — the LLVM stage stages the multicall cc fronts"
-
-	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
-	# ChildStdio EOF mapping + O_APPEND, and a 4 GiB data partition).
-	grep -q 'E_BAD_HANDLE) => Ok(0)' "$MOTOR/src/sys/lib/rt.vdso/src/stdio.rs" || \
-		die "motor-os checkout lacks the ChildStdio EOF fix (rt.vdso/src/stdio.rs) — update the checkout"
-	grep -q 'self.metadata(entry_id)?.size' "$MOTOR/src/sys/lib/rt.vdso/src/rt_fs.rs" || \
-		die "motor-os checkout lacks the O_APPEND fix (rt.vdso/src/rt_fs.rs) — update the checkout"
-	local yaml="$MOTOR/src/imager/motor-os-dev.yaml" size
-	size="$(sed -n 's/^data_partition_size_mb: *\([0-9]\{1,\}\).*/\1/p' "$yaml")"
-	if [ -z "$size" ] || [ "$size" -lt 4096 ]; then
-		die "data_partition_size_mb in $yaml must be >= 4096 — update the checkout"
-	fi
-}
-
-# The four dependency forks (libc, rust_libloading, stacker, rust-ctrlc) are NOT
-# cloned: the rust fork's [patch.crates-io] references them as moturus git URLs,
-# so cargo fetches them. moto-rt comes from crates.io. Nothing to do here.
-
-# --- mlibc: only the sysroot's libc.a matters here ----------------------------
-check_mlibc() {
-	# rustc links against the *sysroot* libc.a / crt1.o that the LLVM stage
-	# built from mlibc @ motor-os-rustc — the mlibc source tree itself is not
-	# needed by this stage (it can even be deleted after the LLVM stage). The
-	# one property that matters is that the installed libc.a carries the
-	# operator-delete stub guard, i.e. has NO strong _ZdlPvm (the
-	# motor-os-rustc branch guarantees this; the older `motor` branch did not).
-	if ! "$B/llvm-nm" "$SYSROOT/devtools/llvm/lib/libc.a" 2>/dev/null | grep -q 'T _ZdlPvm'; then
-		skip "sysroot libc.a already clean of the delete stubs (mlibc source not needed)"
-	elif [ -d "$MLIBC/.git" ]; then
-		# Stale libc.a (built from the old `motor` branch) but mlibc is present:
-		# switch it to motor-os-rustc if needed and rebuild into the sysroot.
-		grep -q '__motor__' "$MLIBC/options/internal/gcc-extra/cxxabi.cpp" || \
-			die "mlibc lacks the operator-delete stub guard — put it on branch $RUSTC_BRANCH (see the LLVM stage)"
-		log "rebuilding mlibc (sysroot libc.a predates the stub guard)"
-		ninja -C "$MLIBC/build"
-		( cd "$MLIBC/build" && DESTDIR="$SYSROOT" meson install --no-rebuild >/dev/null )
-		"$B/llvm-nm" "$SYSROOT/devtools/llvm/lib/libc.a" 2>/dev/null | grep -q 'T _ZdlPvm' && \
-			die "strong _ZdlPvm still present in libc.a after rebuild"
-	else
-		die "sysroot libc.a predates the operator-delete guard and mlibc is not cloned at $MLIBC — re-run the LLVM stage (or clone moturus/mlibc @ $RUSTC_BRANCH and rebuild)"
-	fi
-	# Keep the on-image copy in sync (LLVM stage 8 staged it).
-	if [ -f "$LLVM_IMG/devtools/llvm/lib/libc.a" ]; then
-		"$B/llvm-objcopy" --strip-debug \
-			"$SYSROOT/devtools/llvm/lib/libc.a" \
-			"$LLVM_IMG/devtools/llvm/lib/libc.a"
-	fi
-}
-
-# --- the rust tree: switch from motor-os-rt-v17 to motor-os-rustc -------------
-update_rust() {
-	# build-base.sh cloned the Moturus fork and built the target libraries from
-	# motor-os-rt-v17. Switch the same checkout to the compiler-only branch.
-	if [ "$(git -C "$RUST" branch --show-current)" = "$RUSTC_BRANCH" ]; then
-		skip "rust tree already on $RUSTC_BRANCH"
-	else
-		if [ -n "$(git -C "$RUST" status --porcelain --untracked-files=no)" ]; then
-			die "rust tree is dirty — clean it (git stash) and re-run"
-		fi
-		if git -C "$RUST" show-ref --verify --quiet \
-				"refs/heads/$RUSTC_BRANCH"; then
-			log "switching rust to local $RUSTC_BRANCH"
-			git -C "$RUST" switch -q "$RUSTC_BRANCH"
-		else
-			log "fetching moturus/rust @ $RUSTC_BRANCH"
-			git -C "$RUST" remote add moturus https://github.com/moturus/rust.git \
-				2>/dev/null || true
-			git -C "$RUST" fetch -q moturus "$RUSTC_BRANCH"
-			git -C "$RUST" switch -q -c "$RUSTC_BRANCH" "moturus/$RUSTC_BRANCH"
-		fi
-	fi
-
-	# Seed rustc's LLVM tree from the checkout the LLVM stage just compiled, and
-	# put it on that checkout's exact commit. Do not use `git submodule update`
-	# here: the rust fork currently pins an orphaned pre-amend commit. Besides
-	# relying on GitHub to retain that unreachable object, submodule's
-	# direct-fetch fallback can reject the local reference with "transport
-	# 'file' not allowed" on Ubuntu's Git.
-	#
-	# A direct local clone is safe here because both paths are controlled build
-	# inputs under MOTORH. Keep protocol.file.allow scoped to those commands;
-	# never weaken the user's global Git policy. --shared preserves the original
-	# --reference optimization, and absorbgitdirs restores the normal submodule
-	# gitdir layout.
-	local rust_llvm="$RUST/src/llvm-project"
-	local llvm_commit llvm_url
-	llvm_commit="$(git -C "$LLVM" rev-parse HEAD)"
-	llvm_url="$(git -C "$RUST" config -f .gitmodules \
-		--get submodule.src/llvm-project.url)"
-	[ -n "$llvm_url" ] || die "rust fork has no src/llvm-project URL in .gitmodules"
-
-	git -C "$RUST" submodule init src/llvm-project >/dev/null
-
-	# An uninitialized Rust LLVM submodule can still leave an empty directory
-	# here. `git -C "$rust_llvm" rev-parse --git-dir` is not a valid
-	# initialization test: Git walks up from that directory, finds $RUST/.git,
-	# and reports the *superproject* as though it were the submodule. Require a
-	# .git entry of its own and verify that Git considers rust_llvm—not RUST—the
-	# worktree root.
-	local rust_llvm_top=
-	if [ -e "$rust_llvm/.git" ]; then
-		rust_llvm_top="$(git -C "$rust_llvm" rev-parse --show-toplevel \
-			2>/dev/null || true)"
-	fi
-	if [ "$(readlink -f "$rust_llvm_top" 2>/dev/null || true)" = "$rust_llvm" ]; then
-		skip "rust LLVM submodule already initialized"
-	else
-		if [ -e "$rust_llvm" ] && [ -n "$(ls -A "$rust_llvm" 2>/dev/null)" ]; then
-			die "$rust_llvm exists but is not a Git checkout — move it aside and re-run"
-		fi
-		log "seeding rust LLVM submodule from $LLVM"
-		git -c protocol.file.allow=always clone --no-checkout --shared \
-			"$LLVM" "$rust_llvm"
-		git -C "$RUST" submodule absorbgitdirs src/llvm-project
-	fi
-
-	if ! git -C "$rust_llvm" cat-file -e "$llvm_commit^{commit}" 2>/dev/null; then
-		log "importing the LLVM stage's commit into the existing rust LLVM submodule"
-		git -c protocol.file.allow=always -C "$rust_llvm" \
-			fetch -q "$LLVM" "$llvm_commit"
-	fi
-	git -C "$rust_llvm" checkout -q --detach "$llvm_commit"
-	git -C "$rust_llvm" remote set-url origin "$llvm_url" 2>/dev/null || \
-		git -C "$rust_llvm" remote add origin "$llvm_url"
-	git -C "$RUST" config submodule.src/llvm-project.url "$llvm_url"
-
-	[ "$(git -C "$rust_llvm" rev-parse HEAD)" = "$llvm_commit" ] || \
-		die "rust LLVM submodule did not reach the LLVM stage's commit $llvm_commit"
-	grep -q 'Motor, // Motor OS' "$RUST/src/llvm-project/llvm/include/llvm/TargetParser/Triple.h" || \
-		die "src/llvm-project is not on the Motor triple — is $LLVM on moturus/llvm-project @ $RUSTC_BRANCH?"
-	grep -q 'set(LLVM_VERSION_MAJOR 23)' "$RUST/src/llvm-project/cmake/Modules/LLVMVersion.cmake" || \
-		die "src/llvm-project is not LLVM 23 — check $LLVM"
-
-	# The [patch.crates-io] deps are moturus git URLs and moto-rt is on
-	# crates.io, so there are no local paths to rewrite. Refresh the lock so the
-	# git patches + moto-rt >= 0.17.0 resolve (no-op if the fork's lock is
-	# already current).
-	( cd "$RUST" && cargo update -p libloading -p stacker -p libc -p ctrlc )
-	( cd "$RUST/library" && cargo update -p moto-rt )
-}
-
-# --- compiler wrappers + bootstrap.toml ---------------------------------------
-write_wrappers() {
-	log "writing motor-clang / motor-clang++ / motor-rust-cc wrappers"
-	mkdir -p "$SYSROOT/bin"
-	local cc
-	for cc in clang clang++; do
-		cat > "$SYSROOT/bin/motor-$cc" << EOF
-#!/bin/sh
-# Compiler driver for x86_64-unknown-motor cross builds (cmake/cc-rs use this
-# for both compiling and linking). --no-default-config bypasses
-# build/bin/x86_64-unknown-motor.cfg (its -nostdlib is for the explicit-link
-# recipes in the LLVM stage). The Motor clang driver resolves headers, crt1.o
-# and the runtime link group from the sysroot. Rust bootstrap derives an
-# x86_64-unknown-none-elf flag from the target's LLVM triple; put Motor's target
-# last so clang uses the OS toolchain. _GNU_SOURCE/_DEFAULT_SOURCE: mlibc hides
-# realpath & friends under strict-ANSI C++ dialects otherwise.
-exec $B/$cc --no-default-config \\
-  --sysroot=$SYSROOT -D_GNU_SOURCE -D_DEFAULT_SOURCE \\
-  "\$@" --target=x86_64-unknown-motor
-EOF
-		chmod +x "$SYSROOT/bin/motor-$cc"
-	done
-
-	cat > "$SYSROOT/bin/motor-rust-cc" << EOF
-#!/bin/sh
-# Linker driver for Rust binaries targeting x86_64-unknown-motor that link
-# mlibc (the libc crate, or rustc itself with its C++ LLVM). rustc passes
-# -nostartfiles/-nodefaultlibs, so the Motor clang driver's automatic
-# crt1.o + lib group is suppressed; re-add it after rustc's own inputs.
-# crt1.o's strong motor_start overrides std's weak one: mlibc initializes
-# the C runtime (TCB, stdio, .init_array) and calls the Rust C main.
-SR=$SYSROOT
-exec $B/clang --no-default-config \\
-  --target=x86_64-unknown-motor --sysroot=\$SR "\$@" \\
-  -Wl,--start-group \\
-  \$SR/devtools/llvm/lib/crt1.o \\
-  -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 \\
-  -Wl,--end-group
-EOF
-	chmod +x "$SYSROOT/bin/motor-rust-cc"
-}
-
-write_bootstrap_toml() {
-	if grep -q 'download-ci-llvm' "$RUST/bootstrap.toml" 2>/dev/null; then
-		skip "bootstrap.toml already configured for the rustc port"
-		return
-	fi
-	log "writing rust/bootstrap.toml (backing up the build-base one)"
-	[ -f "$RUST/bootstrap.toml" ] && cp "$RUST/bootstrap.toml" "$RUST/bootstrap.toml.pre-rustc"
-	cat > "$RUST/bootstrap.toml" << EOF
-change-id = "ignore"
-
-profile = "library"
-
-[build]
-host = ["$HOST"]
-target = ["$HOST", "$TARGET"]
-# src/llvm-project is moturus/llvm-project @ motor-os-rustc (LLVM 23), the same
-# checkout the LLVM stage builds from; keep bootstrap from resetting it.
-submodules = false
-
-[rust]
-deny-warnings = false
-incremental = true
-
-# --- rustc-on-motor port (see docs/build-rustc.md) ---
-# LLVM 23 is built from src/llvm-project for both the build triple and
-# x86_64-unknown-motor. X86-only keeps the component lists of the two builds
-# identical — rustc_llvm's build.rs queries the *host* llvm-config and rewrites
-# host->target paths.
-[llvm]
-download-ci-llvm = false
-targets = "X86"
-experimental-targets = ""
-static-libstdcpp = false
-
-[target.$TARGET]
-cc = "$SYSROOT/bin/motor-clang"
-cxx = "$SYSROOT/bin/motor-clang++"
-ar = "$B/llvm-ar"
-ranlib = "$B/llvm-ranlib"
-linker = "$SYSROOT/bin/motor-rust-cc"
-EOF
-}
-
-# --- build rustc + std --------------------------------------------------------
-build_rustc() {
-	log "building rustc for $TARGET (first run: ~1.5-2.5 h — two LLVMs + the compiler)"
-	# --host is what requests a compiler that *runs on* Motor; --target alone
-	# builds nothing new. To force a relink later, delete rustc-main AND the
-	# .rustc-stamp next to it (bootstrap trusts the stamp).
-	( cd "$RUST" && ./x.py build --stage 2 compiler --host "$TARGET" --target "$TARGET" )
-	[ -f "$RUSTC_MAIN" ] || die "rustc-main not produced at $RUSTC_MAIN"
-}
-
-build_stds() {
-	# ONE x.py INVOCATION, BOTH TARGETS, CLIPPY INCLUDED. This single line is
-	# load-bearing in a way that is easy to "tidy" into a broken build, so:
-	#
-	# Bootstrap's Sysroot step opens with an unconditional
-	# `remove_dir_all(build/$HOST/stage2)` ("Removing sysroot ... to avoid
-	# caching bugs", src/bootstrap/src/core/build_steps/compile.rs). That is the
-	# *dev-x86_64-unknown-motor toolchain directory* — the one the Motor OS
-	# make runs on. So every x.py invocation empties the whole stage2 sysroot,
-	# bin/ and lib/rustlib/ alike, and re-links only what that invocation
-	# builds. The wipe happens once per invocation, so everything named in a
-	# single command survives together, while a *later* invocation silently
-	# throws away what an earlier one produced:
-	#
-	#   x.py build library --target A,B   then   x.py build clippy
-	#       -> the clippy run wipes the sysroot and puts NO std back. Both
-	#          targets lose core+std, and the next `cargo
-	#          +dev-x86_64-unknown-motor` — i.e. the whole Motor OS make — dies
-	#          with `error[E0463]: can't find crate for core`/`std` ... "target
-	#          may not be installed", on whatever dependency it compiles first
-	#          (futures-io, futures-sink, ...). It reads as a Motor OS or a
-	#          toolchain-registration failure; it is neither, and re-registering
-	#          the toolchain cannot help.
-	#   x.py build library --target A     then   x.py build library --target B
-	#       -> B evicts A's std, same E0463 for A.
-	#
-	# Naming clippy and library together (exactly what build-base.sh does) makes
-	# the whole set survive one wipe, so no ordering can be wrong and nothing has
-	# to be copied back afterwards. Do not split this into two commands.
-	#
-	# clippy must be *rebuilt* here rather than reused: build-base.sh already
-	# built it from motor-os-rt-v17, so
-	# stage2-tools-bin holds binaries from a *different source tree* by the time
-	# update_rust switches to the compiler branch. clippy-driver dynamically
-	# loads the hash-suffixed librustc_driver-*.so out of stage2/lib, so a stale
-	# pair cannot load (or resolve against) this compiler and the Motor OS build
-	# dies in its vdso step (rt.vdso/build.sh runs clippy). Naming clippy here
-	# rebuilds it from the compiler branch; it is incremental, and a no-op when current.
-	log "building std for both targets + clippy (ONE x.py — each invocation wipes the stage2 sysroot)"
-	( cd "$RUST" && ./x.py build --stage 2 clippy library --target "$TARGET,$HOST" )
-
-	# Belt and braces: bootstrap installs the clippy pair into stage2/bin itself,
-	# but stage2-tools-bin is the copy that survives a sysroot wipe, so top up
-	# from it if a future bootstrap ever stops populating bin/.
-	local tb="$RUST/build/$HOST/stage2-tools-bin"
-	local b
-	for b in cargo-clippy clippy-driver; do
-		[ -f "$STAGE2/bin/$b" ] || cp "$tb/$b" "$STAGE2/bin/$b"
-	done
-
-	verify_stage2_sysroot
-}
-
-# The dev-x86_64-unknown-motor toolchain is exactly build/$HOST/stage2, and the
-# Motor OS make compiles every component with it. Check here — while the rust
-# tree that produced it is still in hand — that it carries everything that
-# build needs, rather than letting a gap surface an hour later as an E0463 deep
-# inside a dependency crate.
-verify_stage2_sysroot() {
-	log "verifying the stage2 sysroot the dev toolchain points at"
-	local t
-	for t in "$TARGET" "$HOST"; do
-		[ -n "$(ls "$STAGE2/lib/rustlib/$t/lib"/libcore-*.rlib 2>/dev/null)" ] || \
-			die "no core rlib for $t in $STAGE2 — an x.py build ran after the library build and wiped the sysroot (see the ordering note in build_stds)"
-		[ -n "$(ls "$STAGE2/lib/rustlib/$t/lib"/libstd-*.rlib 2>/dev/null)" ] || \
-			die "no std rlib for $t in $STAGE2 — an x.py build ran after the library build and wiped the sysroot (see the ordering note in build_stds)"
-	done
-
-	# clippy-driver links librustc_driver-<hash>.so out of stage2/lib, so this
-	# also proves the pair matches the rustc the Motor OS make is about to use.
-	"$STAGE2/bin/clippy-driver" --version >/dev/null || \
-		die "clippy-driver does not run against the freshly built rustc — Motor OS's vdso step would fail; see the clippy pitfall in docs/build-rustc.md"
-
-	# The end-to-end check: actually compile something for each target with the
-	# very toolchain make will use. This is what catches an E0463 here, in one
-	# second, instead of an hour into the make inside some dependency crate.
-	local probe
-	probe="$(mktemp -d)"
-	printf 'pub fn f() -> u32 { 1 }\n' > "$probe/probe.rs"
-	for t in "$TARGET" "$HOST"; do
-		"$STAGE2/bin/rustc" --edition 2021 --crate-type rlib --target "$t" \
-			-o "$probe/probe-$t.rlib" "$probe/probe.rs" || {
-				rm -rf "$probe"
-				die "the dev toolchain's rustc cannot compile for $t — the stage2 sysroot is incomplete; the make would fail with E0463 (see the ordering note in build_stds)"
-			}
-	done
-	rm -rf "$probe"
-	log "stage2 sysroot OK: std for $TARGET and $HOST, clippy matches rustc"
-}
-
-# The LLVM stage initially creates the C ABI shim with the bootstrap Motor
-# toolchain. Rebuild it after the forked stage2 toolchain is complete so every
-# later mixed Rust+C link uses the final std/moto-rt implementation. A fresh
-# target directory avoids cargo accepting artifacts
-# fingerprinted by the compiler that the rustc stage just replaced.
-rebuild_shim() {
-	log "rebuilding moto-rt-cabi with the final Motor Rust toolchain"
-	local rustlibs=("$RUSTLIB_SRC"/*.rlib)
-	local symbol
-	for symbol in motor_start memcpy memmove memset memcmp; do
-		if "$B/llvm-nm" --defined-only "${rustlibs[@]}" 2>/dev/null |
-				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "final Motor target libraries still define strong $symbol; mixed Rust+C links would be unsafe"
-		fi
-	done
-
-	local target_dir="$MOTOR/build/native-toolchain/moto-rt-cabi"
-	rm -rf "$target_dir"
-	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
-		&& CARGO_TARGET_DIR="$target_dir" \
-			cargo +dev-x86_64-unknown-motor build \
-				--target "$TARGET" --release )
-	local shim="$target_dir/$TARGET/release/libmoto_rt_cabi.a"
-	[ -f "$shim" ] || die "final moto-rt-cabi archive was not produced: $shim"
-	for symbol in motor_start memcpy memmove memset memcmp; do
-		if "$B/llvm-nm" --defined-only "$shim" 2>/dev/null |
-				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "final moto-rt-cabi still defines strong $symbol; mixed Rust+C links would be unsafe"
-		fi
-	done
-	cp "$shim" "$SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
-
-	# The LLVM stage has already staged the C sysroot. Keep that generated image
-	# tree synchronized with the final shim before the imager consumes it.
-	[ -d "$LLVM_IMG/devtools/llvm/lib" ] ||
-		die "generated LLVM image tree is missing: $LLVM_IMG"
-	"$B/llvm-objcopy" --strip-debug \
-		"$shim" "$LLVM_IMG/devtools/llvm/lib/libmoto_rt_cabi.a"
-}
-
 # cc — the C compiler / linker driver rustc uses on the image — is not built
 # here: it is a Rush script produced by the LLVM stage (it
 # belongs with the C toolchain: it fronts /devtools/llvm/bin/llvm and the
@@ -1032,11 +693,9 @@ rebuild_shim() {
 
 # --- stage rustc + the Rust sysroot into the image ----------------------------
 rustc_stage_image() {
-	log "staging rustc and the Rust sysroot into img_files/generated/rustc"
-	# Remove generated files left in the tracked static root by the old
-	# workflow; duplicate destinations across static roots are invalid.
-	rm -rf "$MOTOR/img_files/motor-os/devtools/rust"
-	rm -rf "$RUSTC_IMG"
+	log "staging rustc and the Rust sysroot into the assembly image root"
+	[ ! -e "$RUSTC_IMG" ] ||
+		die "Rust image staging already exists without validated reuse: $RUSTC_IMG"
 	local rust_img="$RUSTC_IMG/devtools/rust"
 	mkdir -p "$RUSTC_IMG/devtools/bin" "$RUSTC_IMG/devtools/src" "$rust_img/bin" \
 		"$rust_img/lib/rustlib/$TARGET"
@@ -1059,7 +718,6 @@ EOF
 	# *stubs* (bootstrap uses -Zembed-metadata=no) — the .rmeta siblings and
 	# self-contained/ must come along or rustc fails with "only metadata stub
 	# found for rlib dependency `std`".
-	rm -rf "$rust_img/lib/rustlib/$TARGET/lib"
 	mkdir -p "$rust_img/lib/rustlib/$TARGET/lib"
 	cp -r "$RUSTLIB_SRC"/* "$rust_img/lib/rustlib/$TARGET/lib/"
 	[ -n "$(ls "$rust_img/lib/rustlib/$TARGET/lib"/*.rmeta 2>/dev/null)" ] || \
@@ -1091,15 +749,15 @@ EOF
 # --- build and stage ripgrep -------------------------------------------------
 build_ripgrep() {
 	log "building ripgrep and staging it as /system/bin/rg"
-	local target_dir="$MOTOR/build/native-toolchain/ripgrep"
 	( cd "$RIPGREP" && \
-		CARGO_TARGET_DIR="$target_dir" \
-			cargo +dev-x86_64-unknown-motor build \
+		CARGO_TARGET_DIR="$RIPGREP_TARGET_DIR" \
+			run_motor_cargo build \
 				--target "$TARGET" --release --locked )
 
-	local binary="$target_dir/$TARGET/release/rg"
+	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
 	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
-	rm -rf "$RG_IMG"
+	[ ! -e "$RG_IMG" ] ||
+		die "ripgrep image staging already exists without validated reuse: $RG_IMG"
 	mkdir -p "$RG_IMG/system/bin"
 	"$B/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
 	chmod 755 "$RG_IMG/system/bin/rg"
@@ -1107,15 +765,6 @@ build_ripgrep() {
 
 # --- rebuild the OS and all three images -------------------------------------
 build_images() {
-	# Two builds of the same rust tree produce byte-different compilers with
-	# identical `rustc -vV`, which is all cargo fingerprints — every cache
-	# built with the previous dev toolchain is silently poisoned (E0463
-	# "can't find crate" for random deps). Clear before rebuilding. src/sys/target
-	# is the workspace target dir the shim stage builds into with the same dev
-	# toolchain, so it is poisoned too.
-	log "clearing the Motor OS cargo caches (stale after the rustc rebuild)"
-	rm -rf "$MOTOR/build/obj/release" "$MOTOR/src/sys/target"
-
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
 	# Keep make's output visible: when a component fails, the compiler diagnostic
 	# is the whole diagnosis, and the log alone is easy to overlook.
@@ -1129,77 +778,86 @@ build_images() {
 }
 
 main() {
+	local parse_status=0
+	parse_options "$@" || parse_status=$?
+	[ "$parse_status" -eq 0 ] || {
+		[ "$parse_status" -eq 2 ] && return 0
+		return "$parse_status"
+	}
 	log "complete Motor OS build starting"
 	log "Motor OS checkout: $MOTOR"
 	log "development root:  $MOTORH"
 
-	# Install host dependencies and build the Rust target libraries from
-	# motor-os-rt-v17. Skip this otherwise-valid intermediate base image because
-	# the final compiler replaces these outputs before the definitive build.
-	log "stage 1/3: host setup and motor-os-rt-v17 Rust target (build-base.sh)"
+	log "provisioning host packages, rustup, and VM prerequisites"
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "required build stage is not executable: $base"
-	MOTOR_SKIP_OS_BUILD=1 "$base"
-	# build-base installs rustup in $HOME/.cargo; bring it onto PATH (the
-	# subprocess above can't export into us).
+	MOTOR_BUILD_ORCHESTRATOR=1 "$base"
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+	command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
 
-	# Build every C/C++ input, the native LLVM multicall, and Lua, and stage
-	# them into the generated LLVM image root. No intermediate image: the rustc
-	# stage replaces the bootstrap compiler and performs the definitive build.
-	log "stage 2/3: Motor LLVM, mlibc/libc++, native LLVM, and Lua"
-	ensure_meson
-	clone_sources
-	build_cross_toolchain
-	build_shim
-	build_builtins
-	build_mlibc
-	build_cxx_runtimes
-	build_native_llvm
-	build_lua
-	llvm_stage_image
+	log "resolving exact $SOURCE_MODE source tuple"
+	prepare_exact_sources "$SOURCE_MODE" "$RUST_SOURCE" "$AUTHORING_BASE"
+	log "declared Rust:  $MOTOR_RUST_REV"
+	log "effective Rust: $EFFECTIVE_MOTOR_RUST_REV ($MOTOR_RUST_TREE_STATE)"
+	log "declared LLVM:  $MOTOR_LLVM_REV"
+	log "effective LLVM: $EFFECTIVE_MOTOR_LLVM_REV ($MOTOR_LLVM_TREE_STATE)"
+	toolchain_build_selected_host "$RUST" "$AUTHORING_BASE" "$MOTORH/build/toolchain" \
+		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
+		"$MOTOR/src/sys/lib/moto-rt"
+	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
+	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
+	export PYTHONDONTWRITEBYTECODE=1
+	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
-	# Build the forked native rustc and both standard libraries, rebuild the C
-	# ABI shim with that final toolchain, stage the native Rust toolchain and
-	# ripgrep, clear stale Cargo outputs, and run the final make for every image.
-	log "stage 3/3: native Motor rustc, ripgrep, and all Motor OS images"
-	rustc_verify_prereqs
-	check_mlibc
-	update_rust
-	write_wrappers
-	write_bootstrap_toml
-	build_rustc
-	build_stds
-	rebuild_shim
-	rustc_stage_image
-	build_ripgrep
+	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
+	activate_exact_assembly_paths
+	toolchain_claim_assembly
+	if [ "$TOOLCHAIN_ASSEMBLY_REUSED" = false ]; then
+		log "building assembly $MOTOR_ASSEMBLY_KEY"
+		toolchain_generate_cross_wrappers "$SYSROOT" "$B"
+		configure_exact_cross_driver
+		ensure_meson
+		build_shim
+		build_builtins
+		build_mlibc
+		build_cxx_runtimes
+		build_native_llvm
+		build_lua
+		llvm_stage_image
+		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE"
+		rustc_stage_image
+		update_ripgrep_source
+		build_ripgrep
+		toolchain_complete_assembly
+	else
+		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
+	fi
+	"$MOTOR/src/select-toolchain-assembly.sh" --pin "$ASSEMBLY_ROOT"
+
+	# The tracked selector is deliberately added only by the separately gated
+	# cutover patch after a clean managed provision and the full core test gate.
+	if [ ! -f "$MOTOR/rust-toolchain.toml" ]; then
+		log "exact host and native artifacts are ready; root selector cutover remains gated"
+		return 0
+	fi
+	log "building Motor OS and all images with $MOTOR_RUSTUP_TOOLCHAIN"
 	build_images
 
 	local required_outputs=(
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
-		"$LLVM_IMG/devtools/bin/cc"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
-		"$RUSTC_IMG/devtools/bin/rustc"
 		"$RG_IMG/system/bin/rg"
-		"$LIBC_IMG/system/cfg/libc/shells"
-		"$MOTOR/build/bin/release/dns-resolver"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
-		"$MOTOR/vm_images/release/motor-os-base.img"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-
 	log "base, standard, and dev release images built successfully"
-	log "image: $MOTOR/vm_images/release/motor-os.qcow2"
-	log "run:   cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
-	log "then, at the Motor OS prompt:"
-	log "  cc /devtools/src/hello.c -o /user/tmp/hello && /user/tmp/hello"
-	log "  c++ /devtools/src/hello.cpp -o /user/tmp/hello2 && /user/tmp/hello2"
-	log "  rustc /devtools/src/hello.rs -o /user/tmp/hello3 && /user/tmp/hello3"
-	log "  rg --version"
+	return 0
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	main "$@"
+fi

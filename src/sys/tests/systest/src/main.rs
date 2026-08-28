@@ -60,6 +60,34 @@ pub(crate) fn ensure_temp_dir() {
     }
 }
 
+/// The capabilities a complete run needs; `full-test.sh` grants this set.
+/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE` only and
+/// cannot delegate `CAP_LOG`, so the tests that spawn logging children skip
+/// themselves instead of failing on their first spawn.
+pub(crate) const FULL_RUN_CAPS: u64 =
+    moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_INTERACTIVE;
+
+pub(crate) fn has_cap_log() -> bool {
+    moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
+}
+
+/// Prints the skip notice for `test` and returns true when `CAP_LOG` is missing.
+pub(crate) fn skip_without_cap_log(test: &str) -> bool {
+    if has_cap_log() {
+        return false;
+    }
+    let exe = std::env::current_exe()
+        .map(|exe| exe.display().to_string())
+        .unwrap_or_else(|_| "systest".to_owned());
+    println!(
+        "skipping {test} test because CAP_LOG capability is missing; \
+         run it with all needed capabilities as: {}=0x{:x} {exe}",
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        FULL_RUN_CAPS
+    );
+    true
+}
+
 fn test_syscall() {
     const ITERS: usize = 1_000_000;
     let start = std::time::Instant::now();
@@ -235,10 +263,11 @@ fn test_cpus() {
         probe_controller.unpark();
         while !probe_stop.load(Ordering::Acquire) {
             let cpu = probe_target.load(Ordering::Acquire);
-            if cpu < num_cpus && moto_sys::current_cpu() == cpu {
-                if !probe_touched[cpu as usize].swap(true, Ordering::AcqRel) {
-                    probe_controller.unpark();
-                }
+            if cpu < num_cpus
+                && moto_sys::current_cpu() == cpu
+                && !probe_touched[cpu as usize].swap(true, Ordering::AcqRel)
+            {
+                probe_controller.unpark();
             }
             std::hint::spin_loop();
         }
@@ -591,19 +620,33 @@ fn bench_page_faults() {
 // must survive a blocking syscall (S10: the kernel's pause/resume path skips
 // xsave/xrstor; before the fix another thread's FP env could leak in).
 fn test_fp_env_across_blocking_syscall() {
-    use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+    use core::arch::asm;
+
+    fn read_mxcsr() -> u32 {
+        let mut value = 0_u32;
+        unsafe {
+            asm!("stmxcsr [{value}]", value = in(reg) &mut value, options(nostack, preserves_flags));
+        }
+        value
+    }
+
+    unsafe fn write_mxcsr(value: u32) {
+        unsafe {
+            asm!("ldmxcsr [{value}]", value = in(reg) &value, options(nostack, preserves_flags));
+        }
+    }
 
     const FTZ_DAZ: u32 = 0x8040; // Flush-to-zero + denormals-are-zero.
 
-    let orig_mxcsr = unsafe { _mm_getcsr() };
+    let orig_mxcsr = read_mxcsr();
     assert_eq!(orig_mxcsr & FTZ_DAZ, 0);
-    unsafe { _mm_setcsr(orig_mxcsr | FTZ_DAZ) };
+    unsafe { write_mxcsr(orig_mxcsr | FTZ_DAZ) };
 
     // Blocks in sys_wait with a timeout => TCB::pause()/resume() round trip.
     std::thread::sleep(std::time::Duration::from_millis(30));
 
-    let mxcsr = unsafe { _mm_getcsr() };
-    unsafe { _mm_setcsr(orig_mxcsr) };
+    let mxcsr = read_mxcsr();
+    unsafe { write_mxcsr(orig_mxcsr) };
     assert_eq!(
         mxcsr & FTZ_DAZ,
         FTZ_DAZ,

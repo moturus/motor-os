@@ -64,18 +64,19 @@ directories:
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/motor-os"
-  - "img_files/generated/libc"
-  - "img_files/generated/rg"
   - "img_files/motor-os-dev"
-  - "img_files/generated/llvm"
-  - "img_files/generated/rustc"
-required_executables:
-  - "img_files/generated/rg/system/bin/rg"
-  - "img_files/generated/llvm/devtools/bin/cc"
-  - "img_files/generated/llvm/devtools/bin/c++"
-  - "img_files/generated/llvm/devtools/llvm/bin/llvm"
-  - "img_files/generated/rustc/devtools/bin/rustc"
-  - "img_files/generated/rustc/devtools/rust/bin/rustc"
+assembly_dirs:
+  - "libc"
+  - "rg"
+  - "llvm"
+  - "rustc"
+assembly_required_executables:
+  - "rg/system/bin/rg"
+  - "llvm/devtools/bin/cc"
+  - "llvm/devtools/bin/c++"
+  - "llvm/devtools/llvm/bin/llvm"
+  - "rustc/devtools/bin/rustc"
+  - "rustc/devtools/rust/bin/rustc"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/src/bin/red"

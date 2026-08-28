@@ -2,25 +2,36 @@
 
 BUILD ?= debug
 
+ROOT_DIR := $(CURDIR)
+TOOLCHAIN_SYSROOT := $(shell rustc --print sysroot 2>/dev/null)
+MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
+	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \
+	test -f "$$stamp" && grep -Ex '[0-9a-f]{64}' "$$stamp"))
+ifeq ($(MOTOR_TOOLCHAIN_KEY),)
+	$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
+endif
+OBJ_ROOT := $(ROOT_DIR)/build/obj/$(MOTOR_TOOLCHAIN_KEY)
+
 ifeq ($(BUILD), release)
 	CARGO_RELEASE := --release
 	BIN_DIR := $(CURDIR)/build/bin/release
-	OBJ_DIR := $(CURDIR)/build/obj/release
+	OBJ_DIR := $(OBJ_ROOT)/release
 	SUB_DIR := x86_64-unknown-motor/release
 	IMG_CMD := release
 else
 	CARGO_RELEASE :=
 	BIN_DIR := $(CURDIR)/build/bin/debug
-	OBJ_DIR := $(CURDIR)/build/obj
+	OBJ_DIR := $(OBJ_ROOT)/debug
 	SUB_DIR := x86_64-unknown-motor/debug
 	IMG_CMD := debug
 endif
 
-ROOT_DIR := $(CURDIR)
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
-DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $(CARGO_RELEASE)
+IMAGER_TARGET_DIR := $(OBJ_DIR)/imager
+ASSEMBLY_SELECTOR := $(ROOT_DIR)/src/select-toolchain-assembly.sh
+DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
+DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 all: base.img main.img
 images: base.img main.img dev.img
@@ -41,7 +52,10 @@ user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 .PHONY: rush kibim red rmux russhd httpd httpd-axum gears gears-mock-provider
 .PHONY: lorry curl
 .PHONY: mdbg rnetbench crossbench
-.PHONY: clean clippy
+.PHONY: clean clippy assembly-selected
+
+assembly-selected:
+	@"$(ASSEMBLY_SELECTOR)" --resolve >/dev/null
 
 mbr.bin:
 	mkdir -p $(BIN_DIR)
@@ -188,18 +202,22 @@ gears-mock-provider:
 	strip -o "$(BIN_DIR)/gears-mock-provider" \
 		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
 
-lorry:
+lorry: assembly-selected
 	mkdir -p $(BIN_DIR)
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/lorry && \
-		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(ROOT_DIR)/../motor-sysroot/bin/motor-clang" \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
 # ring's Git checkout generates packaged assembly on the Linux host. Curl is
 # therefore cross-built by Cargo and is not part of the native Lorry surface.
-curl:
+curl: assembly-selected
 	mkdir -p $(BIN_DIR)
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
 	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/curl" \
 		./build-motor.sh $(CARGO_RELEASE)
 
@@ -213,12 +231,15 @@ define INSTALL_VM_SCRIPTS
 endef
 
 # The standard image adds production networking and user programs to base.
-main.img: boot core sys user
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+main.img: assembly-selected boot core sys user
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
 	cd src/imager && \
-		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
@@ -228,28 +249,33 @@ system-tty.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
 	cd src/imager && \
-		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os-system-tty.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the System-console test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
 
-# The base image alone; what src/build-base.sh produces.
+# The minimal base image; it does not consume toolchain assembly overlays.
 base.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
 	cd src/imager && \
-		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 # The dev image adds diagnostics, tests, sources, and native toolchains.
-dev.img: boot core sys user-dev
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+dev.img: assembly-selected boot core sys user-dev
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
+		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
 	cd src/imager && \
-		flock "$(IMAGER_LOCK)" cargo run $(CARGO_RELEASE) -- \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		cargo run $(CARGO_RELEASE) -- \
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
@@ -278,7 +304,7 @@ clippy: vdso
 	cd src/bin/gears && $(DO_CLIPPY)
 	cd src/bin/gears-mock-provider && $(DO_CLIPPY)
 	cd src/bin/lorry && $(DO_CLIPPY)
-	cd src/imager && cargo clippy $(CARGO_RELEASE)
+	cd src/imager && CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo clippy $(CARGO_RELEASE)
 
 clean:
 	rm -rf build/*

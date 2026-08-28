@@ -86,7 +86,7 @@ fn hex_nibble(byte: u8) -> u8 {
     }
 }
 
-/// Cargo 1.97-1.99's cross-platform `rustc-stable-hash` byte contract.
+/// Cargo 1.99's cross-platform `rustc-stable-hash` byte contract.
 ///
 /// Storing the small metadata stream before SipHash finalization keeps this
 /// implementation dependency-free and easy to compare against fixed Cargo

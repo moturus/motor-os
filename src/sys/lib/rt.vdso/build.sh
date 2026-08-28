@@ -14,9 +14,9 @@ if [ -f "${TARGET_FNAME}" ]; then
     PREV_HASH=$(sha256sum "${TARGET_FNAME}" | awk '{print $1}')
 fi
 
-cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --features "netdev" $@
+cargo build --target x86_64-unknown-motor --features "netdev" $@
 
-cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor --features "netdev" $@
+cargo clippy --target x86_64-unknown-motor --features "netdev" $@
 
 # Don't update the output file if nothings has changed,
 # otherwise sys-io is always relinked, which takes time.

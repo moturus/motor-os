@@ -110,11 +110,7 @@ macro_rules! moto_log {
     };
 }
 
-/// Log a backtrace to `rt_fd`.
-///
-/// A negative descriptor selects the process diagnostic sink: stderr first,
-/// with a kernel-log fallback only when stderr fails and the process holds
-/// `CAP_LOG`.
+/// Log backtrace to rt_fd. If rt_fd is < 0, logs to the kernel log.
 #[cfg(not(feature = "base"))]
 pub fn log_backtrace(rt_fd: crate::RtFd) {
     let vdso_log_backtrace: extern "C" fn(crate::RtFd) = unsafe {

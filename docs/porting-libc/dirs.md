@@ -41,8 +41,8 @@ default); everything else is just where files land in the sysroot and the image.
 
 4. **Image staging (stage 8).** Generated roots map to the image root. Stage
    headers, libraries, and the resource directory into
-   `img_files/generated/llvm/devtools/llvm/...`; stage the driver config into
-   `img_files/generated/llvm/devtools/cfg/llvm/x86_64-unknown-motor.cfg` with its
+   `$MOTORH/assemblies/<assembly-key>/images/llvm/devtools/llvm/...`; stage the
+   driver config into the `devtools/cfg/llvm/` subtree of that root with its
    body updated to `-resource-dir /devtools/llvm/lib/clang/<N>`.
 
 5. **Docs / verify text.** Update the prose and the "Verify in the VM" examples
@@ -67,9 +67,9 @@ rather than a per-file patch:
   already carries `-D_GNU_SOURCE`. This keeps the change Motor-contained; the
   shared meson.build is untouched.
 - **Stage** the config files under
-  `img_files/generated/libc/system/cfg/libc/`. This separate generated overlay
-  is consumed by the standard image without pulling in the development-only
-  LLVM tree.
+  `$MOTORH/assemblies/<assembly-key>/images/libc/system/cfg/libc/`. This
+  separate generated overlay is consumed by the standard image without
+  pulling in the development-only LLVM tree.
 
 Functional call sites to route through the macro (from H.8 + a grep):
 `resolv_conf.cpp` (`/etc/resolv.conf`), `lookup.cpp` (`/etc/hosts`, ×2),

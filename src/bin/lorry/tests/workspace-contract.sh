@@ -8,6 +8,13 @@ if [ "$#" -ne 1 ]; then
 fi
 
 LORRY="$(realpath "$1")"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
+    # shellcheck source=current-toolchain.sh
+    source "$SCRIPT_DIR/current-toolchain.sh"
+    lorry_load_current_toolchain
+fi
+export RUSTC="$LORRY_TEST_RUSTC"
 WORK="$(mktemp -d /tmp/lorry-workspace-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"

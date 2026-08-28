@@ -266,7 +266,7 @@ suite and will not be added to `full-test.sh` or `test-all.sh`.
 Run focused checks while developing, followed by:
 
 ```sh
-cargo +nightly fmt --manifest-path src/bin/lorry/Cargo.toml -- --check
+cargo fmt --manifest-path src/bin/lorry/Cargo.toml --check
 cargo test --manifest-path src/bin/lorry/Cargo.toml --locked --offline
 src/bin/lorry/tests/git-contract.sh
 src/bin/lorry/tests/curl-contract.sh
@@ -279,7 +279,7 @@ The final exact commands depend on which crates fail the initial target check
 and will be recorded in the handoff.
 
 Check both worktrees for compiler warnings and unintended files. Do not run
-`cargo +nightly fmt` across unrelated gitoxide workspace crates, and do not
+`cargo fmt` across unrelated gitoxide workspace crates, and do not
 commit either worktree.
 
 ## Review decisions

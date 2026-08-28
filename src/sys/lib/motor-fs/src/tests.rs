@@ -535,8 +535,8 @@ async fn basic_test() -> Result<()> {
         BYTES.len(),
         fs.read(Role::System, file, 0, &mut buf).await.unwrap()
     );
-    for idx in 0..BYTES.len() {
-        assert_eq!(0, buf[idx]);
+    for value in buf.iter().take(BYTES.len()) {
+        assert_eq!(0, *value);
     }
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
@@ -1321,8 +1321,7 @@ async fn midsize_file_test() -> Result<()> {
     }
 
     // Read.
-    let mut bytes_back = vec![];
-    bytes_back.resize(bytes.len(), 0);
+    let mut bytes_back = vec![0; bytes.len()];
 
     let mut offset = 0;
 
@@ -1650,7 +1649,7 @@ async fn no_lost_commits_test() -> Result<()> {
     // Note: no explicit flushing.
     core::mem::drop(fs);
 
-    let mut fs = open_fs(FS_TAG).await?;
+    let fs = open_fs(FS_TAG).await?;
     assert_eq!(
         fs.stat(Role::System, root, "foo").await.unwrap().unwrap(),
         (foo_id, EntryKind::File)
@@ -1862,10 +1861,7 @@ async fn random_file_test() -> Result<()> {
     }
 
     // Remove blocks at random offsets: this tests btree deletion.
-    let mut blocks = Vec::with_capacity(bytes.len());
-    for idx in 0..bytes.len() {
-        blocks.push(idx as usize);
-    }
+    let mut blocks = (0..bytes.len()).collect::<Vec<_>>();
     while !blocks.is_empty() {
         let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
         let block_no = blocks.remove(block_idx);
@@ -3174,7 +3170,7 @@ async fn permissions_storage_test() -> Result<()> {
 
     // Restricted perms survive a flush + reopen; fresh entries stay Rwx.
     fs.flush().await?;
-    let mut fs = open_fs(FS_TAG).await?;
+    let fs = open_fs(FS_TAG).await?;
     assert_eq!(
         fs.metadata(Role::System, g)
             .await?

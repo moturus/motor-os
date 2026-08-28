@@ -45,6 +45,10 @@ struct Config {
     #[serde(default)]
     required_executables: Vec<String>,
     #[serde(default)]
+    assembly_dirs: Vec<String>,
+    #[serde(default)]
+    assembly_required_executables: Vec<String>,
+    #[serde(default)]
     source_dirs: Vec<SourceDirectory>,
     filesystem: String,
     data_partition_size_mb: u64,
@@ -417,8 +421,25 @@ fn add_dir(
     }
 }
 
+#[cfg(test)]
 fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &[]);
+}
+
+fn static_overlay_exclusions(directories: &[String]) -> &'static [&'static str] {
+    const NONE: &[&str] = &[];
+    const DEVTOOLS: &[&str] = &["devtools"];
+
+    let devtools = Path::new("/devtools");
+    if directories
+        .iter()
+        .map(Path::new)
+        .any(|path| path == devtools || path.starts_with(devtools))
+    {
+        NONE
+    } else {
+        DEVTOOLS
+    }
 }
 
 fn add_source_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
@@ -532,6 +553,58 @@ fn validate_static_dirs(motorh: &Path, static_dirs: &[String]) -> Result<(), Str
     Ok(())
 }
 
+fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(), String> {
+    if config.assembly_dirs.is_empty() && config.assembly_required_executables.is_empty() {
+        return Ok(());
+    }
+    let root = root.ok_or_else(|| {
+        "image configuration requires an assembly; run src/select-toolchain-assembly.sh --resolve"
+            .to_owned()
+    })?;
+    let mut components = root.components();
+    if components.next() != Some(Component::RootDir)
+        || components.any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "assembly image root '{}' must be a normalized absolute path",
+            root.display()
+        ));
+    }
+
+    fn resolve(root: &Path, relative: &str) -> Result<String, String> {
+        if relative.is_empty()
+            || relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(format!(
+                "assembly input '{relative}' must be a normalized relative path"
+            ));
+        }
+        root.join(relative)
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "assembly image input is not valid UTF-8".to_owned())
+    }
+
+    config.static_dirs.extend(
+        config
+            .assembly_dirs
+            .iter()
+            .map(|path| resolve(root, path))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    config.required_executables.extend(
+        config
+            .assembly_required_executables
+            .iter()
+            .map(|path| resolve(root, path))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(())
+}
+
 fn print_usage_and_exit() -> ! {
     eprintln!(
         "
@@ -603,7 +676,11 @@ fn main() {
 
     let config_path = Path::new(args[3].as_str());
     let config_file = File::open(config_path).expect("Failed to open config file");
-    let config: Config = serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    let mut config: Config =
+        serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    let assembly_root = std::env::var_os("MOTOR_ASSEMBLY_IMAGE_ROOT");
+    use_assembly_image_root(&mut config, assembly_root.as_deref().map(Path::new))
+        .unwrap_or_else(|err| panic!("MOTOR_ASSEMBLY_IMAGE_ROOT: {err}"));
     validate_directories(&config.directories).unwrap_or_else(|err| panic!("{err}"));
     validate_static_dirs(motorh, &config.static_dirs).unwrap_or_else(|err| panic!("{err}"));
     let policy = permissions::PermissionPolicy::load(config_path, &config.permission_policy)
@@ -632,9 +709,10 @@ fn main() {
         files.insert(bin_dir.join(filename), (*prog).clone());
     }
 
+    let static_exclusions = static_overlay_exclusions(&config.directories);
     for dir in &config.static_dirs {
         let path = motorh.join(dir);
-        add_static_dir(&mut files, path, Path::new("/"));
+        add_dir(&mut files, path, Path::new("/"), static_exclusions);
     }
     for dir in &config.source_dirs {
         let path = motorh.join(&dir.source);
@@ -719,17 +797,10 @@ mod tests {
         assert_eq!(config.data_partition_size_mb, 256);
         assert_eq!(
             config.static_dirs,
-            [
-                "img_files/motor-os-base",
-                "img_files/motor-os",
-                "img_files/generated/libc",
-                "img_files/generated/rg"
-            ]
+            ["img_files/motor-os-base", "img_files/motor-os"]
         );
-        assert_eq!(
-            config.required_executables,
-            ["img_files/generated/rg/system/bin/rg"]
-        );
+        assert_eq!(config.assembly_dirs, ["libc", "rg"]);
+        assert_eq!(config.assembly_required_executables, ["rg/system/bin/rg"]);
         assert!(config
             .directories
             .iter()
@@ -769,20 +840,17 @@ mod tests {
             [
                 "img_files/motor-os-base",
                 "img_files/motor-os",
-                "img_files/generated/libc",
-                "img_files/generated/rg",
-                "img_files/motor-os-dev",
-                "img_files/generated/llvm",
-                "img_files/generated/rustc"
+                "img_files/motor-os-dev"
             ]
         );
-        assert_eq!(config.required_executables.len(), 6);
+        assert_eq!(config.assembly_dirs, ["libc", "rg", "llvm", "rustc"]);
+        assert_eq!(config.assembly_required_executables.len(), 6);
         assert!(config
-            .required_executables
+            .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rustc")));
         assert!(config
-            .required_executables
+            .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rg")));
         assert!(config
@@ -862,6 +930,47 @@ mod tests {
     }
 
     #[test]
+    fn assembly_image_root_resolves_only_assembly_inputs() {
+        let mut config: Config =
+            serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
+        use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images"))).unwrap();
+
+        assert!(config
+            .static_dirs
+            .iter()
+            .any(|path| path == "/assemblies/exact/images/rustc"));
+        assert!(config
+            .required_executables
+            .iter()
+            .any(|path| path == "/assemblies/exact/images/llvm/devtools/bin/cc"));
+        assert!(config
+            .static_dirs
+            .iter()
+            .any(|path| path == "img_files/motor-os-dev"));
+        assert!(use_assembly_image_root(&mut config, Some(Path::new("relative/images"))).is_err());
+        assert!(use_assembly_image_root(&mut config, Some(Path::new("/images/../other"))).is_err());
+    }
+
+    #[test]
+    fn assembly_inputs_require_a_root_and_normalized_relative_paths() {
+        let mut config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+        assert!(use_assembly_image_root(&mut config, None).is_err());
+        for invalid in ["", "/rg", "rg//bin", "rg/../bin", "rg/./bin"] {
+            let mut config: Config =
+                serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+            config.assembly_dirs = vec![invalid.to_owned()];
+            assert!(
+                use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images")))
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+
+        let mut base: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
+        assert!(use_assembly_image_root(&mut base, None).is_ok());
+    }
+
+    #[test]
     fn later_static_overlay_wins() {
         let root =
             std::env::temp_dir().join(format!("motor-imager-overlay-test-{}", std::process::id()));
@@ -909,6 +1018,15 @@ entries: []
             "rw-r--r--"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn static_overlays_cannot_introduce_undeclared_devtools() {
+        assert_eq!(static_overlay_exclusions(&[]), ["devtools"]);
+        assert_eq!(
+            static_overlay_exclusions(&["/devtools/bin".to_owned()]),
+            [] as [&str; 0]
+        );
     }
 
     #[test]

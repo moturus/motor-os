@@ -1,33 +1,22 @@
 #!/usr/bin/env bash
 #
-# build-base.sh — set up a Motor OS development environment from scratch and
-# build the base OS image, following docs/build.md.
+# build-base.sh — private host provisioning for build-motor-os.sh.
 #
-# USAGE
-#   Run it from a Motor OS checkout (src/build-base.sh), or copy it into an
-#   empty directory and run it there:
+# This file remains sourceable by its offline host-networking test. It may be
+# executed only by build-motor-os.sh; contributors use src/build-motor-os.sh.
 #
-#       ./build-base.sh
-#
-#   From a checkout, the checkout's parent becomes $MOTORH (the Motor OS dev
-#   root); copied out, the directory the script lives in becomes $MOTORH.
-#   MOTORH and MOTOR_OS_DIR override either default (the unified
-#   build-motor-os.sh sets both).
+# MOTORH and MOTOR_OS_DIR are supplied by the unified orchestrator.
 #   MOTOR_SKIP_HOST_NETWORK_SETUP=1 skips the privileged tap/NAT setup when
 #   the caller has independently verified the host network configuration.
 #
-# WHAT IT DOES (all under $MOTORH), mirroring docs/build.md:
+# WHAT IT DOES, mirroring docs/build.md:
 #   1. install host build packages via apt          [skipped if already present]
-#   2. install rustup + the pinned nightly toolchain [skipped if already present]
-#   3. clone + build the Rust Motor OS toolchain      [clone skipped if present]
-#   4. clone the motor-os repo                         [skipped if already present]
-#   5. build the base image                         [incremental]
-#   6. create the moto-tap interface + /dev/kvm access [skipped if already done]
+#   2. install rustup without selecting a default    [skipped if already present]
+#   3. create the moto-tap interface + /dev/kvm access [skipped if already done]
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
 #
-# RE-RUNNING is safe: completed setup steps are detected and skipped; only the
-# (incremental) compiles run again.
+# RE-RUNNING is safe: completed setup steps are detected and skipped.
 #
 # See docs/build.md for the prose walkthrough behind each step.
 
@@ -55,11 +44,6 @@ else
 fi
 export MOTORH
 
-# --- pins (keep in sync with docs/build.md) ---------------------------------
-NIGHTLY="nightly-2026-06-19"
-HOST_TRIPLE="x86_64-unknown-linux-gnu"
-RUST_REPO="https://github.com/moturus/rust.git"
-RUST_BASE_BRANCH="motor-os-rt-v17"
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run
 # the VM and qemu-utils so the complete build can create qcow2 images (this
 # script still stops short of actually running a VM).
@@ -102,7 +86,7 @@ install_packages() {
 	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install "${PACKAGES[@]}"
 }
 
-# --- 2. rustup + pinned nightly ---------------------------------------------
+# --- 2. rustup, deliberately without a default toolchain --------------------
 install_rust() {
 	# Bring cargo/rustup onto PATH if a previous run (or the user) installed it.
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
@@ -110,114 +94,14 @@ install_rust() {
 	if command -v rustup >/dev/null 2>&1; then
 		skip "rustup already installed"
 	else
-		log "installing rustup (non-interactive)"
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+		log "installing rustup without a default toolchain"
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+			sh -s -- -y --default-toolchain none
 		. "$HOME/.cargo/env"
 	fi
-
-	# Idempotent: installs the toolchain on the first run, no-ops afterwards.
-	log "selecting ${NIGHTLY} + rust-src (pinned per docs/build.md)"
-	rustup default "${NIGHTLY}"
-	rustup component add rust-src --toolchain "${NIGHTLY}-${HOST_TRIPLE}"
 }
 
-# --- 3. Rust Motor OS toolchain ---------------------------------------------
-build_rust_toolchain() {
-	# Once build-motor-os.sh's rustc stage has taken over the checkout (the
-	# motor-os-rustc compiler branch and its bootstrap.toml), the dev toolchain
-	# is built there. Switching back to motor-os-rt-v17 here would rebuild it
-	# from the wrong branch against the wrong LLVM (and x.py's stage2 sysroot
-	# wipe would break the working toolchain first) — leave the tree alone.
-	if [ -d "$MOTORH/rust/.git" ]; then
-		local rust_branch
-		rust_branch="$(git -C "$MOTORH/rust" branch --show-current 2>/dev/null)"
-		if [ "$rust_branch" = "motor-os-rustc" ] || \
-				grep -q 'download-ci-llvm' "$MOTORH/rust/bootstrap.toml" 2>/dev/null; then
-			skip "rust toolchain (owned by build-motor-os.sh's rustc stage; tree on ${rust_branch:-a detached HEAD})"
-			return
-		fi
-	fi
-
-	if [ -d "$MOTORH/rust/.git" ]; then
-		skip "rust sources already cloned"
-	else
-		log "cloning moturus/rust @ $RUST_BASE_BRANCH (large; this can take a while)"
-		git clone --branch "$RUST_BASE_BRANCH" "$RUST_REPO" "$MOTORH/rust"
-	fi
-
-	local current_branch
-	current_branch="$(git -C "$MOTORH/rust" branch --show-current)"
-	if [ "$current_branch" = "$RUST_BASE_BRANCH" ]; then
-		skip "rust sources already on $RUST_BASE_BRANCH"
-	else
-		if [ -n "$(git -C "$MOTORH/rust" status --porcelain --untracked-files=no)" ]; then
-			die "rust tree is dirty on $current_branch — clean it (git stash) and re-run"
-		fi
-		if git -C "$MOTORH/rust" show-ref --verify --quiet \
-				"refs/heads/$RUST_BASE_BRANCH"; then
-			log "switching rust to local $RUST_BASE_BRANCH"
-			git -C "$MOTORH/rust" switch -q "$RUST_BASE_BRANCH"
-		else
-			log "fetching moturus/rust @ $RUST_BASE_BRANCH"
-			git -C "$MOTORH/rust" remote add moturus "$RUST_REPO" 2>/dev/null || true
-			git -C "$MOTORH/rust" fetch -q moturus "$RUST_BASE_BRANCH"
-			git -C "$MOTORH/rust" switch -q -c "$RUST_BASE_BRANCH" \
-				"moturus/$RUST_BASE_BRANCH"
-		fi
-	fi
-
-	if [ -f "$MOTORH/rust/bootstrap.toml" ]; then
-		skip "rust/bootstrap.toml already present"
-	else
-		log "writing rust/bootstrap.toml"
-		cat > "$MOTORH/rust/bootstrap.toml" << 'EOF'
-change-id = "ignore"
-
-profile = "library"
-
-[build]
-host = ["x86_64-unknown-linux-gnu"]
-target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
-
-[rust]
-# std-features = ["debug_refcell"]
-deny-warnings = false
-incremental = true
-# debug = true
-# debuginfo-level = 2
-EOF
-	fi
-
-	log "building the Rust Motor OS toolchain (x.py build --stage 2 ...)"
-	( cd "$MOTORH/rust" \
-		&& ./x.py build --stage 2 clippy library src/tools/remote-test-server )
-
-	if rustup toolchain list | grep -q '^dev-x86_64-unknown-motor'; then
-		skip "dev-x86_64-unknown-motor toolchain already linked"
-	else
-		log "registering the dev-x86_64-unknown-motor toolchain"
-		rustup toolchain link dev-x86_64-unknown-motor \
-			"$MOTORH/rust/build/${HOST_TRIPLE}/stage2"
-	fi
-}
-
-# --- 4. motor-os repo -------------------------------------------------------
-clone_motor_os() {
-	if [ -e "$MOTOR/.git" ]; then
-		skip "motor-os already cloned"
-	else
-		log "cloning moturus/motor-os"
-		git clone https://github.com/moturus/motor-os.git "$MOTOR"
-	fi
-}
-
-# --- 5. build the Motor OS base image ---------------------------------------
-build_motor_os() {
-	log "building the Motor OS base image (make base.img BUILD=release)"
-	( cd "$MOTOR" && make base.img BUILD=release -j"$(nproc)" )
-}
-
-# --- 6. host VM prerequisites (tap + kvm), but NOT running the VM -----------
+# --- 3. host VM prerequisites (tap + kvm), but NOT running the VM -----------
 host_networking_ready() {
 	[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
 	ip -o link show dev moto-tap 2>/dev/null | grep -q '<[^>]*UP[,>]' || return 1
@@ -297,28 +181,15 @@ setup_host_vm_prereqs() {
 }
 
 main() {
-	log "Motor OS base build starting; MOTORH = $MOTORH"
+	log "Motor OS host provisioning starting; MOTORH = $MOTORH"
 	install_packages
 	install_rust
-	build_rust_toolchain
-	clone_motor_os
-	if [ "${MOTOR_SKIP_OS_BUILD:-0}" = "1" ]; then
-		skip "base Motor OS image build (deferred to the unified toolchain build)"
-	elif ! "$MOTORH/rust/build/${HOST_TRIPLE}/stage2/bin/rustc" --version \
-			>/dev/null 2>&1; then
-		die "the dev-x86_64-unknown-motor toolchain is not functional — run src/build-motor-os.sh (its rustc stage rebuilds it), then re-run this script"
-	else
-		build_motor_os
-	fi
 	setup_host_vm_prereqs
-	log "done — the environment is ready."
-	if [ -f "$MOTOR/vm_images/release/motor-os-base.img" ]; then
-		log "to run the VM:  cd \"$MOTOR/vm_images/release\" && MOTO_IMAGE=motor-os-base.img ./run-qemu.sh"
-	else
-		log "next: run $MOTOR/src/build-motor-os.sh to build the complete main image"
-	fi
+	log "host provisioning complete"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	[ "${MOTOR_BUILD_ORCHESTRATOR:-0}" = "1" ] ||
+		die "build-base.sh is private; run src/build-motor-os.sh"
 	main "$@"
 fi

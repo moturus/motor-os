@@ -317,18 +317,21 @@ cannot approve them.
 A leading rustup-style selector chooses an installed compiler on Linux:
 
 ```sh
-lorry +nightly build
-lorry +dev-x86_64-unknown-motor build --target x86_64-unknown-motor
+lorry +motor-1.99.0-beta-f47d5bb-dev.1-<full-toolchain-key> build
+lorry +motor-1.99.0-beta-f47d5bb-dev.1-<full-toolchain-key> \
+  build --target x86_64-unknown-motor
 ```
 
 Without a selector, `RUSTC` takes precedence over `rustc` from `PATH` on
 Linux. Motor OS normally uses `/devtools/bin/rustc`. Only installed
 target triples are supported; custom JSON targets are rejected.
 
-Lorry supports Cargo compiler-identity compatibility families 1.97, 1.98,
-and 1.99. It infers the family from a conventionally paired rustc. Installation
-configuration must set `cargo-compat-version` for a custom or unpaired
-toolchain.
+Lorry supports only Cargo compiler-identity compatibility family 1.99, the
+family selected by the current Motor Rust toolchain. It infers that family
+from a Rust 1.99 compiler. Installation configuration must set
+`cargo-compat-version = "1.99"` for an equivalent custom or unpaired
+toolchain; older and newer families are rejected until Lorry and the Motor
+toolchain advance together.
 
 Cross-target run and test require a configured target runner. Lorry executes
 the runner as an argument vector and never through a shell.
