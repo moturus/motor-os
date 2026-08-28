@@ -131,9 +131,13 @@ fn failed_route(mode: u64, caps: u64) -> u64 {
 }
 
 fn test_failure_and_reentry_policy() {
+    let with_log =
+        !crate::skip_without_cap_log("diagnostics::failure_and_reentry_policy/with_log");
     for mode in [1, 2, 3] {
         assert_eq!(3, failed_route(mode, WITHOUT_LOG));
-        assert_eq!(2, failed_route(mode, WITH_LOG));
+        if with_log {
+            assert_eq!(2, failed_route(mode, WITH_LOG));
+        }
     }
 }
 

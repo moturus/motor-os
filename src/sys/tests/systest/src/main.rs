@@ -60,6 +60,34 @@ pub(crate) fn ensure_temp_dir() {
     }
 }
 
+/// The capabilities a complete run needs; `full-test.sh` grants this set.
+/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE` only and
+/// cannot delegate `CAP_LOG`, so the tests that spawn logging children skip
+/// themselves instead of failing on their first spawn.
+pub(crate) const FULL_RUN_CAPS: u64 =
+    moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_INTERACTIVE;
+
+pub(crate) fn has_cap_log() -> bool {
+    moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
+}
+
+/// Prints the skip notice for `test` and returns true when `CAP_LOG` is missing.
+pub(crate) fn skip_without_cap_log(test: &str) -> bool {
+    if has_cap_log() {
+        return false;
+    }
+    let exe = std::env::current_exe()
+        .map(|exe| exe.display().to_string())
+        .unwrap_or_else(|_| "systest".to_owned());
+    println!(
+        "skipping {test} test because CAP_LOG capability is missing; \
+         run it with all needed capabilities as: {}=0x{:x} {exe}",
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        FULL_RUN_CAPS
+    );
+    true
+}
+
 fn test_syscall() {
     const ITERS: usize = 1_000_000;
     let start = std::time::Instant::now();
