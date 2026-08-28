@@ -194,13 +194,15 @@ impl TryFrom<u8> for AccessPermissions {
 /// to `new`? Governs **authority only**; cross-role monotonicity is a separate
 /// constraint applied by the FS (cap + cascade). See PERMISSIONS_DESIGN.md.
 ///   - target strictly below caller : any change (widen or narrow)
-///   - target == caller (own byte)  : narrow only
+///   - target == caller (own byte)  : narrow only, plus `Rw` -> `Rx`
 ///   - target strictly above caller : forbidden
 pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPermissions) -> bool {
     use core::cmp::Ordering::*;
     match (caller as u8).cmp(&(target as u8)) {
         Greater => true,
-        Equal => old.can_narrow_to(new),
+        Equal => {
+            old.can_narrow_to(new) || (old == AccessPermissions::Rw && new == AccessPermissions::Rx)
+        }
         Less => false,
     }
 }
@@ -369,8 +371,8 @@ pub trait FileSystem {
     ) -> Result<Option<(EntryId, EntryKind)>>;
 
     /// Create a file or directory with the given initial per-role permissions
-    /// in System/Interactive/None order. `RolePermissions::all(Access::Rwx)`
-    /// is the fully-permissive default.
+    /// in System/Interactive/None order. The caller selects the complete mode;
+    /// sys-io computes creator-relative defaults for ordinary client requests.
     async fn create_entry(
         &mut self,
         role: Role,

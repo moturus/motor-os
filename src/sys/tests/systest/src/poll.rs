@@ -132,6 +132,148 @@ pub fn test_writable_registration_arms_page_waiter() {
     println!("-- test_writable_registration_arms_page_waiter PASS");
 }
 
+pub fn run_mio_ping_pong_peer(addr: &str, connected_marker: Option<&str>) {
+    use std::io::{Read, Write};
+
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(b"ping").unwrap();
+    if let Some(marker) = connected_marker {
+        std::fs::write(marker, b"connected").unwrap();
+    }
+    let mut pong = [0_u8; 4];
+    stream.read_exact(&mut pong).unwrap();
+    assert_eq!(&pong, b"pong");
+}
+
+fn run_mio_accept_pump_case(poison_rearm: bool) {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::process::{Child, Command};
+
+    fn spawn_peer(addr: std::net::SocketAddr, connected_marker: Option<&std::path::Path>) -> Child {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.arg("mio-ping-pong-peer").arg(addr.to_string());
+        if let Some(marker) = connected_marker {
+            command.arg(marker);
+        }
+        command.spawn().unwrap()
+    }
+
+    fn wait_for_peer_connected(peer: &mut Child, marker: &std::path::Path) {
+        let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if marker.exists() {
+                std::fs::remove_file(marker).unwrap();
+                return;
+            }
+            if let Some(status) = peer.try_wait().unwrap() {
+                panic!("peer exited before connecting: {status}");
+            }
+            assert!(
+                moto_rt::time::Instant::now() < deadline,
+                "peer did not connect before the setup deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn serve(listener: &std::net::TcpListener, peer: &mut Child) {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(false).unwrap();
+        let mut ping = [0_u8; 4];
+        stream.read_exact(&mut ping).unwrap();
+        assert_eq!(&ping, b"ping");
+        stream.write_all(b"pong").unwrap();
+        drop(stream);
+        assert!(peer.wait().unwrap().success());
+    }
+
+    // Run in a fresh pool so the slot layout below is deterministic.
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let registry = poll::new().unwrap();
+    poll::add(registry, listener.as_raw_fd(), 1, poll::POLL_READABLE).unwrap();
+
+    // One pool channel has four slots: listener, standing accept, and these
+    // fillers. Rearming after an accept has to provision another channel.
+    std::thread::sleep(Duration::from_millis(100));
+    let fillers = [
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+        std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+    ];
+    assert_eq!(moto_rt::internal_helper(0, 1, 0, 0, 0, 0), 1);
+
+    if poison_rearm {
+        moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
+    }
+    let mut first = spawn_peer(addr, None);
+    let mut events = [poll::Event::default(); 2];
+    let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
+    let count = poll::wait(registry, events.as_mut_ptr(), events.len(), Some(deadline)).unwrap();
+    assert_eq!(count, 1, "first connection did not make listener readable");
+    assert_eq!(events[0].token, 1);
+
+    if poison_rearm {
+        // accept() pokes the pump. Keep all slots occupied until its forced
+        // provisioning failure has entered the error wait, then restore it.
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(false).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
+        let mut ping = [0_u8; 4];
+        stream.read_exact(&mut ping).unwrap();
+        stream.write_all(b"pong").unwrap();
+        drop(stream);
+        assert!(first.wait().unwrap().success());
+    } else {
+        serve(&listener, &mut first);
+    }
+
+    let marker = std::env::temp_dir().join(format!(
+        "mio-accept-pump-peer-connected-{}-{}",
+        std::process::id(),
+        moto_rt::time::Instant::now().as_u64()
+    ));
+    let mut second = spawn_peer(addr, Some(&marker));
+    wait_for_peer_connected(&mut second, &marker);
+    let deadline = moto_rt::time::Instant::now() + Duration::from_secs(2);
+    let count = poll::wait(registry, events.as_mut_ptr(), events.len(), Some(deadline)).unwrap();
+    if count == 0 {
+        let probe = listener.accept();
+        let _ = second.kill();
+        let _ = second.wait();
+        panic!(
+            "reproduced accept-pump stall: second peer connected but listener stayed unreadable; direct accept={probe:?}"
+        );
+    }
+    assert_eq!(events[0].token, 1);
+    serve(&listener, &mut second);
+
+    poll::del(registry, listener.as_raw_fd()).unwrap();
+    moto_rt::fs::close(registry).unwrap();
+    drop(fillers);
+    drop(listener);
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
+}
+
+pub fn test_mio_accept_pump_progress() {
+    run_mio_accept_pump_case(false);
+    run_mio_accept_pump_case(true);
+    println!("-- test_mio_accept_pump_progress PASS");
+}
+
+/// Forces the transient reservation failure seen under stress. This focused
+/// reproducer fails on the current bug and will pass once the pump rearms.
+pub fn reproduce_mio_accept_pump_stall() {
+    run_mio_accept_pump_case(true);
+    println!("-- reproduce_mio_accept_pump_stall PASS");
+}
+
 /// A deregistered source raises no more events, including the CLOSED and
 /// ERROR bits nobody registers for.
 ///
@@ -906,6 +1048,7 @@ pub fn run_all_tests() {
     test_multi_poller();
     test_refused_connect_reports_writable();
     test_writable_registration_arms_page_waiter();
+    test_mio_accept_pump_progress();
     test_deregister_retires_closed_events();
     test_deregister_races_the_delivery_pass();
     test_reregister_same_token_replaces_interests();

@@ -193,6 +193,10 @@ vm_ssh() {
   "${SSH[@]}" "$@"
 }
 
+vm_ssh_stdout() {
+  vm_ssh "$@"
+}
+
 vm_rmux() {
   vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
 }
@@ -302,10 +306,23 @@ read_udp_socket_count() {
 
 DNS_RESOLVER_SSH_PID=""
 VMM_PID=""
+RMUX_TITLE_SSH_PID=""
+RMUX_TITLE_IN_FD=""
+RMUX_TITLE_OUT_FD=""
 
 # cleanup routine
 stop_vmm() {
   set +e
+  if [ -n "$RMUX_TITLE_IN_FD" ]; then
+    exec {RMUX_TITLE_IN_FD}>&-
+  fi
+  if [ -n "$RMUX_TITLE_OUT_FD" ]; then
+    exec {RMUX_TITLE_OUT_FD}<&-
+  fi
+  if [ -n "$RMUX_TITLE_SSH_PID" ]; then
+    kill "$RMUX_TITLE_SSH_PID" 2>/dev/null
+    wait "$RMUX_TITLE_SSH_PID" 2>/dev/null
+  fi
   stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -326,8 +343,8 @@ echo ""
 
 # FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
-# Do not forward the guest's terminal queries: tmux answers them on the pane's
-# input, where the replies would be left for the shell after this run.
+# Do not forward the guest's terminal-size controls: a host terminal may answer
+# or retain them, leaving reports queued for the shell after this run.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
   > >(filter_vm_console | tee /tmp/full-test.log) 2>&1 &
 VMM_PID="$!"
@@ -353,6 +370,16 @@ if ! kill -0 "$VMM_PID" 2>/dev/null; then
   cat /tmp/full-test.log >&2
   fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
 fi
+
+ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
+ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
+vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /system/bin/printenv SSH_STDOUT_MARKER; /system/bin/ls /ssh-stderr-separation-probe" \
+  > "$ssh_split_stdout" 2> "$ssh_split_stderr"
+[ "$(cat "$ssh_split_stdout")" = "SSH_STDOUT_MARKER=ssh-stdout-marker" ] ||
+  fail "russhd mixed remote stderr into SSH stdout"
+grep -q "^error reading directory '/ssh-stderr-separation-probe'\.$" "$ssh_split_stderr" ||
+  fail "russhd did not deliver remote stderr as SSH extended data"
+rm -f "$ssh_split_stdout" "$ssh_split_stderr"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
@@ -439,19 +466,19 @@ EXPECTED_PATH=/system/bin:/user/bin
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   EXPECTED_PATH=$EXPECTED_PATH:/devtools/bin
 fi
-[ "$(vm_ssh /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
+[ "$(vm_ssh_stdout /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
-[ "$(vm_ssh "/system/bin/rush -c 'pwd'")" = "/user" ] ||
+[ "$(vm_ssh_stdout "/system/bin/rush -c 'pwd'")" = "/user" ] ||
   fail "russhd did not start the SSH command in /user"
-[ "$(vm_ssh /system/bin/printenv HOME)" = "HOME=/user" ] ||
+[ "$(vm_ssh_stdout /system/bin/printenv HOME)" = "HOME=/user" ] ||
   fail "russhd did not set HOME to /user"
 rush_path="$(printf 'printenv PATH\nexit\n' |
-  vm_ssh "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
+  vm_ssh_stdout "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
   fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
-[ "$(vm_ssh "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
+[ "$(vm_ssh_stdout "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
   fail "Rush did not supply the user TMPDIR fallback"
-[ "$(vm_ssh "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
+[ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
   fail "Rush replaced an explicit TMPDIR"
 for service in russhd strobe sys-init sys-tty dns-resolver; do
   vm_ssh "[ ! -e /system/bin/$service ]" ||
@@ -511,7 +538,10 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest" 2>&1 |
+# The SSH shell is Interactive, whose unadorned children no longer receive
+# CAP_LOG. The complete suite exercises logging, so grant
+# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE explicitly.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x4c $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -528,7 +558,7 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite" 2>&1)" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
@@ -539,16 +569,16 @@ out="$(vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
 # child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
+out="$(printf 'relay-smoke\n' | vm_ssh_stdout "/system/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # A foreground status 130 is rush's v1 interrupt indication. It fires INT once
 # and abandons the rest of the pipeline, loop, and enclosing command list.
 rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
 rush_interrupt_status=0
-if out="$(vm_ssh "$rush_interrupt_cmd")"; then
+if out="$(vm_ssh_stdout "$rush_interrupt_cmd")"; then
   fail "rush foreground status 130 unexpectedly succeeded: '$out'"
 else
   rush_interrupt_status="$?"
@@ -563,28 +593,28 @@ fi
 route_dir=$TEST_TMP/stdio-routes
 vm_ssh "/system/bin/mkdir $route_dir"
 kind="TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe"
-out="$(vm_ssh "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush loop pump route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush function pump route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
 [ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
-out="$(vm_ssh "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
-out="$(vm_ssh "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
 [ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
 
 # The packaged /system/bin/rg exercises the direct-file identity route through rush
 # and ripgrep together; the in-tree systest above pins the same route directly.
-out="$(vm_ssh "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
 [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
   fail "ripgrep searched its own output file: got '$out'"
 echo "ripgrep file-stdio regression PASS"
@@ -593,7 +623,7 @@ echo "ripgrep file-stdio regression PASS"
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
 # docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
 # kill that landed lets `wait` return.
-out="$(vm_ssh "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
+out="$(vm_ssh_stdout "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
 bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
@@ -627,6 +657,105 @@ case "$out" in
   *) fail "rmux did not give the console back" ;;
 esac
 
+# Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
+# 2 around a foreground external command, while `command &` leaves the shell's
+# title in place. Drive a live client so this also covers rmux's launch marker,
+# OSC parser, auto-name policy, and status renderer.
+#
+# Synchronization is state-based. `ps` proves the uniquely long sleep is alive
+# before `refresh-client` forces a complete frame; an echo marker proves Rush
+# has regained control before the restored title is checked. No settling delay
+# is involved, which is important in this suite's heavily loaded TUI runs.
+RMUX_TITLE_OUTPUT=""
+coproc RMUX_TITLE_CLIENT {
+  vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-title" /user/bin/rmux 2>&1
+}
+RMUX_TITLE_SSH_PID="$!"
+exec {RMUX_TITLE_OUT_FD}<&"${RMUX_TITLE_CLIENT[0]}"
+exec {RMUX_TITLE_IN_FD}>&"${RMUX_TITLE_CLIENT[1]}"
+
+wait_rmux_title_output() {
+  local pattern="$1"
+  local label="$2"
+  local byte
+  local deadline=$((SECONDS + 20))
+  local remaining
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    if ! IFS= read -r -t "$remaining" -n 1 byte <&"$RMUX_TITLE_OUT_FD"; then
+      break
+    fi
+    RMUX_TITLE_OUTPUT+="$byte"
+    if [[ "$RMUX_TITLE_OUTPUT" == *"$pattern"* ]]; then
+      return
+    fi
+  done
+  fail "$label did not paint '$pattern': '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
+}
+
+wait_motor_process() {
+  local name="$1"
+  local presence="$2"
+  local label="$3"
+  local deadline=$((SECONDS + 20))
+  local processes=""
+  local found
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    processes="$(vm_ssh /system/bin/ps)"
+    found=0
+    printf '%s\n' "$processes" | grep -Fq "$name" && found=1
+    if { [ "$presence" = present ] && [ "$found" = 1 ]; } ||
+      { [ "$presence" = absent ] && [ "$found" = 0 ]; }; then
+      return
+    fi
+    sleep 0.2
+  done
+  fail "$label did not become $presence: '$processes'"
+}
+
+printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 314159" present "rmux foreground command"
+RMUX_TITLE_OUTPUT=""
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:sleep*" "rmux foreground title"
+
+printf '\003' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 314159" absent "interrupted rmux command"
+RMUX_TITLE_OUTPUT=""
+printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
+RMUX_TITLE_OUTPUT=""
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:rush*" "restored Rush title"
+
+RMUX_TITLE_OUTPUT=""
+printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
+wait_motor_process "sleep 271828" present "rmux background command"
+printf '\001r' >&"$RMUX_TITLE_IN_FD"
+wait_rmux_title_output "0:rush*" "background Rush title"
+case "$RMUX_TITLE_OUTPUT" in
+  *"0:sleep*"*) fail "a background command took rmux's title" ;;
+esac
+
+printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"
+exec {RMUX_TITLE_IN_FD}>&-
+RMUX_TITLE_IN_FD=""
+set +e
+RMUX_TITLE_OUTPUT+="$(cat <&"$RMUX_TITLE_OUT_FD")"
+rmux_title_read_status="$?"
+wait "$RMUX_TITLE_SSH_PID"
+rmux_title_status="$?"
+set -e
+exec {RMUX_TITLE_OUT_FD}<&-
+RMUX_TITLE_OUT_FD=""
+RMUX_TITLE_SSH_PID=""
+[ "$rmux_title_read_status" -eq 0 ] ||
+  fail "rmux title output ended with status $rmux_title_read_status"
+[ "$rmux_title_status" -eq 0 ] ||
+  fail "rmux title client exited with status $rmux_title_status: '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
+
 # sysbox ls colors directory names orange, executable files bright red, and
 # non-executable files with the terminal's default color. A pane
 # supplies the terminal that enables colors; the child names do not appear in
@@ -636,14 +765,24 @@ vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
+rmux_ls() {
+  sleep 3
+  # Debug rt.vdso diagnostics intentionally share the pane's terminal. Start
+  # the color frame after the shell's completed startup records.
+  printf '\014'
+  sleep 1
+  printf '/system/bin/ls %s %s\n' "$1" "$2"
+  sleep 1
+  printf 'exit\n'
+}
+
 check_ls_colors() {
   local option="$1"
   local output
   local prefix
   local style
 
-  output="$(printf '/system/bin/ls %s %s/sysbox-ls-color\nexit\n' "$option" "$TEST_TMP" |
-    vm_rmux 2>&1)"
+  output="$(rmux_ls "$option" "$TEST_TMP/sysbox-ls-color" | vm_rmux 2>&1)"
   case "$output" in
     *"amber-dir"*"a-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
@@ -657,16 +796,17 @@ check_ls_colors() {
   [ "$style" = $'\033'"[0;91m" ] ||
     fail "ls $option executable style was '$style'"
 
-  output="$(printf '/system/bin/ls %s /user/cfg\nexit\n' "$option" |
-    vm_rmux 2>&1)"
+  output="$(rmux_ls "$option" /user/cfg | vm_rmux 2>&1)"
   case "$output" in
     *"rush.toml"*) ;;
     *) fail "ls $option did not list the non-executable test file: '$output'" ;;
   esac
   prefix="${output%%rush.toml*}"
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  [ "$style" = $'\033'"[0m" ] ||
-    fail "ls $option non-executable style was '$style'"
+  case "$style" in
+    ""|$'\033'"[0m") ;;
+    *) fail "ls $option non-executable style was '$style'" ;;
+  esac
 }
 check_ls_colors ""
 check_ls_colors "-l"
@@ -674,7 +814,7 @@ check_ls_colors "-l"
 # Directories sort before files in both output modes, with each group sorted by
 # name. The names deliberately put a file before a directory lexically.
 for option in "" "-l"; do
-  sorted_ls="$(vm_ssh /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
+  sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
     *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
@@ -683,9 +823,9 @@ done
 
 # Long listings use Linux-shaped type/permission fields. The three permission
 # triplets are Motor FS System, Interactive, and None roles, in that order.
-long_ls="$(vm_ssh /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
+long_ls="$(vm_ssh_stdout /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
 case "$long_ls" in
-  *"drwxrwxrwx"*"amber-dir"*) ;;
+  *"drwxrwxr-x"*"amber-dir"*) ;;
   *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
 esac
 case "$long_ls" in
@@ -869,6 +1009,9 @@ esac
 # a pane's input from the client, and a client that has hung up sends no reply
 # either.
 crossterm_size_in_pane() {
+  sleep 3
+  printf '\014'
+  sleep 1
   printf 'TMPDIR=%s %s/crossterm-smoke size\n' "$TEST_TMP" "$TEST_BIN"
   sleep 5
   printf 'exit\n'

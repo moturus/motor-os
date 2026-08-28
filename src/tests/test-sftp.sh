@@ -64,6 +64,7 @@ run_ssh() {
 }
 
 cleanup() {
+    remove_permission_fixtures
     run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -85,6 +86,17 @@ run_sftp() {
 
 run_scp() {
     scp "${SSH_OPTS[@]}" "$@" >"$WORK/out" 2>"$WORK/err"
+}
+
+# Step 4 leaves an executable (555) and a read-only (444) fixture that a later
+# `put` is refused on, so a rerun against the same VM would fail on its own
+# leftovers. Remove them before step 4 and on exit; `-rm` ignores a missing file.
+remove_permission_fixtures() {
+    run_sftp <<EOF || true
+-rm $REMOTE_UPLOAD_FILE.plain
+-rm $REMOTE_UPLOAD_FILE.exec
+-rm $REMOTE_UPLOAD_FILE.readonly
+EOF
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
@@ -150,27 +162,47 @@ echo "  ok: multi-packet upload round-tripped byte-for-byte"
 permission_source="$WORK/permission-source.bin"
 plain_permission_roundtrip="$WORK/plain-permission-roundtrip.bin"
 exec_permission_roundtrip="$WORK/exec-permission-roundtrip.bin"
+readonly_permission_roundtrip="$WORK/readonly-permission-roundtrip.bin"
 remote_plain_permission_file="$REMOTE_UPLOAD_FILE.plain"
 remote_exec_permission_file="$REMOTE_UPLOAD_FILE.exec"
-printf 'SFTP permission test\n' >"$permission_source"
+remote_readonly_permission_file="$REMOTE_UPLOAD_FILE.readonly"
+printf '#!/system/bin/rush\nexit 0\n' >"$permission_source"
 chmod 600 "$permission_source"
 
 echo "-- setting and reading back SFTP permissions --"
-run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP permission update failed"; }
+remove_permission_fixtures
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "plain SFTP permission update failed"; }
 put $permission_source $remote_plain_permission_file
 chmod 600 $remote_plain_permission_file
 get -p $remote_plain_permission_file $plain_permission_roundtrip
+EOF
+chmod 700 "$permission_source"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "executable SFTP permission update failed"; }
 put $permission_source $remote_exec_permission_file
-chmod 700 $remote_exec_permission_file
 get -p $remote_exec_permission_file $exec_permission_roundtrip
+EOF
+run_ssh "$remote_exec_permission_file" || fail "uploaded executable did not run"
+if run_sftp <<EOF
+put $permission_source $remote_exec_permission_file
+EOF
+then
+    fail "put unexpectedly overwrote an existing executable"
+fi
+chmod 400 "$permission_source"
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "read-only SFTP permission update failed"; }
+put $permission_source $remote_readonly_permission_file
+get -p $remote_readonly_permission_file $readonly_permission_roundtrip
 EOF
 
 plain_mode="$(stat -c %a "$plain_permission_roundtrip")"
 exec_mode="$(stat -c %a "$exec_permission_roundtrip")"
+readonly_mode="$(stat -c %a "$readonly_permission_roundtrip")"
 [ "$plain_mode" = 666 ] ||
     fail "non-executable permission round-trip returned mode $plain_mode"
-[ "$exec_mode" = 777 ] ||
+[ "$exec_mode" = 555 ] ||
     fail "executable permission round-trip returned mode $exec_mode"
+[ "$readonly_mode" = 444 ] ||
+    fail "read-only permission round-trip returned mode $readonly_mode"
 echo "  ok: SFTP permission updates preserved executable-bit distinctions"
 
 # ---------------------------------------------------------------------------
@@ -278,7 +310,7 @@ plain_copy_mode="$(stat -c %a "$WORK/copied-Cargo.toml")"
 exec_copy_mode="$(stat -c %a "$WORK/copied-main.rs")"
 [ "$plain_copy_mode" = 666 ] ||
     fail "cp -r changed a non-executable file to mode $plain_copy_mode"
-[ "$exec_copy_mode" = 777 ] ||
+[ "$exec_copy_mode" = 555 ] ||
     fail "cp -r changed an executable file to mode $exec_copy_mode"
 
 run_ssh /system/bin/rm -r "$remote_copy" ||

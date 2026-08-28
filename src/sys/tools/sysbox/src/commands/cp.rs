@@ -110,7 +110,6 @@ fn ensure_not_copying_into_itself(old: &Path, new: &Path) -> Result<()> {
 }
 
 fn copy_directory(old: &Path, new: &Path) -> Result<()> {
-    let permissions = std::fs::metadata(old)?.permissions();
     if new.exists() {
         if !new.is_dir() {
             return Err(invalid_input(format!(
@@ -135,7 +134,6 @@ fn copy_directory(old: &Path, new: &Path) -> Result<()> {
         }
     }
 
-    std::fs::set_permissions(new, permissions)?;
     Ok(())
 }
 
@@ -148,8 +146,6 @@ fn copy_file(old: &Path, new: &Path) -> Result<()> {
         )));
     }
 
-    let permissions = std::fs::metadata(old)?.permissions();
     std::fs::copy(old, new)?;
-    std::fs::set_permissions(new, permissions)?;
     Ok(())
 }

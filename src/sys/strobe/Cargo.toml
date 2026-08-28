@@ -6,7 +6,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moto-async = { path = "../lib/moto-async" }
 moto-ipc   = { path = "../lib/moto-ipc"   }
+moto-io    = { path = "../lib/moto-io"    }
 moto-rt    = { path = "../lib/moto-rt"    }
 moto-sys   = { path = "../lib/moto-sys"   }
 moto-log   = { path = "../lib/moto-log"   }

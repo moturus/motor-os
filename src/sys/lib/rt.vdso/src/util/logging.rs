@@ -1,6 +1,8 @@
 use log::{LevelFilter, SetLoggerError};
 use log::{Metadata, Record};
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 struct MotoLogger;
 
 impl log::Log for MotoLogger {
@@ -47,17 +49,98 @@ macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
             extern crate alloc;
-            moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
+            $crate::util::logging::log_diagnostic(alloc::format!($($arg)*).as_str());
         }
     };
 }
 
 pub(crate) use moto_log;
 
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticRoute {
+    Stderr = 1,
+    Kernel = 2,
+    Dropped = 3,
+}
+
+static DIAGNOSTIC_OWNER: AtomicU64 = AtomicU64::new(0);
+
+struct DiagnosticGuard(u64);
+
+impl DiagnosticGuard {
+    fn enter() -> Result<Self, ()> {
+        let tid = moto_sys::UserThreadControlBlock::this_thread_tid();
+        loop {
+            match DIAGNOSTIC_OWNER.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Ok(Self(tid)),
+                Err(owner) if owner == tid => return Err(()),
+                Err(_) => moto_sys::SysCpu::sched_yield(),
+            }
+        }
+    }
+}
+
+impl Drop for DiagnosticGuard {
+    fn drop(&mut self) {
+        let owner = DIAGNOSTIC_OWNER.swap(0, Ordering::Release);
+        debug_assert_eq!(owner, self.0);
+    }
+}
+
+fn kernel_fallback(msg: &str) -> DiagnosticRoute {
+    if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG == 0 {
+        return DiagnosticRoute::Dropped;
+    }
+    match moto_sys::SysRay::log(msg) {
+        Ok(()) => DiagnosticRoute::Kernel,
+        Err(_) => DiagnosticRoute::Dropped,
+    }
+}
+
+fn route_diagnostic(msg: &str) -> DiagnosticRoute {
+    let Ok(_guard) = DiagnosticGuard::enter() else {
+        return kernel_fallback(msg);
+    };
+    let written = crate::stdio::stderr_pipe()
+        .ok_or(moto_rt::E_BAD_HANDLE)
+        .and_then(|pipe| pipe.write(msg.as_bytes()));
+    match written {
+        Ok(size) if size == msg.len() => DiagnosticRoute::Stderr,
+        _ => kernel_fallback(msg),
+    }
+}
+
+pub(crate) fn log_diagnostic(msg: &str) {
+    let _ = route_diagnostic(msg);
+}
+
 pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
     let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
     let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
-    moto_sys::SysRay::log(msg).ok();
+    log_diagnostic(msg);
+}
+
+pub(crate) fn internal_test(mode: u64) -> u64 {
+    const MARKER: &str = "rt.vdso diagnostic test marker\n";
+    let route = match mode {
+        0 => crate::stdio::with_stderr_claim(|| route_diagnostic(MARKER))
+            .unwrap_or(DiagnosticRoute::Dropped),
+        1 => {
+            let Ok(_guard) = DiagnosticGuard::enter() else {
+                return DiagnosticRoute::Dropped as u64;
+            };
+            route_diagnostic(MARKER)
+        }
+        2 => route_diagnostic(MARKER),
+        3 => route_diagnostic(
+            alloc::string::String::from_utf8(alloc::vec![b'x'; 4096])
+                .unwrap()
+                .as_str(),
+        ),
+        _ => return 0,
+    };
+    route as u64
 }
 
 // This panic handler is active only for code running here in VDSO.
@@ -154,7 +237,7 @@ pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
 
     let msg = writer.as_str();
     if rt_fd < 0 {
-        let _ = moto_sys::SysRay::log(msg);
+        log_diagnostic(msg);
     } else {
         let _ = crate::posix::posix_write(rt_fd, msg.as_ptr(), msg.len());
     }

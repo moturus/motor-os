@@ -559,6 +559,9 @@ async fn on_msg(
             on_cmd_create_file(msg, &sender, runtime, role).await
         }
         moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_CREATE_WITH_PERMISSIONS => {
+            on_cmd_create_with_permissions(msg, &sender, runtime, role).await
+        }
         moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime, role).await,
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime, role).await,
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime, role).await,
@@ -718,7 +721,7 @@ async fn on_cmd_create_file(
             parent_id,
             EntryKind::File,
             fname.as_str(),
-            RolePermissions::all(AccessPermissions::Rwx),
+            default_file_permissions(role),
         )
         .await
         .map_err(|err| {
@@ -730,6 +733,32 @@ async fn on_cmd_create_file(
     log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
     let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::File);
+    sender.send(resp).await.map_err(map_native_error)
+}
+
+async fn on_cmd_create_with_permissions(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+    role: Role,
+) -> Result<()> {
+    let (parent_id, kind, fname, raw_permissions) =
+        api_fs::create_with_permissions_msg_decode(msg, sender).map_err(map_native_error)?;
+    let permissions = RolePermissions::new(
+        raw_permissions[0].try_into()?,
+        raw_permissions[1].try_into()?,
+        raw_permissions[2].try_into()?,
+    );
+
+    let mut fs = runtime.fs.write().await;
+    let entry_id = fs
+        .create_entry(role, parent_id, kind, fname.as_str(), permissions)
+        .await
+        .map_err(map_err_into_native)
+        .map_err(map_native_error)?;
+    core::mem::drop(fs);
+
+    let resp = api_fs::stat_resp_encode(msg, entry_id, kind);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -749,7 +778,7 @@ async fn on_cmd_create_dir(
             parent_id,
             EntryKind::Directory,
             fname.as_str(),
-            RolePermissions::all(AccessPermissions::Rwx),
+            default_directory_permissions(role),
         )
         .await
         .map_err(|err| {
@@ -758,10 +787,46 @@ async fn on_cmd_create_dir(
         })
         .map_err(map_native_error)?;
     core::mem::drop(fs);
-    log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
+    log::debug!("created directory {parent_id:x}:{fname} => {entry_id:x}");
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::File);
+    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::Directory);
     sender.send(resp).await.map_err(map_native_error)
+}
+
+fn default_file_permissions(role: Role) -> RolePermissions {
+    match role {
+        Role::System => RolePermissions::new(
+            AccessPermissions::Rw,
+            AccessPermissions::R,
+            AccessPermissions::R,
+        ),
+        Role::Interactive => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+            AccessPermissions::R,
+        ),
+        Role::None => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rwx,
+            AccessPermissions::Rw,
+        ),
+    }
+}
+
+fn default_directory_permissions(role: Role) -> RolePermissions {
+    match role {
+        Role::System => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+            AccessPermissions::Rx,
+        ),
+        Role::Interactive => RolePermissions::new(
+            AccessPermissions::Rwx,
+            AccessPermissions::Rwx,
+            AccessPermissions::Rx,
+        ),
+        Role::None => RolePermissions::all(AccessPermissions::Rwx),
+    }
 }
 
 async fn on_cmd_write(

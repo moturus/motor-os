@@ -299,7 +299,7 @@ impl Digest {
 
 const LAUNCHER_RUNTIME: &str = r#"
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -397,7 +397,7 @@ fn extract(root: &Path, destination: &Path) -> Result<(), String> {
                         .map_err(display("create payload file"))?;
                     file.write_all(payload.bytes).map_err(display("write payload file"))?;
                     file.sync_all().map_err(display("persist payload file"))?;
-                    set_private_executable(&path)?;
+                    set_private_executable(&file, &path)?;
                 }
                 let manifest = guard.path.join("manifest");
                 let mut file = OpenOptions::new().write(true).create_new(true).open(&manifest)
@@ -542,7 +542,10 @@ fn regular_file(path: &Path, description: &str, executable: bool) -> Result<(), 
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!("{description} `{}` is linked or not a file", path.display()));
     }
-    verify_private_mode(&metadata, if executable { 0o700 } else { 0o600 }, description, path)?;
+    let expected = if executable && cfg!(target_os = "motor") { 0o555 }
+        else if executable { 0o700 }
+        else { 0o600 };
+    verify_private_mode(&metadata, expected, description, path)?;
     Ok(())
 }
 
@@ -596,14 +599,28 @@ fn set_private_file(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn set_private_file(_path: &Path) -> Result<(), String> { Ok(()) }
 
-#[cfg(unix)]
-fn set_private_executable(path: &Path) -> Result<(), String> {
+#[cfg(all(unix, not(target_os = "motor")))]
+fn set_private_executable(_file: &File, path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(display("set private executable permissions"))
 }
 
-#[cfg(not(unix))]
-fn set_private_executable(_path: &Path) -> Result<(), String> { Ok(()) }
+#[cfg(target_os = "motor")]
+fn set_private_executable(file: &File, _path: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
+    unsafe extern "C" {
+        fn fchmod(fd: i32, mode: u32) -> i32;
+    }
+
+    if unsafe { fchmod(file.as_raw_fd(), 0o555) } != 0 {
+        return Err(format!("set private executable permissions: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "motor")))]
+fn set_private_executable(_file: &File, _path: &Path) -> Result<(), String> { Ok(()) }
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
     let bytes = fs::read(path).map_err(display("read payload for verification"))?;

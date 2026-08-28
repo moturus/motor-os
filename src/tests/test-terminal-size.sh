@@ -196,9 +196,12 @@ wait_console_since() {
 # puts it on the row above the message bar, so one bar says both how wide red
 # thinks the terminal is and how tall. Only a bar repainted from column 1 is
 # counted, which a resize produces and a keystroke -- rewriting the columns it
-# changed -- does not. $1 is the SGR the amber ground arrives as.
+# changed -- does not. Match through red's right-hand status too: diagnostics
+# share a PTY with the program and may arrive before the next escape sequence,
+# but are not part of the bar's width. $1 is the SGR the amber ground arrives
+# as.
 red_bars() {
-  LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*' |
+  LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*NORMAL | [0-9][0-9]*:[0-9][0-9]* ' |
     LC_ALL=C awk -F$'\033' '{
       row = $2; sub(/^\[/, "", row); sub(/;.*/, "", row)
       bar = $NF; sub(/^\[[0-9;]*m/, "", bar)
@@ -628,9 +631,9 @@ bars="$(printf '%s' "$before" | red_bars "$RED_GROUND")"
 # has is in this one measurement, and it is the only place they are all
 # exercised at once.
 #
-# No settlement is needed here and none is used: russhd set `$COLUMNS` before
-# the client existed, so `terminal::size()` is right on the first call and the
-# opening frame is painted once without waiting for anything.
+# `script` can propagate its host terminal size after the command's first
+# `stty`. Restate 100x30 after SSH starts, but before red is launched, so that
+# delayed propagation cannot win while a debug rmux is starting.
 echo "-- rmux over ssh --"
 rmux_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
   "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux)"
@@ -664,6 +667,8 @@ rmux_ssh_keys() {
 rmux_ssh_keys | script -qfc "stty rows 30 cols 100
 $rmux_login </dev/tty 2>/dev/null &
 sshpid=\$!
+sleep 2
+stty rows 30 cols 100
 for _ in \$(seq 1 600); do
   [ -e $SCRATCH/rmux-ssh-resize ] && break
   sleep 0.2
@@ -688,6 +693,11 @@ bars="$(cat "$SCRATCH/rmux-ssh-bars")"
 echo "-- rmux pane --"
 rmux_keys() {
   sleep 3
+  # Debug rt.vdso diagnostics intentionally share stderr with the terminal.
+  # Clear the completed startup records so this geometry check starts its
+  # half-typed line at row 1, as it does in a release build.
+  printf '\014'
+  sleep 1
   printf 'echo %s' "$(printf 'x%.0s' $(seq 1 45))"
   sleep 4
   printf '\001|'    # the split, and the last key the pane's shell may see

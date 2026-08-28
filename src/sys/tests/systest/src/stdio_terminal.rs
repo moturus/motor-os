@@ -2,16 +2,17 @@
  * Per-descriptor `is_terminal()` tests (docs/tui.md).
  *
  * systest normally runs over a non-pty ssh session, so its own streams are
- * not terminals. The tests therefore provide the terminal themselves: a
- * "report child" is spawned with all three streams captured, with or without
- * the terminal launch hint, and reports what its descriptors answer. For the
- * mixed-stdio rows the report child spawns mask children through
+ * not terminals. These tests also decline any ambient session terminal, so
+ * they exercise the same matrix when run interactively. They provide the
+ * terminal themselves: a "report child" is spawned with all three streams,
+ * with or without the terminal launch hint, and reports what its descriptors
+ * answer. For mixed-stdio rows, the report child spawns mask children through
  * `std::process::Command`, which is what covers the `moto-rt` copy embedded
  * in the installed Rust toolchain; the launch-hint rows also spawn through
  * `moto_rt::process::spawn` directly.
  */
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 const REPORT_CHILD: &str = "stdio-terminal-report-child";
 const MASK_CHILD: &str = "stdio-terminal-mask-child";
@@ -225,6 +226,7 @@ struct ReportChild {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
+    stderr: std::thread::JoinHandle<Vec<u8>>,
 }
 
 fn spawn_report_child(terminal: bool) -> ReportChild {
@@ -235,7 +237,7 @@ fn spawn_report_child(terminal: bool) -> ReportChild {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "false");
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true");
     if terminal {
         // This test is the child's terminal provider; it does not need to
         // be on a terminal itself to be one.
@@ -244,10 +246,17 @@ fn spawn_report_child(terminal: bool) -> ReportChild {
     let mut child = cmd.spawn().unwrap();
     let stdin = child.stdin.take().unwrap();
     let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut child_stderr = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
     ReportChild {
         child,
         stdin,
         stdout,
+        stderr,
     }
 }
 
@@ -274,7 +283,13 @@ impl ReportChild {
     fn finish(mut self) {
         writeln!(self.stdin, "exit").unwrap();
         self.stdin.flush().unwrap();
-        assert!(self.child.wait().unwrap().success());
+        let status = self.child.wait().unwrap();
+        let stderr = self.stderr.join().unwrap();
+        assert!(
+            status.success(),
+            "{status}: {}",
+            String::from_utf8_lossy(&stderr)
+        );
     }
 }
 
@@ -355,6 +370,10 @@ fn test_captured_child_non_terminal() {
 /// captured, optionally marked by the launch hint.
 fn direct_spawn_mask(mark_terminal: bool) -> (u32, [bool; 3]) {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push((
+        moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY.to_owned(),
+        "true".to_owned(),
+    ));
     if mark_terminal {
         env.push((
             moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY.to_owned(),

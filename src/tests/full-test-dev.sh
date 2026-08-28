@@ -5,6 +5,10 @@
 # The dev-image full test includes the repository suite, native source builds,
 # and Lorry's bounded product suite. Lorry validation is profile-independent
 # and does not multiply coverage by the OS image profile.
+#
+# Work that is not explicitly scoped to Lorry runs this suite only with
+# --release. If such work necessarily changes src/bin/lorry, ask before adding
+# a debug run; the path overlap alone does not make it Lorry work.
 
 set -euo pipefail
 
@@ -24,3 +28,5 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "$@"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
+
+echo "full-test-dev.sh ALL PASS"

@@ -223,9 +223,12 @@ fn test_errors(root: &Path) {
         String::from_utf8_lossy(&output.stdout),
         "1 one.txt\n1 total\n"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "wc: missing.txt: No such file or directory\n"
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .any(|line| line == "wc: missing.txt: No such file or directory"),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let output = run(root, &["missing.txt"]);

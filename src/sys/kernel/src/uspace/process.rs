@@ -315,6 +315,14 @@ impl Process {
                 return Err(moto_rt::E_NOT_ALLOWED);
             }
 
+            if matches!(
+                moto_sys::caps::ProcessRole::from_caps(parent_caps),
+                moto_sys::caps::ProcessRole::None
+            ) && capabilities & moto_sys::caps::CAP_LOG != 0
+            {
+                return Err(moto_rt::E_NOT_ALLOWED);
+            }
+
             if (capabilities & !parent_caps) != 0 {
                 // Non-system processes cannot grant themseves caps they don't have.
                 return Err(moto_rt::E_NOT_ALLOWED);

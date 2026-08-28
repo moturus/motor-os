@@ -3016,8 +3016,8 @@ fn perms_monotonic_check() {
 
 #[test]
 fn may_set_matrix() {
-    // (§8.7) exhaustive authority matrix, incl. System's own byte never widens.
-    use AccessPermissions::{R, Rwx};
+    // (§8.7) exhaustive authority matrix and the one self-role exception.
+    use AccessPermissions::{R, Rw, Rwx, Rx};
     use async_fs::may_set;
     let roles = [Role::None, Role::Interactive, Role::System];
     for &c in &roles {
@@ -3031,9 +3031,13 @@ fn may_set_matrix() {
             }
         }
     }
-    // The System byte is non-wideable even when the caller is System.
+    // Adding write remains forbidden for every self role, including System.
     assert!(!may_set(Role::System, Role::System, R, Rwx));
     assert!(may_set(Role::System, Role::System, Rwx, R));
+    for role in roles {
+        assert!(may_set(role, role, Rw, Rx), "own Rw -> Rx: {role:?}");
+        assert!(!may_set(role, role, Rx, Rw), "own Rx -> Rw: {role:?}");
+    }
 }
 
 #[test]
@@ -3367,6 +3371,74 @@ async fn permissions_authority_test() -> Result<()> {
             .access(Role::System)
             .unwrap()
             .can_write()
+    );
+
+    // The one non-narrowing self transition, Rw -> Rx, is available to every
+    // role, cascades write away from lower roles, and still obeys the ceiling.
+    for (idx, role) in [Role::None, Role::Interactive, Role::System]
+        .into_iter()
+        .enumerate()
+    {
+        let permissions = match role {
+            Role::None => RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rwx,
+                AccessPermissions::Rw,
+            ),
+            Role::Interactive => RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rw,
+                AccessPermissions::Rw,
+            ),
+            Role::System => RolePermissions::all(AccessPermissions::Rw),
+        };
+        let entry = fs
+            .create_entry(
+                Role::System,
+                root,
+                EntryKind::File,
+                &format!("self-rx-{idx}"),
+                permissions,
+            )
+            .await?;
+        fs.set_permissions(role, entry, role, AccessPermissions::Rx)
+            .await?;
+        assert_eq!(perm_of(&mut fs, entry, role).await, AccessPermissions::Rx);
+        assert_eq!(
+            fs.set_permissions(role, entry, role, AccessPermissions::Rw)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        for lower in [Role::None, Role::Interactive]
+            .into_iter()
+            .filter(|lower| (*lower as u8) < role as u8)
+        {
+            assert!(!perm_of(&mut fs, entry, lower).await.can_write());
+        }
+    }
+
+    let capped = fs
+        .create_entry(
+            Role::System,
+            root,
+            EntryKind::File,
+            "self-rx-capped",
+            RolePermissions::all(AccessPermissions::Rw),
+        )
+        .await?;
+    assert_eq!(
+        fs.set_permissions(
+            Role::Interactive,
+            capped,
+            Role::Interactive,
+            AccessPermissions::Rx,
+        )
+        .await
+        .unwrap_err()
+        .kind(),
+        ErrorKind::PermissionDenied
     );
     Ok(())
 }

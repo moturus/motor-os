@@ -199,6 +199,11 @@ Normal vendoring reports graph resolution and source verification phases, plus
 each Git source, sparse-index entry, and crate archive when its acquisition
 starts. `--quiet` suppresses this progress.
 
+Curl diagnostics spill from memory to a private temporary file and are limited
+to 2 MiB by default. `LORRY_CURL_STDERR_SPILL_LIMIT_BYTES` may raise that limit
+for unusually verbose environments; its value is an integer byte count of at
+least 2097152.
+
 New packages are displayed with their exact version, checksum, license,
 build-script and procedural-macro status, sizes, and new dependency edges.
 Interactive approval is required unless every candidate already exists.

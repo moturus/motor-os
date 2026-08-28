@@ -1,6 +1,225 @@
+use moto_io::fs::{AccessPermissions, FsClient, RolePermissions};
+use moto_ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
+use moto_log::implementation::{CMD_LOG, ConnectRequest, ConnectResponse, LogRequest};
+use std::io::Write;
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
-const LOG_PATH: &str = "/system/logs/systest.log";
+const UNAUTHORIZED_CHILD: &str = "sys-log-unauthorized-child";
+const FALLBACK_CHILD: &str = "sys-log-fallback-child";
+const NONE_LOG_CHILD: &str = "sys-log-none-child";
+const NONE_ACCESS_CHILD: &str = "sys-log-none-access-child";
+
+// Full-test supports at most eight concurrent systest suites on one image.
+const TEST_TAG_SLOTS: [&str; 8] = [
+    "systest-0",
+    "systest-1",
+    "systest-2",
+    "systest-3",
+    "systest-4",
+    "systest-5",
+    "systest-6",
+    "systest-7",
+];
+const LOG_FILE_PERMISSIONS: RolePermissions = RolePermissions::new(
+    AccessPermissions::Rw,
+    AccessPermissions::R,
+    AccessPermissions::None,
+);
+const LOG_DIR_PERMISSIONS: RolePermissions = RolePermissions::new(
+    AccessPermissions::Rwx,
+    AccessPermissions::Rx,
+    AccessPermissions::None,
+);
+
+pub fn is_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            UNAUTHORIZED_CHILD | FALLBACK_CHILD | NONE_LOG_CHILD | NONE_ACCESS_CHILD
+        )
+    })
+}
+
+fn raw_connection() -> ClientConnection {
+    let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+    conn.connect("sys-log").unwrap();
+    conn
+}
+
+fn rpc_result(conn: &mut ClientConnection) -> u16 {
+    conn.do_rpc(None).unwrap();
+    conn.resp::<ResponseHeader>().result
+}
+
+fn connect_tag(conn: &mut ClientConnection, tag: &str) -> Result<u64, u16> {
+    ConnectRequest::prepare(conn.data_mut(), tag);
+    conn.do_rpc(None)?;
+    ConnectResponse::parse(conn.data())
+}
+
+fn connected_tag(tag: &str) -> (ClientConnection, u64) {
+    let mut conn = raw_connection();
+    let tag_id = connect_tag(&mut conn, tag)
+        .unwrap_or_else(|err| panic!("CONNECT for {tag:?} failed with {err}"));
+    (conn, tag_id)
+}
+
+fn derived_tag(slot: &str, suffix: &str) -> String {
+    let tag = format!("{slot}-{suffix}");
+    assert!(tag.len() <= moto_log::MAX_TAG_LEN);
+    tag
+}
+
+fn log_path(tag: &str) -> String {
+    format!("/system/logs/{tag}.log")
+}
+
+fn claim_tag_slot() -> (&'static str, ClientConnection) {
+    for slot in TEST_TAG_SLOTS {
+        let mut conn = raw_connection();
+        match connect_tag(&mut conn, slot) {
+            Ok(_) => return (slot, conn),
+            Err(moto_rt::E_ALREADY_IN_USE) => {}
+            Err(err) => panic!("CONNECT for test slot {slot:?} failed with {err}"),
+        }
+    }
+    panic!("all {} logging test slots are active", TEST_TAG_SLOTS.len())
+}
+
+fn prepare_log(conn: &mut ClientConnection, tag_id: u64, payload: &[u8]) {
+    let req = conn.req::<LogRequest>();
+    req.header.cmd = CMD_LOG;
+    req.header.ver = 0;
+    req.log_level = moto_log::implementation::LOG_LEVEL_INFO;
+    req.payload_size = payload.len() as u32;
+    req.tag_id = tag_id;
+    req.timestamp = moto_rt::time::Instant::now().as_u64();
+    conn.data_mut()[size_of::<LogRequest>()..size_of::<LogRequest>() + payload.len()]
+        .copy_from_slice(payload);
+}
+
+fn expect_error_and_disconnect(mut conn: ClientConnection, expected: u16) {
+    assert_eq!(expected, rpc_result(&mut conn));
+    assert_eq!(Err(moto_rt::E_BAD_HANDLE), conn.do_rpc(None));
+    assert!(!conn.connected());
+}
+
+pub fn run_child(args: &[String]) -> ! {
+    let tag = args.get(2).expect("logging child tag");
+    match args[1].as_str() {
+        UNAUTHORIZED_CHILD => {
+            let mut conn = raw_connection();
+            ConnectRequest::prepare(conn.data_mut(), tag);
+            expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
+        }
+        FALLBACK_CHILD => {
+            moto_log::init(tag).unwrap();
+            moto_log::test_set_tag_id(u64::MAX);
+            log::error!("first failed RPC fallback");
+            assert!(!moto_log::test_rpc_enabled());
+            log::error!("second disabled RPC fallback");
+        }
+        NONE_LOG_CHILD => {
+            moto_log::init(tag).unwrap();
+            log::set_max_level(log::LevelFilter::Info);
+            log::info!("{}", args.get(3).expect("logging child marker"));
+        }
+        NONE_ACCESS_CHILD => {
+            let err = std::fs::read_to_string(tag).unwrap_err();
+            assert_eq!(std::io::ErrorKind::PermissionDenied, err.kind());
+        }
+        _ => unreachable!(),
+    }
+    std::process::exit(0)
+}
+
+fn child_output(mode: &str, caps: u64, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(mode)
+        .args(args)
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
+        .output()
+        .unwrap()
+}
+
+fn protocol_hardening(slot: &str) {
+    let interactive = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
+    let unauthorized = derived_tag(slot, "unauthorized");
+    let output = child_output(UNAUTHORIZED_CHILD, interactive, &[&unauthorized]);
+    assert!(output.status.success(), "{output:?}");
+
+    let health_tag = derived_tag(slot, "health");
+    let (mut health, health_id) = connected_tag(&health_tag);
+
+    let mut conn = raw_connection();
+    prepare_log(&mut conn, health_id, b"");
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(conn.data_mut(), &derived_tag(slot, "version"));
+    conn.req::<RequestHeader>().ver = 1;
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(
+        conn.data_mut(),
+        "x".repeat(moto_log::MAX_TAG_LEN + 1).as_str(),
+    );
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let repeat = derived_tag(slot, "repeat");
+    let (mut conn, _) = connected_tag(&repeat);
+    ConnectRequest::prepare(conn.data_mut(), &repeat);
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag(&derived_tag(slot, "bad-tag"));
+    prepare_log(&mut conn, tag_id + 1, b"bad tag id");
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag(&derived_tag(slot, "payload"));
+    prepare_log(&mut conn, tag_id, b"");
+    conn.req::<LogRequest>().payload_size = u32::MAX;
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let (mut conn, tag_id) = connected_tag(&derived_tag(slot, "utf8"));
+    prepare_log(&mut conn, tag_id, &[0xff]);
+    expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
+
+    let collision_a = derived_tag(slot, "collision.a");
+    let collision_alias = derived_tag(slot, "collision/a");
+    let collision_b = derived_tag(slot, "collision-b");
+    let (first, _) = connected_tag(&collision_a);
+    let mut second = raw_connection();
+    assert_eq!(
+        Err(moto_rt::E_ALREADY_IN_USE),
+        connect_tag(&mut second, &collision_alias)
+    );
+    assert!(second.connected());
+    connect_tag(&mut second, &collision_b).unwrap();
+    drop(first);
+    let third = connected_tag(&collision_a).0;
+    drop((second, third));
+
+    prepare_log(&mut health, health_id, b"protocol tests complete");
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut health));
+    drop(health);
+
+    let fallback = derived_tag(slot, "fallback");
+    let output = child_output(
+        FALLBACK_CHILD,
+        interactive | moto_sys::caps::CAP_LOG,
+        &[&fallback],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("first failed RPC fallback"), "{stderr:?}");
+    assert!(
+        stderr.contains("second disabled RPC fallback"),
+        "{stderr:?}"
+    );
+    println!("logging::protocol_hardening test PASS");
+}
 
 /// Read the log once it holds at least `want` complete lines.
 ///
@@ -9,57 +228,105 @@ const LOG_PATH: &str = "/system/logs/systest.log";
 /// writes it. So both the file's existence and its contents lag the client by an
 /// unbounded amount under load, and a fixed sleep here is a race. Requiring a
 /// trailing newline keeps a half-written record from being counted as a line.
-fn wait_for_lines(want: usize) -> Vec<String> {
+fn wait_for_records(path: &str, records: &[String]) -> String {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let log = std::fs::read_to_string(LOG_PATH).unwrap_or_default();
-        if log.ends_with('\n') {
-            let lines: Vec<String> = log.lines().map(str::to_owned).collect();
-            if lines.len() >= want {
-                return lines;
-            }
+        let log = std::fs::read_to_string(path).unwrap_or_default();
+        if log.ends_with('\n') && records.iter().all(|record| log.contains(record)) {
+            return log;
         }
         assert!(
             Instant::now() < deadline,
-            "{LOG_PATH}: want {want} lines, have {:?}",
-            log.lines().count()
+            "{path}: missing one of {records:?}"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn basic() {
-    let _ = std::fs::remove_file(LOG_PATH);
+fn assert_permissions(path: &str, expected: RolePermissions) {
+    let permissions = moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let (entry_id, _) = client.stat(path).await.unwrap();
+        client
+            .metadata(entry_id)
+            .await
+            .unwrap()
+            .permissions()
+            .unwrap()
+    });
+    assert_eq!(expected, permissions, "{path}");
+}
 
-    moto_log::init("systest").unwrap();
+fn basic(slot: &str) {
+    let path = log_path(slot);
+    moto_log::init(slot).unwrap();
     log::set_max_level(log::LevelFilter::Trace);
 
-    let lines = wait_for_lines(1);
-    assert_eq!(1, lines.len());
-    assert!(lines[0].contains(":I - started log for 'systest'"));
+    let marker = format!(
+        "pid={} nonce={:016x}",
+        moto_sys::current_pid(),
+        std::random::random::<u64>(..)
+    );
 
     // Anchor the expected `target:line` suffixes to where the calls actually
     // are, so editing this file cannot silently break the assertions below.
     let info_line = line!() + 1;
-    log::info!("foo");
-    log::warn!("bar");
-    log::debug!("another debug string");
-    log::trace!("baz"); // should flush.
+    log::info!("{marker} foo");
+    log::warn!("{marker} bar");
+    log::debug!("{marker} another debug string");
+    log::trace!("{marker} baz"); // should flush.
 
-    let lines = wait_for_lines(5);
-    assert_eq!(5, lines.len());
-    assert!(lines[0].ends_with(":I - started log for 'systest'"));
-    assert!(lines[1].ends_with(&format!(":I - systest::logging:{info_line} - foo")));
-    assert!(lines[2].ends_with(&format!(":W - systest::logging:{} - bar", info_line + 1)));
-    assert!(lines[3].ends_with(&format!(
-        ":D - systest::logging:{} - another debug string",
-        info_line + 2
-    )));
-    assert!(lines[4].ends_with(&format!(":T - systest::logging:{} - baz", info_line + 3)));
+    let records = [
+        format!(":I - systest::logging:{info_line} - {marker} foo"),
+        format!(":W - systest::logging:{} - {marker} bar", info_line + 1),
+        format!(
+            ":D - systest::logging:{} - {marker} another debug string",
+            info_line + 2
+        ),
+        format!(":T - systest::logging:{} - {marker} baz", info_line + 3),
+    ];
+    let log = wait_for_records(&path, &records);
+    assert!(log.contains(&format!("started log for '{slot}'")));
+    assert_permissions("/system/logs", LOG_DIR_PERMISSIONS);
+    assert_permissions(&path, LOG_FILE_PERMISSIONS);
+    assert_permissions(&format!("{path}.prev"), LOG_FILE_PERMISSIONS);
+
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        std::io::ErrorKind::PermissionDenied,
+        append
+            .write_all(b"unauthorized mutation\n")
+            .unwrap_err()
+            .kind()
+    );
+    assert_eq!(
+        std::io::ErrorKind::PermissionDenied,
+        std::fs::remove_file(&path).unwrap_err().kind()
+    );
+
+    let none_tag = derived_tag(slot, "none");
+    let none_marker = format!("none-role nonce={:016x}", std::random::random::<u64>(..));
+    let output = child_output(
+        NONE_LOG_CHILD,
+        moto_sys::caps::CAP_LOG,
+        &[&none_tag, &none_marker],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let none_path = log_path(&none_tag);
+    wait_for_records(&none_path, std::slice::from_ref(&none_marker));
+    let output = child_output(NONE_ACCESS_CHILD, 0, &[&none_path]);
+    assert!(output.status.success(), "{output:?}");
 
     println!("logging::basic test PASS");
 }
 
 pub fn run_all_tests() {
-    basic();
+    let (slot, claim) = claim_tag_slot();
+    protocol_hardening(slot);
+    wait_for_records(&log_path(slot), &[]);
+    drop(claim);
+    basic(slot);
 }

@@ -306,6 +306,7 @@ pub struct HttpRequest {
     pub headers: Vec<(String, HeaderValue)>,
     pub body: Vec<u8>,
     pub timeouts: Timeouts,
+    pub(crate) cancellation: Option<crate::cancellation::Cancellation>,
 }
 
 impl HttpRequest {
@@ -316,6 +317,7 @@ impl HttpRequest {
             headers: Vec::new(),
             body: Vec::new(),
             timeouts: Timeouts::default(),
+            cancellation: None,
         }
     }
 
@@ -343,6 +345,14 @@ impl HttpRequest {
                 env: env.to_string(),
             },
         ));
+        self
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: Option<crate::cancellation::Cancellation>,
+    ) -> HttpRequest {
+        self.cancellation = cancellation;
         self
     }
 }

@@ -263,14 +263,14 @@ pub async fn spawn(
         child.stdout.take().unwrap(),
         session.clone(),
         channel,
-        "stdout",
+        OutputStream::Stdout,
         coordinator.clone(),
     ));
     let stderr_task = tokio::spawn(pump_output(
         child.stderr.take().unwrap(),
         session.clone(),
         channel,
-        "stderr",
+        OutputStream::Stderr,
         coordinator,
     ));
 
@@ -315,15 +315,40 @@ pub async fn spawn(
 /// terminal on the far end of it: the size controls the child writes are taken
 /// out of the stream and answered here rather than reaching the client's own
 /// terminal, which would otherwise answer as well and with a different size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+const SSH_EXTENDED_DATA_STDERR: u32 = 1;
+
+impl OutputStream {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+
+    fn extended_data(self, terminal: bool) -> Option<u32> {
+        match (self, terminal) {
+            (Self::Stderr, false) => Some(SSH_EXTENDED_DATA_STDERR),
+            _ => None,
+        }
+    }
+}
+
 async fn pump_output(
     mut stream: impl tokio::io::AsyncRead + Unpin,
     session: russh::server::Handle,
     channel: russh::ChannelId,
-    name: &str,
+    output_stream: OutputStream,
     coordinator: Option<StdinTx>,
 ) {
     use tokio::io::AsyncReadExt;
 
+    let name = output_stream.name();
     let mut scanner = mode2048::Scanner::new(true);
     let mut buf = [0_u8; 256];
 
@@ -341,9 +366,15 @@ async fn pump_output(
                 log::debug!("{name}.read() returned zero.");
                 break;
             }
-            if send_output(&session, channel, &buf[..read], false)
-                .await
-                .is_err()
+            if send_output(
+                &session,
+                channel,
+                &buf[..read],
+                false,
+                output_stream.extended_data(false),
+            )
+            .await
+            .is_err()
             {
                 break;
             }
@@ -371,7 +402,17 @@ async fn pump_output(
                 return;
             }
         }
-        if !output.is_empty() && send_output(&session, channel, &output, true).await.is_err() {
+        if !output.is_empty()
+            && send_output(
+                &session,
+                channel,
+                &output,
+                true,
+                output_stream.extended_data(true),
+            )
+            .await
+            .is_err()
+        {
             break;
         }
         if read == 0 {
@@ -385,11 +426,14 @@ async fn send_output(
     channel: russh::ChannelId,
     bytes: &[u8],
     crlf: bool,
+    extended_data: Option<u32>,
 ) -> Result<(), ()> {
-    session
-        .data(channel, output_bytes(bytes, crlf))
-        .await
-        .map_err(|_| log::debug!("Failed to send bytes to the client."))
+    let bytes = output_bytes(bytes, crlf);
+    let result = match extended_data {
+        Some(code) => session.extended_data(channel, code, bytes).await,
+        None => session.data(channel, bytes).await,
+    };
+    result.map_err(|_| log::debug!("Failed to send bytes to the client."))
 }
 
 /// The bytes to send to the client for `bytes` of child output.
@@ -648,6 +692,17 @@ mod tests {
         // `ssh host cat some-file > copy` must not corrupt the file.
         let bytes = b"\x7fELF\r\n\n\x00\xff";
         assert_eq!(output_bytes(bytes, false), bytes);
+    }
+
+    #[test]
+    fn only_plain_stderr_uses_ssh_extended_data() {
+        assert_eq!(None, OutputStream::Stdout.extended_data(false));
+        assert_eq!(
+            Some(SSH_EXTENDED_DATA_STDERR),
+            OutputStream::Stderr.extended_data(false)
+        );
+        assert_eq!(None, OutputStream::Stdout.extended_data(true));
+        assert_eq!(None, OutputStream::Stderr.extended_data(true));
     }
 
     #[test]

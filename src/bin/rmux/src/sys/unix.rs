@@ -7,16 +7,23 @@
 
 use std::fs::File;
 use std::io::Read;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::Mutex;
 
 use super::PaneIo;
+
+#[cfg(target_os = "linux")]
+const FOREGROUND_EXEC_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How this platform says "there is no more input".
 ///
@@ -52,6 +59,11 @@ pub const ENTER: &[u8] = b"\r";
 pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo> {
     let (master, slave) = open_pty(size)?;
 
+    // A pane is the terminal here, not the terminal rmux is running on. Match
+    // tmux's terminal family so shells do not install hooks meant for the
+    // outer xterm and turn its title into the window name at every prompt.
+    cmd.env("TERM", "screen-256color");
+
     // SAFETY: `pre_exec` runs between fork and exec, so it may call only
     // async-signal-safe functions; `setsid` and `ioctl` are both on that list.
     // Each `Stdio` owns the descriptor it is given, hence a dup apiece.
@@ -80,13 +92,64 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
     // A descriptor of its own, so that telling the pane its size does not depend
     // on which of the other two halves is still alive.
     let sizer = master.try_clone()?;
+    let foreground_command = foreground_command(&master)?;
     let output: Vec<Box<dyn Read + Send>> = vec![Box::new(master)];
     Ok(PaneIo {
         child,
         input,
         output,
         tell_size: Box::new(move |size| set_pty_size(sizer.as_raw_fd(), size)),
+        foreground_command,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn foreground_command(master: &File) -> std::io::Result<super::ForegroundCommand> {
+    let terminal = master.try_clone()?;
+    let mut last_pgrp = 0;
+    let mut last_name = None;
+    let mut exec_may_be_pending_until = None;
+    Ok(Box::new(move || {
+        let pgrp = unsafe { libc::tcgetpgrp(terminal.as_raw_fd()) };
+        if pgrp < 0 {
+            return None;
+        }
+        if pgrp != last_pgrp {
+            let previous = last_name.clone();
+            last_pgrp = pgrp;
+            last_name = command_name(pgrp);
+            // A job-control shell calls `tcsetpgrp` after fork but before the
+            // child necessarily reaches exec. In that window the new PID's
+            // cmdline is still the shell's; do not freeze that inherited name
+            // into the pgrp cache. The next foreground check observes exec.
+            exec_may_be_pending_until = (last_name.is_some() && last_name == previous)
+                .then(|| std::time::Instant::now() + FOREGROUND_EXEC_SETTLE);
+        } else if last_name.is_none() || exec_may_be_pending_until.is_some() {
+            let name = command_name(pgrp);
+            if name != last_name
+                || exec_may_be_pending_until.is_some_and(|until| std::time::Instant::now() >= until)
+            {
+                exec_may_be_pending_until = None;
+            }
+            last_name = name;
+        }
+        last_name.clone()
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn command_name(pgrp: libc::pid_t) -> Option<String> {
+    let cmdline = std::fs::read(format!("/proc/{pgrp}/cmdline")).ok()?;
+    let argv0 = cmdline.split(|byte| *byte == 0).next()?;
+    let name = Path::new(std::ffi::OsStr::from_bytes(argv0)).file_name()?;
+    let name = name.to_string_lossy();
+    let name = name.trim_start_matches('-');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn foreground_command(_: &File) -> std::io::Result<super::ForegroundCommand> {
+    Ok(Box::new(|| None))
 }
 
 /// Tell a pty how big it is, which also sends the child a `SIGWINCH`.

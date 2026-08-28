@@ -1,8 +1,42 @@
 use crate::logging::LogRecord;
+use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 use moto_sys::SysHandle;
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use std::{collections::HashMap, io::Write, path::Path};
 
+// Only System strobe mutates this tree; lower roles submit records over IPC.
 const LOG_DIR_PATH: &str = "/system/logs";
+const LOG_FILE_PERMISSIONS: RolePermissions = RolePermissions::new(
+    AccessPermissions::Rw,
+    AccessPermissions::R,
+    AccessPermissions::None,
+);
+
+fn create_log_file(path: &Path, name: &str) -> Option<std::fs::File> {
+    let result = moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect()?;
+        let (parent_id, kind) = client.stat(LOG_DIR_PATH).await?;
+        if kind != EntryKind::Directory {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        client
+            .create_entry_with_permissions(parent_id, EntryKind::File, name, LOG_FILE_PERMISSIONS)
+            .await?;
+        Ok(())
+    });
+
+    if let Err(err) = result {
+        moto_rt::moto_log!("Error creating {}: {err:?}.", path.display());
+        return None;
+    }
+
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => Some(file),
+        Err(err) => {
+            moto_rt::moto_log!("Error opening {}: {err:?}.", path.display());
+            None
+        }
+    }
+}
 
 pub enum Msg {
     NewConnection(crate::logging::Connection),
@@ -29,19 +63,9 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    fn new(tag: String, tag_id: u64) -> Self {
-        let mut fname_bytes = vec![];
-        for c in tag.chars() {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                fname_bytes.push(c as u8);
-            } else {
-                fname_bytes.push(b'_');
-            }
-        }
-
-        let fname = format!("{}.log", str::from_utf8(&fname_bytes).unwrap());
-        let mut log_file_path = PathBuf::from(LOG_DIR_PATH);
-        log_file_path.push(fname);
+    fn new(tag: String, canonical_tag: String, tag_id: u64) -> Self {
+        let fname = format!("{canonical_tag}.log");
+        let log_file_path = Path::new(LOG_DIR_PATH).join(&fname);
 
         let mut log_file = None;
 
@@ -55,10 +79,10 @@ impl Connection {
                     log_file_path.to_str().unwrap()
                 );
             } else {
-                log_file = std::fs::File::create_new(log_file_path.as_path()).ok();
+                log_file = create_log_file(log_file_path.as_path(), &fname);
             }
         } else {
-            log_file = std::fs::File::create_new(log_file_path.as_path()).ok();
+            log_file = create_log_file(log_file_path.as_path(), &fname);
         }
 
         if let Some(log_file) = log_file.as_mut() {
@@ -77,7 +101,9 @@ impl Connection {
     }
 
     fn process_log_record(&mut self, log_record: LogRecord) {
-        assert_eq!(self.tag_id, log_record.tag_id);
+        if self.tag_id != log_record.tag_id {
+            return;
+        }
 
         if let Some(log_file) = self.log_file.as_mut() {
             // Safe because we don't care much about time skew, and because the TS is ~now.
@@ -122,23 +148,24 @@ pub fn spawn(receiver: std::sync::mpsc::Receiver<Msg>) {
                 Msg::NewConnection(connection) => {
                     let crate::logging::Connection {
                         tag,
+                        canonical_tag,
                         tag_id,
                         handle,
                     } = connection;
-
-                    assert!(
-                        connections
-                            .insert(handle, Connection::new(tag, tag_id))
-                            .is_none()
-                    );
+                    connections
+                        .entry(handle)
+                        .or_insert_with(|| Connection::new(tag, canonical_tag, tag_id));
                 }
 
-                Msg::DroppedConnection(handle) => assert!(connections.remove(&handle).is_some()),
+                Msg::DroppedConnection(handle) => {
+                    connections.remove(&handle);
+                }
 
-                Msg::Record(log_record) => connections
-                    .get_mut(&log_record.handle)
-                    .unwrap()
-                    .process_log_record(log_record),
+                Msg::Record(log_record) => {
+                    if let Some(connection) = connections.get_mut(&log_record.handle) {
+                        connection.process_log_record(log_record);
+                    }
+                }
             }
         }
     });

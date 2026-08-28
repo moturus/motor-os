@@ -18,6 +18,13 @@ use super::PaneIo;
 /// (docs/tui.md).
 const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 
+/// Tell an interactive Rush that its OSC title belongs to an rmux pane.
+///
+/// Unlike the terminal hint above, this is ordinary inherited state: the
+/// `/system/bin/sh` wrapper is a Rush script and passes it to the interactive
+/// Rush it starts. Other shells and programs simply ignore it.
+const RMUX_PANE_ENV_KEY: &str = "RMUX_PANE";
+
 /// How this platform says "there is no more input": by closing the pipe.
 ///
 /// See the Unix backend for why this is a choice rather than an obvious fact.
@@ -55,6 +62,7 @@ pub const ENTER: &[u8] = b"\r\n";
 pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo> {
     let (rows, cols) = size;
     cmd.env(STDIO_IS_TERMINAL_ENV_KEY, "true");
+    cmd.env(RMUX_PANE_ENV_KEY, "1");
     // Mechanism 2 of §3.2: `$LINES`/`$COLUMNS` are what crossterm's Motor OS
     // backend answers `terminal::size()` with until the terminal has reported,
     // so a pane's program is the right size from its *first* frame -- which is
@@ -87,6 +95,10 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
         // so what a resized pane's child learns, it learns from the `ESC[6n` the
         // pane answers with its new size.
         tell_size: Box::new(|_| {}),
+        // Rush reports the foreground command through OSC 2. There is no
+        // process-table fallback here because that cannot distinguish a
+        // foreground child from `command &`.
+        foreground_command: Box::new(|| None),
     })
 }
 

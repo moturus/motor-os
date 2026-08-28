@@ -11,8 +11,10 @@ use crate::net::{HttpClient, HttpRequest, NetError, ResponseHead, Timeouts, Url}
 use crate::trace::{self, Level};
 
 use super::assembler::DeltaAssembler;
-use super::types::{ApiError, ChatRequest, Completion, StreamChunk};
-use super::{EventSink, KEY_ENV, ModelProvider, ProviderError};
+use super::wire::{ApiError, StreamChunk};
+use super::{
+    Completion, ContentBlock, EventSink, KEY_ENV, Message, Provider, ProviderError, Request, Role,
+};
 
 /// The blessed default: the one endpoint validated against a real key.
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -134,10 +136,15 @@ impl<C: HttpClient> OpenAiCompat<C> {
         &self.endpoint
     }
 
-    fn request(&self, body: Vec<u8>) -> HttpRequest {
+    fn request(
+        &self,
+        body: Vec<u8>,
+        cancellation: Option<crate::cancellation::Cancellation>,
+    ) -> HttpRequest {
         let mut request = HttpRequest::post(self.endpoint.url.clone(), body)
             .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream");
+            .header("Accept", "text/event-stream")
+            .with_cancellation(cancellation);
         for (name, value) in &self.extra_headers {
             request = request.header(name, value);
         }
@@ -151,10 +158,10 @@ impl<C: HttpClient> OpenAiCompat<C> {
     }
 }
 
-impl<C: HttpClient> ModelProvider for OpenAiCompat<C> {
+impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
     fn complete(
         &self,
-        req: &ChatRequest,
+        req: &Request,
         sink: &mut dyn EventSink,
     ) -> Result<Completion, ProviderError> {
         let body = build_body(req, self.endpoint.quirks)?;
@@ -187,7 +194,9 @@ impl<C: HttpClient> ModelProvider for OpenAiCompat<C> {
                     }
                 }
             });
-            let mut outcome = self.http.execute(&self.request(body), &mut sse);
+            let mut outcome = self
+                .http
+                .execute(&self.request(body, req.cancellation.clone()), &mut sse);
             if outcome.is_ok()
                 && let Err(e) = sse.finish()
             {
@@ -246,20 +255,117 @@ impl<C: HttpClient> ModelProvider for OpenAiCompat<C> {
 
 /// Serialize the request and add what the endpoint needs on top: streaming,
 /// always, and its usage knob unless the caller set one itself.
-fn build_body(req: &ChatRequest, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
-    let mut value = serde_json::to_value(req)
-        .map_err(|e| ProviderError::Protocol(format!("cannot serialize the request: {e}")))?;
-    let object = value
-        .as_object_mut()
-        .expect("a chat request serializes to an object");
+fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
+    let mut messages = Vec::new();
+    if !req.system.is_empty() {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": req.system.join("\n\n"),
+        }));
+    }
+    for message in &req.messages {
+        messages.extend(wire_messages(message)?);
+    }
+    let tools = req
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut object = serde_json::Map::new();
+    object.insert("model".to_string(), serde_json::json!(req.model));
+    object.insert("messages".to_string(), serde_json::Value::Array(messages));
+    if !tools.is_empty() {
+        object.insert("tools".to_string(), serde_json::Value::Array(tools));
+    }
+    if let Some(max_tokens) = req.max_output_tokens {
+        object.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+    }
     object.insert("stream".to_string(), serde_json::Value::Bool(true));
     let (name, knob) = match quirks.usage {
         UsageStyle::Include => ("usage", serde_json::json!({"include": true})),
         UsageStyle::StreamOptions => ("stream_options", serde_json::json!({"include_usage": true})),
     };
-    object.entry(name).or_insert(knob);
-    serde_json::to_vec(&value)
+    object.entry(name.to_string()).or_insert(knob);
+    serde_json::to_vec(&object)
         .map_err(|e| ProviderError::Protocol(format!("cannot serialize the request: {e}")))
+}
+
+fn wire_messages(message: &Message) -> Result<Vec<serde_json::Value>, ProviderError> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    match message.role {
+        Role::User => Ok(vec![serde_json::json!({
+            "role": "user",
+            "content": text,
+        })]),
+        Role::Assistant => {
+            let calls = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { call } => Some(serde_json::json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }
+                    })),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut value = serde_json::json!({
+                "role": "assistant",
+                "content": if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(text)
+                },
+            });
+            if !calls.is_empty() {
+                value["tool_calls"] = serde_json::Value::Array(calls);
+            }
+            Ok(vec![value])
+        }
+        Role::Tool => {
+            let mut values = Vec::new();
+            for block in &message.content {
+                let ContentBlock::ToolResult {
+                    call_id, content, ..
+                } = block
+                else {
+                    continue;
+                };
+                values.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content,
+                }));
+            }
+            if values.is_empty() {
+                return Err(ProviderError::Protocol(
+                    "a tool message contains no tool result".to_string(),
+                ));
+            }
+            Ok(values)
+        }
+    }
 }
 
 /// Decode one `data:` payload into the assembler. A payload that is not a
@@ -304,7 +410,7 @@ fn clipped(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::mock::provider_conformance_corpus;
-    use crate::provider::{ChatMessage, ToolSpec};
+    use crate::provider::{Message, StreamEvent, ToolSpec};
     use serde_json::{Value, json};
 
     struct CorpusSink {
@@ -312,20 +418,20 @@ mod tests {
     }
 
     impl EventSink for CorpusSink {
-        fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
-            if self.abort_after_content {
+        fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()> {
+            if self.abort_after_content && matches!(event, StreamEvent::Text(_)) {
                 return Err(std::io::Error::other("scripted cancellation"));
             }
             Ok(())
         }
     }
 
-    fn body(req: &ChatRequest, quirks: Quirks) -> Value {
+    fn body(req: &Request, quirks: Quirks) -> Value {
         serde_json::from_slice(&build_body(req, quirks).unwrap()).unwrap()
     }
 
-    fn request() -> ChatRequest {
-        ChatRequest::new("m", vec![ChatMessage::user("hi")])
+    fn request() -> Request {
+        Request::new("m", vec![Message::user("hi")])
     }
 
     #[test]
@@ -400,20 +506,15 @@ mod tests {
     }
 
     #[test]
-    fn the_callers_own_passthrough_wins() {
-        let mut req = request();
-        req.extra
-            .insert("usage".to_string(), json!({"include": false}));
-        // The quirk table supplies a default, not an override: `extra` is a
-        // passthrough, and clobbering it would make it useless.
+    fn system_and_tool_results_are_mapped_only_at_the_wire_boundary() {
+        let mut req = request().with_system(vec!["system one".into(), "system two".into()]);
+        req.messages
+            .push(Message::tool_result("call_1", "sh", "exit status 0", false));
         let sent = body(&req, Quirks::for_host("openrouter.ai"));
-        assert_eq!(sent["usage"], json!({"include": false}));
-        // `stream` is not negotiable: the client only knows how to stream.
-        req.extra.insert("stream".to_string(), json!(false));
-        assert_eq!(
-            body(&req, Quirks::for_host("openrouter.ai"))["stream"],
-            json!(true)
-        );
+        assert_eq!(sent["messages"][0]["role"], "system");
+        assert_eq!(sent["messages"][0]["content"], "system one\n\nsystem two");
+        assert_eq!(sent["messages"][2]["role"], "tool");
+        assert_eq!(sent["messages"][2]["tool_call_id"], "call_1");
     }
 
     #[test]

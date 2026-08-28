@@ -98,13 +98,13 @@ pub fn run_all_tests() {
     // Across these fresh files, every legal permission triplet appears in both
     // the Interactive and None positions where monotonicity permits it.
     let modes = [
-        "rwxrwxrwx",
-        "rwxrwxrw-",
-        "rwxrwxr-x",
-        "rwxrwxr--",
-        "rwxrwx---",
+        "rwxrw-rw-",
+        "rwxrw-r--",
         "rwxrw----",
+        "rwxr-xr-x",
+        "rwxr-xr--",
         "rwxr-x---",
+        "rwxr--r--",
         "rwxr-----",
         "rwx------",
     ];
@@ -167,7 +167,7 @@ pub fn run_all_tests() {
     ] {
         let output = run_sysbox(&[mode, invalid.to_str().unwrap()]);
         assert!(!output.status.success(), "invalid mode {mode:?} succeeded");
-        assert_mode(&root, "invalid", "rwxrwxrwx");
+        assert_mode(&root, "invalid", "rwxrw-r--");
     }
 
     // The all-empty mode is syntactically valid and starts with '-'. This
@@ -178,7 +178,7 @@ pub fn run_all_tests() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("invalid mode"), "{stderr}");
     assert!(!stderr.contains("usage:"), "{stderr}");
-    assert_mode(&root, "invalid", "rwxrwxrwx");
+    assert_mode(&root, "invalid", "rwxrw-r--");
 
     let help = run_sysbox(&["--help"]);
     assert!(help.status.success());

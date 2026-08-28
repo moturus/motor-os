@@ -1,16 +1,19 @@
-//! gears — an agentic coding harness. See `README.md` (user guide) and
-//! `proposal.md` (design and roadmap) in the crate root.
+//! Gears: a small extensible agent harness for Linux and Motor OS.
 
-pub mod agent;
+pub mod cancellation;
 pub mod cli;
 pub mod config;
+pub mod hooks;
 pub mod mock;
 pub mod net;
 pub mod platform;
+pub mod process;
+pub mod prompt;
 #[cfg(test)]
-pub(crate) mod property;
+mod property;
 pub mod provider;
+pub mod runtime;
+pub mod session;
 pub mod state;
-pub mod tools;
 pub mod trace;
 pub mod ui;

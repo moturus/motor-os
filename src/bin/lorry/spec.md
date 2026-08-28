@@ -849,8 +849,11 @@ The Git form uses distinct `LORRY-CURL-GIT-1` markers and adds
 `type=<content_type>` before `size`; Lorry validates the service response
 content type before gix consumes the body.
 
-Lorry drains both pipes concurrently, retains at most 64 KiB of diagnostic
-stderr, and requires one well-formed final trailer terminated at EOF. Control
+Lorry drains both pipes concurrently and spills diagnostic stderr above 64 KiB
+to a private temporary file. The spill is bounded to 2 MiB by default;
+`LORRY_CURL_STDERR_SPILL_LIMIT_BYTES` may raise that bound. Lorry requires one
+well-formed trailer with unique nonce-bound opening and closing markers;
+runtime diagnostics before or after the trailer remain diagnostics. Control
 values must be UTF-8 without control characters, decimal fields must be
 canonical, and the reported size must equal the observed body byte count.
 Lorry terminates curl as soon as the body limit is exceeded; it does not rely

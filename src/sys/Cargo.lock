@@ -1637,6 +1637,8 @@ name = "strobe"
 version = "0.1.0"
 dependencies = [
  "log",
+ "moto-async",
+ "moto-io",
  "moto-ipc",
  "moto-log",
  "moto-rt",

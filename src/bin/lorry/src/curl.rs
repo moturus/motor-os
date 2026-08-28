@@ -14,7 +14,9 @@ use crate::config::NetworkConfig;
 use crate::diagnostic::{Error, Result};
 use crate::redirect::{HttpsUrl, TrustPolicy, redact_url};
 
-const MAX_STDERR_BYTES: u64 = 64 * 1024;
+const MAX_STDERR_MEMORY_BYTES: usize = 64 * 1024;
+const DEFAULT_STDERR_SPILL_BYTES: u64 = 2 * 1024 * 1024;
+const STDERR_SPILL_LIMIT_ENV: &str = "LORRY_CURL_STDERR_SPILL_LIMIT_BYTES";
 const MAX_REDIRECTS: usize = 5;
 const TIMEOUT_RETRIES: usize = 2;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
@@ -578,7 +580,21 @@ fn parse_control_trailer(
         )));
     }
     let start = positions[0];
-    let control = std::str::from_utf8(&stderr[start + opening.len()..])
+    let after_opening = &stderr[start + opening.len()..];
+    let closing = format!("END-{marker} {nonce}\n");
+    let closing_positions = after_opening
+        .windows(closing.len())
+        .enumerate()
+        .filter_map(|(index, bytes)| (bytes == closing.as_bytes()).then_some(index))
+        .collect::<Vec<_>>();
+    if closing_positions.len() != 1 {
+        return Err(Error::failure(format!(
+            "curl stderr contained {} matching control end markers instead of one",
+            closing_positions.len()
+        )));
+    }
+    let closing_start = closing_positions[0];
+    let control = std::str::from_utf8(&after_opening[..closing_start])
         .map_err(|_| Error::failure("curl control trailer is not valid UTF-8"))?;
     let mut lines = control.split('\n');
     let status = field(&mut lines, "status")?;
@@ -588,13 +604,8 @@ fn parse_control_trailer(
         .then(|| field(&mut lines, "type").map(str::to_owned))
         .transpose()?;
     let size = field(&mut lines, "size")?;
-    if lines.next() != Some(&format!("END-{marker} {nonce}"))
-        || lines.next() != Some("")
-        || lines.next().is_some()
-    {
-        return Err(Error::failure(
-            "curl control trailer has a malformed or non-final end marker",
-        ));
+    if lines.next() != Some("") || lines.next().is_some() {
+        return Err(Error::failure("curl control trailer is malformed"));
     }
     if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(Error::failure(
@@ -615,8 +626,12 @@ fn parse_control_trailer(
             "curl reported {size} downloaded bytes, but Lorry received {observed_size}"
         )));
     }
+    let trailing = &after_opening[closing_start + closing.len()..];
+    let mut diagnostic = Vec::with_capacity(start + trailing.len());
+    diagnostic.extend_from_slice(&stderr[..start]);
+    diagnostic.extend_from_slice(trailing);
     Ok((
-        stderr[..start].to_vec(),
+        diagnostic,
         Metadata {
             status,
             effective_url: effective_url.to_owned(),
@@ -675,6 +690,74 @@ struct Captured {
     status: ExitStatus,
     stderr: Vec<u8>,
     body_size: u64,
+}
+
+// Keep ordinary requests allocation-only. A noisy debug build moves the whole
+// stream to a private file so curl's final control trailer is still retained.
+enum CapturedStderr {
+    Memory(Vec<u8>),
+    Spill(StderrSpill),
+}
+
+impl CapturedStderr {
+    fn into_bytes(self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Memory(bytes) => Ok(bytes),
+            Self::Spill(spill) => spill.into_bytes(),
+        }
+    }
+}
+
+struct StderrSpill {
+    path: PathBuf,
+    file: File,
+}
+
+impl StderrSpill {
+    fn create() -> std::io::Result<Self> {
+        let parent = fs::canonicalize(std::env::temp_dir())?;
+        for _ in 0..100 {
+            let suffix = nonce().map_err(|error| std::io::Error::other(error.to_string()))?;
+            let path = parent.join(format!(".lorry-curl-stderr-{suffix}"));
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                        return Err(std::io::Error::other(error.to_string()));
+                    }
+                    return Ok(Self { path, file });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate curl stderr spill file",
+        ))
+    }
+
+    fn into_bytes(mut self) -> std::io::Result<Vec<u8>> {
+        self.file.flush()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for StderrSpill {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn capture_request(
@@ -738,6 +821,25 @@ fn capture(
     timeout: Duration,
     input: Option<Vec<u8>>,
 ) -> Result<Captured> {
+    let stderr_spill_limit = stderr_spill_limit()?;
+    capture_with_stderr_limit(
+        command,
+        destination,
+        max_body_bytes,
+        timeout,
+        input,
+        stderr_spill_limit,
+    )
+}
+
+fn capture_with_stderr_limit(
+    command: &mut Command,
+    destination: File,
+    max_body_bytes: u64,
+    timeout: Duration,
+    input: Option<Vec<u8>>,
+    stderr_spill_limit: u64,
+) -> Result<Captured> {
     let mut child = command.spawn().map_err(|error| {
         Error::failure(format!(
             "failed to start curl `{}`: {error}",
@@ -765,7 +867,7 @@ fn capture(
     let body_exceeded = Arc::new(AtomicBool::new(false));
     let stderr_exceeded = Arc::new(AtomicBool::new(false));
     let body_thread = copy_body(stdout, destination, body_exceeded.clone(), max_body_bytes);
-    let stderr_thread = capture_stderr(stderr, stderr_exceeded.clone());
+    let stderr_thread = capture_stderr(stderr, stderr_exceeded.clone(), stderr_spill_limit);
     let started = Instant::now();
     let status = loop {
         let failure = if body_exceeded.load(Ordering::Acquire) {
@@ -774,7 +876,7 @@ fn capture(
             ))
         } else if stderr_exceeded.load(Ordering::Acquire) {
             Some(format!(
-                "curl stderr exceeded the {MAX_STDERR_BYTES}-byte limit"
+                "curl stderr exceeded the {stderr_spill_limit}-byte spill limit"
             ))
         } else if started.elapsed() >= timeout {
             Some(format!(
@@ -818,6 +920,8 @@ fn capture(
     let stderr = stderr_thread
         .join()
         .map_err(|_| Error::failure("curl stderr capture thread panicked"))?
+        .map_err(|error| Error::failure(format!("failed to read curl stderr: {error}")))?
+        .into_bytes()
         .map_err(|error| Error::failure(format!("failed to read curl stderr: {error}")))?;
     if let Some(thread) = input_thread.take() {
         thread
@@ -834,7 +938,7 @@ fn capture(
     }
     if stderr_exceeded.load(Ordering::Acquire) {
         return Err(Error::failure(format!(
-            "curl stderr exceeded the {MAX_STDERR_BYTES}-byte limit"
+            "curl stderr exceeded the {stderr_spill_limit}-byte spill limit"
         )));
     }
     Ok(Captured {
@@ -871,20 +975,73 @@ fn copy_body(
 }
 
 fn capture_stderr(
-    source: impl Read + Send + 'static,
+    mut source: impl Read + Send + 'static,
     exceeded: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    limit: u64,
+) -> std::thread::JoinHandle<std::io::Result<CapturedStderr>> {
     std::thread::spawn(move || {
-        let mut captured = Vec::new();
-        source
-            .take(MAX_STDERR_BYTES + 1)
-            .read_to_end(&mut captured)?;
-        if captured.len() as u64 > MAX_STDERR_BYTES {
-            captured.truncate(MAX_STDERR_BYTES as usize);
-            exceeded.store(true, Ordering::Release);
+        let mut memory = Vec::with_capacity(MAX_STDERR_MEMORY_BYTES);
+        let mut spill = None;
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(match spill {
+                    Some(spill) => CapturedStderr::Spill(spill),
+                    None => CapturedStderr::Memory(memory),
+                });
+            }
+
+            let available = usize::try_from(limit.saturating_sub(total)).unwrap_or(usize::MAX);
+            let stored = count.min(available);
+            if spill.is_none() && total + stored as u64 > MAX_STDERR_MEMORY_BYTES as u64 {
+                let mut file = StderrSpill::create()?;
+                file.file.write_all(&memory)?;
+                memory.clear();
+                spill = Some(file);
+            }
+            if let Some(file) = &mut spill {
+                file.file.write_all(&buffer[..stored])?;
+            } else {
+                memory.extend_from_slice(&buffer[..stored]);
+            }
+            total = total.saturating_add(count as u64);
+            if stored < count {
+                exceeded.store(true, Ordering::Release);
+                return Ok(match spill {
+                    Some(spill) => CapturedStderr::Spill(spill),
+                    None => CapturedStderr::Memory(memory),
+                });
+            }
         }
-        Ok(captured)
     })
+}
+
+fn stderr_spill_limit() -> Result<u64> {
+    let Some(value) = std::env::var_os(STDERR_SPILL_LIMIT_ENV) else {
+        return Ok(DEFAULT_STDERR_SPILL_BYTES);
+    };
+    let value = value.to_str().ok_or_else(|| {
+        Error::failure(format!(
+            "environment variable `{STDERR_SPILL_LIMIT_ENV}` is not valid UTF-8"
+        ))
+    })?;
+    parse_stderr_spill_limit(value)
+}
+
+fn parse_stderr_spill_limit(value: &str) -> Result<u64> {
+    let limit = value.parse::<u64>().map_err(|_| {
+        Error::failure(format!(
+            "environment variable `{STDERR_SPILL_LIMIT_ENV}` must be a byte count"
+        ))
+    })?;
+    if limit < DEFAULT_STDERR_SPILL_BYTES {
+        return Err(Error::failure(format!(
+            "environment variable `{STDERR_SPILL_LIMIT_ENV}` must be at least {DEFAULT_STDERR_SPILL_BYTES}"
+        )));
+    }
+    Ok(limit)
 }
 
 fn nonce() -> Result<String> {
@@ -1188,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_duplicate_nonfinal_and_malformed_control_data() {
+    fn rejects_missing_duplicate_and_malformed_control_data() {
         assert!(parse_trailer(b"ordinary diagnostic", NONCE, 0).is_err());
 
         let one = trailer(17);
@@ -1196,14 +1353,27 @@ mod tests {
         duplicate.extend_from_slice(&one);
         assert!(parse_trailer(&duplicate, NONCE, 17).is_err());
 
-        let mut trailing = one.clone();
-        trailing.extend_from_slice(b"unexpected");
-        assert!(parse_trailer(&trailing, NONCE, 17).is_err());
+        let closing = format!("END-LORRY-CURL-1 {NONCE}\n");
+        let mut duplicate_closing = one.clone();
+        duplicate_closing.extend_from_slice(closing.as_bytes());
+        assert!(parse_trailer(&duplicate_closing, NONCE, 17).is_err());
 
         let malformed = String::from_utf8(one)
             .unwrap()
             .replace("url=https://", "url=https://bad\u{7f}");
         assert!(parse_trailer(malformed.as_bytes(), NONCE, 17).is_err());
+    }
+
+    #[test]
+    fn retains_diagnostics_before_and_after_the_control_trailer() {
+        let mut stderr = trailer(17);
+        stderr.extend_from_slice(b"runtime diagnostic after trailer\n");
+        let (diagnostic, metadata) = parse_trailer(&stderr, NONCE, 17).unwrap();
+        assert_eq!(
+            diagnostic,
+            b"certificate note\nruntime diagnostic after trailer\n"
+        );
+        assert_eq!(metadata.status, 302);
     }
 
     #[test]
@@ -1219,10 +1389,15 @@ mod tests {
         }
         let mut output: Box<dyn Write> = match action.as_str() {
             "pipes" | "body-limit" => Box::new(std::io::stdout()),
-            "stderr-limit" => Box::new(std::io::stderr()),
+            "stderr-spill" | "stderr-limit" => Box::new(std::io::stderr()),
             _ => panic!("unknown capture-child action"),
         };
-        let iterations = if action == "pipes" { 6_000 } else { 100_000 };
+        let iterations = match action.as_str() {
+            "pipes" => 6_000,
+            "stderr-spill" => 16_384,
+            "stderr-limit" => DEFAULT_STDERR_SPILL_BYTES as usize / 8 + 1_024,
+            _ => 100_000,
+        };
         for _ in 0..iterations {
             output.write_all(b"12345678").unwrap();
             if action == "pipes" {
@@ -1586,17 +1761,41 @@ mod tests {
     #[test]
     fn concurrently_drains_body_and_diagnostic_pipes() {
         let (path, file) = destination();
-        let captured = capture(
+        let captured = capture_with_stderr_limit(
             &mut child("pipes"),
             file,
             60 * 1024,
             Duration::from_secs(10),
             None,
+            DEFAULT_STDERR_SPILL_BYTES,
         )
         .unwrap();
         assert!(captured.status.success());
         assert!(captured.body_size >= 48_000);
         assert!(captured.stderr.len() >= 48_000);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn spills_large_stderr_and_preserves_it() {
+        let (path, file) = destination();
+        let captured = capture_with_stderr_limit(
+            &mut child("stderr-spill"),
+            file,
+            1024,
+            Duration::from_secs(10),
+            None,
+            DEFAULT_STDERR_SPILL_BYTES,
+        )
+        .unwrap();
+        assert!(captured.status.success());
+        assert_eq!(captured.stderr.len(), 16_384 * 8);
+        assert!(
+            captured
+                .stderr
+                .chunks_exact(8)
+                .all(|chunk| chunk == b"12345678")
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -1613,11 +1812,29 @@ mod tests {
             ("stall", 1024, Duration::from_millis(20), "did not exit"),
         ] {
             let (path, file) = destination();
-            let error = capture(&mut child(action), file, body_limit, timeout, None)
-                .err()
-                .unwrap();
+            let error = capture_with_stderr_limit(
+                &mut child(action),
+                file,
+                body_limit,
+                timeout,
+                None,
+                DEFAULT_STDERR_SPILL_BYTES,
+            )
+            .err()
+            .unwrap();
             assert!(error.to_string().contains(expected), "{error}");
             fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_stderr_spill_limit_override() {
+        assert_eq!(
+            parse_stderr_spill_limit("104857600").unwrap(),
+            100 * 1024 * 1024
+        );
+        for value in ["", "1MiB", "0", "2097151"] {
+            assert!(parse_stderr_spill_limit(value).is_err(), "{value}");
         }
     }
 

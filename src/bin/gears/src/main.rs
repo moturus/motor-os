@@ -1,53 +1,36 @@
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use gears::agent::gate::Gate;
-use gears::agent::harness::{Harness, Setup};
-use gears::cli::{Action, Args};
+use gears::cancellation::Cancellation;
+use gears::cli::{Action, Args, SessionStart};
 use gears::config::Config;
 use gears::net::EgressPolicy;
-// The HTTP backend: upstream curl on the host and the in-tree curl on Motor.
-// Both expose the same constructor shape, so this alias is the whole switch.
 #[cfg(unix)]
 use gears::net::host_curl::HostCurl as HttpBackend;
 #[cfg(not(unix))]
 use gears::net::motor_curl::MotorCurl as HttpBackend;
 use gears::provider::{
-    ApiKey, ChatMessage, ChatRequest, Endpoint, EventSink, KEY_ENV, ModelProvider, OpenAiCompat,
-    UsageMeter,
+    ApiKey, Endpoint, EventSink, KEY_ENV, Message, OpenAiCompat, Provider, Request, StreamEvent,
 };
-use gears::ui::terminal::{self, Terminal};
-use gears::ui::{select, tui};
-
-const RESTART_CONTINUE_ENV: &str = "GEARS_RESTART_CONTINUE";
+use gears::runtime::Runtime;
+use gears::session::{Session, Store};
 
 fn main() -> ExitCode {
-    // Before anything else, and while this process is still single-threaded:
-    // a key in gears' own environment would be inherited by every tool it
-    // later spawns, so it is taken out and passed to the transport by hand.
     let key_from_env = std::env::var(KEY_ENV).ok();
     if key_from_env.is_some() {
-        // SAFETY: no other thread exists yet, so nothing can be reading the
-        // environment concurrently.
+        // SAFETY: process startup is still single-threaded.
         unsafe { std::env::remove_var(KEY_ENV) };
     }
-    let restart_continue = std::env::var_os(RESTART_CONTINUE_ENV).is_some();
-    if restart_continue {
-        // SAFETY: as above, this is still the single-threaded process startup.
-        unsafe { std::env::remove_var(RESTART_CONTINUE_ENV) };
-    }
-
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let args = match Args::parse(&argv) {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let args = match Args::parse(&arguments) {
         Ok(args) => args,
-        Err(msg) => {
-            eprintln!("gears: {msg}");
-            eprintln!("Try 'gears --help'.");
+        Err(error) => {
+            diagnostic(&error);
+            eprintln!("Try gears --help.");
             return ExitCode::from(2);
         }
     };
-
     match args.action {
         Action::Version => {
             println!("gears {}", env!("CARGO_PKG_VERSION"));
@@ -57,234 +40,155 @@ fn main() -> ExitCode {
             print!("{}", gears::cli::USAGE);
             ExitCode::SUCCESS
         }
-        Action::Run | Action::Ask => run(&args, key_from_env, restart_continue),
+        Action::Run | Action::Ask => run(args, key_from_env),
     }
 }
 
-/// Print one complete diagnostic and make it visible before an immediate exit.
-/// Motor OS relays an inherited stderr through a pipe; one complete record plus
-/// an explicit flush keeps the shell from reclaiming the console first.
-fn diagnostic(message: &str) {
-    let line = format!("gears: {message}\n");
-    let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(line.as_bytes());
-    let _ = stderr.flush();
-}
-
-fn run(args: &Args, key_from_env: Option<String>, restart_continue: bool) -> ExitCode {
-    let (config, mut models) = match Config::load_user(args.config.as_deref()) {
-        Ok(loaded) => loaded,
-        Err(msg) => {
-            eprintln!("gears: config: {msg}");
+fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
+    let config = match Config::load_user(args.config.as_deref()) {
+        Ok(config) => config,
+        Err(error) => {
+            diagnostic(&format!("config: {error}"));
             return ExitCode::FAILURE;
         }
     };
-    if let Some(model) = args.model.as_deref()
-        && let Err(msg) = models.remember(model)
-    {
-        eprintln!("gears: config: {msg}");
-        return ExitCode::FAILURE;
-    }
-
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
             Ok(tracer) => gears::trace::init(tracer),
-            Err(e) => {
-                eprintln!("gears: cannot open log file {}: {e}", path.display());
+            Err(error) => {
+                diagnostic(&format!("cannot open log file {}: {error}", path.display()));
                 return ExitCode::FAILURE;
             }
         }
-        gears::trace::log(
-            gears::trace::Level::Info,
-            concat!("gears ", env!("CARGO_PKG_VERSION"), " starting"),
-        );
     }
-
+    gears::trace::log(
+        gears::trace::Level::Info,
+        concat!("gears ", env!("CARGO_PKG_VERSION"), " starting"),
+    );
     if !gears::platform::install_interrupt_handler() {
         gears::trace::log(
             gears::trace::Level::Warn,
             "could not install the interrupt handler",
         );
     }
-
-    let outcome = match args.action {
-        Action::Ask => ask(args, &config, key_from_env).map(|()| ExitCode::SUCCESS),
-        _ => agent(args, &config, &mut models, key_from_env, restart_continue),
+    let result = match args.action {
+        Action::Ask => ask(&args, &config, key_from_env),
+        Action::Run => agent(&args, &config, key_from_env),
+        Action::Version | Action::Help => unreachable!(),
     };
-    match outcome {
-        Ok(code) => code,
-        Err(msg) => {
-            // Scrubbed: an endpoint that quotes the key back in its error
-            // message must not get it onto the terminal.
-            diagnostic(&gears::trace::scrub(&msg));
-            gears::trace::log(gears::trace::Level::Error, &msg);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            diagnostic(&gears::trace::scrub(&error));
+            gears::trace::log(gears::trace::Level::Error, &error);
             ExitCode::FAILURE
         }
     }
 }
 
-/// The agent: a workspace, a session, and either one prompt or a terminal
-/// full of them.
-fn agent(
-    args: &Args,
-    config: &Config,
-    models: &mut gears::config::ModelStore,
-    key_from_env: Option<String>,
-    restart_continue: bool,
-) -> Result<ExitCode, String> {
-    let workspace = match &args.workspace {
-        Some(dir) => dir.clone(),
-        None => std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?,
-    };
-    let restart_continue = restart_continue && args.resume.is_some() && args.prompt.is_some();
-    let one_shot = args.prompt.is_some() && !restart_continue;
-    let selected = select::choose(args.ui, one_shot, || {
+fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
+    let workspace = args.workspace.clone().map_or_else(
+        || std::env::current_dir().map_err(|error| format!("current directory: {error}")),
+        Ok,
+    )?;
+    let one_shot = args.prompt.is_some();
+    let selected = gears::ui::select::choose(args.ui, one_shot, || {
         (
             std::io::stdin().is_terminal(),
             std::io::stdout().is_terminal(),
         )
     })?;
-    let key = load_key(config, key_from_env.clone())?;
-
-    let mut setup = Setup::new(workspace.clone());
-    setup.model = args.model.clone().or_else(|| config.model.clone());
-    setup.resume = args.resume.clone();
-    setup.run_timeout = config.run_timeout;
-    setup.build_timeout = config.build_timeout;
-    setup.run = config.run;
-    setup.limits = config.agents.clone();
-    setup.context = config.context;
-    setup.resources = config.resources;
-    setup.selfhost = config.selfhost.clone();
-    let restart = setup.restart.clone();
-    setup.tools = vec![fetcher(config, args.verbosity)?];
-    // The agent must not be able to read its own credentials, wherever they
-    // happen to live.
-    setup.deny = [config.key_file.clone(), ApiKey::default_path()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<PathBuf>>();
-
-    // Shared rather than owned: every sub-agent talks to the same endpoint
-    // with the same key, over a connection of its own.
-    let provider = std::sync::Arc::new(connect(config, &key, args.verbosity)?);
-    let harness = Harness::start(setup, provider)?;
-    if let Some(mode) = args.mode {
-        harness.select_mode(mode)?;
-    }
-
-    let gate = Gate::load(harness.workspace(), config.permissions)?;
-    let code = match selected {
-        select::Selected::Tui => match (&args.prompt, restart_continue) {
-            (Some(prompt), true) => tui::continue_with(&harness, gate, &restart, models, prompt)?,
-            (Some(prompt), false) => tui::once(&harness, gate, &restart, models, prompt)?,
-            (None, _) => tui::interact(&harness, gate, &restart, models)?,
-        },
-        select::Selected::Line => {
-            let mut ui = Terminal::live(
-                std::io::stdout(),
-                gate,
-                // A one-shot run has nobody at the keyboard to answer a
-                // permission question: it is scripted, or it is a pipe.
-                !one_shot,
-            )?
-            .watching(restart.clone());
-            if gears::platform::raw_console() {
-                // Motor OS console: nothing echoes or edits unless gears does.
-                ui = ui.editing();
-            }
-            match (&args.prompt, restart_continue) {
-                (Some(prompt), true) => terminal::continue_with(&harness, &mut ui, models, prompt),
-                (Some(prompt), false) => terminal::once(&harness, &mut ui, models, prompt),
-                (None, _) => terminal::interact(&harness, &mut ui, models),
-            }
-        }
+    let key = load_key(config, key_from_env)?;
+    let provider: Arc<dyn Provider> = Arc::new(connect(config, &key, args.verbosity)?);
+    let store = Store::new(&workspace)?;
+    let session = open_session(&store, args)?;
+    let model = args
+        .model
+        .clone()
+        .or_else(|| session.model())
+        .or_else(|| config.model.clone())
+        .or_else(|| config.models.first().cloned())
+        .ok_or("no model selected; use --model or provider.model in the config")?;
+    let mut runtime = Runtime::new(provider, store, session, config, model)?;
+    let interactive = !one_shot;
+    let result = match selected {
+        gears::ui::select::Selected::Line => gears::ui::line::run(
+            &mut runtime,
+            args.prompt.clone(),
+            interactive,
+            &config.models,
+        ),
+        gears::ui::select::Selected::Tui => gears::ui::tui::run(
+            &mut runtime,
+            args.prompt.clone(),
+            interactive,
+            &config.models,
+        ),
     };
+    for notice in runtime.close() {
+        diagnostic(&notice);
+    }
+    result
+}
 
-    // Dropping the harness is what closes the session file and releases its
-    // lock, and the new gears cannot open the session until that has happened.
-    drop(harness);
-    match restart.take() {
-        Some(plan) => restart_into(&plan, args, key_from_env, !one_shot),
-        None => Ok(code),
+fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
+    match &args.session {
+        SessionStart::New => store.create(false, args.name.as_deref()),
+        SessionStart::Ephemeral => store.create(true, args.name.as_deref()),
+        SessionStart::Continue => store.continue_recent(),
+        SessionStart::Resume(selector) => store.open(selector),
+        SessionStart::Fork(selector) => {
+            let source = store.open(selector)?;
+            store.clone_active(&source)
+        }
     }
 }
 
-/// Start the new gears on this session and wait for it.
-///
-/// Not `exec`: Motor OS has none, and this way the terminal is only ever owned
-/// by one process — a parent that walked away would leave the shell and the
-/// child reading the same keyboard. The child is given the same flags this run
-/// had, so it works where this one worked; the key, if it came from the
-/// environment, is handed over because the new gears takes it straight back
-/// out of its own environment exactly as this one did.
-fn restart_into(
-    plan: &gears::tools::selfhost::Plan,
-    args: &Args,
-    key_from_env: Option<String>,
-    continue_interactive: bool,
-) -> Result<ExitCode, String> {
-    let mut command = std::process::Command::new(&plan.program);
-    for (flag, value) in [
-        ("--config", args.config.as_deref()),
-        ("--workspace", args.workspace.as_deref()),
-        ("--log-file", args.log_file.as_deref()),
-    ] {
-        if let Some(value) = value {
-            command.arg(flag).arg(value);
-        }
-    }
-    command.arg("--resume").arg(&plan.session);
-    command.arg("--ui").arg(args.ui.name());
-    if let Some(flag) = verbosity_flag(args.verbosity) {
-        command.arg(flag);
-    }
-    if let Some(prompt) = &plan.prompt {
-        command.arg("-p").arg(prompt);
-        if continue_interactive {
-            command.env(RESTART_CONTINUE_ENV, "1");
-        }
-    }
-    if let Some(key) = key_from_env {
-        command.env(KEY_ENV, key);
-    }
-
-    let program = plan.program.display();
-    gears::trace::log(
-        gears::trace::Level::Info,
-        &format!("restarting into {program} on session {}", plan.session),
-    );
-    eprintln!("gears: restarting into {program}");
-    let status = command
-        .status()
-        .map_err(|e| format!("cannot start {program}: {e}"))?;
-    Ok(match status.code() {
-        Some(code) => ExitCode::from(code as u8),
-        None => ExitCode::FAILURE,
-    })
+fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
+    let model = args
+        .model
+        .clone()
+        .or_else(|| config.model.clone())
+        .or_else(|| config.models.first().cloned())
+        .ok_or("gears ask needs a model; use --model or provider.model in the config")?;
+    let key = load_key(config, key_from_env)?;
+    let provider = connect(config, &key, args.verbosity)?;
+    let request = Request::new(
+        model,
+        vec![Message::user(
+            args.prompt.as_deref().expect("ask was validated"),
+        )],
+    )
+    .with_cancellation(Cancellation::new());
+    let mut sink = AskSink;
+    provider
+        .complete(&request, &mut sink)
+        .map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
 }
 
-fn load_key(config: &Config, key_from_env: Option<String>) -> Result<ApiKey, String> {
-    match key_from_env {
-        Some(text) => ApiKey::parse(&text, KEY_ENV),
+struct AskSink;
+
+impl EventSink for AskSink {
+    fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()> {
+        match event {
+            StreamEvent::Text(text) => {
+                print!("{text}");
+                std::io::stdout().flush()
+            }
+            StreamEvent::Reasoning(text) => {
+                eprint!("{text}");
+                std::io::stderr().flush()
+            }
+        }
+    }
+}
+
+fn load_key(config: &Config, from_env: Option<String>) -> Result<ApiKey, String> {
+    match from_env {
+        Some(key) => ApiKey::parse(&key, KEY_ENV),
         None => ApiKey::load(config.key_file.as_deref()),
-    }
-}
-
-fn egress(config: &Config) -> EgressPolicy {
-    let policy = EgressPolicy::new(&config.egress_allowlist);
-    match config.allow_plain_http_loopback {
-        true => policy.allow_loopback_http_for_tests(),
-        false => policy,
-    }
-}
-
-fn verbosity_flag(level: u8) -> Option<&'static str> {
-    match level {
-        1 => Some("-v"),
-        2 => Some("-vv"),
-        3 => Some("-vvv"),
-        _ => None,
     }
 }
 
@@ -293,85 +197,24 @@ fn connect(
     key: &ApiKey,
     verbosity: u8,
 ) -> Result<OpenAiCompat<HttpBackend>, String> {
-    let http = HttpBackend::new(egress(config))
-        .map_err(|e| e.to_string())?
+    let mut policy = EgressPolicy::new(&config.egress_allowlist);
+    if config.allow_plain_http_loopback {
+        policy = policy.allow_loopback_http_for_tests();
+    }
+    let http = HttpBackend::new(policy)
+        .map_err(|error| error.to_string())?
         .with_verbosity(verbosity)
         .with_secret(KEY_ENV, key.expose());
     let http = match config.ca_cert.as_deref() {
-        Some(path) => http.with_ca_cert(path).map_err(|e| e.to_string())?,
+        Some(path) => http.with_ca_cert(path).map_err(|error| error.to_string())?,
         None => http,
     };
-    let endpoint = Endpoint::new(&config.base_url).map_err(|e| e.to_string())?;
+    let endpoint = Endpoint::new(&config.base_url).map_err(|error| error.to_string())?;
     Ok(OpenAiCompat::new(http, endpoint))
 }
 
-/// The `fetch` tool's own transport: its own policy, so a host the user allows
-/// for a fetch does not widen what the provider connection may reach, and no
-/// API key, so there is nothing for a fetched host to be told.
-fn fetcher(config: &Config, verbosity: u8) -> Result<Box<dyn gears::tools::Tool>, String> {
-    let policy = egress(config);
-    let client = HttpBackend::new(policy.clone())
-        .map_err(|e| e.to_string())?
-        .with_verbosity(verbosity);
-    Ok(gears::tools::fetch::tool(Box::new(client), policy))
-}
-
-/// One prompt, one answer: the manual spot check for an endpoint, a key and a
-/// model. Never part of `cargo test` against a real provider.
-fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
-    let prompt = args.prompt.as_deref().expect("ask parsed a prompt");
-    let model = args
-        .model
-        .clone()
-        .or_else(|| config.model.clone())
-        .ok_or("no model: pass -m MODEL or set models.last/provider.model in the config")?;
-    let key = load_key(config, key_from_env)?;
-    let provider = connect(config, &key, args.verbosity)?;
-
-    let request = ChatRequest::new(model, vec![ChatMessage::user(prompt)]);
-    let mut printer = Printer::default();
-    let completion = provider
-        .complete(&request, &mut printer)
-        .map_err(|e| e.to_string())?;
-
-    if !printer.wrote_line {
-        println!();
-    }
-    let mut meter = UsageMeter::new();
-    meter.add(&completion.usage);
-    eprintln!("gears: {}", meter.summary());
-    Ok(())
-}
-
-/// Prints the answer as it streams. Reasoning goes to stderr so that stdout
-/// is only ever the answer, and a `^C` between deltas ends the turn.
-#[derive(Default)]
-struct Printer {
-    wrote_line: bool,
-}
-
-impl Printer {
-    fn write(&mut self, text: &str, to_stdout: bool) -> std::io::Result<()> {
-        if gears::platform::take_interrupt() {
-            return Err(std::io::Error::other("interrupted"));
-        }
-        if to_stdout {
-            self.wrote_line = text.ends_with('\n');
-            print!("{text}");
-            std::io::stdout().flush()?;
-        } else {
-            eprint!("{text}");
-        }
-        Ok(())
-    }
-}
-
-impl EventSink for Printer {
-    fn on_content(&mut self, text: &str) -> std::io::Result<()> {
-        self.write(text, true)
-    }
-
-    fn on_reasoning(&mut self, text: &str) -> std::io::Result<()> {
-        self.write(text, false)
-    }
+fn diagnostic(message: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "gears: {message}");
+    let _ = stderr.flush();
 }

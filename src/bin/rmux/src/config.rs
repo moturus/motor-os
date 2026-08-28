@@ -25,6 +25,25 @@ use crate::bindings::ModeKeys;
 use crate::bindings::Table;
 use crate::keys::Key;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+
+fn native_shell() -> &'static str {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = std::env::var_os("PATH") {
+        let bash_available = std::env::split_paths(&path).any(|dir| {
+            dir.join("bash").metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        });
+        if bash_available {
+            return "bash";
+        }
+    }
+
+    "sh"
+}
+
 /// What a new pane takes from the config, and all it takes.
 ///
 /// Handed down rather than reached for, which is the same rule as the config
@@ -66,9 +85,9 @@ impl Default for Config {
         Config {
             // `unbind C-b` / `set -g prefix C-a`.
             prefix: Key::ctrl('a'),
-            // Resolved by the platform: dash on Linux, `/system/bin/sh` -> rush on
-            // Motor (§4.3). `$SHELL` is deliberately not consulted.
-            default_shell: "sh".to_owned(),
+            // Prefer bash on Linux when PATH can resolve it; Motor uses
+            // `/system/bin/sh` -> rush (§4.3). `$SHELL` is not consulted.
+            default_shell: native_shell().to_owned(),
             history_limit: crate::grid::DEFAULT_HISTORY_LIMIT,
             renumber_windows: true,
             aggressive_resize: true,
@@ -293,7 +312,7 @@ mod tests {
         // §2.1: a user who has never written an rmux.toml gets all of this.
         let config = Config::default();
         assert_eq!(config.prefix, key("C-a"));
-        assert_eq!(config.default_shell, "sh");
+        assert_eq!(config.default_shell, native_shell());
         assert_eq!(config.history_limit, 9_999_999);
         assert!(config.renumber_windows);
         assert!(config.aggressive_resize);
@@ -305,9 +324,10 @@ mod tests {
     fn the_example_in_the_plan_is_a_no_op() {
         // §2.2's example deliberately restates the defaults. If applying it
         // changes anything, one of the two representations has drifted.
-        let text = r#"
+        let text = format!(
+            r#"
 prefix            = "C-a"
-default-shell     = "sh"
+default-shell     = "{}"
 history-limit     = 9999999
 renumber-windows  = true
 aggressive-resize = true
@@ -328,8 +348,10 @@ status            = true
 
 [bind-copy]
 "q" = "cancel"
-"#;
-        let (config, complaints) = Config::parse(text);
+"#,
+            native_shell()
+        );
+        let (config, complaints) = Config::parse(&text);
         assert!(complaints.is_empty(), "{complaints:?}");
 
         let defaults = Config::default();

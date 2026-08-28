@@ -5,8 +5,8 @@
 //! in a final chunk. Reassembly is keyed by the tool call's `index`, which is
 //! what keeps parallel calls apart while their fragments interleave.
 
-use super::types::{ApiError, Completion, FinishReason, StreamChunk, ToolCall, Usage};
-use super::{EventSink, ProviderError};
+use super::wire::{ApiError, StreamChunk};
+use super::{Completion, EventSink, FinishReason, ProviderError, StreamEvent, ToolCall, Usage};
 
 #[derive(Default)]
 pub struct DeltaAssembler {
@@ -53,12 +53,12 @@ impl DeltaAssembler {
             let delta = choice.delta;
             if let Some(text) = delta.content.filter(|t| !t.is_empty()) {
                 self.content.push_str(&text);
-                sink.on_content(&text)
+                sink.on_event(StreamEvent::Text(text.clone()))
                     .map_err(|e| ProviderError::Aborted(e.to_string()))?;
             }
             if let Some(text) = delta.reasoning.filter(|t| !t.is_empty()) {
                 self.reasoning.push_str(&text);
-                sink.on_reasoning(&text)
+                sink.on_event(StreamEvent::Reasoning(text.clone()))
                     .map_err(|e| ProviderError::Aborted(e.to_string()))?;
             }
             for fragment in &delta.tool_calls {
@@ -173,13 +173,11 @@ mod tests {
     }
 
     impl EventSink for Rendered {
-        fn on_content(&mut self, text: &str) -> std::io::Result<()> {
-            self.content.push(text.to_string());
-            Ok(())
-        }
-
-        fn on_reasoning(&mut self, text: &str) -> std::io::Result<()> {
-            self.reasoning.push(text.to_string());
+        fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()> {
+            match event {
+                StreamEvent::Text(text) => self.content.push(text),
+                StreamEvent::Reasoning(text) => self.reasoning.push(text),
+            }
             Ok(())
         }
     }
@@ -240,7 +238,7 @@ mod tests {
         assert_eq!(completion.reasoning, "let me think");
         assert_eq!(rendered.reasoning, ["let me ", "think"]);
         // Reasoning is for the user, not for the next request.
-        assert_eq!(completion.message().content.as_deref(), Some("done"));
+        assert_eq!(completion.message().text_content(), "done");
     }
 
     #[test]
@@ -263,19 +261,19 @@ mod tests {
         assert!(completion.wants_tools());
         assert_eq!(completion.tool_calls.len(), 2);
         assert_eq!(completion.tool_calls[0].id, "call_a");
-        assert_eq!(completion.tool_calls[0].name(), "read_file");
+        assert_eq!(completion.tool_calls[0].name, "read_file");
         assert_eq!(
-            completion.tool_calls[0].arguments(),
+            completion.tool_calls[0].arguments,
             r#"{"path":"src/main.rs"}"#
         );
         assert_eq!(completion.tool_calls[1].id, "call_b");
-        assert_eq!(completion.tool_calls[1].name(), "grep");
-        assert_eq!(completion.tool_calls[1].arguments(), r#"{"q":"fn main"}"#);
+        assert_eq!(completion.tool_calls[1].name, "grep");
+        assert_eq!(completion.tool_calls[1].arguments, r#"{"q":"fn main"}"#);
         assert!(rendered.content.is_empty());
 
         // The argument JSON is intact, which is what dispatch needs.
         let parsed: serde_json::Value =
-            serde_json::from_str(completion.tool_calls[1].arguments()).unwrap();
+            serde_json::from_str(&completion.tool_calls[1].arguments).unwrap();
         assert_eq!(parsed["q"], "fn main");
     }
 
@@ -291,8 +289,8 @@ mod tests {
 
         let calls = completion.unwrap().tool_calls;
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].name(), "first");
-        assert_eq!(calls[1].name(), "third");
+        assert_eq!(calls[0].name, "first");
+        assert_eq!(calls[1].name, "third");
         // An endpoint that sent no id still gets an addressable call.
         assert_eq!(calls[0].id, "call_0");
     }
@@ -358,7 +356,7 @@ mod tests {
     fn a_sink_refusal_cancels_the_turn() {
         struct Refuse;
         impl EventSink for Refuse {
-            fn on_content(&mut self, _text: &str) -> std::io::Result<()> {
+            fn on_event(&mut self, _event: StreamEvent) -> std::io::Result<()> {
                 Err(std::io::Error::other("^C"))
             }
         }

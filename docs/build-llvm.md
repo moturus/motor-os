@@ -9,13 +9,20 @@ its outputs; it is not a separate branch-switching or cache-clearing recipe.
 The current beta tuple is declared in `src/toolchain-versions.sh`:
 
 - upstream Rust LLVM base `21cf28432798952d942bacc6bcee3a328faa3638`;
-- Motor LLVM `2dcc671e2eb723ef61a664bde9823fbe880e4e19`;
-- Motor mlibc `62f9495700537ded14a2a6fae9373227fe5ec5ca`.
+- Motor LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
+- Motor mlibc `0cece7e5cfbd7f43ffb5968ced80056a655cb70f`.
 
 The Motor Rust revision's `src/llvm-project` gitlink must equal the declared
 Motor LLVM revision. The standalone host compiler and rustc's host/native LLVM
 builds therefore consume the same effective LLVM commit and source tree. A
 managed build rejects a mismatched gitlink, remote, revision, or dirty checkout.
+
+Executable-permission support is a cross-repository compatibility boundary.
+This tuple combines the Motor OS fd wrapper descended from `fb4d6989`, mlibc
+`0cece7e5`, and LLVM `7c2a7b21e3dc` (the beta-line cherry-pick of
+`bc769e6e44a4`). Do not mix an older shim, libc, or linker binary into an
+assembly: a new output may remain writable or Cargo's copied build scripts may
+become non-executable.
 
 LLVM changes are tested through the Rust checkout that owns the submodule:
 

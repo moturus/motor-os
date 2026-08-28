@@ -19,10 +19,10 @@
 //! # A window's name follows its program until a user says otherwise
 //!
 //! tmux names a window after what is running in it and lets `prefix ,` override
-//! that for good. rmux does the same with what §5.2 already collects: the
-//! **active** pane's `OSC 0`/`2` title. Once renamed, a window keeps its name —
-//! the flag that remembers this is the whole difference between a status line
-//! that tracks reality and one that argues with the user.
+//! that for good. rmux follows the **active** pane's explicit `OSC 0`/`2` title,
+//! or its foreground command where the host exposes one. Once renamed, a window
+//! keeps its name — the flag that remembers this is the whole difference
+//! between a status line that tracks reality and one that argues with the user.
 //!
 //! # A pane is removed when its child's output ends, and only then
 //!
@@ -271,15 +271,23 @@ impl Window {
     }
 
     /// Follow the active pane's title, unless the user has taken the name over.
-    fn track_title(&mut self) {
+    fn track_title(&mut self) -> bool {
         if !self.auto_name {
-            return;
+            return false;
         }
-        if let Some(title) = self.pane().map(|pane| pane.grid().title())
-            && !title.is_empty()
+        let title = self
+            .pane()
+            .map(|pane| pane.grid().title())
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned);
+        if let Some(name) =
+            title.or_else(|| self.pane_mut().and_then(|pane| pane.foreground_command()))
         {
-            self.name = title.to_owned();
+            let changed = self.name != name;
+            self.name = name;
+            return changed;
         }
+        false
     }
 }
 
@@ -465,10 +473,12 @@ impl Windows {
     }
 
     /// Let every window's name catch up with what is running in it.
-    pub fn track_titles(&mut self) {
+    pub fn track_titles(&mut self) -> bool {
+        let mut changed = false;
         for window in &mut self.windows {
-            window.track_title();
+            changed |= window.track_title();
         }
+        changed
     }
 
     /// Tell every window the size it has to live in.

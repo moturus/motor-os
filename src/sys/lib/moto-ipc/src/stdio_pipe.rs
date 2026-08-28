@@ -684,36 +684,45 @@ impl StdioPipe {
     }
 
     pub fn nonblocking_write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        let (published, result) = self.nonblocking_write_progress(buf);
+        result.map(|()| published)
+    }
+
+    /// Attempt a non-blocking write and report bytes published before an error.
+    ///
+    /// A relay reclaiming a departed reader's ring needs the count to separate
+    /// the published bytes from the suffix that never entered the ring.
+    pub fn nonblocking_write_progress(&self, buf: &[u8]) -> (usize, Result<(), ErrorCode>) {
         if self.is_reader {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return (0, Err(moto_rt::E_INVALID_ARGUMENT));
         }
         let Some(buffer) = self.buffer.as_ref() else {
-            return Ok(buf.len());
+            return (buf.len(), Ok(()));
         };
 
         let mut buffer = buffer.lock();
         if buffer.error_code != moto_rt::E_OK {
-            return Err(buffer.error_code);
+            return (0, Err(buffer.error_code));
         }
         if buffer.reader_closing() {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return (0, Err(moto_rt::E_NOT_CONNECTED));
         }
 
-        let sz = buffer.write(buf);
-        if sz == 0 {
-            return Err(moto_rt::E_NOT_READY);
+        let published = buffer.write(buf);
+        if published == 0 {
+            return (0, Err(moto_rt::E_NOT_READY));
         }
         if buffer.reader_closing() {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return (published, Err(moto_rt::E_NOT_CONNECTED));
         }
 
         if let Err(e) = SysCpu::wake(self.handle) {
             // Cache the error.
             buffer.error_code = e;
-            return Err(e);
+            return (published, Err(e));
         }
 
-        Ok(sz)
+        (published, Ok(()))
     }
 
     pub fn handle(&self) -> SysHandle {

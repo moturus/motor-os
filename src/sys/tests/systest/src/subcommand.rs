@@ -16,7 +16,9 @@ pub fn spawn() -> Subcommand {
         .env("none_key", "")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        // The helper never exposes stderr to callers. Keep diagnostics visible
+        // without an unread pipe or a drain thread that perturbs memory tests.
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .unwrap();
 

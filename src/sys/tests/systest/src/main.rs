@@ -7,6 +7,7 @@ mod admission;
 mod command_output;
 mod ctrl_c;
 mod descriptor_attr;
+mod diagnostics;
 mod execute_permissions;
 mod file_locking;
 mod fs;
@@ -32,6 +33,7 @@ mod sys_io_self_test;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
+mod sysbox_ls;
 mod sysbox_wc;
 mod tcp;
 mod threads;
@@ -786,8 +788,10 @@ fn test_caps() {
     };
     let sys_tty = active_named("/system/services/sys-tty");
     let russhd = active_named("/system/services/russhd");
+    let strobe = active_named("/system/services/strobe");
     assert_eq!(ProcessRole::Interactive, role_for(sys_tty.pid));
     assert_eq!(ProcessRole::Interactive, role_for(russhd.pid));
+    assert_eq!(ProcessRole::System, role_for(strobe.pid));
 
     let console_shell = processes
         .iter()
@@ -1017,6 +1021,14 @@ fn main() {
         poll::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "mio-accept-pump-repro" {
+        poll::reproduce_mio_accept_pump_stall();
+        return;
+    }
+    if (args.len() == 3 || args.len() == 4) && args[1] == "mio-ping-pong-peer" {
+        poll::run_mio_ping_pong_peer(&args[2], args.get(3).map(String::as_str));
+        return;
+    }
     if args.len() == 2 && args[1] == "test-moto-async" {
         moto_async::run_all_tests();
         return;
@@ -1062,6 +1074,12 @@ fn main() {
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
     }
+    if diagnostics::is_child(&args) {
+        diagnostics::run_child(&args);
+    }
+    if logging::is_child(&args) {
+        logging::run_child(&args);
+    }
     if stdio::is_stdio_child(&args) {
         stdio::run_stdio_child(&args);
     }
@@ -1074,6 +1092,10 @@ fn main() {
     }
     if stdio_file_direct::is_child(&args) {
         stdio_file_direct::run_child(&args);
+    }
+    if args.get(1).map(String::as_str) == Some("stdio-post-publish-error-progress") {
+        stdio_file_input::post_publish_error_progress_test();
+        return;
     }
     if stdio_file_input::is_child(&args) {
         stdio_file_input::run_child(&args);
@@ -1154,7 +1176,9 @@ fn main() {
             .unwrap()
     );
 
-    // Run the logging test first, as it sets the logger for everything.
+    diagnostics::run_all_tests();
+
+    // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();
 
     pressure::run_all_tests();
@@ -1211,6 +1235,7 @@ fn main() {
     command_output::run_test();
     sysbox_find::run_test();
     sysbox_less::run_test();
+    sysbox_ls::run_test();
     sysbox_wc::run_test();
     test_oom();
     admission::run_all_tests();

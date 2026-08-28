@@ -18,8 +18,12 @@ use alloc::sync::{Arc, Weak};
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::Poll;
+use core::time::Duration;
 use moto_io::net::tcp::TcpListener;
 use moto_rt::mutex::Mutex;
+
+const RESERVATION_RETRY_START_MS: u64 = 10;
+const RESERVATION_RETRY_MAX_MS: u64 = 1000;
 
 /// The pump's cross-thread wakeup: an epoch counter and a single parked
 /// waker. Raisers run on the channel runtime thread (completion dispatch)
@@ -140,6 +144,7 @@ impl AcceptPump {
     /// obtained after a stop are simply dropped -- releasing a never-posted
     /// slot is free.
     pub async fn run(self: Arc<Self>) {
+        let mut reservation_retry_ms = RESERVATION_RETRY_START_MS;
         loop {
             // The epoch is read before the level: a poke landing during
             // the computation re-runs the loop instead of being lost.
@@ -161,18 +166,34 @@ impl AcceptPump {
                             return;
                         }
                         listener.post_accept(reservation);
+                        if reservation_retry_ms != RESERVATION_RETRY_START_MS {
+                            crate::moto_log!("rt_net: accept pump reservation recovered");
+                        }
+                        reservation_retry_ms = RESERVATION_RETRY_START_MS;
                         continue;
                     }
                     Some(Err(err)) => {
-                        // Park until the next poke rather than dying or
-                        // spinning -- the connect budget inside reserve()
-                        // already spent ~10s (sys-io-unavailable coverage:
-                        // net_driver::test_sys_io_unavailable_fails_all).
-                        crate::moto_log!("rt_net: accept pump reservation failed: {err:?}");
+                        crate::moto_log!(
+                            "rt_net: accept pump reservation failed: {err:?}; retry in {}ms",
+                            reservation_retry_ms
+                        );
+
+                        // A failed provision leaves no request standing, so
+                        // no future accept event is guaranteed to poke us.
+                        // Recheck after a capped backoff; a real level change
+                        // or stop interrupts the delay. This keeps transient
+                        // admission pressure recoverable without hot-looping.
+                        drop(listener);
+                        let delay = Duration::from_millis(reservation_retry_ms);
+                        reservation_retry_ms =
+                            (reservation_retry_ms * 10).min(RESERVATION_RETRY_MAX_MS);
+                        let _ = self.signal.race(seen, moto_async::sleep(delay)).await;
+                        continue;
                     }
                 }
             }
 
+            reservation_retry_ms = RESERVATION_RETRY_START_MS;
             // Do not hold the native listener across the park.
             drop(listener);
             self.signal.changed(seen).await;

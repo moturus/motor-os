@@ -669,7 +669,6 @@ fn run_elf(
         env.push((raw_env[idx], raw_env[num_keys + idx]));
     }
 
-    // TODO: remove CAP_LOG from the default when the runtime is stabilized.
     let mut caps =
         moto_sys::caps::default_child_capabilities(moto_sys::ProcessStaticPage::get().capabilities);
     // Whether to spawn the child detached (owner = kernel, survives our exit).

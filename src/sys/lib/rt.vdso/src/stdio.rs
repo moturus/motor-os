@@ -77,6 +77,18 @@ fn terminal_relay_source(
 static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 4]> = SpinLock::new([None, None, None, None]);
 static CTRL_C_HANDLER_PIPE: SpinLock<Option<Arc<StdioPipe>>> = SpinLock::new(None);
 
+pub(crate) fn stderr_pipe() -> Option<Arc<StdioPipe>> {
+    StdioKind::Stderr.get().map(|stdio| stdio.pipe.clone())
+}
+
+pub(crate) fn with_stderr_claim<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let stderr = StdioKind::Stderr.get()?;
+    let owned = stderr.inner.lock().take()?;
+    let result = f();
+    stderr.return_impl(owned);
+    Some(result)
+}
+
 pub fn ctrl_c_register_handler() -> Result<u64, ErrorCode> {
     let mut registered = CTRL_C_HANDLER_PIPE.lock();
     if registered.is_some() {
@@ -567,12 +579,13 @@ async fn relay_in(
                     if let Some(ctrl_c) = ctrl_c.as_mut() {
                         ctrl_c.service(&dest);
                     }
-                    match dest.nonblocking_write(chunk) {
-                        Ok(written) => {
-                            chunk = &chunk[written..];
+                    let (published, result) = dest.nonblocking_write_progress(chunk);
+                    match result {
+                        Ok(()) => {
+                            chunk = &chunk[published..];
                             moto_sys::SysCpu::sched_yield();
                         }
-                        Err(moto_rt::E_NOT_READY) => {
+                        Err(moto_rt::E_NOT_READY) if published == 0 => {
                             if source_alive && ctrl_c.is_some() {
                                 let dest_ready = dest.handle().as_future();
                                 let source_ready = owned.pipe.handle().as_future();
@@ -590,7 +603,7 @@ async fn relay_in(
                             }
                         }
                         Err(_) => {
-                            break 'relay RelayEnd::DestinationGone(chunk.to_vec());
+                            break 'relay RelayEnd::DestinationGone(chunk[published..].to_vec());
                         }
                     }
                 }

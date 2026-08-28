@@ -24,11 +24,11 @@ RUST_LLVM_BASE_REV="21cf28432798952d942bacc6bcee3a328faa3638"
 
 MOTOR_LLVM_REPOSITORY="https://github.com/moturus/llvm-project.git"
 MOTOR_LLVM_REF="refs/heads/motor-os-1.99.0-beta-f47d5bb"
-MOTOR_LLVM_REV="2dcc671e2eb723ef61a664bde9823fbe880e4e19"
+MOTOR_LLVM_REV="7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4"
 
 MOTOR_RUST_REPOSITORY="https://github.com/moturus/rust.git"
 MOTOR_RUST_REF="refs/heads/motor-os-1.99.0-beta-f47d5bb"
-MOTOR_RUST_REV="3f0499a81a0fc6a0a7f033b666f3574176b17ca2"
+MOTOR_RUST_REV="9feb0d353439b36fb94223cb4acd928d50a82295"
 MOTOR_RUST_CHANNEL="dev"
 MOTOR_CARGO_VERSION="1.99.0-dev"
 MOTOR_CARGO_REPOSITORY="https://github.com/rust-lang/cargo.git"
@@ -43,7 +43,7 @@ UPSTREAM_CARGO_REV="eb98b54bc9f3c74519f43d066cb3fd02ebc88df0"
 
 MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
 MOTOR_MLIBC_REF="refs/heads/motor-os-rustc"
-MOTOR_MLIBC_REV="62f9495700537ded14a2a6fae9373227fe5ec5ca"
+MOTOR_MLIBC_REV="0cece7e5cfbd7f43ffb5968ced80056a655cb70f"
 
 STDLIB_MOTO_RT_VERSION="0.17.5"
 STDLIB_MOTO_RT_CHECKSUM="0d957efc93bb603844e45d66f45c9b999168ff8f7630da91f3a7308c498a7ccc"

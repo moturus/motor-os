@@ -9,7 +9,8 @@
 
 use std::{
     fmt::Display,
-    sync::atomic::{AtomicUsize, Ordering},
+    io::Write,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use log::Record;
@@ -54,22 +55,36 @@ impl Display for LogEntry {
 }
 
 struct MotoLogger {
-    tag_id: u64,
-    conn: std::sync::Mutex<ClientConnection>,
+    tag_id: AtomicU64,
+    conn: std::sync::Mutex<Option<ClientConnection>>,
 }
 
 static MOTO_LOGGER: AtomicUsize = AtomicUsize::new(0);
 
 impl log::Log for MotoLogger {
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let mut conn = self.conn.lock().unwrap();
-            implementation::LogRequest::prepare(conn.data_mut(), self.tag_id, record);
-            if conn.do_rpc(None).is_err()
-                || implementation::LogResponse::parse(conn.data()).is_err()
-            {
-                todo!("implement fallback logging: to stderr, if available, or to the kernel (SysRay)");
-            }
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let Ok(mut slot) = self.conn.lock() else {
+            write_stderr(record);
+            return;
+        };
+        let Some(conn) = slot.as_mut() else {
+            drop(slot);
+            write_stderr(record);
+            return;
+        };
+        implementation::LogRequest::prepare(
+            conn.data_mut(),
+            self.tag_id.load(Ordering::Acquire),
+            record,
+        );
+        if conn.do_rpc(None).is_err() || implementation::LogResponse::parse(conn.data()).is_err() {
+            *slot = None;
+            drop(slot);
+            write_stderr(record);
         }
     }
 
@@ -78,6 +93,17 @@ impl log::Log for MotoLogger {
     }
 
     fn flush(&self) {}
+}
+
+fn write_stderr(record: &Record) {
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{} {}:{} - {}",
+        record.level(),
+        record.target(),
+        record.line().unwrap_or(0),
+        record.args()
+    );
 }
 
 pub type StdError = Box<dyn std::error::Error + Send + Sync>;
@@ -102,8 +128,8 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {e:?}.")))?;
 
     let logger = Box::leak(Box::new(MotoLogger {
-        tag_id,
-        conn: std::sync::Mutex::new(conn),
+        tag_id: AtomicU64::new(tag_id),
+        conn: std::sync::Mutex::new(Some(conn)),
     }));
 
     assert_eq!(
@@ -114,6 +140,24 @@ pub fn init(tag: &str) -> Result<(), StdError> {
     log::set_logger(logger)
         .map_err(|err| StdError::from(format!("{err}")))
         .map(|()| log::set_max_level(log::LevelFilter::Info))
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_set_tag_id(tag_id: u64) {
+    let logger = MOTO_LOGGER.load(Ordering::Acquire) as *const MotoLogger;
+    assert!(!logger.is_null());
+    // The logger is leaked by init(), so the pointer remains valid forever.
+    unsafe { &*logger }.tag_id.store(tag_id, Ordering::Release);
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_rpc_enabled() -> bool {
+    let logger = MOTO_LOGGER.load(Ordering::Acquire) as *const MotoLogger;
+    assert!(!logger.is_null());
+    // The logger is leaked by init(), so the pointer remains valid forever.
+    unsafe { &*logger }.conn.lock().unwrap().is_some()
 }
 
 // Implementation details.

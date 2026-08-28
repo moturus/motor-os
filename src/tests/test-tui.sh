@@ -364,7 +364,7 @@ set -e
 printf '%s\n' "$out"
 [ "$status" -eq 0 ] ||
   fail "systest stdio-terminal-tests exited with status $status"
-[ "${out##*$'\n'}" = "PASS" ] ||
+printf '%s\n' "$out" | grep -qx PASS ||
   fail "systest stdio-terminal-tests did not finish with PASS"
 
 echo "-- Ctrl+C Default and handler leaves --"

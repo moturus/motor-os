@@ -44,7 +44,8 @@ The policy follows these principles:
   Interactive. Compiled programs in those directories remain non-writable.
 - `/devtools/src` is the Interactive-writable development workspace.
 - None may read and execute public installed content, but may write only the
-  explicitly shared log and scratch trees. None cannot traverse `/user/cfg`.
+  explicitly shared scratch trees. Lower-role services submit logs over IPC;
+  None cannot traverse `/user/cfg` or `/system/logs`.
 - Host owner/group/other read and write bits do not map to Motor roles. Host
   execute bits select which files require script or ELF classification; the
   image policy supplies all three complete Motor permission triplets.
@@ -64,7 +65,7 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 |---|---|---|---|---|---|
 | `/` and otherwise unmatched paths | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | System-owned installed content with public read/execute access |
 | `/system/bin` | `rwxr-xr-x` | `rw-r--r--` | `r-xr-xr-x` | `r-xr-xr-x` | Non-writable system commands executable by every role |
-| `/system/logs` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Logs written and rotated by None-role strobe and test processes |
+| `/system/logs` | `rwxr-x---` | `rw-r-----` | `r-xr-----` | `r-xr-----` | System strobe writes and rotates logs; Interactive may read them and None has no access |
 | `/system/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Shared system scratch |
 | `/user` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive-owned programs and work, readable by None by default |
 | `/user/bin` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable user scripts and W^X compiled programs |
@@ -81,8 +82,12 @@ Important consequences of the directory modes are:
   a longer tree rule restricts access.
 - Interactive can edit a script in `/devtools/bin` in place, but cannot add,
   delete, or rename entries there because the directory is `rwxr-xr-x`.
-- Every role can create and replace entries in `/system/logs`, `/system/tmp`,
-  `/user/tmp`, and `/devtools/tmp` when that tree exists.
+- Every role can create and replace entries in `/system/tmp`, `/user/tmp`, and
+  `/devtools/tmp` when that tree exists.
+- Only System can create, delete, or rename entries in `/system/logs`.
+  Interactive can traverse and read regular logs but cannot alter them; None
+  cannot traverse the directory. An image containing a script or ELF under
+  this tree is rejected even though its fail-closed profiles are schema-valid.
 
 Several installed trees deliberately use the default rule:
 
@@ -235,16 +240,19 @@ images use their shipped `/devtools`, while standard-image uploads use
 absent. The standard root is reachable by None-role test children because
 every component grants None traversal; `/user/cfg` would not be suitable.
 
-## Limits and follow-up work
+## Runtime behavior and remaining limits
 
-- Runtime-created files and directories still start as `rwxrwxrwx` in sys-io
-  unless their creator narrows them. Runtime narrowing is a separate,
-  non-atomic operation, so this image policy must not be described as enforcing
-  W^X after boot or across Motor OS. A runtime design must address creation
-  modes, writable handles, uploads, compiler output, and executable loading.
-- `/system/logs` remains writable by every role because None-role strobe
-  rotates logs and Interactive tests write and delete logs. Protecting log
-  integrity requires a service or sys-io change.
+- Runtime-created regular files start `rw-` for their creator, `rwx` for
+  higher roles, and `r--` for lower roles. Directories start `rwx` for the
+  creator and higher roles and `r-x` for lower roles. Producers finalize
+  executables with the one-way `rw-` → `r-x` self-role transition after all
+  writes succeed; exact-permissions creation is available for entries that
+  must be linked with their final mode.
+- Runtime logs are created atomically as `rw-r-----` by System-role strobe via
+  the exact-permissions API. Rotation renames the current file to `.prev`,
+  preserving its mode. Authorized lower-role processes use `moto_log`;
+  `CAP_LOG` admits a peer to strobe but does not grant direct filesystem
+  access.
 - The remaining `/system/cfg` content, including `sys-init.cfg` and
   `sys-net.toml`, remains readable by None. Narrowing those reads requires an
   audit of None-role services.

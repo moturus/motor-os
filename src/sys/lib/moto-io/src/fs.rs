@@ -347,7 +347,25 @@ impl FsClient {
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
-        let entry_id = api_fs::create_entry_resp_decode(resp)?;
+        let entry_id = api_fs::create_entry_resp_decode(resp, kind)?;
+        Ok(entry_id)
+    }
+
+    /// Create a file or directory atomically with complete permissions.
+    pub async fn create_entry_with_permissions(
+        self: &Rc<Self>,
+        parent_id: EntryId,
+        kind: EntryKind,
+        name: &str,
+        permissions: RolePermissions,
+    ) -> Result<EntryId> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg =
+            api_fs::create_with_permissions_msg_encode(parent_id, kind, name, permissions, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let entry_id = api_fs::create_entry_resp_decode(resp, kind)?;
         Ok(entry_id)
     }
 

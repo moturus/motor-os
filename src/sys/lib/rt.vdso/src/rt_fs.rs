@@ -15,7 +15,9 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
-use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role};
+use moto_io::fs::{
+    AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role, RolePermissions,
+};
 use moto_ipc::io_channel;
 use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
@@ -522,6 +524,33 @@ impl AsyncFsClient {
         })
     }
 
+    fn role_permissions(&self, entry_id: EntryId) -> Result<RolePermissions> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client.metadata(entry_id).await?.permissions()
+        })
+    }
+
+    fn set_copy_permissions(&self, entry_id: EntryId, source: RolePermissions) -> Result<()> {
+        self.blocking_run(move |fs_client| async move {
+            let mut permissions = fs_client.metadata(entry_id).await?.permissions()?;
+            match current_fs_role() {
+                Role::System => {
+                    let system = copied_access(source.system);
+                    let interactive = source.interactive.meet(system);
+                    permissions =
+                        RolePermissions::new(system, interactive, source.none.meet(interactive));
+                }
+                Role::Interactive => {
+                    let interactive = copied_access(source.interactive);
+                    permissions.interactive = interactive;
+                    permissions.none = source.none.meet(interactive);
+                }
+                Role::None => permissions.none = copied_access(source.none),
+            }
+            fs_client.set_all_permissions(entry_id, permissions).await
+        })
+    }
+
     fn resize(&self, file_id: EntryId, new_size: u64) -> Result<()> {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
@@ -537,12 +566,16 @@ impl AsyncFsClient {
     fn copy(&self, from: &str, to: &str) -> Result<u64> {
         // Open the source: it must exist and be a regular file.
         let src = self.file_open(from, moto_rt::fs::O_READ)?;
+        let source_permissions = self.role_permissions(src.entry_id)?;
 
         // Create the destination, truncating it if it already exists.
         let dst = self.file_open(
             to,
             moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE | moto_rt::fs::O_TRUNCATE,
         )?;
+        // Copy through a writable, non-executable staging file. Under the
+        // legacy default this also removes execute before any contents move.
+        self.set_permissions(dst.entry_id, AccessPermissions::Rw)?;
 
         const CHUNK_SIZE: u64 = 64 * 1024;
 
@@ -557,6 +590,7 @@ impl AsyncFsClient {
             offset += copied;
         }
 
+        self.set_copy_permissions(dst.entry_id, source_permissions)?;
         Ok(offset)
     }
 
@@ -1647,6 +1681,13 @@ fn access_to_perm(access: AccessPermissions) -> u64 {
         perm |= moto_rt::fs::PERM_EXEC;
     }
     perm
+}
+
+fn copied_access(access: AccessPermissions) -> AccessPermissions {
+    match access {
+        AccessPermissions::Rwx => AccessPermissions::Rx,
+        access => access,
+    }
 }
 
 fn perm_to_access(perm: u64) -> Result<AccessPermissions> {

@@ -162,6 +162,7 @@ mod tests {
             ],
             body: b"{\"q\":1}".to_vec(),
             timeouts: Default::default(),
+            cancellation: None,
         };
 
         let mut sink = CollectSink::default();

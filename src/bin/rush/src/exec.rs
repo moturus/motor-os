@@ -1166,6 +1166,7 @@ fn spawn_external(
     sole_use: &[bool; 3],
     shell: &mut Shell,
 ) -> i32 {
+    let _title = crate::pane_title::ForegroundTitle::new(program, shell);
     if let Some(status) = run_shell_script(program, args, env, fds, shell) {
         return status;
     }

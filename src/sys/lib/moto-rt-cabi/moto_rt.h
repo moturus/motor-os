@@ -117,6 +117,7 @@ int32_t moto_rt_vm_unmap(uint64_t addr);
 int64_t moto_rt_open(const uint8_t *path, size_t path_len, uint32_t opts);
 int64_t moto_rt_read(int32_t fd, uint8_t *buf, size_t n);
 int64_t moto_rt_write(int32_t fd, const uint8_t *buf, size_t n);
+int32_t moto_rt_set_file_perm(int32_t fd, uint64_t perm);
 int64_t moto_rt_seek(int32_t fd, int64_t offset, uint8_t whence);
 int32_t moto_rt_close(int32_t fd);
 int32_t moto_rt_mkdir(const uint8_t *path, size_t path_len);

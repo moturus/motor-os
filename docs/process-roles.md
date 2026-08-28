@@ -158,9 +158,9 @@ Role semantics:
 
 | Role | Definition | Meaning | Typical holders |
 |------|------------|---------|-----------------|
-| `System` | `CAP_SYS` set | root-like; unkillable from userspace; unrestricted grant authority at spawn | kernel-spawned sys-io; sys-init |
+| `System` | `CAP_SYS` set | root-like; unkillable from userspace; unrestricted grant authority at spawn | kernel-spawned sys-io; sys-init; strobe |
 | `Interactive` | no `CAP_SYS`, `CAP_INTERACTIVE` set | the logged-in user's authority | sys-tty; russhd; console/ssh shells; commands they run; user daemons (including detached ones) |
-| `None` | neither bit | least privilege | strobe, dns-resolver, other services, deliberately sandboxed children |
+| `None` | neither bit | least privilege | dns-resolver, other services, deliberately sandboxed children |
 
 ### Why derived rather than stored
 
@@ -319,9 +319,11 @@ create a logged-in session. `default_child_capabilities`, used when
 ```rust
 pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
     let role = ProcessRole::from_caps(parent_caps);
-    let mut child_caps = CAP_SPAWN | CAP_LOG;
-    if matches!(role, ProcessRole::Interactive) {
-        child_caps |= CAP_INTERACTIVE;
+    let mut child_caps = CAP_SPAWN;
+    match role {
+        ProcessRole::System => child_caps |= CAP_LOG,
+        ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
+        ProcessRole::None => {}
     }
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
@@ -332,15 +334,22 @@ pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
 
 Semantics:
 
-- Interactive parent → Interactive child (shell → command, command → helper).
+- Interactive parent → Interactive child (shell → command, command → helper),
+  without `CAP_LOG`. An Interactive holder passes `CAP_LOG` only through an
+  explicit replacement mask, and only because the kernel subset rule proves
+  that it already holds the bit.
 - System parent → None child by default; either Interactive or System requires
   an explicit `MOTOR_OS_CAPS` grant. This matters for sys-init services with a
   zero/omitted mask and for all-ones System processes, whose raw word contains
   the Interactive bit even though their derived role is System. A System
   console rush is an explicit session boundary and supplies that grant for
   ordinary external commands (§7); this does not change the global default.
-- None parent → None child. Intersecting the base default with its caps also
-  avoids requesting `CAP_LOG` from a `CAP_SPAWN`-only parent.
+  The default None child does receive `CAP_LOG`, and System may also grant it
+  explicitly regardless of its own raw capability word.
+- None parent → None child without `CAP_LOG`, including when the parent itself
+  holds `CAP_LOG`. The kernel also rejects an explicit `CAP_LOG` grant by a
+  None-role parent. Such a process may use logging authority but is never a
+  grantor.
 
 `MOTOR_OS_CAPS` keeps its replace-wholesale semantics. The two transitions
 that are not produced by the default rule are therefore straightforward:
@@ -351,7 +360,7 @@ that are not produced by the default rule are therefore straightforward:
   points are sys-init → sys-tty and sys-init → russhd (§7).
 - **Interactive → None:** the Interactive parent supplies an explicit
   replacement mask that omits both `CAP_SYS` and `CAP_INTERACTIVE`. The
-  remaining bits must be a subset of the parent's caps; `0` and the usual
+  remaining bits must be a subset of the parent's caps; `0` and an explicit
   `CAP_SPAWN | CAP_LOG` subset are valid examples. This is a deliberate
   demotion/sandboxing operation. An unadorned child instead stays Interactive.
 
@@ -364,6 +373,12 @@ page is mapped in every process, so there is no ordering concern.
 A present-but-unparsable `MOTOR_OS_CAPS` value fails the spawn with
 `E_INVALID_ARGUMENT` instead of falling back to the default. An explicit mask
 is a policy statement, so the demotion path must not fail open.
+
+`CAP_LOG` admits its holder to both the kernel log syscall and strobe's
+`sys-log` record channel. Strobe checks the connection-bound peer capability
+word before accepting a tag. The bit does not grant access to
+`/system/logs`; lower-role holders submit records through `moto_log` while
+System-role strobe alone creates and rotates the files.
 
 ### 5.2 Client-side permission reporting uses the caller's own role
 
@@ -406,18 +421,36 @@ remain server-side `r`/`w`/directory-`x` and the unforgeable role (§1,
 property 1). This matches PERMISSIONS_DESIGN.md, which calls file `x`
 "metadata for an exec-time consumer above the FS".
 
+### 5.4 Process diagnostics use stderr first
+
+rt.vdso's `log` facade and the vtable operation historically named
+`log_to_kernel` both use the process diagnostic sink. The sink clones stderr's
+underlying `StdioPipe` and writes to it directly, bypassing the POSIX descriptor
+table and `SelfStdio` claim. A negative `log_backtrace` descriptor selects the
+same sink. This keeps loader warnings, panic text, backtraces, and debug records
+visible to an ordinary Interactive command after its default loses `CAP_LOG`.
+It does not add another level filter: a debug record admitted by the debug
+rt.vdso logger reaches stderr.
+
+The route is guarded per thread. Same-thread reentry skips stderr; concurrent
+threads serialize rather than losing a record. A missing pipe, a hard write
+failure, or a short write falls back to `SysRay::log` only for a `CAP_LOG`
+holder. Without that bit the record is dropped. The helper never logs a pipe
+failure, so neither failure path can recurse through itself.
+
 ---
 
-## 6. moto-rt: no changes
+## 6. moto-rt ABI unchanged
 
-Deliberately none. The role is enforced server-side (kernel, sys-io) and
-assigned via the existing env-var spawn mechanism, so `std` needs no new API,
-no new error code (`E_NOT_ALLOWED` exists), no vtable slot, and therefore **no
-`RT_VERSION` bump and no toolchain-lag staging** (the published-crate problem
-documented in `docs/plans/networking-remaining-steps.md:41–52`). A program
-that wants its own role reads `ProcessStaticPage` via moto-sys. If a
-`moto_rt::process::role()` getter is ever wanted, it is a compatible
-append-at-end vtable addition.
+The role is enforced server-side (kernel, sys-io) and assigned via the existing
+env-var spawn mechanism, so `std` needs no new API, no new error code
+(`E_NOT_ALLOWED` exists), and no vtable slot. The diagnostic change reuses the
+existing vtable operations; only the `log_backtrace` documentation changes.
+There is therefore **no `RT_VERSION` bump and no toolchain-lag staging** (the
+published-crate problem documented in
+`docs/plans/networking-remaining-steps.md:41–52`). A program that wants its own
+role reads `ProcessStaticPage` via moto-sys. If a `moto_rt::process::role()`
+getter is ever wanted, it is a compatible append-at-end vtable addition.
 
 ---
 
@@ -441,12 +474,15 @@ ordinary descendants of an Interactive process, but every explicit
    includes `CAP_INTERACTIVE` in the intersection mask
    (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE}` ∩ own caps).
    Because russhd is not `CAP_SYS`, the subset rule means **russhd itself must
-   hold the bit** to pass it on:
+   hold each bit** to pass it on. This explicit trust-boundary grant is why the
+   shell holds `CAP_LOG`; its unadorned commands do not inherit that bit:
 4. **Both shipped sys-init configs**:
    `img_files/motor-os/system/cfg/sys-init.cfg` and
    `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
-   `124` (`60 | 64`). dns-resolver
-   (`svc:8`) and strobe (`CAP_LOG`) stay role None.
+   `124` (`60 | 64`). dns-resolver (`svc:8`) stays role None. sys-init launches
+   strobe separately with `CAP_SYS | CAP_LOG`; this makes strobe the only
+   process that writes and rotates `/system/logs` while leaving its public
+   stats-registry channel available to lower roles.
 5. **sys-init zero-mask semantics** (`sys-init/src/main.rs`, `spawn_service`):
    because the documented `svc:<caps>:<cmd>` grammar requires a mask, sys-init
    always sets `MOTOR_OS_CAPS` for a parsed service, including `0`, and rejects
@@ -462,11 +498,13 @@ ordinary descendants of an Interactive process, but every explicit
    the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE` according
    to the shell's derived role while adding `CAP_SPAWN_DETACHED`; otherwise a
    trusted session daemon would be silently demoted.
-7. **Tests and scripts with literal masks**: the focused lifetime path in
-   `src/tests/full-test.sh` uses `0x6c` to retain the ssh session role. Explicit
-   test masks preserve the caller's Interactive bit when testing inheritance,
-   or omit it with a comment when deliberate demotion is part of the test. The
-   existing `CAP_SYS` escalation test deliberately remains unchanged.
+7. **Tests and scripts with literal masks**: full systest and soak invocations
+   use `0x4c` (`CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE`) because the suite tests
+   the logging service. The focused lifetime path in `src/tests/full-test.sh`
+   keeps `0x6c` to add detached-spawn authority. Explicit test masks preserve
+   the caller's Interactive bit when testing inheritance, or omit it with a
+   comment when deliberate demotion is part of the test. The existing
+   `CAP_SYS` escalation test deliberately remains unchanged.
 8. **Unadorned spawns outside Rush's System-session boundary**: §5.1 carries
    Interactive only from an Interactive parent. The kernel's all-ones sys-io
    grant and sys-io's all-ones sys-init grant remain System because `CAP_SYS`
@@ -529,27 +567,40 @@ belong to `PERMISSIONS_DESIGN.md`:
   remain `Role::System`.
 - The existing `set_permissions` request carries `(entry_id, access)` and is
   interpreted as **target = caller role**. Thus ordinary
-  `std::fs::set_permissions` narrows the caller's own byte; motor-fs cascades a
-  narrowing to lower roles and rejects an attempted self-widen. A future
+  `std::fs::set_permissions` changes the caller's own byte; motor-fs permits a
+  narrowing or the exact `Rw` → `Rx` finalization transition, cascades removed
+  permissions to lower roles, and rejects every other self-widen. A future
   administrative API that explicitly edits a lower role can add a distinct
   command/target field when it has a real consumer; it is not required to make
   chmod work correctly.
 
-  Be explicit about what that deferral means: with target = caller and
-  `may_set` allowing only narrowing of one's own byte, **no client of sys-io —
-  not even a System process — can widen any permission byte back through the
-  public API**. Every public chmod is therefore permanently one-way and
-  cascades downward. A Unix-style `chmod -w` → `chmod +w` round-trip, common
-  in ported software and test suites, fails on the second step with
-  PermissionDenied. This is accepted, not accidental — it is what makes
-  sealing real (PERMISSIONS_DESIGN.md §4a) — but it must be called out in
-  user-facing docs, and the runtime recovery idiom — copy, delete, rename;
-  delete needs only parent-directory `w` — documented and tested alongside it
-  (§10.7).
-- Client create requests still use `[Rwx; 3]`. That array is monotonic and is
-  legal for every caller role under `PERMISSIONS_DESIGN.md` §6.2. Initial
-  restricted creation would require a separate protocol addition; do not mix
-  it into role attribution.
+  Be explicit about what that deferral means: no client of sys-io — not even a
+  System process — can restore `w` or any other removed permission through its
+  own byte. The sole exception adds `x` while permanently dropping `w`.
+  A Unix-style `chmod -w` → `chmod +w` round-trip, common in ported software
+  and test suites, fails on the second step with PermissionDenied. This is
+  accepted, not accidental — it is what makes sealing real
+  (PERMISSIONS_DESIGN.md §4a) — but it must be called out in user-facing docs,
+  The recovery idiom is an explicit read/create/write/delete/rename sequence:
+  copying bytes into an ordinarily created writable staging file before
+  replacing the sealed entry. `std::fs::copy` is not suitable because it
+  preserves the source permission byte; delete still needs only
+  parent-directory `w` (§10.7).
+- Ordinary client create requests use creator-relative defaults: files are
+  `Rw` for the creator, `Rwx` for higher roles, and `R` for lower roles;
+  directories are `Rwx` for the creator and higher roles and `Rx` for lower
+  roles. A distinct
+  `create_entry_with_permissions` request carries a complete mode and asks
+  Motor FS to validate creation authority and monotonicity before linking the
+  entry; rejection is atomic.
+- On Motor OS, `std::fs::copy` preserves the source permission visible to the
+  caller and the source permissions of every lower role the caller controls.
+  Lower bytes are intersected with the finalized caller byte to retain
+  monotonicity. The destination is staged as `Rw` while contents move, then
+  `R`, `Rw`, or `Rx` is restored; a legacy caller-role `Rwx` source is
+  finalized as `Rx`. Higher-role bytes retain their creator-relative defaults
+  because the caller cannot edit them. sysbox `cp` relies on that behavior for
+  files and leaves copied directories at their creator-relative default.
 
 ---
 
@@ -574,16 +625,18 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    `{CAP_SYS, CAP_INTERACTIVE}` (System wins when both set), and safe raw-`u8`
    decoding of 0..=2/rejection of other values.
 2. **Default inheritance**: an Interactive systest spawning with no
-   `MOTOR_OS_CAPS` yields an Interactive child (child asserts via
-   `ProcessStaticPage`); explicit `MOTOR_OS_CAPS` without `CAP_INTERACTIVE`
-   yields a None child (demotion). A present-but-unparsable `MOTOR_OS_CAPS`
+   `MOTOR_OS_CAPS` yields an Interactive child without `CAP_LOG` (child asserts
+   via `ProcessStaticPage`); an explicit mask can preserve its held `CAP_LOG`,
+   while one without `CAP_INTERACTIVE` yields a None child (demotion). A
+   present-but-unparsable `MOTOR_OS_CAPS`
    fails the spawn with `E_INVALID_ARGUMENT` (§5.1) rather than falling back
    to the default. Exercise the default-cap helper with a
    System/all-ones parent and assert the default child is None, not Interactive.
 3. **Default subset correctness**: a `CAP_SPAWN`-only parent can spawn an
-   unadorned None child (the default must not over-request `CAP_LOG`). A None
-   child requesting `CAP_INTERACTIVE` explicitly gets `E_NOT_ALLOWED`; the
-   existing `CAP_SYS` escalation test stays green.
+   unadorned None child. A `CAP_LOG`-holding None parent also creates an
+   unadorned child without that bit and is denied when it requests the bit
+   explicitly. A None child requesting `CAP_INTERACTIVE` explicitly gets
+   `E_NOT_ALLOWED`; the existing `CAP_SYS` escalation test stays green.
 4. **Explicit-mask audit**: a trusted detached child launched through rush
    remains Interactive and detached; a mask intentionally omitting the bit
    produces None. Keep the focused full-test lifetime mask and its comment in
@@ -595,15 +648,16 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    Callers test fail-closed behavior rather than depending on one error code for
    every invalid-handle shape.
 6. **Reporting**: `ProcessInfoV1.process_role` matches actual caps for each
-   live role. Assert that sys-tty, its console rush, russhd, and an authenticated
-   ssh shell report Interactive. Assert the documented None result for
-   zombie/aggregate/kernel entries and pin `size_of::<ProcessInfoV1>() == 56`.
+   live role. Assert that strobe reports System and that sys-tty, its console
+   rush, russhd, and an authenticated ssh shell report Interactive. Assert the
+   documented None result for zombie/aggregate/kernel entries and pin
+   `size_of::<ProcessInfoV1>() == 56`.
 7. **FS attribution**: create an entry while Interactive, narrow it with public
    chmod, and verify the Interactive and cascaded None bytes change while the
    System byte remains `Rwx`. Verify self-widening fails — including the
    Unix-style readonly round-trip (`set_permissions` readonly, then
-   un-readonly fails on the second step) — and exercise the copy → delete →
-   rename recovery idiom (§8). Spawn a None child and
+   un-readonly fails on the second step) — and exercise the explicit
+   read/create/write → delete → rename recovery idiom (§8). Spawn a None child and
    exercise read, write, resize, create/delete, move (both parents), and
    directory traversal/listing denial according to `PERMISSIONS_DESIGN.md`.
    Also verify a newly accepted connection cannot send a request when the peer
@@ -615,6 +669,20 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
 9. **russhd policy**: cover unauthenticated denial, authenticated shell
    inheritance, in-process SFTP behavior, and detached rmux/rush descendants
    under the chosen Interactive-russhd policy.
+10. **Diagnostics**: an Interactive child without `CAP_LOG` captures ordinary
+    rt.vdso records, debug-build records, panic text, and a complete backtrace
+    on piped stderr, while direct `SysRay::log` is denied. Exercise the route
+    while stderr's normal state is claimed. A dead reader, a short write, and
+    same-thread reentry drop without `CAP_LOG` and use the kernel fallback with
+    it.
+11. **Logging service**: claim a slot from the fixed eight-tag systest pool and
+    derive every valid protocol-test tag from it. Verify System strobe accepts
+    `CAP_LOG`-bearing Interactive and None clients, rejects unauthorized and
+    malformed peers without losing service, and reports System through
+    process stats. Verify `/system/logs` is `rwxr-x---`, current and rotated
+    logs are `rw-r-----`, Interactive can read but cannot write or delete them,
+    and None cannot read them. Match records with a PID and nonce rather than
+    deleting old files or relying on timestamps.
 
 ---
 

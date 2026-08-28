@@ -269,7 +269,11 @@ pub fn run_tests() {
         "direct operation child stderr: {}",
         String::from_utf8_lossy(&message)
     );
-    assert_eq!(message, b"mixed-ok");
+    assert!(
+        message.ends_with(b"mixed-ok"),
+        "direct operation payload missing from stderr: {}",
+        String::from_utf8_lossy(&message)
+    );
     assert_eq!(
         moto_rt::fs::seek(input, 0, moto_rt::fs::SEEK_CUR).unwrap(),
         0

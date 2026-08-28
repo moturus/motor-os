@@ -34,7 +34,12 @@ The shell is somewhat barebones now (contributions are welcome!).
 - On the development image, `/devtools/tests/systest`,
   `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
   make sure everything is working as expected;
-- `/system/logs` directory contains some occasionally useful logs;
+- `/system/logs` contains current and rotated service logs. Interactive
+  sessions can list and read them, System-role strobe alone creates and rotates
+  them, and None-role processes cannot traverse the directory. Runtime
+  diagnostics go to the process's stderr first, including debug records when
+  debug logging is configured; for these diagnostics, the kernel log is a
+  capability-gated fallback when that write fails;
 - `/devtools/bin/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
   (attempt) to extract stack traces for all threads in the process; the stack traces
   are addresses, so `addr2line` will need to be used with the binary

@@ -77,10 +77,10 @@ fn test_dump(root: &Path) {
     println!("sysbox_less::test_dump PASS");
 }
 
-/// The shape a pipeline's last stage has: the data on stdin, a terminal on
-/// stdout. Motor OS has no `/dev/tty` — a program's terminal is its own stdin
-/// — so there is no keyboard to page with, and the text comes out whole
-/// rather than one screenful with no way to ask for the next.
+/// The shape a pipeline's last stage has without a session terminal: the data
+/// on stdin and a terminal on stdout. This child explicitly declines the
+/// ambient terminal, so there is no keyboard to page with and the text comes
+/// out whole rather than one screenful with no way to ask for the next.
 fn test_pipeline_shape(root: &Path) {
     let input = std::fs::File::open(root.join("ten.txt")).unwrap();
     let output = Command::new(SYSBOX)
@@ -88,6 +88,7 @@ fn test_pipeline_shape(root: &Path) {
         .stdin(Stdio::from(input))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true")
         .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
         .env("LINES", "6")
         .env("COLUMNS", "32")
@@ -154,6 +155,7 @@ struct Pager {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr: std::thread::JoinHandle<Vec<u8>>,
     rows: usize,
     cols: usize,
     /// Everything the pager wrote before the frame just read: the alternate
@@ -184,10 +186,17 @@ fn spawn_terminal_command(
 
     let stdin = child.stdin.take().unwrap();
     let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut child_stderr = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        child_stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
     Pager {
         child,
         stdin,
         stdout,
+        stderr,
         rows,
         cols,
         preamble: String::new(),
@@ -275,7 +284,13 @@ impl Pager {
             tail.contains("\x1b[?1049l"),
             "the pager kept the alternate screen: {tail:?}"
         );
-        assert!(self.child.wait().unwrap().success());
+        let status = self.child.wait().unwrap();
+        let stderr = self.stderr.join().unwrap();
+        assert!(
+            status.success(),
+            "{status}: {}",
+            String::from_utf8_lossy(&stderr)
+        );
     }
 }
 
@@ -457,7 +472,13 @@ fn test_typeahead_reclaim(root: &Path) {
         output.contains("\x1b[?1049l"),
         "pager did not quit: {output:?}"
     );
-    assert!(pager.child.wait().unwrap().success());
+    let status = pager.child.wait().unwrap();
+    let stderr = pager.stderr.join().unwrap();
+    assert!(
+        status.success(),
+        "{status}: {}",
+        String::from_utf8_lossy(&stderr)
+    );
 
     println!("sysbox_less::test_typeahead_reclaim PASS");
 }

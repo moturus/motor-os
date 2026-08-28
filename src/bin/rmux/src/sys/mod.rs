@@ -71,6 +71,16 @@ pub use unix::{
 ///   at every prompt matters.
 pub type TellSize = Box<dyn Fn((u16, u16)) + Send>;
 
+/// Ask the pane's terminal which program currently owns it.
+///
+/// Linux can answer through its pty and process table. Motor OS's process tree
+/// cannot distinguish foreground and background children, so Rush cooperates
+/// through OSC instead and this fallback returns `None` there.
+pub type ForegroundCommand = Box<dyn FnMut() -> Option<String> + Send>;
+
+/// Whether this platform can observe foreground-process changes in a pane.
+pub const HAS_FOREGROUND_COMMAND: bool = cfg!(target_os = "linux");
+
 /// A pane's end of the terminal it gives its child.
 ///
 /// One stream out on a pty, two on pipes: the platform decides, and the pane
@@ -83,4 +93,7 @@ pub struct PaneIo {
     pub output: Vec<Box<dyn Read + Send>>,
     /// How to say the pane is a different size now, where saying so is possible.
     pub tell_size: TellSize,
+    /// The executable holding the terminal's foreground process group, if the
+    /// platform exposes one.
+    pub foreground_command: ForegroundCommand,
 }

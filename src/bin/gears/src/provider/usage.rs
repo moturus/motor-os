@@ -1,10 +1,8 @@
-//! Token and spend accounting, per agent.
+//! Cumulative provider-reported usage for one Gears process.
 //!
 //! The numbers are the endpoint's own — reported usage, never a local
-//! tokenizer's guess. Two things depend on them: `/status`, and the spend
-//! budget that caps sub-agents. Cost is in USD where the endpoint reports it
-//! (OpenRouter does) and token counts everywhere else, so a budget always has
-//! *something* to measure even when it cannot be money.
+//! tokenizer's guess. Cost remains unknown when an endpoint does not report
+//! it; Gears never treats a missing price as zero.
 
 use super::types::Usage;
 
@@ -47,14 +45,6 @@ impl UsageMeter {
     /// makes the total a floor rather than the whole bill.
     pub fn cost_is_partial(&self) -> bool {
         self.costed > 0 && self.costed < self.completions
-    }
-
-    pub fn merge(&mut self, other: &UsageMeter) {
-        self.completions += other.completions;
-        self.prompt_tokens += other.prompt_tokens;
-        self.completion_tokens += other.completion_tokens;
-        self.cost_usd += other.cost_usd;
-        self.costed += other.costed;
     }
 
     /// One line for `/status`.
@@ -105,8 +95,7 @@ mod tests {
     fn an_endpoint_that_prices_nothing_reports_no_spend() {
         let mut meter = UsageMeter::new();
         meter.add(&usage(10, 5, None));
-        // Not zero: unknown. A USD budget cannot be enforced against this,
-        // and decision 10 says to fall back to token counts.
+        // Not zero: unknown.
         assert_eq!(meter.cost_usd(), None);
         assert_eq!(meter.total_tokens(), 15);
         assert_eq!(
@@ -122,18 +111,5 @@ mod tests {
         meter.add(&usage(10, 5, None));
         assert!(meter.cost_is_partial());
         assert!(meter.summary().ends_with("$0.0100 (partly unpriced)"));
-    }
-
-    #[test]
-    fn sub_agent_totals_merge_into_the_parent() {
-        let mut child = UsageMeter::new();
-        child.add(&usage(50, 10, Some(0.002)));
-        let mut parent = UsageMeter::new();
-        parent.add(&usage(100, 20, Some(0.001)));
-        parent.merge(&child);
-
-        assert_eq!(parent.completions, 2);
-        assert_eq!(parent.total_tokens(), 180);
-        assert!((parent.cost_usd().unwrap() - 0.003).abs() < 1e-9);
     }
 }

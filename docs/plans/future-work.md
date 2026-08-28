@@ -11,13 +11,16 @@ the ruling; nothing here should be picked up without a fresh call.
   unhurried, so it waits for a sitting dedicated to it.
 
 - **Wire `sysbox syslog`** (moved out of the networking ledger,
-  2026-08-15: not networking). `do_syslog` exists unwired; nothing on
-  the image reads the kernel log remotely, which is where every
-  headless daemon's output goes -- it has cost diagnosis time (the
-  russhd exec round). The related console-buffer drain is worth a look
-  in the same sitting: vdso panic text can be lost when the console
-  buffer does not drain before teardown, which is why a vdso panic can
-  present as silent exit-222.
+  2026-08-15: not networking). `do_syslog` exists unwired, and nothing on
+  the image reads the kernel log remotely. Ordinary rt.vdso diagnostics now
+  go to stderr first, and authorized service records go through System-role
+  strobe to `/system/logs`; the kernel log remains relevant for kernel and
+  direct `SysRay::log` records and for the capability-gated fallback when
+  stderr fails. A remote reader is therefore still useful, but no longer the
+  primary way to diagnose every headless daemon. The related console-buffer
+  drain is worth a look in the same sitting: fallback panic text can be lost
+  when the console buffer does not drain before teardown, which is why a vdso
+  panic on that path can present as silent exit-222.
 
 - **Resolved 2026-08-20: intermittent `moto_async` channel hang.**
   It recurred in `test_moto_channel_multithreaded`; a focused unchanged
