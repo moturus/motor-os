@@ -3364,7 +3364,7 @@ async fn permissions_authority_test() -> Result<()> {
     );
     // Seal survives reopen.
     fs.flush().await?;
-    let fs = open_fs(FS_TAG).await?;
+    let mut fs = open_fs(FS_TAG).await?;
     assert!(
         !fs.metadata(Role::System, s)
             .await?
