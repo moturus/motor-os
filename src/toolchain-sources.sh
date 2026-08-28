@@ -220,7 +220,8 @@ toolchain_gitlink() {
 toolchain_stage0_revision() {
   local repo="$1" revision="$2" value
   value="$(git -C "$repo" show "$revision:src/stage0" |
-    awk -F= '$1 == "compiler_git_commit_hash" { print $2; exit }')" || return
+    awk -F= '$1 == "compiler_git_commit_hash" && !found { print $2; found = 1 }')" ||
+    return
   toolchain_require_hex stage0_revision "$value" 40 || return
   printf '%s\n' "$value"
 }
@@ -474,12 +475,12 @@ toolchain_verify_managed_rust() {
   toolchain_expect_equal \
     "$(toolchain_gitlink "$rust" "$MOTOR_RUST_REV" src/tools/cargo)" \
     "$MOTOR_CARGO_REV" "Motor Rust Cargo gitlink mismatch" || return
-  toolchain_expect_equal \
-    "$(toolchain_stage0_revision "$rust" "$UPSTREAM_RUST_REV")" \
-    "$UPSTREAM_STAGE0_REV" "upstream Stage 0 mismatch" || return
-  toolchain_expect_equal \
-    "$(toolchain_stage0_revision "$rust" "$MOTOR_RUST_REV")" \
-    "$UPSTREAM_STAGE0_REV" "Motor Rust Stage 0 mismatch" || return
+  value="$(toolchain_stage0_revision "$rust" "$UPSTREAM_RUST_REV")" || return
+  toolchain_expect_equal "$value" "$UPSTREAM_STAGE0_REV" \
+    "upstream Stage 0 mismatch" || return
+  value="$(toolchain_stage0_revision "$rust" "$MOTOR_RUST_REV")" || return
+  toolchain_expect_equal "$value" "$UPSTREAM_STAGE0_REV" \
+    "Motor Rust Stage 0 mismatch" || return
   value="$(sha256sum "$rust/Cargo.lock" | awk '{print $1}')"
   toolchain_expect_equal "$value" "$MOTOR_RUST_ROOT_LOCK_SHA256" \
     "Rust root lock hash mismatch" || return

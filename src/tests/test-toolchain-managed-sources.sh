@@ -23,6 +23,25 @@ commit_file() {
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+stage0_repo="$TMP_ROOT/stage0"
+git init -q -b main "$stage0_repo"
+mkdir -p "$stage0_repo/src"
+{
+  printf 'compiler_git_commit_hash=%040d\n' 8
+  head -c 1048576 /dev/zero | tr '\0' x
+  printf '\n'
+} > "$stage0_repo/src/stage0"
+git -C "$stage0_repo" add src/stage0
+git -C "$stage0_repo" -c user.name=Test -c user.email=test@example.com \
+  commit -q -m stage0
+stage0_commit="$(git -C "$stage0_repo" rev-parse HEAD)"
+if ! stage0_revision="$(toolchain_stage0_revision \
+  "$stage0_repo" "$stage0_commit")"; then
+  fail "large Stage 0 metadata could not be read"
+fi
+[ "$stage0_revision" = 0000000000000000000000000000000000000008 ] ||
+  fail "wrong Stage 0 revision: $stage0_revision"
+
 remote="$TMP_ROOT/remote"
 git init -q -b development "$remote"
 first="$(commit_file "$remote" one first)"
