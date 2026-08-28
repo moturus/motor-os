@@ -908,7 +908,7 @@ The surface, and no more:
 | :--- | :--- |
 | `rmux` | attach to the most recently used session, or create one if the server has none |
 | `rmux new [-s name]` | create a session and attach |
-| `rmux attach [-t name]` | attach to a named session |
+| `rmux attach [-d] [-t name]` | attach to a session; `-d` first detaches every other client attached to it |
 | `rmux ls` | list sessions: name, window count, attached-or-not |
 | `rmux kill-session -t name` | kill it and everything in it |
 | `prefix-d` | detach |

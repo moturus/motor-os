@@ -873,6 +873,27 @@ fn a_session_outlives_the_client_that_started_it() {
     );
 }
 
+#[test]
+fn attach_d_detaches_the_existing_client_and_keeps_its_session() {
+    let server = private_tmpdir();
+    let mut old = shell_in(&server);
+    old.send(b"MARK=sur\"\"vived\r");
+    assert!(old.wait_for(PROMPT), "the shell never took the marker");
+
+    let mut replacement = shell_args(&server, &["attach", "-d"]);
+    assert!(
+        old.exited(),
+        "attach -d did not detach the existing client: {:?}",
+        old.seen
+    );
+    replacement.send(b"echo $MARK\r");
+    assert!(
+        replacement.wait_for("survived"),
+        "attach -d replaced the session instead of its client: {:?}",
+        replacement.seen
+    );
+}
+
 /// A second console, small enough that which of the two is smaller is never in
 /// doubt on either axis.
 const SMALL_ROWS: u16 = 20;

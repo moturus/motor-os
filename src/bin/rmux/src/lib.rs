@@ -50,14 +50,14 @@ pub const SERVER_ARG: &str = "--server";
 /// ```text
 /// rmux                       attach to the most recent session, or start one
 /// rmux new [-s name]         start a session and attach
-/// rmux attach [-t name]      attach to a named session
+/// rmux attach [-d] [-t name] attach to a session, optionally detaching its clients
 /// rmux ls                    list sessions
 /// rmux kill-session -t name  kill it and everything in it
 /// ```
 const USAGE: &str = "\
 usage: rmux
        rmux new [-s name]
-       rmux attach [-t name]
+       rmux attach [-d] [-t name]
        rmux ls
        rmux kill-session -t name";
 
@@ -65,14 +65,18 @@ usage: rmux
 pub fn run(args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
-        [] => client::attach(None),
+        [] => client::attach(None, false),
         [SERVER_ARG] => server::serve().map(|()| 0),
 
         ["new"] => client::create(None),
         ["new", "-s", name] => client::create(Some((*name).to_owned())),
 
-        ["attach"] => client::attach(None),
-        ["attach", "-t", name] => client::attach(Some((*name).to_owned())),
+        ["attach"] => client::attach(None, false),
+        ["attach", "-d"] => client::attach(None, true),
+        ["attach", "-t", name] => client::attach(Some((*name).to_owned()), false),
+        ["attach", "-d", "-t", name] | ["attach", "-t", name, "-d"] => {
+            client::attach(Some((*name).to_owned()), true)
+        }
 
         ["ls"] => client::ask(proto::ToServer::List),
         ["kill-session", "-t", name] => client::ask(proto::ToServer::Kill((*name).to_owned())),

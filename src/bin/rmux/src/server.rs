@@ -408,9 +408,10 @@ impl Server {
         match message {
             ToServer::Attach {
                 session,
+                detach_others,
                 rows,
                 cols,
-            } => self.attach(id, session, rows, cols),
+            } => self.attach(id, session, detach_others, rows, cols),
             ToServer::NewSession { name, rows, cols } => self.new_session(id, name, rows, cols),
             ToServer::Key(key) => self.key(id, key),
             ToServer::Resize { rows, cols } => {
@@ -514,7 +515,14 @@ impl Server {
         self.show(id, order[next], rows, cols);
     }
 
-    fn attach(&mut self, id: ClientId, name: Option<String>, rows: u16, cols: u16) {
+    fn attach(
+        &mut self,
+        id: ClientId,
+        name: Option<String>,
+        detach_others: bool,
+        rows: u16,
+        cols: u16,
+    ) {
         let session = match &name {
             Some(name) => self.sessions.by_name(name),
             // A bare `rmux` takes the most recent session, or starts one when
@@ -551,6 +559,17 @@ impl Server {
                 }
             }
         };
+
+        if detach_others {
+            for client in self
+                .clients
+                .iter()
+                .filter(|client| client.id != id && client.session == Some(session))
+            {
+                let _ = client.out.send(ToClient::Detached);
+            }
+            self.part_with(|client| client.id != id && client.session == Some(session));
+        }
 
         self.show(id, session, rows, cols);
         // The first client to attach is the one that started this server, so
@@ -1584,7 +1603,7 @@ mod tests {
         server
             .clients
             .push(attached(1, out, std::thread::spawn(|| {})));
-        server.attach(1, None, 24, 80);
+        server.attach(1, None, false, 24, 80);
         (server, queue, outbox, 1)
     }
 
@@ -1913,7 +1932,7 @@ mod tests {
         server
             .clients
             .push(attached(1, out, std::thread::spawn(|| {})));
-        server.attach(1, None, 24, 80);
+        server.attach(1, None, false, 24, 80);
         assert_eq!(said(&server), Some("rmux.toml: 3: not a setting"));
 
         // Said once, to that client. Whoever attaches next has not touched the
@@ -1922,8 +1941,25 @@ mod tests {
         server
             .clients
             .push(attached(2, out, std::thread::spawn(|| {})));
-        server.attach(2, None, 24, 80);
+        server.attach(2, None, false, 24, 80);
         assert_eq!(server.clients[1].message, None);
         drop(queue);
+    }
+
+    #[test]
+    fn an_exclusive_attach_detaches_the_sessions_other_clients() {
+        let (mut server, _queue, old_outbox, _) = served();
+        let session = server.clients[0].session;
+        let (out, _outbox) = channel();
+        server
+            .clients
+            .push(attached(2, out, std::thread::spawn(|| {})));
+
+        server.attach(2, None, true, 24, 80);
+
+        assert_eq!(old_outbox.try_recv(), Ok(ToClient::Detached));
+        assert_eq!(server.clients.len(), 1);
+        assert_eq!(server.clients[0].id, 2);
+        assert_eq!(server.clients[0].session, session);
     }
 }

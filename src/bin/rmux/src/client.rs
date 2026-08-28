@@ -113,10 +113,11 @@ pub fn create(name: Option<String>) -> std::io::Result<i32> {
     run(|rows, cols| ToServer::NewSession { name, rows, cols })
 }
 
-/// Attach to `session`, or to the most recent one, and run until told to stop.
-pub fn attach(session: Option<String>) -> std::io::Result<i32> {
+/// Attach to `session`, optionally detaching its other clients first.
+pub fn attach(session: Option<String>, detach_others: bool) -> std::io::Result<i32> {
     run(|rows, cols| ToServer::Attach {
         session,
+        detach_others,
         rows,
         cols,
     })

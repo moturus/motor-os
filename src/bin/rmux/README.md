@@ -42,7 +42,7 @@ console usable, so it had to be written rather than ported. The design is in
 ```text
 rmux                       attach to the most recent session, or start one
 rmux new [-s name]         start a session and attach
-rmux attach [-t name]      attach to a named session
+rmux attach [-d] [-t name] attach to a session; -d detaches its other clients
 rmux ls                    list sessions
 rmux kill-session -t name  kill it and everything in it
 ```

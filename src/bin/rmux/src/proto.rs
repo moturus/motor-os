@@ -59,6 +59,8 @@ pub enum ToServer {
     /// Take me to a session — a named one, or the most recently used (§7.3).
     Attach {
         session: Option<String>,
+        /// Detach every other client viewing this session before attaching.
+        detach_others: bool,
         rows: u16,
         cols: u16,
     },
@@ -124,6 +126,7 @@ const DETACH: u8 = 5;
 const LIST: u8 = 6;
 const KILL: u8 = 7;
 const NEW_SESSION: u8 = 8;
+const ATTACH_DETACH_OTHERS: u8 = 9;
 
 const WRITE: u8 = 65;
 const EXIT: u8 = 66;
@@ -135,6 +138,10 @@ const DONE: u8 = 70;
 impl Message for ToServer {
     fn tag(&self) -> u8 {
         match self {
+            ToServer::Attach {
+                detach_others: true,
+                ..
+            } => ATTACH_DETACH_OTHERS,
             ToServer::Attach { .. } => ATTACH,
             ToServer::NewSession { .. } => NEW_SESSION,
             ToServer::Key(_) => KEY,
@@ -150,6 +157,7 @@ impl Message for ToServer {
         match self {
             ToServer::Attach {
                 session,
+                detach_others: _,
                 rows,
                 cols,
             }
@@ -174,7 +182,7 @@ impl Message for ToServer {
 
     fn decode(tag: u8, payload: &[u8]) -> Option<ToServer> {
         Some(match tag {
-            ATTACH => {
+            ATTACH | ATTACH_DETACH_OTHERS => {
                 let rows = take_u16(payload, 0)?;
                 let cols = take_u16(payload, 2)?;
                 let session = take_str(payload.get(4..)?)?;
@@ -182,6 +190,7 @@ impl Message for ToServer {
                     // An empty name is "whichever session is most recent",
                     // which is what a bare `rmux` means (§7.3).
                     session: (!session.is_empty()).then_some(session),
+                    detach_others: tag == ATTACH_DETACH_OTHERS,
                     rows,
                     cols,
                 }
@@ -414,11 +423,13 @@ mod tests {
         let messages = [
             ToServer::Attach {
                 session: Some("build".into()),
+                detach_others: false,
                 rows: 30,
                 cols: 90,
             },
             ToServer::Attach {
                 session: None,
+                detach_others: true,
                 rows: 24,
                 cols: 80,
             },
@@ -468,6 +479,7 @@ mod tests {
         // deliver one at a time (§8.3).
         let message = ToServer::Attach {
             session: Some("build".into()),
+            detach_others: true,
             rows: 30,
             cols: 90,
         };
@@ -521,6 +533,7 @@ mod tests {
     fn a_truncated_message_waits_rather_than_decoding_half_of_itself() {
         let bytes = encode(&ToServer::Attach {
             session: Some("build".into()),
+            detach_others: false,
             rows: 30,
             cols: 90,
         });
