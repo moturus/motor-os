@@ -453,8 +453,13 @@ Motor OS VM, and open it from the host.</p>
 <a href="running.html">Running Motor OS</a>.</p>
 
 <h2>The program</h2>
-<pre><code>cargo new hello
-cd hello</code></pre>
+<p>Create the project inside the Motor OS checkout, so that the repository's
+<code>rust-toolchain.toml</code> selects the Motor toolchain for it (<code>build/</code> is
+ignored by git):</p>
+<pre><code>cd "$MOTORH/motor-os"
+mkdir -p build/examples
+cargo new build/examples/hello
+cd build/examples/hello</code></pre>
 <p>Replace <code>src/main.rs</code> with this:</p>
 <pre><code>use hello::ThreadPool;
 use std::fs;
@@ -631,26 +636,34 @@ impl Worker {
 &lt;/html&gt;</code></pre>
 
 <h2>Build it for Motor OS</h2>
-<pre><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code></pre>
-<p>The <code>+dev-x86_64-unknown-motor</code> selector is the name under which the
-current build registers the toolchain; the toolchain rework replaces it with a
-versioned toolchain selected by the repository, after which the command is plain
-<code>cargo build --release --target x86_64-unknown-motor</code>. See
-<a href="toolchain.html">Toolchains</a>.</p>
+<pre><code>cargo build --release --target x86_64-unknown-motor</code></pre>
+<p>No toolchain selector is needed: the checkout's <code>rust-toolchain.toml</code> names
+the exact Motor toolchain the build installed. For a project outside the checkout, copy
+that file next to its <code>Cargo.toml</code>. See <a href="toolchain.html">Toolchains</a>.
+The result is <code>target/x86_64-unknown-motor/release/hello</code>.</p>
 
 <h2>Copy it into the VM</h2>
 <p>With the VM running, use SFTP through the SSH server. <code>/user/bin</code> is where
-an interactive session may install programs, and <code>/user/tmp</code> is scratch space:</p>
-<pre><code>scp -P 2222 -o IdentitiesOnly=yes -i test.key \
+an interactive session may install programs, and <code>/user/tmp</code> is scratch space;
+the server reads its two pages from the current directory, so give it a directory of its
+own:</p>
+<pre><code>KEY="$MOTORH/motor-os/vm_images/release/test.key"
+ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /system/bin/mkdir /user/tmp/hello
+scp -P 2222 -o IdentitiesOnly=yes -i "$KEY" \
     target/x86_64-unknown-motor/release/hello hello.html 404.html \
-    motor@192.168.4.2:/user/tmp/</code></pre>
-<p><code>test.key</code> is in the image directory next to <code>run-qemu.sh</code>. The
-executable bit is preserved by the transfer, so the binary is ready to run.</p>
+    motor@192.168.4.2:/user/tmp/hello/
+ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /system/bin/chmod 755 /user/tmp/hello/hello</code></pre>
+<p><code>test.key</code> is in the image directory next to <code>run-qemu.sh</code>
+(<code>src/tests/test.key</code> is the same key). <code>scp</code> carries the executable
+bit over; the <code>chmod</code> makes sure of it.</p>
 
 <h2>Run it</h2>
 <p>On the VM's console, or over <code>ssh-into-motor-os-vm.sh</code>:</p>
-<pre><code>rush:/$ cd /user/tmp
-rush:/user/tmp$ ./hello</code></pre>
+<pre><code>rush:/$ cd /user/tmp/hello
+rush:/user/tmp/hello$ ./hello</code></pre>
+<p>Or start it from the host in one command:</p>
+<pre><code>ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 \
+    /system/bin/rush -c 'cd /user/tmp/hello &amp;&amp; ./hello'</code></pre>
 <p>On the host, open <a href="http://192.168.4.2:5542">http://192.168.4.2:5542</a>. You
 should see the <code>hello.html</code> page above, served from Motor OS. A request to
 <code>/sleep</code> is answered after five seconds. As in the book, the server accepts two

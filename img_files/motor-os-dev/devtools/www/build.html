@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="How to build Motor OS from source. This page is a placeholder until the toolchain rework is merged.">
+<meta name="description" content="How to build Motor OS from source: the one-script toolchain build, the toolchain it installs, make, and the test suites.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Building Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -442,29 +442,176 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">Getting started</div>
 <h1>Building Motor OS</h1>
-<div class="tbd">
-  <div class="callout-title">To be written</div>
-  <p>The way the toolchains are built and versioned is being reworked. This page will be
-  written when that work is merged, so that it does not describe a process that is about
-  to change. What the toolchains are, and how programs are compiled with them, does not
-  change and is already described on the <a href="toolchain.html">Toolchains</a> page.</p>
-</div>
+<p class="lead">Motor OS is cross-compiled on Linux. One script builds the compilers, the
+system, and the VM images from a clean checkout; after that, <code>make</code> rebuilds the
+system in minutes. The script is tested on Ubuntu 24.04 and 26.04.</p>
 
-<p>Until then, the current instructions live in the repository:
-<a href="https://github.com/moturus/motor-os/blob/main/docs/build.md"><code>docs/build.md</code></a>
-describes the one-script build on Ubuntu (<code>src/build-motor-os.sh</code>), which
-installs the required packages, clones and builds the LLVM and Rust toolchains, builds the
-system and user programs, and produces the VM images.</p>
-
-<p>This page will cover:</p>
+<h2>What you need</h2>
 <ul>
-  <li>host requirements and the one-time toolchain build;</li>
-  <li>provisioning the versioned Motor toolchain, and inspecting which sources it was
-  built from;</li>
-  <li>building the system, the programs, and the four images with <code>make</code>;</li>
-  <li>running the test suites.</li>
+  <li>An x86-64 Linux host with KVM (<code>/dev/kvm</code>), which the VM scripts use.
+  Ubuntu 24.04 or 26.04 is what the build script provisions; on another distribution,
+  install the packages listed below yourself and the script carries on.</li>
+  <li><code>sudo</code>, for installing packages and for the host side of VM networking,
+  and network access, for the toolchain sources.</li>
+  <li>Disk space and time. The first run checks out and builds the Rust and LLVM forks
+  twice, for the Linux host and for Motor OS: budget about 45 GB (the managed sources and
+  their build trees alone take over 30 GB) and one to two hours on a fast desktop. Later
+  runs reuse everything that is unchanged.</li>
 </ul>
+<p>The packages the script installs are <code>git</code>, <code>build-essential</code>,
+<code>nasm</code>, <code>clang</code>, <code>cmake</code>, <code>ninja-build</code>,
+<code>zlib1g-dev</code>, <code>libssl-dev</code>, <code>pkg-config</code>, <code>curl</code>,
+<code>qemu-system</code>, and <code>qemu-utils</code>, plus rustup without a default
+toolchain. Cloud Hypervisor and Firecracker are not installed; QEMU is enough to build
+and test.</p>
 
+<h2>The one-script build</h2>
+<pre><code>mkdir motor-dev
+cd motor-dev
+git clone https://github.com/moturus/motor-os.git
+cd motor-os
+src/build-motor-os.sh</code></pre>
+<p><code>src/build-motor-os.sh</code> is the single supported entry point. In order, it:</p>
+<ol>
+  <li>installs the missing host packages and rustup, creates the <code>moto-tap</code>
+  interface with the forwarding and masquerade rules that let VMs reach the Internet, and
+  makes <code>/dev/kvm</code> accessible. Each step is skipped when it has already been
+  done; <code>MOTOR_SKIP_HOST_NETWORK_SETUP=1</code> skips the network part if you have
+  configured it yourself;</li>
+  <li>checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
+  <code>src/toolchain-versions.sh</code>. A checkout that does not match the declaration,
+  including one with a modified or untracked file, is an error; the build never advances a
+  branch or runs <code>cargo update</code>;</li>
+  <li>builds a Linux-host Clang and LLD from the LLVM fork;</li>
+  <li>runs Rust's bootstrap once and installs the result as an immutable toolchain: rustc,
+  rustdoc, Cargo, the standard library for Linux and for <code>x86_64-unknown-motor</code>,
+  Clippy, rustfmt, and <code>rust-src</code>. The toolchain is registered with rustup under
+  a name that ends in a 64-character key derived from its inputs, and validated component
+  by component;</li>
+  <li>builds the native side, called an assembly: the C-ABI shim over <code>rt.vdso</code>,
+  compiler-rt, mlibc, libunwind, libc++abi, and libc++, the native LLVM multicall binary,
+  Lua, native rustc, and ripgrep. An assembly is keyed by its inputs too, so a change to
+  <code>moto-rt</code> or mlibc produces a new assembly without a new compiler;</li>
+  <li>writes the toolchain and assembly manifests, then builds the base, standard, and
+  developer images into <code>vm_images/release/</code>.</li>
+</ol>
+<p>It does not start a VM. Its outputs live next to the checkout, in the directory
+<code>MOTORH</code> names (the parent of the checkout by default; set it before the first
+run to put them elsewhere):</p>
+<div class="table-wrap">
+<table class="plain">
+  <tr><th>Directory</th><th>Contents</th></tr>
+  <tr><td><code>toolchain-src/</code></td><td>The managed Rust checkout, with LLVM and Cargo
+    as submodules, and the mlibc checkout.</td></tr>
+  <tr><td><code>toolchains/&lt;name&gt;/</code></td><td>One immutable host toolchain per key:
+    the rustup toolchain the repository selects.</td></tr>
+  <tr><td><code>assemblies/&lt;key&gt;/</code></td><td>One assembly per key: <code>build/</code>
+    (component build trees), <code>sysroot/</code> (the C/C++ cross sysroot and the
+    <code>motor-clang</code> linker wrappers), and <code>images/</code> (the libc, ripgrep,
+    LLVM, and rustc files the imager places into the images).</td></tr>
+</table>
+</div>
+<p>The build is incremental and safe to rerun: after a failure, run the same command
+again. A completed toolchain or assembly is reused only after its manifest and artifacts
+validate, and older keys are kept rather than deleted. A <code>.building</code> directory
+next to an output means a build is in progress or was interrupted; a
+<code>MOTOR-TOOLCHAIN-REJECTED</code> or <code>MOTOR-ASSEMBLY-REJECTED</code> marker keeps an
+invalid result for diagnosis. Fix the cause before removing either.</p>
+
+<h2>The toolchain the repository selects</h2>
+<p>The checkout's <code>rust-toolchain.toml</code> names the exact toolchain the build
+installed, key included, so ordinary commands run from the checkout use it without a
+<code>+nightly</code>, <code>+stable</code>, or <code>+dev-*</code> selector; do not add one.
+To see what is selected:</p>
+<pre><code>rustc -vV
+cargo -Vv
+rustc --print sysroot</code></pre>
+<p>Cargo reports <code>1.99.0-dev</code> and the exact Cargo commit: the current toolchain
+is built from the Rust 1.99 beta, and the stable <code>1.99.0-motor.1</code> release waits
+for upstream Rust 1.99.0. The sysroot contains <code>MOTOR-TOOLCHAIN-MANIFEST</code> and
+<code>lib/rustlib/MOTOR-TOOLCHAIN-KEY</code>; every assembly, and the developer image under
+<code>/devtools/toolchain/manifest</code>, contains <code>MOTOR-ASSEMBLY-MANIFEST</code>. The
+manifests record the revisions, keys, and hashes everything was built from, and
+<code>make</code> refuses to run with a toolchain that has no key.</p>
+<p>The build also records which assembly this checkout uses, in the ignored directory
+<code>.motor-os/</code>. <code>make clean</code> keeps that record, and a second clone under
+the same <code>MOTORH</code> makes its own. When the runtime sources change and no assembly
+matches any more, run <code>src/build-motor-os.sh</code> again: it derives the new key and
+builds only what is missing. To inspect or change the selection by hand:</p>
+<pre><code>src/select-toolchain-assembly.sh --show
+src/select-toolchain-assembly.sh --list
+src/select-toolchain-assembly.sh --pin ASSEMBLY_KEY</code></pre>
+
+<h2>Building with make</h2>
+<p>With the toolchain in place, the Makefile in the repository root builds the system, the
+programs, and the images. Debug is the default profile:</p>
+<pre><code>make -j"$(nproc)"                  # base and standard images, debug, into vm_images/debug/
+make -j"$(nproc)" images           # the developer image as well
+make -j"$(nproc)" BUILD=release    # the same into vm_images/release/
+make -j"$(nproc)" dev.img BUILD=release
+make sys-io rush                   # individual components
+make system-tty.img                # the test-only System-console image
+make clippy
+make clean                         # removes build/ and vm_images/; keeps the toolchains and assemblies</code></pre>
+<p>Every component is a target named after its binary: <code>kernel</code>,
+<code>vdso</code>, <code>sys-io</code>, <code>sys-init</code>, <code>sys-tty</code>,
+<code>strobe</code>, <code>dns-resolver</code>, <code>sysbox</code>, <code>rush</code>,
+<code>russhd</code>, <code>red</code>, <code>rmux</code>, <code>kibim</code>,
+<code>httpd</code>, <code>httpd-axum</code>, <code>lorry</code>, <code>curl</code>,
+<code>gears</code>, <code>mdbg</code>, <code>systest</code>, and so on; the image targets
+are <code>base.img</code>, <code>main.img</code>, <code>dev.img</code>, and
+<code>system-tty.img</code>. Stripped binaries go to <code>build/bin/&lt;profile&gt;/</code>,
+and Cargo's target directories, with the unstripped binaries that <code>addr2line</code>
+needs, to <code>build/obj/&lt;toolchain-key&gt;/&lt;profile&gt;/&lt;component&gt;/</code>.</p>
+<p>The imager (<code>src/imager</code>) assembles each image from a YAML description and
+the permission policy; see <a href="filesystem.html">Filesystem</a>. The standard and
+developer images additionally take the libc, ripgrep, LLVM, and rustc files from the
+selected assembly, so they cannot be built without one; the base image needs none.</p>
+
+<h2>Running the tests</h2>
+<pre><code>src/tests/full-test.sh              # debug
+src/tests/full-test.sh --release
+src/tests/full-test-dev.sh --release</code></pre>
+<p><code>full-test.sh</code> is the suite every change is expected to pass. It runs the
+host-side tests of the build scripts, builds the standard image and the test programs,
+runs the host <code>cargo test</code> suites (the imager, Motor FS, the networking stack,
+rush, rmux, red, russhd, rnetbench, sys-init, and the runtime libraries) and the
+System-console, TUI, and terminal-size tests, then boots the image under QEMU and drives
+it over SSH: systest, mio-test, tokio-tests, crossterm-smoke, SFTP, and the rest. A run is
+limited to fifteen minutes. <code>full-test-dev.sh</code> does the same against the
+developer image, then compiles the source snapshots natively inside the VM and runs
+Lorry's own suite; it wants a 4 GiB VM. <code>full-test-networking.sh</code> is the
+networking subset with rnetbench throughput runs, and <code>stress-soak.sh</code> keeps one
+VM under concurrent load for as long as you ask, watching for crashes and stalls.</p>
+<p>On the developer image the same test programs are in <code>/devtools/tests</code> and can
+be run from the shell; see <a href="devtools.html">Developer image</a>.</p>
+
+<h2>Working on the compilers</h2>
+<p>Changes to the Rust or LLVM forks are built from your own checkout, without touching
+the managed one:</p>
+<pre><code>src/build-motor-os.sh \
+  --source-mode authoring \
+  --rust-source /absolute/path/to/rust \
+  --authoring-base FULL_40_CHARACTER_BASE_COMMIT</code></pre>
+<p>The checkout owns its <code>src/llvm-project</code> submodule. Local commits, modified
+files, and untracked files in both trees become part of the toolchain's identity, and the
+build reads them as they are, without fetching, switching, resetting, or cleaning
+anything. Such a toolchain gets a distinct, non-release name and key and cannot replace
+the one named in <code>rust-toolchain.toml</code>. A managed source is updated only by
+changing its revision in <code>src/toolchain-versions.sh</code>.</p>
+
+<h2>Further reading</h2>
+<p>The repository describes the build in more depth:
+<a href="https://github.com/moturus/motor-os/blob/main/docs/build-motor-os.md"><code>docs/build-motor-os.md</code></a>
+(the source modes, build order, and manifests),
+<a href="https://github.com/moturus/motor-os/blob/main/docs/build-llvm.md"><code>docs/build-llvm.md</code></a>
+and
+<a href="https://github.com/moturus/motor-os/blob/main/docs/build-rustc.md"><code>docs/build-rustc.md</code></a>
+(the C/C++ and Rust components and their layout on the developer image), and
+<a href="https://github.com/moturus/motor-os/blob/main/docs/assembly-selection.md"><code>docs/assembly-selection.md</code></a>
+(how an assembly is chosen and validated, and how to recover a stale selection). What the
+toolchains contain and how programs are compiled with them is on the
+<a href="toolchain.html">Toolchains</a> page.</p>
 <p>Once you have images, <a href="running.html">Running Motor OS</a> describes the VM
 scripts, and <a href="hello.html">Hello Motor OS</a> walks through running your own
 program.</p>

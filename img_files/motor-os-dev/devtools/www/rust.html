@@ -461,14 +461,13 @@ program that is being ported.</p>
   support pages</a>. Building for it needs the Motor toolchain, described on the
   <a href="toolchain.html">Toolchains</a> page.</li>
 </ul>
-<p>Cross-compiling on Linux, with the toolchain as the current build registers it:</p>
-<pre><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code></pre>
-<p>The toolchain rework replaces the <code>+dev-...</code> selector with a versioned
-toolchain chosen by the repository's <code>rust-toolchain.toml</code>, so the command becomes
-plain <code>cargo build --release --target x86_64-unknown-motor</code>. Either way the binary
-goes into the VM with <code>scp</code> (see <a href="hello.html">Hello Motor OS</a>). On
-the developer image the same program can be built natively with <code>rustc</code> or
-with <a href="lorry.html">Lorry</a>.</p>
+<p>Cross-compiling on Linux, from a project inside the Motor OS checkout, where the
+repository's <code>rust-toolchain.toml</code> selects the Motor toolchain (copy that file
+into a project that lives elsewhere):</p>
+<pre><code>cargo build --release --target x86_64-unknown-motor</code></pre>
+<p>The binary goes into the VM with <code>scp</code> (see
+<a href="hello.html">Hello Motor OS</a>). On the developer image the same program can be
+built natively with <code>rustc</code> or with <a href="lorry.html">Lorry</a>.</p>
 
 <h2>What std supports</h2>
 <div class="table-wrap">

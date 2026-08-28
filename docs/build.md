@@ -63,12 +63,11 @@ While the VM is running, connect with
 ssh -p 2222 -o IdentitiesOnly=yes -i src/tests/test.key motor@192.168.4.2
 ```
 
-The build configures the `moto-tap` host interface but does not enable Internet
-routing for VMs. To enable it explicitly, run:
-
-```sh
-sudo vm_images/release/nft-nat.sh
-```
+The build also creates the `moto-tap` host interface and installs the IPv4
+forwarding and nftables masquerade rules that let VMs reach the Internet. These
+settings do not survive a host reboot; restore them afterwards with
+`vm_images/release/create-tap.sh` (it uses `sudo`), or by re-running
+`src/build-motor-os.sh`.
 
 Run the full debug or release integration suite from the repository root:
 

@@ -98,8 +98,8 @@ OS VMs. There has been no independent security audit yet.
 
 ## Building, running, developing
 
-See [docs/build.md](docs/build.md) for the current build instructions (the
-way the toolchains are built is being reworked), [docs/tools.md](docs/tools.md)
-for the VM scripts and the tools inside the VM, and
-[docs/recipes/index.md](docs/recipes/index.md) for examples. The website
-covers all of this in more detail, including the toolchains and Lorry.
+See [docs/build.md](docs/build.md) for the build instructions,
+[docs/tools.md](docs/tools.md) for the VM scripts and the tools inside the VM,
+[docs/toolchain.md](docs/toolchain.md) for how the toolchain is versioned and
+updated, and [docs/recipes/index.md](docs/recipes/index.md) for examples. The
+website covers all of this in more detail, including the toolchains and Lorry.

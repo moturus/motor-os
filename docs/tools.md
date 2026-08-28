@@ -11,8 +11,9 @@ and several useful scripts:
   regular user programs;
 - `motor-os-dev.qcow2` adds native toolchains, sources, diagnostics, tests, and
   the bundled sample website;
-- `create-tap.sh` is a script to create a local ipvtap device that will be used
-  by the VM for networking;
+- `create-tap.sh` creates the local `moto-tap` interface the VMs use for
+  networking and the NAT rules that let them reach the Internet; the build runs
+  the same steps, so it is needed only after a host reboot;
 - `run-qemu.sh` and `run-chv.sh` run the image selected by `MOTO_IMAGE`; it
   defaults to `motor-os.qcow2`. QEMU and Cloud Hypervisor also accept the raw
   base image; Firecracker supports only that raw image.
@@ -48,3 +49,5 @@ The shell is somewhat barebones now (contributions are welcome!).
   using `addr2line` applied to `$MOTORH/motor-os/build/obj/vdso/x86_64-unknown-motor/debug/rt`.
 
 ![ps -H](ps.png)
+
+For more details, see [https://motor-os.org](https://motor-os.org).

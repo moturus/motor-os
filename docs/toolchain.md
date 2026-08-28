@@ -1,99 +1,62 @@
 # Versioned and reproducible Motor OS toolchain
 
-2026-08-13, updated 2026-08-26. Investigation, implementation plan, and record
-for defining, building, and reporting a meaningfully versioned Motor OS LLVM
-and Rust toolchain, with exact source resolution enforcing that version policy.
-No build scripts or source code were changed during the investigation or the
-2026-08-25 review; implementation began after the reviewed plan was approved.
+This document defines how the Motor OS LLVM and Rust toolchain is versioned,
+built, and reported, and the procedures for updating it. The design was
+implemented on the `toolchain-1.99.0-beta` branch and merged into `main` on
+2026-08-28; the investigation of the workflow it replaced and the
+implementation plan are in this file's history, as `docs/plans/toolchain.md`.
+The user-facing build procedure is in [build.md](build.md) and
+[build-motor-os.md](build-motor-os.md).
 
-The 2026-08-25 review checked every claim below against `src/build-base.sh`,
-`src/build-motor-os.sh`, the Makefile and test scripts, the sibling Rust, LLVM,
-and mlibc checkouts, and the pinned upstream commits on GitHub. Its main design
-change is section 4.6: the Motor toolchain is built from one Motor Rust source
-revision, and the separate bootstrap branch, bootstrap-only Cargo, and
-bootstrap-only rustup toolchain of the previous revision of this plan are
-dropped. Section 5.5 also separates the compiler identity that keys Motor OS
-build outputs from the wider assembly identity that keys the C sysroot.
+## Status
 
-A second pass on the same day re-verified the bootstrap mechanics of section 5
-against the Rust bootstrap sources: `x.py install` semantics, the settings that
-must be explicit (`docs`, `optimized-compiler-builtins`, a relative
-`install.sysconfdir`), and the fact that bootstrap's own `cargo metadata` pass
-runs with `--no-deps`, which replaced the lock-resolution preflight with lock
-hashing before and after the build.
+The beta tuple of section 3.4 is implemented:
 
-The 2026-08-26 revalidation retained that design and closed the remaining
-gaps: Lorry supports only the Cargo selected by the current Motor toolchain;
-managed source checkouts are exact while an explicit authoring mode builds a
-developer's current Rust and LLVM worktrees without switching them; an `x.py`
-run that rewrites a Rust lockfile cannot register an artifact under the
-pre-rewrite key; the local runtime digest includes the workspace-level inputs
-that affect `moto-rt-cabi`; exact rustup names include the toolchain key; and
-the new path is prepared side-by-side before an atomic selector cutover.
-
-The 2026-08-26 review of that revalidation kept its additions and corrected
-them where the sources disagree: the Motor Cargo reports `1.99.0-dev`, not
-`-beta`, because the fork builds on the `dev` channel; Lorry's narrowed
-compatibility contract is declared as the one development-application change
-beyond selector migration instead of contradicting the scope statement; the
-Rust checkout's `src/llvm-project` submodule is the only LLVM source tree in
-managed mode as well, so no separate LLVM checkout has to agree with it; the
-committed Rust lock hashes are declared so a clean managed key and the
-key-qualified `rust-toolchain.toml` name are computable offline; and the cost
-of the side-by-side migration is stated.
-
-## Implementation status (2026-08-26)
-
-Items 1-14 in section 7 are implemented on the beta development line:
-
-- the Motor Rust and LLVM branches were replayed on the exact beta bases,
-  dependency selections were disambiguated and pinned, and all four required
+- the Motor Rust and LLVM branches are replayed on the exact beta bases,
+  dependency selections are disambiguated and pinned, and all four required
   source branches are published;
 - managed and authoring source resolution, deterministic bootstrap inputs,
   immutable key-qualified host prefixes, keyed assemblies, native tools, and
   complete manifests are implemented and covered by the offline toolchain
   tests;
-- the repository has cut over atomically to its exact root toolchain, keyed
-  per-component outputs, keyed generated image roots, and bare Cargo commands;
-- the core cutover passed `src/tests/full-test.sh` three times each in debug and
-  release before commit; and
+- the repository selects its exact root toolchain and uses keyed
+  per-component outputs, keyed generated image roots, and bare Cargo
+  commands; and
 - Lorry supports only the current Motor Cargo 1.99 family and passes its full
   host, oracle, registry, curl, and native self-hosting product suite.
 
-Items 15 and 16 are intentionally deferred. Upstream Rust 1.99.0 is scheduled
-for 2026-10-01 and does not yet have a stable tag. The beta artifacts and refs
-must not be renamed or published as `1.99.0-motor.1`; section 8.1 remains the
-required stable rebase, full rebuild, validation, and immutable source-tag
-procedure after that upstream release exists.
+The stable release (section 6.1) is deferred: upstream Rust 1.99.0 is
+scheduled for 2026-10-01 and does not yet have a stable tag. The beta
+artifacts and refs must not be renamed or published as `1.99.0-motor.1`.
 
-## 0. Decision summary
+## 1. Summary
 
 Motor OS publishes one source-defined compiler lineage with a clear upstream
 lineage, and locally assembles the complete toolchain from that source tuple:
 
-1. Target Rust `1.99.0` as the first stable Motor toolchain baseline.
-2. Use the Rust 1.99 beta commit pinned in section 2.4 as the temporary porting
-   and validation baseline.
-3. Read the exact `rust-lang/llvm-project` commit pinned by that Rust revision.
-4. Start a new Motor LLVM development branch at that commit and replay the four
-   Motor LLVM patches on top.
-5. Start one new Motor Rust development branch at the beta commit, replay the
-   Motor std and rustc patches, point its LLVM gitlink at the resulting Motor
-   LLVM commit, point the LLVM submodule URL at the Motor fork without a
-   branch-following rule, and keep the Cargo gitlink that the Rust revision
-   selects.
-6. Build standalone LLVM/Clang and rustc's LLVM from that same Motor LLVM
+1. The first stable Motor toolchain baseline is Rust `1.99.0`.
+2. Until that release exists, the Rust 1.99 beta commit pinned in section 3.4
+   is the porting and validation baseline.
+3. Motor LLVM is the exact `rust-lang/llvm-project` commit pinned by that Rust
+   revision plus the Motor LLVM patches, on a Motor LLVM development branch.
+4. Motor Rust is that Rust commit plus the Motor std and rustc patches, on one
+   Motor Rust development branch. Its LLVM gitlink points at the Motor LLVM
+   commit, its LLVM submodule URL points at the Motor fork without a
+   branch-following rule, and it keeps the Cargo gitlink that the Rust
+   revision selects.
+5. Standalone LLVM/Clang and rustc's LLVM are built from that same Motor LLVM
    commit.
-7. From that one Rust revision, build and install Linux-host rustc/rustdoc,
-   Cargo, host std, Motor std, Clippy, rustfmt/`cargo-fmt`, and `rust-src` into
-   an immutable tuple-keyed prefix, register it as the one versioned Motor
-   rustup toolchain, and use it for every repository build and test. Build the
-   C sysroot with it, then build the native Motor rustc from the same revision.
-8. When the Rust `1.99.0` stable tag is published, rebase both Motor forks onto
-   the final Rust and Rust-pinned LLVM commits, rebuild and revalidate the
-   complete tuple, and only then publish the immutable source refs for
-   `1.99.0-motor.1` in the Motor Rust and LLVM GitHub forks. This plan does not
-   publish binary toolchain archives.
+6. From that one Rust revision, Linux-host rustc/rustdoc, Cargo, host std,
+   Motor std, Clippy, rustfmt/`cargo-fmt`, and `rust-src` are built and
+   installed into an immutable tuple-keyed prefix, registered as the one
+   versioned Motor rustup toolchain, and used for every repository build and
+   test. The C sysroot is built with it, then the native Motor rustc from the
+   same revision.
+7. When the Rust `1.99.0` stable tag is published, both Motor forks are
+   rebased onto the final Rust and Rust-pinned LLVM commits, the complete
+   tuple is rebuilt and revalidated, and only then are the immutable source
+   refs for `1.99.0-motor.1` published in the Motor Rust and LLVM GitHub
+   forks. Binary toolchain archives are not published.
 
 Reproducibility is the mechanism that enforces this version policy, not the
 only purpose of the policy.
@@ -119,9 +82,8 @@ The important rules are:
   unit tests, the boot loaders, formatting) and Motor cross-compilation;
 - Lorry supports one Cargo compatibility family at a time: the Cargo selected
   by the current Motor Rust revision (the `1.99.0-dev` Cargo built from
-  `MOTOR_CARGO_REV`, compatibility family 1.99, for this plan); its
-  implementation, specification, and oracle tests advance together with that
-  toolchain;
+  `MOTOR_CARGO_REV`, compatibility family 1.99, for the current tuple); its implementation,
+  specification, and oracle tests advance together with that toolchain;
 - ordinary build scripts never advance toolchain source branches or explicitly
   refresh dependency selections; and
 - semantic versions describe upstream lineage, while full commits enforce it.
@@ -152,20 +114,18 @@ compiler-lineage version alone. `MOTOR_OS_REV`, `MOTOR_OS_RUNTIME_TREE`, and
 both keys exist only in generated manifests; they do not imply that a binary
 assembly is published.
 
-The first implementation covers only compiler and runtime inputs in the
-toolchain. Versioning or pinning development applications such as ripgrep and
-Lua is outside this plan. Changes to development applications are limited to
-removing independent toolchain selection from their build and test commands,
-with one deliberate exception: Lorry's Cargo-compatibility contract narrows to
-the Motor Cargo (section 4.4), because a compatibility family that no
-repository test can exercise is not a supported family. That is a Lorry
-product decision, confirmed on 2026-08-26 and recorded here so that Lorry and
-the toolchain advance together.
+The toolchain covers compiler and runtime inputs only. Development
+applications such as ripgrep and Lua are not versioned or pinned by it; they
+build with the Motor toolchain like everything else. The one product decision
+that follows from it is Lorry's: its Cargo-compatibility contract is the Motor
+Cargo alone, because a compatibility family that no repository test can
+exercise is not a supported family, and Lorry and the toolchain advance
+together.
 
-The implementation-readiness review is resolved as follows:
+In particular:
 
 - the initial upstream baseline is the exact Rust 1.99 beta tuple recorded in
-  section 2.4, with the Motor patches replayed on top;
+  section 3.4, with the Motor patches replayed on top;
 - there is one Motor Rust development branch and no bootstrap-only Motor
   toolchain; Rust's own Stage 0 download is the only bootstrap compiler, and
   Cargo is built by Rust bootstrap from the Cargo gitlink that the Rust
@@ -185,7 +145,7 @@ The implementation-readiness review is resolved as follows:
   invalidation defects remain observable, and every authoring compiler carries
   a distinct identity so its outputs cannot be mistaken for a managed build's.
 
-## 1. Goals and scope
+## 2. Goals and scope
 
 - Make clean and incremental compiler/runtime builds select the same reviewed
   sources and use tuple-keyed output directories.
@@ -203,23 +163,22 @@ The implementation-readiness review is resolved as follows:
   user-facing `src/build-motor-os.sh` entry point.
 - Put the exact source tuple in compiler output and the dev image.
 - Keep normal tests offline and add no retries, ignored failures, or wrapper
-  cleanup of reusable outputs that could conceal a defect. Retain only the
-  narrowly scoped generated-tree replacement described in section 4.5.
-- Implement in reviewable patches of roughly 100-300 lines including tests.
+  cleanup of reusable outputs that could conceal a defect. The only deletion
+  the build performs is replacing a generated image-staging tree it fully
+  owns.
 
-The initial work provides reproducible source resolution, not bit-for-bit
-binary reproducibility. Pinning Ubuntu packages, host compilers, paths,
-timestamps, and a hermetic build environment is future work. It also does not
-change Rust stdlib or `moto-rt` APIs, merge the two `x.py` invocations into
-one, use the standalone LLVM build as rustc's LLVM through `llvm-config`, or
-automatically adopt the latest upstream release.
+The toolchain provides reproducible source resolution, not bit-for-bit binary
+reproducibility: Ubuntu packages, host compilers, paths, timestamps, and a
+hermetic build environment are not pinned. The two `x.py` invocations are not
+merged into one, the standalone LLVM build is not used as rustc's LLVM
+through `llvm-config`, and the latest upstream release is not adopted
+automatically.
 
-## 2. Correct version roles
+## 3. Version roles
 
 There are two build-time Rust roles, both derived from the selected Rust
-baseline rather than an independently selected host channel. During the first
-implementation cycle that baseline is an exact Rust 1.99 beta commit; the
-formal compiler source release uses the final stable `1.99.0` tag:
+baseline rather than an independently selected host channel. During the beta cycle that baseline is an exact Rust 1.99 beta commit; the
+formal compiler source release will use the final stable `1.99.0` tag:
 
 1. Rust `x.py` downloads the Stage 0 compiler and Cargo recorded, with hashes,
    in the selected Rust commit's `src/stage0`. This compiler exists only to
@@ -228,18 +187,15 @@ formal compiler source release uses the final stable `1.99.0` tag:
    Clippy, rustfmt, `rust-src`, and the native Motor rustc/std artifacts. The
    Linux-host set is the one Motor toolchain for all repository work.
 
-Today a third role exists: the June 2026 host nightly installed as the global
-rustup default, plus whatever floating `nightly` and `stable` channels happen
-to be installed. Section 3 lists exactly what they compile. They are
-provisioning state, not members of the tuple, and they disappear.
+There is no third role: no host nightly or other rustup channel takes part
+in the build, and the global rustup default is neither selected nor changed.
 
-The current development branches are `motor-os-rt-v17` (the std patch) and
-`motor-os-rustc` (the same std patch plus the compiler patches). The
-policy-conforming layout is one development branch per fork and, for releases,
-new immutable versioned tags rather than moved or force-rebased public
-branches.
+Each fork has one development branch per upstream baseline
+(`motor-os-1.99.0-beta-f47d5bb` today, declared in `src/toolchain-versions.sh`)
+and, for releases, new immutable versioned tags rather than moved or
+force-rebased public branches.
 
-### 2.1 Stable source does not mean stock stable-channel behavior
+### 3.1 Stable source does not mean stock stable-channel behavior
 
 The Motor Rust fork must be based on an exact stable Rust patch tag. Rust is a
 monorepo: that tag identifies rustc, the matching `library/` sources, the
@@ -256,14 +212,15 @@ or nightly feature behavior, and the toolchain must ship `rust-src` because
 nightly source branch. The accurate description is "Motor Rust based on stable
 Rust X.Y.Z, built with unstable features enabled."
 
-### 2.2 One Motor toolchain
+### 3.2 One Motor toolchain
 
-The semantic rustup toolchain-name base `motor-1.99.0-motor.1` identifies the
+The semantic rustup toolchain-name base (`motor-1.99.0-beta-f47d5bb-dev.1`
+during the beta, `motor-1.99.0-motor.1` for the stable release) identifies the
 compiler lineage. The exact registered name appends the full
 `MOTOR_TOOLCHAIN_KEY`; for example,
 `motor-1.99.0-motor.1-<MOTOR_TOOLCHAIN_KEY>`. This prevents a maintenance
 commit from silently repointing the same rustup name to different contents.
-That exact toolchain must contain:
+That exact toolchain contains:
 
 - Linux-host rustc and rustdoc;
 - Linux-host Cargo;
@@ -294,11 +251,9 @@ that toolchain's exact Cargo. For the initial beta tuple this is the Cargo
 built from the gitlink recorded by `MOTOR_CARGO_REV`; it reports
 `cargo 1.99.0-dev`, not `-beta`, because the Motor build uses the `dev`
 channel, and Lorry maps any `1.99.0-*` release to family 1.99. It is never an
-ambient `beta` or `nightly` channel. Cargo 1.97 and 1.98 are removed from
-Lorry's supported compatibility surface rather than retained as historical
-test fixtures.
+ambient `beta` or `nightly` channel. Cargo 1.97 and 1.98 are not in Lorry's supported compatibility surface.
 
-### 2.3 Rust supplies the LLVM baseline
+### 3.3 Rust supplies the LLVM baseline
 
 Official Rust builds use an exact commit of `rust-lang/llvm-project`. Rust's
 LLVM fork is based on an upstream LLVM `release/N.x` branch, not LLVM `main`,
@@ -320,28 +275,21 @@ LLVM/Clang, compiler-rt, libc++, native LLVM, and rustc's LLVM builds all read
 it, so the build must require that submodule, the standalone LLVM artifacts,
 and rustc's built LLVM to all come from `MOTOR_LLVM_REV`. Because the generated
 bootstrap configuration sets `submodules = false`, Rust bootstrap never
-touches the submodule (today's generated file already sets it); the checkout
-helper of section 5.1 owns its state.
-
-This is not the current situation. The current Motor LLVM branch is four
-commits on an upstream LLVM `main` commit, not on Rust's snapshot, and the Rust
-fork's committed gitlink is an amended commit that no Motor LLVM ref reaches
-(section 3). The gitlink is therefore not usable as an authority today, which
-is why the script forces the submodule to the sibling checkout's `HEAD`.
+touches the submodule; the checkout helper of section 5.1 owns its state.
 
 Rust patch releases may change their LLVM gitlink to deliver a correctness
 backport. Therefore an upgrade from, for example, Rust 1.99.0 to 1.99.1 must
 compare the two LLVM bases and replay Motor patches when it changes.
 
-### 2.4 First baseline: 1.99 beta, then 1.99.0 stable
+### 3.4 First baseline: 1.99 beta, then 1.99.0 stable
 
 The first policy-conforming Motor release targets Rust `1.99.0`. Rust 1.99
 entered beta on 2026-08-14 and is scheduled to become stable on 2026-10-01.
-Motor OS will use the beta period to perform and test the port, then publish
+Motor OS uses the beta period to perform and test the port, and publishes
 only after rebasing onto the final stable tag.
 
 The initial porting baseline was resolved from the official Rust `beta` branch
-on 2026-08-25 and is now immutable for this implementation cycle:
+on 2026-08-25 and is immutable for the beta cycle:
 
 ```text
 Rust 1.99.0 beta  f47d5bb13648d5c859f5b438eb7dc834b9729961
@@ -350,21 +298,18 @@ Rust Cargo gitlink eb98b54bc9f3c74519f43d066cb3fd02ebc88df0
 Rust Stage 0      08d5b675a9b2abdca5e2fe4eabe0e07bbda15d49
 ```
 
-The review re-verified these values against GitHub on 2026-08-25: `beta` still
-resolves to `f47d5bb1` ("Auto merge of #161261 - cuviper:beta-next",
-2026-08-17); that commit's `src/version` is `1.99.0` and `src/ci/channel` is
-`beta`; its `src/llvm-project` and `src/tools/cargo` gitlinks and its
-`src/stage0` (`compiler_version=beta`, `compiler_date=2026-07-13`) match the
-pins. The LLVM base commit is dated 2026-07-22 in `rust-lang/llvm-project`.
-The beta commit is not present in the local Motor Rust clone, which has no
-`rust-lang` remote; the branch work in section 7 starts by fetching it.
+These values were verified against GitHub on 2026-08-25: that commit's
+`src/version` is `1.99.0` and `src/ci/channel` is `beta`, and its
+`src/llvm-project` and `src/tools/cargo` gitlinks and its `src/stage0`
+(`compiler_version=beta`, `compiler_date=2026-07-13`) match the pins. The LLVM
+base commit is dated 2026-07-22 in `rust-lang/llvm-project`.
 
-Replay the Motor LLVM and Motor Rust patch sets onto those exact bases. Use
-`motor-os-1.99.0-beta-f47d5bb` as the development-branch name in both forks
-(the LLVM branch name records which Rust baseline chose its base) and
-`motor-1.99.0-beta-f47d5bb-dev.1` as the first local rustup toolchain-name base.
-The registered name also includes the full toolchain key. The central manifest
-still records full commits. A deliberately selected later beta baseline gets a
+The Motor LLVM and Motor Rust patch sets are replayed onto those exact bases
+on the development branch `motor-os-1.99.0-beta-f47d5bb` in both forks (the
+LLVM branch name records which Rust baseline chose its base), and
+`motor-1.99.0-beta-f47d5bb-dev.1` is the local rustup toolchain-name base. The
+registered name also includes the full toolchain key, and the central manifest
+records full commits. A deliberately selected later beta baseline gets a
 new commit-qualified branch and a new `dev.N` name base; do not force-rewrite
 an existing branch onto a different upstream baseline or reuse an exact name
 for a different tuple.
@@ -394,96 +339,14 @@ based on post-1.99-branch development sources and LLVM 23. The 1.99 beta is
 therefore the closest release-line starting point for the existing Motor
 patches.
 
-## 3. Current observed tuple
+## 4. The manifest
 
-Observed in sibling checkouts, installed rustup toolchains, and build artifacts
-on 2026-08-13 and rechecked on 2026-08-25. It predates the stable-lineage
-policy above and is retained as evidence; nothing in it may be selected instead
-of the beta tuple in section 2.4.
-
-| Role | Observed identity | Current enforcement |
-|---|---|---|
-| Global default host Rust (defect) | `nightly-2026-06-19`: rustc 1.98.0-nightly (`bc2112ed5`), Cargo 1.98.0-nightly (`598ab48ec`), plus `rust-src` | `rustup default`, set by `build-base.sh` |
-| Floating `nightly` channel (defect) | Cargo 1.99.0-nightly (`3efb1f477`, 2026-07-17) | None; reached by rustup fallback and `+nightly` |
-| Floating `stable` channel (defect) | Cargo 1.97 | None; reached by Lorry's oracle test |
-| Motor Rust source | `motor-os-rustc` at `9fd149a944bf7787bf2db9db05748f0c6d333eb6` (1.100.0-dev); `motor-os-rt-v17` at `8550ca5e5608`; both directly on upstream `8925ea358a0` (2026-08-19) | Branch/local checkout only |
-| Host rustc and std in use | `rustc 1.100.0-dev`, `commit-hash: unknown`, LLVM 23.0.0, linked from `rust/build/x86_64-unknown-linux-gnu/stage2` | rustup link accepted by name |
-| Rust Stage 0 | recorded by the Rust commit; at `9fd149a9` it is the 1.99 beta `f47d5bb1` of 2026-08-18 | Pinned by the Rust commit |
-| Motor LLVM/Clang | 23.0.0git at `7e58a8983122ecfc9d152a7904e8b0caa7f60b92`: four Motor commits on upstream `main` `53069acdb946` | Branch/local checkout plus Motor-triple and major-23 greps |
-| Rust LLVM gitlink | `88ea5aa2a7b4f634c6698e7674eafa2367e1aad4` committed by the compiler patch; unreachable from any Motor LLVM ref; the submodule work tree is forced to sibling `HEAD` (`7e58a898`) and shows as modified | Not enforced |
-| Rust Cargo gitlink | `514c56dd7321eecbfdcf9b6479519cf4edfab906` at `9fd149a9` | Never initialized or built |
-| mlibc | `motor-os-rustc` at `62f9495700537ded14a2a6fae9373227fe5ec5ca` | Branch/local checkout only |
-| `moto-rt` used by std | 0.17.4 committed in `library/Cargo.lock`; 0.17.5 (checksum `0d957efc93bb603844e45d66f45c9b999168ff8f7630da91f3a7308c498a7ccc`) as an uncommitted lock update; the root lock also carries an uncommitted `ctrlc` bump | Lockfile, rewritten by the normal build |
-| Local `moto-rt` | 0.17.5 in `src/sys/lib/moto-rt`, a path dependency of `moto-rt-cabi` | Never compared with std's version |
-| Cargo used by `cargo +dev-x86_64-unknown-motor` | the floating nightly's Cargo (`info: falling back to .../nightly-x86_64-unknown-linux-gnu/bin/cargo`) | Rustup fallback |
-
-The 2026-08-13 values (host rustc 1.99.0-dev at `4e81c4818fb7`, bootstrap
-source `607430137e08`, LLVM `88ea5aa2` in the sibling checkout, std `moto-rt`
-0.17.2) are superseded by the table; they show how quickly branch-selected
-inputs drift.
-
-The observed Stage 2 compiler reports `commit-hash: unknown` because Rust dev
-builds omit Git metadata by default (`rust.omit-git-hash` defaults to `true`
-when the channel is `dev`), making different compilers look identical to Cargo
-and to a reader.
-
-### 3.1 What each toolchain compiles today
-
-- `make` builds every OS component with `cargo +dev-x86_64-unknown-motor`, so
-  the Motor rustc plus the floating nightly's Cargo.
-  `src/sys/lib/rt.vdso/build.sh` does the same.
-- `src/boot/x64.{mbr,boot,kloader}/build.sh` run bare `cargo`, so the global
-  default June nightly compiles the MBR, boot sector, and kloader with that
-  nightly's `rust-src`, `-Zbuild-std`, and `-Zjson-target-spec`. This is why
-  `build-base.sh` installs `rust-src`.
-- The imager (`cargo run` in `src/imager`) and every host unit test in
-  `src/tests/full-test.sh` (imager, rnetbench, the `src/bin` crates, sys-init,
-  moto-sys, moto-tooling, motor-fs) run bare `cargo`, so the June nightly.
-- The netstack tests in `full-test.sh` and `full-test-networking.sh` run
-  `cargo +nightly test`, so the floating nightly.
-- Lorry's product suite (`test-all.sh`, `cargo-identity.sh`,
-  `proc-macro-contract.sh`, `review-contract.sh`, `curl-contract.sh`,
-  `test-native.sh`) selects the June nightly explicitly, and
-  `verify-stage2-resolution-oracle.sh` runs `stable`, the June nightly, and the
-  floating nightly Cargo. `cargo-identity.sh` defaults the Motor linker to an
-  absolute path under `/home/posk/motor-dev`.
-- `AGENTS.md` formats with `cargo +nightly fmt`, so the floating nightly's
-  rustfmt.
-- `update_rust` runs `cargo update` inside the Rust fork with bare `cargo`, so
-  the June nightly's Cargo rewrites the fork's lockfiles.
-- `build-base.sh` also builds `src/tools/remote-test-server` for both targets;
-  nothing in the repository uses it.
-
-### 3.2 Patch stacks to replay
-
-- Motor Rust, `motor-os-rustc`, on upstream `8925ea358a0`:
-  `736c4c253be library: motor: bump moto-rt ABI ver to 17 and implement several
-  missing methods` (12 files, +215/-75, all under `library/`);
-  `38e0108f5d7 compiler: make rustc run natively on Motor OS` (rustc, one
-  bootstrap file, one std path file, and the LLVM gitlink; most of its 1329
-  deleted lines remove `.github` templates); `099d8b6740d rustc: flock for
-  Motor OS` (+36); `9fd149a944b rustc: Run Motor proc macros over stdio`
-  (+414/-34). `motor-os-rt-v17` is the same base plus the same std patch as
-  `8550ca5e560`; it is not an ancestor of `motor-os-rustc`.
-- Motor LLVM, `motor-os-rustc`, on upstream `main` `53069acdb946`:
-  `41cb5179ddf0 [Triple] Add target triple support for Motor OS`,
-  `6cc6cbd22e61 clang/Driver: add Motor OS`, `43b4813044e6 [libc++] minor
-  fixes to support motor/mlibc`, `7e58a8983122 clang/Driver, misc: minor
-  tweaks to support Motor OS`. The clone has no `rust-lang` remote and no
-  upstream tags. The replay onto `21cf2843` is the first time Motor LLVM sits
-  on Rust's release-branch-based snapshot rather than on `main`; expect small
-  conflicts and a full LLVM rebuild.
-
-Replay these onto the exact beta tuple and commit the `moto-rt` 0.17.5 and
-`ctrlc` lock selections as an explicit reviewed dependency commit on the new
-branch. Do not select the 1.100 checkout or attribute its uncommitted lockfile
-changes to `9fd149a9`.
-
-### 3.3 Manifest shape
-
-A policy-conforming stable manifest has this shape after the final stable tag
-is selected. The first block is declared in `src/toolchain-versions.sh`; the
-second is generated per build (section 5.5):
+The declared manifest is `src/toolchain-versions.sh`; a generated manifest is
+written per build (section 5.5). Their shape, shown with the values a stable
+release will carry (the beta tuple declares
+`MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.1"`,
+`MOTOR_TOOLCHAIN_MATURITY="beta"`, `UPSTREAM_RUST_REF="refs/heads/beta"`, and
+the commits of section 3.4):
 
 ```sh
 MOTOR_TOOLCHAIN_ID="1.99.0-motor.1"
@@ -587,190 +450,12 @@ rebase or a new semantic compiler-lineage version. The next formal source
 branch and tag carry the reviewed dependency selection forward when the Motor
 patches are replayed.
 
-## 4. Problems found
-
-### 4.1 Sources are selected by branch or local state
-
-`src/build-motor-os.sh::clone_repo` checks out `motor-os-rustc` only for a new
-clone. An existing LLVM or mlibc checkout is accepted without verifying remote,
-branch, commit, or cleanliness. A new clone gets the branch tip available that
-day. LLVM is checked only for the Motor triple and major version 23.
-
-`src/build-base.sh` and `update_rust` similarly accept local Rust branches at
-any commit. The Rust LLVM submodule is forced to the sibling LLVM checkout's
-`HEAD` because the committed gitlink points at an amended commit that no Motor
-LLVM ref reaches, so the sibling checkout, not a central declaration or the
-Rust gitlink, is currently authoritative, and the Rust work tree permanently
-shows `src/llvm-project` as modified. An existing rustup link is accepted by
-name without checking its target path or compiler revision.
-
-The only version checks on the Motor OS checkout itself are greps for specific
-source strings in `rt.vdso` and a partition-size field in the imager
-configuration (`rustc_verify_prereqs`). They are ad hoc stand-ins for the
-manifest this plan introduces.
-
-### 4.2 The host nightly is a hidden member of the build
-
-The custom `dev-x86_64-unknown-motor` Stage 2 `bin` directory contains
-`rustc`, `cargo-clippy`, and `clippy-driver`, but no Cargo. Rustup consequently
-borrows Cargo from an installed release channel, preferring the floating
-nightly. On the inspected machine every `cargo +dev-x86_64-unknown-motor`
-command prints a fallback notice and runs the July Cargo 1.99 rather than the
-declared June Cargo 1.98. Selection can differ based on unrelated installed
-toolchains.
-
-That is only the most visible use. Section 3.1 shows that the June nightly also
-compiles the boot loaders, the imager, and every host unit test, that its
-`rust-src` is what `-Zbuild-std` compiles into the boot loaders, that the
-floating nightly runs the netstack tests and `cargo fmt`, and that the June
-nightly's Cargo rewrites the Rust fork's lockfiles. None of these compilers has
-a version relationship to the Motor compiler or to the Stage 0 that the Rust
-source selects.
-
-The current workflow installs the June nightly as the global default, runs
-`x.py` from the first-pass `motor-os-rt-v17` source with CI-downloaded LLVM to
-create host rustc, both stds, Clippy, and `remote-test-server`, builds
-`moto-rt-cabi` with that toolchain and the borrowed Cargo, builds LLVM, mlibc,
-and libc++, switches the same checkout to `motor-os-rustc`, invokes `x.py` for
-the native rustc (building LLVM twice more, for the Linux host and for Motor),
-and invokes `x.py` again to rebuild both stds and Clippy in place, replacing
-the first-pass toolchain under the same rustup name. It then rebuilds the shim
-and deletes the Motor OS Cargo caches because Cargo cannot tell the two
-compilers apart.
-
-### 4.3 Normal builds mutate dependency selection
-
-`update_rust` runs `cargo update -p libloading -p stacker -p libc -p ctrlc` in
-the Rust root workspace and `cargo update -p moto-rt` in `library/`. (The
-previous revision of this plan reported that their output was suppressed and
-failure ignored with `|| true`; that was removed earlier and is no longer the
-case.) The commands still advance the four Git-patched crates to their branch
-tips and `moto-rt` to the newest published `0.17.x` on every run, and they run
-under whichever Cargo is the global default. Normal scripts should start with
-the committed dependency selections and must not explicitly refresh them;
-deliberate updates belong in a separate maintenance workflow.
-
-### 4.4 Global, generated, and test state is weakly controlled
-
-`build-base.sh` runs `rustup default nightly-2026-06-19`, changing the user's
-global configuration. There is no root `rust-toolchain.toml`.
-
-Existing `bootstrap.toml` files are accepted using broad marker checks (the
-presence of `download-ci-llvm`) rather than complete validation, and the
-first-pass configuration is written only when absent. `build-motor-os.sh`
-checks only that generated tool files exist, not which sources produced them.
-No canonical version manifest is staged in the image.
-
-Repository commands outside the main build select their own toolchains
-(section 3.1). Lorry currently declares Cargo 1.97, 1.98, and 1.99 compatibility
-families and its oracle test reaches ambient `stable` and `nightly` channels.
-That is broader and less deterministic than the intended product contract.
-Lorry must instead support only the Cargo selected by the current Motor Rust
-revision: the `1.99.0-dev` Cargo at `MOTOR_CARGO_REV` (compatibility family
-1.99) for the initial tuple. This is the one change to a development
-application beyond selector migration (section 0).
-Its README, specification, compatibility representation, configuration
-validation, cache identity, and tests change together to remove the 1.97/1.98
-contract. The frozen Stage 2
-resolution fixture may remain, but it is regenerated or verified only by the
-exact `MOTOR_CARGO_REV` executable and never by ambient channel aliases. A
-later Motor toolchain update deliberately advances Lorry's sole supported
-Cargo family in the same reviewed tuple change.
-
-### 4.5 Broad cleanup hides cache-invalidation defects
-
-After rebuilding rustc, the current workflow deletes `build/obj/release` and
-`src/sys/target`. These are local artifacts, not published outputs. Deleting
-them is still problematic because a clean rebuild can pass even when the build
-system lacks the dependency edge or compiler-identity check needed to reject a
-mixed old/new incremental tree. That makes the cleanup mask the invalidation
-defect instead of demonstrating that an incremental toolchain change is safe.
-
-The complete list of deletions in `build-motor-os.sh` today:
-
-- `build_images`: `build/obj/release` and `src/sys/target` (Cargo caches);
-- `rebuild_shim`: `build/native-toolchain/moto-rt-cabi` (Cargo cache);
-- `build_cxx_runtimes`: `llvm-project/build-motor-cxx` ("stale try_compile
-  results are poison");
-- `build_mlibc`: `meson setup --wipe` when the cross file's hash changes;
-- `build_native_llvm`: `rm -f build-motor-native/bin/llvm` to force a relink,
-  plus a comment instructing the user to `rm -rf build-motor-native` when the
-  sysroot's set of archives changes;
-- `llvm_stage_image` and `rustc_stage_image`: the generated image roots
-  `$MOTORH/assemblies/<assembly-key>/images/{llvm,libc,rustc}` and the former
-  unkeyed Rust overlay; `build_ripgrep`:
-  `$MOTORH/assemblies/<assembly-key>/images/rg`.
-
-The replacement is not to reuse incompatible artifacts. Reusable directories
-are keyed by a digest of the inputs that determine them (section 5.5). An
-unchanged tuple reuses its directory; a changed tuple selects a new directory.
-The build reports obsolete directories but does not remove them
-automatically. This costs disk space, but preserves evidence and makes clean
-and incremental behavior testable. In addition, every authoring compiler
-carries a distinct `description`, so Cargo itself distinguishes it from the
-managed build and no cache can be silently reused across the two.
-
-This does not prohibit Rust bootstrap from recreating its own stage sysroot or
-an image-staging step from replacing its destination tree. Those operations are
-defined producers of a complete generated tree, not wrapper cleanup of a cache
-whose invalidation is under test. Retain image-root replacement for the staging
-trees the script fully owns. Replace the Cargo-cache deletions, the mlibc
-`--wipe` path, the libc++ build-tree deletion, and the native-LLVM relink and
-cleanup guidance with keyed build directories. Document any other retained
-deletion with the single generated tree it owns.
-
-### 4.6 Two branches and two Rust phases are historical, not required
-
-The previous revision of this plan kept a bootstrap Motor Rust branch, a
-bootstrap-only Cargo, and a temporary bootstrap-only rustup toolchain because
-"the first-pass Motor compiler is needed to build `moto-rt-cabi`, which
-participates in mlibc/C++ sysroot construction. That sysroot is needed before
-the final native and cross compiler artifacts can be completed." The second
-sentence is only half true, and the half that is false carries all the
-complexity.
-
-What actually depends on what:
-
-- The mlibc/libc++ sysroot needs `libmoto_rt_cabi.a`, which needs a
-  Motor-target Rust toolchain.
-- The native Motor rustc, the native LLVM multicall, and Lua link against that
-  sysroot; they must come after it.
-- The Linux-host toolchain (host rustc, both stds, Cargo, Clippy, rustfmt)
-  needs only the Motor LLVM, which `x.py` builds from the submodule, and
-  `moto-rt` from crates.io. Motor std depends on `moto-rt` alone (AGENTS.md
-  note 2), contains no C, and `x.py build library` links no Motor executables.
-  The `[target.x86_64-unknown-motor]` `cc`/`linker` entries are consulted only
-  when linking a Motor executable, which happens only in the native phase. The
-  first-pass `build-base.sh` build already proves this: it builds Motor std
-  with no sysroot at all.
-
-So the order is: exact checkouts, standalone cross LLVM/Clang, the complete
-Linux-host Motor toolchain from the one Motor Rust revision, the shim and C
-sysroot built with that toolchain, native LLVM and Lua, the native rustc from
-the same revision, staging, images. One Rust revision, two `x.py` invocations,
-no bootstrap branch, no bootstrap Cargo, no throwaway toolchain, and no
-CI-LLVM download. The two branches exist today only because `build-base.sh`
-predates the rustc port and wanted CI-downloaded LLVM, which requires the
-upstream gitlink; section 3.2 shows they share the same base and the same std
-patch.
-
-The previous design also left a gap: a bootstrap branch that keeps the upstream
-LLVM gitlink builds its host compiler against a CI-downloaded LLVM artifact
-whose identity the manifest never recorded, while one that points at the Motor
-LLVM needs a third full LLVM build. Both problems disappear with one branch.
-
-One assumption must be verified in the first build patch (section 7, item 9):
-that `x.py build library cargo clippy rustfmt` for both targets from the Motor
-Rust branch succeeds with no sysroot present. If a component turns out to need
-the sysroot, the fallback is still one revision with a split invocation, never
-a second branch.
-
-## 5. Proposed design
+## 5. Design
 
 ### 5.1 Central manifest and exact checkout helper
 
-Add a data-only `src/toolchain-versions.sh`, sourced by relevant scripts. It
-contains the Motor toolchain ID, rustup-name base, and maturity; upstream Rust
+`src/toolchain-versions.sh` is a data-only file, sourced by the build scripts.
+It contains the Motor toolchain ID, rustup-name base, and maturity; upstream Rust
 target version, ref, revision, and Stage 0 hash; Rust's LLVM display version and
 base revision; Motor Rust, LLVM, and mlibc revisions; repository URLs; durable
 refs; expected Cargo/runtime identities; the explicit set of relevant Motor OS
@@ -782,33 +467,24 @@ digests, observed lock hashes, the exact rustup name, or either derived key,
 because a source file cannot pin the commit that contains itself. Do not
 duplicate declared values in scripts, tests, and prose.
 
-Use dedicated, independent ordinary checkouts for the new path under
-`$MOTORH/toolchain-src/{rust,mlibc}`; LLVM lives only in
+Managed mode, the default, uses dedicated, independent ordinary checkouts
+under `$MOTORH/toolchain-src/{rust,mlibc}`; LLVM lives only in
 `toolchain-src/rust/src/llvm-project`, so there is no separate LLVM checkout to
-keep in agreement. Seed them from the existing sibling repositories with an
-ordinary local clone whose expected remote is then configured and verified, or
-clone the expected URL with `--reference-if-able <legacy> --dissociate`, to
-avoid duplicate network transfer. Never use an undissociated reference clone
-or `git worktree add`: the managed checkout must own its object database, refs,
-worktree, and bootstrap/build state so that legacy repository maintenance or
-deletion cannot affect it. This is what makes the pre-cutover implementation
-genuinely side-by-side: it never detaches, switches, fetches into, or rewrites
-the legacy `$MOTORH/{rust,llvm-project,mlibc}` repositories. The price is a
-second complete toolchain build (several hours and tens of gigabytes of build
-trees) on the implementing machine until cutover; accept it rather than sharing
-build state with the legacy path. At cutover the dedicated paths become
-authoritative; the legacy checkouts remain untouched and may be deleted by
-their owner. This is managed mode, the default. An explicitly requested
-authoring mode may instead use a developer's Rust checkout as described below;
-it is never selected merely because a managed checkout happens to be dirty.
+keep in agreement. A managed checkout owns its object database, refs,
+worktree, and bootstrap/build state; it is never an undissociated reference
+clone or a `git worktree add` of another repository, so maintenance or
+deletion of any other checkout under `$MOTORH` cannot affect it. An explicitly
+requested authoring mode may instead use a developer's Rust checkout as
+described below; it is never selected merely because a managed checkout
+happens to be dirty.
 
-For the initial beta work, it records a `beta` maturity state, a distinct
-non-release toolchain ID, and the exact beta Rust commit. Stable source
-publication must reject that state. The October conversion changes the state
+During the beta it records a `beta` maturity state, a distinct non-release
+toolchain ID, and the exact beta Rust commit; stable source publication
+rejects that state. The stable conversion (section 6.1) changes the state
 to `stable`, the upstream ref to `refs/tags/1.99.0`, and the toolchain ID to
 `1.99.0-motor.1` only after all final commits have been selected and verified.
 
-Replace branch-only source handling with a managed-checkout helper that:
+The managed-checkout helper:
 
 1. clones the expected repository if absent;
 2. verifies an existing worktree and remote;
@@ -823,8 +499,7 @@ Replace branch-only source handling with a managed-checkout helper that:
 
 Managed and formal source builds reject every tracked or untracked change.
 The helper must never reset, stash, or delete work, or switch a dirty
-worktree. Tests use local temporary Git repositories and no network. Separate
-ancestry checks must prove:
+worktree. Tests use local temporary Git repositories and no network. Separate ancestry checks prove:
 
 ```text
 UPSTREAM_RUST_REV    is an ancestor of MOTOR_RUST_REV
@@ -836,10 +511,8 @@ them to equal `RUST_LLVM_BASE_REV` and the upstream Cargo gitlink; then require
 the gitlinks in `MOTOR_RUST_REV` to equal `MOTOR_LLVM_REV` and
 `MOTOR_CARGO_REV`. The helper initializes `src/llvm-project` and
 `src/tools/cargo` itself and sets `submodules = false` in the generated
-bootstrap configuration so bootstrap never re-fetches or resets them. Seeding
-`src/llvm-project` from the legacy sibling LLVM clone remains a transfer
-optimization, but the submodule must have `HEAD` detached at `MOTOR_LLVM_REV`
-before any LLVM or `x.py` build runs. The standalone LLVM, compiler-rt,
+bootstrap configuration so bootstrap never re-fetches or resets them. The submodule has `HEAD` detached at `MOTOR_LLVM_REV` before any LLVM or
+`x.py` build runs. The standalone LLVM, compiler-rt,
 libc++-family, and native LLVM build directories live outside the source tree
 in keyed roots. Rustc's LLVM build remains under the `x.py`-owned Rust `build/`
 tree described in section 5.5; it is incremental across commits and is not
@@ -861,7 +534,7 @@ src/build-motor-os.sh \
 The option spelling is part of the implementation contract. The full
 `--authoring-base` commit is the exact upstream Rust commit onto which this
 patch stack is being replayed; for the initial work it is the beta commit in
-section 2.4. From the local Rust object database, the orchestrator reads that
+section 3.4. From the local Rust object database, the orchestrator reads that
 commit's Rust version, Stage 0 identity, LLVM gitlink, and Cargo gitlink. It
 derives the expected bootstrapped Cargo CLI release from that Rust version and
 the configured `dev` channel, and separately verifies and records the Cargo
@@ -874,8 +547,7 @@ authoring a later Rust update before changing the current managed tuple.
 The supplied Rust checkout and its initialized `src/llvm-project` submodule
 are the authoritative authoring worktrees. The orchestrator uses that one LLVM
 worktree for both the standalone LLVM/Clang build and rustc's LLVM build;
-accepting an unrelated sibling LLVM checkout would reintroduce the split
-identity this plan removes. The Cargo submodule must be initialized, clean,
+accepting an unrelated sibling LLVM checkout would split the LLVM identity. The Cargo submodule must be initialized, clean,
 and exactly at the gitlink in the effective Rust `HEAD`; that gitlink must
 remain the Cargo revision derived from `--authoring-base`. The effective
 tree's `src/stage0` identity must likewise remain the one derived from the
@@ -963,26 +635,25 @@ updates. Hash canonical source recipes and semantic arguments, not generated
 wrappers containing absolute sysroot paths; serialize such paths as named
 placeholders. Keep this as an explicit reviewed path list; do not hash the whole
 repository or silently discover a different set.
-Derive `MOTOR_OS_REV` from the checked out `HEAD`, and write both only to
-generated manifests. A local assembly attributed to formal source tags
+`MOTOR_OS_REV` is derived from the checked-out `HEAD`, and both are written
+only to generated manifests. A local assembly attributed to formal source tags
 requires those paths to be clean at that revision; local development assembly
 is allowed but must be marked dirty and identified by the content digest.
 
 ### 5.2 One Motor toolchain from one Rust revision
 
-Do not install or select a separate general host Rust toolchain. Install
-rustup with `--default-toolchain none` when it is absent and never run
-`rustup default`. Rust `x.py` bootstraps directly from the Stage 0 compiler and
+No separate general host Rust toolchain is installed or selected: rustup is
+installed with `--default-toolchain none` when it is absent, and `rustup
+default` is never run. Rust `x.py` bootstraps directly from the Stage 0 compiler and
 Cargo specified, with hashes, by the selected Rust source. That is
 `MOTOR_RUST_REV` in managed mode and `EFFECTIVE_MOTOR_RUST_REV` in authoring
 mode. Stage 0 is an implementation input to compiler bootstrap, not the
 repository toolchain, and the scripts must not override it.
 
-Expose one user-facing entry point: `src/build-motor-os.sh`. Reduce
-`build-base.sh` to a private host-provisioning helper called only by that
-entry point: Ubuntu packages, rustup installation without a default, and the
-tap/KVM setup. It no longer clones or builds Rust, and its standalone workflow
-leaves the contributor documentation. The build sequence is:
+The one user-facing entry point is `src/build-motor-os.sh`. `build-base.sh` is
+a private host-provisioning helper called only by that entry point: Ubuntu
+packages, rustup installation without a default, and the tap/KVM setup. The
+build sequence is:
 
 1. Resolve every source checkout according to the selected mode (section 5.1)
    and verify its ancestry, submodule, and tree-state relationships. Print the
@@ -1026,7 +697,7 @@ while the second `x.py` invocation builds native rustc. For example:
 channel = "motor-1.99.0-motor.1-<full MOTOR_TOOLCHAIN_KEY>"
 ```
 
-During beta development, the base is the beta toolchain name from section 2.4
+During beta development, the base is the beta toolchain name from section 3.4
 instead. For a clean declared tuple, this tracked file contains the exact
 derived name and changes in the same reviewed patch as the tuple. A build from
 authoring Rust or LLVM tree registers a different key-qualified name and the
@@ -1043,12 +714,12 @@ test keep the toolchain name in the TOML file synchronized with
 the clean tuple's derived `MOTOR_RUSTUP_TOOLCHAIN` and verify that the link
 target is the prefix carrying the same full key.
 
-Generate the complete bootstrap configuration deterministically from a
-template and the manifest into a keyed generated-state directory, and pass its
-absolute path to `x.py --config`. Never create or replace `bootstrap.toml` in
-an authoring source checkout. Validate an existing generated configuration
-against the template instead of accepting one that contains a marker. The
-identity-relevant settings are:
+The complete bootstrap configuration is generated deterministically from a
+template and the manifest into a keyed generated-state directory, and its
+absolute path is passed to `x.py --config`. `bootstrap.toml` is never created
+or replaced in an authoring source checkout, and an existing generated
+configuration is validated against the template rather than accepted because
+it contains a marker. The identity-relevant settings are:
 
 ```toml
 [build]
@@ -1077,7 +748,8 @@ targets = "X86"
 
 The remaining settings (the `library` profile, `deny-warnings`, `incremental`,
 `experimental-targets`, `static-libstdcpp`, and the
-`[target.x86_64-unknown-motor]` wrapper paths) carry over from today's file.
+`[target.x86_64-unknown-motor]` wrapper paths) are fixed by the template as
+well.
 The exact key placement must match the pinned Rust bootstrap schema. The
 settings above were checked against the bootstrap sources: the `Docs` install
 step is gated by `build.docs`, not by `tools`; `install.sysconfdir` is joined
@@ -1095,8 +767,8 @@ reader.
 `omit-git-hash = false` makes `rustc -vV` report the effective Rust `HEAD`,
 which distinguishes different committed patch stacks.
 
-Build the compiler with the `dev` channel until Motor's unstable feature usage
-has been removed; do not describe it as an unmodified stock stable compiler.
+The compiler is built with the `dev` channel until Motor's unstable feature
+usage has been removed; it is not an unmodified stock stable compiler.
 
 ### 5.3 Deterministic Rust tools and the installed prefix
 
@@ -1106,41 +778,36 @@ records, and Clippy and rustfmt from the in-tree sources. `x.py install` builds
 and installs them in the same invocation as the compiler and both stds; a
 separate Cargo build outside bootstrap is unnecessary.
 
-The linked toolchain must be an installed prefix, not the `build/<host>/stage2`
-sysroot, because bootstrap's `Sysroot` step removes that directory at the start
-of every invocation. The preferred mechanism is `x.py install` with
-`[install] prefix` pointing at
-`$MOTORH/toolchains/<MOTOR_RUSTUP_TOOLCHAIN>`, whose exact name already includes
-`MOTOR_TOOLCHAIN_KEY`; it produces the standard component layout including
-`rust-src`. Bootstrap's
-install steps build with the compiler one stage below `--stage`, so
-`x.py install --stage 2` installs the same stage-2 artifacts that today's
-`stage2` link exposes. Do not fall back to manually copying the stage sysroot:
+The linked toolchain is an installed prefix, not the `build/<host>/stage2`
+sysroot, because bootstrap's `Sysroot` step removes that directory at the
+start of every invocation. It is produced by `x.py install` with
+`[install] prefix` pointing at `$MOTORH/toolchains/<MOTOR_RUSTUP_TOOLCHAIN>`,
+whose exact name already includes `MOTOR_TOOLCHAIN_KEY`; this gives the
+standard component layout including `rust-src`. Bootstrap's install steps
+build with the compiler one stage below `--stage`, so `x.py install --stage 2`
+installs the stage-2 artifacts. The stage sysroot is never copied by hand:
 that would omit installer behavior and the vendored, reduced `rust-src`
-component. If `x.py install` is unsuitable, stop and revise this plan around
-Rust's component installers.
+component.
 
-Never run `x.py install` into an existing prefix. Reuse an existing prefix only
-after its complete manifest passes validation; otherwise require the target to
-be absent and atomically create an adjacent `<prefix>.building` lock directory
-before installation; stop if another process owns it. After `x.py` returns,
-validate every component and the post-build lock hashes,
-write the complete manifest inside the prefix, and only then remove the marker
-and create the rustup link. An interrupted, invalid, or lock-rewrite prefix is
-marked rejected and never reused or linked; the script reports it but does not
-delete it. A changed tuple installs a new prefix under a new exact name. Later
-`x.py` invocations, including the native rustc build, cannot damage it, so the
-"last sysroot-mutating `x.py`" constraint of the previous plan revision is no
-longer load-bearing.
+`x.py install` never runs into an existing prefix. An existing prefix is
+reused only after its complete manifest passes validation; otherwise the
+target must be absent, and an adjacent `<prefix>.building` lock directory is
+created atomically before installation; the build stops if another process
+owns it. After `x.py` returns, every component and the post-build lock hashes
+are validated, the complete manifest is written inside the prefix, and only
+then are the marker removed and the rustup link created. An interrupted,
+invalid, or lock-rewrite prefix is marked rejected and never reused or
+linked; the script reports it but does not delete it. A changed tuple
+installs a new prefix under a new exact name. Later `x.py` invocations,
+including the native rustc build, cannot damage it.
 
 This does not port these tools to run on Motor; it supplies the Linux-host
 tools that drive and check Motor cross-builds. Native Motor tools remain
 separate binaries built from the same pinned source tuple. All resulting host
-binaries and sysroots are local build artifacts; only the source refs and tags
-are published by this plan.
+binaries and sysroots are local build artifacts; only the source refs and tags are published.
 
-Required validation, all of which must resolve inside the linked prefix and
-report the recorded identities without a rustup fallback notice:
+The required validation, all of which resolves inside the linked prefix and
+reports the recorded identities without a rustup fallback notice:
 
 ```text
 rustup which rustc --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
@@ -1162,32 +829,30 @@ tests and its resolution-oracle test use this exact Cargo. The oracle verifies
 the full `cargo -Vv` identity against `SELECTED_MOTOR_CARGO_REV` (which equals
 `MOTOR_CARGO_REV` in managed mode); it does not install or execute older Cargo
 families or select `stable`, `beta`, or `nightly` aliases.
-`remote-test-server` is not part of the toolchain and is no longer built
-unless a consumer appears.
+`remote-test-server` is not part of the toolchain and is not built.
 
 ### 5.4 Dependency selection and `moto-rt` maintenance
 
-Remove both explicit `cargo update` commands from normal builds and add no lock
-enforcement to Rust bootstrap; `locked-deps` stays `false`. This policy is
-limited to the Rust build. Existing application and offline-test uses of
-`--locked` or `--locked --offline` remain unless their owning component changes
-that policy separately. The committed Rust root and library lockfiles remain
-the starting dependency selection, but `x.py` does not force them to be
-immutable. If Cargo must rewrite one because a manifest changed, leave the diff
-visible. A formal source tag requires any such change to have been reviewed and
+Normal builds run no `cargo update`, and Rust bootstrap enforces no lock
+immutability (`locked-deps` is `false`). This policy is limited to the Rust
+build; application and offline-test uses of `--locked` or `--locked --offline`
+are their owning components' policy. The committed Rust root and library
+lockfiles are the starting dependency selection, but `x.py` does not force
+them to be immutable. If Cargo rewrites one because a manifest changed, the
+diff stays visible. A formal source tag requires any such change to have been reviewed and
 committed before a successful build.
 
 Dependency resolution for the Rust tree happens inside `x.py`: bootstrap's
 early `cargo metadata` pass runs with `--no-deps` and resolves nothing, so the
 first Cargo build of the run, using the Stage 0 Cargo without `--locked`, is
 what may rewrite a lockfile. There is no separate preflight; running Cargo
-before `x.py` would need a repository toolchain that does not exist yet. Hash
-both lockfiles at the start of the run and again after the build. The
-provisional key and install path use the starting hashes. If either hash differs
-afterwards, the run must not register or use that prefix, write a valid stamp,
-or continue into the C sysroot and OS build: mark the prefix rejected, report
-both hashes and the rewritten file, preserve the diff and build outputs, and
-stop. The next run starts from the rewritten lock and derives a new key; it may
+before `x.py` would need a repository toolchain that does not exist yet. Both
+lockfiles are hashed at the start of the run and again after the build. The
+provisional key and install path use the starting hashes. If either hash
+differs afterwards, the run does not register or use that prefix, write a
+valid stamp, or continue into the C sysroot and OS build: the prefix is
+marked rejected, both hashes and the rewritten file are reported, the diff and
+build outputs are preserved, and the build stops. The next run starts from the rewritten lock and derives a new key; it may
 succeed only if the locks then remain unchanged. This ensures every accepted
 prefix was actually built from the locks in its key. A formal tag requires
 committed locks, so a release never starts from a lock that the build has to
@@ -1199,21 +864,21 @@ enter `MOTOR_OS_RUNTIME_TREE` because they affect the shim installed into the C
 sysroot; unrelated lock entries and application locks are recorded in the image
 manifest but do not enter either compiler/runtime key.
 
-Keep the Rust fork's Git patch declarations on reviewed Motor fork sources.
-For the beta tuple, pin `stacker`, `libloading`, and `libc` by full Git
-revision as well as in the lockfile; `ctrlc` remains on its named Motor branch,
+The Rust fork's Git patch declarations point at reviewed Motor fork sources.
+For the beta tuple, `stacker`, `libloading`, and `libc` are pinned by full Git
+revision as well as in the lockfile; `ctrlc` is on its named Motor branch,
 with the lockfile recording the exact resolved commit. The forked `stacker`
-continues to provide Motor's allocation-based stack guard. Give the
-`libloading` and `libc` forks distinct build-metadata versions
-(`0.9.0+motor.1` and `0.2.186+motor.1`) so multi-workspace vendoring cannot
-collide with their crates.io counterparts. Do not change rustc LLVM's existing
-`cc = "=1.2.16"` selection as part of this work. Normal build scripts do not
+provides Motor's allocation-based stack guard. The `libloading` and `libc`
+forks carry distinct build-metadata versions (`0.9.0+motor.1` and
+`0.2.186+motor.1`) so that multi-workspace vendoring cannot collide with their
+crates.io counterparts; rustc LLVM keeps its `cc = "=1.2.16"` selection. Normal build scripts do not
 run a dependency-refresh operation; advancing any selected dependency is an
 explicit maintenance change.
 
-Rust std continues to depend on published crates.io `moto-rt`; the GitHub Rust
+Rust std depends on published crates.io `moto-rt`; the GitHub Rust
 fork must never contain a path dependency or generated patch pointing to
-`../motor-os`. To bump `moto-rt` between compiler-lineage releases:
+`../motor-os`. To bump `moto-rt` between compiler-lineage releases (section 6.3 gives the
+same procedure from the maintainer's side):
 
 1. Bump the local `moto-rt` package version, validate it, and publish that
    version to crates.io.
@@ -1246,15 +911,14 @@ development-branch commit and the keys identify local builds.
 
 ### 5.5 Keys, version checks, stamps, and the image manifest
 
-Before expensive work, print and verify every declared or source-derived input:
+Before expensive work, the build prints and verifies every declared or
+source-derived input:
 the compiler-lineage ID; the selected upstream Rust version/ref/commit and
 Stage 0 hash; expected Motor host rustc/rustdoc/Cargo/Clippy/rustfmt
 identities; the declared and effective Motor Rust commits and tree state; Rust
 LLVM base and declared and effective Motor LLVM commits and tree state; source
 mode; mlibc; both `moto-rt` identities; the Motor OS runtime tree; the Rust
-gitlinks; ancestry relationships; and lockfile hashes. Verify any existing
-reusable artifact against those expectations; a clean provision has no such
-artifact yet.
+gitlinks; ancestry relationships; and lockfile hashes. Any existing reusable artifact is verified against those expectations.
 
 All keys and content digests use SHA-256 and lowercase 64-character hexadecimal
 output. The canonical serializer starts with its schema identifier and emits
@@ -1302,9 +966,9 @@ key it derives.
 
 The distinction matters for Motor OS development. `moto-rt`, `moto-sys`, and
 `moto-rt-cabi` are ordinary workspace sources that Cargo already tracks; keying
-the OS build's Cargo output directories by their content digest, as the
-previous plan revision did, would force a full OS rebuild after every `moto-rt`
-edit. Those directories change only when the compiler changes. The runtime
+the OS build's Cargo output directories by their content digest would force a
+full OS rebuild after every `moto-rt` edit, so those directories change only
+when the compiler changes. The runtime
 digest belongs to the sysroot, whose `libmoto_rt_cabi.a` is built from it.
 
 Directories are keyed by the narrowest set of inputs that determines them, and
@@ -1327,270 +991,72 @@ authoritative managed mlibc checkout used to derive and verify the assembly
 identity.
 
 The Rust `build/` tree is owned by `x.py`, which is incremental across
-commits; it is not re-keyed. `src/sys/target` stops being used by the build
-scripts; every Cargo invocation they make sets `CARGO_TARGET_DIR` under the
-keyed roots. The same tuple may reuse its directory. A changed tuple gets a
+commits; it is not re-keyed. The build scripts do not use `src/sys/target`; every Cargo invocation they
+make sets `CARGO_TARGET_DIR` under the keyed roots. The same tuple may reuse its directory. A changed tuple gets a
 different directory; the build must not delete or silently reuse the old one.
 Each mutable keyed build root has an atomic per-key lock directory; a concurrent
 producer for the same key stops rather than sharing a partially written tree.
 An abandoned lock is reported for explicit inspection and is never removed as
 part of automatic cleanup.
 
-After building, validate at least `rustc -vV`, `cargo -Vv`, `clippy-driver
+After building, the build validates at least `rustc -vV`, `cargo -Vv`, `clippy-driver
 --version`, `rustfmt --version`, `clang --version`, `llvm-config --version`,
-the rustc sysroot, and the Motor target library directory. Verify that the
-host and native rustc report `EFFECTIVE_MOTOR_RUST_REV` and the description
-required by the source mode.
+the rustc sysroot, and the Motor target library directory, and verifies that
+the host and native rustc report `EFFECTIVE_MOTOR_RUST_REV` and the
+description required by the source mode.
 
-Write a versioned machine-readable manifest into the toolchain prefix, every
-generated root, and the dev image, with a canonical on-image path such as:
+A versioned machine-readable manifest is written into the toolchain prefix,
+every generated root, and the dev image, at this on-image path:
 
 ```text
 /devtools/toolchain/manifest
 ```
 
-Include both meaningful upstream versions and exact source revisions, both
+It includes both meaningful upstream versions and exact source revisions, both
 keys, source mode, declared and effective revisions, the Motor OS runtime
 digest, tree-state and dirty markers, lock hashes, target, compiler channel,
 and compiler version output. Authoring mode uses `development-authoring` when
 all relevant worktrees are clean and `development-dirty` otherwise. A
 permitted uncommitted lockfile diff present at the start of the build or another
 dirty tree uses `development-dirty`; a lockfile rewrite during the build rejects
-the run as described in section 5.4. Exclude host absolute paths and
-identity-changing timestamps.
+the run as described in section 5.4. Host absolute paths and identity-changing timestamps are excluded.
 
 `build-motor-os.sh` sources the central manifest and rejects missing or
 mismatched generated manifests instead of checking only for file presence. On
 mismatch it names the stale directory and directs the user to the correctly
-keyed build; it does not broadly clean it. Tests must cover both a no-op
-incremental build with an unchanged tuple and selection of a fresh directory
+keyed build; it does not broadly clean it. Tests cover both a no-op incremental build with an unchanged tuple and selection of a fresh directory
 when any tuple member changes.
 
-## 6. Changes by file
-
-- New `src/toolchain-versions.sh`: authoritative Rust lineage and Stage 0
-  hash, semantic rustup-name base, Rust LLVM base, Motor Rust/LLVM/mlibc
-  revisions and refs, the Cargo gitlink, declared runtime inputs, canonical key
-  formats, and schema; no self-referential Motor OS commit, tree state, exact
-  rustup name, or derived key.
-- New root `rust-toolchain.toml`: select the versioned custom Motor toolchain;
-  for a clean tuple, validate its full key-qualified name against the central
-  manifest and generated key.
-- `src/build-base.sh`: private host-provisioning helper used only by
-  `build-motor-os.sh`: packages, rustup without a default toolchain, tap/KVM.
-  No Rust clone, build, `rustup default`, or `remote-test-server`.
-- `src/build-motor-os.sh`: exact Rust and mlibc checkout and Rust submodule
-  handling in managed mode, with `src/llvm-project` as the only LLVM source
-  tree; explicit non-mutating Rust/LLVM worktree selection
-  in authoring mode; declared/effective ancestry, gitlink, and tree-state
-  verification; the ordered single-revision build of section 5.2;
-  deterministic external bootstrap configuration; installed and registered
-  toolchain; removal of `cargo update`, the Cargo-cache deletions, the
-  mlibc/libc++/native-LLVM wipe paths, and the ad hoc source greps; keyed output
-  directories; manifests and stamps; and the exact generated tuple required
-  before image assembly.
-- Motor Rust fork `library/std/Cargo.toml` and `library/Cargo.lock`: retain a
-  crates.io `moto-rt` dependency and accept explicit dependency-only
-  maintenance commits; never reference the local Motor OS checkout.
-- `Makefile`: replace `cargo +dev-x86_64-unknown-motor` in `DO_BUILD` and
-  `DO_CLIPPY` and the bare `cargo` in the imager rules with the root override;
-  derive `OBJ_DIR` from the toolchain key stamp.
-- `src/sys/lib/rt.vdso/build.sh` and `src/boot/x64.{mbr,boot,kloader}/build.sh`:
-  drop the explicit selector or the reliance on the global default; the root
-  override applies.
-- `src/tests/full-test.sh` and `full-test-networking.sh`: remove the
-  `+nightly` selectors; the host unit tests already run through bare `cargo`
-  and follow the root override.
-- `src/bin/lorry/{README.md,spec.md,src,tests}`: make the current Motor Cargo
-  family the sole compatibility contract (the `1.99.0-dev` Cargo at
-  `MOTOR_CARGO_REV`, family 1.99, for this tuple); remove the 1.97/1.98
-  configuration, implementation variants, and
-  oracle lanes; select the Motor toolchain by exact name in temporary working
-  directories; verify and log its Cargo's full `-Vv` output and
-  `MOTOR_CARGO_REV`; derive the Motor linker and sysroot paths from the manifest
-  instead of a hard-coded home directory; and remove ambient `stable`/`nightly`
-  selection.
-- `AGENTS.md`: format with rustfmt from the Motor toolchain (`cargo fmt`
-  under the root override) rather than a separately selected nightly.
-- `docs/build.md`, `docs/build-motor-os.md`, `docs/build-rustc.md`,
-  `docs/build-llvm.md`, and the recipes: identify the stable Rust and
-  Rust-LLVM baselines, describe the single entry point and single Rust
-  revision, replace the branch-switch and "repurposes the dev toolchain"
-  narratives and the cache-clearing guidance, document the inspection and
-  update procedures, and state that publication is source-only.
-
-## 7. Incremental implementation and tests
-
-Each numbered item is a separate review unit. Land it in 100-300-line patches
-including tests; split the unit further when necessary. For fork rebases,
-preserve the existing small commit boundaries instead of squashing the replayed
-patch stack. Items 1 and 2 happen in the forks; items 3 onward are Motor OS
-patches. Items 3-11 prepare and validate the new path alongside the legacy
-provisioning in the dedicated `toolchain-src` checkouts without changing
-repository selectors or the legacy sibling worktrees. Item 12 is the atomic
-cutover: only after the installed replacement has passed its own checks does it
-change the root override and remove the legacy path. Thus every intermediate
-commit retains a working clean-provision route. Prepare selector-aware helpers
-in earlier no-behavior-change patches so item 12 remains within 100-300 lines if
-possible; if the atomic removal/cutover cannot safely be split, it is the one
-documented exception and must contain only the tightly coupled wiring and
-deletion.
-
-1. In a Motor Rust authoring checkout, configure the Motor Rust fork as
-   `origin` and upstream Rust as `rust-lang`, fetch `f47d5bb1`, create
-   `motor-os-1.99.0-beta-f47d5bb`, and initialize its LLVM and Cargo submodules.
-   Normalize `src/llvm-project` the same way regardless of the URL inherited
-   from upstream `.gitmodules`: the Motor LLVM fork is `origin` and Rust's LLVM
-   repository is `rust-lang`. Fetch `21cf2843`, create the matching Motor LLVM
-   branch, and replay the four Motor LLVM commits. Do not force-rebase the
-   existing public development branch or use a different sibling LLVM worktree
-   for test builds.
-2. In the enclosing Rust branch, replay the std patch and the three compiler
-   patches with their reviewable boundaries, point the LLVM gitlink at the item
-   1 commit, set `.gitmodules` to the Motor LLVM URL without a moving `branch`
-   selector, keep the Cargo gitlink `eb98b54b`, and add one reviewed dependency
-   commit selecting `moto-rt` 0.17.5 and the current `ctrlc` revision. Push the
-   LLVM branch first and the Rust branch second so the gitlink is reachable.
-3. Add the central data manifest and a small offline shell test for required
-   fields, full commit formats, beta/stable maturity, schema/toolchain ID, and
-   canonical key generation. Test that beta state cannot authorize stable
-   source publication.
-4. Add managed and authoring source modes and their offline
-   temporary-repository tests. Managed cases cover a new/correct checkout,
-   advanced development branch retaining the pinned commit, stale formal tag,
-   ref/SHA mismatch, wrong remote, dirty/untracked rejection without switching,
-   submodule gitlink verification, and a missing commit. Authoring cases cover
-   local/unpushed Rust and LLVM commits, dirty and untracked content, a pending
-   LLVM gitlink update, exact Cargo-gitlink enforcement, ancestry failure,
-   initial and later full authoring-base commits with identities derived from
-   each base, canonical content hashing, repeat verification before use,
-   distinct keys, and proof that the helper changes no authoring worktree or
-   ref.
-5. Make `src/build-motor-os.sh` the sole documented user-facing orchestrator
-   and make `build-base.sh` private, but retain its legacy provisioning behind
-   that orchestrator until item 12. Add a small entry-point test; do not yet
-   change the working clean-build path or repository selectors.
-6. Add the exact mlibc checkout, Rust submodule initialization at
-   `MOTOR_LLVM_REV` and `MOTOR_CARGO_REV`, and Rust LLVM-base verification to
-   the new path in the orchestrator, using the helper from item 4. Keep that
-   path side-by-side with the legacy branch-selected path until cutover.
-7. Pin the Motor Rust revision, verify the ancestry relationships and both
-   gitlinks, record Stage 0, and generate the external bootstrap configuration
-   deterministically with Git metadata, the managed release description, the
-   authoring suffix, tools, `docs`/`optimized-compiler-builtins`, and the
-   install layout. Test its exact schema and both source-mode identities.
-8. Remove the dependency-refresh commands. Add starting/post-build lock hashing
-   and derive `MOTOR_TOOLCHAIN_KEY` and the exact rustup name from the starting
-   state. Add rejection of any prefix produced while a lock changed, the
-   crates.io/local `moto-rt` version and clean-package-content checks, and
-   offline tests for rejection without linking, re-keying on the next run, and
-   the explicit runtime-maintenance workflow. Do not add Rust-bootstrap
-   lockfile immutability enforcement or remove application/test `--locked`
-   policy.
-9. Build the Linux-host toolchain with one `x.py` invocation from the pinned
-   revision, before the C sysroot, install it into a new keyed prefix, validate
-   its unchanged locks and components, and register it side-by-side under the
-   full key-qualified name without changing the root override. Write the prefix
-   manifest/key stamp and run the section 5.3 validation. This is where the
-   section 4.6 assumption is proven; if a
-   component needs the sysroot, split the invocation within this item. Test
-   name/prefix synchronization, interrupted or rejected prefix handling,
-   rejection of rustup fallback, `cargo fmt`, `rust-src` presence, and a clean
-   provision of this path with no unrelated installed Rust channel. Also build
-   one explicitly selected local Rust/LLVM authoring tuple, verify its effective
-   revisions and unique description, and prove it neither changes the root
-   override nor qualifies for managed artifact reuse.
-10. Derive `MOTOR_ASSEMBLY_KEY`, move reusable outputs to their keyed
-    directories, stop using `src/sys/target`, and route the existing shim,
-    builtins, mlibc, libc++,
-    native LLVM, and Lua producers through the side-by-side exact toolchain and
-    their keyed directories without replacing the legacy sysroot or image
-    staging roots. Remove the Cargo-cache deletions and the
-    mlibc/libc++/native-LLVM wipe paths in component-sized subpatches, ending
-    with a validated C sysroot, per-root assembly manifests/stamps, and native
-    prerequisites for item 11. Test no-op reuse for an unchanged tuple and
-    selection of a new directory for each changed tuple class, and that a
-    `moto-rt` source edit changes the assembly key but not the toolchain key.
-11. Build the native Motor rustc from the same revision after the sysroot,
-    verify the host and native compiler identities, Git metadata, and release
-    description, and stage it in the new assembly-keyed root without replacing
-    the legacy image root. Stage the on-image manifest there and test rejection
-    of changed Rust, LLVM, mlibc, Cargo, either `moto-rt` identity, Motor OS
-    runtime content, lock hashes, tree state, or schema. Confirm the installed
-    prefix is unchanged by this invocation.
-12. Cut over in one core patch: add the exact key-qualified
-    `rust-toolchain.toml`; switch `Makefile` `DO_BUILD`/`DO_CLIPPY` and imager
-    rules, `src/sys/lib/rt.vdso/build.sh`, the three boot-loader scripts, the
-    orchestrator's Cargo commands, and `full-test.sh`/`full-test-networking.sh`;
-    reduce `build-base.sh` to host provisioning without a host nightly or
-    global-default mutation; make the validated keyed sysroot and staging roots
-    authoritative; and remove the legacy two-branch/toolchain path.
-    Refuse the cutover unless the item 9 prefix and item 11 native artifacts
-    validate. This changes how every component under `src/sys` and `src/boot`
-    is compiled, so before committing run `src/tests/full-test.sh` three times
-    each for debug and release as required by `AGENTS.md`.
-13. Migrate remaining non-core selectors, `AGENTS.md`, contributor instructions,
-    and build documentation, with their component-specific checks.
-14. Separately migrate Lorry's implementation, specification, build, and tests
-    to the current Motor Cargo as their sole compatibility family. Remove the
-    Cargo 1.97/1.98 variants and oracle lanes, replace ambient channel aliases
-    with the exact Motor Cargo path and revision check, remove hard-coded host
-    paths, and run Lorry's specific test gate.
-15. When Rust 1.99.0 is published, rebase onto its exact tag and LLVM pin,
-    update all transitive identities, switch the manifest to stable, rebuild in
-    newly keyed output trees, and repeat the entire validation matrix.
-16. Smoke-test host and native tools, verify the stable source manifest, and
-    create the immutable Rust and LLVM source tags named by the manifest for
-    `1.99.0-motor.1`. Do not publish the locally assembled binaries or sysroot.
-
-Real-toolchain smoke coverage should compile a minimal Motor executable, build
-one boot loader with `-Zbuild-std` through the custom toolchain, run Clippy and
-`cargo fmt --check` through it, verify the Motor std artifacts, inspect native
-rustc/LLVM versions in the dev VM, and compare the image manifest to the host
-source tuple. The binaries tested here are local build artifacts. New tests
-must be offline and included in `src/tests/full-test.sh` directly or
-transitively.
-Keep every implementation patch to roughly 100-300 lines, including tests;
-split an item further if necessary. Run the debug/release build and test
-coverage appropriate to each affected build path without adding warnings.
-
-## 8. Explicit update workflow
+## 6. Update workflow
 
 A normal build never advances source refs or explicitly refreshes dependencies.
 An update is a reviewed operation:
 
-### 8.1 First release: Rust 1.99 beta to Rust 1.99.0
+### 6.1 The first stable release: Rust 1.99.0
 
-1. Start from the exact Rust beta, LLVM, Cargo, and Stage 0 commits recorded in
-   section 2.4 rather than following beta `HEAD`.
-2. Create the commit-qualified non-release Motor development branches, replay
-   the initial Motor patches, push the LLVM branch, update the Rust gitlink,
-   push the Rust branch, and pin their resulting full commits. This initial
-   mechanical replay bootstraps the manifest before the new authoring path
-   exists; later commits are never required to be pushed merely to test them.
-3. Use the beta period to implement the manifest, deterministic checkout,
-   installed rustup toolchain, keyed outputs, version validation, and all
-   required tests. As soon as source-authoring mode is available, use the exact
-   beta commit as `--authoring-base` for every further Rust/LLVM patch
-   iteration; push and update the declared revisions only after a stack is
-   ready. Any move to a later beta commit is an explicit reviewed tuple update.
-4. Development branches may be visible in the GitHub forks, but do not publish
-   beta binaries or label any beta ref as `1.99.0-motor.1`.
-5. When the upstream `1.99.0` tag is published, record its commit and compare
-   its Stage 0, LLVM gitlink, Cargo gitlink, in-tree tools, and locks with the
-   pinned beta tuple.
-6. Rebase the Motor LLVM patches if the final LLVM pin changed. Rebase the
+The beta baseline of section 3.4 is in place: the commit-qualified
+development branches carry the replayed Motor patches, the declared revisions
+point at them, and every further Rust or LLVM patch is developed in authoring
+mode with the exact beta commit as `--authoring-base`, the declared revisions
+being updated only when a stack is ready. Any move to a later beta commit is
+an explicit reviewed tuple update. Development branches may be visible in the
+GitHub forks, but no beta binaries are published and no beta ref is labeled
+`1.99.0-motor.1`. When the upstream `1.99.0` tag is published:
+
+1. Record its commit and compare its Stage 0, LLVM gitlink, Cargo gitlink,
+   in-tree tools, and locks with the pinned beta tuple.
+2. Rebase the Motor LLVM patches if the final LLVM pin changed. Rebase the
    Motor Rust branch onto the stable tag in all cases, update the LLVM gitlink,
    and resolve any changes explicitly.
-7. Change the manifest from beta to stable and assign `1.99.0-motor.1`; build
+3. Change the manifest from beta to stable and assign `1.99.0-motor.1`; build
    every artifact in new keyed output directories without repointing the beta
    root override. After the stable prefix and tuple pass, change
    `rust-toolchain.toml` to the stable key-qualified name and run the complete
    validation matrix through that override.
-8. Create immutable source tags in the Rust and LLVM forks only after the stable
+4. Create immutable source tags in the Rust and LLVM forks only after the stable
    tuple passes. Beta binaries are never promoted, relabeled, or published.
 
-### 8.2 Subsequent stable updates
+### 6.2 Subsequent stable updates
 
 After the first release, selecting another stable Rust patch is a reviewed
 operation:
@@ -1635,7 +1101,7 @@ LLVM gitlinks. A Rust patch release can update LLVM for a correctness backport;
 if it does, rebuild the Motor LLVM commit on the new base rather than retaining
 the old LLVM because its major version is unchanged.
 
-### 8.3 Runtime maintenance between compiler releases
+### 6.3 Runtime maintenance between compiler releases
 
 A `moto-rt` update does not wait for the next Rust/LLVM lineage release:
 
@@ -1662,12 +1128,11 @@ use the exact revisions in reviewed files. Explicit authoring mode is the only
 path that selects a current local `HEAD`, and it records that `HEAD` plus the
 tree digest in a non-release generated manifest.
 
-## 9. Completion criteria
+## 7. Properties
 
-The beta implementation satisfies the applicable criteria below. Criteria
-that require the upstream stable tag, formal Motor source tags, or
-`1.99.0-motor.1` publication belong to deferred items 15 and 16 and cannot be
-completed from the beta baseline.
+The implementation has the properties below; those that concern the upstream
+stable tag, formal Motor source tags, or `1.99.0-motor.1` publication describe
+the stable release of section 6.1 and are not yet exercised.
 
 - The first published compiler source tags are based on the exact upstream Rust
   `1.99.0` stable tag, not a beta commit or binaries built from beta.
@@ -1734,9 +1199,7 @@ completed from the beta baseline.
 - Generated outputs, the toolchain prefix, and the dev image contain a
   validated manifest with the complete compiler/runtime tuple and both keys.
 - `build-motor-os.sh` rejects stale or mismatched inputs.
-- All new tests are offline, integrated, and pass with the required build/test
-  matrix and no new warnings. The core selector patch passes the full debug and
-  release test suite three times each before commit.
+- The toolchain tests are offline and run as part of `src/tests/full-test.sh`.
 
 ## References
 

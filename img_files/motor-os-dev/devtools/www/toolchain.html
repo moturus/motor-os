@@ -449,21 +449,11 @@ Motor OS itself and any program for it. On the developer image, a native toolcha
 driver) builds programs on Motor OS. Both come from the same forks of Rust, LLVM, and
 mlibc.</p>
 
-<div class="note">
-  <div class="callout-title">What is changing</div>
-  <p>The way the toolchains are <em>built and versioned</em> is being reworked; the
-  direction is summarized at the <a href="#versioning">end of this page</a>. What they
-  contain, where they live on the developer image, and how programs are compiled with
-  them stay as described here, with one visible difference: the <code>+dev-x86_64-unknown-motor</code>
-  selector in Cargo commands goes away in favor of a versioned toolchain that the
-  repository selects itself.</p>
-</div>
-
 <h2>Components and lineage</h2>
 <div class="table-wrap">
 <table>
   <tr><th>Component</th><th>Source</th><th>What Motor OS adds</th></tr>
-  <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches. Two branches: one carries the library side (<code>motor-os-rt-v17</code>, matched to moto-rt 0.17), the other the compiler patches (<code>motor-os-rustc</code>).</td></tr>
+  <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches, all on one development branch per upstream baseline (<code>motor-os-1.99.0-beta-f47d5bb</code> today), from which both the cross and the native toolchain are built.</td></tr>
   <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing; they run on Linux only.</td></tr>
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
   <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. It sits on <code>moto-rt-cabi</code>, a C ABI over the Motor runtime (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
@@ -486,26 +476,30 @@ object that the OS maps into every process.</p>
 <h2>The cross toolchain on Linux</h2>
 
 <h3>Rust</h3>
-<p>The Motor OS build registers the Rust fork's stage-2 output as a rustup toolchain
-named <code>dev-x86_64-unknown-motor</code>. It contains <code>rustc</code>, Clippy, the
+<p>The Motor OS build installs the Rust fork's output as one rustup toolchain whose name
+carries the upstream baseline and a key derived from every input,
+<code>motor-1.99.0-beta-f47d5bb-dev.1-&lt;key&gt;</code> today. It contains
+<code>rustc</code> and <code>rustdoc</code>, its own Cargo, Clippy, and rustfmt, the
 standard library for the Linux host, the standard library for
 <code>x86_64-unknown-motor</code> under <code>lib/rustlib/x86_64-unknown-motor</code>, and
-the library sources. It does not contain a Cargo of its own: rustup borrows one from
-whatever channel is installed, which is a known reproducibility gap and one of the things
-the rework fixes. Everything in the repository is built with</p>
-<pre><code>cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor [--release]</code></pre>
+the library sources; nothing is borrowed from another rustup channel. The repository's
+<code>rust-toolchain.toml</code> names that exact toolchain, so everything in the
+repository is built with</p>
+<pre><code>cargo build --target x86_64-unknown-motor [--release]</code></pre>
 <p>and nothing more: the standard library is prebuilt, so ordinary programs do not use
 <code>-Zbuild-std</code>. Only the bare-metal pieces, the kernel and the boot stages, use
-custom JSON targets and build <code>core</code> and <code>alloc</code> themselves. The
-Makefile applies the same command to every component, keeps each crate's Cargo output
-under <code>build/obj/</code>, and copies stripped binaries into
-<code>build/bin/debug</code> or <code>build/bin/release</code> for the imager;
-<code>make -j$(nproc)</code> builds the debug tree and <code>BUILD=release</code> the release
-tree.</p>
+custom JSON targets and build <code>core</code> and <code>alloc</code> themselves from the
+toolchain's library sources. The Makefile applies the same command to every component,
+keeps each crate's Cargo output under <code>build/obj/&lt;toolchain-key&gt;/</code>, and
+copies stripped binaries into <code>build/bin/debug</code> or
+<code>build/bin/release</code> for the imager; <code>make -j$(nproc)</code> builds the debug
+tree and <code>BUILD=release</code> the release tree. See
+<a href="build.html">Building Motor OS</a>.</p>
 <p>A pure-Rust program needs no linker configuration: rustc links it with its bundled
 lld. A crate that compiles C code (curl, Lorry) points Cargo at the Motor Clang instead,
 with <code>CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER</code> set to <code>motor-clang</code>
-and <code>CC_x86_64_unknown_motor</code> to the same compiler, so that the C parts are built
+(from the selected assembly's <code>sysroot/bin</code>) and
+<code>CC_x86_64_unknown_motor</code> to the same compiler, so that the C parts are built
 against the Motor sysroot.</p>
 
 <h4>Cross-compiling your own program</h4>
@@ -515,8 +509,11 @@ against the Motor sysroot.</p>
   <li>If it uses Tokio, mio, rustls with ring, crossterm, or the ctrlc crate, add the Motor
   OS forks to <code>[patch.crates-io]</code> in <code>Cargo.toml</code>, as the in-tree
   programs do; the table in <a href="rust.html">Rust on Motor OS</a> lists them.</li>
-  <li><code>cargo +dev-x86_64-unknown-motor build --release --target x86_64-unknown-motor</code>.
-  The result is <code>target/x86_64-unknown-motor/release/hello</code>.</li>
+  <li><code>cargo build --release --target x86_64-unknown-motor</code>. The repository's
+  <code>rust-toolchain.toml</code> applies to projects inside the checkout (the recipe
+  uses <code>build/examples/</code>); for a project elsewhere, copy that file next to
+  its <code>Cargo.toml</code>. The result is
+  <code>target/x86_64-unknown-motor/release/hello</code>.</li>
   <li>Copy it into a running VM with <code>scp</code> and run it; see
   <a href="hello.html">Hello Motor OS</a> for the whole sequence.</li>
 </ol>
@@ -526,8 +523,9 @@ against the Motor sysroot.</p>
 that turns every link for <code>x86_64-unknown-motor</code> into a raw static-PIE link
 (<code>-fuse-ld=lld -static-pie -nostdlib -Wl,-e,motor_start</code>); that raw form is what
 the build uses to construct the sysroot itself. For compiling programs, the build also
-produces a sysroot directory with mlibc's headers and the static libraries, and three
-small wrappers next to it:</p>
+produces, under the selected assembly (<code>$MOTORH/assemblies/&lt;key&gt;/sysroot</code>),
+a sysroot directory with mlibc's headers and the static libraries, and three small
+wrappers in its <code>bin</code>:</p>
 <div class="table-wrap">
 <table>
   <tr><th>Wrapper</th><th>What it does</th></tr>
@@ -605,60 +603,66 @@ client Lorry fetches with), <code>/devtools/bin/mdbg</code>, the test suites und
 <a href="devtools.html">Developer image</a>.</p>
 
 <h2>How the pieces are produced</h2>
-<p>The current build script (<code>src/build-motor-os.sh</code>) produces everything
-above in a fixed order, on Ubuntu, in one to two hours. The order matters because each
-layer is built with the one before it:</p>
+<p>The build script (<code>src/build-motor-os.sh</code>) produces everything above in a
+fixed order, on Ubuntu, in one to two hours, from the exact source revisions declared in
+<code>src/toolchain-versions.sh</code>. The order matters because each layer is built with
+the one before it:</p>
 <ol>
-  <li>The Rust fork's library branch is bootstrapped with <code>x.py</code> and registered as
-  the cross toolchain, which every later step and every Motor OS component needs.</li>
-  <li>The host Clang and lld are built from the LLVM fork.</li>
-  <li>The runtime shim (<code>moto-rt-cabi</code>) is built with the cross toolchain, then the
-  compiler-rt builtins, then mlibc against the shim, then libunwind, libc++abi, and libc++
-  against mlibc.</li>
+  <li>The Rust and mlibc forks are checked out at their declared commits; LLVM and Cargo
+  come in as the Rust checkout's submodules, so one LLVM tree serves every LLVM build.</li>
+  <li>The host Clang and lld are built from that LLVM tree.</li>
+  <li>One <code>x.py</code> run from the Rust fork builds and installs the cross toolchain:
+  rustc, rustdoc, Cargo, Clippy, rustfmt, both standard libraries, and the library sources,
+  into an immutable directory named by its key, which is registered with rustup. Every
+  later step and every Motor OS component uses it.</li>
+  <li>The runtime shim (<code>moto-rt-cabi</code>) is built with the cross toolchain, then
+  the compiler-rt builtins, then mlibc against the shim, then libunwind, libc++abi, and
+  libc++ against mlibc.</li>
   <li>The native LLVM multicall binary is built for Motor OS against that sysroot, and Lua
   is cross-compiled against the same sysroot as a check that a real C program links and
   runs.</li>
-  <li>The Rust fork's compiler branch produces the native rustc with Motor OS as host,
-  followed by a rebuild of the standard libraries for both hosts.</li>
-  <li>The results are staged into <code>img_files/generated/</code>, from which the imager
-  places them into the developer image.</li>
+  <li>A second <code>x.py</code> run from the same Rust revision produces the native rustc
+  with Motor OS as host; the installed cross toolchain is verified to be unchanged by
+  it.</li>
+  <li>The results are staged under <code>$MOTORH/assemblies/&lt;key&gt;/images/</code>, with
+  the manifest, from which the imager places them into the developer image.</li>
 </ol>
-<p>This is the part that is being reworked; the steps are listed so the relationships
-are clear, not as instructions. The user-facing procedure will be on the
-<a href="build.html">Building Motor OS</a> page when the rework is merged.</p>
+<p>The steps are listed so the relationships are clear; the procedure, the directory
+layout, and the test suites are on the <a href="build.html">Building Motor OS</a>
+page.</p>
 
-<h2 id="versioning">Versioning, and what the rework changes</h2>
-<p>Today the compilers report a development version and no commit hash, the toolchain
-is selected by the name <code>dev-x86_64-unknown-motor</code>, Cargo comes from whichever
-channel rustup finds, and the image carries no record of which sources built it. The
-rework, in progress on the <code>toolchain-1.99.0-beta</code> branch of the repository,
-replaces this with one versioned Motor toolchain:</p>
+<h2 id="versioning">Versioning</h2>
+<p>The toolchain is defined by source revisions, not by branch tips: one file in the
+repository, <code>src/toolchain-versions.sh</code>, declares the upstream Rust release and
+commit, the LLVM commit that release uses, the Motor Rust and LLVM commits on top of them,
+the Cargo and mlibc commits, and the <code>moto-rt</code> version. Every version change is
+a reviewed diff to that file; a normal build never advances a branch or runs
+<code>cargo update</code>.</p>
 <ul>
-  <li><strong>One toolchain, one name.</strong> rustc, Cargo, Clippy, rustfmt, rustdoc, the
+  <li><strong>One toolchain, one name.</strong> rustc, rustdoc, Cargo, Clippy, rustfmt, the
   library sources, and both standard libraries live in one rustup toolchain, built from
-  one Rust revision, with no host nightly involved. A <code>rust-toolchain.toml</code> in the
-  repository selects it, so the command becomes plain
-  <code>cargo build --target x86_64-unknown-motor</code>, and the Makefile refuses to run with
-  a toolchain that is not a stamped Motor toolchain.</li>
-  <li><strong>Exact lineage.</strong> A central manifest records the upstream Rust release and
-  commit, the LLVM commit that release uses, the Motor Rust and LLVM commits on top of
-  them, the Cargo and mlibc commits, the moto-rt version, and the lock-file hashes. The
-  toolchain's identifier carries the upstream version and commit (for example
-  <code>1.99.0-beta-f47d5bb-motor.dev.1</code> during the beta), and the same manifest is
-  written into the developer image as <code>/devtools/toolchain/manifest</code>.</li>
-  <li><strong>Reproducible inputs.</strong> Sources are checked out at exact commits and
-  verified before building; a normal build never advances a branch, runs
-  <code>cargo update</code>, or changes the rustup default.</li>
+  one Rust revision, with no host nightly involved. The repository's
+  <code>rust-toolchain.toml</code> selects it, and the Makefile refuses to run with a
+  toolchain that does not carry a Motor key.</li>
+  <li><strong>Exact lineage.</strong> The toolchain's identifier carries the upstream version
+  and commit (<code>1.99.0-beta-f47d5bb-motor.dev.1</code> during the beta), and
+  <code>rustc -vV</code> reports the Motor Rust commit it was built from. Two keys derived
+  from the inputs name the local outputs: the toolchain key covers the compilers and
+  their libraries, and the assembly key adds the C sysroot inputs, so a
+  <code>moto-rt</code> or mlibc change produces a new assembly without a new compiler.</li>
+  <li><strong>A manifest everywhere.</strong> The installed toolchain, every assembly, and
+  the developer image (as <code>/devtools/toolchain/manifest</code>) carry a manifest with
+  the revisions, keys, and hashes they were built from.</li>
   <li><strong>The same C wrappers.</strong> <code>motor-clang</code>, <code>motor-clang++</code>,
-  and <code>motor-rust-cc</code> keep their names and are generated into the versioned
-  sysroot.</li>
-  <li><strong>A stable baseline.</strong> The first release is planned on the exact Rust
-  1.99.0 tag once it ships (scheduled for October 2026), rebased from the beta used to
-  develop it, as <code>1.99.0-motor.1</code>.</li>
+  and <code>motor-rust-cc</code> are generated into each assembly's sysroot.</li>
+  <li><strong>A stable baseline to come.</strong> The current toolchain is built from the
+  Rust 1.99 beta, and Cargo reports <code>1.99.0-dev</code>. The first stable release,
+  <code>1.99.0-motor.1</code>, is planned on the exact Rust 1.99.0 tag once it ships
+  (scheduled for October 2026): the Motor patches are rebased onto it, everything is
+  rebuilt and revalidated, and only then are the source tags published in the forks.
+  Binaries are not published; the toolchain is built locally from the tagged
+  sources.</li>
 </ul>
-<p>The target, the two-phase bootstrap, and the developer image's layout
-(<code>/devtools/rust</code>, <code>/devtools/llvm</code>, <code>/devtools/bin</code>) do not
-change.</p>
 <nav class="pager">
 <a class="pager-prev" href="devtools.html"><span>Previous</span>Developer image</a>
 <a class="pager-next" href="rust.html"><span>Next</span>Rust on Motor OS</a>
