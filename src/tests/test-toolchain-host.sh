@@ -44,6 +44,10 @@ toolchain_verify_moto_rt_package() {
 	LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
 	MOTO_RT_PACKAGE_COMPARISON=exact
 }
+toolchain_precheck_moto_rt_package() {
+	printf p >> "$temporary/precheck-runs"
+	[ "${FAIL_PRECHECK:-0}" != 1 ] || toolchain_die "package precheck failed"
+}
 fake_cmake="$temporary/cmake"
 printf '%s\n' '#!/usr/bin/env bash' \
 	'while [ "$#" -gt 0 ]; do if [ "$1" = -B ]; then shift; mkdir -p "$1/bin"; fi; shift; done' > "$fake_cmake"
@@ -116,6 +120,16 @@ toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"
 [ "$(cat "$temporary/xpy-runs")" = x ] || fail "valid prefix was rebuilt"
+
+FAIL_PRECHECK=1
+if toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
+	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" 2>/dev/null; then
+	fail "failed package precheck was accepted"
+fi
+FAIL_PRECHECK=0
+[ "$(cat "$temporary/xpy-runs")" = x ] || fail "failed package precheck reached bootstrap"
+[ "$(cat "$temporary/precheck-runs")" = ppp ] ||
+	fail "package precheck did not run before each host build"
 
 printf 'new starting lock\n' > "$rust/Cargo.lock"
 export FAIL_XPY=1

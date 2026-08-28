@@ -48,7 +48,7 @@ toolchain_lock_package_identity() {
 	' "$lock"
 }
 
-toolchain_cached_crate() {
+toolchain_find_cached_crate() {
 	local cargo_home="$1" filename="$2" checksum="$3" candidate
 	while IFS= read -r candidate; do
 		if [ "$(sha256sum "$candidate" | awk '{print $1}')" = "$checksum" ]; then
@@ -56,63 +56,97 @@ toolchain_cached_crate() {
 			return 0
 		fi
 	done < <(find "$cargo_home/registry/cache" -type f -name "$filename" -print 2>/dev/null | LC_ALL=C sort)
-	toolchain_die "cached $filename with checksum $checksum is unavailable"
+	return 1
 }
 
-toolchain_compare_moto_rt_package() {
-	local cargo="$1" local_package="$2" archive="$3" version="$4"
-	local temporary archive_root path archive_path
-	temporary="$(mktemp -d)"
-	archive_root="moto-rt-$version"
-	if ! "$cargo" package --list --allow-dirty --offline \
-		--manifest-path "$local_package/Cargo.toml" > "$temporary/local.list"; then
-		rm -rf "$temporary"
-		return 1
-	fi
+toolchain_cached_crate() {
+	toolchain_find_cached_crate "$@" ||
+		toolchain_die "cached $2 with checksum $3 is unavailable"
+}
+
+# Drop the members Cargo generates while packaging; the author's manifest is
+# published as Cargo.toml.orig.
+toolchain_normalize_moto_rt_list() {
+	sed -e '/^\.cargo_vcs_info\.json$/d' -e '/^Cargo\.lock$/d' \
+		-e '/^Cargo\.toml$/d' -e 's/^Cargo\.toml\.orig$/Cargo.toml/' "$1" |
+		LC_ALL=C sort -u
+}
+
+toolchain_moto_rt_archive_members_ok() {
+	local archive="$1" archive_root="$2" path
 	while IFS= read -r path; do
 		case "$path" in
 			"$archive_root"/*)
 				case "/${path#"$archive_root"/}/" in
-					*/../*) rm -rf "$temporary"; return 1 ;;
+					*/../*) return 1 ;;
 				esac
 				;;
-			*) rm -rf "$temporary"; return 1 ;;
+			*) return 1 ;;
 		esac
-	done < <(tar -tzf "$archive")
-	mkdir "$temporary/archive"
-	tar -xzf "$archive" -C "$temporary/archive"
-	if [ -n "$(find "$temporary/archive/$archive_root" -mindepth 1 \
-		! -type d ! -type f -print -quit)" ]; then
-		rm -rf "$temporary"
-		return 1
-	fi
-	find "$temporary/archive/$archive_root" -type f -printf '%P\n' |
-		LC_ALL=C sort > "$temporary/archive.list"
-	for list in local archive; do
-		sed -e '/^\.cargo_vcs_info\.json$/d' -e '/^Cargo\.lock$/d' \
-			-e '/^Cargo\.toml$/d' -e 's/^Cargo\.toml\.orig$/Cargo.toml/' \
-			"$temporary/$list.list" | LC_ALL=C sort -u > "$temporary/$list.normalized"
-	done
-	if ! cmp -s "$temporary/local.normalized" "$temporary/archive.normalized"; then
-		rm -rf "$temporary"
-		return 1
-	fi
-	while IFS= read -r path; do
-		archive_path="$path"
-		[ "$path" != Cargo.toml ] || archive_path=Cargo.toml.orig
-		if [ ! -f "$local_package/$path" ] ||
-			[ "$(sha256sum "$local_package/$path" | awk '{print $1}')" != \
-			"$(sha256sum "$temporary/archive/$archive_root/$archive_path" | awk '{print $1}')" ]; then
-			rm -rf "$temporary"
-			return 1
-		fi
-	done < "$temporary/local.normalized"
-	rm -rf "$temporary"
+	done < <(tar -tzf "$archive" 2>/dev/null)
+	return 0
 }
 
-toolchain_verify_moto_rt_package() {
-	local rust="$1" local_package="$2" cargo="$3" cargo_home="$4"
-	local identity local_version archive
+# Unpack the exact cached crate into a new temporary directory, print that
+# directory, and list the published files in its archive.normalized.
+toolchain_unpack_moto_rt_archive() {
+	local archive="$1" version="$2" root temporary
+	temporary="$(mktemp -d)" || return
+	root="$temporary/archive/moto-rt-$version"
+	if ! toolchain_moto_rt_archive_members_ok "$archive" "moto-rt-$version" ||
+		! mkdir "$temporary/archive" ||
+		! tar -xzf "$archive" -C "$temporary/archive" 2>/dev/null ||
+		[ ! -d "$root" ] ||
+		[ -n "$(find "$root" -mindepth 1 ! -type d ! -type f -print -quit)" ]; then
+		rm -rf "$temporary"
+		toolchain_die "cached $(basename "$archive") is not a plain moto-rt package" || return
+	fi
+	find "$root" -type f -printf '%P\n' | LC_ALL=C sort > "$temporary/archive.list"
+	toolchain_normalize_moto_rt_list "$temporary/archive.list" \
+		> "$temporary/archive.normalized"
+	if [ ! -s "$temporary/archive.normalized" ]; then
+		rm -rf "$temporary"
+		toolchain_die "cached $(basename "$archive") publishes no files" || return
+	fi
+	printf '%s\n' "$temporary"
+}
+
+# Compare every published file with the local package and name each
+# difference. This needs no Cargo, so it cannot see local files that are not
+# published; toolchain_compare_moto_rt_package covers the file set.
+toolchain_compare_moto_rt_files() {
+	local local_package="$1" unpacked="$2" version="$3" path published status=0
+	while IFS= read -r path; do
+		published="$unpacked/archive/moto-rt-$version/$path"
+		[ "$path" != Cargo.toml ] || published="$published.orig"
+		if [ ! -f "$local_package/$path" ]; then
+			echo "toolchain: moto-rt $path is published but missing locally" >&2
+			status=1
+		elif ! cmp -s "$published" "$local_package/$path"; then
+			echo "toolchain: moto-rt $path differs from the published $version package" >&2
+			status=1
+		fi
+	done < "$unpacked/archive.normalized"
+	return "$status"
+}
+
+# Full comparison: the file set Cargo would package, then every file.
+toolchain_compare_moto_rt_package() {
+	local local_package="$1" unpacked="$2" version="$3" status=0
+	toolchain_normalize_moto_rt_list "$unpacked/local.list" > "$unpacked/local.normalized"
+	if ! cmp -s "$unpacked/archive.normalized" "$unpacked/local.normalized"; then
+		LC_ALL=C comm -23 "$unpacked/archive.normalized" "$unpacked/local.normalized" |
+			sed 's/^/toolchain: moto-rt published file is not packaged locally: /' >&2
+		LC_ALL=C comm -13 "$unpacked/archive.normalized" "$unpacked/local.normalized" |
+			sed 's/^/toolchain: moto-rt local package adds unpublished file: /' >&2
+		status=1
+	fi
+	toolchain_compare_moto_rt_files "$local_package" "$unpacked" "$version" || status=1
+	return "$status"
+}
+
+toolchain_resolve_moto_rt_identity() {
+	local rust="$1" local_package="$2" identity local_version
 	identity="$(toolchain_lock_package_identity "$rust/library/Cargo.lock" moto-rt)" ||
 		toolchain_die "Rust library lock has no unique complete moto-rt package" || return
 	IFS=$'\t' read -r LOCKED_MOTO_RT_VERSION LOCKED_MOTO_RT_SOURCE \
@@ -128,17 +162,59 @@ toolchain_verify_moto_rt_package() {
 	[ "$local_version" = "$LOCAL_MOTO_RT_VERSION" ] &&
 		[ "$local_version" = "$LOCKED_MOTO_RT_VERSION" ] ||
 		toolchain_die "local and Rust std moto-rt versions differ" || return
-	archive="$(toolchain_cached_crate "$cargo_home" \
-		"moto-rt-$LOCKED_MOTO_RT_VERSION.crate" "$LOCKED_MOTO_RT_CHECKSUM")" || return
-	if toolchain_compare_moto_rt_package \
-		"$cargo" "$local_package" "$archive" "$LOCKED_MOTO_RT_VERSION"; then
-		MOTO_RT_PACKAGE_COMPARISON=exact
-		return 0
-	fi
+}
+
+# A difference is fatal for a clean assembly and recorded for a dirty one.
+toolchain_moto_rt_package_differs() {
 	if [ "${MOTOR_ASSEMBLY_STATE:-}" = development-dirty ]; then
 		MOTO_RT_PACKAGE_COMPARISON=development-dirty
 		echo "toolchain: local moto-rt differs from its crates.io package (development-dirty)" >&2
 		return 0
 	fi
+	echo "toolchain: restore the published moto-rt $LOCKED_MOTO_RT_VERSION content, or publish" \
+		"a new version and select it in the Rust fork and src/toolchain-versions.sh" >&2
 	toolchain_die "local moto-rt content differs from the locked crates.io package"
+}
+
+# Content check that runs before the LLVM and Rust builds. Without a Motor
+# Cargo it cannot list the local package, so it compares every published file
+# and leaves file-set differences to toolchain_verify_moto_rt_package. The
+# first Rust bootstrap fetches the crate, so its absence only defers.
+toolchain_precheck_moto_rt_package() {
+	local rust="$1" local_package="$2" cargo_home="$3" archive unpacked status=0
+	toolchain_resolve_moto_rt_identity "$rust" "$local_package" || return
+	if ! archive="$(toolchain_find_cached_crate "$cargo_home" \
+		"moto-rt-$LOCKED_MOTO_RT_VERSION.crate" "$LOCKED_MOTO_RT_CHECKSUM")"; then
+		echo "toolchain: moto-rt-$LOCKED_MOTO_RT_VERSION.crate is not cached yet;" \
+			"its package check runs after Rust bootstrap" >&2
+		return 0
+	fi
+	unpacked="$(toolchain_unpack_moto_rt_archive "$archive" "$LOCKED_MOTO_RT_VERSION")" || return
+	toolchain_compare_moto_rt_files "$local_package" "$unpacked" \
+		"$LOCKED_MOTO_RT_VERSION" || status=1
+	rm -rf "$unpacked"
+	[ "$status" -ne 0 ] || return 0
+	toolchain_moto_rt_package_differs
+}
+
+toolchain_verify_moto_rt_package() {
+	local rust="$1" local_package="$2" cargo="$3" cargo_home="$4"
+	local archive unpacked status=0
+	toolchain_resolve_moto_rt_identity "$rust" "$local_package" || return
+	archive="$(toolchain_cached_crate "$cargo_home" \
+		"moto-rt-$LOCKED_MOTO_RT_VERSION.crate" "$LOCKED_MOTO_RT_CHECKSUM")" || return
+	unpacked="$(toolchain_unpack_moto_rt_archive "$archive" "$LOCKED_MOTO_RT_VERSION")" || return
+	if ! "$cargo" package --list --allow-dirty --offline \
+		--manifest-path "$local_package/Cargo.toml" > "$unpacked/local.list"; then
+		rm -rf "$unpacked"
+		toolchain_die "cannot list the local moto-rt package" || return
+	fi
+	toolchain_compare_moto_rt_package "$local_package" "$unpacked" \
+		"$LOCKED_MOTO_RT_VERSION" || status=1
+	rm -rf "$unpacked"
+	if [ "$status" -eq 0 ]; then
+		MOTO_RT_PACKAGE_COMPARISON=exact
+		return 0
+	fi
+	toolchain_moto_rt_package_differs
 }

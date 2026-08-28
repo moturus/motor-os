@@ -69,6 +69,8 @@ toolchain_build_selected_host() {
 
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || return
+	# A stale local runtime fails here, before the LLVM and Rust builds.
+	toolchain_precheck_moto_rt_package "$rust" "$local_moto_rt" "$cargo_home" || return
 	toolchain_build_standalone_llvm "$rust/src/llvm-project" "$build_root" || return
 	toolchain_generate_cross_wrappers "$BOOTSTRAP_SYSROOT" "$STANDALONE_LLVM_BIN" || return
 	BOOTSTRAP_CONFIG="$TOOLCHAIN_STATE_ROOT/bootstrap.toml"

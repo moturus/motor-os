@@ -51,21 +51,60 @@ EOF
 chmod +x "$fake_cargo"
 
 MOTOR_ASSEMBLY_STATE=clean
+toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home"
 toolchain_verify_moto_rt_package "$rust" "$local_package" "$fake_cargo" "$cargo_home"
 [ "$MOTO_RT_PACKAGE_COMPARISON" = exact ] || fail "equal packages do not compare exact"
 
+# An unpublished local file is visible only through Cargo's package listing.
+adding_cargo="$temporary/cargo-adding"
+cat > "$adding_cargo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' .cargo_vcs_info.json Cargo.lock Cargo.toml Cargo.toml.orig src/extra.rs src/lib.rs
+EOF
+chmod +x "$adding_cargo"
+printf 'unpublished\n' > "$local_package/src/extra.rs"
+toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home"
+if toolchain_verify_moto_rt_package \
+	"$rust" "$local_package" "$adding_cargo" "$cargo_home" 2> "$temporary/stderr"; then
+	fail "clean assembly accepted an unpublished local file"
+fi
+grep -q 'adds unpublished file: src/extra.rs' "$temporary/stderr" ||
+	fail "unpublished local file was not named"
+rm "$local_package/src/extra.rs"
+
 printf 'local edit\n' >> "$local_package/src/lib.rs"
+if toolchain_precheck_moto_rt_package \
+	"$rust" "$local_package" "$cargo_home" 2> "$temporary/stderr"; then
+	fail "clean precheck accepted differing local runtime content"
+fi
+grep -q 'moto-rt src/lib.rs differs' "$temporary/stderr" ||
+	fail "precheck did not name the differing file"
 if toolchain_verify_moto_rt_package \
 	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null; then
 	fail "clean assembly accepted differing local runtime content"
 fi
 MOTOR_ASSEMBLY_STATE=development-dirty
+toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home" 2>/dev/null
 toolchain_verify_moto_rt_package \
 	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null
 [ "$MOTO_RT_PACKAGE_COMPARISON" = development-dirty ] ||
 	fail "dirty package difference was not recorded"
 
+# Before the first bootstrap fetches the crate, the precheck can only defer.
+MOTOR_ASSEMBLY_STATE=clean
+mv "$archive" "$archive.absent"
+toolchain_precheck_moto_rt_package \
+	"$rust" "$local_package" "$cargo_home" 2> "$temporary/stderr" ||
+	fail "uncached crate was not deferred to the full check"
+grep -q 'not cached yet' "$temporary/stderr" || fail "deferred precheck was silent"
+mv "$archive.absent" "$archive"
+
+MOTOR_ASSEMBLY_STATE=development-dirty
 sed -i 's/version = "0.17.5"/version = "0.17.6"/' "$local_package/Cargo.toml"
+if toolchain_precheck_moto_rt_package \
+	"$rust" "$local_package" "$cargo_home" 2>/dev/null; then
+	fail "dirty precheck accepted a moto-rt version mismatch"
+fi
 if toolchain_verify_moto_rt_package \
 	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null; then
 	fail "dirty assembly accepted a moto-rt version mismatch"
