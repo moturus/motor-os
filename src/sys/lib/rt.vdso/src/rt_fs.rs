@@ -23,7 +23,6 @@ use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
 use moto_rt::fs::MAX_PATH_LEN;
 use moto_sys::SysHandle;
-use moto_sys_io::api_fs_legacy;
 
 type IoTask = Box<
     dyn FnOnce(alloc::rc::Rc<moto_io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>> + Send,
