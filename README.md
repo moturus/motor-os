@@ -89,9 +89,9 @@ What works today:
 
 ## Status
 
-Motor OS is beta quality. It is under active development, and in 2026 it went
-through weeks of systematic review and hardening, of the networking stack
-above all. Networking is considered ready for production use within its
+Motor OS is approaching beta quality. It's development started in 2021, and in 2026 it went
+through weeks of systematic AI-assisted review and hardening, of the networking stack
+in particular. Networking is considered ready for production use within its
 supported feature set; the rest of the system is exercised daily by the full
 test suite, by long soak runs, and by the website, which is served from Motor
 OS VMs. There has been no independent security audit yet.

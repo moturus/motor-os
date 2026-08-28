@@ -448,13 +448,14 @@ the developer image. <code>ls /system/bin</code> and <code>ls /user/bin</code> l
 installed.</p>
 
 <h2>sysbox</h2>
-<p>Most everyday commands are applets of one program, <code>/system/bin/sysbox</code>.
-Motor OS has no symbolic links, so each applet also has a two-line rush script of the
-same name in <code>/system/bin</code> that forwards to it; <code>sysbox help</code> lists
+<p>Most everyday commands are calls into <code>/system/bin/sysbox</code>, which was inspired
+by <code>busybox</code> in Linux.
+Motor OS has no symbolic links, so each command is a two-line rush script of the
+same name in <code>/system/bin</code> that forwards to sysbox; <code>sysbox help</code> lists
 them.</p>
 <div class="table-wrap">
 <table>
-  <tr><th>Applet</th><th>What it does</th></tr>
+  <tr><th>Command</th><th>What it does</th></tr>
   <tr><td><code>cat</code>, <code>less</code>, <code>wc</code></td><td>Print, page, and count files. <code>less</code> is a full pager built on the crossterm port.</td></tr>
   <tr><td><code>ls</code>, <code>find</code></td><td>List and search directories.</td></tr>
   <tr><td><code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>rmdir</code></td><td>Copy (preserving permissions), move, and delete files and directories. A denied operation fails with a nonzero status.</td></tr>

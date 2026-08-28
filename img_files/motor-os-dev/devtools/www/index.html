@@ -403,11 +403,6 @@ a.card h3 { color: var(--accent); }
     <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
     system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
     Cloud Hypervisor, and Firecracker.</p>
-    <div class="actions">
-      <a class="btn" href="what.html">What it is</a>
-      <a class="btn ghost" href="docs.html">Documentation</a>
-      <a class="btn ghost" href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
-    </div>
   </div>
 </section>
 
@@ -416,7 +411,6 @@ a.card h3 { color: var(--accent); }
   <div class="fact"><b>Microkernel</b><span>drivers, filesystem, and networking run in userspace</span></div>
   <div class="fact"><b>~200 ms</b><span>to boot the kernel and start userspace</span></div>
   <div class="fact"><b>~10 Gbps</b><span>host-to-guest TCP throughput</span></div>
-  <div class="fact"><b>Tier-3</b><span>Rust target <code>x86_64-unknown-motor</code></span></div>
 </div>
 
 <h2>What you get</h2>
@@ -427,7 +421,7 @@ a.card h3 { color: var(--accent); }
     VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
   </a>
   <a class="card" href="rust.html">
-    <h3>Rust's standard library, ported</h3>
+    <h3>Rust's standard library</h3>
     <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
     and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
     Rust, C, and C++ natively.</p>
@@ -438,7 +432,7 @@ a.card h3 { color: var(--accent); }
     resolver service, and configuration from one TOML file.</p>
   </a>
   <a class="card" href="processes.html">
-    <h3>Capabilities instead of users</h3>
+    <h3>Capability-based security</h3>
     <p>Every process carries an immutable capability word. Three roles, System, Interactive,
     and None, drive filesystem permissions. There is no root account.</p>
   </a>
@@ -448,7 +442,7 @@ a.card h3 { color: var(--accent); }
     HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
   </a>
   <a class="card" href="lorry.html">
-    <h3>A smaller, stricter Cargo replacement for security-sensitive builds</h3>
+    <h3>A native Rust package manager</h3>
     <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
     and aims for byte-identical binaries, but builds offline, from dependencies that were
     fetched once, checked, and approved explicitly; build scripts and procedural macros
@@ -457,10 +451,9 @@ a.card h3 { color: var(--accent); }
 </div>
 
 <h2>Status</h2>
-<p>Motor OS is beta quality. It is under active development, and in 2026 it went through
-weeks of systematic review and hardening, of the networking stack above all, with AI
-coding systems (Anthropic's Claude Fable and OpenAI's SOL) doing much of that work
-against the test suites. Networking is considered ready for production use within its
+<p>Motor OS is approaching beta quality. It's development started in 2021, and in 2026 it went through
+weeks of systematic AI-assisted review and hardening, of the networking stack in particular.
+Networking is considered ready for production use within its
 supported feature set; the rest of the system is exercised daily by the full test suite,
 by long soak runs, and by this website, which is served from Motor OS VMs. There has been
 no independent security audit yet. See <a href="what.html">What is Motor OS</a> for a
