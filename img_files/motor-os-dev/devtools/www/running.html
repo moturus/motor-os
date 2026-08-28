@@ -536,10 +536,10 @@ rule from <code>create-tap.sh</code> in place, <code>ping google.com</code> and
 <a href="networking.html">Networking</a> for the configuration format and for DHCP.</p>
 
 <h2>Stopping the VM</h2>
-<p>Press the hypervisor's escape sequence (<kbd>Ctrl</kbd>+<kbd>A</kbd>, <kbd>X</kbd> under
+<p>Exiting the serial console exits the VM (type <code>exit</code> in the terminal).</p>
+<p>You can also press the hypervisor's escape sequence (<kbd>Ctrl</kbd>+<kbd>A</kbd>, <kbd>X</kbd> under
 QEMU) or kill the hypervisor process. Motor FS is journaled and is designed to survive a
-power-off; there is no separate shutdown ritual for a VM whose data you do not need to
-keep.</p>
+power-off.</p>
 <nav class="pager">
 <a class="pager-prev" href="build.html"><span>Previous</span>Building from source</a>
 <a class="pager-next" href="architecture.html"><span>Next</span>Architecture</a>
