@@ -89,7 +89,7 @@ What works today:
 
 ## Status
 
-Motor OS is approaching beta quality. It's development started in 2021, and in 2026 it went
+Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went
 through weeks of systematic AI-assisted review and hardening, of the networking stack
 in particular. Networking is considered ready for production use within its
 supported feature set; the rest of the system is exercised daily by the full

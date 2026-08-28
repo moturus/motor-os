@@ -232,7 +232,7 @@ table.plain td code { white-space: normal; }
 /* Cards and pills */
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
   margin: 1.2rem 0 1.5rem;
 }
@@ -262,27 +262,10 @@ a.card h3 { color: var(--accent); }
 }
 .pill.dim { border-color: var(--line); color: var(--fg-2); }
 
-/* Buttons */
-.btn {
-  display: inline-block;
-  font-family: var(--mono);
-  font-weight: 500;
-  font-size: .95rem;
-  padding: .6rem 1.15rem;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--ink);
-  border: 1px solid var(--accent);
-}
-.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
-.btn.ghost { background: transparent; color: var(--accent); }
-.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
-.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
-
 /* Home page */
-.hero { padding: 1.5rem 0 2.5rem; }
+.hero { padding: 1.5rem 0 2.5rem; text-align: center; }
 .hero h1 { font-size: 3rem; margin-bottom: .75rem; }
-.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero .lead { max-width: 40rem; margin-left: auto; margin-right: auto; font-size: 1.2rem; }
 .hero-tag {
   font-family: var(--mono);
   color: var(--accent);
@@ -292,32 +275,6 @@ a.card h3 { color: var(--accent); }
   margin-bottom: 1rem;
 }
 .home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
-.facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 1rem;
-  margin: 1rem 0 2rem;
-}
-.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
-.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
-.fact span { color: var(--fg-2); font-size: .9rem; }
-.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
-.two-col h3 { margin-top: .5rem; }
-.terminal {
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-  margin: 1.2rem 0 1.5rem;
-}
-.terminal .bar {
-  background: var(--accent);
-  color: var(--ink);
-  font-family: var(--mono);
-  font-size: .8rem;
-  padding: .3rem .8rem;
-}
-.terminal pre { border: 0; border-radius: 0; margin: 0; }
 
 /* Pager and footer */
 .pager {
@@ -370,9 +327,13 @@ a.card h3 { color: var(--accent); }
   .sidebar li a.current { border-color: var(--accent); }
   .hero { padding-bottom: 1.5rem; }
   .hero h1 { font-size: 2.3rem; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
   pre { font-size: .82rem; }
+}
+@media (max-width: 560px) {
+  .cards { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -393,27 +354,17 @@ a.card h3 { color: var(--accent); }
 <main class="wrap home">
 <article class="content">
 <section class="hero">
-  <div>
-    <div class="hero-tag">An operating system for virtual machines</div>
-    <h1>Motor OS</h1>
-    <p class="lead">A simple, fast, and secure operating system built for the cloud.
-    Motor OS targets virtualized workloads such as web serving, serverless computing,
-    and edge caching, and avoids the overhead a general-purpose OS carries when it
-    runs inside a VM.</p>
-    <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
-    system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-    Cloud Hypervisor, and Firecracker.</p>
-  </div>
+  <div class="hero-tag">An operating system for virtual machines</div>
+  <h1>Motor OS</h1>
+  <p class="lead">A simple, fast, and secure operating system built for the cloud.
+  Motor OS targets virtualized workloads such as web serving, serverless computing,
+  and edge caching, and avoids the overhead a general-purpose OS carries when it
+  runs inside a VM.</p>
+  <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
+  system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
+  Cloud Hypervisor, and Firecracker.</p>
 </section>
 
-<div class="facts">
-  <div class="fact"><b>Rust</b><span>kernel, runtime, services, and applications; no C in the system</span></div>
-  <div class="fact"><b>Microkernel</b><span>drivers, filesystem, and networking run in userspace</span></div>
-  <div class="fact"><b>~200 ms</b><span>to boot the kernel and start userspace</span></div>
-  <div class="fact"><b>~10 Gbps</b><span>host-to-guest TCP throughput</span></div>
-</div>
-
-<h2>What you get</h2>
 <div class="cards">
   <a class="card" href="architecture.html">
     <h3>A small kernel, everything else in userspace</h3>
@@ -451,7 +402,7 @@ a.card h3 { color: var(--accent); }
 </div>
 
 <h2>Status</h2>
-<p>Motor OS is approaching beta quality. It's development started in 2021, and in 2026 it went through
+<p>Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went through
 weeks of systematic AI-assisted review and hardening, of the networking stack in particular.
 Networking is considered ready for production use within its
 supported feature set; the rest of the system is exercised daily by the full test suite,

@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Lorry, the Rust package builder of Motor OS and a smaller, stricter Cargo replacement for security-sensitive environments: offline, Cargo-compatible builds from dependencies that were fetched once, checked, and approved, on Linux and natively on Motor OS.">
+<meta name="description" content="Lorry, the Rust package manager of Motor OS and a smaller, stricter Cargo replacement for security-sensitive environments: offline, Cargo-compatible builds from dependencies that were fetched once, checked, and approved, on Linux and natively on Motor OS.">
 <meta name="theme-color" content="#0a0a0a">
-<title>Lorry: the package builder | Motor OS</title>
+<title>Lorry: the package manager | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
 <style>
 @font-face {
@@ -397,10 +397,10 @@ a.card h3 { color: var(--accent); }
   <div class="nav-title">Getting started</div>
   <ul>
     <li><a href="docs.html">Documentation</a></li>
-    <li><a href="what.html">What is Motor OS</a></li>
+    <li><a href="what.html">Overview</a></li>
     <li><a href="why.html">Why Motor OS</a></li>
-    <li><a href="build.html">Building Motor OS</a></li>
-    <li><a href="running.html">Running Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -432,8 +432,8 @@ a.card h3 { color: var(--accent); }
     <li><a href="toolchain.html">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
-    <li><a href="lorry.html" class="current">Lorry: the package builder</a></li>
-    <li><a href="hello.html">Hello Motor OS</a></li>
+    <li><a href="lorry.html" class="current">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
     <li><a href="profiling.html">Profiling</a></li>
   </ul>
 </div>
@@ -441,8 +441,8 @@ a.card h3 { color: var(--accent); }
 </aside>
 <article class="content">
 <div class="eyebrow">Developing</div>
-<h1>Lorry: the package builder</h1>
-<p class="lead">Lorry is Motor OS's Rust package builder: a smaller, stricter Cargo
+<h1>Lorry: the package manager</h1>
+<p class="lead">Lorry is Motor OS's Rust package manager: a smaller, stricter Cargo
 replacement for security-sensitive environments. It is Cargo-compatible: it takes a
 package's <code>Cargo.toml</code> and <code>Cargo.lock</code> as they are and aims to produce
 byte-identical binaries. What it changes is how dependencies get in: builds are offline,
@@ -695,7 +695,7 @@ developer-image test run (<code>src/tests/full-test-dev.sh</code>) includes it; 
 document are under <code>src/bin/lorry/</code> in the repository.</p>
 <nav class="pager">
 <a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
-<a class="pager-next" href="hello.html"><span>Next</span>Hello Motor OS</a>
+<a class="pager-next" href="hello.html"><span>Next</span>Hello, world</a>
 </nav>
 </article>
 </main>

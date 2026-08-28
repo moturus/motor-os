@@ -397,10 +397,10 @@ a.card h3 { color: var(--accent); }
   <div class="nav-title">Getting started</div>
   <ul>
     <li><a href="docs.html">Documentation</a></li>
-    <li><a href="what.html">What is Motor OS</a></li>
+    <li><a href="what.html">Overview</a></li>
     <li><a href="why.html">Why Motor OS</a></li>
-    <li><a href="build.html">Building Motor OS</a></li>
-    <li><a href="running.html">Running Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -432,8 +432,8 @@ a.card h3 { color: var(--accent); }
     <li><a href="toolchain.html" class="current">Toolchains</a></li>
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
-    <li><a href="lorry.html">Lorry: the package builder</a></li>
-    <li><a href="hello.html">Hello Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
     <li><a href="profiling.html">Profiling</a></li>
   </ul>
 </div>
@@ -592,7 +592,7 @@ dependencies once and explicitly with <code>lorry vendor</code>, and then builds
 tests packages offline using
 <code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
 and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
-It has its own page: <a href="lorry.html">Lorry: the package builder</a>.</p>
+It has its own page: <a href="lorry.html">Lorry: the package manager</a>.</p>
 <pre><code>lorry new hello && cd hello
 lorry vendor --accept-all      # once, with network access
 lorry build --release
