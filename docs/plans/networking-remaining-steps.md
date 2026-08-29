@@ -268,6 +268,18 @@ These need scope/design decisions before implementation.
   per-socket sizing are insufficient.
 - Unify ephemeral-port randomization once connect can pin its source port and
   the loopback exemption can be removed.
+- Recover small-write host-to-VM throughput under halt polling. With the
+  kernel's idle polling (2026-08-29) the guest ACKs promptly, the host's
+  1 KiB NODELAY writes stop coalescing, and rnetbench's 1 KiB
+  client-to-server phase fell from 580 to ~300 MiB/s while round trips went
+  from 100 to 41 us and 64 KiB bulk rose 80%; sys-io was only ~60% busy, so
+  the phase became a packets-per-second test (the same effect was recorded
+  in July). Candidates, measure first: drain the virtqueue for a bounded
+  time after an RX interrupt before re-arming it (NAPI-style batching), a
+  bounded spin in `tcp_read` before `block_on_deadline` (the receive-side
+  counterpart of `TX_WRITE_SPINS` in `rt.vdso/src/net/blocking.rs`, i.e.
+  the SO_BUSY_POLL analogue), and fewer wake syscalls per packet (sys-io
+  issued ~140K wait/wake syscalls per second under rnetbench).
 
 ### Test debt
 
@@ -299,3 +311,6 @@ These need scope/design decisions before implementation.
 - If `udp_rebind_after_close_test` recurs, reopen the close/rebind diagnosis.
 - If the debug-VM ssh output freeze recurs often enough to investigate, capture
   stacks and output-path state before changing the harness.
+- The networking bugs found by the 2026-08-28/29 performance run -- the
+  loopback accept backoff and the debug-only loopback `ConnectionReset` --
+  are listed with the other open bugs at the top of `future-work.md`.
