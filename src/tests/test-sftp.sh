@@ -49,6 +49,7 @@ REMOTE_PHASE0_PARENT="$TEST_TMP/lorry"
 REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-$REMOTE_PHASE0_PARENT/sftp-prerequisite-$$}"
 
 WORK="$(mktemp -d)"
+ABANDONED_PID=""
 
 run_ssh() {
     ssh \
@@ -64,6 +65,10 @@ run_ssh() {
 }
 
 cleanup() {
+    if [ -n "$ABANDONED_PID" ]; then
+        kill "$ABANDONED_PID" 2>/dev/null || true
+        wait "$ABANDONED_PID" 2>/dev/null || true
+    fi
     remove_permission_fixtures
     run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
@@ -96,6 +101,7 @@ remove_permission_fixtures() {
 -rm $REMOTE_UPLOAD_FILE.plain
 -rm $REMOTE_UPLOAD_FILE.exec
 -rm $REMOTE_UPLOAD_FILE.readonly
+-rm $REMOTE_UPLOAD_FILE.abandoned
 EOF
 }
 
@@ -156,8 +162,7 @@ cmp -s "$upload_source" "$upload_roundtrip" ||
 echo "  ok: multi-packet upload round-tripped byte-for-byte"
 
 # ---------------------------------------------------------------------------
-# 4. Preserve permission classes explicitly. Motor has one R/W/X class rather
-#    than POSIX owner/group/other classes, so SFTP folds each class by union.
+# 4. Preserve the SFTP owner/public distinction through Motor role modes.
 # ---------------------------------------------------------------------------
 permission_source="$WORK/permission-source.bin"
 plain_permission_roundtrip="$WORK/plain-permission-roundtrip.bin"
@@ -197,13 +202,69 @@ EOF
 plain_mode="$(stat -c %a "$plain_permission_roundtrip")"
 exec_mode="$(stat -c %a "$exec_permission_roundtrip")"
 readonly_mode="$(stat -c %a "$readonly_permission_roundtrip")"
-[ "$plain_mode" = 666 ] ||
+[ "$plain_mode" = 600 ] ||
     fail "non-executable permission round-trip returned mode $plain_mode"
-[ "$exec_mode" = 555 ] ||
+[ "$exec_mode" = 500 ] ||
     fail "executable permission round-trip returned mode $exec_mode"
-[ "$readonly_mode" = 444 ] ||
+[ "$readonly_mode" = 400 ] ||
     fail "read-only permission round-trip returned mode $readonly_mode"
-echo "  ok: SFTP permission updates preserved executable-bit distinctions"
+
+permission_listing="$(run_ssh /system/bin/ls -l "$TEST_TMP")"
+plain_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_plain_permission_file")" '$NF == name { print $1; exit }')"
+exec_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_exec_permission_file")" '$NF == name { print $1; exit }')"
+readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_readonly_permission_file")" '$NF == name { print $1; exit }')"
+[ "$plain_motor_mode" = -rwxrw---- ] ||
+    fail "private upload has Motor mode $plain_motor_mode"
+[ "$exec_motor_mode" = -rwxr-x--- ] ||
+    fail "executable upload has Motor mode $exec_motor_mode"
+[ "$readonly_motor_mode" = -rwxr----- ] ||
+    fail "read-only upload has Motor mode $readonly_motor_mode"
+if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_plain_permission_file" >/dev/null 2>&1; then
+    fail "None-role child read a private SFTP upload"
+fi
+echo "  ok: SFTP permission updates preserved owner/public role distinctions"
+
+# A throttled upload keeps its handle open long enough to inspect the staging
+# permissions, then an intentional client termination exercises connection-drop
+# cleanup. The file must never become readable by the None role.
+abandoned_source="$WORK/abandoned-source.bin"
+abandoned_batch="$WORK/abandoned.batch"
+remote_abandoned_file="$REMOTE_UPLOAD_FILE.abandoned"
+dd if=/dev/urandom of="$abandoned_source" bs=1024 count=256 status=none
+printf 'put %s %s\n' "$abandoned_source" "$remote_abandoned_file" >"$abandoned_batch"
+sftp "${SSH_OPTS[@]}" -l 64 -b "$abandoned_batch" "$USER@$HOST" \
+    >"$WORK/abandoned.out" 2>"$WORK/abandoned.err" &
+abandoned_pid=$!
+ABANDONED_PID="$abandoned_pid"
+abandoned_created=0
+for _ in $(seq 1 50); do
+    if run_ssh /system/bin/ls "$remote_abandoned_file" >/dev/null 2>&1; then
+        abandoned_created=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "$abandoned_created" != 1 ]; then
+    kill "$abandoned_pid" 2>/dev/null || true
+    wait "$abandoned_pid" 2>/dev/null || true
+    cat "$WORK/abandoned.err" >&2
+    fail "throttled SFTP upload did not create its destination"
+fi
+if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+    kill "$abandoned_pid" 2>/dev/null || true
+    wait "$abandoned_pid" 2>/dev/null || true
+    fail "None-role child read an in-progress SFTP upload"
+fi
+kill "$abandoned_pid"
+wait "$abandoned_pid" 2>/dev/null || true
+ABANDONED_PID=""
+abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
+[ "$abandoned_motor_mode" = -rwxrw---- ] ||
+    fail "abandoned upload has Motor mode $abandoned_motor_mode"
+if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+    fail "None-role child read an abandoned SFTP upload"
+fi
+echo "  ok: in-progress and abandoned uploads stayed private"
 
 # ---------------------------------------------------------------------------
 # 5. Overwrite with a shorter file. A server that opens for writing without
@@ -263,6 +324,7 @@ printf '[package]\nname = "phase0-fixture"\nversion = "0.1.0"\n' \
     >"$source_tree/Cargo.toml"
 printf 'fn main() { println!("nested fixture"); }\n' \
     >"$source_tree/src/main.rs"
+chmod 644 "$source_tree/Cargo.toml"
 chmod 700 "$source_tree/src/main.rs"
 dd if=/dev/urandom of="$source_tree/src/nested/payload.bin" \
     bs=1024 count=96 status=none
@@ -308,9 +370,9 @@ cmp -s "$source_tree/src/nested/payload.bin" "$WORK/copied-payload.bin" ||
     fail "binary payload changed during nested upload/copy"
 plain_copy_mode="$(stat -c %a "$WORK/copied-Cargo.toml")"
 exec_copy_mode="$(stat -c %a "$WORK/copied-main.rs")"
-[ "$plain_copy_mode" = 666 ] ||
+[ "$plain_copy_mode" = 644 ] ||
     fail "cp -r changed a non-executable file to mode $plain_copy_mode"
-[ "$exec_copy_mode" = 555 ] ||
+[ "$exec_copy_mode" = 500 ] ||
     fail "cp -r changed an executable file to mode $exec_copy_mode"
 
 run_ssh /system/bin/rm -r "$remote_copy" ||
