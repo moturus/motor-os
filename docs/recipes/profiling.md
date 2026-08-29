@@ -94,3 +94,58 @@ For your own experiments, `stats get` (the `stats` command) reads the same
 counters: the kernel's include `sched.poll_hit`, `sched.ipi_elided`,
 `sys_cpu_waits` and `sys_cpu_wakes`; read them before and after a run and
 take the difference.
+
+## Other benchmarks
+
+* `rnetbench` (`src/bin/rnetbench`) measures TCP between the VM and the
+  host. Server in the VM: `/devtools/tests/rnetbench --server` (port 40000
+  by default, `-p` changes it; on the standard image copy
+  `build/bin/release/rnetbench` in first). Client on the host, from
+  `src/bin/rnetbench`: `cargo run --release -- --client 192.168.4.2:40000`.
+  The client runs three phases of `-t` seconds each (default 5): a
+  round-robin exchange of 64-byte messages (iterations per second and usec
+  per round trip), then throughput client to server and server to client
+  in MiB/s, over `-P` parallel streams (default 1) with `-b` bytes of
+  application buffer (default 1024 with random write sizes, which stresses
+  the per-write costs; 65536 measures the pipe). `--flow-bytes N
+  --flow-count M` (default 200) replaces the phases with fresh connections
+  carrying N bytes each and prints the transfer-time percentiles, which is
+  what a connection's opening round trips cost. Read the round-trip line
+  first: it is the gauge of host interference, and throughput numbers are
+  comparable only between runs whose round-trip latency agrees.
+* `crossbench` (`src/sys/tests/crossbench`) is a file benchmark that also
+  builds for Linux, so one run can be compared with the host's filesystem.
+  `crossbench -f /user/tmp/cb.dat -i 500` creates a 20 MB file (sequential
+  write throughput), reads it back (sequential read throughput) and does
+  `-i` random 4 KB reads (default 100) at aligned offsets with `O_DIRECT`,
+  printing their latency distribution in usec (mean, standard deviation,
+  min, max, percentiles) and throughput. On the host: `cargo build
+  --release` in `src/sys/tests/crossbench`, then the same command line
+  against a file on the host.
+* The `systest` suite itself prints a few numbers while it runs (it checks
+  them only against sanity bounds): `test_syscall` (ns per no-op syscall),
+  `test_ipc` (ns per synchronous IPC round trip), `bench_thread_swap` (ns
+  per handoff through `wait(swap_target)`), `bench_page_faults` (ns per
+  first-touch page fault), `test_liveness` (scheduling latency p50/p99/max
+  in ms with busy background threads), `io_channel::test_ping_pong` (ns
+  per io_channel round trip) and `test_udp_large_packets` (usec per UDP
+  round trip). Run the suite the way `full-test.sh` does
+  (`TMPDIR=/user/tmp MOTOR_OS_CAPS=0x4c systest`) and grep them out.
+* Reproducers and probes, also `systest` subcommands: `listener-exhaustion-probe [cap]`
+  floods listeners and prints sys-io's page counts stage by stage;
+  `test-tcp-shutdown-repro`, `mio-accept-pump-repro`, `stdio-poll-stress`
+  and `udp-rebind-soak` drive the shapes of specific past bugs. Their doc
+  comments in `src/sys/tests/systest/src` say what each one exercises.
+
+## Observing a running system
+
+`top`, `ps`, `pstat`, `free` and `uptime` show CPU and memory per process;
+`time CMD` times a command; `ss` lists the TCP sockets sys-io knows.
+`stats list`, `stats providers` and `stats get <provider>[:<metric>][:<scope>]`
+read any metric from any provider: the kernel is provider 1 and sys-io
+provider 2, the scope is a PID (0 is the aggregate), so `stats get 1::2` is
+the kernel's view of sys-io (its syscalls, waits, wakes and page maps) and
+`stats get 2` sys-io's own filesystem and network counters. For a hung or
+slow process, `/devtools/bin/mdbg print-stacks PID` prints every thread's
+stack as addresses; `addr2line` against the unstripped binary under
+`build/obj` turns them into symbols (see `docs/tools.md`).

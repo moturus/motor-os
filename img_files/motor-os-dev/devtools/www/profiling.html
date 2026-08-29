@@ -525,6 +525,60 @@ suite only; each tool has its own subcommand and prints to stdout.</p>
 <a href="diagnostics.html">Logs and diagnostics</a>) reads the same counters: the kernel's
 include <code>sched.poll_hit</code>, <code>sched.ipi_elided</code>, <code>sys_cpu_waits</code>
 and <code>sys_cpu_wakes</code>; read them before and after a run and take the difference.</p>
+<h2>Other benchmarks</h2>
+<ul>
+  <li><code>rnetbench</code> (<code>src/bin/rnetbench</code>) measures TCP between the VM and
+  the host. Server in the VM: <code>/devtools/tests/rnetbench --server</code> (port 40000 by
+  default, <code>-p</code> changes it; on the standard image copy
+  <code>build/bin/release/rnetbench</code> in first). Client on the host, from
+  <code>src/bin/rnetbench</code>: <code>cargo run --release -- --client 192.168.4.2:40000</code>.
+  The client runs three phases of <code>-t</code> seconds each (default 5): a round-robin
+  exchange of 64-byte messages (iterations per second and usec per round trip), then throughput
+  client to server and server to client in MiB/s, over <code>-P</code> parallel streams
+  (default 1) with <code>-b</code> bytes of application buffer (default 1024 with random write
+  sizes, which stresses the per-write costs; 65536 measures the pipe).
+  <code>--flow-bytes N --flow-count M</code> (default 200) replaces the phases with fresh
+  connections carrying N bytes each and prints the transfer-time percentiles, which is what a
+  connection's opening round trips cost. Read the round-trip line first: it is the gauge of host
+  interference, and throughput numbers are comparable only between runs whose round-trip latency
+  agrees.</li>
+  <li><code>crossbench</code> (<code>src/sys/tests/crossbench</code>) is a file benchmark that
+  also builds for Linux, so one run can be compared with the host's filesystem.
+  <code>crossbench -f /user/tmp/cb.dat -i 500</code> creates a 20 MB file (sequential write
+  throughput), reads it back (sequential read throughput) and does <code>-i</code> random 4 KB
+  reads (default 100) at aligned offsets with <code>O_DIRECT</code>, printing their latency
+  distribution in usec (mean, standard deviation, min, max, percentiles) and throughput. On the
+  host: <code>cargo build --release</code> in <code>src/sys/tests/crossbench</code>, then the
+  same command line against a file on the host.</li>
+  <li>The <code>systest</code> suite itself prints a few numbers while it runs (it checks them
+  only against sanity bounds): <code>test_syscall</code> (ns per no-op syscall),
+  <code>test_ipc</code> (ns per synchronous IPC round trip), <code>bench_thread_swap</code> (ns
+  per handoff through <code>wait(swap_target)</code>), <code>bench_page_faults</code> (ns per
+  first-touch page fault), <code>test_liveness</code> (scheduling latency p50/p99/max in ms with
+  busy background threads), <code>io_channel::test_ping_pong</code> (ns per io_channel round
+  trip) and <code>test_udp_large_packets</code> (usec per UDP round trip). Run the suite the way
+  <code>full-test.sh</code> does (<code>TMPDIR=/user/tmp MOTOR_OS_CAPS=0x4c systest</code>) and
+  grep them out.</li>
+  <li>Reproducers and probes, also <code>systest</code> subcommands:
+  <code>listener-exhaustion-probe [cap]</code> floods listeners and prints sys-io's page counts
+  stage by stage; <code>test-tcp-shutdown-repro</code>, <code>mio-accept-pump-repro</code>,
+  <code>stdio-poll-stress</code> and <code>udp-rebind-soak</code> drive the shapes of specific
+  past bugs. Their doc comments in <code>src/sys/tests/systest/src</code> say what each one
+  exercises.</li>
+</ul>
+<h2>Observing a running system</h2>
+<p><code>top</code>, <code>ps</code>, <code>pstat</code>, <code>free</code> and
+<code>uptime</code> show CPU and memory per process; <code>time CMD</code> times a command;
+<code>ss</code> lists the TCP sockets sys-io knows. <code>stats list</code>,
+<code>stats providers</code> and
+<code>stats get &lt;provider&gt;[:&lt;metric&gt;][:&lt;scope&gt;]</code> read any metric from
+any provider: the kernel is provider 1 and sys-io provider 2, the scope is a PID (0 is the
+aggregate), so <code>stats get 1::2</code> is the kernel's view of sys-io (its syscalls, waits,
+wakes and page maps) and <code>stats get 2</code> sys-io's own filesystem and network counters.
+For a hung or slow process, <code>/devtools/bin/mdbg print-stacks PID</code> prints every
+thread's stack as addresses; <code>addr2line</code> against the unstripped binary under
+<code>build/obj</code> turns them into symbols (see
+<a href="diagnostics.html">Logs and diagnostics</a>).</p>
 <nav class="pager">
 <a class="pager-prev" href="hello.html"><span>Previous</span>Hello, world</a>
 <span></span>
