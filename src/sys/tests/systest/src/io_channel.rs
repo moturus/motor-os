@@ -548,6 +548,60 @@ fn test_concurrent_spawn_reads() {
     println!("----- io_channel::test_concurrent_spawn_reads PASS");
 }
 
+/// Both runtimes poll a recently active channel instead of parking (the
+/// Receiver registers a moto_async::SpinSource), so a ping-pong costs a
+/// small fraction of a wait syscall per round trip instead of about two.
+fn test_active_channel_polls() {
+    const ITERS: u64 = 20000;
+    let pid = moto_sys::current_pid();
+    let waits_0 = crate::kernel_metric("sys_cpu_waits", pid);
+
+    let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = server_started.clone();
+    let server_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let listener = moto_ipc::io_channel::listen("systest_polls");
+            server_started.store(true, Ordering::Release);
+            let (sender, mut receiver) = listener.await.unwrap();
+            for idx in 0..ITERS {
+                let mut msg = receiver.recv().await.unwrap();
+                assert_eq!(msg.id, idx * 2);
+                msg.id = idx * 2 + 1;
+                sender.send(msg).await.unwrap();
+            }
+        });
+    });
+    while !waiter.load(Ordering::Relaxed) {
+        core::hint::spin_loop();
+    }
+    let client_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_polls").unwrap();
+            for idx in 0..ITERS {
+                let mut msg = moto_ipc::io_channel::Msg::new();
+                msg.id = idx * 2;
+                sender.send(msg).await.unwrap();
+                msg = receiver.recv().await.unwrap();
+                assert_eq!(msg.id, idx * 2 + 1);
+            }
+        });
+    });
+    server_thread.join().unwrap();
+    client_thread.join().unwrap();
+
+    let waits = crate::kernel_metric("sys_cpu_waits", pid) - waits_0;
+    println!(
+        "      io_channel::test_active_channel_polls: {ITERS} roundtrips, {waits} wait syscalls"
+    );
+    if !crate::under_load() {
+        assert!(
+            waits < ITERS / 2,
+            "{waits} wait syscalls for {ITERS} roundtrips"
+        );
+    }
+    println!("----- io_channel::test_active_channel_polls PASS");
+}
+
 pub fn run_all_tests() {
     basic_test();
     test_ping_pong();
@@ -557,6 +611,7 @@ pub fn run_all_tests() {
     test_remote_page_free_preserves_other_waiters();
     test_error_handler_on_double_free();
     test_concurrent_spawn_reads();
+    test_active_channel_polls();
 
     println!("io_channel: ALL PASS");
 }

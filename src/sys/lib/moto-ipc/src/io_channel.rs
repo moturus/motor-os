@@ -455,6 +455,20 @@ impl RawChannel {
         }
     }
 
+    // Is a message waiting in the given queue? A peek: a stored message
+    // stamps its slot with tail + 1.
+    fn has_msg(&self, endpoint: EndpointType) -> bool {
+        let (queue_tail, queue) = match endpoint {
+            EndpointType::Client => (&self.server_queue_tail, &self.server_queue),
+            EndpointType::Server => (&self.client_queue_tail, &self.client_queue),
+        };
+        let pos = queue_tail.load(Ordering::Relaxed);
+        queue[(pos & QUEUE_MASK) as usize]
+            .stamp
+            .load(Ordering::Acquire)
+            == pos + 1
+    }
+
     fn client_queue_full(&self) -> bool {
         let pos = self.client_queue_head.load(Ordering::Relaxed);
         let slot = &self.client_queue[(pos & QUEUE_MASK) as usize];
@@ -1691,6 +1705,61 @@ impl Sender {
 pub struct Receiver {
     inner: Arc<IoChannelImpl>,
     recv_future: Option<moto_async::SysHandleFuture>,
+    // TSC of the last received message: a recently active channel is
+    // registered as a spin source (moto_async::SpinSource) when the
+    // receiver goes Pending.
+    last_recv_tsc: u64,
+}
+
+/// A channel that received a message this recently is polled by the
+/// executor instead of waking it.
+const ACTIVE_WINDOW_NS: u64 = 200_000;
+
+fn tsc_now() -> u64 {
+    moto_rt::time::Instant::now().as_u64()
+}
+
+fn ns_to_tsc(ns: u64) -> u64 {
+    moto_sys::KernelStaticPage::get().tsc_in_sec * ns / 1_000_000_000
+}
+
+struct RecvSpin {
+    inner: Arc<IoChannelImpl>,
+}
+
+impl moto_async::SpinSource for RecvSpin {
+    fn ready(&self) -> bool {
+        self.inner.raw_channel().has_msg(self.inner.endpoint_type)
+    }
+
+    // While the executor polls the queue the peer need not wake us.
+    fn begin(&self) {
+        match self.inner.endpoint_type {
+            EndpointType::Client => self
+                .inner
+                .raw_channel()
+                .clear_client_wait(WaitType::WaitingToRecv),
+            EndpointType::Server => self
+                .inner
+                .raw_channel()
+                .clear_server_wait(WaitType::WaitingToRecv),
+        }
+    }
+
+    // Set the waiting flag again, then recheck (the poll_recv order).
+    fn end(&self) -> bool {
+        match self.inner.endpoint_type {
+            EndpointType::Client => self
+                .inner
+                .raw_channel()
+                .set_client_waiting(WaitType::WaitingToRecv),
+            EndpointType::Server => self
+                .inner
+                .raw_channel()
+                .set_server_waiting(WaitType::WaitingToRecv),
+        }
+        self.ready()
+    }
 }
 
 impl !Sync for Receiver {}
@@ -1790,7 +1859,21 @@ impl Receiver {
                                 // We must not poll the same future after it is ready.
                                 self.recv_future = None;
                             }
-                            core::task::Poll::Pending => return core::task::Poll::Pending,
+                            core::task::Poll::Pending => {
+                                // Let the executor poll this queue before it
+                                // parks.
+                                let idle = tsc_now().wrapping_sub(self.last_recv_tsc);
+                                if idle < ns_to_tsc(ACTIVE_WINDOW_NS) {
+                                    moto_async::register_spin_source(
+                                        alloc::boxed::Box::new(RecvSpin {
+                                            inner: self.inner.clone(),
+                                        }),
+                                        cx,
+                                        ACTIVE_WINDOW_NS,
+                                    );
+                                }
+                                return core::task::Poll::Pending;
+                            }
                         }
 
                         match self.inner.endpoint_type {
@@ -1806,6 +1889,7 @@ impl Receiver {
                 }
                 Err(err) => return core::task::Poll::Ready(Err(err)),
                 Ok(msg) => {
+                    self.last_recv_tsc = tsc_now();
                     if match self.inner.endpoint_type {
                         EndpointType::Client => self
                             .raw_channel()
@@ -1887,6 +1971,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
     let receiver = Receiver {
         inner: sender.inner.clone(),
         recv_future: None,
+        last_recv_tsc: 0,
     };
 
     Ok((sender, receiver))
@@ -1956,6 +2041,7 @@ pub fn listen(url: &str) -> impl Future<Output = Result<(Sender, Receiver)>> {
         let receiver = Receiver {
             inner: sender.inner.clone(),
             recv_future: None,
+            last_recv_tsc: 0,
         };
 
         Ok((sender, receiver))
