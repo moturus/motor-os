@@ -10,6 +10,20 @@ pub fn secret(message: &str) -> io::Result<String> {
     prompt(message, false)
 }
 
+pub(crate) fn clear_secret(value: &mut String) {
+    // Zero bytes remain valid UTF-8 while the String still owns them.
+    clear_bytes(unsafe { value.as_bytes_mut() });
+    value.clear();
+}
+
+fn clear_bytes(value: &mut [u8]) {
+    // Ordinary dead stores may be optimized away before the allocation is freed.
+    for byte in value {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 fn prompt(message: &str, echo: bool) -> io::Result<String> {
     let stdin_terminal = io::stdin().is_terminal();
     #[cfg(target_os = "motor")]
@@ -178,5 +192,12 @@ mod tests {
         let value = read_edited_line(&b"bad\x15good\n"[..], &mut output, false).unwrap();
         assert_eq!(value, "good");
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn secret_bytes_are_zeroed() {
+        let mut value = *b"secret";
+        clear_bytes(&mut value);
+        assert_eq!(value, [0; 6]);
     }
 }

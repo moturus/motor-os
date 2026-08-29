@@ -287,6 +287,22 @@ impl Destination {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PtyMode {
+    #[default]
+    Auto,
+    Force,
+    Disable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshArgs {
+    pub connection: ConnectionOptions,
+    pub destination: Destination,
+    pub command: Vec<String>,
+    pub pty: PtyMode,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
