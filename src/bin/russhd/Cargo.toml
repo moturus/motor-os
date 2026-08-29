@@ -8,6 +8,7 @@ env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
 moto-tooling = { path = "../../sys/lib/moto-tooling", features = ["std"] }
+rand         = "0.10"
 russh        = { git = "https://github.com/moturus/russh.git", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
 serde        = { version = "1.0.*", features = ["derive"] }
@@ -25,9 +26,6 @@ moto-async   = { path = "../../sys/lib/moto-async" }
 moto-io      = { path = "../../sys/lib/moto-io" }
 moto-rt      = { path = "../../sys/lib/moto-rt"  }
 moto-sys     = { path = "../../sys/lib/moto-sys" }
-
-[dev-dependencies]
-rand = "0.10"
 
 [target.'cfg(unix)'.dev-dependencies]
 tokio = { version = "=1.47.1", features = ["test-util"] }
