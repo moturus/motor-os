@@ -2,6 +2,61 @@ use std::path::PathBuf;
 
 use crate::client::args::{Applet, ConnectionOptions, Destination, ParseError, PtyMode, SshArgs};
 
+#[derive(Debug)]
+pub enum AppletError {
+    Parse(ParseError),
+    Ssh(russh::Error),
+    Io(std::io::Error),
+    Key(russh::keys::Error),
+    SshKey(russh::keys::ssh_key::Error),
+    Message(String),
+}
+
+impl std::fmt::Display for AppletError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(f),
+            Self::Ssh(error) => error.fmt(f),
+            Self::Io(error) => error.fmt(f),
+            Self::Key(error) => error.fmt(f),
+            Self::SshKey(error) => error.fmt(f),
+            Self::Message(message) => message.fmt(f),
+        }
+    }
+}
+
+impl From<ParseError> for AppletError {
+    fn from(error: ParseError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+impl From<russh::Error> for AppletError {
+    fn from(error: russh::Error) -> Self {
+        Self::Ssh(error)
+    }
+}
+
+impl From<std::io::Error> for AppletError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<russh::keys::Error> for AppletError {
+    fn from(error: russh::keys::Error) -> Self {
+        Self::Key(error)
+    }
+}
+
+impl From<russh::keys::ssh_key::Error> for AppletError {
+    fn from(error: russh::keys::ssh_key::Error) -> Self {
+        Self::SshKey(error)
+    }
+}
+
+mod keygen;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CopyEndpoint {
     Local(PathBuf),
@@ -59,6 +114,29 @@ pub fn parse(applet: Applet, args: &[String]) -> Result<ParsedArgs, ParseError> 
         Applet::SshKeygen => parse_keygen(args).map(ParsedArgs::SshKeygen),
         Applet::SshCopyId => parse_copy_id(args).map(ParsedArgs::SshCopyId),
     }
+}
+
+pub fn run(applet: Applet, args: &[String]) -> Result<i32, AppletError> {
+    let parsed = parse(applet, args)?;
+    match parsed {
+        ParsedArgs::Ssh(args) => {
+            let runtime = runtime()?;
+            runtime
+                .block_on(crate::client::session::run_ssh(args))
+                .map_err(Into::into)
+        }
+        ParsedArgs::SshKeygen(args) => keygen::run(args),
+        ParsedArgs::Scp(_) | ParsedArgs::Sftp(_) | ParsedArgs::SshCopyId(_) => Err(
+            AppletError::Message(format!("{} is not implemented", applet.name())),
+        ),
+    }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, AppletError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| AppletError::Message("failed to create SSH runtime".to_owned()))
 }
 
 fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
