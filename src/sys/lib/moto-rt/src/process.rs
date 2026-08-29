@@ -437,9 +437,6 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
     };
 
     for arg in args {
-        if arg.is_empty() {
-            continue;
-        }
         calc_lengths(arg.as_str());
     }
 
@@ -466,9 +463,6 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
         };
 
         for arg in args {
-            if arg.is_empty() {
-                continue;
-            }
             write_arg(arg.as_str());
         }
     }
