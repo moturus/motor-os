@@ -301,31 +301,11 @@ impl FsClient {
             return Err(moto_rt::Error::InvalidArgument);
         }
 
-        let (mut entry_id, mut entry_kind) = (ROOT_ID, EntryKind::Directory);
-        for entry_name in path.split('/') {
-            if entry_name.is_empty() {
-                continue;
-            }
-
-            if entry_kind != EntryKind::Directory {
-                return Err(moto_rt::Error::NotFound);
-            }
-
-            (entry_id, entry_kind) = self.stat_one(entry_id, entry_name).await?;
-        }
-
-        Ok((entry_id, entry_kind))
-    }
-
-    async fn stat_one(
-        self: &Rc<Self>,
-        parent_id: EntryId,
-        fname: &str,
-    ) -> Result<(EntryId, EntryKind)> {
+        // The server walks the whole path: one round trip instead of one
+        // per component.
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
-        let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
+        let mut msg = api_fs::stat_path_msg_encode(path, io_page);
         msg.id = self.new_request_id();
-
         let resp = self.clone().send_recv(msg).await?;
         api_fs::stat_resp_decode(resp)
     }

@@ -28,13 +28,16 @@ pub const CMD_SET_PERMISSIONS: u16 = 16;
 pub const CMD_MOVE_NOREPLACE: u16 = 17;
 pub const CMD_SET_ALL_PERMISSIONS: u16 = 18;
 pub const CMD_CREATE_WITH_PERMISSIONS: u16 = 19;
+/// Resolve a whole absolute path in one round trip (CMD_STAT resolves one
+/// component under a known parent).
+pub const CMD_STAT_PATH: u16 = 20;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
 /// `CMD_*` list above. sys-io's memory-pressure gate consults this so an
 /// unrecognized command is answered `InvalidData` as usual, not counted and
 /// refused as a pressure refusal.
 pub fn known_cmd(cmd: u16) -> bool {
-    (CMD_STAT..=CMD_CREATE_WITH_PERMISSIONS).contains(&cmd)
+    (CMD_STAT..=CMD_STAT_PATH).contains(&cmd)
 }
 
 /// The `shared_pages` slot in which a single-page request or response
@@ -91,6 +94,18 @@ pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     })?;
 
     Ok((parent_id, fname))
+}
+
+/// The whole absolute path travels in the page like a CMD_STAT name; the
+/// server walks it from the root.
+pub fn stat_path_msg_encode(path: &str, io_page: IoPage) -> Msg {
+    let mut msg = stat_msg_encode(async_fs::ROOT_ID, path, io_page);
+    msg.command = CMD_STAT_PATH;
+    msg
+}
+
+pub fn stat_path_msg_decode(msg: Msg, sender: &Sender) -> Result<String> {
+    stat_msg_decode(msg, sender).map(|(_, path)| path)
 }
 
 pub fn stat_resp_encode(req: Msg, entry_id: u128, entry_kind: async_fs::EntryKind) -> Msg {
@@ -197,6 +212,7 @@ pub fn release_donated_pages(msg: &Msg, sender: &Sender) {
 
     match msg.command {
         CMD_STAT
+        | CMD_STAT_PATH
         | CMD_CREATE_FILE
         | CMD_CREATE_DIR
         | CMD_CREATE_WITH_PERMISSIONS

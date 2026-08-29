@@ -555,6 +555,7 @@ async fn on_msg(
 
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime, role).await,
+        moto_sys_io::api_fs::CMD_STAT_PATH => on_cmd_stat_path(msg, &sender, runtime, role).await,
         moto_sys_io::api_fs::CMD_CREATE_FILE => {
             on_cmd_create_file(msg, &sender, runtime, role).await
         }
@@ -699,6 +700,39 @@ async fn on_cmd_stat(
         log::debug!("stat({parent_id}, {fname}): not found");
         return Err(std::io::Error::from(ErrorKind::NotFound));
     };
+    core::mem::drop(fs);
+
+    let resp = api_fs::stat_resp_encode(msg, entry_id, entry_kind);
+    sender.send(resp).await.map_err(map_native_error)
+}
+
+// The per-component permission checks are the same `fs.stat` calls the
+// client would issue one round trip at a time.
+async fn on_cmd_stat_path(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+    role: Role,
+) -> Result<()> {
+    let path = api_fs::stat_path_msg_decode(msg, sender).map_err(map_native_error)?;
+    if !path.starts_with('/') {
+        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+    }
+
+    let fs = runtime.fs.read().await;
+    let (mut entry_id, mut entry_kind) = (async_fs::ROOT_ID, EntryKind::Directory);
+    for name in path.split('/') {
+        if name.is_empty() {
+            continue;
+        }
+        if entry_kind != EntryKind::Directory {
+            return Err(std::io::Error::from(ErrorKind::NotFound));
+        }
+        let Some(next) = fs.stat(role, entry_id, name).await? else {
+            return Err(std::io::Error::from(ErrorKind::NotFound));
+        };
+        (entry_id, entry_kind) = next;
+    }
     core::mem::drop(fs);
 
     let resp = api_fs::stat_resp_encode(msg, entry_id, entry_kind);

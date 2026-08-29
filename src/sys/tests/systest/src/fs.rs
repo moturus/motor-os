@@ -1060,6 +1060,51 @@ fn seek_test() {
     println!("    ---- FS: seek_test PASS");
 }
 
+/// Path resolution goes to sys-io as one request per path (CMD_STAT_PATH),
+/// with the same per-component outcome as a component-by-component walk.
+fn path_resolution_test() {
+    println!("    ---- FS: path_resolution_test starting...");
+    let root = temp_dir().join("systest-fs-path");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    std::fs::write(root.join("a/b/file"), "x").unwrap();
+
+    assert!(std::fs::metadata(root.join("a/b/file")).unwrap().is_file());
+    assert!(std::fs::metadata(root.join("a/b")).unwrap().is_dir());
+    assert!(
+        std::fs::metadata(root.join("a/./b/../b//file"))
+            .unwrap()
+            .is_file()
+    );
+    assert_eq!(std::fs::read(root.join("a/b/file")).unwrap(), b"x");
+
+    // A file in the middle of the path, and a missing component.
+    assert_eq!(
+        std::fs::metadata(root.join("a/b/file/x"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        std::fs::metadata(root.join("a/nope/file"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        std::fs::File::open(root.join("a/b/nope"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    std::fs::write(root.join("a/b/second"), "y").unwrap();
+    assert_eq!(std::fs::read(root.join("a/b/second")).unwrap(), b"y");
+
+    std::fs::remove_dir_all(&root).unwrap();
+    println!("    ---- FS: path_resolution_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     permissions_vdso_test();
@@ -1074,6 +1119,7 @@ pub fn run_tests() {
     remove_dir_all_test();
     resize_test();
     seek_test();
+    path_resolution_test();
 
     println!("FS tests PASS");
 }
