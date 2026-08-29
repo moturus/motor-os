@@ -19,6 +19,10 @@ use moto_sys::SysHandle;
 const EMPTY: u32 = 0;
 const WAITING: u32 = 1;
 const NOTIFIED: u32 = 2;
+// The parker spins this long before its wait syscall; an unpark that lands
+// meanwhile costs no syscall either.
+const SPINNING: u32 = 3;
+const PARK_SPIN_NS: u64 = 20_000;
 
 /// The core state machine. At most one thread may park at a time;
 /// unpark may be called from any thread, including runtime tasks.
@@ -52,7 +56,7 @@ impl Parker {
         // failure pairs with unpark()'s Release swap to NOTIFIED.
         match self
             .state
-            .compare_exchange(EMPTY, WAITING, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(EMPTY, SPINNING, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {}
             Err(prev) => {
@@ -63,6 +67,25 @@ impl Parker {
                 debug_assert_eq!(consumed, NOTIFIED, "concurrent park() calls");
                 return;
             }
+        }
+
+        // Spin before committing to the syscall.
+        let tsc_in_sec = moto_sys::KernelStaticPage::get().tsc_in_sec;
+        let spin_deadline = Instant::now().as_u64() + tsc_in_sec * PARK_SPIN_NS / 1_000_000_000;
+        while self.state.load(Ordering::Acquire) == SPINNING {
+            if Instant::now().as_u64() >= spin_deadline {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if self
+            .state
+            .compare_exchange(SPINNING, WAITING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            // Unparked while spinning: consume, no syscall.
+            self.state.swap(EMPTY, Ordering::AcqRel);
+            return;
         }
 
         let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);

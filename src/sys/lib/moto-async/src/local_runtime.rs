@@ -125,6 +125,77 @@ pub fn timer_queue_len() -> usize {
     LocalRuntimeInner::current().timeq.borrow().len()
 }
 
+/// A readiness check the executor polls instead of parking.
+///
+/// A task that goes Pending on a recently active source registers one (see
+/// [`register_spin_source`]). While the registration lives the executor
+/// checks the source on every scheduling turn, spins on it for a bounded
+/// time when it has nothing else to run, and wakes the task without a
+/// syscall or an IPI when it becomes ready. Between `begin` and `end` the
+/// peer need not send wakes, so `end` runs exactly once per registration:
+/// when the task is woken, when the registration expires, or before the
+/// executor parks.
+pub trait SpinSource {
+    fn ready(&self) -> bool;
+    /// The executor now watches the source (e.g. clear the channel's
+    /// "waiting" flag so the peer skips its wake syscall).
+    fn begin(&self) {}
+    /// The executor stops watching: ask the peer for wakes again, then
+    /// report whether the source became ready meanwhile.
+    fn end(&self) -> bool {
+        self.ready()
+    }
+}
+
+struct SpinEntry {
+    source: Box<dyn SpinSource>,
+    waker: core::task::LocalWaker,
+    expires: u64, // TSC
+}
+
+/// How long an idle executor spins on its sources before parking.
+const SPIN_BEFORE_PARK_NS: u64 = 20_000;
+/// Registrations beyond this keep the normal wake path: a pass over more
+/// sources would eat the spin window.
+const MAX_SPIN_SOURCES: usize = 8;
+
+fn tsc_now() -> u64 {
+    moto_rt::time::Instant::now().as_u64()
+}
+
+fn ns_to_tsc(ns: u64) -> u64 {
+    moto_sys::KernelStaticPage::get().tsc_in_sec * ns / 1_000_000_000
+}
+
+/// Register `source` for the current task for `active_for_ns` from now. A
+/// no-op outside a LocalRuntime context or when the table is full.
+pub fn register_spin_source(source: Box<dyn SpinSource>, cx: &mut Context<'_>, active_for_ns: u64) {
+    let Some(inner) = (unsafe { get_local_runtime_context().as_ref() }) else {
+        return;
+    };
+    let waker = cx.local_waker().clone();
+    let mut sources = inner.spin_sources.borrow_mut();
+    // One registration per task: a re-poll replaces the previous one.
+    if let Some(idx) = sources
+        .iter()
+        .position(|entry| entry.waker.data() == waker.data())
+    {
+        let old = sources.swap_remove(idx);
+        if old.source.end() {
+            old.waker.wake_by_ref();
+        }
+    }
+    if sources.len() >= MAX_SPIN_SOURCES {
+        return;
+    }
+    source.begin();
+    sources.push(SpinEntry {
+        source,
+        waker,
+        expires: tsc_now() + ns_to_tsc(active_for_ns),
+    });
+}
+
 // This is the waker to use cross-threads.
 // The local waker is just a pointer to TaskId.
 struct MotoWaker {
@@ -263,6 +334,9 @@ struct LocalRuntimeInner {
     // Set only by the task currently being polled. The scheduler consumes it
     // at the safe point after releasing that task's borrow.
     io_turn_requested: core::cell::Cell<bool>,
+
+    // See SpinSource.
+    spin_sources: RefCell<Vec<SpinEntry>>,
 }
 
 impl LocalRuntimeInner {
@@ -279,7 +353,93 @@ impl LocalRuntimeInner {
             wake_on_sleep: core::cell::Cell::new(None),
             currently_running_task: Default::default(),
             io_turn_requested: Default::default(),
+            spin_sources: Default::default(),
         }
+    }
+
+    // About to park: nobody will watch the sources, so end every
+    // registration. True if one turned ready.
+    fn park_spin_sources(&self) -> bool {
+        let entries = core::mem::take(&mut *self.spin_sources.borrow_mut());
+        let mut woke = false;
+        for entry in entries {
+            if entry.source.end() {
+                entry.waker.wake_by_ref();
+                woke = true;
+            }
+        }
+        woke
+    }
+
+    // A pass over the registered sources on every scheduling turn: a ready
+    // one wakes its task, an expired one is dropped; both end the
+    // registration.
+    fn check_spin_sources(&self) {
+        let mut sources = self.spin_sources.borrow_mut();
+        if sources.is_empty() {
+            return;
+        }
+        let now = tsc_now();
+        sources.retain(|entry| {
+            if entry.expires > now && !entry.source.ready() {
+                return true;
+            }
+            if entry.source.end() {
+                entry.waker.wake_by_ref();
+            }
+            false
+        });
+    }
+
+    // Spin on the registered sources for a bounded time. True if a task
+    // was woken or cross-thread work arrived, i.e. do not park yet.
+    fn spin_for_sources(&self) -> bool {
+        let mut entries = core::mem::take(&mut *self.spin_sources.borrow_mut());
+        if entries.is_empty() {
+            return false;
+        }
+        let now = tsc_now();
+        let mut resume = false;
+        entries.retain(|entry| {
+            if entry.expires > now {
+                return true;
+            }
+            if entry.source.end() {
+                entry.waker.wake_by_ref();
+                resume = true;
+            }
+            false
+        });
+        let deadline = now + ns_to_tsc(SPIN_BEFORE_PARK_NS);
+        while !resume && !entries.is_empty() {
+            if entries.iter().any(|entry| entry.source.ready()) {
+                break;
+            }
+            if !self.nonlocal_wakes.is_empty() || !self.incoming.borrow().is_empty() {
+                resume = true;
+                break;
+            }
+            if tsc_now() >= deadline {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // A ready source ends its registration and wakes its task; the
+        // rest stay registered (check_spin_sources watches them while tasks
+        // run, park_spin_sources ends them before a park).
+        entries.retain(|entry| {
+            if !entry.source.ready() {
+                return true;
+            }
+            entry.source.end();
+            entry.waker.wake_by_ref();
+            resume = true;
+            false
+        });
+        let mut sources = self.spin_sources.borrow_mut();
+        debug_assert!(sources.is_empty());
+        *sources = entries;
+        resume
     }
 
     fn new_waker(&self, task_id: TaskId) -> Waker {
@@ -355,6 +515,10 @@ impl LocalRuntimeInner {
     /// borrow: timer wakers may run arbitrary code and newly spawned tasks must
     /// be free to enter the map.
     fn poll_io_nonblocking(&self) {
+        // The peer of a registered source sends no wakes (SpinSource::begin),
+        // so a busy executor must check the sources on every IO turn too.
+        self.check_spin_sources();
+
         // A deferred peer wake normally rides the executor's sleep syscall.
         // An explicitly requested I/O turn does not sleep, so deliver it the
         // same way LocalRuntime::wait does when runnable work reappears.
@@ -604,6 +768,16 @@ impl LocalRuntime {
                 return; // Always entered and left in POLLING.
             }
 
+            // Nothing runnable: poll the active sources before parking.
+            if inner.spin_for_sources() {
+                continue;
+            }
+            // A parked executor watches nothing: end the registrations
+            // (one that turned ready meanwhile makes us resume).
+            if inner.park_spin_sources() {
+                continue;
+            }
+
             // Commit to park, then recheck: a waker that pushed before
             // seeing COMMITTING skipped its wake syscall (see the SC
             // fence pairing in waker_wake_by_ref). A wake that lands
@@ -683,6 +857,7 @@ impl LocalRuntime {
             let inner = LocalRuntimeInner::current();
 
             inner.merge_incoming();
+            inner.check_spin_sources();
             let next_runnable = inner.next_runnable();
 
             let Some(next_runnable) = next_runnable else {
