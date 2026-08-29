@@ -9,6 +9,8 @@ pub enum AppletError {
     Io(std::io::Error),
     Key(russh::keys::Error),
     SshKey(russh::keys::ssh_key::Error),
+    ClientSftp(crate::client::sftp::Error),
+    Transfer(crate::client::transfer::Error),
     Message(String),
 }
 
@@ -20,6 +22,8 @@ impl std::fmt::Display for AppletError {
             Self::Io(error) => error.fmt(f),
             Self::Key(error) => error.fmt(f),
             Self::SshKey(error) => error.fmt(f),
+            Self::ClientSftp(error) => error.fmt(f),
+            Self::Transfer(error) => error.fmt(f),
             Self::Message(message) => message.fmt(f),
         }
     }
@@ -55,7 +59,20 @@ impl From<russh::keys::ssh_key::Error> for AppletError {
     }
 }
 
+impl From<crate::client::sftp::Error> for AppletError {
+    fn from(error: crate::client::sftp::Error) -> Self {
+        Self::ClientSftp(error)
+    }
+}
+
+impl From<crate::client::transfer::Error> for AppletError {
+    fn from(error: crate::client::transfer::Error) -> Self {
+        Self::Transfer(error)
+    }
+}
+
 mod keygen;
+mod scp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CopyEndpoint {
@@ -125,10 +142,12 @@ pub fn run(applet: Applet, args: &[String]) -> Result<i32, AppletError> {
                 .block_on(crate::client::session::run_ssh(args))
                 .map_err(Into::into)
         }
+        ParsedArgs::Scp(args) => runtime()?.block_on(scp::run(args)),
         ParsedArgs::SshKeygen(args) => keygen::run(args),
-        ParsedArgs::Scp(_) | ParsedArgs::Sftp(_) | ParsedArgs::SshCopyId(_) => Err(
-            AppletError::Message(format!("{} is not implemented", applet.name())),
-        ),
+        ParsedArgs::Sftp(_) | ParsedArgs::SshCopyId(_) => Err(AppletError::Message(format!(
+            "{} is not implemented",
+            applet.name()
+        ))),
     }
 }
 
