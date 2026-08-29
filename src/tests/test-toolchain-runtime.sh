@@ -100,7 +100,7 @@ grep -q 'not cached yet' "$temporary/stderr" || fail "deferred precheck was sile
 mv "$archive.absent" "$archive"
 
 MOTOR_ASSEMBLY_STATE=development-dirty
-sed -i 's/version = "0.17.5"/version = "0.17.6"/' "$local_package/Cargo.toml"
+sed -i 's/^version = .*/version = "0.0.0"/' "$local_package/Cargo.toml"
 if toolchain_precheck_moto_rt_package \
 	"$rust" "$local_package" "$cargo_home" 2>/dev/null; then
 	fail "dirty precheck accepted a moto-rt version mismatch"

@@ -115,7 +115,7 @@ packages:
   `22836a72e660c7000b1b00db2f0a345fff4e52b6` and version
   `0.2.186+motor.1` in the main Rust workspace.
 - rustc LLVM retains its exact `cc = "=1.2.16"` dependency.
-- Rust std uses published crates.io `moto-rt` 0.17.5, never a path into the
+- Rust std uses published crates.io `moto-rt` 0.17.6, never a path into the
   Motor OS checkout.
 
 The `+motor.1` versions give the forked `libloading` and `libc` distinct Cargo
