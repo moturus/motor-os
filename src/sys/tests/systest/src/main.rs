@@ -32,6 +32,7 @@ mod stdio_file_relay;
 mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
+mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
@@ -1323,6 +1324,7 @@ fn main() {
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
     fs_permissions::run_all_tests();
+    sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
     descriptor_attr::run_all_tests();

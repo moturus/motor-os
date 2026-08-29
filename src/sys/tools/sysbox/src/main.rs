@@ -60,7 +60,11 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "cat" => commands::cat::do_command(&args[1..]),
+        "cat" => {
+            if !commands::cat::do_command(&args[1..]) {
+                std::process::exit(1);
+            }
+        }
         "chmod" => commands::chmod::do_command(&args[1..]),
         "cp" => commands::cp::do_command(&args[1..]),
         "date" => commands::date::do_command(&args[1..]),
