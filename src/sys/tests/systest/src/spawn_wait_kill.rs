@@ -7,6 +7,38 @@ const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
 const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
 const CAPS_POLICY_CHILD: &str = "caps-policy-child";
 const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
+const EMPTY_ARGS_CHILD: &str = "empty-args-child";
+
+pub fn is_empty_args_child(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == EMPTY_ARGS_CHILD)
+}
+
+pub fn run_empty_args_child(args: &[String]) -> ! {
+    assert_eq!(
+        args,
+        [
+            std::env::current_exe()
+                .unwrap()
+                .into_os_string()
+                .into_string()
+                .unwrap(),
+            EMPTY_ARGS_CHILD.to_owned(),
+            String::new(),
+            "middle".to_owned(),
+            String::new(),
+        ]
+    );
+    std::process::exit(0)
+}
+
+pub fn test_empty_args_preserved() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([EMPTY_ARGS_CHILD, "", "middle", ""])
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
+    println!("test_empty_args_preserved PASS");
+}
 
 pub fn is_interrupt_child(args: &[String]) -> bool {
     args.len() == 2 && args[1] == INTERRUPT_CHILD

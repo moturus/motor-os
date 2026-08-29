@@ -1201,6 +1201,9 @@ fn main() {
     if spawn_wait_kill::is_interrupt_child(&args) {
         spawn_wait_kill::run_interrupt_child();
     }
+    if spawn_wait_kill::is_empty_args_child(&args) {
+        spawn_wait_kill::run_empty_args_child(&args);
+    }
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
     }
@@ -1354,6 +1357,7 @@ fn main() {
     test_liveness();
 
     spawn_wait_kill::test_pid_invariants();
+    spawn_wait_kill::test_empty_args_preserved();
     spawn_wait_kill::test_process_pid_query();
     spawn_wait_kill::test_peer_capabilities_query();
     spawn_wait_kill::test_child_id();

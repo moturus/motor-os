@@ -476,7 +476,6 @@ unsafe fn create_remote_args(
     address_space: moto_sys::SysHandle,
     args1: &Vec<&[u8]>,
     args2: &Vec<&[u8]>,
-    skip_empty: bool,
 ) -> Result<u64, ErrorCode> {
     let mut needed_len: u32 = 4; // Args num.
     let mut num_args = 0_u32;
@@ -488,16 +487,10 @@ unsafe fn create_remote_args(
     };
 
     for arg in args1 {
-        if arg.is_empty() && skip_empty {
-            continue;
-        }
         calc_lengths(arg);
     }
 
     for arg in args2 {
-        if arg.is_empty() && skip_empty {
-            continue;
-        }
         calc_lengths(arg);
     }
 
@@ -531,16 +524,10 @@ unsafe fn create_remote_args(
     };
 
     for arg in args1 {
-        if arg.is_empty() && skip_empty {
-            continue;
-        }
         write_arg(arg);
     }
 
     for arg in args2 {
-        if arg.is_empty() && skip_empty {
-            continue;
-        }
         write_arg(arg);
     }
 
@@ -561,7 +548,7 @@ unsafe fn create_remote_env(
         flat_vec.push(v);
     }
 
-    unsafe { create_remote_args(address_space, &Vec::new(), &flat_vec, false) }
+    unsafe { create_remote_args(address_space, &Vec::new(), &flat_vec) }
 }
 
 fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
@@ -733,7 +720,7 @@ fn run_elf(
 
     unsafe {
         let pd = remote_process_data.as_mut().unwrap();
-        pd.args = create_remote_args(address_space.syshandle(), &exe_plus, &args, true)?;
+        pd.args = create_remote_args(address_space.syshandle(), &exe_plus, &args)?;
         pd.env = create_remote_env(address_space.syshandle(), env)?;
     }
 
@@ -1211,9 +1198,6 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
     };
 
     for arg in &args {
-        if arg.is_empty() {
-            continue;
-        }
         calc_lengths(arg.as_str());
     }
 
@@ -1241,9 +1225,6 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
         };
 
         for arg in args {
-            if arg.is_empty() {
-                continue;
-            }
             write_arg(arg.as_str());
         }
     }
