@@ -1248,50 +1248,32 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
         return pos.pos as i64;
     }
 
-    let file_size = {
-        let attr = match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
-            Ok(attr) => attr,
-            Err(err) => return -(err as u16 as i64),
-        };
-
-        if attr.file_type != moto_rt::fs::FILETYPE_FILE {
-            return -(moto_rt::Error::InvalidArgument as u16 as i64);
-        }
-        attr.size
-    };
-    match whence {
-        moto_rt::fs::SEEK_CUR => {
-            let new = pos.pos as i128 + offset as i128;
-            if new > file_size as i128 || new < 0 {
-                return -(moto_rt::Error::InvalidArgument as u16 as i64);
-            }
-            pos.pos = new as u64;
-            new as i64
-        }
-        moto_rt::fs::SEEK_SET => {
-            if offset < 0 {
-                return -(moto_rt::Error::InvalidArgument as u16 as i64);
-            }
-            if (offset as u64) > file_size {
-                return -(moto_rt::Error::InvalidArgument as u16 as i64);
-            }
-            pos.pos = offset as u64;
-            offset
-        }
+    // A position past the end is valid (reads there return 0, writes zero
+    // the gap), so only SEEK_END needs the file size: one round trip to
+    // sys-io, which SEEK_SET/SEEK_CUR do not pay.
+    let base = match whence {
+        moto_rt::fs::SEEK_SET => 0,
+        moto_rt::fs::SEEK_CUR => pos.pos,
         moto_rt::fs::SEEK_END => {
-            if offset < 0 && offset.unsigned_abs() > file_size {
+            let attr = match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
+                Ok(attr) => attr,
+                Err(err) => return -(err as u16 as i64),
+            };
+            if attr.file_type != moto_rt::fs::FILETYPE_FILE {
                 return -(moto_rt::Error::InvalidArgument as u16 as i64);
             }
-            if offset > 0 {
-                log::error!("File::seek past end Not Implemented");
-                return -(moto_rt::Error::NotImplemented as u16 as i64);
-            }
-            let new_pos = file_size - offset.unsigned_abs();
-            pos.pos = new_pos;
-            new_pos as i64
+            attr.size
         }
-        _ => -(moto_rt::Error::InvalidArgument as u16 as i64),
-    }
+        _ => return -(moto_rt::Error::InvalidArgument as u16 as i64),
+    };
+    let new_pos = base
+        .checked_add_signed(offset)
+        .filter(|pos| *pos <= i64::MAX as u64);
+    let Some(new_pos) = new_pos else {
+        return -(moto_rt::Error::InvalidArgument as u16 as i64);
+    };
+    pos.pos = new_pos;
+    new_pos as i64
 }
 
 pub extern "C" fn truncate(rt_fd: i32, size: u64) -> moto_rt::ErrorCode {

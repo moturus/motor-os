@@ -1010,6 +1010,56 @@ fn concurrent_large_file_read_test() {
     println!("    ---- FS: concurrent_large_file_read_test PASS");
 }
 
+/// Seek does not consult the file size except for SeekFrom::End: a position
+/// past the end is valid (reads return 0, a write zero-fills the gap), a
+/// negative one is rejected and leaves the position unchanged.
+fn seek_test() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    println!("    ---- FS: seek_test starting...");
+    let path = crate::temp_path("systest-fs-seek");
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"0123456789").unwrap();
+
+    assert_eq!(file.seek(SeekFrom::Start(100)).unwrap(), 100);
+    assert_eq!(file.stream_position().unwrap(), 100);
+    let mut buf = [1_u8; 4];
+    assert_eq!(file.read(&mut buf).unwrap(), 0);
+    assert_eq!(file.seek(SeekFrom::Current(-90)).unwrap(), 10);
+    assert_eq!(file.seek(SeekFrom::End(-3)).unwrap(), 7);
+    let mut tail = String::new();
+    file.read_to_string(&mut tail).unwrap();
+    assert_eq!(tail, "789");
+
+    assert_eq!(file.seek(SeekFrom::End(2)).unwrap(), 12);
+    file.write_all(b"ab").unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 14);
+    assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
+    let mut all = Vec::new();
+    file.read_to_end(&mut all).unwrap();
+    assert_eq!(all, b"0123456789\0\0ab");
+
+    assert_eq!(file.seek(SeekFrom::Start(5)).unwrap(), 5);
+    assert_eq!(
+        file.seek(SeekFrom::Current(-6)).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        file.seek(SeekFrom::End(-15)).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(file.stream_position().unwrap(), 5);
+
+    drop(file);
+    std::fs::remove_file(&path).unwrap();
+    println!("    ---- FS: seek_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     permissions_vdso_test();
@@ -1023,6 +1073,7 @@ pub fn run_tests() {
     readdir_error_exhausts_stream_test();
     remove_dir_all_test();
     resize_test();
+    seek_test();
 
     println!("FS tests PASS");
 }
