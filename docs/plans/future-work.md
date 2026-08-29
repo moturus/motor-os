@@ -185,9 +185,6 @@ without). Left on the table, largest first:
   cost nothing on a guest that only ticks if the idle host CPU of the
   fixed window ever matters; the KVM-style adaptive window was measured and
   rejected (it loses most of the latency win: 25 us hot reads).
-- **Publish frusa 0.1.4** and switch the vdso back to the registry
-  dependency (the download-statistics reason of 1e51744c). The tree crate
-  is versioned 0.1.4 and the vdso links it by path until then.
 - **Recorded verdicts.** The sliding read window (DEPTH 5) was dropped
   after a same-sitting A/B: cold_fs_read 269-279 vs 526-649 MB/s and
   crossbench sequential read 309-323 vs 382-435 MB/s for the batch of 4; it
