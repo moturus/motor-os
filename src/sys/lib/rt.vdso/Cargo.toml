@@ -19,8 +19,7 @@ test = false
 
 # internal dependencies
 elfloader        = { path = "../../../third_party/elfloader" }
-# frusa          = { path = "../frusa"            }
-frusa            = "0.1.3"
+frusa            = { path = "../frusa"            }
 moto-async       = { path = "../moto-async"       }
 futures          = { version = "0.3", default-features = false, features = ["alloc"] }
 moto-dns         = { path = "../moto-dns"         }
