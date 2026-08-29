@@ -22,3 +22,4 @@ pub mod time;
 pub mod top;
 pub mod uptime;
 pub mod wc;
+pub mod which;

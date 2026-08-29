@@ -29,6 +29,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox top");
     println!("\tsysbox uptime");
     println!("\tsysbox wc");
+    println!("\tsysbox which");
     std::process::exit(exit_code);
 }
 
@@ -84,6 +85,7 @@ fn main() {
         "top" => commands::top::do_command(&args[1..]),
         "uptime" => commands::uptime::do_command(&args[1..]),
         "wc" => commands::wc::do_command(&args[1..]),
+        "which" => commands::which::do_command(&args[1..]),
         _ => print_usage_and_exit(1),
     }
 

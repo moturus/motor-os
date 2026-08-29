@@ -35,6 +35,7 @@ mod sysbox_find;
 mod sysbox_less;
 mod sysbox_ls;
 mod sysbox_wc;
+mod sysbox_which;
 mod tcp;
 mod threads;
 mod tls;
@@ -1265,6 +1266,7 @@ fn main() {
     sysbox_less::run_test();
     sysbox_ls::run_test();
     sysbox_wc::run_test();
+    sysbox_which::run_test();
     test_oom();
     admission::run_all_tests();
     test_nx();

@@ -1,0 +1,3 @@
+#!/system/bin/rush
+
+/system/bin/sysbox which $@
