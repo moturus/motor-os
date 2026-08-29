@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="A recipe: instrument a Motor OS program with the tracing crate and turn the trace into a flame graph on the host.">
+<meta name="description" content="A recipe: instrument a Motor OS program with the tracing crate and turn the trace into a flame graph on the host; the microbenchmarks built into systest.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Profiling | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -487,6 +487,44 @@ core::mem::drop(guard); // writes the trace to the file</code></pre></li>
 <p><code>profile.svg</code> is the CPU profile flame graph. <code>profile.folded</code> is a
 text file; you may need to edit it by hand or adjust inferno's options to make the graph
 readable.</p>
+<h2>Built-in microbenchmarks</h2>
+<p><code>systest</code> carries three measurement tools next to its test suite (on the
+development image it is <code>/devtools/tests/systest</code>; on the standard image, copy
+<code>build/bin/release/systest</code> into the VM first). A bare <code>systest</code> runs the
+suite only; each tool has its own subcommand and prints to stdout.</p>
+<ul>
+  <li><code>systest wake-bench</code> measures a cross-thread wake/wait hop: ns per roundtrip
+  and per hop for the kernel's three wake shapes (<code>wake()</code> then <code>wait()</code>,
+  <code>wait(wake_target)</code>, <code>wait(swap_target)</code>), with the two threads
+  unaffined, on the same CPU, and on different CPUs (the last needs at least three CPUs). It is
+  the first number to look at on a new host or hypervisor: a synchronous file operation costs
+  several such hops, and on KVM a cross-CPU hop is about 1 us with the kernel's idle polling and
+  about 25 us without it (an IPI exit plus a halted vCPU wake-up).</li>
+  <li><code>systest fs-bench [prefix]</code> measures file I/O per phase: cache-hot sequential
+  reads of 4 KB to 1 MB (<code>hot_seq_4k</code> .. <code>hot_seq_1m</code>), hot random 4 KB
+  reads, writes with 1 MB, 64 KB and 4 KB chunks, cold reads that go to the device
+  (<code>cold_seq_4k</code>, <code>cold_seq_1m</code>, <code>cold_fs_read</code>,
+  <code>cold_rand_4k</code>), <code>stat</code> and <code>open_close</code>. Each phase prints
+  us/op and MB/s with the counters that explain them: wait/wake syscalls and page maps of sys-io
+  and of the benchmark process, kernel IRQs and wake-up IPIs, block cache hits/misses and device
+  reads/writes, and CPU time per CPU. A prefix runs only the phases whose name starts with it,
+  for example <code>systest fs-bench hot_seq</code> (the large writes always run: the cold phases
+  read the files they leave). The files go under <code>TMPDIR</code>, which must be writable:
+  <code>TMPDIR=/user/tmp systest fs-bench</code>. Wait a few seconds after boot; the tool reads
+  sys-io's statistics provider, which registers shortly after start.</li>
+  <li><code>systest close-race [iters]</code> and <code>systest close-race-child [iters]</code>
+  reproduce loopback TCP close ordering: a server accepts, reads <code>ping</code>, writes
+  <code>pong</code> and drops the stream; the client must read <code>pong</code>, never a
+  connection reset. The first keeps everything in one process (default 2000 iterations;
+  accepting from one's own listener slows to about one per second after a dozen connections, so
+  a small count is enough), the second uses a fresh listener per iteration and a child process
+  for the client (default 200; it needs the spawn capability a shell child has). Both print the
+  ok / ConnectionReset / other counts.</li>
+</ul>
+<p>For your own experiments, <code>stats get</code> (see
+<a href="diagnostics.html">Logs and diagnostics</a>) reads the same counters: the kernel's
+include <code>sched.poll_hit</code>, <code>sched.ipi_elided</code>, <code>sys_cpu_waits</code>
+and <code>sys_cpu_wakes</code>; read them before and after a run and take the difference.</p>
 <nav class="pager">
 <a class="pager-prev" href="hello.html"><span>Previous</span>Hello, world</a>
 <span></span>

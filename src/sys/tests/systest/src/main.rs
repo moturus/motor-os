@@ -4,6 +4,7 @@
 
 mod admission;
 // mod channel_test;
+mod closerace;
 mod command_output;
 mod ctrl_c;
 mod descriptor_attr;
@@ -12,6 +13,7 @@ mod execute_permissions;
 mod file_locking;
 mod fs;
 mod fs_permissions;
+mod fsbench;
 mod icmp;
 mod io_channel;
 mod logging;
@@ -40,6 +42,7 @@ mod tcp;
 mod threads;
 mod tls;
 mod udp;
+mod wakebench;
 mod xor_server;
 
 use std::{
@@ -1080,6 +1083,26 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 && args[1] == "close-race-child" {
+        closerace::run_child_mode(&args);
+        return;
+    }
+    if args.len() == 3 && args[1] == "close-race-client" {
+        closerace::run_client(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "close-race" {
+        closerace::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "wake-bench" {
+        wakebench::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "fs-bench" {
+        fsbench::run(&args);
+        return;
+    }
     if args.len() == 2 && args[1] == "--under-load" {
         UNDER_LOAD.store(true, Ordering::Relaxed);
         args.truncate(1); // Not a subcommand: run the normal suite.

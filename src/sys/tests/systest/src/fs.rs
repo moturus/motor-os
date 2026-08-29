@@ -13,7 +13,7 @@ const FS_METRICS: std::ops::Range<u32> = 1002..1014;
 /// request's failure mode is an empty or short metric set returned as success,
 /// so an individual read can report NotFound for a metric that always exists.
 /// Retry until a complete snapshot arrives; only a persistent absence fails.
-fn read_sys_io_fs_metrics(provider: &moto_stats::ProviderInfo) -> [u64; 12] {
+pub(crate) fn read_sys_io_fs_metrics(provider: &moto_stats::ProviderInfo) -> [u64; 12] {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let snapshot = moto_stats::Collector::query(provider).unwrap_or_default();
