@@ -13,17 +13,6 @@ use russh::*;
 use russhd::config;
 use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
 
-// `ring` gets its randomness through `getrandom` 0.2, which does not know
-// Motor OS; route it to the OS entropy source (same pattern as httpd/curl).
-#[cfg(target_os = "motor")]
-fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
-    moto_rt::fill_random_bytes(dest);
-    Ok(())
-}
-
-#[cfg(target_os = "motor")]
-getrandom::register_custom_getrandom!(motor_getrandom);
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     #[cfg(target_os = "motor")]
