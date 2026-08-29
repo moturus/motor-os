@@ -173,8 +173,10 @@ impl CopyMode {
             Motion::Bottom => self.row = grid.total_rows().saturating_sub(1),
             Motion::HalfPageUp => self.scroll(true, rows / 2),
             Motion::HalfPageDown => self.scroll(false, rows / 2),
-            Motion::PageUp => self.scroll(true, rows),
-            Motion::PageDown => self.scroll(false, rows),
+            // tmux leaves two rows of overlap between full pages. `scroll`'s
+            // minimum of one handles panes that are only one or two rows high.
+            Motion::PageUp => self.scroll(true, rows.saturating_sub(2)),
+            Motion::PageDown => self.scroll(false, rows.saturating_sub(2)),
         }
         self.clamp(grid);
     }
@@ -442,9 +444,9 @@ mod tests {
         // The screen is the last four lines; the rest is history.
         assert_eq!(shown(&copy, &grid)[0], "line17");
         walk(&mut copy, &grid, &[Motion::PageUp]);
-        assert_eq!(shown(&copy, &grid)[0], "line13");
+        assert_eq!(shown(&copy, &grid)[0], "line15");
         walk(&mut copy, &grid, &[Motion::HalfPageUp]);
-        assert_eq!(shown(&copy, &grid)[0], "line11");
+        assert_eq!(shown(&copy, &grid)[0], "line13");
         walk(&mut copy, &grid, &[Motion::HalfPageDown, Motion::PageDown]);
         assert_eq!(shown(&copy, &grid)[0], "line17");
     }

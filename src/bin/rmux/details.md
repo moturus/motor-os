@@ -108,7 +108,8 @@ and which is therefore in scope rather than an extra.
 
 The tmux defaults that file does *not* override still have to exist, because it
 is written against them: the prefix table's `c`, `n`, `p`, `0`-`9`, `,`, `&`, `x`,
-`o`, `z`, `d`, `[`, `]`, `:`, and arrow-key pane selection.
+`o`, `z`, `d`, `[`, `]`, `:`, `PageUp` (`copy-mode -u`), and arrow-key pane
+selection.
 
 ### 2.2 `/user/cfg/rmux.toml`
 

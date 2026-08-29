@@ -1093,12 +1093,18 @@ impl Server {
 
             // Copy mode is entered on the pane in front, and reads *that*
             // pane's buffer for as long as it is up (§7.6).
-            Command::CopyMode => {
+            Command::CopyMode(motion) => {
                 let copy = self
                     .sessions
                     .get(session)
                     .and_then(Session::pane)
-                    .map(|pane| CopyMode::enter(pane.id(), pane.grid()));
+                    .map(|pane| {
+                        let mut copy = CopyMode::enter(pane.id(), pane.grid());
+                        if let Some(motion) = motion {
+                            copy.apply(motion, pane.grid());
+                        }
+                        copy
+                    });
                 if let Some(copy) = copy
                     && let Some(client) = self.client_mut(id)
                 {

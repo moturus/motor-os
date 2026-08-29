@@ -113,7 +113,8 @@ pub enum Command {
     RenameSession,
     ChooseSession,
 
-    CopyMode,
+    /// Enter copy mode, optionally moving one page up as `copy-mode -u` does.
+    CopyMode(Option<Motion>),
     PasteBuffer,
     CommandPrompt,
     /// Repaint the console from scratch (§6.2, §9.2).
@@ -174,7 +175,8 @@ impl Command {
             "switch-client" if flag("-p") => Command::PreviousSession,
             "rename-session" => Command::RenameSession,
             "choose-session" => Command::ChooseSession,
-            "copy-mode" => Command::CopyMode,
+            "copy-mode" if flag("-u") => Command::CopyMode(Some(Motion::PageUp)),
+            "copy-mode" => Command::CopyMode(None),
             "paste-buffer" => Command::PasteBuffer,
             "command-prompt" => Command::CommandPrompt,
             // rmux has no client to name and no pane offsets to move, so
@@ -317,6 +319,11 @@ impl Bindings {
             Key::plain(Code::Char('-')),
             Command::SplitWindow(Split::Vertical),
         );
+        bindings.bind(
+            Table::Prefix,
+            Key::plain(Code::PageUp),
+            Command::CopyMode(Some(Motion::PageUp)),
+        );
 
         // The tmux defaults §2.1 says have to exist because the config is
         // written against them.
@@ -330,7 +337,7 @@ impl Bindings {
             ('o', Command::NextPane),
             ('z', Command::ZoomPane),
             ('d', Command::DetachClient),
-            ('[', Command::CopyMode),
+            ('[', Command::CopyMode(None)),
             (']', Command::PasteBuffer),
             (':', Command::CommandPrompt),
             // `r`, and not `C-l`: tmux binds the redraw here and leaves `C-l`
@@ -608,7 +615,7 @@ mod tests {
             ("o", Command::NextPane),
             ("z", Command::ZoomPane),
             ("d", Command::DetachClient),
-            ("[", Command::CopyMode),
+            ("[", Command::CopyMode(None)),
             ("]", Command::PasteBuffer),
             (":", Command::CommandPrompt),
             ("r", Command::RefreshClient),
@@ -623,6 +630,10 @@ mod tests {
         assert_eq!(
             bindings.get(Table::Prefix, key("Left")),
             Some(Command::SelectPane(Direction::Left))
+        );
+        assert_eq!(
+            bindings.get(Table::Prefix, key("PageUp")),
+            Some(Command::CopyMode(Some(Motion::PageUp)))
         );
         assert_eq!(
             bindings.get(Table::Prefix, key("4")),
@@ -759,7 +770,7 @@ mod tests {
         // The other two tables are untouched by the choice.
         assert_eq!(
             bindings.get(Table::Prefix, key("[")),
-            Some(Command::CopyMode)
+            Some(Command::CopyMode(None))
         );
     }
 
@@ -773,6 +784,10 @@ mod tests {
 
     #[test]
     fn the_copy_commands_parse_as_tmux_names_them() {
+        assert_eq!(
+            Command::parse("copy-mode -u"),
+            Some(Command::CopyMode(Some(Motion::PageUp)))
+        );
         assert_eq!(
             Command::parse("cursor-left"),
             Some(Command::Copy(CopyCommand::Move(Motion::Left)))

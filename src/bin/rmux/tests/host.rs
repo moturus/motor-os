@@ -1783,6 +1783,35 @@ fn copy_mode_reads_what_has_scrolled_off_the_top() {
 }
 
 #[test]
+fn prefix_page_up_opens_scrollback_and_page_down_returns_to_the_live_screen() {
+    let mut pty = shell_with_scrollback();
+
+    // tmux's prefix PageUp is `copy-mode -u`: enter copy mode and immediately
+    // move one page into this pane's history.
+    pty.send(b"\x01\x1b[5~");
+    assert!(
+        pty.wait_painted("-- copy mode --"),
+        "prefix PageUp did not open copy mode:\n{}",
+        pty.picture()
+    );
+    let status = pty.painted_row(ROWS as usize - 1);
+    assert!(
+        !status.contains("[0/"),
+        "prefix PageUp left the pane on its live screen: {status:?}"
+    );
+
+    // Copy mode owns the prefix key in rmux, so it is harmless here; PageDown
+    // is then interpreted by the copy table and returns to the live viewport.
+    pty.send(b"\x01\x1b[6~");
+    assert!(
+        pty.wait_painted("[0/"),
+        "prefix PageDown did not return to the live screen:\n{}",
+        pty.picture()
+    );
+    pty.send(b"q");
+}
+
+#[test]
 fn a_search_in_copy_mode_finds_a_line_that_is_no_longer_on_screen() {
     // `?needle Enter` (§7.6). The needle is in history, so what this exercises
     // is the search reading the same rows copy mode walks.

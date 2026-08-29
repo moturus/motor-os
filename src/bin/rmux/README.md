@@ -57,6 +57,7 @@ The prefix is `C-a`, as the config says. After it:
 | `C-`arrows, `M-`arrows | move the border beside the pane, by one cell or five |
 | `(` `)` `$` `s` | previous / next / rename session, and a list to pick from |
 | `[` `]` | copy mode, and paste the top buffer |
+| `PageUp` | enter copy mode one page above the live screen |
 | `:` | type a command — the same words `rmux.toml` binds |
 | `r` | redraw the console from scratch |
 | `d` | detach |
@@ -64,9 +65,9 @@ The prefix is `C-a`, as the config says. After it:
 
 Without the prefix: `S-Left`/`S-Right` change window, and `M-`arrows change
 pane. Copy mode is vi by default: `hjklwb0$`, `g`/`G`, `C-u`/`C-d`/`C-f`/`C-b`,
-`/` and `?` with `n`/`N`, `Space` to start a selection, `Enter` to take it, `q`
-to leave. `mode-keys = "emacs"` swaps in tmux's other table — `C-b`/`C-f`,
-`M-b`/`M-f`, `C-Space` and `M-w`, `C-r`/`C-s`.
+`PageUp`/`PageDown`, `/` and `?` with `n`/`N`, `Space` to start a selection,
+`Enter` to take it, `q` to leave. `mode-keys = "emacs"` swaps in tmux's other
+table — `C-b`/`C-f`, `M-b`/`M-f`, `C-Space` and `M-w`, `C-r`/`C-s`.
 
 Overrides go in `/user/cfg/rmux.toml` on Motor OS and `$HOME/.config/rmux.toml`
 on Linux. It is the `key = value` subset of TOML plus three binding tables, and
