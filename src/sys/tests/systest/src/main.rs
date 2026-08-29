@@ -54,6 +54,18 @@ pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(name)
 }
 
+/// A kernel metric by its `stats get 1` name, for one scope: a pid, or
+/// `moto_stats::provider::KERNEL` for the kernel's own counters.
+pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {
+    let kernel = moto_stats::Collector::kernel();
+    let metric = moto_stats::Collector::describe(&kernel)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("no kernel metric {name}"));
+    moto_stats::Collector::read(&kernel, metric.id, scope).unwrap()
+}
+
 pub(crate) fn ensure_temp_dir() {
     let temp_dir = std::env::temp_dir();
     if !temp_dir.is_dir() {
@@ -179,6 +191,72 @@ fn test_reentrant_mutex() {
     lock2
         .write_all(b"test_reentrant_stdout lock PASS\n")
         .unwrap();
+}
+
+/// Guest halt polling (kernel Scheduler::halt_poll): in a cross-CPU
+/// ping-pong the woken CPU is still polling when the next wake arrives, so
+/// the kernel counts poll hits and skipped IPIs.
+fn test_halt_poll_metrics() {
+    let num_cpus = moto_sys::num_cpus();
+    if num_cpus < 2 {
+        println!("test_halt_poll_metrics: SKIPPED (one cpu)");
+        return;
+    }
+    const ITERS: u32 = 2000;
+    let scope = moto_stats::provider::KERNEL;
+    let hits_0 = kernel_metric("sched.poll_hit", scope);
+    let elided_0 = kernel_metric("sched.ipi_elided", scope);
+
+    let token = Arc::new(AtomicU32::new(0));
+    let peer_handle = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let main_thread = moto_sys::current_thread();
+    moto_sys::SysCpu::affine_to_cpu(Some(num_cpus - 2)).unwrap();
+    let peer = {
+        let (token, peer_handle) = (token.clone(), peer_handle.clone());
+        std::thread::spawn(move || {
+            moto_sys::SysCpu::affine_to_cpu(Some(num_cpus - 1)).unwrap();
+            peer_handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+            for i in 0..ITERS {
+                while token.load(Ordering::Acquire) != 2 * i + 1 {
+                    moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None)
+                        .unwrap();
+                }
+                token.store(2 * i + 2, Ordering::Release);
+                moto_sys::SysCpu::wake(main_thread).unwrap();
+            }
+        })
+    };
+    while peer_handle.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let peer_handle = SysHandle::from_u64(peer_handle.load(Ordering::Acquire));
+    for i in 0..ITERS {
+        // Give the peer's CPU time to go idle (it polls for 200 us), so the
+        // wake lands in its poll rather than while the peer still runs.
+        let pause = std::time::Instant::now() + Duration::from_micros(30);
+        while std::time::Instant::now() < pause {
+            core::hint::spin_loop();
+        }
+        token.store(2 * i + 1, Ordering::Release);
+        moto_sys::SysCpu::wake(peer_handle).unwrap();
+        while token.load(Ordering::Acquire) != 2 * i + 2 {
+            moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        }
+    }
+    peer.join().unwrap();
+    moto_sys::SysCpu::affine_to_cpu(None).unwrap();
+
+    let hits = kernel_metric("sched.poll_hit", scope) - hits_0;
+    let elided = kernel_metric("sched.ipi_elided", scope) - elided_0;
+    println!(
+        "test_halt_poll_metrics: {ITERS} round trips: {hits} poll hits, {elided} IPIs skipped"
+    );
+    let floor = if under_load() { 1 } else { ITERS as u64 / 4 };
+    assert!(
+        hits >= floor && elided >= floor,
+        "hits {hits}, elided {elided}, floor {floor}"
+    );
+    println!("test_halt_poll_metrics PASS");
 }
 
 fn test_cpus() {
@@ -1244,6 +1322,7 @@ fn main() {
     poll::run_all_tests();
     io_channel::run_all_tests();
     test_thread_names();
+    test_halt_poll_metrics();
     test_cpus();
     test_random_bytes();
     tls::test_tls();

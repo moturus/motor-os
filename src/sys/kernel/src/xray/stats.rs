@@ -157,7 +157,14 @@ pub enum MetricType {
     TlbShootdownTargeted = 60,
     TlbShootdownCpusSkipped = 61,
 
-    TotalMetricTypes = 62,
+    // Guest halt polling (sched::Scheduler::halt_poll): idle polls that saw
+    // a wake vs expired, and cross-CPU wakes that skipped the IPI because
+    // the target was polling.
+    SchedPollHit = 62,
+    SchedPollMiss = 63,
+    SchedIpiElided = 64,
+
+    TotalMetricTypes = 65,
 }
 
 impl MetricType {
@@ -242,6 +249,9 @@ impl MetricType {
             MetricType::PhysSmallPagesLowWater => "mem.phys_small_pages_low_water",
             MetricType::UserFloorPages => "mem.user_floor_pages",
             MetricType::SysIoFloorPages => "mem.sys_io_floor_pages",
+            MetricType::SchedPollHit => "sched.poll_hit",
+            MetricType::SchedPollMiss => "sched.poll_miss",
+            MetricType::SchedIpiElided => "sched.ipi_elided",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }

@@ -123,6 +123,11 @@ struct Scheduler {
 
     queue_length: AtomicU32,
     idle: AtomicBool,
+    // True while this idle CPU polls `wake` before halting; wake() then
+    // skips the IPI (see halt_poll).
+    polling: AtomicBool,
+    // Consecutive polls that expired without a wake.
+    poll_misses: AtomicU32,
 
     local_queue: SpinLock<VecDeque<Job>>,
 
@@ -151,6 +156,8 @@ impl Scheduler {
             wake: AtomicBool::new(false),
             queue_length: AtomicU32::new(0),
             idle: AtomicBool::new(false),
+            polling: AtomicBool::new(false),
+            poll_misses: AtomicU32::new(0),
             local_queue: SpinLock::new(VecDeque::with_capacity(INITIAL_QUEUE_SIZE)),
             timers: Timers::new(),
 
@@ -251,8 +258,69 @@ impl Scheduler {
             self.local_wake();
             return;
         }
-        self.wake.store(true, Ordering::Release);
+        self.wake.store(true, Ordering::SeqCst);
+        // A polling CPU sees `wake` without an IPI (SeqCst pairs with the
+        // stores in halt_poll).
+        if self.polling.load(Ordering::SeqCst) {
+            crate::xray::stats::kernel_stats()
+                .adjust_metric(crate::xray::stats::MetricType::SchedIpiElided, 1);
+            return;
+        }
         crate::arch::irq::wake_remote_cpu(self.cpu); // Will send an IPI that will call local_wake().
+    }
+
+    // Guest halt polling: before hlt, an idle CPU spins on `wake` for a
+    // bounded time, and wake() skips the IPI while `polling` is set. On a
+    // VM that IPI is an exit on the sender and the halted target wakes
+    // slowly, ~25 us per wake on KVM; a wake that lands during the poll
+    // costs about 1 us. A CPU whose polls keep expiring is idle and polls
+    // only HALT_POLL_IDLE until a poll or a job resets the miss count.
+    //
+    // Returns true when the poll ended because a wake or a global-queue
+    // job arrived; the caller then resumes the sched loop instead of
+    // halting.
+    //
+    // Orderings: skipping the IPI makes the exit a store-buffer pattern
+    // (the waker stores `wake` then loads `polling`; this CPU stores
+    // `polling = false` then, in the caller, loads `wake` before hlt), so
+    // those four accesses are SeqCst: with weaker ones both sides can read
+    // stale values and the wake is lost until the next interrupt. The
+    // loop's loads only need eventual visibility.
+    fn halt_poll(&self) -> bool {
+        if HALT_POLL.is_zero() || self.wake.load(Ordering::Acquire) {
+            return false;
+        }
+        let window = if self.poll_misses.load(Ordering::Relaxed) >= HALT_POLL_IDLE_AFTER {
+            HALT_POLL_IDLE
+        } else {
+            HALT_POLL
+        };
+        let deadline = (Instant::now() + window).as_u64();
+        self.idle.store(true, Ordering::Release);
+        self.polling.store(true, Ordering::Release);
+        let mut hit = false;
+        loop {
+            if self.wake.load(Ordering::Relaxed) || GLOBAL_QUEUE_LENGTH.load(Ordering::Relaxed) != 0
+            {
+                hit = true;
+                break;
+            }
+            if Instant::now().as_u64() >= deadline {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.polling.store(false, Ordering::SeqCst);
+        self.idle.store(false, Ordering::Release);
+        let metric = if hit {
+            self.poll_misses.store(0, Ordering::Relaxed);
+            crate::xray::stats::MetricType::SchedPollHit
+        } else {
+            self.poll_misses.fetch_add(1, Ordering::Relaxed);
+            crate::xray::stats::MetricType::SchedPollMiss
+        };
+        crate::xray::stats::kernel_stats().adjust_metric(metric, 1);
+        hit
     }
 
     fn local_wake(&self) {
@@ -395,6 +463,8 @@ impl Scheduler {
                 let maybe_job = self.local_queue.lock(line!()).pop_front();
                 if let Some(job) = maybe_job {
                     self.queue_length.fetch_sub(1, Ordering::Relaxed);
+                    // A CPU that runs jobs keeps the full poll window.
+                    self.poll_misses.store(0, Ordering::Relaxed);
                     job.run();
                     last_job_iter = curr_iteration;
                     continue;
@@ -405,6 +475,7 @@ impl Scheduler {
                 let maybe_job = { GLOBAL_READY_QUEUE_NORMAL.lock(line!()).pop_front() };
                 if let Some(job) = maybe_job {
                     GLOBAL_QUEUE_LENGTH.fetch_sub(1, Ordering::Relaxed);
+                    self.poll_misses.store(0, Ordering::Relaxed);
                     job.run();
                     last_job_iter = curr_iteration;
                     continue;
@@ -450,31 +521,34 @@ impl Scheduler {
             } else {
                 use x86_64::instructions::interrupts;
 
-                interrupts::disable();
-                if self.wake.load(Ordering::Acquire) {
-                    interrupts::enable();
-                } else {
-                    self.idle.store(true, Ordering::Release);
-
-                    // Check again.
-                    if self.wake.load(Ordering::Acquire) {
+                // A hit means a job is queued already: resume the loop.
+                if !self.halt_poll() {
+                    interrupts::disable();
+                    if self.wake.load(Ordering::SeqCst) {
                         interrupts::enable();
-                        self.idle.store(false, Ordering::Release);
                     } else {
-                        // Go to sleep. Interrupts are disabled, so the timer
-                        // can be reprogrammed without racing on_timer_irq().
-                        self.program_idle_timer();
-                        crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
-                        crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
-                        interrupts::enable_and_hlt();
-                        #[cfg(debug_assertions)]
-                        self.last_alive_check.store(
-                            crate::arch::time::Instant::now().as_u64(),
-                            Ordering::Release,
-                        );
-                        self.idle.store(false, Ordering::Release);
-                        crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
-                        crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
+                        self.idle.store(true, Ordering::Release);
+
+                        // Check again.
+                        if self.wake.load(Ordering::Acquire) {
+                            interrupts::enable();
+                            self.idle.store(false, Ordering::Release);
+                        } else {
+                            // Go to sleep. Interrupts are disabled, so the timer
+                            // can be reprogrammed without racing on_timer_irq().
+                            self.program_idle_timer();
+                            crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
+                            crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
+                            interrupts::enable_and_hlt();
+                            #[cfg(debug_assertions)]
+                            self.last_alive_check.store(
+                                crate::arch::time::Instant::now().as_u64(),
+                                Ordering::Release,
+                            );
+                            self.idle.store(false, Ordering::Release);
+                            crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
+                            crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
+                        }
                     }
                 }
             }
@@ -552,6 +626,13 @@ fn update_system_time() {
     let shared_page = crate::mm::virt::get_kernel_static_page_mut();
     crate::arch::time::populate_kernel_static_page(shared_page);
 }
+
+// Guest halt polling (see Scheduler::halt_poll): how long an idle CPU polls
+// for a wake before hlt (zero disables), and the short window it drops to
+// after HALT_POLL_IDLE_AFTER polls in a row expired.
+const HALT_POLL: core::time::Duration = core::time::Duration::from_micros(200);
+const HALT_POLL_IDLE: core::time::Duration = core::time::Duration::from_micros(10);
+const HALT_POLL_IDLE_AFTER: u32 = 3;
 
 pub fn post(job: Job) {
     if job.cpu == uCpus::MAX {
