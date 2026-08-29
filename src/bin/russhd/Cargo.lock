@@ -1888,6 +1888,7 @@ dependencies = [
  "env_logger",
  "getrandom 0.2.17",
  "hex",
+ "libc",
  "log",
  "moto-async",
  "moto-io",
