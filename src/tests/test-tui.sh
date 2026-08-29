@@ -419,7 +419,9 @@ wait_pty_output "CTRL_C_DEFAULT_READY" "nested Default leaf"
 # The command is type-ahead for rush while Ctrl+C is routed through rmux and
 # rush to the leaf. It must survive teardown and observe the leaf's status.
 printf '\003echo CTRL_C_NESTED_STATUS=$?\n' >&"$PTY_IN_FD"
-wait_pty_output "CTRL_C_NESTED_STATUS=130" "nested rush"
+# rmux sends screen diffs. The preceding CTRL_C_DEFAULT_READY line may retain
+# the common CTRL_C_ prefix, so only the unique changed suffix is guaranteed.
+wait_pty_output "NESTED_STATUS=130" "nested rush"
 printf 'exit\n' >&"$PTY_IN_FD"
 finish_pty 0 "nested rmux"
 
