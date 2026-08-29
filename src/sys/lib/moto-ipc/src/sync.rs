@@ -529,12 +529,11 @@ impl LocalServerConnection {
 
     pub fn have_req(&self) -> bool {
         let seq = self.req::<RequestHeader>().seq.load(Ordering::SeqCst);
-        if seq == self.seq {
-            false
-        } else {
-            assert_eq!(seq, self.seq + 1);
-            true
-        }
+        // Zero means the client disconnected and reset the header (see
+        // ClientConnection::disconnect). Any other value that is not the
+        // next sequence number is a client protocol violation; the value is
+        // client-controlled, so it is ignored, not asserted on.
+        seq == self.seq.wrapping_add(1)
     }
 }
 
