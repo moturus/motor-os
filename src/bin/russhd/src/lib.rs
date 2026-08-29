@@ -1,4 +1,5 @@
 #![allow(unexpected_cfgs)]
+pub mod applets;
 pub mod client;
 pub mod config;
 pub mod local_session;
