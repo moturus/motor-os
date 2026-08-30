@@ -543,10 +543,10 @@ Rendered bootstrap configuration:
   explicitly not a priority.
 - `[target.x86_64-unknown-linux-gnu] llvm-config = "$llvm_bin/llvm-config"`.
   The pinned bootstrap then treats the host LLVM as prebuilt, links it
-  statically by default, builds `rust-lld` against `llvm-config --cmakedir`
-  with the `llvm-tblgen` beside it, and requires LLVM 21 or newer; the
-  selected LLVM is 23.1.0-rc1. The `$llvm_bin` location is already a
-  placeholder in the configuration identity digest.
+  statically by default, uses `llvm-config --cmakedir` with the
+  `llvm-tblgen` beside it, and requires LLVM 21 or newer; the selected LLVM is
+  23.1.0-rc1. The `$llvm_bin` location is already a placeholder in the
+  configuration identity digest.
 
 Standalone LLVM build:
 
@@ -557,7 +557,13 @@ Standalone LLVM build:
   needs an assertions-enabled toolchain to debug LLVM, authoring mode can
   build one under its own key.
 - Build the existing tool list plus `llvm-libraries`, so that every static
-  library `llvm-config --libs` may name actually exists.
+  library `llvm-config --libs` may name actually exists. Rust bootstrap also
+  requires all 14 of its `LLVM_TOOLS` while assembling intermediate sysroots,
+  even though external LLVM makes the later component-install step skip them:
+  `llvm-cov`, `llvm-nm`, `llvm-objcopy`, `llvm-objdump`, `llvm-profdata`,
+  `llvm-readobj`, `llvm-size`, `llvm-strip`, `llvm-ar`, `llvm-as`, `llvm-dis`,
+  `llvm-link`, `llc`, and `opt`. Keep this exact list in one checked-in array
+  used by standalone build and validation.
 - Replace the configuration digest schema with
   `motor-standalone-llvm-config-v2` carrying the assertion setting and the
   ninja target list, so an existing build directory cannot be reused without
@@ -588,11 +594,16 @@ Identity decision, approved 2026-08-30:
 
 Product consequences to record:
 
-- The installed prefix loses the `llvm-tools` component (`llc`, `opt`,
-  `llvm-cov`, and similar under `lib/rustlib/x86_64-unknown-linux-gnu/bin/`):
-  bootstrap skips that component when the host LLVM is external. Nothing in
-  the repository or its documentation uses those binaries, and `rust-lld`,
-  `gcc-ld`, and `rust-objcopy` remain in place from the rustc component.
+- The installed prefix loses the separate `llvm-tools` component because
+  bootstrap skips that install step when the host LLVM is external. The 14
+  tools above are nevertheless required for intermediate compiler assembly;
+  leaving `rust.llvm-tools` at its default also preserves `rust-objcopy` in
+  the rustc component.
+- External `llvm-config` disables bootstrap's automatic self-contained LLD
+  and bootstrap rejects `rust.lld = true` in this mode. The prefix therefore
+  also loses `rust-lld` and `gcc-ld`. Nothing in the repository uses those
+  binaries. Do not customize Rust bootstrap or manually assemble the prefix
+  merely to retain unused components.
 - rustc's host LLVM takes the standalone configuration: clang and lld
   projects present, X86 only, tests off, assertions off.
 - The Motor-target LLVM and the guest clang driver are unchanged:
@@ -610,10 +621,11 @@ Tests and documentation:
 - `src/tests/test-toolchain-llvm.sh` moves to the v2 digest and keeps the reuse
   and re-key assertions. Its fake CMake and Ninja commands record their
   argument vectors so the test also requires `LLVM_ENABLE_ASSERTIONS=OFF` and
-  the exact Ninja target list including `llvm-libraries`. Standalone validation
-  requires `llvm-config --link-static --libfiles` to succeed and every named
-  library to exist; the fake provides representative libraries, and a missing
-  library is a negative test.
+  the exact Ninja target list including `llvm-libraries` and all 14 bootstrap
+  tools. Standalone validation requires every bootstrap tool and
+  `llvm-config --link-static --libfiles` to exist, the command to succeed, and
+  every named library to exist; the fake provides representative libraries,
+  and a missing library is a negative test.
 - The versions/state tests prove that changing only the normalized standalone
   configuration digest changes both clean and dynamic toolchain keys without
   introducing host-path identity. The assembly test proves that this new

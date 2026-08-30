@@ -793,12 +793,19 @@ start of every invocation. It is produced by `x.py install` with
 whose exact name already includes `MOTOR_TOOLCHAIN_KEY`; this gives the
 standard component layout including `rust-src`. Because host rustc uses the
 external standalone LLVM, bootstrap does not install the `llvm-tools`
-component (`llc`, `opt`, `llvm-cov`, and similar tools). `rust-lld`, `gcc-ld`,
-and `rust-objcopy` remain part of the rustc component. Bootstrap's install steps
-build with the compiler one stage below `--stage`, so `x.py install --stage 2`
-installs the stage-2 artifacts. The stage sysroot is never copied by hand:
-that would omit installer behavior and the vendored, reduced `rust-src`
-component.
+component. It still requires all 14 tools when assembling intermediate
+sysroots: `llvm-cov`, `llvm-nm`, `llvm-objcopy`, `llvm-objdump`,
+`llvm-profdata`, `llvm-readobj`, `llvm-size`, `llvm-strip`, `llvm-ar`,
+`llvm-as`, `llvm-dis`, `llvm-link`, `llc`, and `opt`. The standalone build
+therefore produces and validates that exact set, and bootstrap retains
+`rust-objcopy` in the rustc component.
+
+External `llvm-config` also disables bootstrap's self-contained LLD support,
+so `rust-lld` and `gcc-ld` are absent. The repository uses none of the omitted
+binaries. Bootstrap's install steps build with the compiler one stage below
+`--stage`, so `x.py install --stage 2` installs the stage-2 artifacts. The
+stage sysroot is never copied by hand: that would omit installer behavior and
+the vendored, reduced `rust-src` component.
 
 `x.py install` never runs into an existing prefix. An existing prefix is
 reused only after its complete manifest passes validation; otherwise the

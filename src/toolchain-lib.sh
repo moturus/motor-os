@@ -52,6 +52,8 @@ toolchain_validate_versions() {
   esac
   [ "$STDLIB_MOTO_RT_VERSION" = "$LOCAL_MOTO_RT_VERSION" ] ||
     toolchain_die "local and std moto-rt versions differ"
+  [ "${#MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[@]}" -gt 0 ] ||
+    toolchain_die "Rust bootstrap LLVM tool list is empty"
   [ "${#MOTOR_STANDALONE_LLVM_NINJA_TARGETS[@]}" -gt 0 ] ||
     toolchain_die "standalone LLVM ninja target list is empty"
 }

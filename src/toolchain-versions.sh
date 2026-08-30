@@ -69,9 +69,13 @@ MOTOR_STANDALONE_LLVM_PROJECTS="clang;lld"
 MOTOR_STANDALONE_LLVM_INCLUDE_TESTS="OFF"
 MOTOR_STANDALONE_LLVM_C_COMPILER="clang"
 MOTOR_STANDALONE_LLVM_CXX_COMPILER="clang++"
+MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS=(
+  llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj
+  llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt
+)
 MOTOR_STANDALONE_LLVM_NINJA_TARGETS=(
-  clang lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy
-  llvm-config llvm-libraries
+  clang lld llvm-ranlib llvm-readelf llvm-config llvm-libraries
+  "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[@]}"
 )
 
 # Reviewed inputs to the local runtime/sysroot content digest. Directories are

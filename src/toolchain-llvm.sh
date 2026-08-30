@@ -22,6 +22,8 @@ EOF
 
 toolchain_validate_standalone_llvm() {
 	local build="$1" binary version expected library library_files
+	local -a binaries=(clang clang++ ld.lld llvm-ranlib llvm-readelf llvm-config
+		"${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[@]}")
 	expected="$(mktemp)"
 	toolchain_render_standalone_llvm_manifest > "$expected"
 	if ! cmp -s "$expected" "$build/MOTOR-LLVM-MANIFEST"; then
@@ -30,8 +32,7 @@ toolchain_validate_standalone_llvm() {
 		return 1
 	fi
 	rm -f "$expected"
-	for binary in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-nm \
-		llvm-readelf llvm-strip llvm-objcopy llvm-config; do
+	for binary in "${binaries[@]}"; do
 		[ -x "$build/bin/$binary" ] ||
 			toolchain_die "standalone LLVM lacks $binary: $build" || return
 	done

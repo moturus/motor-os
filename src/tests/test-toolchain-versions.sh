@@ -17,6 +17,9 @@ toolchain_validate_versions
   fail "unexpected toolchain key schema"
 [ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v2 ] ||
   fail "unexpected assembly key schema"
+expected_llvm_tools='llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt'
+[ "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[*]}" = "$expected_llvm_tools" ] ||
+  fail "Rust bootstrap LLVM tool contract differs"
 
 key="$(toolchain_clean_key)"
 [[ "$key" =~ ^[0-9a-f]{64}$ ]] || fail "invalid clean key: $key"

@@ -55,9 +55,18 @@ fake_ninja="$temporary/ninja"
 cat > "$fake_ninja" <<'EOF'
 #!/usr/bin/env bash
 build="$2"
-for binary in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy; do
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$RUST_LLVM_VERSION"' > "$build/bin/$binary"
-  chmod +x "$build/bin/$binary"
+shift 2
+for target in "$@"; do
+  case "$target" in
+  clang) binaries='clang clang++' ;;
+  lld) binaries='ld.lld' ;;
+  llvm-libraries) continue ;;
+  *) binaries="$target" ;;
+  esac
+  for binary in $binaries; do
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$RUST_LLVM_VERSION"' > "$build/bin/$binary"
+    chmod +x "$build/bin/$binary"
+  done
 done
 mkdir -p "$build/lib"
 : > "$build/lib/libLLVM-test.a"
