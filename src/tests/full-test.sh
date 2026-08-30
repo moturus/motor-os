@@ -1034,7 +1034,8 @@ resizes="$(printf '%s\n' "$readings" | grep '^resize=' | sort -u)"
 [ "${readings##*$'\n'}" = "size-after=80x23" ] ||
   fail "crossterm did not keep the pane size: '$readings'"
 
-# SFTP integration test against the running VM (before the trap shuts it down).
+# SSH/SFTP integration tests against the running VM (before the trap shuts it down).
+"$WD/test-ssh-client.sh"
 "$WD/test-sftp.sh"
 
 vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/mio-test"
