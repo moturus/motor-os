@@ -10,15 +10,12 @@ use moto_sys::SysHandle;
 use moto_sys::SysObj;
 use moto_sys::SysRay;
 
-use crate::serial::write_serial_raw;
+use crate::output::{Output, Source};
 
+mod output;
 mod serial;
 
 const USER_HOME: &str = "/user";
-
-fn _putc(c: u8) {
-    serial::write_serial_raw(std::slice::from_ref(&c));
-}
 
 /// Whether a config word is a `NAME=value` environment assignment rather than
 /// the program name or an argument.
@@ -33,19 +30,28 @@ fn is_assignment(word: &str) -> bool {
     }
 }
 
-fn read_config() -> String {
+fn read_config(output: &Output) -> String {
     let config_path = "/system/cfg/sys-tty.cfg";
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {
-            write_serial!("sys-tty: error reading '{config_path}': {err:?}");
+            output.send_fmt(
+                Source::Stderr,
+                format_args!("sys-tty: error reading '{config_path}': {err:?}"),
+            );
             std::process::exit(1);
         }
     }
 }
 
 fn main() {
-    let config = read_config();
+    if std::env::args().nth(1).as_deref() == Some("--self-test") {
+        output::run_self_tests();
+        return;
+    }
+
+    let output = Output::start_serial_writer();
+    let config = read_config(&output);
     let words: Vec<_> = config.split_whitespace().collect();
 
     // Leading `NAME=value` words set the child's environment, as in a shell
@@ -59,17 +65,11 @@ fn main() {
     let words = &words[assignments.len()..];
 
     if words.is_empty() {
-        write_serial!("sys-tty: error: empty config.");
+        output.send(Source::Stderr, b"sys-tty: error: empty config.".to_vec());
         std::process::exit(1);
     }
 
     let fname = words[0];
-    let millis = moto_rt::time::since_system_start().as_millis();
-    crate::serial::write_serial!(
-        "   ... all services up at {:03}ms. Starting {}.\n\n",
-        millis,
-        fname
-    );
 
     let buf_addr = moto_sys::SysMem::alloc(4096, (SysRay::CONSOLE_SHARED_BUF_SZ / 4096) as u64)
         .unwrap() as usize;
@@ -85,6 +85,15 @@ fn main() {
         format!("serial_console:{buf_addr}:{offset_addr}").as_str(),
     )
     .unwrap();
+
+    let millis = moto_rt::time::since_system_start().as_millis();
+    output.send_fmt(
+        Source::Stdout,
+        format_args!(
+            "   ... all services up at {:03}ms. Starting {}.\n\n",
+            millis, fname
+        ),
+    );
 
     let mut command = std::process::Command::new(fname);
     command.env_clear();
@@ -133,6 +142,7 @@ fn main() {
                 moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
 
             let mut child_stdin = child.stdin.take().unwrap();
+            let input_output = output.clone();
             let stdin_thread = std::thread::spawn(move || {
                 let mut prev_offset = 0;
                 loop {
@@ -153,7 +163,7 @@ fn main() {
 
                     let offset = kernel_log_buf_offset.load(Ordering::Acquire);
                     if prev_offset != offset {
-                        process_kernel_log(kernel_log_buf, prev_offset, offset);
+                        process_kernel_log(kernel_log_buf, prev_offset, offset, &input_output);
                         prev_offset = offset;
                     }
                 }
@@ -162,31 +172,28 @@ fn main() {
             });
 
             // stdout
-            let exit2 = exit_notifier.clone();
             let mut child_stdout = child.stdout.take().unwrap();
+            let stdout_output = output.clone();
             let stdout_thread = std::thread::spawn(move || {
-                let mut buf = [0_u8; 80];
-                while !exit2.load(Ordering::Relaxed) {
-                    use std::io::Read;
-                    if let Ok(sz) = child_stdout.read(&mut buf) {
-                        if sz > 0 {
-                            write_serial_raw(&buf[0..sz]);
-                        }
-                    } else {
-                        break;
+                use std::io::Read;
+                let mut buf = [0_u8; 4096];
+                loop {
+                    match child_stdout.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(sz) => stdout_output.send(Source::Stdout, buf[..sz].to_vec()),
                     }
                 }
             });
-            let exit3 = exit_notifier.clone();
+
             let mut child_stderr = child.stderr.take().unwrap();
+            let stderr_output = output.clone();
             let stderr_thread = std::thread::spawn(move || {
-                let mut buf = [0_u8; 80];
-                while !exit3.load(Ordering::Relaxed) {
-                    use std::io::Read;
-                    if let Ok(sz) = child_stderr.read(&mut buf) {
-                        write_serial_raw(&buf[0..sz]);
-                    } else {
-                        break;
+                use std::io::Read;
+                let mut buf = [0_u8; 4096];
+                loop {
+                    match child_stderr.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(sz) => stderr_output.send(Source::Stderr, buf[..sz].to_vec()),
                     }
                 }
             });
@@ -194,14 +201,19 @@ fn main() {
                 Ok(status) => {
                     if !status.success() {
                         match status.code() {
-                            Some(code) => {
-                                write_serial!("'{}' exited with status {}.\n", fname, code)
-                            }
-                            None => write_serial!("'{}' failed.\n", fname),
+                            Some(code) => output.send_fmt(
+                                Source::Stderr,
+                                format_args!("'{}' exited with status {}.\n", fname, code),
+                            ),
+                            None => output
+                                .send_fmt(Source::Stderr, format_args!("'{}' failed.\n", fname)),
                         }
                     }
                 }
-                Err(err) => write_serial!("Error waiting for '{}': {:?}\n", fname, err),
+                Err(err) => output.send_fmt(
+                    Source::Stderr,
+                    format_args!("Error waiting for '{}': {:?}\n", fname, err),
+                ),
             };
             exit_notifier.store(true, Ordering::Release);
             SysCpu::wake(this_h).ok();
@@ -210,11 +222,14 @@ fn main() {
             stdout_thread.join().unwrap();
             stderr_thread.join().unwrap();
         }
-        Err(err) => write_serial!("Error spawning '{}': {:?}\n", fname, err),
+        Err(err) => output.send_fmt(
+            Source::Stderr,
+            format_args!("Error spawning '{}': {:?}\n", fname, err),
+        ),
     }
 }
 
-fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize) {
+fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize, output: &Output) {
     assert!(offset > prev_offset);
     assert_eq!(kernel_log_buf.len(), SysRay::CONSOLE_SHARED_BUF_SZ);
 
@@ -222,15 +237,14 @@ fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize) 
     let start = prev_offset & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
     let end = start + len;
 
-    if end <= SysRay::CONSOLE_SHARED_BUF_SZ {
-        write_serial_raw(&kernel_log_buf[start..end]);
-        return;
-    }
-
-    let end = end & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
-    write_serial!(
-        "{}:{}",
-        str::from_utf8(&kernel_log_buf[start..]).unwrap(),
-        str::from_utf8(&kernel_log_buf[..end]).unwrap()
-    );
+    let data = if end <= SysRay::CONSOLE_SHARED_BUF_SZ {
+        kernel_log_buf[start..end].to_vec()
+    } else {
+        let wrapped_end = end & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
+        let mut data = Vec::with_capacity(SysRay::CONSOLE_SHARED_BUF_SZ - start + wrapped_end);
+        data.extend_from_slice(&kernel_log_buf[start..]);
+        data.extend_from_slice(&kernel_log_buf[..wrapped_end]);
+        data
+    };
+    output.try_send_kernel(data);
 }

@@ -1,5 +1,3 @@
-use core::fmt;
-
 use x86_64::instructions::port::{Port, PortReadOnly};
 
 const INPUT_FULL: u8 = 1;
@@ -71,15 +69,6 @@ impl SerialPort {
     }
 }
 
-impl fmt::Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            self.send(byte);
-        }
-        Ok(())
-    }
-}
-
 // The UART has independent receive and transmit paths. A long output write may
 // poll OUTPUT_EMPTY for every byte, so sharing its lock with input can split a
 // terminal response by starving the receiver.
@@ -96,23 +85,3 @@ pub fn read_serial() -> Option<u8> {
 pub fn write_serial_raw(data: &[u8]) {
     SERIAL1_OUTPUT.lock().unwrap().write(data);
 }
-
-#[doc(hidden)]
-pub fn write_serial_args(args: ::core::fmt::Arguments) {
-    use core::fmt::Write;
-    SERIAL1_OUTPUT
-        .lock()
-        .unwrap()
-        .write_fmt(args)
-        .expect("Printing to serial failed");
-}
-
-#[macro_export]
-macro_rules! write_serial {
-    ($($arg:tt)*) => {
-        $crate::serial::write_serial_args(format_args!($($arg)*))
-    };
-}
-
-#[allow(unused)]
-pub use write_serial;

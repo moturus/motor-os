@@ -34,6 +34,7 @@ mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
 mod sysbox_cat;
+mod sys_tty;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
@@ -1312,6 +1313,7 @@ fn main() {
     );
 
     diagnostics::run_all_tests();
+    sys_tty::run_all_tests();
     kernel_log::run_all_tests();
 
     // Run the service logging test before later tests emit through its logger.
