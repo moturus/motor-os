@@ -15,6 +15,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
 const REPORT_CHILD: &str = "stdio-terminal-report-child";
+const REPORT_PATH_ENV: &str = "MOTOR_STDIO_REPORT_PATH";
 const MASK_CHILD: &str = "stdio-terminal-mask-child";
 const FILE_RELAY_PARENT: &str = "stdio-terminal-file-relay-parent";
 const CLOSE_STDIN_PARENT: &str = "stdio-terminal-close-stdin-parent";
@@ -195,13 +196,17 @@ pub fn run_report_child() -> ! {
     let dupnew = moto_rt::fs::is_terminal(dup) as u32;
     moto_rt::fs::close(dup).unwrap();
 
-    println!(
+    let report = format!(
         "self={mask:03b} set={mask_set:03b} unset={mask_unset:03b} \
          key={key_present} nokey={no_terminal_key_present} \
          terminal={terminal} firstfd={first_open} \
          dupfd={dup} duporig={duporig} dupnew={dupnew}"
     );
+    println!("{report}");
     std::io::stdout().flush().unwrap();
+    if let Ok(path) = std::env::var(REPORT_PATH_ENV) {
+        std::fs::write(path, report).unwrap();
+    }
 
     loop {
         let mut line = String::new();

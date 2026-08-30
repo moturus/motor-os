@@ -373,10 +373,14 @@ masks="$(printf '%s\n' "$out" | strip_escapes |
 
 # An rmux pane: the pane's shell runs the probe on the terminal rmux
 # provides. The sleeps order piped keystrokes against the pane, as in
-# full-test.sh's rmux checks; the second "exit" ends the pane's shell.
+# full-test.sh's rmux checks; the second "exit" ends the pane's shell. The
+# report is mirrored to a file because debug console logs can legitimately
+# overwrite cells in rmux's final painted screen.
 echo "-- rmux pane child --"
+rmux_report="$TEST_TMP/rmux-terminal-report-$$"
 rmux_report_keys() {
-  printf 'TMPDIR=%s %s/systest stdio-terminal-report-child\n' "$TEST_TMP" "$TEST_BIN"
+  printf 'MOTOR_STDIO_REPORT_PATH=%s TMPDIR=%s %s/systest stdio-terminal-report-child\n' \
+    "$rmux_report" "$TEST_TMP" "$TEST_BIN"
   sleep 5
   printf 'exit\n'
   sleep 2
@@ -384,13 +388,14 @@ rmux_report_keys() {
   sleep 1
 }
 set +e
-out="$(rmux_report_keys |
+pane_out="$(rmux_report_keys |
   vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux new -s test-tui 2>&1)"
 rmux_status="$?"
 set -e
 if [ "$rmux_status" -ne 0 ]; then
-  fail "rmux pane exited with status $rmux_status: '$(printf '%s' "$out" | tail -c 800)'"
+  fail "rmux pane exited with status $rmux_status: '$(printf '%s' "$pane_out" | tail -c 800)'"
 fi
+out="$(vm_ssh cat "$rmux_report")"
 check_report "rmux pane child" "$out" 111 1
 
 # The full invariant matrix from the design doc: mixed-stream rows through

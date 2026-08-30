@@ -123,8 +123,12 @@ run_console /user/tmp/system-tty-direct-done \
   'echo direct > /user/tmp/system-tty-direct; /system/bin/sysbox chmod r-xr--r-- /user/tmp/system-tty-direct'
 run_console /user/tmp/system-tty-defaults-done \
   'echo default > /user/tmp/system-tty-default-file; /system/bin/mkdir /user/tmp/system-tty-default-dir'
+run_console /user/tmp/system-tty-script-v1-done \
+  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V1 > /user/tmp/system-tty-script-v1' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
+run_console /user/tmp/system-tty-script-edit-done \
+  "echo 'echo EDITED > /user/tmp/system-tty-edit-succeeded' >> /user/tmp/system-tty-script; chmod rw-r--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; /system/bin/rm /user/tmp/system-tty-script"
 run_console /user/tmp/system-tty-script-done \
-  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V1 > /user/tmp/system-tty-script-v1' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; echo 'echo EDITED > /user/tmp/system-tty-edit-succeeded' >> /user/tmp/system-tty-script; chmod rw-r--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; /system/bin/rm /user/tmp/system-tty-script; echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
+  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
 
 ps_output="$(vm_ssh /system/bin/cat /user/tmp/system-tty-ps)"
 listing="$(vm_ssh /system/bin/ls -l /user/tmp)"
