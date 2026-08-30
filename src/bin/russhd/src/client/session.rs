@@ -163,7 +163,7 @@ async fn run_channel(
         channel.request_shell(true).await?;
     }
     let (mut reader, writer) = channel.split();
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     #[cfg(target_os = "motor")]
     if pty {
         start_ctrl_c(input_tx.clone())?;
@@ -184,20 +184,11 @@ async fn run_channel(
         }
     });
 
-    let mut input_closed = false;
+    let input = forward_stdin(&writer, input_rx, pty);
+    tokio::pin!(input);
+    let mut input_done = false;
     let mut exit_status = None;
-    let mut filter = pty.then(InputFilter::new);
-    let mut control_deadline = None;
     loop {
-        let expiry_deadline = control_deadline;
-        let expiry = async move {
-            if let Some(deadline) = expiry_deadline {
-                tokio::time::sleep_until(deadline).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        tokio::pin!(expiry);
         tokio::select! {
             message = reader.wait() => {
                 let Some(message) = message else { break };
@@ -215,37 +206,11 @@ async fn run_channel(
                     _ => {}
                 }
             }
-            input = input_rx.recv(), if !input_closed => {
-                if let Some(input) = input {
-                    if let Some(filter) = filter.as_mut() {
-                        let events = filter.feed(&input);
-                        if forward_input(&writer, events).await? {
-                            break;
-                        }
-                        control_deadline = filter.has_pending_control().then(|| {
-                            tokio::time::Instant::now() + std::time::Duration::from_millis(50)
-                        });
-                    } else {
-                        writer.data_bytes(input).await?;
-                    }
-                } else {
-                    if let Some(filter) = filter.as_mut()
-                        && forward_input(&writer, filter.finish()).await?
-                    {
-                        break;
-                    }
-                    writer.eof().await?;
-                    input_closed = true;
-                    control_deadline = None;
-                }
-            }
-            () = &mut expiry => {
-                if let Some(filter) = filter.as_mut()
-                    && forward_input(&writer, filter.expire()).await?
-                {
+            result = &mut input, if !input_done => {
+                if result? {
                     break;
                 }
-                control_deadline = None;
+                input_done = true;
             }
         }
     }
@@ -254,6 +219,58 @@ async fn run_channel(
         .and_then(|status| i32::try_from(status).ok())
         .filter(|status| *status <= 255)
         .unwrap_or(255))
+}
+
+async fn forward_stdin(
+    writer: &russh::ChannelWriteHalf<russh::client::Msg>,
+    mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    pty: bool,
+) -> Result<bool, russh::Error> {
+    let mut filter = pty.then(InputFilter::new);
+    let mut control_deadline = None;
+    loop {
+        let expiry_deadline = control_deadline;
+        let expiry = async move {
+            if let Some(deadline) = expiry_deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(expiry);
+        tokio::select! {
+            input = input_rx.recv() => {
+                let Some(input) = input else {
+                    if let Some(filter) = filter.as_mut()
+                        && forward_input(writer, filter.finish()).await?
+                    {
+                        return Ok(true);
+                    }
+                    writer.eof().await?;
+                    return Ok(false);
+                };
+                if let Some(filter) = filter.as_mut() {
+                    let events = filter.feed(&input);
+                    if forward_input(writer, events).await? {
+                        return Ok(true);
+                    }
+                    control_deadline = filter.has_pending_control().then(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(50)
+                    });
+                } else {
+                    writer.data_bytes(input).await?;
+                }
+            }
+            () = &mut expiry => {
+                if let Some(filter) = filter.as_mut()
+                    && forward_input(writer, filter.expire()).await?
+                {
+                    return Ok(true);
+                }
+                control_deadline = None;
+            }
+        }
+    }
 }
 
 async fn forward_input(

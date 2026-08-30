@@ -1,10 +1,13 @@
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use russh::server::{Auth, Session};
+use russh::{Channel, ChannelId};
 
 const RUSSHD: &str = env!("CARGO_BIN_EXE_russhd");
 const SSH: &str = env!("CARGO_BIN_EXE_ssh");
@@ -117,6 +120,152 @@ impl Drop for Fixture {
             let _ = thread.join();
         }
         let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+const FULL_DUPLEX_STREAM_SIZE: usize = 8 * 1024 * 1024;
+
+#[derive(Clone)]
+struct OutputOnlyServer;
+
+impl russh::server::Server for OutputOnlyServer {
+    type Handler = Self;
+
+    fn new_client(&mut self, _addr: Option<std::net::SocketAddr>) -> Self {
+        self.clone()
+    }
+}
+
+impl russh::server::Handler for OutputOnlyServer {
+    type Error = russh::Error;
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<russh::server::Msg>,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        _command: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        let handle = session.handle();
+        tokio::spawn(async move {
+            let _ = handle
+                .data(channel, vec![0_u8; FULL_DUPLEX_STREAM_SIZE])
+                .await;
+            let _ = handle.exit_status_request(channel, 0).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
+
+    fn adjust_window(&mut self, _channel: ChannelId, _current: u32) -> u32 {
+        // Stop replenishing the receive window: this command deliberately does
+        // not consume stdin while it writes more than one window of stdout.
+        1
+    }
+}
+
+fn start_output_only_server() -> (std::thread::JoinHandle<()>, u16) {
+    let (address_tx, address_rx) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_tx.send(listener.local_addr().unwrap()).unwrap();
+                let (socket, _) = listener.accept().await.unwrap();
+                let config = russh::server::Config {
+                    keys: vec![
+                        russh::keys::PrivateKey::random(
+                            &mut rand::rng(),
+                            russh::keys::ssh_key::Algorithm::Ed25519,
+                        )
+                        .unwrap(),
+                    ],
+                    ..Default::default()
+                };
+                let running = russh::server::run_stream(
+                    std::sync::Arc::new(config),
+                    socket,
+                    OutputOnlyServer,
+                )
+                .await
+                .unwrap();
+                let _ = running.await;
+            });
+    });
+    let port = address_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("test SSH server did not report its listening address")
+        .port();
+    (thread, port)
+}
+
+fn run_full_duplex(args: &[String], input: Vec<u8>) -> Output {
+    let mut child = Command::new(SSH)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let input_thread = std::thread::spawn(move || stdin.write_all(&input));
+    let output_thread = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let error_thread = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = input_thread.join();
+            let stdout = output_thread.join().unwrap().unwrap();
+            let stderr = error_thread.join().unwrap().unwrap();
+            panic!(
+                "ssh did not finish full-duplex relay: {} stdout bytes, stderr: {}",
+                stdout.len(),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    match input_thread.join().unwrap() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("writing ssh stdin failed: {error}"),
+    }
+    Output {
+        status,
+        stdout: output_thread.join().unwrap().unwrap(),
+        stderr: error_thread.join().unwrap().unwrap(),
     }
 }
 
@@ -233,4 +382,35 @@ fn command_and_sftp_transfers_work_end_to_end() {
     let mut changed = fixture.ssh_args();
     changed.extend(["motor@127.0.0.1".to_owned(), "true".to_owned()]);
     assert_eq!(fixture.run(&changed, b"").status.code(), Some(255));
+}
+
+#[test]
+fn command_drains_output_while_remote_does_not_read_large_stdin() {
+    let (server_thread, port) = start_output_only_server();
+    let known_hosts = std::env::temp_dir().join(format!(
+        "russhd-full-duplex-known-hosts-{}",
+        std::process::id()
+    ));
+    let ssh = vec![
+        "-p".to_owned(),
+        port.to_string(),
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "StrictHostKeyChecking=accept-new".to_owned(),
+        "-o".to_owned(),
+        format!("UserKnownHostsFile={}", known_hosts.display()),
+        "motor@127.0.0.1".to_owned(),
+        "output-only".to_owned(),
+    ];
+    let output = run_full_duplex(&ssh, vec![0x5a; FULL_DUPLEX_STREAM_SIZE]);
+    server_thread.join().unwrap();
+    let _ = std::fs::remove_file(known_hosts);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout.len(), FULL_DUPLEX_STREAM_SIZE);
+    assert!(output.stdout.iter().all(|byte| *byte == 0));
 }
