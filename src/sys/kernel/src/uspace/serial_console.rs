@@ -9,15 +9,28 @@ use crate::util::StaticRef;
 use super::sysobject::SysObject;
 use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 use core::sync::atomic::*;
-use moto_sys::{ErrorCode, SysRay};
+use moto_sys::{
+    kernel_log::{
+        encode_kernel_log_frame_header, kernel_log_control_is_aligned, KernelLogControl,
+        KERNEL_LOG_FRAME_HEADER_SIZE, KERNEL_LOG_MAX_PAYLOAD, KERNEL_LOG_RING_SIZE,
+    },
+    ErrorCode,
+};
+
+#[derive(Default)]
+struct KernelLogRingState {
+    end: u64,
+    next_sequence: u32,
+    generation: u64,
+}
 
 struct SerialConsole {
     owner_pid: AtomicU64,
     this_object: Arc<SysObject>,
 
     uspace_log_buf_addr: AtomicUsize,
-    uspace_log_buf_offset_addr: AtomicUsize,
-    uspace_log_buf_offset: crate::util::SpinLock<usize>,
+    kernel_log_control_addr: AtomicUsize,
+    kernel_log_ring_state: crate::util::SpinLock<KernelLogRingState>,
 
     console_driver_address_space:
         crate::util::SpinLock<Option<Arc<crate::mm::user::UserAddressSpace>>>,
@@ -35,8 +48,8 @@ pub fn init() {
         this_object: SysObject::new(Arc::new("serial_console".to_owned())),
 
         uspace_log_buf_addr: AtomicUsize::new(0),
-        uspace_log_buf_offset_addr: AtomicUsize::new(0),
-        uspace_log_buf_offset: crate::util::SpinLock::new(0),
+        kernel_log_control_addr: AtomicUsize::new(0),
+        kernel_log_ring_state: crate::util::SpinLock::new(KernelLogRingState::default()),
 
         console_driver_address_space: crate::util::SpinLock::new(None),
     })));
@@ -66,14 +79,40 @@ pub(super) fn get_for_process(
         return Err(moto_rt::E_INVALID_ARGUMENT);
     };
 
-    let Ok(offset_addr) = offset_addr.parse::<usize>() else {
+    let Ok(control_addr) = offset_addr.parse::<usize>() else {
         log::error!("Failed to parse serial console handler parameters");
         return Err(moto_rt::E_INVALID_ARGUMENT);
     };
+    if !kernel_log_control_is_aligned(control_addr) {
+        log::error!("The serial console control block is not aligned");
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+
+    let page_size = crate::mm::PAGE_SIZE_SMALL as usize;
+    let control_page = control_addr & !(page_size - 1);
+    let control_offset = control_addr - control_page;
+    if control_offset + core::mem::size_of::<KernelLogControl>() > page_size {
+        log::error!("The serial console control block crosses a page");
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+
+    let address_space = process.address_space().clone();
+    let kernel_control_page = match address_space.get_user_page_as_kernel(control_page as u64) {
+        Ok(addr) => addr as usize,
+        Err(err) => {
+            log::error!("The serial console control block is not mapped: {err:?}");
+            return Err(err);
+        }
+    };
+    let kernel_control_addr = kernel_control_page + control_offset;
+    let control = unsafe { &*(kernel_control_addr as *const KernelLogControl) };
+    control.end.store(0, Ordering::Relaxed);
+    control.generation.store(0, Ordering::Release);
 
     PERCPU_LOG_GUARD.set(Box::leak(Box::new(crate::util::StaticPerCpu::init())));
 
-    *CONSOLE.console_driver_address_space.lock(line!()) = Some(process.address_space().clone());
+    *CONSOLE.console_driver_address_space.lock(line!()) = Some(address_space);
+    *CONSOLE.kernel_log_ring_state.lock(line!()) = KernelLogRingState::default();
 
     CONSOLE
         .uspace_log_buf_addr
@@ -82,8 +121,8 @@ pub(super) fn get_for_process(
         .owner_pid
         .store(process.pid().as_u64(), Ordering::Relaxed);
     CONSOLE
-        .uspace_log_buf_offset_addr
-        .store(offset_addr, Ordering::Release);
+        .kernel_log_control_addr
+        .store(kernel_control_addr, Ordering::Release);
 
     Ok(CONSOLE.this_object.clone())
 }
@@ -97,14 +136,27 @@ pub fn on_irq() {
 }
 
 pub fn logging_to_uspace() -> bool {
-    CONSOLE.uspace_log_buf_offset_addr.load(Ordering::Relaxed) != 0
+    CONSOLE.kernel_log_control_addr.load(Ordering::Acquire) != 0
+}
+
+fn copy_to_ring(
+    address_space: &crate::mm::user::UserAddressSpace,
+    ring_addr: usize,
+    end: u64,
+    bytes: &[u8],
+) -> Result<(), ErrorCode> {
+    let start = end as usize & (KERNEL_LOG_RING_SIZE - 1);
+    let first_len = bytes.len().min(KERNEL_LOG_RING_SIZE - start);
+    address_space.copy_to_user(&bytes[..first_len], (ring_addr + start) as u64)?;
+    if first_len != bytes.len() {
+        address_space.copy_to_user(&bytes[first_len..], ring_addr as u64)?;
+    }
+    Ok(())
 }
 
 pub fn log_to_uspace(msg: &str) -> bool {
-    assert!(msg.len() < SysRay::CONSOLE_SHARED_BUF_SZ);
-
-    let uspace_log_buf_offset_addr = CONSOLE.uspace_log_buf_offset_addr.load(Ordering::Relaxed);
-    if uspace_log_buf_offset_addr == 0 {
+    let kernel_control_addr = CONSOLE.kernel_log_control_addr.load(Ordering::Acquire);
+    if kernel_control_addr == 0 {
         return false;
     }
 
@@ -120,48 +172,55 @@ pub fn log_to_uspace(msg: &str) -> bool {
     }
     *PERCPU_LOG_GUARD.get_per_cpu() = true;
 
-    let mut offset = CONSOLE.uspace_log_buf_offset.lock(line!());
-    let start = (*offset) & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
-    let end = start + bytes.len();
+    let mut state = CONSOLE.kernel_log_ring_state.lock(line!());
+    let sequence = state.next_sequence;
+    state.next_sequence = state.next_sequence.wrapping_add(1);
+
+    if bytes.len() > KERNEL_LOG_MAX_PAYLOAD {
+        core::mem::drop(state);
+        *PERCPU_LOG_GUARD.get_per_cpu() = false;
+        return false;
+    }
+
+    let mut header = [0; KERNEL_LOG_FRAME_HEADER_SIZE];
+    encode_kernel_log_frame_header(&mut header, sequence, bytes.len()).unwrap();
+    let control = unsafe { &*(kernel_control_addr as *const KernelLogControl) };
+
+    let odd_generation = state.generation.wrapping_add(1);
+    control.generation.store(odd_generation, Ordering::Relaxed);
+    fence(Ordering::Release);
 
     let address_space_guard = CONSOLE.console_driver_address_space.lock(line!());
     let address_space = address_space_guard.as_ref().unwrap();
 
-    if end <= SysRay::CONSOLE_SHARED_BUF_SZ {
-        if let Err(err) = address_space.copy_to_user(bytes, (uspace_log_buf_addr + start) as u64) {
-            log::error!("Failed to log to userspace: {err:?}.");
-            *PERCPU_LOG_GUARD.get_per_cpu() = false;
-            return false;
-        }
-    } else {
-        if let Err(err) = address_space.copy_to_user(
-            &bytes[..(SysRay::CONSOLE_SHARED_BUF_SZ - start)],
-            (uspace_log_buf_addr + start) as u64,
-        ) {
-            log::error!("Failed to log to userspace: {err:?}.");
-            *PERCPU_LOG_GUARD.get_per_cpu() = false;
-            return false;
-        }
+    let copy_result = copy_to_ring(address_space, uspace_log_buf_addr, state.end, &header)
+        .and_then(|()| {
+            copy_to_ring(
+                address_space,
+                uspace_log_buf_addr,
+                state.end.wrapping_add(KERNEL_LOG_FRAME_HEADER_SIZE as u64),
+                bytes,
+            )
+        });
 
-        if let Err(err) = address_space.copy_to_user(
-            &bytes[(SysRay::CONSOLE_SHARED_BUF_SZ - start)..],
-            uspace_log_buf_addr as u64,
-        ) {
-            log::error!("Failed to log to userspace: {err:?}.");
-            *PERCPU_LOG_GUARD.get_per_cpu() = false;
-            return false;
-        }
+    let even_generation = odd_generation.wrapping_add(1);
+    state.generation = even_generation;
+    if copy_result.is_err() {
+        control.generation.store(even_generation, Ordering::Release);
+        *PERCPU_LOG_GUARD.get_per_cpu() = false;
+        core::mem::drop(address_space_guard);
+        core::mem::drop(state);
+        return false;
     }
 
-    *offset += bytes.len();
-    let offset_bytes = offset.to_ne_bytes();
-
-    if let Err(err) = address_space.copy_to_user(&offset_bytes, uspace_log_buf_offset_addr as u64) {
-        log::error!("Failed to log to userspace: {err:?}.");
-    }
+    state.end = state
+        .end
+        .wrapping_add((KERNEL_LOG_FRAME_HEADER_SIZE + bytes.len()) as u64);
+    control.end.store(state.end, Ordering::Relaxed);
+    control.generation.store(even_generation, Ordering::Release);
 
     core::mem::drop(address_space_guard);
-    core::mem::drop(offset);
+    core::mem::drop(state);
 
     SysObject::wake_irq(&CONSOLE.this_object);
     *PERCPU_LOG_GUARD.get_per_cpu() = false;
@@ -170,7 +229,7 @@ pub fn log_to_uspace(msg: &str) -> bool {
 }
 
 pub fn log_to_uspace_protected(msg: &str) -> bool {
-    if CONSOLE.uspace_log_buf_offset_addr.load(Ordering::Relaxed) == 0 {
+    if CONSOLE.kernel_log_control_addr.load(Ordering::Relaxed) == 0 {
         return false;
     }
     if PERCPU_LOG_GUARD.is_null() {
@@ -186,7 +245,5 @@ pub fn log_to_uspace_protected(msg: &str) -> bool {
 pub fn sys_panic_notify() {
     // Force raw serial writes, as the VM is going bye-bye, and logs via
     // sys-tty are likely to get lost.
-    CONSOLE
-        .uspace_log_buf_offset_addr
-        .store(0, Ordering::SeqCst)
+    CONSOLE.kernel_log_control_addr.store(0, Ordering::SeqCst)
 }

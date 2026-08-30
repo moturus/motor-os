@@ -2,16 +2,16 @@ use core::slice;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 use moto_sys::SysObj;
-use moto_sys::SysRay;
+use moto_sys::kernel_log::{KERNEL_LOG_RING_SIZE, KernelLogControl};
 
 use crate::output::{Output, Source};
 
+mod kernel_log;
 mod output;
 mod serial;
 
@@ -47,6 +47,7 @@ fn read_config(output: &Output) -> String {
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
         output::run_self_tests();
+        kernel_log::run_self_tests();
         return;
     }
 
@@ -71,18 +72,18 @@ fn main() {
 
     let fname = words[0];
 
-    let buf_addr = moto_sys::SysMem::alloc(4096, (SysRay::CONSOLE_SHARED_BUF_SZ / 4096) as u64)
-        .unwrap() as usize;
+    let buf_addr =
+        moto_sys::SysMem::alloc(4096, (KERNEL_LOG_RING_SIZE / 4096) as u64).unwrap() as usize;
     let kernel_log_buf =
-        unsafe { slice::from_raw_parts_mut(buf_addr as *mut u8, SysRay::CONSOLE_SHARED_BUF_SZ) };
+        unsafe { slice::from_raw_parts(buf_addr as *const u8, KERNEL_LOG_RING_SIZE) };
 
-    let mut kernel_log_buf_offset: Box<AtomicUsize> = Box::new(AtomicUsize::new(0));
-    let offset_addr = Box::as_mut_ptr(&mut kernel_log_buf_offset) as usize;
+    let mut kernel_log_control = Box::new(KernelLogControl::new());
+    let control_addr = Box::as_mut(&mut kernel_log_control) as *mut KernelLogControl as usize;
 
     let console_wait_handle = moto_sys::SysObj::get(
         SysHandle::KERNEL,
         0,
-        format!("serial_console:{buf_addr}:{offset_addr}").as_str(),
+        format!("serial_console:{buf_addr}:{control_addr}").as_str(),
     )
     .unwrap();
 
@@ -144,7 +145,17 @@ fn main() {
             let mut child_stdin = child.stdin.take().unwrap();
             let input_output = output.clone();
             let stdin_thread = std::thread::spawn(move || {
-                let mut prev_offset = 0;
+                let mut drain = kernel_log::KernelLogDrain::new();
+                let mut service_input = || {
+                    while let Some(c) = serial::read_serial() {
+                        if c != 13 {
+                            child_stdin.write_all(&[c]).ok();
+                        } else {
+                            child_stdin.write_all(&[c, 10]).ok();
+                        }
+                    }
+                };
+
                 loop {
                     if exit1.load(Ordering::Relaxed) {
                         break;
@@ -152,19 +163,16 @@ fn main() {
                     let mut waiters: [SysHandle; 2] = [console_wait_handle, that_h];
                     SysCpu::wait(&mut waiters, SysHandle::NONE, SysHandle::NONE, None).unwrap();
 
-                    while let Some(c) = serial::read_serial() {
-                        if c != 13 {
-                            child_stdin.write_all(&[c]).ok();
-                        } else {
-                            // Insert newline.
-                            child_stdin.write_all(&[c, 10]).ok();
-                        }
-                    }
-
-                    let offset = kernel_log_buf_offset.load(Ordering::Acquire);
-                    if prev_offset != offset {
-                        process_kernel_log(kernel_log_buf, prev_offset, offset, &input_output);
-                        prev_offset = offset;
+                    let status = drain.drain(kernel_log_buf, &kernel_log_control, |record| {
+                        input_output.try_send_kernel(record)
+                    });
+                    if status == kernel_log::DrainStatus::Busy {
+                        service_input();
+                        let _ = drain.drain(kernel_log_buf, &kernel_log_control, |record| {
+                            input_output.try_send_kernel(record)
+                        });
+                    } else {
+                        service_input();
                     }
                 }
 
@@ -227,24 +235,4 @@ fn main() {
             format_args!("Error spawning '{}': {:?}\n", fname, err),
         ),
     }
-}
-
-fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize, output: &Output) {
-    assert!(offset > prev_offset);
-    assert_eq!(kernel_log_buf.len(), SysRay::CONSOLE_SHARED_BUF_SZ);
-
-    let len = offset - prev_offset;
-    let start = prev_offset & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
-    let end = start + len;
-
-    let data = if end <= SysRay::CONSOLE_SHARED_BUF_SZ {
-        kernel_log_buf[start..end].to_vec()
-    } else {
-        let wrapped_end = end & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
-        let mut data = Vec::with_capacity(SysRay::CONSOLE_SHARED_BUF_SZ - start + wrapped_end);
-        data.extend_from_slice(&kernel_log_buf[start..]);
-        data.extend_from_slice(&kernel_log_buf[..wrapped_end]);
-        data
-    };
-    output.try_send_kernel(data);
 }

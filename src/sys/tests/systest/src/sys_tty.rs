@@ -11,7 +11,10 @@ pub fn run_all_tests() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"sys-tty writer self-test PASS\n");
+    assert_eq!(
+        output.stdout,
+        b"sys-tty writer self-test PASS\nsys-tty kernel-log self-test PASS\n"
+    );
     assert!(output.stderr.is_empty());
 
     println!("sys_tty::run_all_tests PASS");

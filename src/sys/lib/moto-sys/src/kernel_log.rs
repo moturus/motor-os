@@ -56,6 +56,21 @@ pub struct DecodedKernelLogFrame<'a> {
     pub encoded_len: usize,
 }
 
+pub fn encode_kernel_log_frame_header(
+    dst: &mut [u8; KERNEL_LOG_FRAME_HEADER_SIZE],
+    sequence: u32,
+    payload_len: usize,
+) -> Result<(), KernelLogFrameError> {
+    if payload_len > KERNEL_LOG_MAX_PAYLOAD {
+        return Err(KernelLogFrameError::PayloadTooLarge);
+    }
+
+    dst[..2].copy_from_slice(&KERNEL_LOG_FRAME_MAGIC_V1.to_le_bytes());
+    dst[2..4].copy_from_slice(&(payload_len as u16).to_le_bytes());
+    dst[4..8].copy_from_slice(&sequence.to_le_bytes());
+    Ok(())
+}
+
 pub fn encode_kernel_log_frame(
     dst: &mut [u8],
     sequence: u32,
@@ -69,9 +84,11 @@ pub fn encode_kernel_log_frame(
         return Err(KernelLogFrameError::BufferTooSmall);
     }
 
-    dst[..2].copy_from_slice(&KERNEL_LOG_FRAME_MAGIC_V1.to_le_bytes());
-    dst[2..4].copy_from_slice(&(payload.len() as u16).to_le_bytes());
-    dst[4..8].copy_from_slice(&sequence.to_le_bytes());
+    let header: &mut [u8; KERNEL_LOG_FRAME_HEADER_SIZE] = (&mut dst
+        [..KERNEL_LOG_FRAME_HEADER_SIZE])
+        .try_into()
+        .unwrap();
+    encode_kernel_log_frame_header(header, sequence, payload.len())?;
     dst[8..encoded_len].copy_from_slice(payload);
     Ok(encoded_len)
 }
