@@ -40,7 +40,7 @@ core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base kibim httpd httpd-axum
+user: user-base kibim httpd httpd-axum ssh
 user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
@@ -49,7 +49,7 @@ user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd httpd httpd-axum gears gears-mock-provider
+.PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-mock-provider
 .PHONY: lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy assembly-selected
@@ -155,8 +155,13 @@ rush:
 
 russhd:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/russhd && CARGO_TARGET_DIR="$(OBJ_DIR)/russhd" $(DO_BUILD)
+	cd src/bin/russhd && CARGO_TARGET_DIR="$(OBJ_DIR)/russhd" $(DO_BUILD) --bin russhd
 	strip -o "$(BIN_DIR)/russhd" "$(OBJ_DIR)/russhd/$(SUB_DIR)/russhd"
+
+ssh: russhd
+	mkdir -p $(BIN_DIR)
+	cd src/bin/russhd && CARGO_TARGET_DIR="$(OBJ_DIR)/russhd" $(DO_BUILD) --bin ssh
+	strip -o "$(BIN_DIR)/ssh" "$(OBJ_DIR)/russhd/$(SUB_DIR)/ssh"
 
 httpd:
 	mkdir -p $(BIN_DIR)

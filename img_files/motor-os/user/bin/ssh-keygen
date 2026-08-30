@@ -1,0 +1,3 @@
+#!/system/bin/rush
+
+exec /user/bin/ssh --motor-applet=ssh-keygen "$@"

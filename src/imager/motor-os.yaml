@@ -12,6 +12,7 @@ input_files:
   - "/user/bin/httpd"
   - "/user/bin/httpd-axum"
   - "/user/bin/kibim"
+  - "/user/bin/ssh"
 directories:
   - "/system"
   - "/system/bin"
@@ -24,6 +25,7 @@ directories:
   - "/user/bin"
   - "/user/cfg"
   - "/user/cfg/kibim"
+  - "/user/cfg/ssh"
   - "/user/tmp"
 static_dirs:
   - "img_files/motor-os-base"

@@ -814,6 +814,20 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/system/bin/curl"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/user/bin/ssh"));
+        assert!(config
+            .directories
+            .iter()
+            .any(|path| path == "/user/cfg/ssh"));
+        for wrapper in ["scp", "sftp", "ssh-keygen", "ssh-copy-id"] {
+            let path = Path::new("../../img_files/motor-os/user/bin").join(wrapper);
+            let metadata = fs::metadata(&path).unwrap();
+            assert!(metadata.is_file());
+            assert_ne!(metadata.permissions().mode() & 0o111, 0, "{path:?}");
+        }
     }
 
     #[test]
@@ -835,6 +849,14 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/system/bin/curl"));
+        assert!(config
+            .input_files
+            .iter()
+            .any(|path| path == "/user/bin/ssh"));
+        assert!(config
+            .directories
+            .iter()
+            .any(|path| path == "/user/cfg/ssh"));
         assert_eq!(
             config.static_dirs,
             [
@@ -894,6 +916,14 @@ mod tests {
             .iter()
             .filter(|path| path.starts_with("/system/bin/"))
             .all(|path| !path.contains("services")));
+        assert!(!config
+            .input_files
+            .iter()
+            .any(|path| path == "/user/bin/ssh"));
+        assert!(!config
+            .directories
+            .iter()
+            .any(|path| path == "/user/cfg/ssh"));
     }
 
     #[test]
