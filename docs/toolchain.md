@@ -681,7 +681,11 @@ build sequence is:
 5. Run the second `x.py` invocation from the same revision for the native Motor
    rustc (`--host x86_64-unknown-motor`). Its own stage sysroot is
    `build/x86_64-unknown-motor/stage2`, and it may also recreate the Linux
-   `stage2`; the installed prefix is unaffected either way.
+   `stage2`; the installed prefix is unaffected either way. An assembly-scoped
+   `llvm-config` adapter keeps `--bindir` on the runnable standalone host tools
+   while directing include and library paths to the built Motor LLVM. This is
+   necessary because upstream's normal host-triple path substitution cannot
+   rewrite the content-addressed standalone LLVM path.
 6. Stage the generated image roots with manifests, build ripgrep and the OS
    with the Motor toolchain, and build the images.
 
@@ -967,9 +971,9 @@ Two keys are derived from that canonical serialization:
 - `MOTOR_ASSEMBLY_KEY` covers the toolchain key plus everything that
   determines the C sysroot and native artifacts: `MOTOR_MLIBC_REV` and its
   tree state, `MOTOR_OS_RUNTIME_TREE`, `LOCAL_MOTO_RT_VERSION`, and the native
-  build configuration digest, canonically normalized to exclude host absolute
-  paths. It inherits the standalone host LLVM identity through the toolchain
-  key.
+  build configuration digest, including the native `llvm-config` adapter
+  recipe, canonically normalized to exclude host absolute paths. It inherits
+  the standalone host LLVM identity through the toolchain key.
 
 The exact `MOTOR_RUSTUP_TOOLCHAIN` name is derived from the selected base plus
 the full toolchain key after the key is computed; it is not itself a key input.

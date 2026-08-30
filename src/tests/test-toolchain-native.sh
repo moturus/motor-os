@@ -15,6 +15,21 @@ printf root > "$rust/Cargo.lock"
 printf library > "$rust/library/Cargo.lock"
 printf installed > "$temporary/prefix/bin/rustc"
 chmod +x "$temporary/prefix/bin/rustc"
+cat > "$temporary/llvm/bin/llvm-config" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$temporary/llvm-config-args'
+case "\${1:-}" in
+--bindir) printf '%s\n' '$temporary/llvm/bin' ;;
+--cxxflags) printf '%s\n' '-I$temporary/llvm/include -DNDEBUG' ;;
+--ldflags) printf '%s\n' '-L$temporary/llvm/lib' ;;
+--fail) exit 23 ;;
+*) printf '%s\n' '23.1.0' ;;
+esac
+EOF
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$temporary/llvm/bin/tool"
+chmod +x "$temporary/llvm/bin/llvm-config" "$temporary/llvm/bin/tool"
+ln -s tool "$temporary/llvm/bin/llvm-ar"
+ln -s tool "$temporary/llvm/bin/llvm-ranlib"
 
 MOTOR_SOURCE_MODE=managed
 SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
@@ -44,6 +59,28 @@ chmod +x "$rust/x.py"
 
 toolchain_build_native_rustc "$rust" ''
 toolchain_validate_native_rustc "$RUSTC_MAIN" || fail "native identity was rejected"
+adapter="$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-config"
+target_llvm="$rust/build/x86_64-unknown-motor/llvm"
+[ -x "$adapter" ] || fail "native llvm-config adapter is missing"
+[ "$("$adapter" --bindir)" = "$temporary/llvm/bin" ] ||
+	fail "native llvm-config adapter rewrote the host bindir"
+[ "$("$adapter" --cxxflags)" = "-I$target_llvm/include -DNDEBUG" ] ||
+	fail "native llvm-config adapter did not rewrite the include path"
+[ "$("$adapter" --ldflags)" = "-L$target_llvm/lib" ] ||
+	fail "native llvm-config adapter did not rewrite the library path"
+[ "$("$adapter" --version)" = 23.1.0 ] ||
+	fail "native llvm-config adapter changed non-path output"
+set +e
+"$adapter" --fail
+status=$?
+set -e
+[ "$status" -eq 23 ] || fail "native llvm-config adapter hid a command failure"
+[ "$(readlink "$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-ar")" = \
+	"$temporary/llvm/bin/llvm-ar" ] || fail "native llvm-ar link is wrong"
+grep -Fqx 'llvm-config = "'"$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-config"'"' \
+	"$NATIVE_BOOTSTRAP_CONFIG" || fail "native bootstrap bypasses the adapter"
+grep -Fqx -- '--cxxflags' "$temporary/llvm-config-args" ||
+	fail "native llvm-config arguments were not forwarded"
 
 ASSEMBLY_ROOT="$temporary/changed-assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"

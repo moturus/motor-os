@@ -610,8 +610,16 @@ Product consequences to record:
   `llvm-config` must run on the build host, and a cross build's `llvm-config`
   is a Motor executable, so three LLVM builds are the floor.
 - The native bootstrap's stage1 rework under the assembly configuration is a
-  relink plus a std rebuild worth one to two minutes; it needs no change and
-  no further diagnosis.
+  relink plus a std rebuild worth one to two minutes. The first real build
+  exposed one additional cross-bootstrap constraint: upstream uses the
+  runnable host `llvm-config` and substitutes host-triple paths with target
+  paths, but the content-addressed standalone path contains no host triple.
+  Generate an assembly-scoped Bash adapter that leaves `--bindir` pointing at
+  runnable host tools and rewrites other standalone include/library paths to
+  the built Motor LLVM tree. Keep the real `llvm-ar` and `llvm-ranlib` beside
+  it as symlinks, use this bin directory only in the native bootstrap config,
+  and record the adapter recipe in a v2 native-configuration digest. Do not
+  patch Rust bootstrap or rebuild a fourth LLVM.
 
 Tests and documentation:
 
@@ -626,6 +634,10 @@ Tests and documentation:
   `llvm-config --link-static --libfiles` to exist, the command to succeed, and
   every named library to exist; the fake provides representative libraries,
   and a missing library is a negative test.
+- `src/tests/test-toolchain-native.sh` requires the adapter in the native
+  bootstrap config, unchanged host `--bindir`, rewritten include/library
+  paths, exact argument forwarding and failure status, and the adjacent host
+  archive-tool links.
 - The versions/state tests prove that changing only the normalized standalone
   configuration digest changes both clean and dynamic toolchain keys without
   introducing host-path identity. The assembly test proves that this new
