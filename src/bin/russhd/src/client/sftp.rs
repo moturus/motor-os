@@ -77,7 +77,7 @@ impl From<russh_sftp::client::error::Error> for Error {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

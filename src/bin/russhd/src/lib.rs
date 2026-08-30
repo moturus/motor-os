@@ -3,8 +3,8 @@ pub mod applets;
 pub mod client;
 pub mod config;
 pub mod local_session;
-pub mod sftp_session;
 pub mod permissions;
+pub mod sftp_session;
 
 // `ring` gets its randomness through getrandom 0.2. Register Motor's entropy
 // source in the library so every binary in this package carries the hook.

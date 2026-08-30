@@ -3,7 +3,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use moto_tooling::mode2048;
 
-pub type StdinTx = tokio::sync::mpsc::Sender<SessionMessage>;
+pub const SSH_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
+
+pub struct StdinTx {
+    coordinator: tokio::sync::mpsc::Sender<SessionMessage>,
+}
+
+impl StdinTx {
+    pub fn is_open(&self) -> bool {
+        !self.coordinator.is_closed()
+    }
+
+    pub async fn send(
+        &self,
+        message: SessionMessage,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<SessionMessage>> {
+        self.coordinator.send(message).await
+    }
+}
 
 /// Something for the one task that owns a session's child stdin to do.
 ///
@@ -13,8 +30,6 @@ pub type StdinTx = tokio::sync::mpsc::Sender<SessionMessage>;
 /// (`docs/tui.md`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionMessage {
-    /// Bytes the SSH client sent.
-    Input(Vec<u8>),
     /// A size control the child wrote towards its terminal, which is russhd.
     Control(mode2048::Command),
     /// A new size from `pty-req` or `window-change`.
@@ -107,7 +122,6 @@ impl SessionState {
     /// What to write into the child's stdin for `message`, if anything.
     fn handle(&mut self, message: SessionMessage) -> Option<Vec<u8>> {
         match message {
-            SessionMessage::Input(bytes) => Some(bytes),
             // An enable is answered every time, because a client that repeats it
             // is a client that wants the size again.
             SessionMessage::Control(mode2048::Command::Enable) => {
@@ -181,14 +195,16 @@ fn configure_terminal(cmd: &mut tokio::process::Command, pty: Option<PtyGeometry
 pub async fn spawn(
     command: Command,
     pty: Option<PtyGeometry>,
-    channel: russh::ChannelId,
+    mut channel: russh::Channel<russh::server::Msg>,
     session: russh::server::Handle,
+    receive_credit: russh::ReceiveCredit,
     close_guard: ChannelCloseGuard,
     cfg: &Arc<crate::config::Config>,
 ) -> Result<StdinTx, russh::Error> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
 
+    let channel_id = channel.id();
     let Some((program, args)) = command.argv.split_first() else {
         return Err(russh::Error::IO(std::io::ErrorKind::InvalidInput.into()));
     };
@@ -231,45 +247,67 @@ pub async fn spawn(
 
     log::info!("Started `{argv}`");
 
-    // The one owner of the child's stdin: everything that reaches it -- the
-    // client's keystrokes, an answer to a control the child wrote, a report of a
-    // size the client changed -- is a message to this task and is written in the
-    // order the messages arrived.
+    // The one owner of the child's stdin serializes client input, answers to
+    // terminal controls, and resize reports. Keep client input in russh's
+    // bounded channel: its connection task can still send child output while
+    // this task is blocked on a child that does not read stdin.
     let mut stdin = child.stdin.take().unwrap();
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
+    let (coordinator_tx, mut coordinator_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
 
     let mut state = SessionState {
         geometry: pty.unwrap_or_default(),
         subscribed: false,
     };
     tokio::spawn(async move {
-        while let Some(message) = stdin_rx.recv().await {
-            let Some(bytes) = state.handle(message) else {
-                continue;
+        let mut input_rx = channel.make_reader();
+        let mut input = [0_u8; 32 * 1024];
+        let mut coordinator_open = true;
+        loop {
+            let (bytes, window_credit) = tokio::select! {
+                result = tokio::io::AsyncReadExt::read(&mut input_rx, &mut input) => {
+                    let read = match result {
+                        Ok(0) => break,
+                        Ok(read) => read,
+                        Err(err) => {
+                            log::debug!("input.read() failed with error '{err:?}'");
+                            break;
+                        }
+                    };
+                    (input[..read].to_vec(), u32::try_from(read).unwrap())
+                }
+                message = coordinator_rx.recv(), if coordinator_open => {
+                    let Some(message) = message else {
+                        coordinator_open = false;
+                        continue;
+                    };
+                    let Some(bytes) = state.handle(message) else { continue };
+                    (bytes, 0)
+                }
             };
             if let Err(err) = stdin.write_all(&bytes).await {
                 log::debug!("stdin.write_all() failed with error '{err:?}'");
                 break;
             }
+            receive_credit.consumed(window_credit);
         }
     });
 
     // Only a pty session's output is scanned: on a plain `ssh host cmd` the
     // bytes are the client's file, and each stream needs its own scanner because
     // a sequence split across reads must not be reassembled across streams.
-    let coordinator = terminal.then(|| stdin_tx.clone());
+    let coordinator = terminal.then(|| coordinator_tx.clone());
 
     let stdout_task = tokio::spawn(pump_output(
         child.stdout.take().unwrap(),
         session.clone(),
-        channel,
+        channel_id,
         OutputStream::Stdout,
         coordinator.clone(),
     ));
     let stderr_task = tokio::spawn(pump_output(
         child.stderr.take().unwrap(),
         session.clone(),
-        channel,
+        channel_id,
         OutputStream::Stderr,
         coordinator,
     ));
@@ -291,7 +329,7 @@ pub async fn spawn(
                 if let Some(code) = status.code() {
                     log::info!("child exited with {code}");
                     let _ = session_handle
-                        .exit_status_request(channel, i32::cast_unsigned(code))
+                        .exit_status_request(channel_id, i32::cast_unsigned(code))
                         .await;
                 }
             }
@@ -301,12 +339,14 @@ pub async fn spawn(
         }
 
         if close_guard.claim() {
-            let _ = session_handle.eof(channel).await;
-            let _ = session_handle.close(channel).await;
+            let _ = session_handle.eof(channel_id).await;
+            let _ = session_handle.close(channel_id).await;
         }
     });
 
-    Ok(stdin_tx)
+    Ok(StdinTx {
+        coordinator: coordinator_tx,
+    })
 }
 
 /// Sends one of the child's output streams to the client until it ends.
@@ -344,13 +384,14 @@ async fn pump_output(
     session: russh::server::Handle,
     channel: russh::ChannelId,
     output_stream: OutputStream,
-    coordinator: Option<StdinTx>,
+    coordinator: Option<tokio::sync::mpsc::Sender<SessionMessage>>,
 ) {
     use tokio::io::AsyncReadExt;
 
     let name = output_stream.name();
     let mut scanner = mode2048::Scanner::new(true);
     let mut buf = [0_u8; 256];
+    let mut coordinator_open = true;
 
     loop {
         let read = match stream.read(&mut buf).await {
@@ -393,13 +434,14 @@ async fn pump_output(
         }
 
         for command in commands {
-            if coordinator
-                .send(SessionMessage::Control(command))
-                .await
-                .is_err()
+            if coordinator_open
+                && coordinator
+                    .send(SessionMessage::Control(command))
+                    .await
+                    .is_err()
             {
                 log::debug!("the session coordinator is gone.");
-                return;
+                coordinator_open = false;
             }
         }
         if !output.is_empty()
@@ -598,17 +640,6 @@ mod tests {
             control(&mut state, mode2048::Command::Query),
             mode2048::DECRPM_ENABLED,
             "russhd implements the mode whether or not it has a size to report"
-        );
-    }
-
-    #[test]
-    fn what_the_client_types_reaches_the_child_untouched() {
-        let mut state = session(pty(100, 30, 0, 0));
-        let typed = b"\x03\x1b[A\r\n\x00\xff".to_vec();
-
-        assert_eq!(
-            state.handle(SessionMessage::Input(typed.clone())),
-            Some(typed)
         );
     }
 

@@ -99,9 +99,17 @@ impl client::Handler for Handler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         self.deadline.clear();
+        let russh::keys::PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_public_key
+        else {
+            // known_hosts does not implement certificate-authority trust.
+            return Ok(false);
+        };
         let state = known_hosts::check(
             &self.known_hosts,
             &self.destination.host,

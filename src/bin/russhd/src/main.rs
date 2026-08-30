@@ -55,6 +55,7 @@ async fn main() {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
+        window_size: local_session::SSH_RECEIVE_WINDOW,
         keys: vec![program_config.host_key().clone()],
         preferred: Preferred {
             ..Preferred::default()
@@ -97,6 +98,7 @@ struct ConnectionHandler {
     stdin_tx: Option<StdinTx>,
     sftp_channel_id: Option<ChannelId>,
     close_guard: Option<ChannelCloseGuard>,
+    receive_credit: Option<ReceiveCredit>,
 }
 
 impl ConnectionHandler {
@@ -112,6 +114,7 @@ impl ConnectionHandler {
             stdin_tx: None,
             sftp_channel_id: None,
             close_guard: None,
+            receive_credit: None,
         }
     }
 
@@ -124,14 +127,20 @@ impl ConnectionHandler {
             .clone();
 
         let (channel, session) = self.channel.take().unwrap();
+        let channel_id = channel.id();
+        let receive_credit = self
+            .receive_credit
+            .take()
+            .ok_or(russh::Error::Inconsistent)?;
         let session_clone = session.clone();
         let geometry = self.pty_request.as_ref().map(|request| request.geometry);
         self.stdin_tx = Some(
             local_session::spawn(
                 command,
                 geometry,
-                channel.id(),
+                channel,
                 session,
+                receive_credit,
                 close_guard,
                 &self.config,
             )
@@ -145,7 +154,7 @@ impl ConnectionHandler {
         let data = "Hello! Welcome to RUSSHD.\r\n\r\n";
 
         session_clone
-            .data(channel.id(), data)
+            .data(channel_id, data)
             .await
             .map_err(|_| russh::Error::Inconsistent)?;
 
@@ -155,6 +164,11 @@ impl ConnectionHandler {
     async fn spawn_sftp_server(&mut self) -> Result<(), russh::Error> {
         assert!(self.sftp_channel_id.is_none());
         let (channel, _session) = self.channel.take().unwrap();
+        drop(
+            self.receive_credit
+                .take()
+                .ok_or(russh::Error::Inconsistent)?,
+        );
         self.sftp_channel_id = Some(channel.id());
 
         let sftp = russhd::sftp_session::SftpSession::default();
@@ -205,13 +219,18 @@ impl ConnectionHandler {
             .clone();
 
         let (channel, session) = self.channel.take().unwrap();
+        let receive_credit = self
+            .receive_credit
+            .take()
+            .ok_or(russh::Error::Inconsistent)?;
         let geometry = self.pty_request.as_ref().map(|request| request.geometry);
         self.stdin_tx = Some(
             local_session::spawn(
                 command,
                 geometry,
-                channel.id(),
+                channel,
                 session,
+                receive_credit,
                 close_guard,
                 &self.config,
             )
@@ -364,6 +383,11 @@ impl server::Handler for ConnectionHandler {
             return Ok(());
         }
 
+        self.receive_credit = Some(
+            session
+                .receive_credit(channel.id())
+                .ok_or(russh::Error::Inconsistent)?,
+        );
         self.channel = Some((channel, session.handle()));
         self.close_guard = Some(ChannelCloseGuard::default());
         reply.accept().await;
@@ -539,7 +563,7 @@ impl server::Handler for ConnectionHandler {
     async fn data(
         &mut self,
         channel_id: ChannelId,
-        data: &[u8],
+        _data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
@@ -552,11 +576,11 @@ impl server::Handler for ConnectionHandler {
             return Err(russh::Error::Disconnect);
         };
 
-        if let Err(err) = stdin_tx
-            .send(local_session::SessionMessage::Input(data.to_vec()))
-            .await
-        {
-            log::warn!("stdin_tx.send() failed with error '{err:?}'.");
+        // Russh queued these bytes on the channel before invoking this
+        // callback. The session's stdin task consumes that bounded queue and
+        // returns receive credit only after writing the bytes to the child.
+        if !stdin_tx.is_open() {
+            log::warn!("Got remote data after the local input task stopped.");
             return Err(russh::Error::Disconnect);
         }
 

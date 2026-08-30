@@ -9,7 +9,7 @@ hex          = "0.4.3"
 log          = "=0.4.28"
 moto-tooling = { path = "../../sys/lib/moto-tooling", features = ["std"] }
 rand         = "0.10"
-russh        = { git = "https://github.com/moturus/russh.git", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh        = { git = "https://github.com/moturus/russh.git", branch = "server-window", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
 serde        = { version = "1.0.*", features = ["derive"] }
 sha2         = "=0.10.8"

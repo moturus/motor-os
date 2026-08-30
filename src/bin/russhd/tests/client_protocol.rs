@@ -99,8 +99,8 @@ impl Fixture {
         args
     }
 
-    fn run(&self, args: &[String], input: &[u8]) -> Output {
-        let mut child = Command::new(SSH)
+    fn run_with(&self, program: &str, args: &[String], input: &[u8]) -> Output {
+        let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -109,6 +109,10 @@ impl Fixture {
             .unwrap();
         child.stdin.take().unwrap().write_all(input).unwrap();
         child.wait_with_output().unwrap()
+    }
+
+    fn run(&self, args: &[String], input: &[u8]) -> Output {
+        self.run_with(SSH, args, input)
     }
 }
 
@@ -413,4 +417,57 @@ fn command_drains_output_while_remote_does_not_read_large_stdin() {
     );
     assert_eq!(output.stdout.len(), FULL_DUPLEX_STREAM_SIZE);
     assert!(output.stdout.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn server_drains_output_while_child_does_not_read_large_stdin() {
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend([
+        "motor@127.0.0.1".to_owned(),
+        format!("/usr/bin/head -c {FULL_DUPLEX_STREAM_SIZE} /dev/zero"),
+    ]);
+    let output = run_full_duplex(&ssh, vec![0x5a; FULL_DUPLEX_STREAM_SIZE]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout.len(), FULL_DUPLEX_STREAM_SIZE);
+    assert!(output.stdout.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn server_returns_window_credit_as_child_consumes_stdin() {
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend(["motor@127.0.0.1".to_owned(), "cat".to_owned()]);
+    let input = vec![0x5a; FULL_DUPLEX_STREAM_SIZE];
+    let output = run_full_duplex(&ssh, input.clone());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout.len(), input.len());
+    assert!(output.stdout.iter().all(|byte| *byte == 0x5a));
+}
+
+#[test]
+fn pty_output_survives_client_eof_before_terminal_controls() {
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend([
+        "-tt".to_owned(),
+        "motor@127.0.0.1".to_owned(),
+        r#"sleep 0.1; printf '\033[?2048$p\033[?2048hvisible\n'"#.to_owned(),
+    ]);
+    let output = fixture.run_with("ssh", &ssh, b"");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"visible\n\r");
 }
