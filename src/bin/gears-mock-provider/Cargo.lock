@@ -60,7 +60,7 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#610d8b0f6cf602695208204002dfed120fccc4df"
+source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#94317189d1be68cd409d13380b8f4f94af9bc08c"
 dependencies = [
  "bitflags",
  "mio",
