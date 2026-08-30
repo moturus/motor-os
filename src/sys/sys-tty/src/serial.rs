@@ -80,22 +80,27 @@ impl fmt::Write for SerialPort {
     }
 }
 
-static SERIAL1: std::sync::Mutex<SerialPort> =
+// The UART has independent receive and transmit paths. A long output write may
+// poll OUTPUT_EMPTY for every byte, so sharing its lock with input can split a
+// terminal response by starving the receiver.
+static SERIAL1_INPUT: std::sync::Mutex<SerialPort> =
+    std::sync::Mutex::new(unsafe { SerialPort::new(0x3F8) });
+static SERIAL1_OUTPUT: std::sync::Mutex<SerialPort> =
     std::sync::Mutex::new(unsafe { SerialPort::new(0x3F8) });
 
 pub fn read_serial() -> Option<u8> {
-    SERIAL1.lock().unwrap().read()
+    SERIAL1_INPUT.lock().unwrap().read()
 }
 
 #[doc(hidden)]
 pub fn write_serial_raw(data: &[u8]) {
-    SERIAL1.lock().unwrap().write(data);
+    SERIAL1_OUTPUT.lock().unwrap().write(data);
 }
 
 #[doc(hidden)]
 pub fn write_serial_args(args: ::core::fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1
+    SERIAL1_OUTPUT
         .lock()
         .unwrap()
         .write_fmt(args)
