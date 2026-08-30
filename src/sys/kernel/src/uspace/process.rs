@@ -1893,6 +1893,7 @@ impl Thread {
         }
 
         // See the WakeDiag doc: rates from two dumps taken seconds apart.
+        /*
         crate::write_serial!(
             "WDIAG tid={} q={} t={} waits={} fast={} paused={} spurw={} spurc={} w_in={} w_run={} o_in={} o_run={} to={} scw={} lwt={} lwh=0x{:x} tmo={}\n",
             self.tid.as_u64(),
@@ -1913,6 +1914,7 @@ impl Thread {
             self.diag.last_wake_handle.load(Ordering::Relaxed),
             self.timed_out.load(Ordering::Relaxed)
         );
+        */
 
         thread_data
     }
