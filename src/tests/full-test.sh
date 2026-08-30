@@ -204,6 +204,7 @@ vm_rmux() {
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
 . "$WD/test-udp-fragmentation.sh"
+. "$WD/test-ssh-client-host.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -323,6 +324,7 @@ stop_vmm() {
     kill "$RMUX_TITLE_SSH_PID" 2>/dev/null
     wait "$RMUX_TITLE_SSH_PID" 2>/dev/null
   fi
+  cleanup_ssh_client_host
   stop_udp_fragment_echo
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -493,6 +495,7 @@ vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
+test_ssh_client_host
 
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test
