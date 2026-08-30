@@ -16,6 +16,7 @@ mod fs_permissions;
 mod fsbench;
 mod icmp;
 mod io_channel;
+mod kernel_log;
 mod logging;
 mod moto_async;
 mod mpmc;
@@ -1311,6 +1312,7 @@ fn main() {
     );
 
     diagnostics::run_all_tests();
+    kernel_log::run_all_tests();
 
     // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();

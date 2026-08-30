@@ -3,6 +3,7 @@
 
 // Syscalls.
 pub mod caps;
+pub mod kernel_log;
 pub mod stats;
 pub mod sys_cpu;
 pub mod sys_mem;

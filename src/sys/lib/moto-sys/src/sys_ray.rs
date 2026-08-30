@@ -58,7 +58,7 @@ impl SysRay {
     pub const F_DBG_DETACH: u32 = 8;
 
     /// Used internally by the kernel and sys-tty.
-    pub const CONSOLE_SHARED_BUF_SZ: usize = 65536;
+    pub const CONSOLE_SHARED_BUF_SZ: usize = crate::kernel_log::KERNEL_LOG_RING_SIZE;
 
     #[cfg(feature = "userspace")]
     pub fn process_status(handle: SysHandle) -> Result<Option<u64>, ErrorCode> {
