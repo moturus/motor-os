@@ -14,6 +14,7 @@ use crate::output::{Output, Source};
 mod ansi;
 mod kernel_log;
 mod output;
+mod sanitize;
 mod serial;
 
 const USER_HOME: &str = "/user";
@@ -48,6 +49,7 @@ fn read_config(output: &Output) -> String {
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
         ansi::run_self_tests();
+        sanitize::run_self_tests();
         output::run_self_tests();
         kernel_log::run_self_tests();
         return;
