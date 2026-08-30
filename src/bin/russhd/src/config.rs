@@ -70,19 +70,19 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
 
     fn new(conf: ConfigV1) -> Result<Arc<Self>, russh::Error> {
         let listen_on = SocketAddr::from_str(&conf.listen_on).map_err(|e| {
-            russh::Error::InvalidConfig(format!("Error parsing {}: {e:?}", &conf.listen_on))
+            russh::Error::InvalidConfig(format!("Error parsing {}: {e:?}", conf.listen_on))
         })?;
         let host_key = russh::keys::PrivateKey::from_openssh(&conf.host_key)?;
 
         let mut users = HashMap::new();
         for (username, user_cfg) in &conf.users {
             let salt = hex::decode(&user_cfg.salt).map_err(|e| {
-                russh::Error::InvalidConfig(format!("Bad salt {}: {e:?}", &user_cfg.salt))
+                russh::Error::InvalidConfig(format!("Bad salt {}: {e:?}", user_cfg.salt))
             })?;
             let password_hash = hex::decode(&user_cfg.password_hash).map_err(|e| {
                 russh::Error::InvalidConfig(format!(
                     "Bad password hash {}: {e:?}",
-                    &user_cfg.password_hash
+                    user_cfg.password_hash
                 ))
             })?;
             let pub_key = if user_cfg.authorized_key.is_empty() {

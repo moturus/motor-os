@@ -19,7 +19,7 @@ fn vroom_vroom() {
     rand::rng().fill_bytes(&mut salt);
 
     let mut hasher = Sha256::new();
-    hasher.update(&salt);
+    hasher.update(salt);
     hasher.update(password.as_bytes());
     let password_hash = hasher.finalize();
 
