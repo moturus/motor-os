@@ -110,6 +110,9 @@ toolchain_derive_runtime_identity() {
 
 toolchain_derive_assembly_identity() {
 	local root="$1" mlibc="$2" cargo="$3"
+	STANDALONE_LLVM_CONFIG_DIGEST="$(
+		toolchain_standalone_llvm_config_digest
+	)" || return
 	toolchain_derive_runtime_identity "$root" "$cargo" || return
 	MOTOR_OS_REV="$(git -C "$root" rev-parse HEAD)" || return
 	MOTOR_MLIBC_TREE_STATE="$(toolchain_worktree_digest "$mlibc" mlibc)" || return
@@ -133,6 +136,9 @@ toolchain_derive_consumed_assembly_identity() {
 	local root="$1" cargo="$2" toolchain_key="$3"
 	MOTOR_TOOLCHAIN_KEY="$toolchain_key"
 	MOTOR_MLIBC_TREE_STATE=clean
+	STANDALONE_LLVM_CONFIG_DIGEST="$(
+		toolchain_standalone_llvm_config_digest
+	)" || return
 	toolchain_derive_runtime_identity "$root" "$cargo" || return
 	NATIVE_CONFIGURATION_DIGEST="$(toolchain_native_configuration_digest)"
 	MOTOR_ASSEMBLY_KEY="$(toolchain_assembly_key)"
@@ -194,6 +200,7 @@ authoring_source_digest=$AUTHORING_SOURCE_DIGEST
 root_lock_sha256=$START_RUST_ROOT_LOCK_SHA256
 library_lock_sha256=$START_RUST_LIBRARY_LOCK_SHA256
 bootstrap_config_digest=$BOOTSTRAP_CONFIG_DIGEST
+standalone_llvm_config_digest=$STANDALONE_LLVM_CONFIG_DIGEST
 stdlib_moto_rt_version=$LOCKED_MOTO_RT_VERSION
 stdlib_moto_rt_checksum=$LOCKED_MOTO_RT_CHECKSUM
 stdlib_moto_rt_package_comparison=$MOTO_RT_PACKAGE_COMPARISON
@@ -265,11 +272,13 @@ toolchain_validate_consumed_assembly() (
 		exit 1
 	}
 
-	fields=(schema toolchain_key assembly_key motor_os_runtime_tree mlibc_rev
-		mlibc_tree_state local_moto_rt_version native_configuration_digest)
+	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
+		motor_os_runtime_tree mlibc_rev mlibc_tree_state local_moto_rt_version
+		native_configuration_digest)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
-		"$MOTOR_ASSEMBLY_KEY" "$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean
-		"$LOCAL_MOTO_RT_VERSION" "$NATIVE_CONFIGURATION_DIGEST")
+		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
+		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
+		"$NATIVE_CONFIGURATION_DIGEST")
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {

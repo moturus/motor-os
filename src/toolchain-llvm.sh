@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 # Keyed standalone LLVM used by the Rust bootstrap and C sysroot producers.
 
-toolchain_standalone_llvm_config_digest() {
-	toolchain_hash_pairs schema motor-standalone-llvm-config-v1 \
-		generator Ninja build_type Release assertions true \
-		projects 'clang;lld' targets X86 tests false \
-		c_compiler clang cxx_compiler clang++
-}
-
 toolchain_standalone_llvm_key() {
 	toolchain_hash_pairs schema motor-standalone-llvm-key-v1 \
 		effective_llvm_rev "$EFFECTIVE_MOTOR_LLVM_REV" \
@@ -28,7 +21,7 @@ EOF
 }
 
 toolchain_validate_standalone_llvm() {
-	local build="$1" binary version expected
+	local build="$1" binary version expected library library_files
 	expected="$(mktemp)"
 	toolchain_render_standalone_llvm_manifest > "$expected"
 	if ! cmp -s "$expected" "$build/MOTOR-LLVM-MANIFEST"; then
@@ -46,7 +39,15 @@ toolchain_validate_standalone_llvm() {
 	[ "$version" = "$RUST_LLVM_VERSION" ] ||
 		toolchain_die "standalone LLVM version is $version, expected $RUST_LLVM_VERSION" || return
 	"$build/bin/clang" --version | grep -Fq "$RUST_LLVM_VERSION" ||
-		toolchain_die "standalone Clang reports the wrong version"
+		toolchain_die "standalone Clang reports the wrong version" || return
+	library_files="$("$build/bin/llvm-config" --link-static --libfiles)" ||
+		toolchain_die "standalone llvm-config cannot list static libraries" || return
+	[ -n "$library_files" ] ||
+		toolchain_die "standalone llvm-config listed no static libraries" || return
+	for library in $library_files; do
+		[ -f "$library" ] ||
+			toolchain_die "standalone LLVM lacks static library: $library" || return
+	done
 }
 
 toolchain_verify_llvm_selection() {
@@ -81,13 +82,17 @@ toolchain_build_standalone_llvm() {
 	fi
 	TOOLCHAIN_LLVM_REUSED=false
 	toolchain_verify_llvm_selection "$llvm" || return
-	"$cmake" -S "$llvm/llvm" -B "$STANDALONE_LLVM_BUILD" -G Ninja \
-		-DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON \
-		-DLLVM_ENABLE_PROJECTS='clang;lld' -DLLVM_TARGETS_TO_BUILD=X86 \
-		-DLLVM_INCLUDE_TESTS=OFF -DCMAKE_C_COMPILER=clang \
-		-DCMAKE_CXX_COMPILER=clang++ || return
-	"$ninja" -C "$STANDALONE_LLVM_BUILD" clang lld llvm-ar llvm-ranlib \
-		llvm-nm llvm-readelf llvm-strip llvm-objcopy llvm-config || return
+	"$cmake" -S "$llvm/llvm" -B "$STANDALONE_LLVM_BUILD" \
+		-G "$MOTOR_STANDALONE_LLVM_GENERATOR" \
+		-DCMAKE_BUILD_TYPE="$MOTOR_STANDALONE_LLVM_BUILD_TYPE" \
+		-DLLVM_ENABLE_ASSERTIONS="$MOTOR_STANDALONE_LLVM_ASSERTIONS" \
+		-DLLVM_ENABLE_PROJECTS="$MOTOR_STANDALONE_LLVM_PROJECTS" \
+		-DLLVM_TARGETS_TO_BUILD="$MOTOR_LLVM_TARGETS" \
+		-DLLVM_INCLUDE_TESTS="$MOTOR_STANDALONE_LLVM_INCLUDE_TESTS" \
+		-DCMAKE_C_COMPILER="$MOTOR_STANDALONE_LLVM_C_COMPILER" \
+		-DCMAKE_CXX_COMPILER="$MOTOR_STANDALONE_LLVM_CXX_COMPILER" || return
+	"$ninja" -C "$STANDALONE_LLVM_BUILD" \
+		"${MOTOR_STANDALONE_LLVM_NINJA_TARGETS[@]}" || return
 	toolchain_verify_llvm_selection "$llvm" || return
 	manifest="$STANDALONE_LLVM_BUILD/MOTOR-LLVM-MANIFEST"
 	temporary="$(mktemp "${manifest}.tmp.XXXXXX")"

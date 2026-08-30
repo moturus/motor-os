@@ -52,15 +52,27 @@ fake_cmake="$temporary/cmake"
 printf '%s\n' '#!/usr/bin/env bash' \
 	'while [ "$#" -gt 0 ]; do if [ "$1" = -B ]; then shift; mkdir -p "$1/bin"; fi; shift; done' > "$fake_cmake"
 fake_ninja="$temporary/ninja"
-cat > "$fake_ninja" <<EOF
+cat > "$fake_ninja" <<'EOF'
 #!/usr/bin/env bash
-build="\$2"
-for binary in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy llvm-config; do
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$RUST_LLVM_VERSION"' > "\$build/bin/\$binary"
-  chmod +x "\$build/bin/\$binary"
+build="$2"
+for binary in clang clang++ ld.lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy; do
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$RUST_LLVM_VERSION"' > "$build/bin/$binary"
+  chmod +x "$build/bin/$binary"
 done
+mkdir -p "$build/lib"
+: > "$build/lib/libLLVM-test.a"
+cat > "$build/bin/llvm-config" <<TOOL
+#!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in
+--version:) printf '%s\n' '$RUST_LLVM_VERSION' ;;
+--link-static:--libfiles) printf '%s\n' '$build/lib/libLLVM-test.a' ;;
+*) exit 2 ;;
+esac
+TOOL
+chmod +x "$build/bin/llvm-config"
 EOF
 chmod +x "$fake_cmake" "$fake_ninja"
+export RUST_LLVM_VERSION
 export MOTOR_CMAKE_COMMAND="$fake_cmake" MOTOR_NINJA_COMMAND="$fake_ninja"
 
 cat > "$rust/x.py" <<EOF

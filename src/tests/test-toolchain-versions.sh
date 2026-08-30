@@ -13,6 +13,8 @@ fail() {
 }
 
 toolchain_validate_versions
+[ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v2 ] ||
+  fail "unexpected toolchain key schema"
 [ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v2 ] ||
   fail "unexpected assembly key schema"
 
@@ -31,6 +33,12 @@ original_build_tools="$MOTOR_BUILD_TOOLS"
 MOTOR_BUILD_TOOLS="cargo,clippy,rustdoc,rustfmt,src"
 [ "$key" != "$(toolchain_clean_key)" ] || fail "build tools did not change the key"
 MOTOR_BUILD_TOOLS="$original_build_tools"
+
+original_assertions="$MOTOR_STANDALONE_LLVM_ASSERTIONS"
+MOTOR_STANDALONE_LLVM_ASSERTIONS=ON
+[ "$key" != "$(toolchain_clean_key)" ] ||
+  fail "standalone LLVM configuration did not change the key"
+MOTOR_STANDALONE_LLVM_ASSERTIONS="$original_assertions"
 
 [ "$(toolchain_hash_pairs a bc)" != "$(toolchain_hash_pairs ab c)" ] ||
   fail "field boundaries are ambiguous"

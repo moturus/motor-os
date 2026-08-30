@@ -5,7 +5,7 @@
 # worktree state belong in generated manifests.
 
 MOTOR_GENERATED_MANIFEST_SCHEMA="motor-toolchain-manifest-v1"
-MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v1"
+MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v2"
 MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v2"
 
 MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.1"
@@ -62,6 +62,18 @@ MOTOR_OPTIMIZED_COMPILER_BUILTINS="false"
 MOTOR_DOWNLOAD_CI_LLVM="false"
 MOTOR_OMIT_GIT_HASH="false"
 
+MOTOR_STANDALONE_LLVM_GENERATOR="Ninja"
+MOTOR_STANDALONE_LLVM_BUILD_TYPE="Release"
+MOTOR_STANDALONE_LLVM_ASSERTIONS="OFF"
+MOTOR_STANDALONE_LLVM_PROJECTS="clang;lld"
+MOTOR_STANDALONE_LLVM_INCLUDE_TESTS="OFF"
+MOTOR_STANDALONE_LLVM_C_COMPILER="clang"
+MOTOR_STANDALONE_LLVM_CXX_COMPILER="clang++"
+MOTOR_STANDALONE_LLVM_NINJA_TARGETS=(
+  clang lld llvm-ar llvm-ranlib llvm-nm llvm-readelf llvm-strip llvm-objcopy
+  llvm-config llvm-libraries
+)
+
 # Reviewed inputs to the local runtime/sysroot content digest. Directories are
 # traversed canonically by the assembly implementation.
 MOTOR_OS_RUNTIME_INPUTS=(
@@ -78,7 +90,7 @@ MOTOR_TOOLCHAIN_KEY_FIELDS=(
   upstream_cargo_rev cargo_version cargo_rev effective_rust_rev effective_llvm_rev
   rust_tree_state llvm_tree_state authoring_source_digest
   rust_root_lock_sha256 rust_library_lock_sha256 bootstrap_config_digest
-  rust_channel build_host
+  standalone_llvm_config_digest rust_channel build_host
   build_targets build_tools build_extended build_docs build_submodules
   build_locked_deps optimized_compiler_builtins download_ci_llvm llvm_targets
   omit_git_hash declared_rust_rev declared_llvm_rev

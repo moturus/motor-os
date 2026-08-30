@@ -25,11 +25,13 @@ selector_initialize_identity() {
 	MOTOR_ASSEMBLY_KEY="$assembly_key"
 	MOTOR_OS_RUNTIME_TREE="$runtime_tree"
 	MOTOR_MLIBC_TREE_STATE=clean
+	STANDALONE_LLVM_CONFIG_DIGEST="$(toolchain_standalone_llvm_config_digest)"
 	NATIVE_CONFIGURATION_DIGEST="$native_config"
 }
 
 write_assembly() {
-	local key="$1" root manifest
+	local key="$1" root manifest standalone_llvm_config_digest
+	standalone_llvm_config_digest="$(toolchain_standalone_llvm_config_digest)"
 	root="$temporary/assemblies/$key"
 	mkdir -p "$root/sysroot/devtools/llvm/lib" \
 		"$root/images/llvm/devtools/llvm/bin" \
@@ -48,6 +50,8 @@ write_assembly() {
 		printf 'schema=%s\n' "$MOTOR_GENERATED_MANIFEST_SCHEMA"
 		printf 'toolchain_key=%s\n' "$toolchain_key"
 		printf 'assembly_key=%s\n' "$key"
+		printf 'standalone_llvm_config_digest=%s\n' \
+			"$standalone_llvm_config_digest"
 		printf 'source_mode=managed\nassembly_state=clean\n'
 		printf 'motor_os_rev=0123456789abcdef0123456789abcdef01234567\n'
 		printf 'motor_os_runtime_tree=%s\n' "$runtime_tree"

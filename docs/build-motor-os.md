@@ -80,10 +80,11 @@ The workflow performs these stages:
    default is selected or changed.
 2. Resolve and verify the exact Rust, LLVM, Cargo, and mlibc inputs. Hash the
    starting Rust root and library lockfiles.
-3. Build standalone host LLVM from the same effective LLVM tree used by rustc.
+3. Build standalone host LLVM from the effective LLVM tree and use it as
+   rustc's host LLVM.
 4. Run Rust bootstrap once to install Linux-host rustc/rustdoc, Cargo, host and
-   Motor std, Clippy, rustfmt/`cargo-fmt`, and `rust-src` into an immutable
-   key-qualified prefix.
+   Motor std, Clippy, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src` into
+   an immutable key-qualified prefix.
 5. Register that prefix under its exact rustup name and validate every
    component, source commit, sysroot, lock hash, and both host/target compile
    probes.
@@ -185,6 +186,30 @@ source, lockfile, or build defect before removing any marker or output.
 If Rust bootstrap rewrites a lockfile, that run's prefix is rejected because
 its starting key no longer describes the produced artifact. Review and commit
 the visible lockfile change in the Rust fork; the next run derives a new key.
+
+For a deliberately clean managed rebuild, first set and verify the development
+root. Then remove the keyed outputs and Rust bootstrap state before rerunning
+the build:
+
+```sh
+(
+  set -eu
+  test -n "${MOTORH:-}" && test "$MOTORH" != /
+  rm -rf -- "$MOTORH/toolchains"/* \
+    "$MOTORH/toolchain-state"/* \
+    "$MOTORH/assemblies"/* \
+    "$MOTORH/build/toolchain/standalone-llvm"/* \
+    "$MOTORH/toolchain-src/rust/build"
+  src/build-motor-os.sh --source-mode managed
+)
+```
+
+The globs include adjacent `.building` producer locks. Inspect the expanded
+`MOTORH` and these paths before deleting them. Remove standalone LLVM only
+together with all assemblies: their sysroot wrappers refer to that keyed LLVM
+directory. The Rust `build/` tree is disposable after a successful build
+because each assembly contains copies of the native rustc and LLVM images it
+needs.
 
 ## Building and testing the repository
 

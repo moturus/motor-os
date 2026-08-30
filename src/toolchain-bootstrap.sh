@@ -45,13 +45,16 @@ sysconfdir = "etc"
 channel = "dev"
 omit-git-hash = false
 deny-warnings = false
-incremental = true
+incremental = false
 
 [llvm]
 download-ci-llvm = false
 targets = "X86"
 experimental-targets = ""
 static-libstdcpp = false
+
+[target.x86_64-unknown-linux-gnu]
+llvm-config = "$llvm_bin/llvm-config"
 
 [target.x86_64-unknown-motor]
 cc = "$sysroot/bin/motor-clang"

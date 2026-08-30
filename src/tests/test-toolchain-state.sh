@@ -46,6 +46,16 @@ first_key="$MOTOR_TOOLCHAIN_KEY"
 	fail "derived rustup name is not synchronized with the key"
 [ "$first_key" = "$(toolchain_key)" ] || fail "dynamic key is not deterministic"
 
+original_assertions="$MOTOR_STANDALONE_LLVM_ASSERTIONS"
+MOTOR_STANDALONE_LLVM_ASSERTIONS=ON
+toolchain_derive_identity
+[ "$MOTOR_TOOLCHAIN_KEY" != "$first_key" ] ||
+	fail "standalone LLVM configuration did not re-key dynamic identity"
+MOTOR_STANDALONE_LLVM_ASSERTIONS="$original_assertions"
+toolchain_derive_identity
+[ "$MOTOR_TOOLCHAIN_KEY" = "$first_key" ] ||
+	fail "restored standalone LLVM configuration did not restore identity"
+
 # A locally selected source stack cannot collide with the managed tuple even
 # when it starts from the same lockfiles.
 MOTOR_SOURCE_MODE=authoring

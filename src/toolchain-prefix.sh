@@ -113,6 +113,7 @@ declared_llvm_rev=$MOTOR_LLVM_REV
 cargo_rev=$SELECTED_MOTOR_CARGO_REV
 root_lock_sha256=$START_RUST_ROOT_LOCK_SHA256
 library_lock_sha256=$START_RUST_LIBRARY_LOCK_SHA256
+standalone_llvm_config_digest=$STANDALONE_LLVM_CONFIG_DIGEST
 moto_rt_version=$LOCKED_MOTO_RT_VERSION
 moto_rt_checksum=$LOCKED_MOTO_RT_CHECKSUM
 moto_rt_package_comparison=$MOTO_RT_PACKAGE_COMPARISON

@@ -22,13 +22,13 @@ toolchain_generate_bootstrap_config "$managed" "$rust_source" \
 	"$temporary/toolchains/managed" "$temporary/sysroot" \
 	"$temporary/llvm/bin" "$MOTOR_TOOLCHAIN_ID"
 
-expected_keys='change-id profile host target description submodules extended tools docs optimized-compiler-builtins locked-deps prefix sysconfdir channel omit-git-hash deny-warnings incremental download-ci-llvm targets experimental-targets static-libstdcpp cc cxx ar ranlib linker'
+expected_keys='change-id profile host target description submodules extended tools docs optimized-compiler-builtins locked-deps prefix sysconfdir channel omit-git-hash deny-warnings incremental download-ci-llvm targets experimental-targets static-libstdcpp llvm-config cc cxx ar ranlib linker'
 actual_keys="$(sed -n 's/^[[:space:]]*\([A-Za-z][A-Za-z0-9_-]*\)[[:space:]]*=.*/\1/p' "$managed" | tr '\n' ' ' | sed 's/ $//')"
 [ "$actual_keys" = "$expected_keys" ] ||
 	fail "bootstrap schema differs: $actual_keys"
 
 for section in '[build]' '[install]' '[rust]' '[llvm]' \
-	'[target.x86_64-unknown-motor]'; do
+	'[target.x86_64-unknown-linux-gnu]' '[target.x86_64-unknown-motor]'; do
 	grep -Fqx "$section" "$managed" || fail "missing section $section"
 done
 grep -Fqx 'profile = "library"' "$managed" || fail "wrong profile"
@@ -36,6 +36,10 @@ grep -Fqx 'tools = ["cargo", "clippy", "rust-analyzer", "rustdoc", "rustfmt", "s
 	fail "wrong bootstrap tools"
 grep -Fqx 'description = "'"$MOTOR_TOOLCHAIN_ID"'"' "$managed" ||
 	fail "managed description is missing"
+grep -Fqx 'incremental = false' "$managed" ||
+	fail "incremental compiler build was enabled"
+grep -Fqx 'llvm-config = "'"$temporary/llvm/bin/llvm-config"'"' "$managed" ||
+	fail "host rustc does not use the standalone LLVM"
 
 # Existing generated state is reusable only when it is byte-for-byte exact.
 before="$(sha256sum "$managed")"

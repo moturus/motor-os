@@ -28,7 +28,11 @@ toolchain_validate_versions() {
     UPSTREAM_CARGO_REV \
     MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 \
     MOTOR_MLIBC_REPOSITORY MOTOR_MLIBC_REF MOTOR_MLIBC_REV MOTOR_LUA_VERSION \
-    STDLIB_MOTO_RT_VERSION STDLIB_MOTO_RT_CHECKSUM LOCAL_MOTO_RT_VERSION; do
+    STDLIB_MOTO_RT_VERSION STDLIB_MOTO_RT_CHECKSUM LOCAL_MOTO_RT_VERSION \
+    MOTOR_STANDALONE_LLVM_GENERATOR MOTOR_STANDALONE_LLVM_BUILD_TYPE \
+    MOTOR_STANDALONE_LLVM_ASSERTIONS MOTOR_STANDALONE_LLVM_PROJECTS \
+    MOTOR_STANDALONE_LLVM_INCLUDE_TESTS MOTOR_STANDALONE_LLVM_C_COMPILER \
+    MOTOR_STANDALONE_LLVM_CXX_COMPILER; do
     [ -n "${!name:-}" ] || toolchain_die "missing declared field $name"
   done
 
@@ -48,6 +52,8 @@ toolchain_validate_versions() {
   esac
   [ "$STDLIB_MOTO_RT_VERSION" = "$LOCAL_MOTO_RT_VERSION" ] ||
     toolchain_die "local and std moto-rt versions differ"
+  [ "${#MOTOR_STANDALONE_LLVM_NINJA_TARGETS[@]}" -gt 0 ] ||
+    toolchain_die "standalone LLVM ninja target list is empty"
 }
 
 toolchain_serialize_pairs() {
@@ -66,6 +72,19 @@ toolchain_hash_pairs() {
   toolchain_serialize_pairs "$@" | sha256sum | awk '{print $1}'
 }
 
+toolchain_standalone_llvm_config_digest() {
+  local IFS=,
+  toolchain_hash_pairs schema motor-standalone-llvm-config-v2 \
+    generator "$MOTOR_STANDALONE_LLVM_GENERATOR" \
+    build_type "$MOTOR_STANDALONE_LLVM_BUILD_TYPE" \
+    assertions "$MOTOR_STANDALONE_LLVM_ASSERTIONS" \
+    projects "$MOTOR_STANDALONE_LLVM_PROJECTS" targets "$MOTOR_LLVM_TARGETS" \
+    tests "$MOTOR_STANDALONE_LLVM_INCLUDE_TESTS" \
+    c_compiler "$MOTOR_STANDALONE_LLVM_C_COMPILER" \
+    cxx_compiler "$MOTOR_STANDALONE_LLVM_CXX_COMPILER" \
+    ninja_targets "${MOTOR_STANDALONE_LLVM_NINJA_TARGETS[*]}"
+}
+
 toolchain_key() {
   local name
   for name in MOTOR_SOURCE_MODE SELECTED_RUSTUP_TOOLCHAIN_BASE \
@@ -75,7 +94,7 @@ toolchain_key() {
     EFFECTIVE_MOTOR_RUST_REV EFFECTIVE_MOTOR_LLVM_REV MOTOR_RUST_TREE_STATE \
     MOTOR_LLVM_TREE_STATE AUTHORING_SOURCE_DIGEST \
     START_RUST_ROOT_LOCK_SHA256 START_RUST_LIBRARY_LOCK_SHA256 \
-    BOOTSTRAP_CONFIG_DIGEST; do
+    BOOTSTRAP_CONFIG_DIGEST STANDALONE_LLVM_CONFIG_DIGEST; do
     [ -n "${!name:-}" ] || toolchain_die "missing toolchain-key input $name" || return
   done
   toolchain_hash_pairs \
@@ -100,6 +119,7 @@ toolchain_key() {
     rust_root_lock_sha256 "$START_RUST_ROOT_LOCK_SHA256" \
     rust_library_lock_sha256 "$START_RUST_LIBRARY_LOCK_SHA256" \
     bootstrap_config_digest "$BOOTSTRAP_CONFIG_DIGEST" \
+    standalone_llvm_config_digest "$STANDALONE_LLVM_CONFIG_DIGEST" \
     rust_channel "$MOTOR_RUST_CHANNEL" build_host "$MOTOR_BUILD_HOST" \
     build_targets "$MOTOR_BUILD_TARGETS" build_tools "$MOTOR_BUILD_TOOLS" \
     build_extended "$MOTOR_BUILD_EXTENDED" build_docs "$MOTOR_BUILD_DOCS" \
@@ -127,9 +147,12 @@ toolchain_clean_key() {
   local AUTHORING_SOURCE_DIGEST=none
   local START_RUST_ROOT_LOCK_SHA256="$MOTOR_RUST_ROOT_LOCK_SHA256"
   local START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
-  local BOOTSTRAP_CONFIG_DIGEST
+  local BOOTSTRAP_CONFIG_DIGEST STANDALONE_LLVM_CONFIG_DIGEST
   BOOTSTRAP_CONFIG_DIGEST="$(
     toolchain_bootstrap_identity_digest "$SELECTED_TOOLCHAIN_DESCRIPTION"
+  )" || return
+  STANDALONE_LLVM_CONFIG_DIGEST="$(
+    toolchain_standalone_llvm_config_digest
   )" || return
   toolchain_key
 }

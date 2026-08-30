@@ -14,6 +14,9 @@ toolchain_capture_starting_locks() {
 }
 
 toolchain_derive_identity() {
+	STANDALONE_LLVM_CONFIG_DIGEST="$(
+		toolchain_standalone_llvm_config_digest
+	)" || return
 	BOOTSTRAP_CONFIG_DIGEST="$(
 		toolchain_bootstrap_identity_digest "$SELECTED_TOOLCHAIN_DESCRIPTION"
 	)" || return

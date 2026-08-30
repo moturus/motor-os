@@ -44,11 +44,11 @@ lineage, and locally assembles the complete toolchain from that source tuple:
    commit, its LLVM submodule URL points at the Motor fork without a
    branch-following rule, and it keeps the Cargo gitlink that the Rust
    revision selects.
-5. Standalone LLVM/Clang and rustc's LLVM are built from that same Motor LLVM
-   commit.
+5. Standalone LLVM/Clang is built from that Motor LLVM commit and supplies
+   rustc's host LLVM through its `llvm-config`.
 6. From that one Rust revision, Linux-host rustc/rustdoc, Cargo, host std,
-   Motor std, Clippy, rustfmt/`cargo-fmt`, and `rust-src` are built and
-   installed into an immutable tuple-keyed prefix, registered as the one
+   Motor std, Clippy, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src` are
+   built and installed into an immutable tuple-keyed prefix, registered as the one
    versioned Motor rustup toolchain, and used for every repository build and
    test. The C sysroot is built with it, then the native Motor rustc from the
    same revision.
@@ -64,20 +64,21 @@ only purpose of the policy.
 The important rules are:
 
 - rustc/rustdoc, `core`, `alloc`, `std`, `proc_macro`, Cargo, Clippy,
-  rustfmt/`cargo-fmt`, and the native Motor rustc come from one Motor Rust
-  source revision;
+  rust-analyzer and its proc-macro server, rustfmt/`cargo-fmt`, and the native
+  Motor rustc come from one Motor Rust source revision;
 - every formal Motor Rust source tag descends from the declared stable Rust
   tag;
 - every formal Motor LLVM source tag descends from the exact LLVM gitlink in
   that stable Rust tag;
-- standalone LLVM/Clang and rustc's LLVM use the same effective LLVM revision
-  and source tree;
+- standalone LLVM/Clang supplies rustc's host LLVM, so both use the same
+  effective LLVM revision, source tree, and normalized configuration;
 - Rust's Stage 0 compiler is the only bootstrap-only input; it is selected by
   the Rust revision's `src/stage0`, recorded, and never chosen by Motor OS;
 - mlibc and separately versioned runtime inputs such as both copies of
   `moto-rt` are recorded;
-- Cargo, Clippy, rustdoc, rustfmt/`cargo-fmt`, and `rust-src` are components of
-  the Motor toolchain, not rustup fallbacks selected from installed channels;
+- Cargo, Clippy, rustdoc, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src`
+  are components of the Motor toolchain, not rustup fallbacks selected from
+  installed channels;
 - the same versioned Motor toolchain drives Linux-host work (host tools, host
   unit tests, the boot loaders, formatting) and Motor cross-compilation;
 - Lorry supports one Cargo compatibility family at a time: the Cargo selected
@@ -98,7 +99,7 @@ the generated local assembly manifest report:
 ```text
 Motor compiler lineage 1.99.0-motor.1
   based on upstream Rust 1.99.0 @ UPSTREAM_RUST_REV (Stage 0 @ UPSTREAM_STAGE0_REV)
-  rustc + rustdoc + rust-std + Cargo + Clippy + rustfmt/cargo-fmt + rust-src @ MOTOR_RUST_REV
+  rustc + rustdoc + rust-std + Cargo + Clippy + rust-analyzer + rustfmt/cargo-fmt + rust-src @ MOTOR_RUST_REV
   Cargo CLI MOTOR_CARGO_VERSION from source @ MOTOR_CARGO_REV (gitlink in MOTOR_RUST_REV)
   based on Rust's LLVM 23.x snapshot @ RUST_LLVM_BASE_REV
   LLVM/Clang/lld/libc++/compiler-rt @ MOTOR_LLVM_REV
@@ -170,9 +171,7 @@ In particular:
 The toolchain provides reproducible source resolution, not bit-for-bit binary
 reproducibility: Ubuntu packages, host compilers, paths, timestamps, and a
 hermetic build environment are not pinned. The two `x.py` invocations are not
-merged into one, the standalone LLVM build is not used as rustc's LLVM
-through `llvm-config`, and the latest upstream release is not adopted
-automatically.
+merged into one, and the latest upstream release is not adopted automatically.
 
 ## 3. Version roles
 
@@ -199,8 +198,9 @@ force-rebased public branches.
 
 The Motor Rust fork must be based on an exact stable Rust patch tag. Rust is a
 monorepo: that tag identifies rustc, the matching `library/` sources, the
-in-tree Clippy and rustfmt sources, and the Cargo submodule gitlink. The Motor
-compiler and std remain one source revision after Motor patches are applied.
+in-tree Clippy, rust-analyzer, and rustfmt sources, and the Cargo submodule
+gitlink. The Motor compiler and std remain one source revision after Motor
+patches are applied.
 
 Motor OS nevertheless uses unstable language features, and the boot loaders
 (`src/boot/x64.{mbr,boot,kloader}/build.sh`) build with `-Zbuild-std`,
@@ -227,6 +227,7 @@ That exact toolchain contains:
 - Linux-host standard libraries;
 - Motor target standard libraries;
 - Clippy and its driver;
+- rust-analyzer and its proc-macro server;
 - rustfmt and `cargo-fmt`;
 - `rust-src` (`lib/rustlib/src/rust/library`) for the boot loaders'
   `-Zbuild-std`; and
@@ -270,10 +271,10 @@ RUST_LLVM_BASE_REV + Motor LLVM patches = MOTOR_LLVM_REV
 
 In a managed build, the Motor Rust commit changes the upstream Rust gitlink from
 `RUST_LLVM_BASE_REV` to `MOTOR_LLVM_REV`. The Rust checkout's initialized
-`src/llvm-project` submodule is the only LLVM source tree: the standalone
-LLVM/Clang, compiler-rt, libc++, native LLVM, and rustc's LLVM builds all read
-it, so the build must require that submodule, the standalone LLVM artifacts,
-and rustc's built LLVM to all come from `MOTOR_LLVM_REV`. Because the generated
+`src/llvm-project` submodule is the only LLVM source tree: standalone
+LLVM/Clang, compiler-rt, libc++, and native LLVM all read it, and standalone
+LLVM supplies rustc's host LLVM. The build therefore requires that submodule
+and every LLVM artifact to come from `MOTOR_LLVM_REV`. Because the generated
 bootstrap configuration sets `submodules = false`, Rust bootstrap never
 touches the submodule; the checkout helper of section 5.1 owns its state.
 
@@ -411,8 +412,9 @@ Repository URLs and expected tool/runtime identities also belong in the
 declared block. Cargo is a submodule whose exact revision is selected by the
 Rust tree, while its reported CLI release is set by Rust bootstrap from the
 selected Rust version and channel; the Cargo package version in the submodule
-does not define that CLI release. Clippy and rustfmt are in-tree sources selected
-directly by `MOTOR_RUST_REV`. None is an independently selected host tool. The
+does not define that CLI release. Clippy, rust-analyzer, and rustfmt are in-tree
+sources selected directly by `MOTOR_RUST_REV`. None is an independently
+selected host tool. The
 manifest
 must assert for managed builds that `UPSTREAM_RUST_REV` is an ancestor of
 `MOTOR_RUST_REV`, `RUST_LLVM_BASE_REV` is an ancestor of `MOTOR_LLVM_REV`, the
@@ -511,13 +513,14 @@ them to equal `RUST_LLVM_BASE_REV` and the upstream Cargo gitlink; then require
 the gitlinks in `MOTOR_RUST_REV` to equal `MOTOR_LLVM_REV` and
 `MOTOR_CARGO_REV`. The helper initializes `src/llvm-project` and
 `src/tools/cargo` itself and sets `submodules = false` in the generated
-bootstrap configuration so bootstrap never re-fetches or resets them. The submodule has `HEAD` detached at `MOTOR_LLVM_REV` before any LLVM or
-`x.py` build runs. The standalone LLVM, compiler-rt,
+bootstrap configuration so bootstrap never re-fetches or resets them. The
+submodule has `HEAD` detached at `MOTOR_LLVM_REV` before any LLVM or `x.py`
+build runs. The standalone LLVM supplies rustc's host LLVM; compiler-rt,
 libc++-family, and native LLVM build directories live outside the source tree
-in keyed roots. Rustc's LLVM build remains under the `x.py`-owned Rust `build/`
-tree described in section 5.5; it is incremental across commits and is not
-separately keyed. The LLVM source submodule must be clean for every managed
-build.
+in keyed roots. The remaining bootstrap state remains under the `x.py`-owned
+Rust `build/` tree described in section 5.5 and is not separately keyed;
+compiler incremental compilation is disabled. The LLVM source submodule must
+be clean for every managed build.
 
 #### Source-authoring mode
 
@@ -546,8 +549,9 @@ authoring a later Rust update before changing the current managed tuple.
 
 The supplied Rust checkout and its initialized `src/llvm-project` submodule
 are the authoritative authoring worktrees. The orchestrator uses that one LLVM
-worktree for both the standalone LLVM/Clang build and rustc's LLVM build;
-accepting an unrelated sibling LLVM checkout would split the LLVM identity. The Cargo submodule must be initialized, clean,
+worktree for standalone LLVM/Clang, which supplies rustc's host LLVM;
+accepting an unrelated sibling LLVM checkout would split the LLVM identity.
+The Cargo submodule must be initialized, clean,
 and exactly at the gitlink in the effective Rust `HEAD`; that gitlink must
 remain the Cargo revision derived from `--authoring-base`. The effective
 tree's `src/stage0` identity must likewise remain the one derived from the
@@ -658,16 +662,16 @@ build sequence is:
 1. Resolve every source checkout according to the selected mode (section 5.1)
    and verify its ancestry, submodule, and tree-state relationships. Print the
    declared tuple, effective tuple, and source mode.
-2. Build the standalone cross LLVM/Clang/lld from the Rust checkout's
+2. Build standalone host LLVM/Clang/lld from the Rust checkout's
    `src/llvm-project` at the selected LLVM revision and tree, into a keyed
    build directory outside the source tree, and write the
    `motor-clang`/`motor-clang++`/`motor-rust-cc` wrappers. The wrappers
    reference the sysroot directory, which may still be empty.
 3. Generate the bootstrap configuration (below) and run one `x.py` invocation
    from the selected Rust revision and tree. It builds the Linux-host compiler,
-   std for both targets, Cargo from the `src/tools/cargo` gitlink, Clippy, and
-   rustfmt, with LLVM built from the same effective `src/llvm-project` source
-   state used in item 2, and installs the result into a tuple-keyed prefix
+   std for both targets, Cargo from the `src/tools/cargo` gitlink, Clippy,
+   rust-analyzer, and rustfmt. It uses the standalone LLVM from item 2 as its
+   host LLVM and installs the result into a tuple-keyed prefix
    (section 5.3). Register that prefix under the exact
    `${SELECTED_RUSTUP_TOOLCHAIN_BASE}-${MOTOR_TOOLCHAIN_KEY}` name. Validate
    its full key and prefix before anything else uses it.
@@ -728,7 +732,7 @@ target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
 description = "<SELECTED_TOOLCHAIN_DESCRIPTION>"
 submodules = false                      # source-mode resolution validates both submodules
 extended = true                         # x.py install installs tools only if set
-tools = ["cargo", "clippy", "rustdoc", "rustfmt", "src"]
+tools = ["cargo", "clippy", "rust-analyzer", "rustdoc", "rustfmt", "src"]
 docs = false                            # default true: install would build all docs
 optimized-compiler-builtins = false     # default depends on the channel; std has no C
 locked-deps = false                     # stated explicitly; see section 5.4
@@ -740,13 +744,17 @@ sysconfdir = "etc"                      # the default "/etc" is absolute and unw
 [rust]
 channel = "dev"
 omit-git-hash = false
+incremental = false
 
 [llvm]
 download-ci-llvm = false                # the library profile defaults it to true
 targets = "X86"
+
+[target.x86_64-unknown-linux-gnu]
+llvm-config = "<standalone LLVM bin>/llvm-config"
 ```
 
-The remaining settings (the `library` profile, `deny-warnings`, `incremental`,
+The remaining settings (the `library` profile, `deny-warnings`,
 `experimental-targets`, `static-libstdcpp`, and the
 `[target.x86_64-unknown-motor]` wrapper paths) are fixed by the template as
 well.
@@ -772,18 +780,21 @@ usage has been removed; it is not an unmodified stock stable compiler.
 
 ### 5.3 Deterministic Rust tools and the installed prefix
 
-Cargo, Clippy, and rustfmt are all ordinary Rust bootstrap tool steps: Cargo
-builds from the `src/tools/cargo` gitlink that the effective Rust `HEAD`
-records, and Clippy and rustfmt from the in-tree sources. `x.py install` builds
-and installs them in the same invocation as the compiler and both stds; a
-separate Cargo build outside bootstrap is unnecessary.
+Cargo, Clippy, rust-analyzer, and rustfmt are ordinary Rust bootstrap tool
+steps. Cargo builds from the `src/tools/cargo` gitlink that the effective Rust
+`HEAD` records, and the other tools build from in-tree sources. `x.py install`
+builds and installs them in the same invocation as the compiler and both stds;
+a separate Cargo build outside bootstrap is unnecessary.
 
 The linked toolchain is an installed prefix, not the `build/<host>/stage2`
 sysroot, because bootstrap's `Sysroot` step removes that directory at the
 start of every invocation. It is produced by `x.py install` with
 `[install] prefix` pointing at `$MOTORH/toolchains/<MOTOR_RUSTUP_TOOLCHAIN>`,
 whose exact name already includes `MOTOR_TOOLCHAIN_KEY`; this gives the
-standard component layout including `rust-src`. Bootstrap's install steps
+standard component layout including `rust-src`. Because host rustc uses the
+external standalone LLVM, bootstrap does not install the `llvm-tools`
+component (`llc`, `opt`, `llvm-cov`, and similar tools). `rust-lld`, `gcc-ld`,
+and `rust-objcopy` remain part of the rustc component. Bootstrap's install steps
 build with the compiler one stage below `--stage`, so `x.py install --stage 2`
 installs the stage-2 artifacts. The stage sysroot is never copied by hand:
 that would omit installer behavior and the vendored, reduced `rust-src`
@@ -819,6 +830,7 @@ rustup which cargo-clippy --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
 rustup which clippy-driver --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
 rustup which cargo-fmt --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
 rustup which rustfmt --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
+rustup which rust-analyzer --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
 rustc +"$MOTOR_RUSTUP_TOOLCHAIN" --print sysroot   # lib/rustlib/src/rust/library exists
 ```
 
@@ -941,14 +953,16 @@ Two keys are derived from that canonical serialization:
   and LLVM revisions and their tree states, `AUTHORING_SOURCE_DIGEST`, the Rust
   root and library lock hashes at the start of the run, and the
   identity-relevant bootstrap settings (channel, description, targets, tools,
-  LLVM options), but no host absolute paths. The declared Motor revisions are
-  also recorded and included, including in authoring mode when they differ
-  from the effective revisions.
+  LLVM options), plus the normalized standalone host LLVM configuration
+  digest, but no host absolute paths. The declared Motor revisions are also
+  recorded and included, including in authoring mode when they differ from
+  the effective revisions.
 - `MOTOR_ASSEMBLY_KEY` covers the toolchain key plus everything that
   determines the C sysroot and native artifacts: `MOTOR_MLIBC_REV` and its
-  tree state, `MOTOR_OS_RUNTIME_TREE`, `LOCAL_MOTO_RT_VERSION`, and the
-  standalone LLVM/compiler-rt/mlibc/libc++ configuration digest, canonically
-  normalized to exclude host absolute paths.
+  tree state, `MOTOR_OS_RUNTIME_TREE`, `LOCAL_MOTO_RT_VERSION`, and the native
+  build configuration digest, canonically normalized to exclude host absolute
+  paths. It inherits the standalone host LLVM identity through the toolchain
+  key.
 
 The exact `MOTOR_RUSTUP_TOOLCHAIN` name is derived from the selected base plus
 the full toolchain key after the key is computed; it is not itself a key input.
@@ -979,7 +993,7 @@ the manifest records the mapping:
   target directories, and `build/native-toolchain/*`): `MOTOR_TOOLCHAIN_KEY`,
   which the Makefile reads from the stamp inside
   `$(rustc --print sysroot)` rather than recomputing;
-- the standalone cross LLVM build: the effective LLVM revision and tree state
+- the standalone host LLVM build: the effective LLVM revision and tree state
   plus its normalized CMake/toolchain configuration digest;
 - the C sysroot, builtins, libc++, native LLVM, Lua, native rustc staging, and
   the generated image roots: `MOTOR_ASSEMBLY_KEY`.
@@ -990,8 +1004,9 @@ commit-pinned subproject checkouts may populate that snapshot, but never the
 authoritative managed mlibc checkout used to derive and verify the assembly
 identity.
 
-The Rust `build/` tree is owned by `x.py`, which is incremental across
-commits; it is not re-keyed. The build scripts do not use `src/sys/target`; every Cargo invocation they
+The Rust `build/` tree is owned by `x.py` and is not re-keyed. Rust compiler
+incremental compilation is disabled, though bootstrap may reuse completed
+build steps. The build scripts do not use `src/sys/target`; every Cargo invocation they
 make sets `CARGO_TARGET_DIR` under the keyed roots. The same tuple may reuse its directory. A changed tuple gets a
 different directory; the build must not delete or silently reuse the old one.
 Each mutable keyed build root has an atomic per-key lock directory; a concurrent
@@ -1165,9 +1180,9 @@ the stable release of section 6.1 and are not yet exercised.
   imager, the host unit tests, Lorry itself, and `cargo fmt` all resolve to the
   same versioned Motor toolchain through the root override or its exact name.
   Rust's Stage 0 is used only inside `x.py`.
-- Cargo, Clippy, rustdoc, rustfmt/`cargo-fmt`, and `rust-src` resolve inside
-  that toolchain and cannot fall back to unrelated nightly, beta, or stable
-  installations.
+- Cargo, Clippy, rustdoc, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src`
+  resolve inside that toolchain and cannot fall back to unrelated nightly,
+  beta, or stable installations.
 - The linked toolchain is an installed keyed prefix that no `x.py` invocation
   modifies. Its rustup name includes the full toolchain key, and the link,
   prefix manifest, and clean root override agree on that key.
@@ -1176,9 +1191,9 @@ the stable release of section 6.1 and are not yet exercised.
   tuple that is the `1.99.0-dev` Cargo (family 1.99) at `MOTOR_CARGO_REV`; no
   1.97/1.98 or ambient-channel compatibility lane remains.
 - Host and native rustc share one effective Rust revision and report it in
-  `rustc -vV`; the standalone LLVM build and rustc LLVM build consume one
-  effective LLVM revision and tree. Managed builds also require the declared
-  Rust gitlink to equal that LLVM revision.
+  `rustc -vV`; standalone LLVM supplies host rustc's LLVM from one effective
+  LLVM revision and tree. Managed builds also require the declared Rust
+  gitlink to equal that LLVM revision.
 - Every authoring compiler carries a distinct description containing its full
   `AUTHORING_SOURCE_DIGEST` and is marked `development-authoring` or
   `development-dirty`. It cannot update the root override, satisfy
