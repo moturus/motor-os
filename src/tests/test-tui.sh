@@ -56,6 +56,9 @@ export MOTOR_TEST_ROOT
 TEST_BIN="$MOTOR_TEST_ROOT/tests"
 TEST_TMP="$MOTOR_TEST_ROOT/tmp"
 RMUX_TMPDIR="$TEST_TMP/test-tui-rmux"
+GUEST_KEY="$TEST_TMP/test-tui.key"
+GUEST_KNOWN="$TEST_TMP/test-tui-known-hosts"
+GUEST_STREAM_HELPER="$TEST_TMP/test-tui-stream-child.sh"
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -104,6 +107,15 @@ PTY_OUT_FD=""
 PTY_IN_FD=""
 PTY_OUTPUT=""
 
+GUEST_SSH="/user/bin/ssh -p 2222 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$GUEST_KNOWN -i $GUEST_KEY"
+
+remove_ssh_fixtures() {
+  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
+    vm_ssh "/system/bin/rm $GUEST_KEY $GUEST_KNOWN $GUEST_STREAM_HELPER" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
 remove_test_root() {
   if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
     kill -0 "$VMM_PID" 2>/dev/null; then
@@ -125,6 +137,7 @@ cleanup() {
     kill "$PTY_PID" 2>/dev/null
     wait "$PTY_PID" 2>/dev/null
   fi
+  remove_ssh_fixtures
   remove_test_root
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -168,6 +181,14 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2
 fi
+
+remove_ssh_fixtures
+printf 'put %s %s\nchmod 600 %s\nput %s %s\n' \
+  "$WD/test.key" "$GUEST_KEY" "$GUEST_KEY" \
+  "$WD/ssh-terminal-child.sh" "$GUEST_STREAM_HELPER" |
+  sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+    -i "$WD/test.key" motor@192.168.4.2 >/dev/null
 
 # The probe is systest's report child: it prints one line of fields
 # ("self=111 set=111 unset=111 key=0 dupfd=3 duporig=1 dupnew=1"), then reads
@@ -243,7 +264,7 @@ start_pty() {
 
   PTY_OUTPUT=""
   coproc CTRL_C_PTY {
-    ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$command" 2>&1
+    ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 "$command" 2>&1
   }
   PTY_PID="$!"
   exec {PTY_OUT_FD}<&"${CTRL_C_PTY[0]}"
@@ -291,6 +312,26 @@ finish_pty() {
   [ "$read_status" -eq 0 ] || fail "$label output ended with status $read_status"
   [ "$status" -eq "$expected" ] ||
     fail "$label exited with status $status, want $expected: '$(printf '%s' "$PTY_OUTPUT" | tail -c 800)'"
+}
+
+# Run a nested Motor ssh command, then ask the outer russhd pty which mode the
+# client left behind. The query and its reply are consumed by russhd; the
+# marker orders the host's newline after that reply has reached rush's stdin.
+start_nested_pty() {
+  local command="$1"
+
+  start_pty "$command; nested_status=\$?; printf '\\033[?2048\\044p'; printf MODE_QUERY_READY; read -r mode_state; printf '\\nMODE_STATE=%s NESTED_STATUS=%s\\n' \"\$mode_state\" \"\$nested_status\"; exit \"\$nested_status\""
+}
+
+finish_nested_pty() {
+  local expected="$1"
+  local label="$2"
+
+  wait_pty_output "MODE_QUERY_READY" "$label mode query"
+  printf '\n' >&"$PTY_IN_FD"
+  wait_pty_output $'MODE_STATE=\033[?2048;2$y' "$label mode restoration"
+  wait_pty_output "NESTED_STATUS=$expected" "$label nested status"
+  finish_pty "$expected" "$label"
 }
 
 # The console shell is a child of sys-tty, the serial-console terminal
@@ -425,6 +466,53 @@ wait_pty_output "NESTED_STATUS=130" "nested rush"
 printf 'exit\n' >&"$PTY_IN_FD"
 finish_pty 0 "nested rmux"
 
+echo "-- Motor ssh terminal size and normal restoration --"
+start_nested_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys"
+wait_pty_output "ready" "nested ssh terminal"
+wait_pty_output "resize=100x30" "nested ssh initial size"
+printf '\033[48;20;60;0;0t' >&"$PTY_IN_FD"
+wait_pty_output "resize=60x20" "nested ssh resize"
+printf 'x' >&"$PTY_IN_FD"
+wait_pty_output "key=Char('x')" "nested ssh input"
+printf '\n~~q' >&"$PTY_IN_FD"
+wait_pty_output "key=Char('~')" "nested ssh literal escape"
+wait_pty_output "end=quit" "nested ssh normal exit"
+finish_nested_pty 0 "nested ssh normal exit"
+
+echo "-- Motor ssh byte stream, prefix expiry, and local escape --"
+start_nested_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 /system/bin/rush $GUEST_STREAM_HELPER"
+wait_pty_output "STREAM_READY" "nested ssh byte stream"
+printf 'byte-transparent-x~.y\n' >&"$PTY_IN_FD"
+wait_pty_output "STREAM_ONE=<byte-transparent-x~.y>" "nested ssh byte stream"
+printf '~~literal\n' >&"$PTY_IN_FD"
+wait_pty_output "STREAM_TWO=<~literal>" "nested ssh doubled escape"
+finish_nested_pty 0 "nested ssh byte stream"
+
+start_nested_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys"
+wait_pty_output "ready" "nested ssh prefix expiry"
+# A lone Escape is also a possible terminal-reply prefix. It must be released
+# by the 50 ms idle deadline without another byte making it impossible.
+printf '\033' >&"$PTY_IN_FD"
+wait_pty_output "key=Esc" "nested ssh 50 ms prefix expiry"
+printf '\n~.' >&"$PTY_IN_FD"
+finish_nested_pty 255 "nested ssh local escape"
+
+echo "-- Motor ssh remote failure restoration --"
+start_nested_pty "$GUEST_SSH -t motor@127.0.0.1 '/system/bin/rush -c \"exit 7\"'"
+finish_nested_pty 7 "nested ssh remote failure"
+
+echo "-- Motor ssh Ctrl+C routing --"
+start_pty "$GUEST_SSH -t motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child"
+wait_pty_output "CTRL_C_DEFAULT_READY" "nested ssh pty Ctrl+C"
+printf '\003' >&"$PTY_IN_FD"
+finish_pty 130 "nested ssh pty Ctrl+C"
+
+start_pty "$GUEST_SSH -T motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child"
+wait_pty_output "CTRL_C_DEFAULT_READY" "nested ssh non-pty Ctrl+C"
+printf '\003' >&"$PTY_IN_FD"
+finish_pty 130 "nested ssh non-pty Ctrl+C"
+
+remove_ssh_fixtures
 remove_test_root
 stop_vm "$VMM_PID"
 VMM_PID=""
