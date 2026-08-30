@@ -2,11 +2,12 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::protocol::{FileAttributes, StatusCode};
 
 use super::{AppletError, SftpArgs};
 use crate::client::prompt;
 use crate::client::sftp::SftpConnection;
-use crate::client::transfer;
+use crate::client::{local, transfer};
 
 pub(super) async fn run(mut args: SftpArgs) -> Result<i32, AppletError> {
     let batch = args.batch_file.is_some();
@@ -143,9 +144,43 @@ async fn execute(
             }
             state.local_cwd = path;
         }
+        "ls" => list_remote(connection, state, args).await?,
+        "lls" => list_local(state, args)?,
+        "get" => get(connection, state, args).await?,
+        "put" => put(connection, state, args).await?,
+        "mkdir" => {
+            let path = remote_path(&state.remote_cwd, one_arg(args)?);
+            connection
+                .raw
+                .mkdir(path, attributes(0o755, true))
+                .await
+                .map_err(sftp_error)?;
+        }
+        "lmkdir" => local::create_dir(&local_path(&state.local_cwd, one_arg(args)?), 0o755)?,
+        "rm" => {
+            let path = remote_path(&state.remote_cwd, one_arg(args)?);
+            connection.raw.remove(path).await.map_err(sftp_error)?;
+        }
+        "rmdir" => {
+            let path = remote_path(&state.remote_cwd, one_arg(args)?);
+            connection.raw.rmdir(path).await.map_err(sftp_error)?;
+        }
+        "rename" => {
+            two_args(args)?;
+            connection
+                .raw
+                .rename(
+                    remote_path(&state.remote_cwd, &args[0]),
+                    remote_path(&state.remote_cwd, &args[1]),
+                )
+                .await
+                .map_err(sftp_error)?;
+        }
         "help" => {
             no_args(args)?;
-            println!("Commands: pwd lpwd cd lcd help bye exit quit");
+            println!(
+                "Commands: pwd lpwd cd lcd ls lls get put mkdir lmkdir rm rmdir rename help bye exit quit"
+            );
         }
         "bye" | "exit" | "quit" => {
             no_args(args)?;
@@ -158,6 +193,178 @@ async fn execute(
         }
     }
     Ok(Control::Continue)
+}
+
+async fn list_remote(
+    connection: &SftpConnection,
+    state: &State,
+    args: &[String],
+) -> Result<(), AppletError> {
+    at_most_one(args)?;
+    let path = remote_path(&state.remote_cwd, args.first().map_or(".", String::as_str));
+    let attrs = connection
+        .raw
+        .lstat(path.clone())
+        .await
+        .map_err(sftp_error)?
+        .attrs;
+    if !attrs.is_dir() {
+        println!("{path}");
+        return Ok(());
+    }
+    let handle = connection
+        .raw
+        .opendir(path)
+        .await
+        .map_err(sftp_error)?
+        .handle;
+    let result = async {
+        loop {
+            match connection.raw.readdir(handle.clone()).await {
+                Ok(names) => {
+                    for entry in names.files {
+                        if entry.filename != "." && entry.filename != ".." {
+                            println!("{}", entry.filename);
+                        }
+                    }
+                }
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+                Err(error) => return Err(sftp_error(error)),
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let close = connection.raw.close(handle).await.map_err(sftp_error);
+    result?;
+    close?;
+    Ok(())
+}
+
+fn list_local(state: &State, args: &[String]) -> Result<(), AppletError> {
+    at_most_one(args)?;
+    let path = local_path(&state.local_cwd, args.first().map_or(".", String::as_str));
+    if !path.is_dir() {
+        println!("{}", path.display());
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        println!("{}", entry?.file_name().to_string_lossy());
+    }
+    Ok(())
+}
+
+async fn get(
+    connection: &SftpConnection,
+    state: &State,
+    args: &[String],
+) -> Result<(), AppletError> {
+    let (recursive, source, target) = transfer_args(args)?;
+    let source = remote_path(&state.remote_cwd, source);
+    let mut target = match target {
+        Some(path) => local_path(&state.local_cwd, path),
+        None => state.local_cwd.join(transfer::basename(&source)?),
+    };
+    if target.is_dir() {
+        target = target.join(transfer::basename(&source)?);
+    }
+    let attrs = connection
+        .raw
+        .lstat(source.clone())
+        .await
+        .map_err(sftp_error)?
+        .attrs;
+    if attrs.is_dir() {
+        if !recursive {
+            return Err(AppletError::Message("get directory requires -r".to_owned()));
+        }
+        transfer::download_tree(
+            &connection.raw,
+            &source,
+            &target,
+            connection.limits.read_len,
+        )
+        .await?;
+    } else {
+        transfer::download_file(
+            &connection.raw,
+            &source,
+            &target,
+            connection.limits.read_len,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn put(
+    connection: &SftpConnection,
+    state: &State,
+    args: &[String],
+) -> Result<(), AppletError> {
+    let (recursive, source, target) = transfer_args(args)?;
+    let source = local_path(&state.local_cwd, source);
+    let mut target = match target {
+        Some(path) => remote_path(&state.remote_cwd, path),
+        None => {
+            let name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| AppletError::Message("local path has no UTF-8 name".to_owned()))?;
+            remote_path(&state.remote_cwd, name)
+        }
+    };
+    if remote_is_dir(connection, &target).await? {
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AppletError::Message("local path has no UTF-8 name".to_owned()))?;
+        target = transfer::remote_join(&target, name);
+    }
+    let metadata = source.symlink_metadata()?;
+    if metadata.is_dir() {
+        if !recursive {
+            return Err(AppletError::Message("put directory requires -r".to_owned()));
+        }
+        transfer::upload_tree(
+            &connection.raw,
+            &source,
+            &target,
+            connection.limits.write_len,
+        )
+        .await?;
+    } else {
+        transfer::upload_file(
+            &connection.raw,
+            &source,
+            &target,
+            connection.limits.write_len,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn remote_is_dir(connection: &SftpConnection, path: &str) -> Result<bool, AppletError> {
+    match connection.raw.stat(path.to_owned()).await {
+        Ok(attrs) => Ok(attrs.attrs.is_dir()),
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(false),
+        Err(error) => Err(sftp_error(error)),
+    }
+}
+
+fn transfer_args(args: &[String]) -> Result<(bool, &str, Option<&str>), AppletError> {
+    let (recursive, args) = if args.first().is_some_and(|value| value == "-r") {
+        (true, &args[1..])
+    } else {
+        (false, args)
+    };
+    if !(1..=2).contains(&args.len()) {
+        return Err(AppletError::Message(
+            "get/put require SOURCE and optional TARGET".to_owned(),
+        ));
+    }
+    Ok((recursive, &args[0], args.get(1).map(String::as_str)))
 }
 
 fn remote_path(cwd: &str, path: &str) -> String {
@@ -177,6 +384,15 @@ fn local_path(cwd: &Path, path: &str) -> PathBuf {
     }
 }
 
+fn attributes(mode: u32, directory: bool) -> FileAttributes {
+    let mut attrs = FileAttributes::empty();
+    attrs.permissions = Some(mode);
+    if directory {
+        attrs.set_dir(true);
+    }
+    attrs
+}
+
 fn no_args(args: &[String]) -> Result<(), AppletError> {
     if args.is_empty() {
         Ok(())
@@ -193,6 +409,26 @@ fn one_arg(args: &[String]) -> Result<&str, AppletError> {
     } else {
         Err(AppletError::Message(
             "command requires one argument".to_owned(),
+        ))
+    }
+}
+
+fn two_args(args: &[String]) -> Result<(), AppletError> {
+    if args.len() == 2 {
+        Ok(())
+    } else {
+        Err(AppletError::Message(
+            "command requires two arguments".to_owned(),
+        ))
+    }
+}
+
+fn at_most_one(args: &[String]) -> Result<(), AppletError> {
+    if args.len() <= 1 {
+        Ok(())
+    } else {
+        Err(AppletError::Message(
+            "command takes at most one argument".to_owned(),
         ))
     }
 }
@@ -258,5 +494,21 @@ mod tests {
         assert_eq!(tokenize("mkdir ''").unwrap(), ["mkdir", ""]);
         assert!(tokenize("put 'unterminated").is_err());
         assert!(tokenize("put trailing\\").is_err());
+    }
+
+    #[test]
+    fn parses_transfer_arguments() {
+        let args = ["source", "target"].map(str::to_owned);
+        assert_eq!(
+            transfer_args(&args).unwrap(),
+            (false, "source", Some("target"))
+        );
+
+        let recursive = ["-r", "source"].map(str::to_owned);
+        assert_eq!(transfer_args(&recursive).unwrap(), (true, "source", None));
+
+        assert!(transfer_args(&[]).is_err());
+        let too_many = ["one", "two", "three"].map(str::to_owned);
+        assert!(transfer_args(&too_many).is_err());
     }
 }
