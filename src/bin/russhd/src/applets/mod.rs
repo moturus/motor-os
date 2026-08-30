@@ -74,6 +74,7 @@ impl From<crate::client::transfer::Error> for AppletError {
 mod copy_id;
 mod keygen;
 mod scp;
+mod sftp;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CopyEndpoint {
@@ -144,12 +145,9 @@ pub fn run(applet: Applet, args: &[String]) -> Result<i32, AppletError> {
                 .map_err(Into::into)
         }
         ParsedArgs::Scp(args) => runtime()?.block_on(scp::run(args)),
+        ParsedArgs::Sftp(args) => runtime()?.block_on(sftp::run(args)),
         ParsedArgs::SshKeygen(args) => keygen::run(args),
         ParsedArgs::SshCopyId(args) => runtime()?.block_on(copy_id::run(args)),
-        ParsedArgs::Sftp(_) => Err(AppletError::Message(format!(
-            "{} is not implemented",
-            applet.name()
-        ))),
     }
 }
 
