@@ -11,6 +11,7 @@ use moto_sys::kernel_log::{KERNEL_LOG_RING_SIZE, KernelLogControl};
 
 use crate::output::{Output, Source};
 
+mod ansi;
 mod kernel_log;
 mod output;
 mod serial;
@@ -46,6 +47,7 @@ fn read_config(output: &Output) -> String {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
+        ansi::run_self_tests();
         output::run_self_tests();
         kernel_log::run_self_tests();
         return;
