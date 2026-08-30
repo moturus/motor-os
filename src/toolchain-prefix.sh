@@ -1,14 +1,40 @@
 #!/usr/bin/env bash
 # Validation and rustup registration for immutable installed toolchain prefixes.
 
+toolchain_validate_rust_analyzer_version() {
+	local output="$1" name="$2" expected_prefix detail hash
+	expected_prefix="$name $SELECTED_RUST_VERSION-$MOTOR_RUST_CHANNEL ("
+	case "$output" in
+		"$expected_prefix"*) ;;
+		*) toolchain_die "$name reports the wrong release: $output"; return ;;
+	esac
+	detail="${output#"$expected_prefix"}"
+	hash="${detail%% *}"
+	[ -n "$hash" ] && [ "$detail" != "$hash" ] ||
+		toolchain_die "$name reports no commit: $output" || return
+	case "$EFFECTIVE_MOTOR_RUST_REV" in
+		"$hash"*) ;;
+		*) toolchain_die "$name reports the wrong commit: $hash" ;;
+	esac
+}
+
 toolchain_validate_prefix() {
-	local prefix="$1" binary target probe
+	local prefix="$1" binary target probe proc_macro_srv
 	[ ! -e "$prefix/MOTOR-TOOLCHAIN-REJECTED" ] ||
 		toolchain_die "toolchain prefix is rejected: $prefix" || return
-	for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt; do
+	for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt \
+		rust-analyzer; do
 		[ -x "$prefix/bin/$binary" ] ||
 			toolchain_die "installed toolchain lacks $binary: $prefix" || return
 	done
+	[ -f "$prefix/bin/rust-analyzer" ] ||
+		toolchain_die "installed rust-analyzer is not a regular file: $prefix" || return
+	proc_macro_srv="$prefix/libexec/rust-analyzer-proc-macro-srv"
+	[ -f "$proc_macro_srv" ] && [ -x "$proc_macro_srv" ] ||
+		toolchain_die "installed toolchain lacks rust-analyzer-proc-macro-srv: $prefix" || return
+	[ "$(readlink -f "$proc_macro_srv")" = \
+		"$(readlink -f "$prefix")/libexec/rust-analyzer-proc-macro-srv" ] ||
+		toolchain_die "installed proc-macro server resolves outside the prefix" || return
 	[ -d "$prefix/lib/rustlib/src/rust/library" ] ||
 		toolchain_die "installed toolchain lacks rust-src: $prefix" || return
 	for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
@@ -37,6 +63,16 @@ toolchain_validate_prefix() {
 	VALIDATED_RUSTDOC_VERSION="$($prefix/bin/rustdoc --version)" || return
 	VALIDATED_CLIPPY_VERSION="$($prefix/bin/clippy-driver --version)" || return
 	VALIDATED_RUSTFMT_VERSION="$($prefix/bin/rustfmt --version)" || return
+	VALIDATED_RUST_ANALYZER_VERSION="$($prefix/bin/rust-analyzer --version)" || return
+	toolchain_validate_rust_analyzer_version \
+		"$VALIDATED_RUST_ANALYZER_VERSION" rust-analyzer || return
+	VALIDATED_RUST_ANALYZER_PROC_MACRO_SRV_VERSION="$(
+		RUST_ANALYZER_INTERNALS_DO_NOT_USE='this is unstable' \
+			"$proc_macro_srv" --version
+	)" || return
+	toolchain_validate_rust_analyzer_version \
+		"$VALIDATED_RUST_ANALYZER_PROC_MACRO_SRV_VERSION" \
+		rust-analyzer-proc-macro-srv || return
 	VALIDATED_RUSTC_SYSROOT="$($prefix/bin/rustc --print sysroot)" || return
 	[ "$(readlink -f "$VALIDATED_RUSTC_SYSROOT")" = "$(readlink -f "$prefix")" ] ||
 		toolchain_die "installed rustc reports a different sysroot" || return
@@ -85,6 +121,8 @@ cargo_verbose_base64=$(printf '%s' "$VALIDATED_CARGO_VERBOSE" | base64 -w0)
 rustdoc_version_base64=$(printf '%s' "$VALIDATED_RUSTDOC_VERSION" | base64 -w0)
 clippy_version_base64=$(printf '%s' "$VALIDATED_CLIPPY_VERSION" | base64 -w0)
 rustfmt_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
+rust_analyzer_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_VERSION" | base64 -w0)
+rust_analyzer_proc_macro_srv_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_PROC_MACRO_SRV_VERSION" | base64 -w0)
 rustc_sysroot=.
 EOF
 }
@@ -124,7 +162,8 @@ toolchain_write_prefix_manifest() {
 
 toolchain_validate_rustup_link() {
 	local rustup="$1" prefix="$2" binary resolved
-	for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt; do
+	for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt \
+		rust-analyzer; do
 		resolved="$($rustup which "$binary" --toolchain "$MOTOR_RUSTUP_TOOLCHAIN" 2>/dev/null)" ||
 			toolchain_die "rustup cannot resolve $binary from $MOTOR_RUSTUP_TOOLCHAIN" || return
 		[ -x "$resolved" ] || toolchain_die "rustup resolved missing $binary: $resolved" || return

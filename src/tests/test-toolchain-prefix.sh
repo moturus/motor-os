@@ -23,6 +23,7 @@ EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
 SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
 SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
 SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
+SELECTED_RUST_VERSION="$UPSTREAM_RUST_VERSION"
 fake_tool="$temporary/tool"
 cat > "$fake_tool" <<EOF
 #!/usr/bin/env bash
@@ -42,13 +43,20 @@ rustc)
   fi ;;
 cargo) printf '%s\n' 'cargo 1.99.0-dev' 'release: 1.99.0-dev' \
   'commit-hash: $MOTOR_CARGO_REV' ;;
+rust-analyzer) printf '%s\n' 'rust-analyzer 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+rust-analyzer-proc-macro-srv)
+  [ "\${RUST_ANALYZER_INTERNALS_DO_NOT_USE:-}" = 'this is unstable' ] || exit 9
+  printf '%s\n' 'rust-analyzer-proc-macro-srv 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
 *) printf '%s 1.99.0-dev\n' "\$(basename "\$0")" ;;
 esac
 EOF
 chmod +x "$fake_tool"
-for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt; do
+for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt \
+	rust-analyzer; do
 	ln -s "$fake_tool" "$prefix/bin/$binary"
 done
+mkdir -p "$prefix/libexec"
+ln "$fake_tool" "$prefix/libexec/rust-analyzer-proc-macro-srv"
 
 MOTOR_TOOLCHAIN_KEY="$(printf key | sha256sum | awk '{print $1}')"
 MOTOR_RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN_BASE-$MOTOR_TOOLCHAIN_KEY"
@@ -60,6 +68,27 @@ START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
 LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
 LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
 MOTO_RT_PACKAGE_COMPARISON=exact
+
+if toolchain_validate_rust_analyzer_version \
+	"rust-analyzer 1.98.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)" \
+	rust-analyzer 2>/dev/null; then
+	fail "rust-analyzer with the wrong release was accepted"
+fi
+if toolchain_validate_rust_analyzer_version \
+	"rust-analyzer 1.99.0-dev (aaaaaaaaa 2026-08-30)" \
+	rust-analyzer 2>/dev/null; then
+	fail "rust-analyzer with the wrong commit was accepted"
+fi
+mv "$prefix/bin/rust-analyzer" "$temporary/rust-analyzer"
+if toolchain_validate_prefix "$prefix" 2>/dev/null; then
+	fail "prefix without rust-analyzer was accepted"
+fi
+mv "$temporary/rust-analyzer" "$prefix/bin/rust-analyzer"
+mv "$prefix/libexec/rust-analyzer-proc-macro-srv" "$temporary/proc-macro-srv"
+if toolchain_validate_prefix "$prefix" 2>/dev/null; then
+	fail "prefix without the proc-macro server was accepted"
+fi
+mv "$temporary/proc-macro-srv" "$prefix/libexec/rust-analyzer-proc-macro-srv"
 
 toolchain_validate_prefix "$prefix"
 toolchain_write_prefix_manifest "$prefix"
@@ -85,6 +114,10 @@ toolchain)
   esac ;;
 which)
   [ -f "$RUSTUP_TEST_STATE" ] || exit 1
+  if [ "${RUSTUP_TEST_WRONG_BINARY:-}" = "$2" ]; then
+    printf '%s\n' "$RUSTUP_TEST_WRONG_PATH"
+    exit
+  fi
   printf '%s/bin/%s\n' "$(cat "$RUSTUP_TEST_STATE")" "$2" ;;
 run)
   [ -f "$RUSTUP_TEST_STATE" ] || exit 1
@@ -95,6 +128,13 @@ chmod +x "$fake_rustup"
 export RUSTUP_TEST_STATE="$temporary/rustup-state" MOTOR_RUSTUP_TOOLCHAIN
 toolchain_register_prefix "$fake_rustup" "$prefix"
 toolchain_validate_rustup_link "$fake_rustup" "$prefix"
+wrong_rust_analyzer="$temporary/wrong-rust-analyzer"
+ln "$fake_tool" "$wrong_rust_analyzer"
+if RUSTUP_TEST_WRONG_BINARY=rust-analyzer \
+	RUSTUP_TEST_WRONG_PATH="$wrong_rust_analyzer" \
+	toolchain_validate_rustup_link "$fake_rustup" "$prefix" 2>/dev/null; then
+	fail "rustup resolving rust-analyzer outside the prefix was accepted"
+fi
 
 new_prefix="$temporary/new-prefix"
 toolchain_claim_prefix "$new_prefix"

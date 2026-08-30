@@ -91,11 +91,17 @@ rustc)
   elif [ "\${1:-}" = --print ]; then dirname "\$(dirname "\$0")";
   else while [ "\$#" -gt 0 ]; do if [ "\$1" = -o ]; then shift; : > "\$1"; fi; shift; done; fi ;;
 cargo) printf '%s\\n' 'cargo' 'release: $MOTOR_CARGO_VERSION' 'commit-hash: $MOTOR_CARGO_REV' ;;
+rust-analyzer) printf '%s\\n' 'rust-analyzer 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+rust-analyzer-proc-macro-srv)
+  [ "\${RUST_ANALYZER_INTERNALS_DO_NOT_USE:-}" = 'this is unstable' ] || exit 9
+  printf '%s\\n' 'rust-analyzer-proc-macro-srv 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
 *) printf '%s\\n' version ;;
 esac
 TOOL
 chmod +x "\$prefix/bin/tool"
-for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt; do ln -s tool "\$prefix/bin/\$binary"; done
+for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt rust-analyzer; do ln -s tool "\$prefix/bin/\$binary"; done
+mkdir -p "\$prefix/libexec"
+ln "\$prefix/bin/tool" "\$prefix/libexec/rust-analyzer-proc-macro-srv"
 EOF
 chmod +x "$rust/x.py"
 
@@ -116,6 +122,11 @@ toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"
 [ "$(cat "$temporary/xpy-runs")" = x ] || fail "bootstrap did not run exactly once"
 [ -f "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ] || fail "prefix was not finalized"
+grep -q '^rust_analyzer_version_base64=' "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ||
+	fail "prefix manifest lacks the rust-analyzer version"
+grep -q '^rust_analyzer_proc_macro_srv_version_base64=' \
+	"$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ||
+	fail "prefix manifest lacks the proc-macro server version"
 [ ! -e "$TOOLCHAIN_PREFIX.building" ] || fail "successful producer lock remains"
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"

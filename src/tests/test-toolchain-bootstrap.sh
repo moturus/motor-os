@@ -32,7 +32,7 @@ for section in '[build]' '[install]' '[rust]' '[llvm]' \
 	grep -Fqx "$section" "$managed" || fail "missing section $section"
 done
 grep -Fqx 'profile = "library"' "$managed" || fail "wrong profile"
-grep -Fqx 'tools = ["cargo", "clippy", "rustdoc", "rustfmt", "src"]' "$managed" ||
+grep -Fqx 'tools = ["cargo", "clippy", "rust-analyzer", "rustdoc", "rustfmt", "src"]' "$managed" ||
 	fail "wrong bootstrap tools"
 grep -Fqx 'description = "'"$MOTOR_TOOLCHAIN_ID"'"' "$managed" ||
 	fail "managed description is missing"

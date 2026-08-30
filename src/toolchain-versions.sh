@@ -52,7 +52,7 @@ MOTOR_LUA_VERSION="5.4.8"
 
 MOTOR_BUILD_HOST="x86_64-unknown-linux-gnu"
 MOTOR_BUILD_TARGETS="x86_64-unknown-linux-gnu,x86_64-unknown-motor"
-MOTOR_BUILD_TOOLS="cargo,clippy,rustdoc,rustfmt,src"
+MOTOR_BUILD_TOOLS="cargo,clippy,rust-analyzer,rustdoc,rustfmt,src"
 MOTOR_LLVM_TARGETS="X86"
 MOTOR_BUILD_EXTENDED="true"
 MOTOR_BUILD_DOCS="false"

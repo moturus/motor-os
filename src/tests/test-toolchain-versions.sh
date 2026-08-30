@@ -27,6 +27,11 @@ MOTOR_CARGO_REV="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 [ "$key" != "$(toolchain_clean_key)" ] || fail "Cargo revision did not change the key"
 MOTOR_CARGO_REV="$original_cargo_rev"
 
+original_build_tools="$MOTOR_BUILD_TOOLS"
+MOTOR_BUILD_TOOLS="cargo,clippy,rustdoc,rustfmt,src"
+[ "$key" != "$(toolchain_clean_key)" ] || fail "build tools did not change the key"
+MOTOR_BUILD_TOOLS="$original_build_tools"
+
 [ "$(toolchain_hash_pairs a bc)" != "$(toolchain_hash_pairs ab c)" ] ||
   fail "field boundaries are ambiguous"
 newline_value=$'first\nsecond:third'
