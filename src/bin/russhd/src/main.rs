@@ -64,10 +64,12 @@ async fn main() {
     let config = Arc::new(russh_config);
     let mut sh = ConnectionHandler::new(program_config.clone(), None);
 
-    log::info!("Starting SSHD on {:?}.", program_config.listen_on());
-    sh.run_on_address(config, program_config.listen_on())
+    let listener = tokio::net::TcpListener::bind(program_config.listen_on())
         .await
         .unwrap();
+    let listen_addr = listener.local_addr().unwrap();
+    log::info!("Listening on {listen_addr}");
+    sh.run_on_socket(config, &listener).await.unwrap();
 }
 
 #[allow(unused)]
