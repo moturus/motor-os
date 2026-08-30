@@ -14,6 +14,14 @@ Prefer:
 General guidelines:
 
 * Split your work in small (100-300 loc) patches, including tests.
+* Changes to code in Motor OS main repo are, in general, permitted, although it is preferred
+  that project-specific work avoid touching src/sys code. For example, when working on src/bin/rmux,
+  changes to src/sys/kernel are suspicious and should be extremely well argued for.
+* Same applies to changes to crates outside of the main Motor OS repo (e.g. to forked code
+  in russh, ripgrep, mlibc, toolchains, etc).
+* If your (intend to) change any code outside the main Motor OS repo (e.g. ../russh, ../toolchan-src, etc.),
+  be very specific and vocal about it, mention it very explicitly in your conversations and in
+  design docs.
 * Only rarely, when it is hard to make a smaller change, make a larger patch.
 * Document your code with comments, but use them sparingly: the ratio of comments to code should be about 1:5 on average.
 * Stop if any non-obvious decision is required and ask for guidance.
@@ -46,6 +54,9 @@ General guidelines:
   potentially destabilize (DDOS) the external resource. Only rare integration tests for internet-facing
   services like DNS lookup or ping should include reaching out to the internet, and only after
   an express discussion and approval.
+  Please note that existing dns/ping tests that are part of src/tests/*.sh are accepted. If they
+  flake, assume this is because of the external networking issue and retry once. If the retry
+  fails, stop and discuss.
 * Explicit user instructions may override anything stated above.
 
 Notes:
