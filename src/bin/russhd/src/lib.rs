@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod local_session;
 pub mod permissions;
+pub mod sftp_extensions;
 pub mod sftp_session;
 
 // `ring` gets its randomness through getrandom 0.2. Register Motor's entropy

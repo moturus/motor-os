@@ -391,15 +391,50 @@ EOF
 cmp -s "$WORK/outside-sentinel" "$WORK/outside-roundtrip" ||
     fail "recursive cleanup changed the outside sentinel"
 
+printf 'replacement source\n' > "$WORK/rename-source"
+printf 'replacement target\n' > "$WORK/rename-target"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP filesystem commands failed"; }
 mkdir $remote_operations
+mkdir $remote_operations/dir-target
 rename $remote_outside $remote_operations/sentinel
 get $remote_operations/sentinel $WORK/renamed-roundtrip
-rm $remote_operations/sentinel
-rmdir $remote_operations
+put $WORK/rename-source $remote_operations/rename-source
+put $WORK/rename-target $remote_operations/rename-target
 EOF
 cmp -s "$WORK/outside-sentinel" "$WORK/renamed-roundtrip" ||
     fail "SFTP rename changed the outside sentinel"
+
+# The plain (legacy) rename must not replace an existing destination, and
+# posix-rename must not replace a directory with a file.
+if run_sftp <<EOF
+rename -l $remote_operations/rename-source $remote_operations/rename-target
+EOF
+then
+    fail "plain SFTP rename replaced an existing destination"
+fi
+if run_sftp <<EOF
+rename $remote_operations/rename-source $remote_operations/dir-target
+EOF
+then
+    fail "posix-rename replaced a directory with a file"
+fi
+
+# The rmdir doubles as proof that the refused rename left the directory alone.
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP replacing rename failed"; }
+rename $remote_operations/rename-source $remote_operations/rename-target
+get $remote_operations/rename-target $WORK/replaced-roundtrip
+rmdir $remote_operations/dir-target
+EOF
+cmp -s "$WORK/rename-source" "$WORK/replaced-roundtrip" ||
+    fail "posix-rename did not replace the existing destination"
+if run_ssh /system/bin/ls "$remote_operations/rename-source" >/dev/null 2>&1; then
+    fail "posix-rename left its source path reachable"
+fi
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP rename cleanup failed"; }
+rm $remote_operations/sentinel
+rm $remote_operations/rename-target
+rmdir $remote_operations
+EOF
 echo "  ok: recursive upload, preserved modes, and SFTP filesystem commands passed"
 
 echo

@@ -3,7 +3,7 @@
 //! Protocol: https://www.ietf.org/proceedings/50/I-D/secsh-filexfer-00.txt
 
 use russh_sftp::protocol::{
-    File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+    File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
 };
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::permissions::unix_mode;
 #[cfg(target_os = "motor")]
 use crate::permissions::{Access, NormalizedMode};
+use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION, decode_posix_rename};
 
 #[derive(Default)]
 pub struct SftpSession {
@@ -63,6 +64,61 @@ fn io_status(err: &std::io::Error) -> StatusCode {
         std::io::ErrorKind::Unsupported => StatusCode::OpUnsupported,
         _ => StatusCode::Failure,
     }
+}
+
+// No-replace fallback for platforms and filesystems without an atomic
+// primitive: check-then-rename, racy the same way OpenSSH's sftp-server is.
+#[cfg(unix)]
+fn rename_noreplace_emulated(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
+    if std::fs::symlink_metadata(newpath).is_ok() {
+        return Err(StatusCode::Failure);
+    }
+    std::fs::rename(oldpath, newpath).map_err(|error| io_status(&error))
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
+    use std::ffi::CString;
+
+    let old = CString::new(oldpath).map_err(|_| StatusCode::BadMessage)?;
+    let new = CString::new(newpath).map_err(|_| StatusCode::BadMessage)?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            old.as_ptr(),
+            libc::AT_FDCWD,
+            new.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        // Filesystems without RENAME_NOREPLACE support (NFS < 4.2, some
+        // FUSE/overlayfs mounts) report EINVAL; pre-renameat2 kernels ENOSYS.
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => rename_noreplace_emulated(oldpath, newpath),
+        _ => Err(io_status(&error)),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn rename_noreplace(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
+    rename_noreplace_emulated(oldpath, newpath)
+}
+
+#[cfg(target_os = "motor")]
+fn rename_noreplace(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
+    moto_rt::fs::move_noreplace(oldpath, newpath).map_err(|error| match error {
+        // rt.vdso reports a missing source or destination parent as
+        // InvalidFilename (rt_fs.rs move_path), not NotFound.
+        moto_rt::Error::NotFound | moto_rt::Error::InvalidFilename => StatusCode::NoSuchFile,
+        moto_rt::Error::NotAllowed => StatusCode::PermissionDenied,
+        moto_rt::Error::NotImplemented => StatusCode::OpUnsupported,
+        _ => StatusCode::Failure,
+    })
 }
 
 fn permission_mode(attrs: &FileAttributes) -> Result<Option<u32>, StatusCode> {
@@ -476,7 +532,11 @@ impl russh_sftp::server::Handler for SftpSession {
 
         self.version = Some(version);
         log::info!("version: {:?}, extensions: {:?}", self.version, extensions);
-        Ok(Version::new())
+        let mut response = Version::new();
+        response
+            .extensions
+            .insert(POSIX_RENAME.to_owned(), POSIX_RENAME_VERSION.to_owned());
+        Ok(response)
     }
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
@@ -826,13 +886,56 @@ impl russh_sftp::server::Handler for SftpSession {
         oldpath: String,
         newpath: String,
     ) -> Result<Status, Self::Error> {
-        tokio::fs::rename(&oldpath, &newpath)
+        // The no-replace rename is a synchronous filesystem call; keep it off
+        // the single-threaded runtime like the tokio::fs-based handlers.
+        let (old, new) = (oldpath.clone(), newpath.clone());
+        tokio::task::spawn_blocking(move || rename_noreplace(&old, &new))
             .await
             .map_err(|error| {
                 log::warn!("rename {oldpath} -> {newpath}: {error}");
-                io_status(&error)
+                StatusCode::Failure
+            })?
+            .inspect_err(|error| {
+                log::warn!("rename {oldpath} -> {newpath}: {error}");
             })?;
         Ok(ok_status(id))
+    }
+
+    async fn extended(
+        &mut self,
+        id: u32,
+        request: String,
+        data: Vec<u8>,
+    ) -> Result<Packet, Self::Error> {
+        if request != POSIX_RENAME {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let (oldpath, newpath) = decode_posix_rename(data).map_err(|error| {
+            log::warn!("invalid {POSIX_RENAME} request: {error}");
+            StatusCode::BadMessage
+        })?;
+        // motor-fs's replacing move deletes an existing empty-directory
+        // destination whatever the source kind is; POSIX rename fails
+        // mismatched kinds (EISDIR/ENOTDIR), and the kernel enforces that on
+        // the other platforms.
+        #[cfg(target_os = "motor")]
+        if let Ok(new_metadata) = tokio::fs::metadata(&newpath).await {
+            let old_metadata = tokio::fs::metadata(&oldpath).await.map_err(|error| {
+                log::warn!("{POSIX_RENAME} {oldpath} -> {newpath}: {error}");
+                io_status(&error)
+            })?;
+            if old_metadata.is_dir() != new_metadata.is_dir() {
+                log::warn!("{POSIX_RENAME} {oldpath} -> {newpath}: kind mismatch");
+                return Err(StatusCode::Failure);
+            }
+        }
+        tokio::fs::rename(&oldpath, &newpath)
+            .await
+            .map_err(|error| {
+                log::warn!("{POSIX_RENAME} {oldpath} -> {newpath}: {error}");
+                io_status(&error)
+            })?;
+        Ok(ok_status(id).into())
     }
 
     /// Called on SSH_FXP_LSTAT
@@ -906,7 +1009,8 @@ fn canonicalize_lexical(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SftpSession, canonicalize_lexical};
-    use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+    use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION, encode_posix_rename};
+    use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
     use russh_sftp::server::Handler as _;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -944,6 +1048,107 @@ mod tests {
         // `..` pops the last cwd segment.
         let parent = canonicalize_lexical("..");
         assert!(cwd.starts_with(&parent));
+    }
+
+    #[test]
+    fn server_advertises_posix_rename() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let version = runtime
+            .block_on(SftpSession::default().init(3, Default::default()))
+            .unwrap();
+        assert_eq!(
+            version.extensions.get(POSIX_RENAME).map(String::as_str),
+            Some(POSIX_RENAME_VERSION)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn standard_rename_refuses_replacement_and_posix_rename_replaces() {
+        let root = temp_path("rename-semantics");
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&target, b"target").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut session = SftpSession::default();
+            assert_eq!(
+                session
+                    .rename(
+                        1,
+                        source.to_string_lossy().into_owned(),
+                        target.to_string_lossy().into_owned(),
+                    )
+                    .await
+                    .unwrap_err(),
+                StatusCode::Failure
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), b"source");
+            assert_eq!(std::fs::read(&target).unwrap(), b"target");
+
+            let data = encode_posix_rename(&source.to_string_lossy(), &target.to_string_lossy());
+            let Packet::Status(status) = session
+                .extended(2, POSIX_RENAME.to_owned(), data)
+                .await
+                .unwrap()
+            else {
+                panic!("POSIX rename returned an unexpected packet");
+            };
+            assert_eq!(status.status_code, StatusCode::Ok);
+            assert!(!source.exists());
+            assert_eq!(std::fs::read(&target).unwrap(), b"source");
+
+            assert_eq!(
+                session
+                    .extended(3, "unknown@example.com".to_owned(), Vec::new())
+                    .await
+                    .unwrap_err(),
+                StatusCode::OpUnsupported
+            );
+            assert_eq!(
+                session
+                    .extended(4, POSIX_RENAME.to_owned(), vec![0])
+                    .await
+                    .unwrap_err(),
+                StatusCode::BadMessage
+            );
+
+            assert_eq!(
+                session
+                    .rename(
+                        5,
+                        root.join("missing").to_string_lossy().into_owned(),
+                        root.join("elsewhere").to_string_lossy().into_owned(),
+                    )
+                    .await
+                    .unwrap_err(),
+                StatusCode::NoSuchFile
+            );
+
+            // A file must not replace a directory, even an empty one.
+            let file = root.join("file");
+            let dir = root.join("dir");
+            std::fs::write(&file, b"file").unwrap();
+            std::fs::create_dir(&dir).unwrap();
+            let data = encode_posix_rename(&file.to_string_lossy(), &dir.to_string_lossy());
+            assert!(
+                session
+                    .extended(6, POSIX_RENAME.to_owned(), data)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), b"file");
+            assert!(dir.is_dir());
+        });
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

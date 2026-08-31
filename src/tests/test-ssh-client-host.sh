@@ -106,6 +106,7 @@ test_ssh_client_host() {
   local guest_wrong=/user/cfg/ssh/wrong_ed25519
   local guest_known=/user/cfg/ssh/known_hosts
   local guest_executable="$TEST_TMP/ssh-client-host-executable"
+  local guest_transfer_root="$TEST_TMP/ssh-client-host-transfer"
   local host=192.168.4.1
   local first_key="$WD/test.key"
   local second_key="$WD/test-host-alt.key"
@@ -129,6 +130,7 @@ test_ssh_client_host() {
   for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known" "$guest_executable"; do
     vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
   done
+  vm_ssh "/system/bin/rm -r $guest_transfer_root" >/dev/null 2>&1 || true
   printf 'put %s %s\nchmod 600 %s\nput %s %s\nchmod 644 %s\nput %s %s\nchmod 600 %s\n' \
     "$first_key" "$guest_key" "$guest_key" \
     "$public_file" "$guest_key.pub" "$guest_key.pub" \
@@ -161,6 +163,43 @@ test_ssh_client_host() {
     fail "Motor client could not return the downloaded executable"
   [ "$(stat -c %a "$returned_executable")" = 555 ] ||
     fail "Motor client did not normalize a downloaded 0755 file to 0555"
+  chmod 600 "$returned_executable"
+  printf 'stale destination\n' > "$returned_executable"
+  vm_ssh "$native_scp $guest_executable motor@$host:$returned_executable" ||
+    fail "Motor client could not replace an existing Unix file"
+  cmp -s "$host_executable" "$returned_executable" ||
+    fail "Motor client overwrite did not replace the existing Unix file"
+  [ "$(stat -c %a "$returned_executable")" = 600 ] ||
+    fail "Motor client overwrite did not preserve the destination's mode"
+
+  local host_source_tree="$SSH_CLIENT_HOST_ROOT/source-tree"
+  local host_upload_parent="$SSH_CLIENT_HOST_ROOT/upload-parent"
+  local guest_download_parent="$guest_transfer_root/download"
+  mkdir -p "$host_source_tree/nested" "$host_source_tree/empty" "$host_upload_parent"
+  printf 'first recursive payload\n' > "$host_source_tree/nested/file"
+  vm_ssh "/system/bin/rush -c '/system/bin/mkdir $guest_transfer_root && /system/bin/mkdir $guest_download_parent'" ||
+    fail "could not create the guest recursive-transfer directories"
+  vm_ssh "$native_scp -r motor@$host:$host_source_tree $guest_download_parent" ||
+    fail "Motor client could not download a Unix directory"
+  printf 'updated recursive payload\n' > "$host_source_tree/nested/file"
+  vm_ssh "$native_scp -r motor@$host:$host_source_tree $guest_download_parent" ||
+    fail "Motor client could not download into an existing directory"
+  [ "$(vm_ssh /system/bin/cat "$guest_download_parent/source-tree/nested/file")" = \
+      "updated recursive payload" ] ||
+    fail "recursive re-download did not replace an existing local file"
+
+  vm_ssh "$native_scp -r $guest_download_parent/source-tree motor@$host:$host_upload_parent" ||
+    fail "Motor client could not upload a directory"
+  printf 'stale recursive destination\n' > "$host_upload_parent/source-tree/nested/file"
+  chmod 775 "$host_upload_parent/source-tree"
+  vm_ssh "$native_scp -r $guest_download_parent/source-tree motor@$host:$host_upload_parent" ||
+    fail "Motor client could not upload into an existing directory"
+  cmp -s "$host_source_tree/nested/file" "$host_upload_parent/source-tree/nested/file" ||
+    fail "recursive re-upload did not replace an existing remote file"
+  [ -d "$host_upload_parent/source-tree/empty" ] ||
+    fail "recursive re-upload did not preserve an empty directory"
+  [ "$(stat -c %a "$host_upload_parent/source-tree")" = 775 ] ||
+    fail "recursive re-upload changed the mode of an existing directory"
 
   local password_command="/user/bin/ssh -F /dev/null -p $port -i $guest_wrong -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo password-ok"
   output="$(printf 'vroomvroom\n' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$password_command" 2>&1)" ||
@@ -197,6 +236,8 @@ test_ssh_client_host() {
     vm_ssh "/system/bin/rm $guest_file" >/dev/null ||
       fail "failed to remove guest SSH fixture $guest_file"
   done
+  vm_ssh "/system/bin/rm -r $guest_transfer_root" >/dev/null ||
+    fail "failed to remove the guest recursive-transfer fixture"
   cleanup_ssh_client_host
   echo "-- Motor SSH client private-network compatibility PASS"
 }

@@ -46,21 +46,9 @@ async fn upload(
                         "scp directory source requires -r".to_owned(),
                     ));
                 }
-                transfer::upload_tree(
-                    &connection.raw,
-                    source,
-                    &target,
-                    connection.limits.write_len,
-                )
-                .await?;
+                transfer::upload_tree(&connection, source, &target).await?;
             } else {
-                transfer::upload_file(
-                    &connection.raw,
-                    source,
-                    &target,
-                    connection.limits.write_len,
-                )
-                .await?;
+                transfer::upload_file(&connection, source, &target).await?;
             }
         }
         Ok::<(), AppletError>(())
@@ -102,24 +90,14 @@ async fn download(args: &ScpArgs) -> Result<(), AppletError> {
                     "scp directory source requires -r".to_owned(),
                 ))
             } else {
-                transfer::download_tree(
-                    &connection.raw,
-                    remote_source,
-                    &target,
-                    connection.limits.read_len,
-                )
-                .await
-                .map_err(Into::into)
+                transfer::download_tree(&connection, remote_source, &target)
+                    .await
+                    .map_err(Into::into)
             }
         } else {
-            transfer::download_file(
-                &connection.raw,
-                remote_source,
-                &target,
-                connection.limits.read_len,
-            )
-            .await
-            .map_err(Into::into)
+            transfer::download_file(&connection, remote_source, &target)
+                .await
+                .map_err(Into::into)
         }
     }
     .await;

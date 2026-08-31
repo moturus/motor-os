@@ -6,10 +6,12 @@ use russh_sftp::protocol::Version;
 
 use super::args::{ConnectionOptions, Destination};
 use super::{session, transport};
+use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION};
 
 pub struct SftpConnection {
     pub raw: RawSftpSession,
     pub limits: Limits,
+    pub posix_rename: bool,
     ssh: russh::client::Handle<transport::Handler>,
 }
 
@@ -24,8 +26,14 @@ impl SftpConnection {
         let mut raw = RawSftpSession::new(channel.into_stream());
         raw.set_timeout(u64::MAX).await;
         let version = raw.init().await?;
+        let posix_rename = supports_posix_rename(&version);
         let limits = configure_limits(&mut raw, &version).await?;
-        Ok(Self { raw, limits, ssh })
+        Ok(Self {
+            raw,
+            limits,
+            posix_rename,
+            ssh,
+        })
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -35,6 +43,13 @@ impl SftpConnection {
             .await?;
         Ok(())
     }
+}
+
+fn supports_posix_rename(version: &Version) -> bool {
+    version
+        .extensions
+        .get(POSIX_RENAME)
+        .is_some_and(|value| value == POSIX_RENAME_VERSION)
 }
 
 async fn configure_limits(raw: &mut RawSftpSession, version: &Version) -> Result<Limits, Error> {
@@ -81,6 +96,20 @@ impl From<russh_sftp::client::error::Error> for Error {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn posix_rename_requires_the_documented_version() {
+        let mut version = Version::new();
+        assert!(!supports_posix_rename(&version));
+        version
+            .extensions
+            .insert(POSIX_RENAME.to_owned(), "2".to_owned());
+        assert!(!supports_posix_rename(&version));
+        version
+            .extensions
+            .insert(POSIX_RENAME.to_owned(), POSIX_RENAME_VERSION.to_owned());
+        assert!(supports_posix_rename(&version));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn maximum_timeout_does_not_expire_at_ten_seconds() {

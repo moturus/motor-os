@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -319,9 +320,129 @@ fn command_and_sftp_transfers_work_end_to_end() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        std::fs::read(source).unwrap(),
-        std::fs::read(downloaded).unwrap()
+        std::fs::read(&source).unwrap(),
+        std::fs::read(&downloaded).unwrap()
     );
+
+    let replacement = b"replacement contents\n";
+    std::fs::write(&source, replacement).unwrap();
+    let output = fixture.run(&upload, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&remote).unwrap(), replacement);
+
+    // Overwriting keeps the destination's mode instead of stamping the
+    // source's.
+    let probe = b"mode-preserving overwrite\n";
+    std::fs::write(&source, probe).unwrap();
+    std::fs::set_permissions(&remote, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let output = fixture.run(&upload, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&remote).unwrap(), probe);
+    assert_eq!(
+        std::fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let tree_source = fixture.root.join("tree-source");
+    let nested_source = tree_source.join("nested/file");
+    let empty_source = tree_source.join("empty");
+    let upload_parent = fixture.root.join("upload-parent");
+    let download_parent = fixture.root.join("download-parent");
+    std::fs::create_dir_all(nested_source.parent().unwrap()).unwrap();
+    std::fs::create_dir(&empty_source).unwrap();
+    std::fs::create_dir(&upload_parent).unwrap();
+    std::fs::create_dir(&download_parent).unwrap();
+    std::fs::write(&nested_source, b"recursive upload\n").unwrap();
+    let locked_source = tree_source.join("locked");
+    let locked_file_source = locked_source.join("file");
+    std::fs::create_dir(&locked_source).unwrap();
+    std::fs::write(&locked_file_source, b"locked contents\n").unwrap();
+    std::fs::set_permissions(&locked_source, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let mut recursive_upload = fixture.base_args(Some("scp"));
+    recursive_upload.push("-r".to_owned());
+    recursive_upload.extend([
+        tree_source.to_string_lossy().into_owned(),
+        format!("motor@127.0.0.1:{}", upload_parent.display()),
+    ]);
+    let output = fixture.run(&recursive_upload, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let remote_tree = upload_parent.join("tree-source");
+    let remote_nested = remote_tree.join("nested/file");
+    let remote_locked = remote_tree.join("locked");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&remote_locked), 0o555);
+    std::fs::write(&remote_nested, b"stale\n").unwrap();
+    std::fs::write(remote_locked.join("file"), b"stale locked\n").unwrap();
+    std::fs::set_permissions(&remote_tree, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let output = fixture.run(&recursive_upload, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&remote_nested).unwrap(),
+        std::fs::read(&nested_source).unwrap()
+    );
+    assert!(remote_tree.join("empty").is_dir());
+    // The merge overwrote a file inside a read-only directory in place and
+    // left the permissions of directories it did not create alone.
+    assert_eq!(
+        std::fs::read(remote_locked.join("file")).unwrap(),
+        std::fs::read(&locked_file_source).unwrap()
+    );
+    assert_eq!(mode(&remote_tree), 0o775);
+    assert_eq!(mode(&remote_locked), 0o555);
+
+    let mut recursive_download = fixture.base_args(Some("scp"));
+    recursive_download.push("-r".to_owned());
+    recursive_download.extend([
+        format!("motor@127.0.0.1:{}", remote_tree.display()),
+        download_parent.to_string_lossy().into_owned(),
+    ]);
+    let output = fixture.run(&recursive_download, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let downloaded_tree = download_parent.join("tree-source");
+    let downloaded_nested = downloaded_tree.join("nested/file");
+    let downloaded_locked = downloaded_tree.join("locked");
+    std::fs::write(&remote_nested, b"recursive download replacement\n").unwrap();
+    std::fs::write(downloaded_locked.join("file"), b"stale local\n").unwrap();
+    let output = fixture.run(&recursive_download, b"");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&downloaded_nested).unwrap(),
+        std::fs::read(&remote_nested).unwrap()
+    );
+    assert!(downloaded_tree.join("empty").is_dir());
+    assert_eq!(
+        std::fs::read(downloaded_locked.join("file")).unwrap(),
+        std::fs::read(remote_locked.join("file")).unwrap()
+    );
+    // Reopen the read-only fixtures so the fixture root can be removed.
+    for dir in [&locked_source, &remote_locked, &downloaded_locked] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let remote_dir = fixture.root.join("sftp-dir");
     let batch_download = fixture.root.join("batch-download");

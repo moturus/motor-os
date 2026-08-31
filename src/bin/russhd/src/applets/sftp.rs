@@ -166,15 +166,25 @@ async fn execute(
             connection.raw.rmdir(path).await.map_err(sftp_error)?;
         }
         "rename" => {
+            // Like OpenSSH sftp: a replacing posix-rename when the server
+            // supports it; `-l` requests the plain no-replace rename.
+            let (legacy, args) = if args.first().is_some_and(|value| value == "-l") {
+                (true, &args[1..])
+            } else {
+                (false, args)
+            };
             two_args(args)?;
-            connection
-                .raw
-                .rename(
-                    remote_path(&state.remote_cwd, &args[0]),
-                    remote_path(&state.remote_cwd, &args[1]),
-                )
-                .await
-                .map_err(sftp_error)?;
+            let oldpath = remote_path(&state.remote_cwd, &args[0]);
+            let newpath = remote_path(&state.remote_cwd, &args[1]);
+            if legacy || !connection.posix_rename {
+                connection
+                    .raw
+                    .rename(oldpath, newpath)
+                    .await
+                    .map_err(sftp_error)?;
+            } else {
+                transfer::posix_rename(connection, &oldpath, &newpath).await?;
+            }
         }
         "help" => {
             no_args(args)?;
@@ -278,21 +288,9 @@ async fn get(
         if !recursive {
             return Err(AppletError::Message("get directory requires -r".to_owned()));
         }
-        transfer::download_tree(
-            &connection.raw,
-            &source,
-            &target,
-            connection.limits.read_len,
-        )
-        .await?;
+        transfer::download_tree(connection, &source, &target).await?;
     } else {
-        transfer::download_file(
-            &connection.raw,
-            &source,
-            &target,
-            connection.limits.read_len,
-        )
-        .await?;
+        transfer::download_file(connection, &source, &target).await?;
     }
     Ok(())
 }
@@ -326,21 +324,9 @@ async fn put(
         if !recursive {
             return Err(AppletError::Message("put directory requires -r".to_owned()));
         }
-        transfer::upload_tree(
-            &connection.raw,
-            &source,
-            &target,
-            connection.limits.write_len,
-        )
-        .await?;
+        transfer::upload_tree(connection, &source, &target).await?;
     } else {
-        transfer::upload_file(
-            &connection.raw,
-            &source,
-            &target,
-            connection.limits.write_len,
-        )
-        .await?;
+        transfer::upload_file(connection, &source, &target).await?;
     }
     Ok(())
 }

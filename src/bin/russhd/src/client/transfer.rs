@@ -7,19 +7,21 @@ use rand::RngExt as _;
 
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 
 use super::local;
+use super::sftp::SftpConnection;
+use crate::sftp_extensions::{POSIX_RENAME, encode_posix_rename};
 
 const PACKET_SIZE: usize = 261_120;
 const MAX_DEPTH: usize = 64;
 
 pub async fn upload_file(
-    sftp: &RawSftpSession,
+    connection: &SftpConnection,
     source: &Path,
     target: &str,
-    write_limit: Option<u64>,
 ) -> Result<(), Error> {
+    let sftp = &connection.raw;
     let mut source_file = std::fs::File::open(source)?;
     if !source_file.metadata()?.is_file() {
         return Err(Error::Message(
@@ -27,18 +29,47 @@ pub async fn upload_file(
         ));
     }
     let mode = local::file_mode(source, false)?;
+    let existing = existing_remote_file(connection, target).await?;
     let staging = remote_staging_path(target)?;
-    let attrs = attributes(0o600, false);
-    let handle = sftp
-        .open(
-            staging.clone(),
-            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
-            attrs,
-        )
-        .await?
-        .handle;
+    // Prefer a staging file installed by an atomic rename. Without
+    // posix-rename an existing target cannot be replaced that way, and a
+    // read-only parent directory refuses the staging file; both fall back to
+    // an OpenSSH-style in-place overwrite.
+    let staging_handle = if existing.is_some() && !connection.posix_rename {
+        None
+    } else {
+        match sftp
+            .open(
+                staging.clone(),
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+                attributes(0o600, false),
+            )
+            .await
+        {
+            Ok(handle) => Some(handle.handle),
+            Err(SftpError::Status(status))
+                if status.status_code == StatusCode::PermissionDenied && existing.is_some() =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let staged = staging_handle.is_some();
+    let handle = match staging_handle {
+        Some(handle) => handle,
+        None => {
+            sftp.open(
+                target.to_owned(),
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                FileAttributes::empty(),
+            )
+            .await?
+            .handle
+        }
+    };
     let result = async {
-        let chunk_size = limited_packet(write_limit);
+        let chunk_size = limited_packet(connection.limits.write_len);
         let mut offset = 0_u64;
         loop {
             let mut data = vec![0; chunk_size];
@@ -52,53 +83,83 @@ pub async fn upload_file(
                 .checked_add(read as u64)
                 .ok_or_else(|| Error::Message("file offset overflow".to_owned()))?;
         }
-        sftp.fsetstat(handle.clone(), attributes(mode, false))
+        if staged {
+            // Replacing keeps the target's mode, the way an in-place
+            // overwrite would; only a new file gets the source's.
+            sftp.fsetstat(
+                handle.clone(),
+                attributes(existing.flatten().unwrap_or(mode), false),
+            )
             .await?;
+        }
         Ok::<(), Error>(())
     }
     .await;
     let close = sftp.close(handle).await;
     if let Err(error) = result {
-        let _ = sftp.remove(staging).await;
+        if staged {
+            let _ = sftp.remove(staging).await;
+        }
         return Err(error);
     }
     if let Err(error) = close {
-        let _ = sftp.remove(staging).await;
+        if staged {
+            let _ = sftp.remove(staging).await;
+        }
         return Err(error.into());
     }
-    if let Err(error) = sftp.rename(staging.clone(), target.to_owned()).await {
+    if staged && let Err(error) = install_remote_file(connection, &staging, target).await {
         let _ = sftp.remove(staging).await;
-        return Err(error.into());
+        return Err(error);
     }
     Ok(())
 }
 
 pub async fn download_file(
-    sftp: &RawSftpSession,
+    connection: &SftpConnection,
     source: &str,
     target: &Path,
-    read_limit: Option<u64>,
 ) -> Result<(), Error> {
+    let sftp = &connection.raw;
     let attrs = sftp.stat(source).await?.attrs;
     if !attrs.is_regular() {
         return Err(Error::Message(
             "remote source is not a regular file".to_owned(),
         ));
     }
+    let existing = existing_local_file(target)?;
     let handle = sftp
         .open(source.to_owned(), OpenFlags::READ, FileAttributes::empty())
         .await?
         .handle;
+    // Like the upload side: a staging file installed by a rename, falling
+    // back to an in-place overwrite when a read-only parent directory
+    // refuses the staging file.
     let staging = local_staging_path(target)?;
-    let mut target_file = match local::create_file(&staging, 0o600) {
-        Ok(file) => file,
+    let (mut target_file, staging) = match local::create_file(&staging, 0o600) {
+        Ok(file) => (file, Some(staging)),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied && existing.is_some() =>
+        {
+            let opened = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(target);
+            match opened {
+                Ok(file) => (file, None),
+                Err(error) => {
+                    let _ = sftp.close(handle).await;
+                    return Err(error.into());
+                }
+            }
+        }
         Err(error) => {
             let _ = sftp.close(handle).await;
             return Err(error.into());
         }
     };
     let result = async {
-        let chunk_size = limited_packet(read_limit) as u32;
+        let chunk_size = limited_packet(connection.limits.read_len) as u32;
         let mut offset = 0_u64;
         loop {
             match sftp.read(handle.clone(), offset, chunk_size).await {
@@ -124,41 +185,49 @@ pub async fn download_file(
     let close = sftp.close(handle).await;
     drop(target_file);
     if let Err(error) = result {
-        let _ = std::fs::remove_file(&staging);
+        if let Some(staging) = &staging {
+            let _ = std::fs::remove_file(staging);
+        }
         return Err(error);
     }
     if let Err(error) = close {
-        let _ = std::fs::remove_file(&staging);
+        if let Some(staging) = &staging {
+            let _ = std::fs::remove_file(staging);
+        }
         return Err(error.into());
     }
-    if let Err(error) = local::set_mode(&staging, attrs.permissions.unwrap_or(0o644), false) {
-        let _ = std::fs::remove_file(&staging);
-        return Err(error.into());
-    }
-    if let Err(error) = std::fs::rename(&staging, target) {
-        let _ = std::fs::remove_file(&staging);
-        return Err(error.into());
+    if let Some(staging) = &staging {
+        // Replacing keeps the target's mode; only a new file gets the
+        // remote's.
+        let mode = existing.unwrap_or(attrs.permissions.unwrap_or(0o644));
+        if let Err(error) = local::set_mode(staging, mode, false) {
+            let _ = std::fs::remove_file(staging);
+            return Err(error.into());
+        }
+        if let Err(error) = std::fs::rename(staging, target) {
+            let _ = std::fs::remove_file(staging);
+            return Err(error.into());
+        }
     }
     Ok(())
 }
 
 pub fn upload_tree<'a>(
-    sftp: &'a RawSftpSession,
+    connection: &'a SftpConnection,
     source: &'a Path,
     target: &'a str,
-    write_limit: Option<u64>,
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
-    upload_tree_at(sftp, source, target, write_limit, 0)
+    upload_tree_at(connection, source, target, 0)
 }
 
 fn upload_tree_at<'a>(
-    sftp: &'a RawSftpSession,
+    connection: &'a SftpConnection,
     source: &'a Path,
     target: &'a str,
-    write_limit: Option<u64>,
     depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
     Box::pin(async move {
+        let sftp = &connection.raw;
         check_depth(depth)?;
         let metadata = source.symlink_metadata()?;
         if metadata.file_type().is_symlink() {
@@ -167,14 +236,13 @@ fn upload_tree_at<'a>(
             ));
         }
         if metadata.is_file() {
-            return upload_file(sftp, source, target, write_limit).await;
+            return upload_file(connection, source, target).await;
         }
         if !metadata.is_dir() {
             return Err(Error::Message("unsupported local file type".to_owned()));
         }
         let final_mode = local::file_mode(source, true)?;
-        sftp.mkdir(target.to_owned(), attributes(0o700, true))
-            .await?;
+        let created = ensure_remote_dir(sftp, target).await?;
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
             let name = entry
@@ -183,40 +251,43 @@ fn upload_tree_at<'a>(
                 .map_err(|_| Error::Message("local file name is not UTF-8".to_owned()))?;
             validate_component(&name)?;
             let remote = remote_join(target, &name);
-            upload_tree_at(sftp, &entry.path(), &remote, write_limit, depth + 1).await?;
+            upload_tree_at(connection, &entry.path(), &remote, depth + 1).await?;
         }
-        sftp.setstat(target.to_owned(), attributes(final_mode, true))
-            .await?;
+        // Only a directory this transfer created gets the source's mode;
+        // merging must not rewrite the permissions of an existing one.
+        if created {
+            sftp.setstat(target.to_owned(), attributes(final_mode, true))
+                .await?;
+        }
         Ok(())
     })
 }
 
 pub fn download_tree<'a>(
-    sftp: &'a RawSftpSession,
+    connection: &'a SftpConnection,
     source: &'a str,
     target: &'a Path,
-    read_limit: Option<u64>,
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
-    download_tree_at(sftp, source, target, read_limit, 0)
+    download_tree_at(connection, source, target, 0)
 }
 
 fn download_tree_at<'a>(
-    sftp: &'a RawSftpSession,
+    connection: &'a SftpConnection,
     source: &'a str,
     target: &'a Path,
-    read_limit: Option<u64>,
     depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
     Box::pin(async move {
+        let sftp = &connection.raw;
         check_depth(depth)?;
         let attrs = sftp.lstat(source).await?.attrs;
         if attrs.is_regular() {
-            return download_file(sftp, source, target, read_limit).await;
+            return download_file(connection, source, target).await;
         }
         if !attrs.is_dir() {
             return Err(Error::Message("unsupported remote file type".to_owned()));
         }
-        local::create_dir(target, 0o700)?;
+        let created = ensure_local_dir(target)?;
         let handle = sftp.opendir(source.to_owned()).await?.handle;
         let result = async {
             loop {
@@ -229,7 +300,7 @@ fn download_tree_at<'a>(
                             validate_component(&entry.filename)?;
                             let remote = remote_join(source, &entry.filename);
                             let local = target.join(&entry.filename);
-                            download_tree_at(sftp, &remote, &local, read_limit, depth + 1).await?;
+                            download_tree_at(connection, &remote, &local, depth + 1).await?;
                         }
                     }
                     Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
@@ -244,9 +315,122 @@ fn download_tree_at<'a>(
         let close = sftp.close(handle).await;
         result?;
         close?;
-        local::set_mode(target, attrs.permissions.unwrap_or(0o755), true)?;
+        // Matches the upload side: existing directories keep their mode.
+        if created {
+            local::set_mode(target, attrs.permissions.unwrap_or(0o755), true)?;
+        }
         Ok(())
     })
+}
+
+/// Replaces `newpath` atomically via posix-rename@openssh.com. The caller
+/// must have negotiated the extension (`connection.posix_rename`).
+pub async fn posix_rename(
+    connection: &SftpConnection,
+    oldpath: &str,
+    newpath: &str,
+) -> Result<(), Error> {
+    let data = encode_posix_rename(oldpath, newpath);
+    match connection.raw.extended(POSIX_RENAME, data).await? {
+        Packet::Status(status) if status.status_code == StatusCode::Ok => Ok(()),
+        Packet::Status(status) => Err(SftpError::Status(status).into()),
+        _ => Err(SftpError::UnexpectedPacket.into()),
+    }
+}
+
+async fn install_remote_file(
+    connection: &SftpConnection,
+    staging: &str,
+    target: &str,
+) -> Result<(), Error> {
+    if connection.posix_rename {
+        posix_rename(connection, staging, target).await
+    } else {
+        // The target was absent when the transfer started (upload_file falls
+        // back to an in-place overwrite otherwise), so the no-replace rename
+        // only fails if it appeared concurrently.
+        connection
+            .raw
+            .rename(staging.to_owned(), target.to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+/// The state of an existing regular-file transfer target: None when absent,
+/// Some(mode) otherwise, with the mode itself None when the server did not
+/// report one. Any other existing kind fails before data is transferred.
+async fn existing_remote_file(
+    connection: &SftpConnection,
+    target: &str,
+) -> Result<Option<Option<u32>>, Error> {
+    match connection.raw.stat(target.to_owned()).await {
+        Ok(attrs) => existing_file_mode(&attrs.attrs).map(Some).map_err(|()| {
+            Error::Message(format!(
+                "remote target '{target}' exists and is not a regular file"
+            ))
+        }),
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The permissions attribute is optional and its file-type bits may be
+/// absent too, so an entry counts as a regular file unless the type bits
+/// name another kind; the mode is None when the server reported none.
+fn existing_file_mode(attrs: &FileAttributes) -> Result<Option<u32>, ()> {
+    match attrs.permissions.map(|mode| mode & 0o170000) {
+        None | Some(0) | Some(0o100000) => Ok(attrs.permissions.map(|mode| mode & 0o777)),
+        Some(_) => Err(()),
+    }
+}
+
+fn existing_local_file(target: &Path) -> Result<Option<u32>, Error> {
+    match target.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => Ok(Some(local::file_mode(target, false)?)),
+        Ok(_) => Err(Error::Message(format!(
+            "local target '{}' exists and is not a regular file",
+            target.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+// Both ensure helpers create first — the fresh-tree path costs one round
+// trip, and two concurrent transfers cannot both pass an existence check —
+// and treat an existing directory as a merge target, reporting whether the
+// directory was created. New directories start at 0700 so the transfer can
+// write into them; the caller stamps the final mode.
+async fn ensure_remote_dir(sftp: &RawSftpSession, path: &str) -> Result<bool, Error> {
+    let mkdir_error = match sftp.mkdir(path.to_owned(), attributes(0o700, true)).await {
+        Ok(_) => return Ok(true),
+        Err(error) => error,
+    };
+    match sftp.lstat(path.to_owned()).await {
+        // lstat: a symlink planted at the target is refused, not silently
+        // traversed, matching the local side.
+        Ok(attrs) if attrs.attrs.is_dir() => Ok(false),
+        Ok(_) => Err(Error::Message(format!(
+            "remote target '{path}' exists and is not a directory"
+        ))),
+        Err(_) => Err(mkdir_error.into()),
+    }
+}
+
+fn ensure_local_dir(path: &Path) -> Result<bool, Error> {
+    let create_error = match local::create_dir(path, 0o700) {
+        Ok(()) => return Ok(true),
+        Err(error) => error,
+    };
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => Ok(false),
+        Ok(_) => Err(Error::Message(format!(
+            "local target '{}' exists and is not a directory",
+            path.display()
+        ))),
+        Err(_) => Err(create_error.into()),
+    }
 }
 
 pub fn remote_join(parent: &str, child: &str) -> String {
@@ -378,5 +562,61 @@ mod tests {
         assert_eq!(limited_packet(None), PACKET_SIZE);
         assert_eq!(limited_packet(Some(100)), 100);
         assert_eq!(limited_packet(Some(0)), 1);
+    }
+
+    #[test]
+    fn existing_local_transfer_target_must_be_a_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "russhd-transfer-{}-{}",
+            std::process::id(),
+            rand::rng().random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        assert!(!ensure_local_dir(&root).unwrap());
+
+        let file = root.join("file");
+        std::fs::write(&file, b"file").unwrap();
+        assert!(matches!(ensure_local_dir(&file), Err(Error::Message(_))));
+
+        let created = root.join("created");
+        assert!(ensure_local_dir(&created).unwrap());
+        assert!(created.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_file_mode_tolerates_optional_permissions() {
+        let mut attrs = FileAttributes::empty();
+        assert_eq!(existing_file_mode(&attrs), Ok(None));
+        attrs.permissions = Some(0o644);
+        assert_eq!(existing_file_mode(&attrs), Ok(Some(0o644)));
+        attrs.permissions = Some(0o100600);
+        assert_eq!(existing_file_mode(&attrs), Ok(Some(0o600)));
+        for other_kind in [0o040755, 0o120777, 0o140644] {
+            attrs.permissions = Some(other_kind);
+            assert_eq!(existing_file_mode(&attrs), Err(()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_local_file_reports_mode_absence_and_kind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "russhd-transfer-existing-{}-{}",
+            std::process::id(),
+            rand::rng().random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        assert!(matches!(existing_local_file(&root), Err(Error::Message(_))));
+
+        let file = root.join("file");
+        std::fs::write(&file, b"file").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(existing_local_file(&file).unwrap(), Some(0o640));
+
+        assert_eq!(existing_local_file(&root.join("missing")).unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
