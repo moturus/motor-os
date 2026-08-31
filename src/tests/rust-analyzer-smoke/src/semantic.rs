@@ -59,6 +59,21 @@ impl Toolchain {
             rust_analyzer,
         })
     }
+
+    pub fn target_cfgs(&self, target: &str) -> io::Result<Vec<String>> {
+        let output = Command::new(self.sysroot.join("bin/rustc"))
+            .args(["--print", "cfg", "--target", target])
+            .env("RUSTUP_TOOLCHAIN", &self.name)
+            .output()?;
+        if !output.status.success() {
+            return Err(invalid(format!("rustc could not report cfgs for {target}")));
+        }
+        Ok(std::str::from_utf8(&output.stdout)
+            .map_err(|_| invalid("rustc printed non-UTF-8 cfgs"))?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
 }
 
 pub fn file_uri(path: &Path) -> String {

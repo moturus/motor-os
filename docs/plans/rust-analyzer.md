@@ -446,9 +446,14 @@ discovery. It should describe the same dependency-free Motor crate with:
   fixture).
 
 The inline case deliberately excludes proc macros and build-script output so
-the same shape can later run in the guest. Require the same Motor std
-definition result. Keep its project-data builder path-parameterized; do not
-embed Linux home-directory or toolchain-key strings in a checked-in JSON file.
+the same shape can later run in the guest. Set `cargo.target` to
+`x86_64-unknown-motor` in its initialization options as well: real Stage 1
+logs confirmed that the pinned server uses this workspace setting when it
+loads even a project object's sysroot through Cargo; the crate's own `target`
+field controls the described crate but does not select the sysroot metadata
+platform. Require the same Motor std definition result. Keep its project-data
+builder path-parameterized; do not embed Linux home-directory or toolchain-key
+strings in a checked-in JSON file.
 
 Run a fourth, multi-root case with the Motor and Linux Cargo fixtures as two
 `workspaceFolders` in one rust-analyzer process. Do not set a global

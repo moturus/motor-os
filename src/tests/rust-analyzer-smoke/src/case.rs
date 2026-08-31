@@ -29,6 +29,9 @@ impl SemanticCase {
             .current_dir(root)
             .env("RUSTUP_TOOLCHAIN", &toolchain.name)
             .env_remove("RA_LOG");
+        if let Ok(log) = std::env::var("MOTOR_RA_SMOKE_LOG") {
+            command.env("RA_LOG", log);
+        }
         let mut session = LspSession::spawn(&mut command)?;
         let workspace_folders: Vec<_> = folders
             .iter()
@@ -129,7 +132,15 @@ impl SemanticCase {
             }),
             self.deadline,
         )?;
-        definition_uri(rpc_result(response)?)
+        definition_uri(rpc_result(response)?).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; rust-analyzer stderr: {}",
+                    self.session.stderr_tail()
+                ),
+            )
+        })
     }
 
     pub fn hover(&mut self, path: &Path, needle: &str) -> io::Result<Value> {
