@@ -45,7 +45,7 @@ SSH_OPTS=(
     -o UserKnownHostsFile=/dev/null
 )
 
-REMOTE_PHASE0_PARENT="$TEST_TMP/lorry"
+REMOTE_PHASE0_PARENT="$TEST_TMP/source-staging"
 REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-$REMOTE_PHASE0_PARENT/sftp-prerequisite-$$}"
 
 WORK="$(mktemp -d)"
@@ -314,9 +314,9 @@ cmp -s "$scp_tree/nested/file" "$WORK/scp-nested" || fail "nested scp file chang
 echo "  ok: recursive scp completed without fsetstat errors"
 
 # ---------------------------------------------------------------------------
-# 7. Lorry's native harness prerequisite: recursively stage a representative
-#    source tree through one SFTP session, copy it in the guest, and remove only
-#    the selected copy. This also verifies empty directories and preserved modes.
+# 7. Recursively stage a representative source tree through one SFTP session,
+#    copy it in the guest, and remove only the selected copy. This also verifies
+#    empty directories and preserved modes.
 # ---------------------------------------------------------------------------
 source_tree="$WORK/source"
 mkdir -p "$source_tree/src/nested" "$source_tree/empty"
@@ -335,7 +335,7 @@ remote_copy="$REMOTE_PHASE0_ROOT/copy"
 remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
 remote_operations="$REMOTE_PHASE0_ROOT/operations"
 
-echo "-- staging a nested Lorry source fixture under $REMOTE_PHASE0_ROOT --"
+echo "-- staging a nested source fixture under $REMOTE_PHASE0_ROOT --"
 run_ssh /system/bin/mkdir "$remote_source" ||
     fail "could not create the fixture source root"
 

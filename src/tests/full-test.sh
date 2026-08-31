@@ -63,8 +63,7 @@ fi
 python3 "$WD/test-dev-path-locks.py"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
-# both to run this same suite against the dev image, which adds native
-# toolchains, tests, source trees, Gears, and Lorry to the standard contents.
+# both to run this same suite against the dev image.
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 

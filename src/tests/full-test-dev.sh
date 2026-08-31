@@ -20,6 +20,9 @@ ROOT_DIR="$WD/../.."
 # established default VM memory unless the caller explicitly overrides it.
 DEV_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
 
+# Keep a local runtime version bump from breaking only the dev-image suite.
+python3 "$WD/test-dev-path-locks.py"
+
 FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "$@"
