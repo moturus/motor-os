@@ -683,9 +683,11 @@ build sequence is:
    `build/x86_64-unknown-motor/stage2`, and it may also recreate the Linux
    `stage2`; the installed prefix is unaffected either way. An assembly-scoped
    `llvm-config` adapter keeps `--bindir` on the runnable standalone host tools
-   while directing include and library paths to the built Motor LLVM. This is
-   necessary because upstream's normal host-triple path substitution cannot
-   rewrite the content-addressed standalone LLVM path.
+   and rewrites include and library paths to the built Motor LLVM only when
+   Cargo's inherited `TARGET` is `x86_64-unknown-motor`. Linux-host and
+   target-less calls pass through unchanged. This is necessary because
+   upstream's normal host-triple path substitution cannot rewrite the
+   content-addressed standalone LLVM path.
 6. Stage the generated image roots with manifests, build ripgrep and the OS
    with the Motor toolchain, and build the images.
 

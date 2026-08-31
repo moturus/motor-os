@@ -62,16 +62,22 @@ toolchain_validate_native_rustc "$RUSTC_MAIN" || fail "native identity was rejec
 adapter="$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-config"
 target_llvm="$rust/build/x86_64-unknown-motor/llvm"
 [ -x "$adapter" ] || fail "native llvm-config adapter is missing"
-[ "$("$adapter" --bindir)" = "$temporary/llvm/bin" ] ||
+[ "$(TARGET=x86_64-unknown-motor "$adapter" --bindir)" = "$temporary/llvm/bin" ] ||
 	fail "native llvm-config adapter rewrote the host bindir"
-[ "$("$adapter" --cxxflags)" = "-I$target_llvm/include -DNDEBUG" ] ||
+[ "$(TARGET=x86_64-unknown-linux-gnu "$adapter" --cxxflags)" = \
+	"-I$temporary/llvm/include -DNDEBUG" ] ||
+	fail "native llvm-config adapter rewrote a host include path"
+[ "$("$adapter" --ldflags)" = "-L$temporary/llvm/lib" ] ||
+	fail "native llvm-config adapter rewrote a path without a target"
+[ "$(TARGET=x86_64-unknown-motor "$adapter" --cxxflags)" = \
+	"-I$target_llvm/include -DNDEBUG" ] ||
 	fail "native llvm-config adapter did not rewrite the include path"
-[ "$("$adapter" --ldflags)" = "-L$target_llvm/lib" ] ||
+[ "$(TARGET=x86_64-unknown-motor "$adapter" --ldflags)" = "-L$target_llvm/lib" ] ||
 	fail "native llvm-config adapter did not rewrite the library path"
-[ "$("$adapter" --version)" = 23.1.0 ] ||
+[ "$(TARGET=x86_64-unknown-motor "$adapter" --version)" = 23.1.0 ] ||
 	fail "native llvm-config adapter changed non-path output"
 set +e
-"$adapter" --fail
+TARGET=x86_64-unknown-motor "$adapter" --fail
 status=$?
 set -e
 [ "$status" -eq 23 ] || fail "native llvm-config adapter hid a command failure"

@@ -40,6 +40,9 @@ target_root=$target_root_q
 if [ "\$#" -eq 1 ] && [ "\$1" = --bindir ]; then
 	exec "\$real" "\$@"
 fi
+if [ "\${TARGET:-}" != x86_64-unknown-motor ]; then
+	exec "\$real" "\$@"
+fi
 output="\$("\$real" "\$@")"
 printf '%s\n' "\${output//"\$real_root"/"\$target_root"}"
 EOF
