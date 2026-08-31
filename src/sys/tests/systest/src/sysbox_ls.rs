@@ -45,6 +45,26 @@ pub fn run_test() {
     // Options before the delimiter still apply to that directory.
     assert_lists(run(&root, &["-l", "--", "-lh"]), "marker.txt");
 
+    // A file operand lists itself, named as it was typed, as ls(1) does.
+    assert_lists(run(&root, &["--", "-lh/marker.txt"]), "-lh/marker.txt");
+    assert_lists(
+        run(&root, &["-l", "--", "-lh/marker.txt"]),
+        "-lh/marker.txt",
+    );
+
+    // An inaccessible operand is ls(1)'s "serious trouble": stderr and status 2.
+    let output = run(&root, &["missing-entry"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "ls of a missing path: {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "ls of a missing path: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("error reading directory"),
+        "ls of a missing path: {output:?}"
+    );
+
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox_ls::run_test PASS");
 }

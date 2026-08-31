@@ -375,8 +375,13 @@ fi
 
 ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
 ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
+# The probe's `ls` of a missing path exits 2, like ls(1); expecting that exact
+# status here also pins remote exit-status propagation through russhd.
+ssh_split_status=0
 vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /system/bin/printenv SSH_STDOUT_MARKER; /system/bin/ls /ssh-stderr-separation-probe" \
-  > "$ssh_split_stdout" 2> "$ssh_split_stderr"
+  > "$ssh_split_stdout" 2> "$ssh_split_stderr" || ssh_split_status="$?"
+[ "$ssh_split_status" -eq 2 ] ||
+  fail "russhd did not deliver ls's error status (got $ssh_split_status)"
 [ "$(cat "$ssh_split_stdout")" = "SSH_STDOUT_MARKER=ssh-stdout-marker" ] ||
   fail "russhd mixed remote stderr into SSH stdout"
 grep -q "^error reading directory '/ssh-stderr-separation-probe'\.$" "$ssh_split_stderr" ||

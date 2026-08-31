@@ -80,57 +80,75 @@ fn permission_chars(permission: PermissionTriplet) -> [char; 3] {
     ]
 }
 
-fn read_detailed_entries(dir: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
-    use moto_io::fs::{EntryKind, FsClient, Role};
+fn detailed_entry(
+    name: String,
+    metadata: &moto_io::fs::Metadata,
+) -> moto_rt::Result<DetailedEntry> {
+    use moto_io::fs::{EntryKind, Role};
 
-    let dir = dir
+    let kind = match metadata.try_kind()? {
+        EntryKind::Directory => DetailedEntryKind::Directory,
+        EntryKind::File => DetailedEntryKind::File,
+    };
+    let mut permissions = [PermissionTriplet {
+        read: false,
+        write: false,
+        execute: false,
+    }; 3];
+    for (idx, role) in [Role::System, Role::Interactive, Role::None]
+        .into_iter()
+        .enumerate()
+    {
+        let (read, write, execute) = metadata.access(role)?.triple();
+        permissions[idx] = PermissionTriplet {
+            read,
+            write,
+            execute,
+        };
+    }
+    Ok(DetailedEntry {
+        name,
+        kind,
+        size: metadata.size,
+        permissions,
+    })
+}
+
+fn read_entries(operand: &str, path: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
+    use moto_io::fs::{EntryKind, FsClient};
+
+    let path = path
         .to_str()
         .ok_or(moto_rt::Error::InvalidArgument)?
         .to_owned();
+    let operand = operand.to_owned();
 
     moto_async::LocalRuntime::new().block_on(async move {
         let client = FsClient::connect()?;
-        let (dir_id, kind) = client.stat(&dir).await?;
-        if kind != EntryKind::Directory {
-            return Err(moto_rt::Error::NotADirectory);
+        let (id, kind) = client.stat(&path).await?;
+        // A file operand lists itself, named as it was typed, as ls(1) does.
+        if kind == EntryKind::File {
+            let metadata = client.metadata(id).await?;
+            return Ok(vec![detailed_entry(operand, &metadata)?]);
         }
 
         let mut entries = Vec::new();
-        let mut entry_id = client.get_first_entry(dir_id).await?;
+        let mut entry_id = client.get_first_entry(id).await?;
         while let Some(id) = entry_id {
             // Fetch the successor first, as std::fs::read_dir does, so a
             // concurrently removed current entry cannot strand the cursor.
             entry_id = client.get_next_entry(id).await?;
             let metadata = client.metadata(id).await?;
-            let kind = match metadata.try_kind()? {
-                EntryKind::Directory => DetailedEntryKind::Directory,
-                EntryKind::File => DetailedEntryKind::File,
-            };
-            let mut permissions = [PermissionTriplet {
-                read: false,
-                write: false,
-                execute: false,
-            }; 3];
-            for (idx, role) in [Role::System, Role::Interactive, Role::None]
-                .into_iter()
-                .enumerate()
-            {
-                let (read, write, execute) = metadata.access(role)?.triple();
-                permissions[idx] = PermissionTriplet {
-                    read,
-                    write,
-                    execute,
-                };
-            }
-            entries.push(DetailedEntry {
-                name: client.name(id).await?,
-                kind,
-                size: metadata.size,
-                permissions,
-            });
+            entries.push(detailed_entry(client.name(id).await?, &metadata)?);
         }
         Ok(entries)
     })
+}
+
+// ls(1) exits with 2 when a command-line operand cannot be accessed.
+fn operand_error_exit(operand: &str) -> ! {
+    eprintln!("error reading directory '{operand}'.\n");
+    std::process::exit(2);
 }
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
@@ -195,17 +213,11 @@ pub fn do_command(args: &[String]) {
 fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
     let path = match std::fs::canonicalize(Path::new(dir)) {
         Ok(path) => path,
-        Err(_) => {
-            eprintln!("error reading directory '{dir}'.\n");
-            return;
-        }
+        Err(_) => operand_error_exit(dir),
     };
-    let mut entries = match read_detailed_entries(&path) {
+    let mut entries = match read_entries(dir, &path) {
         Ok(entries) => entries,
-        Err(_) => {
-            eprintln!("error reading directory '{dir}'.\n");
-            return;
-        }
+        Err(_) => operand_error_exit(dir),
     };
 
     let max_size = entries.iter().map(|entry| entry.size).max().unwrap_or(0);
@@ -248,17 +260,11 @@ fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
 fn list_plain(dir: &str, list_dots: bool) {
     let path = match std::fs::canonicalize(Path::new(dir)) {
         Ok(path) => path,
-        Err(_) => {
-            eprintln!("error reading directory '{dir}'.\n");
-            return;
-        }
+        Err(_) => operand_error_exit(dir),
     };
-    let mut entries = match read_detailed_entries(&path) {
+    let mut entries = match read_entries(dir, &path) {
         Ok(entries) => entries,
-        Err(_) => {
-            eprintln!("error reading directory '{dir}'.\n");
-            return;
-        }
+        Err(_) => operand_error_exit(dir),
     };
     entries.sort_by(compare_detailed_entries);
 
