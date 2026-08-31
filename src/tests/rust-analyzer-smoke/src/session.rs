@@ -48,7 +48,7 @@ impl LspSession {
         Ok(())
     }
 
-    pub fn notifications(&self) -> impl Iterator<Item = &Notification> {
+    pub fn notifications(&self) -> impl DoubleEndedIterator<Item = &Notification> {
         self.dispatcher.notifications()
     }
 

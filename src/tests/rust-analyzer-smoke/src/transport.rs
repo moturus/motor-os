@@ -187,7 +187,7 @@ impl Dispatcher {
         }
     }
 
-    pub fn notifications(&self) -> impl Iterator<Item = &Notification> {
+    pub fn notifications(&self) -> impl DoubleEndedIterator<Item = &Notification> {
         self.notifications.iter()
     }
 
