@@ -85,6 +85,16 @@ impl ServerProcess {
         )
     }
 
+    pub(crate) fn stdin(&mut self) -> io::Result<&mut ChildStdin> {
+        self.stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "server stdin closed"))
+    }
+
+    pub(crate) fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
+
     pub fn read_until(&mut self, deadline: Instant) -> io::Result<Value> {
         let remaining = deadline
             .checked_duration_since(Instant::now())

@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::thread;
 
 use rust_analyzer_smoke::process::MAX_STDERR_LEN;
-use rust_analyzer_smoke::transport::write_frame;
-use serde_json::json;
+use rust_analyzer_smoke::transport::{FrameReader, write_frame};
+use serde_json::{Value, json};
 
 fn main() {
     let mut args = env::args();
@@ -30,6 +30,60 @@ fn main() {
         Some("hang") => loop {
             thread::park();
         },
+        Some("lifecycle") => lifecycle(0),
+        Some("lifecycle-error") => lifecycle(9),
         _ => std::process::exit(2),
+    }
+}
+
+fn lifecycle(exit_code: i32) {
+    let mut input = FrameReader::new(io::stdin());
+    let mut output = io::stdout().lock();
+    let initialize = input.read().unwrap().unwrap();
+    write_frame(
+        &mut output,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "server-request",
+            "method": "window/workDoneProgress/create"
+        }),
+    )
+    .unwrap();
+    let reply = input.read().unwrap().unwrap();
+    if reply["id"] != "server-request" || reply["result"] != Value::Null {
+        std::process::exit(3);
+    }
+    for method in [
+        "textDocument/publishDiagnostics",
+        "$/progress",
+        "experimental/serverStatus",
+    ] {
+        write_frame(
+            &mut output,
+            &json!({"jsonrpc": "2.0", "method": method, "params": {}}),
+        )
+        .unwrap();
+    }
+    write_frame(
+        &mut output,
+        &json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"ready": true}}),
+    )
+    .unwrap();
+
+    let shutdown = input.read().unwrap().unwrap();
+    if shutdown["method"] != "shutdown" {
+        std::process::exit(4);
+    }
+    write_frame(
+        &mut output,
+        &json!({"jsonrpc": "2.0", "id": shutdown["id"], "result": null}),
+    )
+    .unwrap();
+    if input.read().unwrap().unwrap()["method"] != "exit" {
+        std::process::exit(5);
+    }
+    if exit_code != 0 {
+        eprintln!("fake lifecycle failure marker");
+        std::process::exit(exit_code);
     }
 }
