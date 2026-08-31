@@ -381,5 +381,76 @@ pub(crate) fn run_self_tests() {
         Some(b"\x18\r\ntimeout".to_vec())
     );
 
+    let mut arbiter = Arbiter::new();
+    let mut state = State::new();
+    state.slots[Source::Stdout.index()] = Some(vec![0xc3]);
+    assert_eq!(arbiter.take_ready(&mut state, base), Some(vec![0xc3]));
+    state.slots[Source::Stderr.index()] = Some(b"other".to_vec());
+    assert_eq!(arbiter.take_ready(&mut state, base), None);
+    state.slots[Source::Stdout.index()] = Some(vec![0xa9]);
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(1)),
+        Some(vec![0xa9])
+    );
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(1)),
+        Some(b"other".to_vec())
+    );
+
+    let mut arbiter = Arbiter::new();
+    let mut state = State::new();
+    assert_eq!(
+        arbiter.finish_screen(Source::Stdout, b"prompt".to_vec(), base),
+        b"prompt"
+    );
+    arbiter.hold_log(b"\x1b unsafe \xc2\x9b".to_vec(), base);
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(29)),
+        None
+    );
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(31)),
+        Some(
+            b"\r\n[UNSAFE ASCII ESCAPE SEQUENCE DETECTED] unsafe [UNSAFE C1 CONTROL CHARACTER DETECTED]"
+                .to_vec()
+        )
+    );
+
+    let mut arbiter = Arbiter::new();
+    let mut state = State::new();
+    arbiter.finish_screen(Source::Stdout, b"screen".to_vec(), base);
+    arbiter.hold_log(b"held".to_vec(), base);
+    arbiter.finish_screen(
+        Source::Stdout,
+        b"activity".to_vec(),
+        base + Duration::from_millis(490),
+    );
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(499)),
+        None
+    );
+    assert_eq!(
+        arbiter.take_ready(&mut state, base + Duration::from_millis(501)),
+        Some(b"\r\nheld".to_vec())
+    );
+
+    let mut arbiter = Arbiter::new();
+    let mut state = State::new();
+    arbiter.finish_screen(Source::Stdout, b"screen".to_vec(), base);
+    let sized = vec![b'x'; HOLD_SIZE];
+    arbiter.hold_log(sized.clone(), base);
+    let mut expected = b"\r\n".to_vec();
+    expected.extend_from_slice(&sized);
+    assert_eq!(arbiter.take_ready(&mut state, base), Some(expected));
+
+    let mut arbiter = Arbiter::new();
+    let mut state = State::new();
+    arbiter.hold_log(vec![b'a'; LOG_CAPACITY * 3 / 4], base);
+    let kept = vec![b'b'; LOG_CAPACITY / 2];
+    arbiter.hold_log(kept.clone(), base);
+    let mut expected = b"[kernel log: 1 records dropped: console backlog]\n".to_vec();
+    expected.extend_from_slice(&kept);
+    assert_eq!(arbiter.take_ready(&mut state, base), Some(expected));
+
     println!("sys-tty writer self-test PASS");
 }
