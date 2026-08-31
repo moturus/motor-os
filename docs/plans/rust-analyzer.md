@@ -322,9 +322,11 @@ opening the checkout does not force an editor to discard a bundled server.
 For a Linux host program, leave `cargo.target` and `check.targets` unset: the
 server then analyzes and checks `x86_64-unknown-linux-gnu` with the keyed
 toolchain's host std and the same `rust-src`, under the same toolchain
-selection rule. `cargo.target` is a workspace-scoped setting in the pinned
-rust-analyzer, so a Motor workspace can carry it in a `rust-analyzer.toml` at
-its root while a Linux workspace linked into the same session leaves it unset.
+selection rule. Run Motor and Linux projects in separate rust-analyzer
+processes. Although the pinned server describes `cargo.target` as a
+workspace-scoped setting, its project loader constructs one target-neutral
+configuration and reuses it for every Cargo workspace in a process. A mixed
+Motor/Linux session therefore loads both semantic graphs for the host target.
 
 Build scripts and procedural macros execute project code on the Linux host.
 They are acceptable for the trusted Motor OS checkout and explicit trusted
@@ -455,16 +457,10 @@ platform. Require the same Motor std definition result. Keep its project-data
 builder path-parameterized; do not embed Linux home-directory or toolchain-key
 strings in a checked-in JSON file.
 
-Run a fourth, multi-root case with the Motor and Linux Cargo fixtures as two
-`workspaceFolders` in one rust-analyzer process. Do not set a global
-`cargo.target` or `check.targets`. Put the Motor target and check target in a
-`rust-analyzer.toml` at the Motor workspace root and leave both unset in the
-Linux workspace. After both workspaces load and both checks complete, require
-the Motor and Linux standard-library definition results and the absence of
-both wrong-target sentinels. Only then perform one `shutdown`/`exit` sequence
-and require a clean child exit. This case proves that workspace-scoped target
-configuration works in one session rather than merely in two independent
-server processes.
+The Motor and Linux cases must use independent rust-analyzer processes. This
+matches the supported editor configuration boundary and proves both target
+contexts without relying on the pinned server's ineffective per-root
+`cargo.target` setting during Cargo project loading.
 
 Add the smoke test to `src/tests/full-test.sh` directly or through a focused
 host-toolchain test. It must not reach Cargo registries, Git repositories, or
@@ -504,8 +500,7 @@ Keep the implementation incremental:
    partial frames, fill stderr, exit cleanly, or hang. Split patches 4 and 5
    further if needed to keep each patch, including tests, near 100-300 lines.
 6. **Host semantic smoke.** Add the Motor Cargo, Linux host, and
-   inline-project fixtures and their four cases, including the mixed-target
-   multi-root case, wired into
+   inline-project fixtures and their three cases, wired into
    `src/tests/full-test.sh`.
 7. **User documentation.** Document editor-neutral launch/configuration and
    the mixed-target repository boundary.
