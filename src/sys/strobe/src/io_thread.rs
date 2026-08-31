@@ -1,4 +1,4 @@
-use crate::logging::LogRecord;
+use crate::logging::{LogRecord, RawLogRecord};
 use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 use moto_sys::SysHandle;
 use std::{collections::HashMap, io::Write, path::Path};
@@ -42,6 +42,7 @@ pub enum Msg {
     NewConnection(crate::logging::Connection),
     DroppedConnection(SysHandle),
     Record(LogRecord),
+    RawRecord(RawLogRecord),
 }
 
 struct Connection {
@@ -127,6 +128,20 @@ impl Connection {
             }
         }
     }
+
+    fn process_raw_log_record(&mut self, record: RawLogRecord) {
+        if self.tag_id != record.tag_id {
+            return;
+        }
+        let result = self
+            .log_file
+            .as_mut()
+            .map(|file| file.write_all(&record.data).and_then(|()| file.flush()));
+        if let Some(Err(err)) = result {
+            self.log_file = None;
+            moto_rt::moto_log!("Disabling raw log file for '{}': {err:?}.", self.tag);
+        }
+    }
 }
 
 pub fn spawn(receiver: std::sync::mpsc::Receiver<Msg>) {
@@ -164,6 +179,12 @@ pub fn spawn(receiver: std::sync::mpsc::Receiver<Msg>) {
                 Msg::Record(log_record) => {
                     if let Some(connection) = connections.get_mut(&log_record.handle) {
                         connection.process_log_record(log_record);
+                    }
+                }
+
+                Msg::RawRecord(record) => {
+                    if let Some(connection) = connections.get_mut(&record.handle) {
+                        connection.process_raw_log_record(record);
                     }
                 }
             }

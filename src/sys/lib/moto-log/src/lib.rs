@@ -171,6 +171,7 @@ pub mod implementation {
     pub const CMD_LOG: u16 = 2;
     pub const CMD_DISCONNECT: u16 = 3;
     pub const CMD_GET_TAIL_ENTRIES: u16 = 4;
+    pub const CMD_LOG_RAW: u16 = 5;
 
     pub const LOG_LEVEL_FATAL: u8 = 0;
     pub const LOG_LEVEL_ERROR: u8 = 1;
@@ -268,6 +269,29 @@ pub mod implementation {
 
             let payload_buf = &mut buffer[size_of::<Self>()..(size_of::<Self>() + payload_size)];
             payload_buf.copy_from_slice(&payload.as_bytes()[0..payload_size]);
+        }
+    }
+
+    #[repr(C, align(8))]
+    pub struct RawLogRequest {
+        pub header: moto_ipc::sync::RequestHeader,
+        pub payload_size: u32,
+        pub tag_id: u64,
+    }
+
+    impl RawLogRequest {
+        pub fn prepare(buffer: &mut [u8], tag_id: u64, payload: &[u8]) {
+            assert!(buffer.len() >= size_of::<Self>() + payload.len());
+            let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
+            assert!(prefix.is_empty());
+            assert!(!data.is_empty());
+
+            let req = &mut data[0];
+            req.header.cmd = CMD_LOG_RAW;
+            req.header.ver = 0;
+            req.payload_size = payload.len() as u32;
+            req.tag_id = tag_id;
+            buffer[size_of::<Self>()..size_of::<Self>() + payload.len()].copy_from_slice(payload);
         }
     }
 

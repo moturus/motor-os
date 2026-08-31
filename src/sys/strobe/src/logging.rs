@@ -20,6 +20,12 @@ pub struct LogRecord {
     pub msg: String,
 }
 
+pub struct RawLogRecord {
+    pub handle: SysHandle,
+    pub tag_id: u64,
+    pub data: Vec<u8>,
+}
+
 struct Registration {
     tag_id: u64,
     canonical_tag: String,
@@ -85,6 +91,7 @@ fn remove_registration(
 impl LogServer {
     fn process_connect_request(
         conn: &mut LocalServerConnection,
+        caps: u64,
         sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
         next_tag_id: &mut u64,
         registrations: &mut HashMap<SysHandle, Registration>,
@@ -112,6 +119,9 @@ impl LogServer {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         };
         let canonical_tag = canonicalize_tag(tag);
+        if canonical_tag == "kernel" && caps & moto_sys::caps::CAP_IO_MANAGER == 0 {
+            return RpcOutcome::disconnect(moto_rt::E_NOT_ALLOWED);
+        }
         if let Some(active_handle) = active_tags.get(&canonical_tag).copied() {
             match SysObj::get_capabilities(active_handle) {
                 Err(moto_rt::E_BAD_HANDLE) => {
@@ -190,6 +200,43 @@ impl LogServer {
         RpcOutcome::keep(moto_rt::E_OK)
     }
 
+    fn process_raw_log_request(
+        conn: &LocalServerConnection,
+        caps: u64,
+        sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
+        registrations: &HashMap<SysHandle, Registration>,
+    ) -> RpcOutcome {
+        use moto_log::implementation::*;
+
+        let Some(registration) = registrations.get(&conn.handle()) else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        };
+        if registration.canonical_tag != "kernel" || caps & moto_sys::caps::CAP_IO_MANAGER == 0 {
+            return RpcOutcome::disconnect(moto_rt::E_NOT_ALLOWED);
+        }
+        let req = conn.req::<RawLogRequest>();
+        let payload_size = req.payload_size as usize;
+        let Some(payload_end) = size_of::<RawLogRequest>().checked_add(payload_size) else {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        };
+        if req.header.ver != 0
+            || req.tag_id != registration.tag_id
+            || payload_end > conn.channel_size()
+        {
+            return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let record = RawLogRecord {
+            handle: conn.handle(),
+            tag_id: req.tag_id,
+            data: conn.data()[size_of::<RawLogRequest>()..payload_end].to_vec(),
+        };
+        if sender.send(io_thread::Msg::RawRecord(record)).is_err() {
+            return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);
+        }
+        RpcOutcome::keep(moto_rt::E_OK)
+    }
+
     fn process_ipc(&mut self, waker: SysHandle) {
         use moto_log::implementation::*;
 
@@ -220,12 +267,14 @@ impl LogServer {
                 match conn.req::<RequestHeader>().cmd {
                     CMD_CONNECT => Self::process_connect_request(
                         conn,
+                        caps,
                         sender,
                         next_tag_id,
                         registrations,
                         active_tags,
                     ),
                     CMD_LOG => Self::process_log_request(conn, sender, registrations),
+                    CMD_LOG_RAW => Self::process_raw_log_request(conn, caps, sender, registrations),
                     _ => RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT),
                 }
             }
@@ -272,7 +321,7 @@ impl LogServer {
         crate::io_thread::spawn(receiver);
 
         let mut log_server = LogServer {
-            ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 10, 2).unwrap(),
+            ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 11, 2).unwrap(),
             next_tag_id: 1,
             sender,
             registrations: HashMap::new(),

@@ -1,6 +1,8 @@
 use moto_io::fs::{AccessPermissions, FsClient, RolePermissions};
 use moto_ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
-use moto_log::implementation::{CMD_LOG, ConnectRequest, ConnectResponse, LogRequest};
+use moto_log::implementation::{
+    CMD_LOG, ConnectRequest, ConnectResponse, LogRequest, RawLogRequest,
+};
 use std::io::Write;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
@@ -148,6 +150,14 @@ fn protocol_hardening(slot: &str) {
     let unauthorized = derived_tag(slot, "unauthorized");
     let output = child_output(UNAUTHORIZED_CHILD, interactive, &[&unauthorized]);
     assert!(output.status.success(), "{output:?}");
+
+    let mut conn = raw_connection();
+    ConnectRequest::prepare(conn.data_mut(), "kernel");
+    expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
+
+    let (mut conn, tag_id) = connected_tag(&derived_tag(slot, "raw"));
+    RawLogRequest::prepare(conn.data_mut(), tag_id, b"raw bytes");
+    expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
 
     let health_tag = derived_tag(slot, "health");
     let (mut health, health_id) = connected_tag(&health_tag);
