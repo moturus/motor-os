@@ -1,2 +1,0 @@
-cargo.target = "x86_64-unknown-motor"
-check.targets = ["x86_64-unknown-motor"]
