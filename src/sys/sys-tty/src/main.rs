@@ -186,7 +186,7 @@ fn main() {
                     let Some(forwarder) = input_forwarder.as_ref() else {
                         return input_output.try_send_kernel(record);
                     };
-                    let console = synthetic_warning || forwarder::is_warning_or_error(&record);
+                    let console = forwarder::console_eligible(&record, synthetic_warning);
                     if console {
                         let _ = forwarder.offer(record.clone());
                         input_output.try_send_kernel(record)

@@ -46,6 +46,10 @@ pub fn is_warning_or_error(record: &[u8]) -> bool {
     after_cpu.starts_with(b"ERROR  ") || after_cpu.starts_with(b"WARN   ")
 }
 
+pub fn console_eligible(record: &[u8], synthetic_warning: bool) -> bool {
+    synthetic_warning || is_warning_or_error(record)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Batch {
     pub data: Vec<u8>,
@@ -277,6 +281,8 @@ pub fn run_self_tests() {
     ] {
         assert!(!is_warning_or_error(record), "{record:?}");
     }
+    assert!(console_eligible(b"free text", true));
+    assert!(!console_eligible(b"free text", false));
 
     let mut queue = FileQueue::with_capacity(8);
     queue.offer(b"aaa".to_vec()).unwrap();

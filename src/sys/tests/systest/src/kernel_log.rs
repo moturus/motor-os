@@ -4,7 +4,113 @@ use moto_sys::kernel_log::{
     encode_kernel_log_frame, kernel_log_control_is_aligned, kernel_log_sequence_gap,
     snapshot_kernel_log_ring,
 };
+use std::fs::File;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+const KERNEL_LOG_PATH: &str = "/system/logs/kernel.log";
+const KERNEL_LOG_PREVIOUS_PATH: &str = "/system/logs/kernel.log.prev";
+const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const BOOT_PREAMBLE_PREFIX: &[u8] = b"[kernel log: file forwarding started at ";
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn wait_for_file_records(records: &[&[u8]]) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut log = std::fs::read(KERNEL_LOG_PREVIOUS_PATH).unwrap_or_default();
+        log.extend(std::fs::read(KERNEL_LOG_PATH).unwrap_or_default());
+        if records.iter().all(|record| contains(&log, record)) {
+            return log;
+        }
+        if Instant::now() >= deadline {
+            let missing = records
+                .iter()
+                .find(|record| !contains(&log, record))
+                .unwrap();
+            panic!("kernel log files missing test record {missing:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn boot_milestone(log: &[u8]) -> u128 {
+    const SUFFIX: &[u8] = b"ms since boot]\n";
+    let start = log
+        .windows(BOOT_PREAMBLE_PREFIX.len())
+        .position(|window| window == BOOT_PREAMBLE_PREFIX)
+        .expect("kernel log boot preamble")
+        + BOOT_PREAMBLE_PREFIX.len();
+    let end = log[start..]
+        .windows(SUFFIX.len())
+        .position(|window| window == SUFFIX)
+        .expect("kernel log boot preamble suffix")
+        + start;
+    std::str::from_utf8(&log[start..end])
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn file_mode_end_to_end() {
+    if crate::skip_without_cap_log("kernel_log::file_mode_end_to_end") {
+        return;
+    }
+
+    let initial = wait_for_file_records(&[BOOT_PREAMBLE_PREFIX]);
+    let milestone = boot_milestone(&initial);
+    let max_milestone = if cfg!(debug_assertions) { 3_000 } else { 1_000 };
+    assert!(milestone <= max_milestone, "boot milestone {milestone}ms");
+
+    let nonce = format!("kernel-e2e-{:016x}", std::random::random::<u64>(..));
+    let records = [
+        format!("  0:001: ERROR file.rs:1: {nonce} error\n"),
+        format!("  0:002: WARN file.rs:2: {nonce} unsafe \x1b[31m \u{009b}32m\n"),
+        format!("  0:003: INFO file.rs:3: {nonce} info\n"),
+        format!("  0:004: DEBUG file.rs:4: {nonce} debug\n"),
+        format!("{nonce} free text\n"),
+        format!("{nonce} newline-free"),
+        format!("{nonce} multi-line first\n{nonce} multi-line second\n"),
+    ];
+    for record in &records {
+        moto_sys::SysRay::log(record).unwrap();
+    }
+    let expected: Vec<&[u8]> = records.iter().map(|record| record.as_bytes()).collect();
+    wait_for_file_records(&expected);
+
+    let file = File::open(KERNEL_LOG_PATH).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let before = file.metadata().unwrap().len();
+    std::thread::sleep(Duration::from_secs(5));
+    let after = file.metadata().unwrap().len();
+    assert_eq!(before, after, "kernel.log did not become quiescent");
+
+    let flood_prefix = format!("kernel-rotation-{nonce} ");
+    let flood = format!("{flood_prefix}{}\n", "x".repeat(220 - flood_prefix.len()));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        for _ in 0..32 {
+            moto_sys::SysRay::log(&flood).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        let previous = std::fs::read(KERNEL_LOG_PREVIOUS_PATH).unwrap_or_default();
+        if contains(&previous, flood_prefix.as_bytes()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "kernel.log did not rotate");
+    }
+
+    let marker = format!("{nonce} after rotation\n");
+    moto_sys::SysRay::log(&marker).unwrap();
+    wait_for_file_records(&[marker.as_bytes()]);
+    assert!(std::fs::metadata(KERNEL_LOG_PREVIOUS_PATH).unwrap().len() <= LOG_FILE_MAX_BYTES);
+    assert!(std::fs::metadata(KERNEL_LOG_PATH).unwrap().len() <= LOG_FILE_MAX_BYTES);
+    println!("kernel_log::file_mode_end_to_end PASS");
+}
 
 fn put_wrapped(ring: &mut [u8], start: usize, bytes: &[u8]) {
     let first = bytes.len().min(ring.len() - start);
@@ -129,6 +235,8 @@ pub fn run_all_tests() {
     assert_eq!(kernel_log_sequence_gap(10, 10), 0);
     assert_eq!(kernel_log_sequence_gap(10, 13), 3);
     assert_eq!(kernel_log_sequence_gap(u32::MAX, 0), 1);
+
+    file_mode_end_to_end();
 
     println!("kernel_log::run_all_tests PASS");
 }
