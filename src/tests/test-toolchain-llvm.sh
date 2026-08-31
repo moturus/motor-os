@@ -39,7 +39,7 @@ shift 2
 for target in "$@"; do
   case "$target" in
   clang) binaries='clang clang++' ;;
-  lld) binaries='ld.lld' ;;
+  lld) binaries='lld ld.lld' ;;
   llvm-libraries) continue ;;
   *) binaries="$target" ;;
   esac

@@ -135,8 +135,9 @@ toolchain_bootstrap_identity_digest() {
 				/MOTOR_SYSROOT /MOTOR_LLVM_BIN || return
 		done
 	} | sha256sum | awk '{print $1}')" || return
-	toolchain_hash_pairs schema motor-bootstrap-identity-v1 \
-		config "$config_digest" wrappers "$wrappers_digest"
+	toolchain_hash_pairs schema motor-bootstrap-identity-v2 \
+		config "$config_digest" wrappers "$wrappers_digest" \
+		rust_lld motor-standalone-lld-v1
 }
 
 toolchain_generate_bootstrap_config() {

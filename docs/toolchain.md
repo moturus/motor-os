@@ -806,12 +806,18 @@ sysroots: `llvm-cov`, `llvm-nm`, `llvm-objcopy`, `llvm-objdump`,
 therefore produces and validates that exact set, and bootstrap retains
 `rust-objcopy` in the rustc component.
 
-External `llvm-config` also disables bootstrap's self-contained LLD support,
-so `rust-lld` and `gcc-ld` are absent. The repository uses none of the omitted
-binaries. Bootstrap's install steps build with the compiler one stage below
-`--stage`, so `x.py install --stage 2` installs the stage-2 artifacts. The
-stage sysroot is never copied by hand: that would omit installer behavior and
-the vendored, reduced `rust-src` component.
+External `llvm-config` also disables bootstrap's self-contained LLD support.
+The MBR, bootloader, kernel loader, and kernel custom targets require
+`rust-lld`, so provisioning copies the already-built standalone `lld` to the
+standard prefix path
+`lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld` after `x.py install` and
+before validation. Validation requires a regular executable byte-identical to
+standalone `lld`; the manifest records its digest. `gcc-ld` remains absent
+because the repository does not use it. Bootstrap's install steps build with
+the compiler one stage below `--stage`, so `x.py install --stage 2` installs
+the stage-2 artifacts. Other than the explicit `rust-lld` copy, the stage
+sysroot is never copied by hand: that would omit installer behavior and the
+vendored, reduced `rust-src` component.
 
 `x.py install` never runs into an existing prefix. An existing prefix is
 reused only after its complete manifest passes validation; otherwise the

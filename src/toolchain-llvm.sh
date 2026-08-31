@@ -22,7 +22,7 @@ EOF
 
 toolchain_validate_standalone_llvm() {
 	local build="$1" binary version expected library library_files
-	local -a binaries=(clang clang++ ld.lld llvm-ranlib llvm-readelf llvm-config
+	local -a binaries=(clang clang++ lld ld.lld llvm-ranlib llvm-readelf llvm-config
 		"${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[@]}")
 	expected="$(mktemp)"
 	toolchain_render_standalone_llvm_manifest > "$expected"

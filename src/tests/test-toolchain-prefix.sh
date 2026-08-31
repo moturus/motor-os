@@ -12,6 +12,10 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 prefix="$temporary/prefix"
 mkdir -p "$prefix/bin" "$prefix/lib/rustlib/src/rust/library"
+STANDALONE_LLVM_BIN="$temporary/llvm/bin"
+mkdir -p "$STANDALONE_LLVM_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$STANDALONE_LLVM_BIN/lld"
+chmod +x "$STANDALONE_LLVM_BIN/lld"
 for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
 	mkdir -p "$prefix/lib/rustlib/$target/lib"
 	: > "$prefix/lib/rustlib/$target/lib/libcore-test.rlib"
@@ -57,6 +61,7 @@ for binary in rustc rustdoc cargo cargo-clippy clippy-driver cargo-fmt rustfmt \
 done
 mkdir -p "$prefix/libexec"
 ln "$fake_tool" "$prefix/libexec/rust-analyzer-proc-macro-srv"
+toolchain_stage_rust_lld "$prefix" "$STANDALONE_LLVM_BIN"
 
 MOTOR_TOOLCHAIN_KEY="$(printf key | sha256sum | awk '{print $1}')"
 MOTOR_RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN_BASE-$MOTOR_TOOLCHAIN_KEY"
@@ -90,6 +95,18 @@ if toolchain_validate_prefix "$prefix" 2>/dev/null; then
 	fail "prefix without the proc-macro server was accepted"
 fi
 mv "$temporary/proc-macro-srv" "$prefix/libexec/rust-analyzer-proc-macro-srv"
+rust_lld="$prefix/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+mv "$rust_lld" "$temporary/rust-lld"
+if toolchain_validate_prefix "$prefix" 2>/dev/null; then
+	fail "prefix without rust-lld was accepted"
+fi
+mv "$temporary/rust-lld" "$rust_lld"
+printf changed >> "$rust_lld"
+if toolchain_validate_prefix "$prefix" 2>/dev/null; then
+	fail "prefix with a changed rust-lld was accepted"
+fi
+cp "$STANDALONE_LLVM_BIN/lld" "$rust_lld"
+chmod +x "$rust_lld"
 
 toolchain_validate_prefix "$prefix"
 toolchain_write_prefix_manifest "$prefix"

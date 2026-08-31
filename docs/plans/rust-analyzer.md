@@ -600,10 +600,15 @@ Product consequences to record:
   leaving `rust.llvm-tools` at its default also preserves `rust-objcopy` in
   the rustc component.
 - External `llvm-config` disables bootstrap's automatic self-contained LLD
-  and bootstrap rejects `rust.lld = true` in this mode. The prefix therefore
-  also loses `rust-lld` and `gcc-ld`. Nothing in the repository uses those
-  binaries. Do not customize Rust bootstrap or manually assemble the prefix
-  merely to retain unused components.
+  and bootstrap rejects `rust.lld = true` in this mode. A real image build
+  proved that the MBR, bootloader, kernel loader, and kernel custom targets all
+  name `rust-lld`. After `x.py install` and before validation, automatically
+  copy the already-built standalone `lld` to the standard prefix path
+  `lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld`. Require a regular
+  executable byte-identical to standalone `lld`, record its digest in the
+  prefix manifest, and include the staging recipe in bootstrap identity. Keep
+  `gcc-ld` omitted because the repository does not use it. Do not patch Rust
+  bootstrap or build a fourth LLVM.
 - rustc's host LLVM takes the standalone configuration: clang and lld
   projects present, X86 only, tests off, assertions off.
 - The Motor-target LLVM and the guest clang driver are unchanged:
@@ -641,6 +646,9 @@ Tests and documentation:
   target-less paths, Motor-only rewritten include/library paths, exact
   argument forwarding and failure status, and the adjacent host archive-tool
   links.
+- The prefix and host tests require the staged `rust-lld`, reject a missing or
+  changed copy, and require its digest in the prefix manifest. Standalone LLVM
+  validation requires the source `lld` multicall binary as well as `ld.lld`.
 - The versions/state tests prove that changing only the normalized standalone
   configuration digest changes both clean and dynamic toolchain keys without
   introducing host-path identity. The assembly test proves that this new

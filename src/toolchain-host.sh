@@ -38,6 +38,10 @@ toolchain_accept_new_prefix() {
 		toolchain_reject_incomplete_prefix "$prefix" "Rust bootstrap install failed"
 		return 1
 	fi
+	toolchain_stage_rust_lld "$prefix" "$STANDALONE_LLVM_BIN" || {
+		toolchain_reject_incomplete_prefix "$prefix" "rust-lld staging failed"
+		return 1
+	}
 	toolchain_check_postbuild_locks "$rust" "$prefix" || return
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || {

@@ -59,7 +59,7 @@ shift 2
 for target in "$@"; do
   case "$target" in
   clang) binaries='clang clang++' ;;
-  lld) binaries='ld.lld' ;;
+  lld) binaries='lld ld.lld' ;;
   llvm-libraries) continue ;;
   *) binaries="$target" ;;
   esac
@@ -148,6 +148,11 @@ grep -q '^rust_analyzer_version_base64=' "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANI
 grep -q '^rust_analyzer_proc_macro_srv_version_base64=' \
 	"$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ||
 	fail "prefix manifest lacks the proc-macro server version"
+grep -q '^rust_lld_sha256=' "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ||
+	fail "prefix manifest lacks the rust-lld digest"
+cmp -s "$STANDALONE_LLVM_BIN/lld" \
+	"$TOOLCHAIN_PREFIX/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld" ||
+	fail "prefix rust-lld differs from standalone lld"
 [ ! -e "$TOOLCHAIN_PREFIX.building" ] || fail "successful producer lock remains"
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"

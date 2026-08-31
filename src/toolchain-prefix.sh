@@ -18,6 +18,42 @@ toolchain_validate_rust_analyzer_version() {
 	esac
 }
 
+toolchain_stage_rust_lld() {
+	local prefix="$1" llvm_bin="$2" source destination temporary
+	source="$llvm_bin/lld"
+	destination="$prefix/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+	[ -f "$source" ] && [ ! -L "$source" ] && [ -x "$source" ] ||
+		toolchain_die "standalone LLVM lacks an executable lld: $source" || return
+	[ ! -e "$destination" ] && [ ! -L "$destination" ] ||
+		toolchain_die "refusing to replace installed rust-lld: $destination" || return
+	mkdir -p "$(dirname "$destination")"
+	temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+	if ! cp "$source" "$temporary"; then
+		rm -f "$temporary"
+		return 1
+	fi
+	chmod 0755 "$temporary"
+	if ! cmp -s "$source" "$temporary"; then
+		rm -f "$temporary"
+		toolchain_die "staged rust-lld differs from standalone lld"
+		return 1
+	fi
+	mv "$temporary" "$destination"
+}
+
+toolchain_validate_rust_lld() {
+	local prefix="$1" source destination
+	source="$STANDALONE_LLVM_BIN/lld"
+	destination="$prefix/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
+	[ -f "$source" ] && [ ! -L "$source" ] && [ -x "$source" ] ||
+		toolchain_die "standalone LLVM lacks an executable lld: $source" || return
+	[ -f "$destination" ] && [ ! -L "$destination" ] && [ -x "$destination" ] ||
+		toolchain_die "installed toolchain lacks rust-lld: $destination" || return
+	cmp -s "$source" "$destination" ||
+		toolchain_die "installed rust-lld differs from standalone lld" || return
+	VALIDATED_RUST_LLD_SHA256="$(sha256sum "$destination" | awk '{print $1}')"
+}
+
 toolchain_validate_prefix() {
 	local prefix="$1" binary target probe proc_macro_srv
 	[ ! -e "$prefix/MOTOR-TOOLCHAIN-REJECTED" ] ||
@@ -37,6 +73,7 @@ toolchain_validate_prefix() {
 		toolchain_die "installed proc-macro server resolves outside the prefix" || return
 	[ -d "$prefix/lib/rustlib/src/rust/library" ] ||
 		toolchain_die "installed toolchain lacks rust-src: $prefix" || return
+	toolchain_validate_rust_lld "$prefix" || return
 	for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
 		[ -n "$(find "$prefix/lib/rustlib/$target/lib" -maxdepth 1 \
 			-type f -name 'libcore-*.rlib' -print -quit 2>/dev/null)" ] ||
@@ -124,6 +161,7 @@ clippy_version_base64=$(printf '%s' "$VALIDATED_CLIPPY_VERSION" | base64 -w0)
 rustfmt_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
 rust_analyzer_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_VERSION" | base64 -w0)
 rust_analyzer_proc_macro_srv_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_PROC_MACRO_SRV_VERSION" | base64 -w0)
+rust_lld_sha256=$VALIDATED_RUST_LLD_SHA256
 rustc_sysroot=.
 EOF
 }
