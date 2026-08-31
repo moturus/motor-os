@@ -33,6 +33,8 @@ const LOG_DIR_PERMISSIONS: RolePermissions = RolePermissions::new(
     AccessPermissions::Rx,
     AccessPermissions::None,
 );
+const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const MIN_LOG_AVAILABLE_BYTES: u64 = 50 * 1024 * 1024;
 
 pub fn is_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
@@ -267,6 +269,82 @@ fn assert_permissions(path: &str, expected: RolePermissions) {
     assert_eq!(expected, permissions, "{path}");
 }
 
+fn fs_available_bytes() -> u64 {
+    let provider = moto_stats::Collector::provider_by_name("sys-io").unwrap();
+    let metric = moto_stats::Collector::describe(&provider)
+        .unwrap()
+        .into_iter()
+        .find(|metric| metric.name == "fs.available_bytes")
+        .unwrap();
+    moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL).unwrap()
+}
+
+fn previous_log_bytes() -> u64 {
+    std::fs::read_dir("/system/logs")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".prev"))
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn rotation_and_space_cleanup(slot: &str) {
+    let tag = derived_tag(slot, "rotation");
+    let path = log_path(&tag);
+    let previous_path = format!("{path}.prev");
+    let (mut conn, tag_id) = connected_tag(&tag);
+    let payload = vec![b'x'; conn.data().len() - size_of::<LogRequest>()];
+
+    for _ in 0..(LOG_FILE_MAX_BYTES / payload.len() as u64 + 8) {
+        prepare_log(&mut conn, tag_id, &payload);
+        assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    }
+    let marker = format!("rotation complete {:016x}", std::random::random::<u64>(..));
+    prepare_log(&mut conn, tag_id, marker.as_bytes());
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    wait_for_records(&path, std::slice::from_ref(&marker));
+
+    let previous_size = std::fs::metadata(&previous_path).unwrap().len();
+    assert!(previous_size <= LOG_FILE_MAX_BYTES, "{previous_size}");
+    assert!(previous_size > LOG_FILE_MAX_BYTES / 2, "{previous_size}");
+    assert!(std::fs::metadata(&path).unwrap().len() <= LOG_FILE_MAX_BYTES);
+    drop(conn);
+
+    let other_previous_bytes = previous_log_bytes() - previous_size;
+    let target_available = MIN_LOG_AVAILABLE_BYTES
+        .saturating_sub(other_previous_bytes)
+        .saturating_sub(2 * 1024 * 1024)
+        .max(8 * 1024 * 1024);
+    let fill_path = crate::temp_path(&format!(
+        "strobe-space-{:016x}",
+        std::random::random::<u64>(..)
+    ));
+    let mut fill = std::fs::File::create(&fill_path).unwrap();
+    let chunk = vec![0_u8; 1024 * 1024];
+    while fs_available_bytes() > target_available {
+        fill.write_all(&chunk).unwrap();
+        fill.flush().unwrap();
+    }
+
+    let trigger = derived_tag(slot, "cleanup-trigger");
+    let trigger_path = log_path(&trigger);
+    let (mut trigger_conn, trigger_id) = connected_tag(&trigger);
+    prepare_log(&mut trigger_conn, trigger_id, b"cleanup complete");
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut trigger_conn));
+    wait_for_records(&trigger_path, &["cleanup complete".to_string()]);
+    assert!(!std::fs::exists(&previous_path).unwrap(), "{previous_path}");
+
+    drop((trigger_conn, fill));
+    std::fs::remove_file(fill_path).unwrap();
+    println!("logging::rotation_and_space_cleanup test PASS");
+}
+
 fn basic(slot: &str) {
     let path = log_path(slot);
     moto_log::init(slot).unwrap();
@@ -344,4 +422,5 @@ pub fn run_all_tests() {
     wait_for_records(&log_path(slot), &[]);
     drop(claim);
     basic(slot);
+    rotation_and_space_cleanup(slot);
 }
