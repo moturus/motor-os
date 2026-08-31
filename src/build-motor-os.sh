@@ -17,7 +17,7 @@
 # consumes the libc and rg roots; the development imager additionally consumes
 # the LLVM and rustc roots.
 #
-# On-image layout (see docs/porting-libc/dirs.md): C/C++ headers + libraries
+# On-image layout (see docs/libc.md): C/C++ headers + libraries
 # live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
 # mlibc's config files under /system/cfg/libc, and the Rust toolchain at
 # /devtools/rust — not the classic /usr and /etc.

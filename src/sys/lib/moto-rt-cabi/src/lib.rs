@@ -4,7 +4,7 @@
 //! (moto-rt/src/error.rs), NOT a POSIX errno; errno translation happens in the
 //! libc sysdeps. Non-negative return = success value.
 //!
-//! See docs/porting-libc-appendix-b.md for the design.
+//! See docs/libc.md for the runtime architecture.
 #![no_std]
 // The safety contract of every exported function is the C ABI documented in
 // moto_rt.h (valid pointer + length, etc.); per-function `# Safety` sections

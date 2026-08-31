@@ -4,7 +4,7 @@
  * (moto-rt/src/error.rs), not POSIX errno. Non-negative = success value.
  *
  * This header is the C half of the moto-rt-cabi crate's ABI; keep the two in
- * sync. See docs/porting-libc-appendix-b.md for the design.
+ * sync. See docs/libc.md for the runtime architecture.
  */
 #ifndef MOTO_RT_H
 #define MOTO_RT_H
