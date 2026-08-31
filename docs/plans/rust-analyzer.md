@@ -668,9 +668,23 @@ Tests and documentation:
   `toolchain-src/rust/build` is disposable after a successful build because
   assemblies copy the native rustc and LLVM images they need.
 
-With this patch the expected clean rebuild is roughly 80 minutes. Patch 3
-records the actual duration, including what rust-analyzer adds to the tools
-phase.
+With this patch the expected clean rebuild is roughly 80 minutes. The
+successful real-build validation on 2026-08-30 reused the sealed standalone
+LLVM, so it is not a clean-build measurement: it completed in 49 minutes 14
+seconds, including an 18-minute 11-second host `x.py install` with
+rust-analyzer, a 7-minute 2-second native Rust bootstrap, and all three
+release images. Earlier implementation discoveries required re-keying between
+attempts, so there is not yet one successful end-to-end clean timing; retain
+the roughly 80-minute estimate until the final clean gate measures it.
+
+The same validation recorded both `rustc_llvm` paths from Cargo build-script
+output. Linux-target builds linked from the sealed standalone LLVM `lib`
+directory. The Motor-target stage-2 build invoked the assembly adapter and
+linked from `build/x86_64-unknown-motor/llvm/lib`. The prefix's staged
+`rust-lld` was byte-identical to standalone `lld` with SHA-256
+`6dca91de3516a10e14c0c4dcfbb1ac36a20441990eeeeb90a6faf905b6d86d06`;
+the MBR, bootloader, kernel loader, and kernel then linked successfully, and
+the base, standard, and developer images were produced.
 
 ## 4. Stage 2: native Motor OS guest design
 
