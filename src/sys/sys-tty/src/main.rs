@@ -12,6 +12,7 @@ use moto_sys::kernel_log::{KERNEL_LOG_RING_SIZE, KernelLogControl};
 use crate::output::{Output, Source};
 
 mod ansi;
+mod config;
 mod kernel_log;
 mod output;
 mod sanitize;
@@ -49,6 +50,7 @@ fn read_config(output: &Output) -> String {
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
         ansi::run_self_tests();
+        config::run_self_tests();
         sanitize::run_self_tests();
         output::run_self_tests();
         kernel_log::run_self_tests();
@@ -57,7 +59,18 @@ fn main() {
 
     let output = Output::start_serial_writer();
     let config = read_config(&output);
-    let words: Vec<_> = config.split_whitespace().collect();
+    let config = match config::parse(&config) {
+        Ok(config) => config,
+        Err(err) => {
+            output.send_fmt(
+                Source::Stderr,
+                format_args!("sys-tty: invalid config: {err}."),
+            );
+            std::process::exit(1);
+        }
+    };
+    let _kernel_log_mode = config.kernel_log;
+    let words: Vec<_> = config.command.split_whitespace().collect();
 
     // Leading `NAME=value` words set the child's environment, as in a shell
     // command line: the config is the only place to hand the login shell its

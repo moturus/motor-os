@@ -13,7 +13,7 @@ pub fn run_all_tests() {
     );
     assert_eq!(
         output.stdout,
-        b"sys-tty ANSI scanner self-test PASS\nsys-tty sanitizer self-test PASS\nsys-tty writer self-test PASS\nsys-tty kernel-log self-test PASS\n"
+        b"sys-tty ANSI scanner self-test PASS\nsys-tty config self-test PASS\nsys-tty sanitizer self-test PASS\nsys-tty writer self-test PASS\nsys-tty kernel-log self-test PASS\n"
     );
     assert!(output.stderr.is_empty());
 
