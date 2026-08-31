@@ -186,7 +186,7 @@ impl TxnLogger {
             // Note: the borrow is confined to `take_pending_batch_if_current`;
             // it must not be held across the `send().await` below.
             if let Some(txn_batch) = take_pending_batch_if_current(&txn_batch_holder, txn_id) {
-                log::debug!("committing batch {txn_id} on timeout");
+                log::trace!("committing batch {txn_id} on timeout");
                 let _ = sender.send(CommitterMessage::TxnBatch(txn_batch)).await;
             }
         };
@@ -248,7 +248,7 @@ impl TxnLogger {
                                 let _ = sender.send(Err(err));
                                 return;
                             }
-                            log::debug!("Motor FS: flushing the Block Device.");
+                            log::trace!("Motor FS: flushing the Block Device.");
                             let result = block_cache_stub.flush().await;
                             // The receiver may be gone if the flush requester was
                             // cancelled; dropping the completion signal is fine.
