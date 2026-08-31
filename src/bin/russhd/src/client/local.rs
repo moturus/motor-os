@@ -176,18 +176,19 @@ fn current_role() -> moto_io::fs::Role {
 
 #[cfg(target_os = "motor")]
 fn permissions(mode: u32, directory: bool) -> moto_io::fs::RolePermissions {
+    use crate::permissions::{Access, NormalizedMode};
     use moto_io::fs::{AccessPermissions, Role, RolePermissions};
 
-    let access = |bits| match (bits, directory) {
-        (0, _) => AccessPermissions::None,
-        (4, _) => AccessPermissions::R,
-        (6, false) => AccessPermissions::Rw,
-        (5, _) => AccessPermissions::Rx,
-        (_, true) => AccessPermissions::Rwx,
-        _ => AccessPermissions::Rw,
+    let access = |access| match access {
+        Access::None => AccessPermissions::None,
+        Access::R => AccessPermissions::R,
+        Access::Rw => AccessPermissions::Rw,
+        Access::Rx => AccessPermissions::Rx,
+        Access::Rwx => AccessPermissions::Rwx,
     };
-    let owner = access((mode >> 6) & 7);
-    let public = access(mode & 7);
+    let NormalizedMode { owner, public } = NormalizedMode::from_posix(mode, directory);
+    let owner = access(owner);
+    let public = access(public);
     match current_role() {
         Role::System => RolePermissions::new(owner, public, public),
         Role::Interactive => RolePermissions::new(AccessPermissions::Rwx, owner, public),

@@ -105,6 +105,7 @@ test_ssh_client_host() {
   local guest_key=/user/cfg/ssh/id_ed25519
   local guest_wrong=/user/cfg/ssh/wrong_ed25519
   local guest_known=/user/cfg/ssh/known_hosts
+  local guest_executable="$TEST_TMP/ssh-client-host-executable"
   local host=192.168.4.1
   local first_key="$WD/test.key"
   local second_key="$WD/test-host-alt.key"
@@ -125,7 +126,7 @@ test_ssh_client_host() {
   public_key="$(ssh-keygen -y -f "$first_key")"
   printf '%s\n' "$public_key" > "$public_file"
 
-  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known"; do
+  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known" "$guest_executable"; do
     vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
   done
   printf 'put %s %s\nchmod 600 %s\nput %s %s\nchmod 644 %s\nput %s %s\nchmod 600 %s\n' \
@@ -148,6 +149,18 @@ test_ssh_client_host() {
   known="$(vm_ssh /system/bin/cat "$guest_known")"
   [ "$known" = "[$host]:$port $public_key" ] ||
     fail "known_hosts contains an unexpected record: '$known'"
+
+  local host_executable="$SSH_CLIENT_HOST_ROOT/executable"
+  local returned_executable="$SSH_CLIENT_HOST_ROOT/returned-executable"
+  printf '#!/bin/sh\necho executable-download\n' > "$host_executable"
+  chmod 755 "$host_executable"
+  local native_scp="/user/bin/scp -P $port -i $guest_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$guest_known"
+  vm_ssh "$native_scp motor@$host:$host_executable $guest_executable" ||
+    fail "Motor client could not download a 0755 Unix file"
+  vm_ssh "$native_scp $guest_executable motor@$host:$returned_executable" ||
+    fail "Motor client could not return the downloaded executable"
+  [ "$(stat -c %a "$returned_executable")" = 555 ] ||
+    fail "Motor client did not normalize a downloaded 0755 file to 0555"
 
   local password_command="/user/bin/ssh -F /dev/null -p $port -i $guest_wrong -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo password-ok"
   output="$(printf 'vroomvroom\n' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$password_command" 2>&1)" ||
@@ -180,7 +193,7 @@ test_ssh_client_host() {
     fail "changed host key modified known_hosts"
 
   stop_ssh_client_host
-  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known"; do
+  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known" "$guest_executable"; do
     vm_ssh "/system/bin/rm $guest_file" >/dev/null ||
       fail "failed to remove guest SSH fixture $guest_file"
   done
