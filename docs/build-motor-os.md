@@ -137,6 +137,7 @@ rustc -vV
 cargo -Vv
 rustc --print sysroot
 rustup which cargo
+rustup which rust-analyzer
 ```
 
 The selected sysroot contains:

@@ -792,6 +792,10 @@ steps. Cargo builds from the `src/tools/cargo` gitlink that the effective Rust
 builds and installs them in the same invocation as the compiler and both stds;
 a separate Cargo build outside bootstrap is unnecessary.
 
+Editor-neutral rust-analyzer launch and target configuration are documented
+in `docs/build-rustc.md`. Motor and Linux Cargo projects require separate
+server processes with target-appropriate initialization options.
+
 The linked toolchain is an installed prefix, not the `build/<host>/stage2`
 sysroot, because bootstrap's `Sysroot` step removes that directory at the
 start of every invocation. It is produced by `x.py install` with

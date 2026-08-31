@@ -38,6 +38,7 @@ prefix contains:
 - Cargo from the Rust revision's Cargo gitlink;
 - host and `x86_64-unknown-motor` standard libraries;
 - Clippy and `cargo-clippy`;
+- Linux-host rust-analyzer and its matching proc-macro server;
 - rustfmt and `cargo-fmt`;
 - `rust-src` for boot-loader `-Zbuild-std` builds.
 
@@ -59,6 +60,53 @@ make clippy
 
 Do not use the removed `+dev-x86_64-unknown-motor` selector or borrow Cargo,
 rustfmt, or Clippy from an ambient channel.
+
+## Using host rust-analyzer
+
+The installed rust-analyzer runs on Linux and analyzes both Linux-host and
+ordinary Motor userspace projects. It is not the native server planned for a
+later development image. From the repository, obtain the exact name and
+server path with:
+
+```sh
+rustup show active-toolchain
+rustup which rust-analyzer
+```
+
+Configure the editor's language-server command as `rustup run
+<exact-active-name> rust-analyzer`, with the Cargo project as its working
+directory. This prevents an editor-bundled server or an ambient Rust channel
+from replacing the server selected by `rust-toolchain.toml`.
+
+For a trusted Motor userspace Cargo project, pass these rust-analyzer LSP
+initialization options:
+
+```json
+{
+  "cargo": {
+    "target": "x86_64-unknown-motor",
+    "targetDir": true,
+    "sysroot": "discover",
+    "buildScripts": { "enable": true }
+  },
+  "check": {
+    "targets": ["x86_64-unknown-motor"]
+  },
+  "procMacro": { "enable": true }
+}
+```
+
+For a Linux-host project, leave `cargo.target` and `check.targets` unset.
+Use a separate rust-analyzer process, normally a separate editor workspace or
+window, for each target context. The pinned server does not apply a per-root
+`cargo.target` from `rust-analyzer.toml` while loading multiple Cargo graphs,
+so one process cannot accurately combine Motor and Linux projects. Opening
+the repository root as one homogeneous workspace is also unsupported: the
+kernel and loader use custom JSON targets outside this integration's scope.
+
+Enabling build scripts and procedural macros executes project code on the
+Linux host. Keep them enabled only for this trusted checkout or another
+trusted project; disable both options when inspecting untrusted code.
 
 ## Native Motor rustc
 

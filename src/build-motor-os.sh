@@ -40,6 +40,7 @@ Usage: src/build-motor-os.sh [--source-mode managed]
 
 Build the complete Motor OS release environment and all three images, including:
   - the exact key-qualified Rust 1.99 Motor toolchain;
+  - Linux-host rust-analyzer and its matching proc-macro server;
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
