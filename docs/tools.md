@@ -37,7 +37,10 @@ The shell is somewhat barebones now (contributions are welcome!).
   make sure everything is working as expected;
 - `/system/logs` contains current and rotated service logs. Interactive
   sessions can list and read them, System-role strobe alone creates and rotates
-  them, and None-role processes cannot traverse the directory. Runtime
+  them, and None-role processes cannot traverse the directory. The unfiltered
+  kernel stream is `/system/logs/kernel.log`; its previous 4 MiB generation is
+  `kernel.log.prev`. Strobe applies the same size bound to every tag and removes
+  the oldest `.prev` files when free space falls below 50 MiB. Runtime
   diagnostics go to the process's stderr first, including debug records when
   debug logging is configured; for these diagnostics, the kernel log is a
   capability-gated fallback when that write fails;

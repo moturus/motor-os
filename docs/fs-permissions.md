@@ -88,6 +88,8 @@ Important consequences of the directory modes are:
   Interactive can traverse and read regular logs but cannot alter them; None
   cannot traverse the directory. An image containing a script or ELF under
   this tree is rejected even though its fail-closed profiles are schema-valid.
+  In particular, Interactive sys-tty submits raw kernel records to System
+  strobe over IPC; strobe alone owns `kernel.log` and `kernel.log.prev`.
 
 Several installed trees deliberately use the default rule:
 

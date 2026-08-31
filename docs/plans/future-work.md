@@ -7,25 +7,10 @@ Found while reviewing file I/O and the async runtime; the run's report
 git history. Unlike the rest of this file these are scheduled: pick them up
 in this order.
 
-1. **sys-tty interleaves application output with the kernel log, which
-   breaks the debug full test.** The console driver's stdout relay writes
-   each chunk it reads (80 bytes at most) under its own `SERIAL1` lock
-   acquisition while the main thread drains the kernel log ring in between
-   (`sys-tty/src/main.rs`), so a log line can land inside an application's
-   escape sequence. In a debug build the vdso's `file_open`/`stat` logs and
-   sys-io's TCP logs add ~1200 lines to the console while rmux runs, and
-   `src/tests/test-terminal-size.sh` fails at clean HEAD 228e46c6 (two
-   clean-worktree runs and three full runs: "the console resize did not
-   reach red inside rmux"); release builds emit no debug logs and pass. The
-   leg passed on 2026-08-15; the test and the tty changed on 08-23..26
-   (9c5421a7, 13735ac7, 4939cdbb), not bisected. Fix: one serial writer that
-   emits whole chunks and drains the log ring only between them, or hold the
-   lock across a relay burst. Gain: the debug half of the AGENTS.md test
-   requirement becomes runnable again (every debug `full-test.sh` stops
-   there today), and console TUI output stays intact whenever the kernel
-   log is busy.
+The former sys-tty/kernel-log interleaving item is complete; see
+[Kernel logs and the serial console](../kernel-logs.md).
 
-2. **Loopback accepts take a second each after a dozen connections.** A
+1. **Loopback accepts take a second each after a dozen connections.** A
    process that connects to its own listener sees every accept take ~1.00 s
    after the first 9-15 connections: the closed connections still hold the
    NetPool reservations the listener needs, the accept pump's reservation
@@ -40,7 +25,7 @@ in this order.
    about 50x faster after a burst (20 ms instead of 1 s per connection), no
    retry noise in the suite, and the close-race reproducer usable at scale.
 
-3. **frusa holds its slab lock across the fallback `SysMem::alloc`.** The
+2. **frusa holds its slab lock across the fallback `SysMem::alloc`.** The
    allocator's spin lock stays held while a slab grows through the fallback
    path, i.e. across the syscall; any allocation on that path (a `format!`
    in a diagnostic, a log record) self-deadlocks the thread, and a thread
@@ -53,7 +38,7 @@ in this order.
    self-deadlock class from every process, sys-io included, and makes the
    allocator safe to instrument.
 
-4. **sys-io never returns allocator slack.** The vdso's `reclaim_resident`
+3. **sys-io never returns allocator slack.** The vdso's `reclaim_resident`
    gives freed slab pages back to the kernel every 5 s, but only in
    processes that run a vdso IO runtime; sys-io drives its own runtime and
    has none, so its slab slack stays resident forever. A listener flood left
@@ -64,7 +49,7 @@ in this order.
    baseline after bursts instead of holding the peak, which matters on small
    VMs and for the memory-pressure model's accounting.
 
-5. **`MAX_BLOCKS_IN_TXN_LOG` 256 stops sys-io on the first large write.**
+4. **`MAX_BLOCKS_IN_TXN_LOG` 256 stops sys-io on the first large write.**
    Raising the transaction-log batch from 64 to 256 blocks compiles (the
    superblock still fits) but the first 20 MB write stops sys-io without a
    panic. The likely mechanism: `write_blocks_with_completion` posts every
@@ -78,7 +63,7 @@ in this order.
    its three levers) and removes a latent stall for any device with a
    smaller queue.
 
-6. **sys-io allocates a Vec of every wait handle on each park.**
+5. **sys-io allocates a Vec of every wait handle on each park.**
    `LocalRuntime::wait` builds the array of registered wait handles anew per
    park; sys-io registers one per channel, so under a listener flood that is
    a 16-24 KB allocation per park, which the allocator serves with a page
@@ -88,7 +73,7 @@ in this order.
    channels are open (sys-io parks up to ~130k times in a benchmark run);
    the structural fix is the kernel wait-set item at the end of this file.
 
-7. **Debug-only loopback `ConnectionReset` in the suite.** In 2 of 3 debug
+6. **Debug-only loopback `ConnectionReset` in the suite.** In 2 of 3 debug
    full runs with the perf patches a net test read `ConnectionReset` where
    an orderly close was expected (`poll.rs:147`: the child got an RST
    instead of "pong" after the server wrote it and dropped the stream;
@@ -102,7 +87,7 @@ in this order.
    written just before a close is never replaced by a reset, a correctness
    bug once it reaches a real peer.
 
-8. **Killing the ssh session mid-suite leaves two vCPUs spinning.** Killing
+7. **Killing the ssh session mid-suite leaves two vCPUs spinning.** Killing
    the ssh client while systest was in its pressure/admission tests (child
    processes being killed by design) twice left the guest with two vCPUs at
    100% and the network dead, once on a debug build and once on release; an
@@ -112,7 +97,7 @@ in this order.
    threads from the console. Gain: closes a hang class that any operator can
    trigger with Ctrl+C on a session.
 
-9. **sys-io's statistics provider is absent for a moment after boot.**
+8. **sys-io's statistics provider is absent for a moment after boot.**
    `moto_stats::Collector::providers()` does not list sys-io (provider 2)
    for a short window after boot: `systest fs-bench` started ~2 s after ssh
    came up panicked on the lookup, and two places in the suite retry around
@@ -121,7 +106,7 @@ in this order.
    snapshot. Gain: tools and scripts read sys-io's counters as soon as the
    VM answers, and the retry loops in the suite can go.
 
-10. **`CpuStatsV1::entry` uses the wrong slice length.**
+9. **`CpuStatsV1::entry` uses the wrong slice length.**
     `moto-sys/src/stats.rs` builds the per-CPU slice with
     `self.num_entries` as its length instead of `num_cpus` (lines 128-131),
     so the slice overruns into the next entry when there are more entries
@@ -131,7 +116,7 @@ in this order.
     ships with the next moto-sys bump. Gain: correct per-CPU statistics for
     `top` and the benchmarks, and no latent panic.
 
-11. **The dev-image suite refuses a host with two assemblies.**
+10. **The dev-image suite refuses a host with two assemblies.**
     `full-test-dev.sh` passes the main suite and TEST-DEV-SOURCES, but
     Lorry's `current-toolchain.sh` refuses when two assemblies exist for the
     toolchain key under `assemblies/` ("expected one assembly manifest ...;

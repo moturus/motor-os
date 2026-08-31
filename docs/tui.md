@@ -8,7 +8,12 @@ providers are:
 
 - **`sys-tty`**, the serial console. It is a byte pump: the terminal a console
   program converses with is whatever is on the far end of the wire, and
-  sys-tty has no opinion about its size and takes no part in the protocol.
+  sys-tty has no opinion about its size and takes no part in the protocol. It
+  serializes stdout, stderr, and console-bound kernel records so another stream
+  is not inserted inside an incomplete ANSI sequence. Application bytes are
+  unchanged; after a 100 ms grace period it may inject `CAN` and a line break
+  to abort an incomplete sequence before emitting waiting output. See
+  [Kernel logs and the serial console](kernel-logs.md).
 - **`russhd`**, for SSH sessions in which the client requested a pty. Its size
   comes from the SSH client, in `pty-req` at the start and `window-change`
   afterwards. A session without `pty-req` — plain `ssh host command` — is not a

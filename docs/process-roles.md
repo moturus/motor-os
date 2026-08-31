@@ -378,7 +378,10 @@ is a policy statement, so the demotion path must not fail open.
 `sys-log` record channel. Strobe checks the connection-bound peer capability
 word before accepting a tag. The bit does not grant access to
 `/system/logs`; lower-role holders submit records through `moto_log` while
-System-role strobe alone creates and rotates the files.
+System-role strobe alone creates and rotates the files. The `kernel` tag and
+its byte-preserving raw operation additionally require `CAP_IO_MANAGER`.
+Interactive sys-tty holds both bits and submits the kernel ring through this
+reserved connection without gaining write access to `/system/logs`.
 
 ### 5.2 Client-side permission reporting uses the caller's own role
 
