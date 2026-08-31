@@ -1,16 +1,16 @@
 # rust-analyzer for Motor OS development
 
-Status 2026-08-31: the three Stage 1 implementation phases are complete and
-gated. All seven patch-sequence items in section 3.7 have landed, including
-the keyed host toolchain, bounded LSP harness, semantic fixtures, full-test
-integration, and user documentation. This completes the plan's Linux-host
-Stage 1. Stage 2, the native Motor OS guest, remains design-only; this plan
-does not define a product Stage 3.
+Status 2026-08-31: Stage 1 is complete and gated. Section 3 is now maintained
+documentation for running rust-analyzer on a Linux host while developing
+Motor OS; it is no longer an implementation plan or patch history. Section 4
+contains the detailed implementation design for Stage 2, the native Motor OS
+guest. Stage 2 has not been implemented or gated, and this plan does not
+define a product Stage 3.
 
-2026-08-29. Investigation and staged plan for using the rust-analyzer snapshot
-that is embedded in the Motor Rust source tree. The first stage runs
-rust-analyzer on Linux while Cargo and rustc cross-compile for Motor OS. The
-second stage runs rust-analyzer inside a Motor OS development VM.
+2026-08-29. Initial investigation and staged plan for using the rust-analyzer
+snapshot embedded in the Motor Rust source tree. Stage 1 has since delivered
+the Linux-host service documented in section 3. Stage 2 will run
+rust-analyzer inside a Motor OS development VM.
 
 Revised 2026-08-30: Stage 1 analyzes two targets from the same keyed
 toolchain, `x86_64-unknown-motor` and the Linux host target
@@ -27,28 +27,16 @@ none of them are repository state.
 
 Both stages are required:
 
-| Stage | Server host | Analyzed targets | Planning status |
+| Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
-| 1. Host | Linux | Motor and Linux host | Complete; implemented and gated |
-| 2. Guest | Motor OS | Motor only | Constraints and evidence |
+| 1. Host | Linux | Motor and Linux host | Complete; maintained documentation |
+| 2. Guest | Motor OS | Motor only | Detailed design; not implemented |
 
-Stage 1 comes first because it is useful immediately and exercises the same
-rust-analyzer source, Motor rustc, Motor standard-library sources, target cfgs,
-project descriptions, and LSP behavior that Stage 2 will need. It must leave
-clean interfaces for Stage 2 rather than treating the Linux executable as the
-only product.
-
-Stage 2 is deliberately not a patch-by-patch implementation plan yet. The
-native prototype identifies the important constraints, but Stage 1 will give us
-the first maintained rust-analyzer build, repeatable semantic fixtures, and
-project-loading evidence against the exact selected toolchain. Planning the
-guest port in implementation detail after that evidence exists will be more
-accurate and will avoid duplicating or prematurely freezing interfaces.
-
-Reviewers should therefore treat the lower level of Stage 2 detail as an
-intentional sequencing decision, not as missing work. Before Stage 2
-implementation begins, this document must be updated with a reviewed patch
-series based on the completed Stage 1 artifacts and measurements.
+Stage 1 supplies a maintained Linux-host rust-analyzer, repeatable semantic
+fixtures, an exact project schema, and a bounded LSP harness. Section 3
+documents that current host capability. Section 4 uses it as the baseline for
+the native build, Lorry project export, patch sequence, tests, and release
+gates. Review that design before beginning Stage 2 implementation.
 
 The two outputs are distinct even though they use the same pinned source:
 
@@ -78,8 +66,8 @@ The complete effort will:
 - keep generated artifacts in exact key-qualified locations;
 - keep normal tests offline and deterministic;
 - introduce no boot-time work;
-- use editor-neutral LSP and `rust-project.json` contracts so the Linux test
-  fixtures can be reused by a native editor and Lorry later;
+- use editor-neutral standard LSP and `rust-project.json` contracts, with
+  Lorry owning the native project description rather than a future client;
 - keep each implementation patch near 100-300 lines including tests; and
 - introduce no compiler or Clippy warnings and format Rust changes with the
   repository-selected toolchain.
@@ -92,6 +80,8 @@ The initial effort will not:
   targets, or any analyzed target other than `x86_64-unknown-motor` and, in
   Stage 1 only, `x86_64-unknown-linux-gnu`;
 - port Cargo to Motor OS;
+- port, configure, or otherwise modify a text editor, Helix, Red, Gears, or
+  any other LSP consumer as part of Stage 2;
 - add dynamic linking or general ELF constructor execution to the pure-Rust
   Motor process startup;
 - support native procedural-macro dylibraries in Stage 2;
@@ -118,9 +108,9 @@ The host toolchain is installed transactionally by one command:
 ./x.py --config "$BOOTSTRAP_CONFIG" install --stage 2
 ```
 
-The generated bootstrap configuration already has `extended = true` and
-installs rustc, rustdoc, Cargo, host and Motor std, Clippy, rustfmt, and
-`rust-src`. Its `tools` list currently omits rust-analyzer.
+The generated bootstrap configuration has `extended = true` and now installs
+rustc, rustdoc, Cargo, host and Motor std, Clippy, rustfmt, `rust-src`, and the
+Stage 1 Linux-host rust-analyzer components.
 
 The selected Rust bootstrap already has first-class steps for both host
 components needed here:
@@ -130,179 +120,97 @@ components needed here:
 - `rust-analyzer-proc-macro-srv`, built when rust-analyzer is enabled and
   installed below the compiler sysroot's `libexec` directory.
 
-Rust-analyzer searches that `libexec` directory for the proc-macro server.
-Stage 1 changes no file in the Rust tree: rust-analyzer is enabled through the
-rendered bootstrap configuration, and the build-pipeline patch in section 3.9
-also changes only rendered configuration and Motor OS scripts.
+Rust-analyzer searches that `libexec` directory for the proc-macro server. The
+completed prefix is validated before it is linked through rustup. The shared
+standalone LLVM supplies all 14 bootstrap tools: `llvm-cov`, `llvm-nm`,
+`llvm-objcopy`, `llvm-objdump`, `llvm-profdata`, `llvm-readobj`, `llvm-size`,
+`llvm-strip`, `llvm-ar`, `llvm-as`, `llvm-dis`, `llvm-link`, `llc`, and `opt`.
+The build and identity details are maintained in `docs/toolchain.md`.
 
 After the host prefix has been completed and linked through rustup, the
 pipeline builds the assembly, including native LLVM, mlibc, and a Stage 2 rustc
 whose host is `x86_64-unknown-motor`. That later native-compiler bootstrap is
 why the two rust-analyzer builds must remain separate.
 
-## 3. Stage 1: Linux host, Motor target
+## 3. Stage 1 (complete): rust-analyzer on the Linux host
 
-### 3.1 Deliverables and acceptance boundary
+Stage 1 has no remaining implementation items. It is the supported way to run
+rust-analyzer on Linux while developing ordinary Motor OS userspace code, and
+it also supports the repository's Linux-host Rust projects. The concise
+user-facing setup is maintained in `docs/build-rustc.md`; this section records
+the service boundary, configuration contract, and acceptance coverage that
+Stage 2 builds upon.
 
-Stage 1 is complete when:
+### 3.1 Installed server and toolchain selection
 
-1. `src/build-motor-os.sh` builds or reuses a key-qualified Linux
-   rust-analyzer and its matching proc-macro server in the host prefix.
-2. Bare `rust-analyzer` from the Motor OS checkout resolves through rustup to
-   that exact prefix.
-3. A Linux editor can load a Cargo project for
-   `x86_64-unknown-motor`, resolve a definition in `std::os::motor`, and run a
-   target-correct check without using an ambient Rust installation.
-4. The same editor can load a Linux host Cargo project for
-   `x86_64-unknown-linux-gnu`, resolve a definition in `std::os::linux`, and
-   run a host check, again from the keyed toolchain rather than an ambient
-   installation. Motor and Linux projects may be open in one session with
-   different targets.
-5. The Motor semantic fixture can be loaded from an inline
-   `rust-project.json` object. This is the project-description seam reserved
-   for the future native Lorry/editor integration.
-6. The host smoke tests use no network and are included transitively in
-   `src/tests/full-test.sh`.
-
-Stage 1 does not claim that opening the repository root gives one accurate
-crate graph for every component. The checkout contains Linux host programs,
-ordinary Motor targets, and the custom JSON kernel/loader targets that are out
-of scope here. Users must open or link Motor and Linux projects by build
-context. A future repository-wide workspace discovery command may combine
-those contexts, but silently assigning `x86_64-unknown-motor` to every crate
-would be incorrect.
-
-### 3.2 Enable rust-analyzer in the host bootstrap
-
-Update both identity declarations of the bootstrap tool list:
+The managed Rust build installs three related inputs from the same selected
+Rust revision:
 
 ```text
-src/toolchain-bootstrap.sh
-  tools = ["cargo", "clippy", "rust-analyzer", "rustdoc", "rustfmt", "src"]
-
-src/toolchain-versions.sh
-  MOTOR_BUILD_TOOLS="cargo,clippy,rust-analyzer,rustdoc,rustfmt,src"
+$TOOLCHAIN_PREFIX/bin/rust-analyzer
+$TOOLCHAIN_PREFIX/libexec/rust-analyzer-proc-macro-srv
+$TOOLCHAIN_PREFIX/lib/rustlib/src/rust/library
 ```
 
-Do not add a second `x.py` command and do not run rust-analyzer's
-`cargo xtask install`. The existing `x.py install --stage 2` invocation must
-produce all host components together. This preserves bootstrap's installer
-layout, uses the in-tree features, builds the matching proc-macro server, and
-keeps the result inside the immutable keyed prefix rather than
-`$HOME/.cargo/bin`.
+The first two are Linux executables. They analyze Motor code by invoking the
+matching compiler and reading the matching Motor standard library; they are
+not native Motor OS programs. The prefix is immutable and keyed by the
+compiler inputs. Its component paths and identities are validated before the
+toolchain is linked through rustup.
 
-The changed tool list and rendered bootstrap configuration already participate
-in `MOTOR_TOOLCHAIN_KEY`. The change must therefore select a new prefix. It
-must not add files to or relax validation of the currently completed prefix.
-
-The rust-analyzer workspace has its own committed `Cargo.lock` inside the exact
-Rust source tree. Its contents are selected by the effective Rust commit or
-authoring tree digest. Managed-source verification must remain clean after
-bootstrap. A lockfile rewrite or other source mutation rejects the new prefix;
-the build must not run `cargo update` or accept an unreviewed resolution.
-
-### 3.3 Validate and record the installed components
-
-Extend `src/toolchain-prefix.sh` so a prefix is incomplete unless it contains:
-
-```text
-bin/rust-analyzer
-libexec/rust-analyzer-proc-macro-srv
-```
-
-Validation must:
-
-- require both files to be regular executable files;
-- run `rust-analyzer --version` and require the selected Rust release family;
-- set `RUST_ANALYZER_INTERNALS_DO_NOT_USE='this is unstable'`, the value
-  rust-analyzer itself sends, when running
-  `libexec/rust-analyzer-proc-macro-srv --version`; the pinned server only
-  checks that the variable exists, but a later snapshot may check the value;
-- retain the existing full `rustc -vV`, `cargo -Vv`, sysroot, and two-target
-  compile probes;
-- record both new version strings in `MOTOR-TOOLCHAIN-MANIFEST` as base64
-  fields; and
-- leave `MOTOR_GENERATED_MANIFEST_SCHEMA` unchanged: the toolchain key
-  already changes, the prefix manifest is compared byte-for-byte against a
-  fresh render that embeds that key, readers fetch fields by name, and the
-  constant is shared with the assembly manifest and the assembly selector,
-  where a bump would only add churn.
-
-The source transaction, exact toolchain key, and clean-source re-verification
-are the authority tying rust-analyzer to the selected Rust revision. The short
-commit spelling in `rust-analyzer --version` is diagnostic evidence, not a
-replacement for that identity chain and must not be hard-coded to a fixed
-abbreviation length.
-
-Both binaries print `<name> <CFG_RELEASE> (<abbrev> <date>)`, so the expected
-outputs are `rust-analyzer 1.99.0-dev (...)` and
-`rust-analyzer-proc-macro-srv 1.99.0-dev (...)`; the abbreviation comes from
-`git log --format=%h` and is shorter than rustc's. Check the fixed prefix up
-to the opening parenthesis and that the hash is a prefix of
-`EFFECTIVE_MOTOR_RUST_REV`, nothing stricter. Both executables link
-`librustc_driver` through a `$ORIGIN/../lib` runpath, so run them by absolute
-path inside the prefix. Get these expectations right the first time: a
-failure in `toolchain_validate_prefix` after `x.py install` marks the freshly
-built prefix rejected, and rejected prefixes are never revalidated, so a wrong
-expectation costs a complete rebuild.
-
-Extend rustup-link validation to require:
+From the repository, verify selection with:
 
 ```sh
-rustup which rust-analyzer --toolchain "$MOTOR_RUSTUP_TOOLCHAIN"
+rustup show active-toolchain
+rustup which rust-analyzer
+rust-analyzer --version
+rustc --print sysroot
 ```
 
-and compare its canonical path with
-`$TOOLCHAIN_PREFIX/bin/rust-analyzer`. The proc-macro server has no rustup
-proxy; validate its canonical path directly below the same prefix.
-
-Update the fake prefix and fake rustup implementations in:
-
-- `src/tests/test-toolchain-prefix.sh`; and
-- `src/tests/test-toolchain-host.sh`.
-
-Add negative assertions that a missing rust-analyzer, missing proc-macro
-server, wrong rustup resolution, or stale manifest is rejected. Update
-`src/tests/test-toolchain-bootstrap.sh` to require the exact new tools array and
-`src/tests/test-toolchain-versions.sh` to retain deterministic re-keying.
-
-### 3.4 Provision and select the new immutable prefix
-
-Run the managed build through the public entry point; do not invoke bootstrap
-manually:
+`rustup which rust-analyzer` and `rustc --print sysroot` must resolve below
+the same keyed prefix. Configure an editor or another LSP client to launch:
 
 ```sh
-src/build-motor-os.sh --source-mode managed
+rustup run <exact-active-name> rust-analyzer
 ```
 
-Sequencing, decided 2026-08-30: every toolchain re-key also re-keys the
-assembly, and the checked-in selector is already unbuilt on the development
-host, so land the bootstrap-selection/prefix-contract patch and the
-build-pipeline patch of section 3.9 before running the next managed build.
-One build then serves both; do not run a throwaway build of the current
-selector first. Neither patch touches `x.py` or the Rust bootstrap sources.
+Use the Cargo project as the server's working directory. This explicit command
+prevents an editor-bundled server or an ambient Rust channel from replacing
+the version selected by the repository's `rust-toolchain.toml`. Do not copy a
+server, proc-macro server, or `rust-src` from another toolchain into the
+prefix; rebuild or provision the managed toolchain instead.
 
-After the new prefix validates and rustup links it, update
-`rust-toolchain.toml` to the exact value returned by `toolchain_clean_name`.
-Do not guess or truncate the key. `src/tests/test-toolchain-cutover.sh` must
-continue to prove that the checked-in selector, computed clean tuple, key
-stamp, rustc, Cargo, and rustup paths all agree.
+Rust-analyzer discovers its matching proc-macro server in the prefix's
+`libexec` directory. No `procMacro.server` override is needed for the
+supported configuration.
 
-Document rust-analyzer with the other host components in:
+### 3.2 Supported target and workspace boundaries
 
-- `docs/build-motor-os.md`;
-- `docs/build-rustc.md`;
-- `docs/toolchain.md`; and
-- the `src/build-motor-os.sh --help` component summary.
+The host service supports these project contexts:
 
-The documentation must distinguish the Linux executable from the later native
-one. Installing Stage 1 must not change either VM image.
+| Project context | Status |
+|---|---|
+| Ordinary Cargo project for `x86_64-unknown-motor` | Supported |
+| Cargo project for `x86_64-unknown-linux-gnu` | Supported |
+| Inline Project JSON describing an ordinary Motor crate | Supported and covered by the smoke test |
+| Kernel or loader project using a custom JSON target | Unsupported |
+| The repository root treated as one homogeneous workspace | Unsupported |
 
-### 3.5 Editor-neutral Motor target configuration
+Run Motor and Linux project contexts in separate rust-analyzer processes,
+normally separate editor workspaces or windows. The pinned server treats
+`cargo.target` as workspace-scoped but reuses one target-neutral Cargo-loader
+configuration for every Cargo graph in a process. It therefore cannot
+accurately combine Motor and Linux Cargo roots. A per-root
+`rust-analyzer.toml` does not repair that behavior.
 
-The repository should document LSP initialization options instead of adding a
-VS Code-, Vim-, or editor-specific settings file. For an ordinary trusted
-Motor userspace Cargo project, the semantic configuration is:
+This restriction does not prevent a client from using several independent
+standard-LSP server processes. Stage 1 defines no editor-specific session
+manager and no repository-wide project-discovery command.
+
+### 3.3 Ordinary Motor Cargo projects
+
+For a trusted Motor userspace Cargo project, pass these standard
+rust-analyzer LSP initialization options:
 
 ```json
 {
@@ -319,416 +227,174 @@ Motor userspace Cargo project, the semantic configuration is:
 }
 ```
 
-`targetDir = true` gives rust-analyzer a separate Cargo artifact directory so
-editor checks do not contend with ordinary command-line builds. The root
-`rust-toolchain.toml` or an explicit `RUSTUP_TOOLCHAIN` must select the Motor
-toolchain before the server starts. Editors that bundle their own server must
-be pointed explicitly at the rustup proxy or the exact prefix binary; merely
-opening the checkout does not force an editor to discard a bundled server.
+The `cargo.target` setting selects Motor cfgs and dependencies during project
+loading. `check.targets` makes the flycheck use the same target.
+`cargo.targetDir = true` gives rust-analyzer a separate Cargo artifact
+directory so editor checks do not contend with ordinary command-line builds.
+`cargo.sysroot = "discover"` selects the std sources installed with the active
+keyed compiler.
 
-For a Linux host program, leave `cargo.target` and `check.targets` unset: the
-server then analyzes and checks `x86_64-unknown-linux-gnu` with the keyed
-toolchain's host std and the same `rust-src`, under the same toolchain
-selection rule. Run Motor and Linux projects in separate rust-analyzer
-processes. Although the pinned server describes `cargo.target` as a
-workspace-scoped setting, its project loader constructs one target-neutral
-configuration and reuses it for every Cargo workspace in a process. A mixed
-Motor/Linux session therefore loads both semantic graphs for the host target.
+For a Linux-host Cargo project, leave `cargo.target` and `check.targets` unset.
+The server then uses `x86_64-unknown-linux-gnu` and the host std from the same
+keyed toolchain.
 
 Build scripts and procedural macros execute project code on the Linux host.
-They are acceptable for the trusted Motor OS checkout and explicit trusted
-projects, but the documentation must call out that trust boundary. The
-network-free smoke fixture below contains no external dependencies or build
-script.
+Keep them enabled only for this trusted checkout or another trusted project.
+When inspecting untrusted code, disable both
+`cargo.buildScripts.enable` and `procMacro.enable`. This is a host trust
+boundary, not a Motor OS sandbox.
 
-Custom JSON targets are out of scope. The kernel and loader crates
-(`src/sys/kernel/kernel.json`, `src/boot/x64.kloader/kloader.json`) are not
-supported by this plan, and no fixture, configuration, or documentation for
-them is a deliverable of either stage. The reason was verified on 2026-08-30
-with the installed prefix: the pinned Cargo rejects every `.json` target
-invocation (`cargo metadata --filter-platform`, `cargo rustc --print cfg`,
-`--print target-spec-json`) unless `-Zjson-target-spec` is passed, and bare
-rustc rejects JSON targets without `-Zunstable-options`. The pinned
-rust-analyzer adds `-Zjson-target-spec` to `cargo metadata` on its own and
-forwards `-Z` flags from `cargo.extraArgs` to build-script runs, but its rustc
-cfg and target-data queries take no extra arguments, so a JSON-target project
-silently loads with an empty cfg set. Supporting these targets needs either a
-Motor-fork rust-analyzer change or a project-description bridge that supplies
-the cfgs, and belongs to a separate plan. Do not work around it with
-`cargo.cfgs` or by substituting `x86_64-unknown-motor` for a kernel or loader
-crate.
+### 3.4 Project JSON contract
 
-### 3.6 Reusable host LSP smoke test
+The pinned server also accepts a Project JSON object directly in
+`linkedProjects`. Stage 1's inline fixture supplies:
 
-Add a dependency-free fixture beneath `src/tests/` with:
+- absolute, normalized `sysroot` and `sysroot_src` paths from the selected
+  keyed toolchain;
+- an absolute `root_module` for each crate;
+- `edition`, `target`, `cfg`, `env`, and source include/exclude roots; and
+- dependency indices and names admitted by the project description.
 
-- an ordinary Cargo library configured for `x86_64-unknown-motor`;
-- a Motor-only source path that references
-  `std::os::motor::rt_version` under `#![feature(motor_ext)]`;
-- a `#[cfg(not(target_os = "motor"))]` failure sentinel;
-- a small local procedural-macro crate for the host-only proc-macro check; and
-- a separate Linux host library that references
-  `std::os::linux::fs::MetadataExt` with a
-  `#[cfg(not(target_os = "linux"))]` failure sentinel.
+For a Motor Project JSON object, the initialization options must still set
+`cargo.target` to `x86_64-unknown-motor`. The crate's `target` field describes
+that crate, while the workspace setting selects the platform when
+rust-analyzer loads sysroot metadata through Cargo.
 
-Use a small Rust host harness, not an editor extension. It is a Cargo package
-beneath `src/tests/` that `src/tests/full-test.sh` builds and runs with the
-keyed toolchain for the Linux host. `serde_json` is its only external
-dependency; its use was explicitly approved on 2026-08-30 as a test-only
-exception to the standard-Rust rule because a new JSON implementation or a
-Python harness would be worse. It must not become a product or guest
-dependency and must not carry its own JSON parser. Pin its direct version
-exactly to the version in rust-analyzer's committed `Cargo.lock`, commit the
-harness `Cargo.lock` with only package versions and checksums already selected
-by that rust-analyzer lock, and build and run it with the keyed Cargo using
-`--locked --offline`. The harness spawns the exact rust-analyzer with piped
-stdin/stdout, drains stderr on its own thread into a bounded buffer, enforces
-one deadline per case, and kills the server on timeout. It must not retry a
-failed server. It implements only what the cases need:
+The Stage 1 fixture deliberately has no build-script output or procedural
+macros. This is the stable, editor-neutral project-description seam reused by
+the Stage 2 Lorry export. Generated descriptions must contain current
+key-qualified absolute paths; do not check a developer home directory or a
+toolchain key into a static JSON file.
 
-- LSP framing in both directions and a dispatch loop that matches responses
-  to pending requests, answers server-to-client requests
-  (`window/workDoneProgress/create`, `client/registerCapability`) with `null`
-  results, and records `textDocument/publishDiagnostics`, `$/progress`, and
-  `experimental/serverStatus` notifications;
-- client capabilities that declare `experimental.serverStatusNotification`,
-  without which the server never reports quiescence, and that omit
-  `workspace.configuration`;
-- no `workspace/didChangeConfiguration` notification: it is the pinned
-  server's only trigger for a `workspace/configuration` pull, so omitting it
-  makes the initialization options the sole configuration source;
-- `cargo.extraEnv = {"CARGO_NET_OFFLINE": "true"}` in every case's
-  initialization options, so that a registry package missing from
-  `CARGO_HOME` fails `cargo metadata` visibly instead of being downloaded.
-  This reaches only the cargo processes spawned by the test's server; it is
-  not part of the editor configuration in section 3.5 and does not affect
-  `make` or a developer's own server; and
-- fixed bounds on frame size, pending requests, retained diagnostics, and
-  stderr retention.
+### 3.5 Custom JSON targets remain unsupported
 
-Before inspecting diagnostics the harness waits for the quiescent report and
-then for every expected flycheck `$/progress` token to reach `end`;
-quiescence does not cover the check. Each single-workspace Cargo case expects
-one begin/end pair. The mixed-workspace case below expects one for each
-workspace and must not treat the first completed check as completion of the
-second.
+The kernel and loader targets
+(`src/sys/kernel/kernel.json` and
+`src/boot/x64.kloader/kloader.json`) are outside both stages.
 
-For Cargo project discovery, the harness must:
+The pinned Cargo and rustc require unstable flags for JSON target
+specifications. Rust-analyzer adds the necessary flag to its Cargo metadata
+query, but its rustc cfg and target-data queries cannot receive equivalent
+extra arguments. The result can be a project that appears to load while
+silently carrying an empty target cfg set. Do not work around this by
+substituting `x86_64-unknown-motor` or hard-coding `cargo.cfgs` for a kernel
+or loader crate. Correct support requires a separate design for either a
+Motor rust-analyzer change or a project-description bridge that supplies all
+target data consistently.
 
-1. start rust-analyzer with the exact rustup toolchain and fixture working
-   directory;
-2. send `initialize` with the Motor target options above, followed by
-   `initialized`;
-3. wait for the server to report that project loading is quiescent;
-4. open the fixture source;
-5. request the definition of `std::os::motor::rt_version` and require a URI
-   below the selected sysroot's `library/std/src/os/motor` directory;
-6. request the definition of the `moto_rt::RT_VERSION` reference inside that
-   `std::os::motor` source and require a URI below
-   the selected sysroot's `library/vendor/moto-rt-<version>/`. The real
-   Stage 1 prefix confirmed that bootstrap installs a vendored, reduced
-   `rust-src`, consistent with `docs/toolchain.md`. The pinned server loads
-   the sysroot through `cargo metadata` on `library/Cargo.toml` and, when
-   that fails, silently keeps a `--no-deps` result or a stitched crate list;
-   only the full load resolves `moto_rt`, so this step is what proves the
-   sysroot loaded correctly and offline;
-7. require no active non-Motor sentinel diagnostic;
-8. prove that the local proc macro expands with `procMacro.server` unset, so
-   the server discovered its own `libexec/rust-analyzer-proc-macro-srv`; the
-   prefix validation in section 3.3 is what proves that file's identity; and
-9. perform the LSP `shutdown`/`exit` sequence and require a clean child exit.
+### 3.6 Offline acceptance test
 
-Run a second case for the Linux host fixture with `cargo.target` and
-`check.targets` unset. Require the definition of
-`std::os::linux::fs::MetadataExt` below the selected sysroot's
-`library/std/src/os/linux` directory and no active non-Linux sentinel
-diagnostic once the check has completed. The proc-macro and vendored-source
-steps are not repeated; the Linux sysroot loads through the same path.
+The maintained Stage 1 acceptance test consists of:
 
-Run a third case using an inline `rust-project.json` object instead of Cargo
-discovery. It should describe the same dependency-free Motor crate with:
+- `src/tests/test-rust-analyzer.sh`;
+- the Rust harness in `src/tests/rust-analyzer-smoke/`; and
+- its three dependency-free semantic fixtures.
 
-- the selected `sysroot` and `sysroot_src` paths;
-- an absolute normalized root module;
-- edition, target, cfgs, environment, and source include/exclude roots; and
-- admitted dependency indices and names (empty for this dependency-free
-  fixture).
+`serde_json` is the harness's only external dependency. Its use is an
+explicitly approved test-only exception: implementing another JSON stack in
+Rust or delegating the protocol to Python would add more risk and code. Its
+locked packages are already selected by the pinned rust-analyzer sources; the
+harness is built and run with `--locked --offline`.
 
-The inline case deliberately excludes proc macros and build-script output so
-the same shape can later run in the guest. Set `cargo.target` to
-`x86_64-unknown-motor` in its initialization options as well: real Stage 1
-logs confirmed that the pinned server uses this workspace setting when it
-loads even a project object's sysroot through Cargo; the crate's own `target`
-field controls the described crate but does not select the sysroot metadata
-platform. Require the same Motor std definition result. Keep its project-data
-builder path-parameterized; do not embed Linux home-directory or toolchain-key
-strings in a checked-in JSON file.
+The semantic cases prove:
 
-The Motor and Linux cases must use independent rust-analyzer processes. This
-matches the supported editor configuration boundary and proves both target
-contexts without relying on the pinned server's ineffective per-root
-`cargo.target` setting during Cargo project loading.
+| Case | Required result |
+|---|---|
+| Motor Cargo | Motor cfgs, one completed flycheck, `std::os::motor` definition, vendored `moto_rt` definition, and local proc-macro expansion |
+| Linux Cargo | Linux cfgs, one completed flycheck, and `std::os::linux` definition |
+| Inline Motor Project JSON | Motor cfgs and `std::os::motor` definition without Cargo project discovery, build scripts, or proc macros |
 
-Add the smoke test to `src/tests/full-test.sh` directly or through a focused
-host-toolchain test. It must not reach Cargo registries, Git repositories, or
-any other network service. `--locked --offline` covers the harness build, and
-the offline environment above turns any such need in a server child into a
-visible failure. Its only external inputs are the keyed toolchain and the
-registry cache under `CARGO_HOME`, which must already hold the
-rust-analyzer `Cargo.lock` packages selected by the harness lock. The
-installed `rust-src` vendors the library closure, so semantic sysroot loading
-does not consult an ambient registry. The managed toolchain build on the same
-host with the same `CARGO_HOME` (`src/build-motor-os.sh` uses
-`${CARGO_HOME:-$HOME/.cargo}`, Cargo's own default) provides the harness
-packages because it builds rust-analyzer.
+Every case also contains a wrong-target sentinel. The harness launches the
+exact selected server, uses bounded LSP frames, pending requests, diagnostic
+state, and stderr retention, and applies a 60-second total deadline to each
+case. It drains stderr concurrently, waits for server quiescence and the
+expected flycheck completion, performs `shutdown`/`exit`, and kills and reaps
+a server that fails the lifecycle. It does not retry.
 
-### 3.7 Stage 1 patch sequence
+The server's Cargo children receive `CARGO_NET_OFFLINE=true`. Consequently,
+missing cached inputs fail visibly rather than reaching a registry or Git
+repository. Run the focused gate in both profiles with:
 
-Keep the implementation incremental:
+```sh
+src/tests/test-rust-analyzer.sh
+src/tests/test-rust-analyzer.sh --release
+```
 
-1. **Bootstrap selection and prefix contract.** Add rust-analyzer to the
-   exact tools declaration, validate the server and proc-macro server, extend
-   the manifest and rustup checks, and update the bootstrap/key and
-   fake-prefix tests. The tools-list change alone is a few lines and does not
-   warrant its own patch.
-2. **Build pipeline and identity.** The section 3.9 changes. Independent of
-   patch 1 in content, but it must land before the same managed build.
-3. **Real provision and selector cutover.** Build the managed prefix, inspect
-   both binaries, update `rust-toolchain.toml`, and run the cutover tests.
-   Runs only after patches 1 and 2 are in, so that one managed build serves
-   all of them.
-4. **LSP transport.** Add the harness package's bounded framing and dispatch
-   logic, with in-memory tests for valid and malformed frames, frame and
-   pending-request limits, response correlation, server requests, and the
-   retained-notification bounds. It has no semantic fixtures yet.
-5. **LSP process lifecycle.** Add child startup, concurrent bounded stderr
-   draining, deadlines, timeout kill/reap, shutdown, and exit handling. Test
-   it with a self-hosted fake-child mode of the test binary that can emit
-   partial frames, fill stderr, exit cleanly, or hang. Split patches 4 and 5
-   further if needed to keep each patch, including tests, near 100-300 lines.
-6. **Host semantic smoke.** Add the Motor Cargo, Linux host, and
-   inline-project fixtures and their three cases, wired into
-   `src/tests/full-test.sh`.
-7. **User documentation.** Document editor-neutral launch/configuration and
-   the mixed-target repository boundary.
+`src/tests/full-test.sh` invokes the matching profile transitively.
 
-Do not combine an unproven native build or Red changes with these patches.
+### 3.7 Maintenance rules
 
-### 3.8 Stage 1 tests and gates
+Keep `docs/build-rustc.md` as the short user-facing launch and configuration
+guide. Update that guide and this section together if the supported target,
+toolchain-selection, trust, or process boundary changes.
 
-Before accepting Stage 1:
-
-- run the focused bootstrap, versions, llvm, prefix, host, state, assembly,
-  and cutover shell tests;
-- run the new host LSP smoke entirely offline, on the host that built the
-  selected toolchain with the same `CARGO_HOME`;
-- run `src/build-motor-os.sh --source-mode managed` to prove the real in-tree
-  rust-analyzer workspace builds through bootstrap;
-- confirm both new installed files resolve inside the new prefix;
-- run `src/tests/full-test.sh` in debug and release modes; and
-- run the non-Lorry developer-image gate only in release mode with
-  `src/tests/full-test-dev.sh --release`.
-
-This stage does not change `src/sys`, the Motor Rust standard library, or
-`moto-rt`, so the three-debug/three-release core repetition requirement does
-not apply. If implementation discovers that one of those core components must
-change, stop and obtain review before expanding the scope.
-
-### 3.9 Build-pipeline prerequisite: one host LLVM, non-incremental builds
-
-Decided 2026-08-30 with the Stage 1 review. A clean managed rebuild takes
-about 105 minutes on the development host, and roughly 71 of them compile the
-same X86-only LLVM source four times: the standalone host clang (20.6 min),
-rustc's host LLVM (20.9), the Motor-target LLVM inside the native rustc
-bootstrap (12.3), and the guest clang driver (17.7). This patch removes the
-second build and the incremental caches. It changes only
-the Motor OS toolchain identity, bootstrap, prefix/assembly manifest, and LLVM
-scripts, their tests, and documentation; no file under the Rust tree changes.
-
-Rendered bootstrap configuration:
-
-- `[rust] incremental = false`. The `library` profile sets it to true, so the
-  value must be explicit. Clean builds get slightly faster and stop leaving
-  multi-gigabyte incremental caches; incremental toolchain rebuilds are
-  explicitly not a priority.
-- `[target.x86_64-unknown-linux-gnu] llvm-config = "$llvm_bin/llvm-config"`.
-  The pinned bootstrap then treats the host LLVM as prebuilt, links it
-  statically by default, uses `llvm-config --cmakedir` with the
-  `llvm-tblgen` beside it, and requires LLVM 21 or newer; the selected LLVM is
-  23.1.0-rc1. The `$llvm_bin` location is already a placeholder in the
-  configuration identity digest.
-
-Standalone LLVM build:
-
-- `LLVM_ENABLE_ASSERTIONS=OFF`. With the build shared, assertions would slow
-  every host rustc codegen invocation by roughly five to ten percent against
-  today's assertion-free rustc LLVM; upstream ships assertions only in
-  nightly. Clang and everything it compiles also get faster. When someone
-  needs an assertions-enabled toolchain to debug LLVM, authoring mode can
-  build one under its own key.
-- Build the existing tool list plus `llvm-libraries`, so that every static
-  library `llvm-config --libs` may name actually exists. Rust bootstrap also
-  requires all 14 of its `LLVM_TOOLS` while assembling intermediate sysroots,
-  even though external LLVM makes the later component-install step skip them:
-  `llvm-cov`, `llvm-nm`, `llvm-objcopy`, `llvm-objdump`, `llvm-profdata`,
-  `llvm-readobj`, `llvm-size`, `llvm-strip`, `llvm-ar`, `llvm-as`, `llvm-dis`,
-  `llvm-link`, `llc`, and `opt`. Keep this exact list in one checked-in array
-  used by standalone build and validation.
-- Replace the configuration digest schema with
-  `motor-standalone-llvm-config-v2` carrying the assertion setting and the
-  ninja target list, so an existing build directory cannot be reused without
-  the added libraries. The new standalone key costs one additional
-  twenty-minute LLVM build, paid once.
-
-Identity decision, approved 2026-08-30:
-
-- The normalized standalone LLVM configuration digest becomes an explicit
-  `MOTOR_TOOLCHAIN_KEY` input because the external LLVM now determines the
-  installed host rustc. Bump `MOTOR_TOOLCHAIN_KEY_SCHEMA` from v1 to v2 and
-  add a named `standalone_llvm_config_digest` field to the required-field list
-  and canonical serialization. The effective LLVM revision and tree state are
-  already separate toolchain-key inputs, so do not hash the host build path or
-  redundantly add the full standalone key.
-- Derive the digest from the same single configuration authority that drives
-  the CMake and Ninja commands, before deriving `MOTOR_TOOLCHAIN_KEY`. The
-  clean-key path must compute it offline from checked-in data. Do not duplicate
-  assertion, project, target, or Ninja-target lists between identity and
-  execution.
-- `MOTOR_ASSEMBLY_KEY` inherits this input through `MOTOR_TOOLCHAIN_KEY`; it
-  does not need a second identity field. Record the digest in both the prefix
-  and assembly manifests for diagnosis, and update `docs/toolchain.md`, whose
-  current text incorrectly places the standalone configuration only at the
-  assembly boundary. The shared generated-manifest schema remains unchanged
-  under the compatibility rationale in section 3.3; this key-schema bump is a
-  separate change.
-
-Product consequences to record:
-
-- The installed prefix loses the separate `llvm-tools` component because
-  bootstrap skips that install step when the host LLVM is external. The 14
-  tools above are nevertheless required for intermediate compiler assembly;
-  leaving `rust.llvm-tools` at its default also preserves `rust-objcopy` in
-  the rustc component.
-- External `llvm-config` disables bootstrap's automatic self-contained LLD
-  and bootstrap rejects `rust.lld = true` in this mode. A real image build
-  proved that the MBR, bootloader, kernel loader, and kernel custom targets all
-  name `rust-lld`. After `x.py install` and before validation, automatically
-  copy the already-built standalone `lld` to the standard prefix path
-  `lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld`. Require a regular
-  executable byte-identical to standalone `lld`, record its digest in the
-  prefix manifest, and include the staging recipe in bootstrap identity. Keep
-  `gcc-ld` omitted because the repository does not use it. Do not patch Rust
-  bootstrap or build a fourth LLVM.
-- rustc's host LLVM takes the standalone configuration: clang and lld
-  projects present, X86 only, tests off, assertions off.
-- The Motor-target LLVM and the guest clang driver are unchanged:
-  `llvm-config` must run on the build host, and a cross build's `llvm-config`
-  is a Motor executable, so three LLVM builds are the floor.
-- The native bootstrap's stage1 rework under the assembly configuration is a
-  relink plus a std rebuild worth one to two minutes. The first real build
-  exposed one additional cross-bootstrap constraint: upstream uses the
-  runnable host `llvm-config` and substitutes host-triple paths with target
-  paths, but the content-addressed standalone path contains no host triple.
-  Generate an assembly-scoped Bash adapter that leaves `--bindir` pointing at
-  runnable host tools and, only when Cargo's inherited `TARGET` is
-  `x86_64-unknown-motor`, rewrites other standalone include/library paths to
-  the built Motor LLVM tree. Host-target and target-less calls pass through
-  unchanged. Keep the real `llvm-ar` and `llvm-ranlib` beside it as symlinks,
-  use this bin directory only in the native bootstrap config, and record the
-  adapter recipe in a v2 native-configuration digest. Do not patch Rust
-  bootstrap or rebuild a fourth LLVM.
-
-Tests and documentation:
-
-- `src/tests/test-toolchain-bootstrap.sh` gains the host-target section and
-  `llvm-config` key in its exact rendered-key list and asserts the exact
-  external `llvm-config` path and `incremental = false`.
-- `src/tests/test-toolchain-llvm.sh` moves to the v2 digest and keeps the reuse
-  and re-key assertions. Its fake CMake and Ninja commands record their
-  argument vectors so the test also requires `LLVM_ENABLE_ASSERTIONS=OFF` and
-  the exact Ninja target list including `llvm-libraries` and all 14 bootstrap
-  tools. Standalone validation requires every bootstrap tool and
-  `llvm-config --link-static --libfiles` to exist, the command to succeed, and
-  every named library to exist; the fake provides representative libraries,
-  and a missing library is a negative test.
-- `src/tests/test-toolchain-native.sh` requires the adapter in the native
-  bootstrap config, unchanged host `--bindir`, pass-through host and
-  target-less paths, Motor-only rewritten include/library paths, exact
-  argument forwarding and failure status, and the adjacent host archive-tool
-  links.
-- The prefix and host tests require the staged `rust-lld`, reject a missing or
-  changed copy, and require its digest in the prefix manifest. Standalone LLVM
-  validation requires the source `lld` multicall binary as well as `ld.lld`.
-- The versions/state tests prove that changing only the normalized standalone
-  configuration digest changes both clean and dynamic toolchain keys without
-  introducing host-path identity. The assembly test proves that this new
-  toolchain key selects a new assembly key, and the cutover test continues to
-  derive the checked-in selector entirely offline.
-- `docs/toolchain.md` currently lists "the standalone LLVM build is not used
-  as rustc's LLVM through `llvm-config`" among the design's exclusions and
-  shows the identity-relevant bootstrap settings; both passages must be
-  updated, and the component documentation must record the removed
-  `llvm-tools`.
-- `docs/build-motor-os.md` gains the clean-rebuild procedure: delete the
-  keyed `toolchains`, `toolchain-state`, `assemblies`, and
-  `build/toolchain/standalone-llvm` entries with any `.building` locks, plus
-  `toolchain-src/rust/build`, then rerun the managed build. The standalone
-  LLVM directory is a runtime input of every assembly whose sysroot wrappers
-  point into it, so it is deleted only together with those assemblies.
-  `toolchain-src/rust/build` is disposable after a successful build because
-  assemblies copy the native rustc and LLVM images they need.
-
-With this patch the expected clean rebuild is roughly 80 minutes. The
-successful real-build validation on 2026-08-30 reused the sealed standalone
-LLVM, so it is not a clean-build measurement: it completed in 49 minutes 14
-seconds, including an 18-minute 11-second host `x.py install` with
-rust-analyzer, a 7-minute 2-second native Rust bootstrap, and all three
-release images. Earlier implementation discoveries required re-keying between
-attempts, so there is not yet one successful end-to-end clean timing; retain
-the roughly 80-minute estimate until the final clean gate measures it.
-
-The same validation recorded both `rustc_llvm` paths from Cargo build-script
-output. Linux-target builds linked from the sealed standalone LLVM `lib`
-directory. The Motor-target stage-2 build invoked the assembly adapter and
-linked from `build/x86_64-unknown-motor/llvm/lib`. The prefix's staged
-`rust-lld` was byte-identical to standalone `lld` with SHA-256
-`6dca91de3516a10e14c0c4dcfbb1ac36a20441990eeeeb90a6faf905b6d86d06`;
-the MBR, bootloader, kernel loader, and kernel then linked successfully, and
-the base, standard, and developer images were produced.
+Changes to the Rust revision, bootstrap component set, proc-macro server,
+`rust-src` contents, or standalone LLVM inputs must flow through the managed
+toolchain key and validation pipeline described in `docs/toolchain.md`. Never
+repair a prefix in place. Changes to host LSP behavior must keep the focused
+test offline and pass it in both debug and release profiles before the normal
+repository gates.
 
 ## 4. Stage 2: native Motor OS guest design
 
-### 4.1 Design status and replanning point
+### 4.1 Scope and fixed design choices
 
-Stage 2 will cross-build another rust-analyzer executable that runs inside the
-development VM. It analyzes `x86_64-unknown-motor` only; there is no Linux
-target in the guest. It remains required, but implementation must wait for
-Stage 1 completion.
+Stage 2 cross-builds rust-analyzer as a Motor OS process, packages it only in
+the development image, and gives it an exact Motor crate graph generated by
+Lorry. It analyzes only `x86_64-unknown-motor`. The server speaks the ordinary
+rust-analyzer stdio LSP protocol; Stage 2 adds no proxy, socket protocol, or
+Motor-specific LSP messages.
 
-After Stage 1, update this section using:
+Stage 2 has three deliverables:
 
-- the exact installed rust-analyzer version, remembering that Stage 1's
-  `in-rust-tree` build links `librustc_driver` dynamically while the native
-  build must use the crates.io `ra-ap-rustc_*` closure of the same source, so
-  the two dependency graphs differ;
-- the maintained Cargo and inline-project semantic fixtures;
-- observed sysroot and custom-target behavior;
-- the reusable bounded LSP test harness;
-- host startup, memory, thread-count, and first-analysis measurements; and
-- any source changes that were actually needed for Stage 1.
+1. an assembly-keyed native `rust-analyzer` plus the matching `rust-src`;
+2. a deterministic `lorry rust-project` command that publishes the selected
+   Lorry package as the pinned rust-analyzer `rust-project.json` schema; and
+3. repository tests that drive the native server over stdio through SSH and
+   prove project load and semantic results in the normal 1 GiB VM.
 
-At that point, produce a reviewed 100-300-line patch series for dependency
-ports, native build/staging, project generation, and editor integration. The
-design below preserves the constraints that Stage 1 must not foreclose; it is
-not authorization to begin those patches now.
+This stage deliberately contains no consumer. In particular, it does not port
+or configure Helix, Red, Gears, an agent harness, or an editor extension. It
+also does not design client restart policy, buffer synchronization, UTF-16
+position conversion, UI behavior, or project refresh UX. A future consumer may
+launch this server and use the generated project file through standard LSP and
+rust-analyzer configuration, but that is a separate plan.
 
-### 4.2 Native prototype evidence
+The following choices are part of this design rather than deferred decisions:
 
-The 2026-08-13 prototype used the in-tree rust-analyzer snapshot and the final
-Stage 2 Motor compiler.
+- use mlibc process startup to execute `.init_array`; do not change
+  `motor_start` or the Rust standard library;
+- carry the minimal rust-analyzer changes in the selected Motor Rust fork and
+  use exact-revision Motor forks only for the two registry crates that require
+  target support;
+- generate a stable project file with Lorry rather than port Cargo;
+- allow no implicit native user-configuration directory initially;
+- disable rust-analyzer build-script execution, proc-macro expansion, checks,
+  and server-side filesystem watching by default on Motor; and
+- omit run/check/test commands from the project description.
 
-After temporary compatibility changes for `dirs`, rust-analyzer's child-pipe
-reader, and `url`, this cross-check completed:
+### 4.2 Baseline evidence
+
+The maintained Stage 1 baseline is currently:
+
+```text
+Motor Rust revision: 3c9729fb79778d71daabbff78319a8b9535c340b
+rust-analyzer:        1.99.0-dev (3c9729fb797 2026-08-29)
+inventory:            0.3.24
+url:                  2.5.8
+dirs:                 6.0.0
+salsa:                0.28.2
+ra-ap-rustc_*:        0.166
+```
+
+The implementation will necessarily select a later Motor Rust revision that
+contains the native patches, so these values are the reviewed starting point,
+not hard-coded final output. The final binary's version, Rust revision,
+standalone lock digest, and fork revisions must be recorded by the assembly.
+
+The 2026-08-13 prototype used the same native architecture. After temporary
+compatibility changes for `dirs`, rust-analyzer's child-pipe reader, and `url`,
+this cross-check completed:
 
 ```sh
 RUSTC="$RUST/build/$HOST/stage2/bin/rustc" \
@@ -738,177 +404,541 @@ RUSTC="$RUST/build/$HOST/stage2/bin/rustc" \
 ```
 
 A pure-Rust-linked executable was approximately 28 MiB stripped and answered
-`--version` and LSP `initialize`, but then failed because Salsa's `inventory`
-registrations were absent. `inventory 0.3.24` did not emit Motor OS ELF
-constructors, and pure-Rust `motor_start` did not walk `.init_array`.
+`--version` and `initialize`, but Salsa registrations were absent because
+`inventory` emitted no Motor ELF constructors. Classifying Motor as an ELF
+`.init_array` platform and linking through `motor-rust-cc` produced an
+approximately 29 MiB static PIE. In a 1 GiB, four-vCPU VM it answered
+`--version`, initialized, loaded an inline project, became quiescent, shut
+down, and exited cleanly.
 
-After temporarily classifying Motor as an ELF `.init_array` platform and
-linking through `motor-rust-cc`, the resulting static PIE was approximately
-29 MiB stripped with a nonempty `.init_array`. In a 1 GiB, four-vCPU VM it:
+That result proves the basic process, pipe, thread, file-URI, Salsa, and LSP
+lifecycle. It does not replace the production source pinning, Lorry graph,
+semantic tests, or resource measurements below.
 
-1. ran `--version`;
-2. answered LSP `initialize`;
-3. loaded an inline project for a staged Rust file;
-4. reported `health=ok, quiescent=true`;
-5. answered `shutdown`; and
-6. exited cleanly after `exit`.
+### 4.3 Source, dependency, and identity model
 
-This proves native process, thread, pipe, file-URL, Salsa database,
-project-load, and JSON-RPC lifecycle feasibility. It did not prove complete
-Motor project analysis, production dependency pinning, editor integration, or
-acceptable resource use.
+The native binary uses
+`$RUST/src/tools/rust-analyzer` from the exact effective Motor Rust revision
+selected by `src/toolchain-versions.sh`. Unlike the Stage 1 bootstrap tool, it
+is built without `in-rust-tree`. The native closure therefore uses the
+standalone workspace lock and `ra-ap-rustc_*` crates rather than dynamically
+linking the bootstrap compiler's `librustc_driver`.
 
-### 4.3 Native build and image boundary
+Source changes are maintained as follows:
 
-The likely native build remains:
+- rust-analyzer target conditionals and the Motor child-pipe implementation
+  live in the Motor Rust fork beside the in-tree rust-analyzer source;
+- `url 2.5.8` and `inventory 0.3.24` use minimal Motor forks pinned to full Git
+  revisions by the standalone rust-analyzer workspace and its lockfile;
+- `dirs` is not forked: rust-analyzer does not compile that dependency for
+  Motor and returns no implicit user configuration directory there; and
+- no source is patched in place under a managed checkout, copied from `/tmp`,
+  or fetched by a regular test.
 
-- use the same in-tree rust-analyzer source selected for the host component,
-  without the `in-rust-tree` feature;
-- use host Cargo from the installed keyed toolchain;
-- compile with the final Stage 2 `x86_64-unknown-motor` rustc;
-- link through the assembly's `motor-rust-cc` wrapper;
-- use the rust-analyzer workspace lockfile with explicit, reviewed dependency
-  acquisition and offline normal tests;
-- keep Cargo output outside the image root;
-- strip with the assembly's LLVM tools; and
-- mechanically reject an executable that is not a static PIE, has a dynamic
-  `NEEDED` entry, has an executable stack, lacks `.init_array`, or retains
-  undefined symbols.
+The complete provisioning command may acquire the locked registry and Git
+sources while it is already in its managed network-enabled source-provisioning
+phase. Before the native build, it runs the selected host Cargo's equivalent
+of `cargo fetch --locked --target x86_64-unknown-motor` for the standalone
+rust-analyzer manifest. The check and build themselves use `--locked
+--offline`. Authoring mode uses the supplied Rust tree and the same lock
+contract; neither mode may rewrite the lock.
 
-Do not invoke `x.py` after the final native compiler/sysroot build. Rust
-bootstrap can recreate a Stage 2 sysroot at the start of a later invocation.
-The native rust-analyzer should instead be built directly with Cargo after the
-final Stage 2 compiler and both required standard libraries have been
-validated. Stage 2 source changes, where needed, are to dependency crates and
-to `src/tools/rust-analyzer`; the Rust bootstrap is never patched.
+Identity changes are fail-closed:
 
-Stage only into a dev-specific root such as:
+- add the standalone rust-analyzer `Cargo.lock` digest to toolchain state and
+  key validation so an authoring lock change cannot reuse a host prefix;
+- increment the native-configuration identity schema and include a native
+  rust-analyzer recipe version in it;
+- add every new Motor OS helper used by that recipe to
+  `MOTOR_OS_RUNTIME_INPUTS` rather than leaving unkeyed executable logic;
+- let the effective Motor Rust revision identify the in-tree source and exact
+  fork declarations; and
+- record the final version string, binary SHA-256, standalone lock SHA-256,
+  rust-src tree digest, and native recipe version in
+  `MOTOR-ASSEMBLY-MANIFEST` and each assembly image manifest.
+
+An existing assembly is reusable only when those fields and the staged files
+all validate. A missing or changed binary, rust-src tree, manifest field, or
+active/rejected producer marker rejects reuse.
+
+### 4.4 Native portability patches
+
+Keep the native patch set small and target-specific. Revalidate each item
+against the newly selected Rust revision before editing because rust-analyzer
+and its dependency lock move together.
+
+| Area | Native implementation | Required proof |
+|---|---|---|
+| Configuration | Compile `dirs` only for non-Motor targets. `Config::user_config_dir_path()` returns `None` on Motor. Motor defaults turn off build scripts, proc macros, checks, and server watching; explicit LSP configuration remains possible. | Cross-check has no `dirs-sys` Motor edge; initialize with no HOME/XDG variables succeeds and reads no implicit config file. |
+| Child stdout/stderr | Add a Motor branch to `stdx::process::read2` using two standard Rust reader threads and a bounded chunk channel. Both pipes are drained concurrently; the coordinator alone invokes callbacks and propagates the first read/join failure. There is no polling, retry, shell, or dependency on Unix file descriptors. | A platform-neutral unit test covers interleaved output, either pipe closing first, partial final lines, output above pipe capacity, and reader error; a guest child test covers the Motor branch. |
+| File URIs | In the exact `url` fork, treat Motor as an absolute, slash-rooted, UTF-8 path platform. Reject relative paths, authorities, invalid UTF-8, and malformed percent escapes; never classify Motor as Unix or use Unix `OsStrExt`. | Fork unit tests round-trip root, spaces, `%`, `#`, and non-ASCII names and reject the negative cases; the guest semantic test opens a non-ASCII path. |
+| Salsa registration | In the exact `inventory` fork, emit Motor constructor pointers in `.init_array`. Link rust-analyzer through the assembly wrapper so mlibc startup walks the array. Do not add constructor walking to Rust startup. | A small native inventory fixture observes more than one registration; ELF validation requires nonempty `.init_array`; the LSP database reaches quiescence. |
+| Allocator and workers | Leave optional jemalloc/mimalloc features off. Verify `num_cpus` against Motor's standard-library result and use an explicit native default worker count only if the 1 GiB measurements require it. | Record available CPUs, rust-analyzer threads, and peak memory; a worker cap needs its own measured justification. |
+| Filesystem changes | Keep the upstream client-watcher mode. Do not add a polling watcher or port a host notify backend in Stage 2. | Project load performs no periodic filesystem scan or watcher child process; standard `didOpen`/`didChange` drives the semantic test. |
+
+The pipe channel bounds queued chunks, not total command output. Existing
+rust-analyzer callers still own their final output buffers. Native defaults do
+not start Cargo-like commands; the only required child commands are exact
+`/devtools/bin/rustc` queries for sysroot, target cfg, and target metadata.
+
+### 4.5 Native build and development-image layout
+
+Build after the final host compiler, Motor std, assembly sysroot, and
+`motor-rust-cc` wrapper have validated. Use the installed keyed Linux-host
+Cargo and rustc to cross-compile; do not try to run the Motor-host rustc on
+Linux and do not invoke `x.py` again.
+
+The recipe is equivalent to:
+
+```sh
+RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" \
+CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/rust-analyzer" \
+CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$ASSEMBLY_SYSROOT/bin/motor-rust-cc" \
+  "$TOOLCHAIN_PREFIX/bin/cargo" build --release --locked --offline \
+  --manifest-path "$RUST/src/tools/rust-analyzer/Cargo.toml" \
+  --target x86_64-unknown-motor -p rust-analyzer
+```
+
+The implementation must use argument arrays/environment assignments already
+available to the build shell; it must not synthesize a Cargo config in the
+source tree. Cargo output stays under the assembly build root. Strip a copy
+with the assembly's LLVM tool and stage only the copy.
+
+The producer atomically publishes:
 
 ```text
 $MOTORH/assemblies/<assembly-key>/images/rust-analyzer/
   devtools/rust/bin/rust-analyzer
   devtools/rust/lib/rustlib/src/rust/library/...
+  devtools/toolchain/manifest
 ```
 
-Only `src/imager/motor-os-dev.yaml` should consume this root. The main image
-must contain neither rust-analyzer nor the added rust-src overlay. The server
-must start on demand from an editor, never during boot.
+Copy `rust-src` from the validated installed prefix's
+`lib/rustlib/src/rust/library`, not from an ambient rustup toolchain and not
+from a second checkout. The guest paths are consequently fixed:
 
-### 4.4 Portability areas to revalidate
+```text
+server:      /devtools/rust/bin/rust-analyzer
+rustc:       /devtools/bin/rustc
+sysroot:     /devtools/rust
+sysroot-src: /devtools/rust/lib/rustlib/src/rust/library
+```
 
-The prototype found the following likely native work. Revalidate each item
-against the exact source left by Stage 1 before designing patches:
+Mechanical validation rejects a server that:
 
-- **Configuration directory:** Motor has no approved implicit user config
-  path; the initial server takes reviewed settings from LSP initialization
-  options only.
-- **Child output:** rust-analyzer's concurrent stdout/stderr reader needs a
-  Motor implementation on standard Rust threads with bounded messages that
-  drains both pipes without polling, retrying, or holding one pipe until the
-  other closes.
-- **File URLs:** the selected `url` crate must support absolute Motor UTF-8
-  paths without pretending Motor is Unix.
-- **Salsa registration:** the selected `inventory` crate must emit Motor ELF
-  constructors and the chosen startup path must execute them; the prototype's
-  path is mlibc startup through `motor-rust-cc` (section 4.7, item 1).
-- **CPU selection:** use `std::thread::available_parallelism()`; choose any
-  worker cap only from the measurements in section 4.8.
+- is not the expected x86-64 Motor static PIE;
+- has a dynamic `NEEDED` entry or interpreter;
+- has an executable stack, undefined dynamic symbol, or text relocation;
+- lacks a nonempty `.init_array`;
+- does not contain the effective Rust revision and selected release
+  description.
 
-### 4.5 Project bridge and editor direction
+The assembly producer cannot execute a Motor binary on Linux. Native
+`--version`, constructor execution, and the inventory fixture are therefore
+guest release gates, not host-side assembly-reuse checks.
 
-The guest image has no Cargo. Rust-analyzer supports non-Cargo build systems
-through `rust-project.json`, `linkedProjects`, and workspace discovery:
+Add `rust-analyzer` to `assembly_dirs` and its binary to
+`assembly_required_executables` only in `src/imager/motor-os-dev.yaml`. The
+base and standard image configurations must reject `/devtools` as before and
+must not contain the server or rust-src. Nothing launches rust-analyzer during
+image construction or boot.
 
-- <https://rust-analyzer.github.io/book/non_cargo_based_projects.html>
-- <https://rust-analyzer.github.io/book/configuration>
+### 4.6 Runtime and LSP contract
 
-The first native project bridge is expected to expose Lorry's resolved
-compilation plan as deterministic rust-analyzer project data. It reuses the
-Stage 1 inline-project fixture and preserves, at minimum:
+The supported server command is exactly the native binary in stdio mode. It
+uses LSP/JSON-RPC framing on stdin/stdout and diagnostics/logging on stderr.
+There is no daemon, TCP listener, shell wrapper, Lorry proxy, or custom
+framing. Standard initialize, initialized, text-document, progress,
+configuration, shutdown, and exit messages remain rust-analyzer's upstream
+protocol.
 
-- sysroot and sysroot-source paths;
-- crate roots, editions, targets, target kinds, and source boundaries;
-- dependency indices and the names visible to rustc;
-- selected features, cfgs, and compile-time environment;
-- workspace membership; and
-- build labels for later checks and runnables.
+For the Stage 2 supported profile, initialization names one or more generated
+project files through rust-analyzer's `linkedProjects` setting and leaves
+Cargo discovery disabled. Native defaults are:
 
-Paths are absolute, normalized UTF-8 paths within the admitted workspace,
-verified dependency repository, or sysroot. Unsupported build-script output is
-rejected explicitly rather than represented inaccurately, and crates built for
-custom JSON targets stay out of scope. The exact Lorry command, refresh
-protocol, proc-macro artifact policy, and flycheck JSON envelope wait until
-Stage 1 proves the consumer side; porting Cargo is not the preferred first
-solution.
+- `cargo.buildScripts.enable = false`;
+- `procMacro.enable = false`;
+- `checkOnSave = false`; and
+- `files.watcher = "client"`.
 
-Red remains the likely first native client. It needs a bounded LSP transport
-with concurrent stdout/stderr draining, one serialized writer, request
-correlation, UTF-16 position conversion, document synchronization, and a
-unified terminal/LSP event loop in which only the editor's main thread mutates
-buffers or terminal state.
+The project file itself supplies sysroot, sysroot source, crate roots, and
+compile context. Rust-analyzer may query `/devtools/bin/rustc`, but it must not
+invoke Lorry, Cargo, a build script, a proc macro, a check command, or a
+workspace-discovery command during the accepted session. Tests inspect the
+process tree and Lorry trace rather than assuming this from a quiet log.
 
-### 4.6 Security and resource constraints
+A consumer may later send standard configuration changes, file notifications,
+and multiple linked projects. How it discovers the project-file path, decides
+when to regenerate/reload it, bounds its own queues, or presents server
+failures is outside Stage 2.
 
-The Stage 2 implementation plan must retain these constraints:
+### 4.7 Lorry ownership and command boundary
 
-- start the server only for an explicitly opened Rust workspace, with absolute
-  tool paths, argument vectors rather than a shell, and an explicit minimal
-  environment;
-- initially disable build scripts, procedural macros, command execution,
-  workspace edits, and server-side polling; declarative macros remain
-  available;
-- bound protocol frames, pending requests, diagnostics, completion items,
-  stderr retention, and event queues;
-- reject project paths outside admitted roots and validate server-returned
-  file URIs before opening them;
-- leave `workspace/executeCommand` and `workspace/applyEdit` unsupported until
-  separately designed;
-- keep server failure visible, with no automatic restart; and
-- choose worker limits and any executable compression only from the
-  measurements in section 4.8; startup decompression is not acceptable.
+Lorry already owns the exact package selection, target evaluation, default
+features, dependency resolution, admission evidence, source remapping,
+build-script directives, and rustc environment. The project exporter must use
+those structures directly. It must not independently reinterpret Cargo.toml,
+Cargo.lock, `.cargo` configuration, target cfg expressions, or dependency
+aliases.
 
-### 4.7 Decisions deferred to the Stage 2 review
+Add this machine-stable command:
 
-Stage 2 implementation requires explicit review of:
+```text
+lorry rust-project [-p NAME] [--target TRIPLE] [--strict-validation]
+```
 
-1. **Constructor path:** the recommended `inventory` plus mlibc startup path,
-   or a vetted Rust standard-library change that walks `.init_array` from
-   pure-Rust `motor_start`. The latter affects every qualifying process and
-   its startup latency, so it stays outside this design unless separately
-   approved, and choosing it triggers the full repeated core test gate.
-2. **Dependency source:** exact-revision Motor forks versus a reviewed vendor
-   snapshot for native-only dependency changes.
-3. **Project bridge:** the Lorry command/data boundary, refresh mechanism, and
-   treatment of build-script-dependent graphs.
-4. **Editor JSON:** approval of `serde`/`serde_json` for Red, or a reviewed
-   standard-Rust JSON component with complete bounds and escaping behavior.
-5. **User configuration:** no implicit path initially, and any later Motor
-   filesystem convention.
-6. **Procedural macros and checks:** procedural macros need compiler-produced
-   dylibraries, so enabling them needs a separate dynamic-loading or
-   static/IPC design; checks need the flycheck envelope from item 3.
+There is intentionally no `--release`, `--bin`, child-argument, run, or watch
+mode. The graph represents Lorry's development/test analysis view with the
+selected package's default feature set. Package selection and target defaults
+match existing Lorry commands: on Motor the native default is
+`x86_64-unknown-motor`; a Linux test requests that target explicitly.
 
-These are not blockers for Stage 1. They are explicit replanning inputs for
-Stage 2 and must not be decided implicitly by host-only implementation choices.
+On success the command atomically publishes one directory beneath the selected
+package's existing Lorry artifact root:
 
-### 4.8 Stage 2 acceptance direction
+```text
+target/lorry[/packages/<package>]/rust-project/<triple>/
+  rust-project.json
+  state
+  sources/...
+  out/...
+```
 
-The later detailed plan should culminate in:
+Stdout contains only the absolute UTF-8 path to `rust-project.json` followed by
+a newline. Progress and diagnostics use stderr and existing color/verbosity
+rules. `state` is a Lorry-owned versioned identity record; no nonstandard field
+is added to the rust-analyzer JSON. `lorry clean` removes the analysis tree
+when it removes the corresponding all-target or selected-target Lorry tree.
 
-- a reproducible assembly-keyed native rust-analyzer and rust-src overlay;
-- offline cross-check and mechanical ELF validation;
-- native `--version`, initialize, inline/linked project load, quiescent,
-  shutdown, and clean-exit tests;
-- a deterministic Lorry project graph proven equivalent on Linux and Motor for
-  supported fixtures;
-- a real diagnostic plus definition/hover/completion result in Red, with
-  correct UTF-16 handling for non-ASCII text;
-- visible, bounded failure behavior; and
-- recorded image growth, startup latency, resident and virtual memory, thread
-  count, and first completion latency in the normal 1 GiB VM.
+`lorry rust-project` is offline and may write only its generated analysis tree.
+It may resolve, verify, extract, copy, and restore cache data, but it must not:
 
-The Stage 1 semantic fixture and LSP harness should be extended for these guest
-checks rather than replaced by an unrelated test protocol. The harness keeps
-running on the Linux host and reaches the guest server through `ssh`, as
-`src/tests/full-test.sh` reaches other guest programs; only the child command
-changes.
+- invoke Cargo or a shell;
+- compile a crate;
+- execute a build script, proc macro, target binary, or other package code;
+- contact a registry, Git remote, or other network resource; or
+- alter a manifest, lockfile, admission record, vendor object, or normal build
+  profile.
+
+Use Lorry's existing `serde` and `serde_json` dependencies with dedicated
+private output structs matching the pinned `ProjectJsonData` schema. This adds
+no product dependency. Serialize vectors in defined order and maps from
+`BTreeMap`, terminate the file with one newline, and use the existing atomic
+directory and safe-path machinery.
+
+### 4.8 Stable source and build-output views
+
+Rust-analyzer needs source paths that remain valid after the command exits.
+Lorry's current crates.io preparation extracts verified archives into a build
+staging directory owned by `PreparedGraph`; those paths disappear when the
+prepared graph is dropped. The exporter must therefore publish an analysis
+source view before dropping it.
+
+The source rules are:
+
+- selected workspace packages and ordinary path dependencies point to their
+  admitted live physical roots so edits remain visible;
+- verified registry and immutable Git packages are copied into
+  `sources/<source-identity>/<package-identity>` under the analysis directory;
+- source identity includes Lorry's checksum/tree evidence, not merely name and
+  version;
+- an existing immutable source view is reused only after its state and tree
+  digest validate; and
+- copies retain admitted files and relevant modes but never hard-link mutable
+  workspace input into generated state or follow a link outside an admitted
+  root.
+
+Apply existing package count, tree byte, entry, path-length, and file-size
+limits to the published view. All paths placed in JSON are canonical absolute
+UTF-8 paths inside the sysroot, selected workspace/path roots, or the freshly
+published analysis directory. Reject non-UTF-8, missing, linked-root, escaping,
+duplicate-identity, and overlapping-root cases.
+
+Dependency build scripts need a separate rule. A manifest-only graph can be
+wrong when a script supplies `rustc-cfg`, `rustc-env`, `OUT_DIR`, or generated
+Rust source. The exporter therefore asks a new cache-only executor to restore
+the exact development dependency plan into analysis staging:
+
+- if the graph has no dependency build scripts, no cache restoration is
+  required;
+- if every required unit and build-script result is present and validates in
+  Lorry's existing caches, restore it without spawning a process;
+- copy only required `OUT_DIR` trees into `out/` for final publication and
+  discard restored compiler artifacts from staging; and
+- if any required record is missing, stale, malformed, non-UTF-8 where JSON
+  needs text, or inconsistent with the selected graph, fail and tell the user
+  to run the corresponding explicit `lorry build` first.
+
+Running `lorry build` is the user's explicit authorization to compile and run
+admitted dependency build scripts. `lorry rust-project` never turns a cache
+miss into execution. Cache-only mode shares unit identity, freshness,
+admission, output limits, directive parsing, and path relocation with the
+normal executor; it is not a second cache format.
+
+For language analysis, retain `rustc-cfg` directives, `rustc-env` values, and
+the relocated `OUT_DIR`. Link search/library/argument directives and Cargo
+metadata affect linking or downstream build scripts, not the crate graph, and
+are omitted. Add each relevant `OUT_DIR` to that crate's source include set so
+`include!` and generated modules can load.
+
+### 4.9 Exact project-graph mapping
+
+Generate the crate array from Lorry's selected `Resolution` and development
+`CompilationPlan`, not from artifact filenames. Every reachable
+`UnitKind::Library` or `UnitKind::ProcMacro` with a distinct compile kind or
+feature set is a distinct project crate. Build-script compile/run units are not
+project crates. Append selected root targets in the stable order library,
+binaries by name, then integration tests by name.
+
+The mapping is:
+
+| rust-analyzer field | Lorry source of truth |
+|---|---|
+| `sysroot` / `sysroot_src` | The selected toolchain sysroot and its validated rust-src. Native output uses the fixed `/devtools/rust` paths. |
+| `display_name`, `version`, `edition` | Prepared package or selected root manifest; crate names are normalized exactly as Lorry passes them to rustc. |
+| `root_module` | Target path restored to a stable physical source root, never the logical path used only for rustc remapping. |
+| `deps[].crate` | Index of the exact dependency unit selected by the Lorry unit edge. |
+| `deps[].name` | The edge alias visible to rustc after Lorry's dash-to-underscore normalization. Duplicate visible aliases are errors. |
+| `cfg` | Selected target's `rustc --print cfg`, unit `feature="..."` values, semantic `--cfg` rustflags, and restored `rustc-cfg` output. `cfg(test)` and `rust_analyzer` are left to rust-analyzer for workspace members. |
+| `target` | Exact installed triple; Stage 2 accepts only `x86_64-unknown-motor`. |
+| `env` | Lorry's shared pure Cargo/rustc environment helper plus restored `rustc-env` and relocated `OUT_DIR`; omit linker/runtime-only variables. |
+| `source` | Minimal admitted package root plus relocated generated source, with `target`, `.git`, and unrelated Lorry artifact trees excluded. |
+| `is_workspace_member` | True only for selected root targets. Every dependency is false, including another declared workspace member reached as a path dependency; Lorry analyzes that package as a dependency unless it is selected separately. |
+| `is_proc_macro` | True for a Lorry proc-macro unit; `proc_macro_dylib_path` is omitted in Stage 2. |
+| `repository` | Valid UTF-8 package metadata when present. |
+| `build` | Opaque stable Lorry label, defining Cargo.toml path, and `lib`, `bin`, or `test` target kind. |
+| `runnables` | Always an empty array in Stage 2. |
+
+Root binaries and integration tests depend on the selected package library
+when it exists, using the library crate name Lorry passes through `--extern`.
+Root normal dependencies attach using `Resolution::root_edges`. Dependency
+libraries attach only their applicable normal edges. Use Lorry's currently
+supported root dependency model; do not silently add ignored root
+dev-dependencies or root build-dependencies to make the analysis graph look
+more Cargo-like than the build graph.
+
+Use one shared cfg group for the base Motor target cfg and per-crate additions
+for features and build output. Stable crate ordering is dependency-plan order
+followed by root-target order; dependency indices are assigned only after that
+order is fixed. Reject a missing root, edge to an omitted unit, invalid crate
+alias, feature/context mismatch, unsupported custom target, or semantic env
+value that cannot be represented losslessly in JSON.
+
+One Lorry invocation describes one selected package. A multi-root LSP session
+uses multiple generated paths in `linkedProjects`; Lorry does not merge
+unrelated selected packages or invent a workspace-discovery protocol.
+
+### 4.10 Procedural macros, checks, and refresh boundary
+
+Lorry now supports Motor-native procedural macros: it compiles a proc macro as
+a static PIE helper and rustc communicates with that helper using Lorry's
+private framed stdio registration protocol. The previous claim that Lorry
+needed general dylibrary support is obsolete.
+
+That helper is nevertheless not a rust-analyzer proc-macro artifact.
+Rust-analyzer's pinned `rust-analyzer-proc-macro-srv` is an `in-rust-tree`
+compiler-private binary that loads compiler-produced proc-macro libraries. The
+standalone non-`in-rust-tree` native build cannot provide it, and the project
+schema field remains named `proc_macro_dylib_path`. Stage 2 therefore:
+
+- preserves proc-macro crate source and dependency edges with
+  `is_proc_macro = true`;
+- emits no `proc_macro_dylib_path`;
+- does not package `rust-analyzer-proc-macro-srv`;
+- defaults `procMacro.enable` to false; and
+- tests that no Lorry proc-macro helper is launched by rust-analyzer.
+
+Declarative macros continue to work. Code requiring procedural expansion is
+visibly incomplete rather than executed through an incompatible protocol. An
+adapter or native compiler-private proc-macro server is separate future work,
+not a hidden Stage 2 subtask.
+
+Likewise, Stage 2 emits no flycheck, run, test, debug, or discovery runnable
+and never starts `lorry check` on save. A future consumer/check design must
+define cancellation, diagnostic JSON, concurrency with foreground builds, and
+authorization before adding those commands.
+
+The generated file is a snapshot. `lorry rust-project` regenerates it
+atomically when explicitly invoked. Automatic file watching, server reload,
+and restart policy belong to the consumer; Stage 2 only proves that a fresh
+file can be loaded at initialization and that two files can be loaded as a
+multi-root session.
+
+### 4.11 Security and resource rules
+
+The native server runs with the invoking user's authority and is not a boot or
+privileged service. Even so, the supported path is deliberately inert:
+
+- use absolute executable and project paths and process argument arrays;
+- give the test process a minimal explicit environment with
+  `TMPDIR=/devtools/tmp` and no Cargo network variables that could enable
+  access;
+- accept project paths only from Lorry's admitted roots and validated generated
+  state;
+- perform no package execution while generating or loading the project;
+- keep failures visible and do not add automatic restarts, retries, ignored
+  errors, or longer timeouts;
+- retain the Stage 1 harness's frame, stderr, message, progress, and total
+  deadline bounds; and
+- add no executable compression or startup decompression.
+
+Lorry's existing policy limits bound package count/depth and source/output
+trees. Add explicit JSON byte and crate/edge counts derived from those same
+limits, with checked arithmetic before allocation. The project exporter must
+reject an output that exceeds them rather than truncate it.
+
+Record the following in the final gate on a four-vCPU, 1 GiB VM: stripped
+binary size, rust-src and total image growth, time to initialize, time to
+quiescence, first completion latency, resident/virtual peak memory, and maximum
+thread count. The prototype's approximately 29 MiB binary is the comparison
+point. The first maintained measurement establishes explicit future regression
+thresholds; do not choose a worker cap or hide a failure merely to meet an
+unreviewed number.
+
+### 4.12 Test design
+
+The tests are layered so a failure is attributable before a full image run.
+
+**Motor Rust and dependency tests**
+
+- Run the exact standalone workspace's relevant host unit tests, then
+  `cargo check --release --locked --offline --target
+  x86_64-unknown-motor -p rust-analyzer`.
+- Test the portable pipe coordinator on Linux and the Motor implementation in
+  a guest helper whose stdout and stderr each exceed pipe capacity.
+- Test the exact URL fork's path conversion helpers and the inventory fork's
+  registration list; do not rely only on rust-analyzer startup.
+- Assert the standalone lock remains byte-identical and the Motor graph has no
+  `dirs-sys` edge or optional allocator feature.
+
+**Lorry focused and product tests**
+
+- Unit-test stable ordering and every field in section 4.9, including renamed
+  dependencies, target-specific edges, distinct host/target feature contexts,
+  selected-root membership, binaries, integration tests, non-ASCII paths,
+  cfg/env escaping, and all fail-closed cases.
+- Add a contract fixture with a verified registry dependency, a path
+  dependency, generated `OUT_DIR` Rust, and build-script cfg/env. Prove a cold
+  project export refuses to execute, an explicit build populates the cache,
+  and a later export restores only admitted analysis data.
+- Trace child creation and network entry points so the no-execution/no-network
+  rule is affirmative, not inferred from successful output.
+- Extend the native Lorry fixture to generate the same supported
+  proc-macro-free project on Linux-cross and Motor-native Lorry. Normalize only
+  declared host roots/sysroot paths, then require identical crate identities,
+  edges, cfgs, env, and source digests.
+- Add a negative proc-macro fixture proving the graph marks the crate but emits
+  no executable/dylib path.
+
+**Native rust-analyzer semantic test**
+
+Extend `src/tests/rust-analyzer-smoke`; do not create a second LSP protocol
+harness. Add a child-command transport that can run
+`/devtools/rust/bin/rust-analyzer` through the existing SSH path while keeping
+the harness on Linux. Stage fixtures under a known guest workspace, run native
+`lorry rust-project`, read its one-line path, and initialize rust-analyzer with
+that generated path.
+
+The accepted session must prove:
+
+1. `--version` matches the assembly manifest;
+2. initialize/initialized and workspace health reach `ok` and quiescent;
+3. one real Motor diagnostic is published;
+4. hover, go-to-definition into Motor std, and completion return semantic
+   results;
+5. a non-ASCII file URI and UTF-16 request position round-trip correctly in
+   the test harness;
+6. two separately selected Lorry packages load together through two
+   `linkedProjects` entries;
+7. rust-analyzer starts only the allowed rustc queries and no Cargo, Lorry,
+   build-script, proc-macro, check, or watcher process; and
+8. shutdown, exit, EOF, stderr capture, and child status complete within the
+   existing bounded deadline.
+
+This is a server acceptance test, not an editor test. No test launches Helix,
+Red, Gears, or another consumer.
+
+### 4.13 Incremental patch sequence
+
+Keep each implementation patch near 100-300 changed lines including focused
+tests. The repositories and review stops are explicit:
+
+1. **Motor Rust: native configuration boundary.** Make `dirs` non-Motor,
+   return no native implicit config directory, and set inert Motor defaults.
+2. **URL fork and lock.** Add lossless Motor file-path conversion and tests;
+   pin the full fork revision in the standalone rust-analyzer lock.
+3. **Inventory fork and lock.** Add Motor `.init_array` registration and tests;
+   pin the full fork revision.
+4. **Motor Rust: child pipes.** Add the standard-thread Motor pipe reader and
+   portable coordinator tests. Cross-check rust-analyzer offline. Stop for
+   review of the complete external patch stack.
+5. **Toolchain identity and acquisition.** Add the standalone lock/key fields,
+   native recipe identity, locked source fetch, and shell contract tests;
+   select the reviewed Motor Rust revision.
+6. **Native build and validation.** Cross-build, strip, ELF-check, hash, and
+   atomically stage rust-analyzer and rust-src under the assembly key.
+7. **Development image.** Add only the new assembly root to the dev image and
+   test required/missing/changed overlays and standard-image exclusion.
+8. **Lorry project model.** Add private deterministic JSON types and pure
+   mapping from prepared resolution/unit data, with golden and negative unit
+   tests. Stop for review of the schema mapping.
+9. **Lorry analysis sources.** Atomically materialize verified stable source
+   views with existing limits, identities, and clean integration.
+10. **Lorry cache-only outputs.** Restore required build-script results without
+    execution and map cfg/env/OUT_DIR; fail on a cache miss.
+11. **Lorry command.** Add CLI/help/dispatch, final publication/state, one-line
+    output contract, README documentation, and Linux contract fixture.
+12. **Lorry native equivalence.** Extend the native product fixture and add
+    the proc-macro-path negative case.
+13. **Native LSP acceptance.** Extend the bounded Stage 1 harness, dev-image
+    guest staging, multi-root case, semantic assertions, process audit, and
+    measurements. Stop for review of the first native results.
+14. **Release integration and documentation.** Wire the accepted server test
+    into the dev-image gate, update toolchain/build documentation and this
+    status, then run the gates below.
+
+No patch in this sequence contains consumer code. Do not combine the Motor
+Rust fork changes, Lorry graph changes, image publication, and native semantic
+test into one unreviewable cutover.
+
+### 4.14 Gates and completion criteria
+
+While iterating, run the focused fork, shell, imager, Lorry, or LSP test owned
+by the patch. Every Lorry behavior patch is ultimately gated by the single
+bounded product suite:
+
+```sh
+src/bin/lorry/tests/test-all.sh
+```
+
+Before final cutover, perform one clean managed toolchain/assembly build so the
+network-enabled provisioning path and then-offline native build are both
+tested. Preserve its timing and manifest. Run the repository gates without
+duplicating Lorry's profile-independent product suite:
+
+```sh
+src/tests/full-test.sh
+src/tests/full-test.sh --release
+src/tests/full-test-dev.sh --release
+```
+
+The dev-image repository phase runs the native LSP acceptance in the normal 1
+GiB VM; the later native-source/Lorry phase may use its established 4 GiB
+compiler profile. All ordinary component and system tests remain offline. Any
+new compiler or Clippy warning fails its owning patch.
+
+Stage 2 is complete only when all of the following are true:
+
+- the assembly validates and records the exact native server, lock, rust-src,
+  and recipe identities;
+- only the development image contains the server and rust-src overlay;
+- cross-check, ELF checks, URL, pipe, and inventory tests pass;
+- `lorry rust-project` is deterministic, offline, cache-only, atomically
+  published, and semantically equivalent across the supported Linux-cross and
+  Motor-native fixture;
+- build-script-dependent graphs are exact after an explicit build and fail
+  visibly without the required cache state;
+- native standard-LSP lifecycle, diagnostic, hover, definition, completion,
+  non-ASCII, and multi-root tests pass with no forbidden child process;
+- the clean build and three final gates pass; and
+- resource measurements and future regression thresholds are recorded.
