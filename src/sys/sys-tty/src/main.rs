@@ -13,6 +13,7 @@ use crate::output::{Output, Source};
 
 mod ansi;
 mod config;
+mod forwarder;
 mod kernel_log;
 mod output;
 mod sanitize;
@@ -51,6 +52,7 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
         ansi::run_self_tests();
         config::run_self_tests();
+        forwarder::run_self_tests();
         sanitize::run_self_tests();
         output::run_self_tests();
         kernel_log::run_self_tests();
