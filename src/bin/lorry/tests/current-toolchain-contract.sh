@@ -67,6 +67,7 @@ chmod +x "$assembly/sysroot/bin/motor-clang"
 
 export PATH="$temporary/bin:$PATH"
 export LORRY_REPOSITORY_ROOT="$repository"
+LORRY_ASSEMBLY_MANIFEST="$assembly/MOTOR-ASSEMBLY-MANIFEST"
 . "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain >"$temporary/output" 2>"$temporary/log"
 [ "$LORRY_MOTOR_TOOLCHAIN" = "$toolchain" ]
