@@ -1,8 +1,12 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub const MAX_PENDING_REQUESTS: usize = 64;
+pub const MAX_RETAINED_NOTIFICATIONS: usize = 256;
+pub const MAX_RETAINED_NOTIFICATION_BYTES: usize = 32 * 1024 * 1024;
 const MAX_HEADER_LEN: usize = 8 * 1024;
 
 pub struct FrameReader<R> {
@@ -77,6 +81,153 @@ pub fn write_frame(mut output: impl Write, message: &Value) -> io::Result<()> {
     write!(output, "Content-Length: {}\r\n\r\n", body.len())?;
     output.write_all(&body)?;
     output.flush()
+}
+
+pub struct Dispatcher {
+    next_id: u64,
+    pending: HashMap<u64, Pending>,
+    notifications: VecDeque<Notification>,
+    notification_bytes: usize,
+}
+
+enum Pending {
+    Waiting,
+    Ready(Value),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Notification {
+    pub method: String,
+    pub params: Value,
+    encoded_len: usize,
+}
+
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            pending: HashMap::new(),
+            notifications: VecDeque::new(),
+            notification_bytes: 0,
+        }
+    }
+}
+
+impl Dispatcher {
+    pub fn send_request(
+        &mut self,
+        output: impl Write,
+        method: &str,
+        params: Value,
+    ) -> io::Result<u64> {
+        if self.pending.len() >= MAX_PENDING_REQUESTS {
+            return Err(invalid("too many pending LSP requests"));
+        }
+        let id = self.next_id;
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| invalid("LSP request ID exhausted"))?;
+        write_frame(
+            output,
+            &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        )?;
+        self.next_id = next_id;
+        self.pending.insert(id, Pending::Waiting);
+        Ok(id)
+    }
+
+    pub fn dispatch(&mut self, message: Value) -> io::Result<Option<Value>> {
+        let object = message
+            .as_object()
+            .ok_or_else(|| invalid("LSP message is not an object"))?;
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Err(invalid("invalid LSP jsonrpc version"));
+        }
+
+        match (object.get("method"), object.get("id")) {
+            (Some(method), id) => {
+                let method = method
+                    .as_str()
+                    .ok_or_else(|| invalid("LSP method is not a string"))?;
+                if let Some(id) = id {
+                    Ok(Some(server_response(id, method)))
+                } else {
+                    self.record_notification(method, object.get("params"));
+                    Ok(None)
+                }
+            }
+            (None, Some(id)) => {
+                let id = id
+                    .as_u64()
+                    .ok_or_else(|| invalid("unexpected LSP response ID"))?;
+                if object.contains_key("result") == object.contains_key("error") {
+                    return Err(invalid("LSP response needs one result or error"));
+                }
+                let state = self
+                    .pending
+                    .get_mut(&id)
+                    .ok_or_else(|| invalid("response for unknown LSP request"))?;
+                if matches!(state, Pending::Ready(_)) {
+                    return Err(invalid("duplicate LSP response"));
+                }
+                *state = Pending::Ready(message);
+                Ok(None)
+            }
+            (None, None) => Err(invalid("unclassified LSP message")),
+        }
+    }
+
+    pub fn take_response(&mut self, id: u64) -> Option<Value> {
+        if !matches!(self.pending.get(&id), Some(Pending::Ready(_))) {
+            return None;
+        }
+        match self.pending.remove(&id) {
+            Some(Pending::Ready(message)) => Some(message),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn notifications(&self) -> impl Iterator<Item = &Notification> {
+        self.notifications.iter()
+    }
+
+    fn record_notification(&mut self, method: &str, params: Option<&Value>) {
+        if !matches!(
+            method,
+            "textDocument/publishDiagnostics" | "$/progress" | "experimental/serverStatus"
+        ) {
+            return;
+        }
+        let params = params.cloned().unwrap_or(Value::Null);
+        let encoded_len = method.len() + params.to_string().len();
+        while self.notifications.len() == MAX_RETAINED_NOTIFICATIONS
+            || self.notification_bytes.saturating_add(encoded_len) > MAX_RETAINED_NOTIFICATION_BYTES
+        {
+            let Some(discarded) = self.notifications.pop_front() else {
+                return;
+            };
+            self.notification_bytes -= discarded.encoded_len;
+        }
+        self.notification_bytes += encoded_len;
+        self.notifications.push_back(Notification {
+            method: method.to_owned(),
+            params,
+            encoded_len,
+        });
+    }
+}
+
+fn server_response(id: &Value, method: &str) -> Value {
+    match method {
+        "window/workDoneProgress/create" | "client/registerCapability" => {
+            json!({"jsonrpc": "2.0", "id": id, "result": null})
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": "unsupported server request"}
+        }),
+    }
 }
 
 fn split_header(line: &[u8]) -> io::Result<(&[u8], &[u8])> {
@@ -167,5 +318,85 @@ mod tests {
             io::ErrorKind::UnexpectedEof
         );
         assert!(FrameReader::new(frame(b"xx").as_slice()).read().is_err());
+    }
+
+    #[test]
+    fn correlates_responses_and_bounds_pending_requests() {
+        let mut dispatcher = Dispatcher::default();
+        let mut output = Vec::new();
+        let first = dispatcher
+            .send_request(&mut output, "initialize", json!({}))
+            .unwrap();
+        let second = dispatcher
+            .send_request(&mut output, "shutdown", Value::Null)
+            .unwrap();
+        let mut sent = FrameReader::new(output.as_slice());
+        assert_eq!(sent.read().unwrap().unwrap()["id"], first);
+        assert_eq!(sent.read().unwrap().unwrap()["method"], "shutdown");
+        dispatcher
+            .dispatch(json!({"jsonrpc": "2.0", "id": second, "result": null}))
+            .unwrap();
+        assert!(dispatcher.take_response(first).is_none());
+        assert_eq!(dispatcher.take_response(second).unwrap()["id"], second);
+        assert!(
+            dispatcher
+                .dispatch(json!({"jsonrpc": "2.0", "id": 999, "result": null}))
+                .is_err()
+        );
+
+        let mut full = Dispatcher::default();
+        for _ in 0..MAX_PENDING_REQUESTS {
+            full.send_request(io::sink(), "test", Value::Null).unwrap();
+        }
+        assert!(full.send_request(io::sink(), "test", Value::Null).is_err());
+    }
+
+    #[test]
+    fn answers_server_requests() {
+        let mut dispatcher = Dispatcher::default();
+        for (id, method) in [
+            (json!(7), "window/workDoneProgress/create"),
+            (json!("server-id"), "client/registerCapability"),
+        ] {
+            let reply = dispatcher
+                .dispatch(json!({"jsonrpc": "2.0", "id": id, "method": method}))
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply["id"], id);
+            assert_eq!(reply["result"], Value::Null);
+        }
+        let reply = dispatcher
+            .dispatch(json!({"jsonrpc": "2.0", "id": 8, "method": "unknown"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn retains_only_bounded_relevant_notifications() {
+        let mut dispatcher = Dispatcher::default();
+        dispatcher
+            .dispatch(json!({"jsonrpc": "2.0", "method": "window/logMessage"}))
+            .unwrap();
+        for method in ["$/progress", "experimental/serverStatus"] {
+            dispatcher
+                .dispatch(json!({"jsonrpc": "2.0", "method": method}))
+                .unwrap();
+        }
+        assert_eq!(dispatcher.notifications().count(), 2);
+
+        let mut dispatcher = Dispatcher::default();
+        for sequence in 0..MAX_RETAINED_NOTIFICATIONS + 3 {
+            dispatcher
+                .dispatch(json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {"sequence": sequence}
+                }))
+                .unwrap();
+        }
+        let retained: Vec<_> = dispatcher.notifications().collect();
+        assert_eq!(retained.len(), MAX_RETAINED_NOTIFICATIONS);
+        assert_eq!(retained[0].params["sequence"], 3);
     }
 }
