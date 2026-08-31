@@ -9,11 +9,23 @@ use serde_json::{Value, json};
 fn main() {
     let mut args = env::args();
     let _program = args.next();
-    if args.next().as_deref() != Some("--fake-child") {
-        eprintln!("rust-analyzer smoke harness is not implemented yet");
-        std::process::exit(2);
-    }
     match args.next().as_deref() {
+        Some("--fake-child") => fake_child(args.next().as_deref()),
+        None => {
+            if let Err(error) = rust_analyzer_smoke::smoke::run() {
+                eprintln!("rust-analyzer-smoke: {error}");
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            eprintln!("usage: rust-analyzer-smoke");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn fake_child(mode: Option<&str>) {
+    match mode {
         Some("message") => write_frame(io::stdout(), &json!({"ready": true})).unwrap(),
         Some("partial") => {
             io::stdout()

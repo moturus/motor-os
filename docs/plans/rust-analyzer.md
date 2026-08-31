@@ -416,7 +416,9 @@ For Cargo project discovery, the harness must:
    below the selected sysroot's `library/std/src/os/motor` directory;
 6. request the definition of the `moto_rt::RT_VERSION` reference inside that
    `std::os::motor` source and require a URI below
-   `$CARGO_HOME/registry/src/*/moto-rt-<version>/`. The pinned server loads
+   the selected sysroot's `library/vendor/moto-rt-<version>/`. The real
+   Stage 1 prefix confirmed that bootstrap installs a vendored, reduced
+   `rust-src`, consistent with `docs/toolchain.md`. The pinned server loads
    the sysroot through `cargo metadata` on `library/Cargo.toml` and, when
    that fails, silently keeps a `--no-deps` result or a stitched crate list;
    only the full load resolves `moto_rt`, so this step is what proves the
@@ -431,7 +433,7 @@ Run a second case for the Linux host fixture with `cargo.target` and
 `check.targets` unset. Require the definition of
 `std::os::linux::fs::MetadataExt` below the selected sysroot's
 `library/std/src/os/linux` directory and no active non-Linux sentinel
-diagnostic once the check has completed. The proc-macro and registry-source
+diagnostic once the check has completed. The proc-macro and vendored-source
 steps are not repeated; the Linux sysroot loads through the same path.
 
 Run a third case using an inline `rust-project.json` object instead of Cargo
@@ -465,11 +467,12 @@ any other network service. `--locked --offline` covers the harness build, and
 the offline environment above turns any such need in a server child into a
 visible failure. Its only external inputs are the keyed toolchain and the
 registry cache under `CARGO_HOME`, which must already hold the
-rust-analyzer `Cargo.lock` packages selected by the harness lock and the
-`library/Cargo.lock` closure for both targets. The managed toolchain build on
-the same host with the same `CARGO_HOME` (`src/build-motor-os.sh` uses
-`${CARGO_HOME:-$HOME/.cargo}`, Cargo's own default) provides both sets because
-it builds rust-analyzer and std for both targets.
+rust-analyzer `Cargo.lock` packages selected by the harness lock. The
+installed `rust-src` vendors the library closure, so semantic sysroot loading
+does not consult an ambient registry. The managed toolchain build on the same
+host with the same `CARGO_HOME` (`src/build-motor-os.sh` uses
+`${CARGO_HOME:-$HOME/.cargo}`, Cargo's own default) provides the harness
+packages because it builds rust-analyzer.
 
 ### 3.7 Stage 1 patch sequence
 
