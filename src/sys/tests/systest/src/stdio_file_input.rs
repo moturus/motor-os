@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 
 const PREFIX: &str = "stdio-file-input-";
@@ -225,14 +225,28 @@ fn delayed_writer(args: &[String]) -> ! {
         moto_sys::caps::ProcessRole::Interactive,
         moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
     );
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let mut completion = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&args[4])
+        .unwrap();
+    completion.lock().unwrap();
+    std::fs::File::create(&args[5]).unwrap();
+
+    let release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&args[3])
+        .unwrap();
+    release.lock().unwrap();
     let result = moto_rt::fs::write(moto_rt::FD_STDOUT, b"survived");
     if args[2] == "direct" {
         assert_eq!(result.unwrap(), 8);
     } else {
         assert!(result.is_err());
     }
-    std::fs::write(&args[3], b"done").unwrap();
+    completion.write_all(b"done").unwrap();
+    completion.unlock().unwrap();
     std::process::exit(0)
 }
 
@@ -244,13 +258,22 @@ fn lifetime_parent(args: &[String]) -> ! {
         moto_rt::process::STDIO_INHERIT
     };
     spawn_with_env(
-        &["stdio-file-input-delayed-writer", route, &args[3]],
+        &[
+            "stdio-file-input-delayed-writer",
+            route,
+            &args[3],
+            &args[4],
+            &args[5],
+        ],
         moto_rt::process::STDIO_NULL,
         stdout,
         moto_rt::process::STDIO_NULL,
         &[(moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY, "true")],
     )
     .unwrap();
+    while !std::path::Path::new(&args[5]).exists() {
+        std::thread::yield_now();
+    }
     std::process::exit(0)
 }
 
@@ -399,17 +422,6 @@ fn source_error_and_nested_tests() {
     std::fs::remove_file(&nested).unwrap();
 }
 
-fn wait_for_file(path: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !std::path::Path::new(path).exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "detached child did not finish"
-        );
-        std::thread::yield_now();
-    }
-}
-
 fn lifetime_and_pipe_counter_tests() {
     let path = crate::temp_path("stdio-long-grandchild");
     let output = moto_rt::fs::open(
@@ -488,8 +500,26 @@ fn privileged_lifetime_tests() {
     );
     for route in ["direct", "relay"] {
         let output_path = crate::temp_path(&format!("stdio-lifetime-{route}"));
-        let done_path = crate::temp_path(&format!("stdio-lifetime-{route}-done"));
-        let _ = std::fs::remove_file(&done_path);
+        let release_path = crate::temp_path(&format!("stdio-lifetime-{route}-release"));
+        let completion_path = crate::temp_path(&format!("stdio-lifetime-{route}-completion"));
+        let ready_path = crate::temp_path(&format!("stdio-lifetime-{route}-ready"));
+        let _ = std::fs::remove_file(&ready_path);
+
+        let release = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&release_path)
+            .unwrap();
+        release.lock().unwrap();
+        let mut completion = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&completion_path)
+            .unwrap();
         let output = moto_rt::fs::open(
             output_path.to_str().unwrap(),
             moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
@@ -499,7 +529,9 @@ fn privileged_lifetime_tests() {
             &[
                 "stdio-file-input-lifetime-parent",
                 route,
-                done_path.to_str().unwrap(),
+                release_path.to_str().unwrap(),
+                completion_path.to_str().unwrap(),
+                ready_path.to_str().unwrap(),
             ],
             moto_rt::process::STDIO_NULL,
             output,
@@ -508,7 +540,18 @@ fn privileged_lifetime_tests() {
         )
         .unwrap();
         assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
-        wait_for_file(done_path.to_str().unwrap());
+
+        // The child holds completion before its parent reports readiness, so
+        // this unlock-then-lock sequence cannot race past the child.
+        release.unlock().unwrap();
+        completion.lock().unwrap();
+        let mut message = Vec::new();
+        completion.read_to_end(&mut message).unwrap();
+        assert_eq!(message, b"done", "detached {route} child failed");
+        completion.unlock().unwrap();
+        drop(completion);
+        drop(release);
+
         let expected = if route == "direct" {
             b"survived".as_slice()
         } else {
@@ -517,7 +560,9 @@ fn privileged_lifetime_tests() {
         assert_eq!(std::fs::read(&output_path).unwrap(), expected);
         moto_rt::fs::close(output).unwrap();
         std::fs::remove_file(output_path).unwrap();
-        std::fs::remove_file(done_path).unwrap();
+        std::fs::remove_file(release_path).unwrap();
+        std::fs::remove_file(completion_path).unwrap();
+        std::fs::remove_file(ready_path).unwrap();
     }
 }
 

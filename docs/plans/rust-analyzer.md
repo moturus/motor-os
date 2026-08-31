@@ -1,5 +1,12 @@
 # rust-analyzer for Motor OS development
 
+Status 2026-08-31: the three Stage 1 implementation phases are complete and
+gated. All seven patch-sequence items in section 3.7 have landed, including
+the keyed host toolchain, bounded LSP harness, semantic fixtures, full-test
+integration, and user documentation. This completes the plan's Linux-host
+Stage 1. Stage 2, the native Motor OS guest, remains design-only; this plan
+does not define a product Stage 3.
+
 2026-08-29. Investigation and staged plan for using the rust-analyzer snapshot
 that is embedded in the Motor Rust source tree. The first stage runs
 rust-analyzer on Linux while Cargo and rustc cross-compile for Motor OS. The
@@ -22,7 +29,7 @@ Both stages are required:
 
 | Stage | Server host | Analyzed targets | Planning status |
 |---|---|---|---|
-| 1. Host | Linux | Motor and Linux host | Detailed; ready to implement |
+| 1. Host | Linux | Motor and Linux host | Complete; implemented and gated |
 | 2. Guest | Motor OS | Motor only | Constraints and evidence |
 
 Stage 1 comes first because it is useful immediately and exercises the same
