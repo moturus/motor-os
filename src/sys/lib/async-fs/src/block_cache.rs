@@ -551,7 +551,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                                     }
                                 }
                             } else {
-                                log::debug!("BD: flushed.");
+                                log::trace!("BD: flushed.");
                             }
                             let _ = sender.send(result);
                         }

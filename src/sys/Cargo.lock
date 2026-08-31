@@ -1712,6 +1712,7 @@ name = "sys-tty"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
+ "moto-log",
  "moto-rt",
  "moto-sys",
  "x86_64",

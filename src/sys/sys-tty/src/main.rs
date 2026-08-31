@@ -71,7 +71,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let _kernel_log_mode = config.kernel_log;
+    let kernel_log_mode = config.kernel_log;
     let words: Vec<_> = config.command.split_whitespace().collect();
 
     // Leading `NAME=value` words set the child's environment, as in a shell
@@ -107,6 +107,22 @@ fn main() {
     .unwrap();
 
     let millis = moto_rt::time::since_system_start().as_millis();
+    let forwarder = match kernel_log_mode {
+        config::KernelLogMode::Console => None,
+        config::KernelLogMode::Strobe => {
+            let forwarder = forwarder::Forwarder::start(output.clone());
+            if let Some(forwarder) = forwarder.as_ref() {
+                let preamble =
+                    format!("[kernel log: file forwarding started at {millis}ms since boot]\n");
+                let _ = forwarder.offer(preamble.into_bytes());
+            } else {
+                let _ = output.try_send_kernel(
+                    b"[kernel log: unable to start file forwarding worker]\n".to_vec(),
+                );
+            }
+            forwarder
+        }
+    };
     output.send_fmt(
         Source::Stdout,
         format_args!(
@@ -163,8 +179,24 @@ fn main() {
 
             let mut child_stdin = child.stdin.take().unwrap();
             let input_output = output.clone();
+            let input_forwarder = forwarder.clone();
             let stdin_thread = std::thread::spawn(move || {
                 let mut drain = kernel_log::KernelLogDrain::new();
+                let route_kernel = |record: Vec<u8>, synthetic_warning: bool| {
+                    let Some(forwarder) = input_forwarder.as_ref() else {
+                        return input_output.try_send_kernel(record);
+                    };
+                    let console = synthetic_warning || forwarder::is_warning_or_error(&record);
+                    if console {
+                        let _ = forwarder.offer(record.clone());
+                        input_output.try_send_kernel(record)
+                    } else {
+                        match forwarder.offer(record) {
+                            Ok(()) => true,
+                            Err(record) => input_output.try_send_kernel(record),
+                        }
+                    }
+                };
                 let mut service_input = || {
                     while let Some(c) = serial::read_serial() {
                         if c != 13 {
@@ -182,14 +214,10 @@ fn main() {
                     let mut waiters: [SysHandle; 2] = [console_wait_handle, that_h];
                     SysCpu::wait(&mut waiters, SysHandle::NONE, SysHandle::NONE, None).unwrap();
 
-                    let status = drain.drain(kernel_log_buf, &kernel_log_control, |record| {
-                        input_output.try_send_kernel(record)
-                    });
+                    let status = drain.drain(kernel_log_buf, &kernel_log_control, &route_kernel);
                     if status == kernel_log::DrainStatus::Busy {
                         service_input();
-                        let _ = drain.drain(kernel_log_buf, &kernel_log_control, |record| {
-                            input_output.try_send_kernel(record)
-                        });
+                        let _ = drain.drain(kernel_log_buf, &kernel_log_control, &route_kernel);
                     } else {
                         service_input();
                     }

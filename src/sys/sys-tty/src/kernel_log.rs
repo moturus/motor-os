@@ -33,7 +33,7 @@ impl KernelLogDrain {
         mut offer: F,
     ) -> DrainStatus
     where
-        F: FnMut(Vec<u8>) -> bool,
+        F: FnMut(Vec<u8>, bool) -> bool,
     {
         let snapshot = snapshot_kernel_log_ring(
             control,
@@ -57,7 +57,10 @@ impl KernelLogDrain {
             let frame = match decode_kernel_log_frame(&self.staging[position..len]) {
                 Ok(frame) => frame,
                 Err(_) => {
-                    let _ = offer(b"[kernel log: corrupt framed ring snapshot]\n".to_vec());
+                    let _ = offer(
+                        b"[kernel log: corrupt framed ring snapshot]\n".to_vec(),
+                        true,
+                    );
                     return DrainStatus::Stable;
                 }
             };
@@ -71,29 +74,29 @@ impl KernelLogDrain {
             if lost != 0 {
                 let marker =
                     format!("[kernel log: {lost} records lost: ring overwrite]\n").into_bytes();
-                let _ = offer(marker);
+                let _ = offer(marker, true);
             }
-            self.offer_record(payload, &mut offer);
+            self.offer_record(payload, false, &mut offer);
         }
         DrainStatus::Stable
     }
 
-    fn offer_record<F>(&mut self, payload: Vec<u8>, offer: &mut F)
+    fn offer_record<F>(&mut self, payload: Vec<u8>, synthetic_warning: bool, offer: &mut F)
     where
-        F: FnMut(Vec<u8>) -> bool,
+        F: FnMut(Vec<u8>, bool) -> bool,
     {
         if self.console_drops != 0 {
             let count = self.console_drops;
             let marker =
                 format!("[kernel log: {count} records dropped: console backlog]\n").into_bytes();
-            if !offer(marker) {
-                self.console_drops = self.console_drops.saturating_add(1);
-                return;
+            if !offer(marker, true) {
+                self.console_drops = count.saturating_add(1);
+            } else {
+                self.console_drops = 0;
             }
-            self.console_drops = 0;
         }
 
-        if !offer(payload) {
+        if !offer(payload, synthetic_warning) {
             self.console_drops = self.console_drops.saturating_add(1);
         }
     }
@@ -118,8 +121,8 @@ pub(crate) fn run_self_tests() {
     let mut output = Vec::new();
     let mut drain = KernelLogDrain::new();
     assert_eq!(
-        drain.drain(&ring, &control, |record| {
-            output.push(record);
+        drain.drain(&ring, &control, |record, warning| {
+            output.push((record, warning));
             true
         }),
         DrainStatus::Stable
@@ -127,14 +130,17 @@ pub(crate) fn run_self_tests() {
     assert_eq!(
         output,
         [
-            b"first".to_vec(),
-            b"[kernel log: 1 records lost: ring overwrite]\n".to_vec(),
-            b"third".to_vec(),
+            (b"first".to_vec(), false),
+            (
+                b"[kernel log: 1 records lost: ring overwrite]\n".to_vec(),
+                true
+            ),
+            (b"third".to_vec(), false),
         ]
     );
 
     control.generation.store(3, Ordering::Release);
-    assert_eq!(drain.drain(&ring, &control, |_| true), DrainStatus::Busy);
+    assert_eq!(drain.drain(&ring, &control, |_, _| true), DrainStatus::Busy);
 
     println!("sys-tty kernel-log self-test PASS");
 }

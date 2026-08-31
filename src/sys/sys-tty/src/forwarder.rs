@@ -1,4 +1,11 @@
 use std::collections::VecDeque;
+use std::mem::size_of;
+use std::sync::{Arc, Condvar, Mutex};
+
+use moto_ipc::sync::{ChannelSize, ClientConnection, ResponseHeader};
+use moto_log::implementation::{ConnectRequest, ConnectResponse, RawLogRequest};
+
+use crate::output::Output;
 
 pub const FILE_QUEUE_CAPACITY: usize = 1024 * 1024;
 
@@ -150,6 +157,106 @@ impl FileQueue {
         self.disabled = true;
         lost
     }
+
+    fn disable_pending(&mut self) -> u64 {
+        self.disable(Batch {
+            data: Vec::new(),
+            record_count: 0,
+            reported_drops: 0,
+        })
+    }
+}
+
+struct Shared {
+    queue: Mutex<FileQueue>,
+    changed: Condvar,
+}
+
+#[derive(Clone)]
+pub struct Forwarder {
+    shared: Arc<Shared>,
+}
+
+impl Forwarder {
+    pub fn start(output: Output) -> Option<Self> {
+        let forwarder = Self {
+            shared: Arc::new(Shared {
+                queue: Mutex::new(FileQueue::new()),
+                changed: Condvar::new(),
+            }),
+        };
+        let worker = forwarder.clone();
+        if std::thread::Builder::new()
+            .name("kernel-log-file".to_owned())
+            .spawn(move || worker.run(output))
+            .is_err()
+        {
+            return None;
+        }
+        Some(forwarder)
+    }
+
+    pub fn offer(&self, record: Vec<u8>) -> Result<(), Vec<u8>> {
+        let result = self.shared.queue.lock().unwrap().offer(record);
+        if result.is_ok() {
+            self.shared.changed.notify_one();
+        }
+        result
+    }
+
+    fn connect() -> Result<(ClientConnection, u64), u16> {
+        let mut connection = ClientConnection::new(ChannelSize::Small)?;
+        connection.connect("sys-log")?;
+        ConnectRequest::prepare(connection.data_mut(), "kernel");
+        connection.do_rpc(None)?;
+        let tag_id = ConnectResponse::parse(connection.data())?;
+        Ok((connection, tag_id))
+    }
+
+    fn send(connection: &mut ClientConnection, tag_id: u64, batch: &Batch) -> Result<(), u16> {
+        RawLogRequest::prepare(connection.data_mut(), tag_id, &batch.data);
+        connection.do_rpc(None)?;
+        match connection.resp::<ResponseHeader>().result {
+            moto_rt::E_OK => Ok(()),
+            err => Err(err),
+        }
+    }
+
+    fn report_disabled(output: &Output, error: u16, lost: u64) {
+        let notice = format!(
+            "[kernel log: file forwarding disabled with error {error}; {lost} records dropped]\n"
+        );
+        let _ = output.try_send_kernel(notice.into_bytes());
+    }
+
+    fn run(&self, output: Output) {
+        let (mut connection, tag_id) = match Self::connect() {
+            Ok(connected) => connected,
+            Err(error) => {
+                let lost = self.shared.queue.lock().unwrap().disable_pending();
+                Self::report_disabled(&output, error, lost);
+                return;
+            }
+        };
+        let max_payload = connection.data().len() - size_of::<RawLogRequest>();
+
+        loop {
+            let batch = {
+                let mut queue = self.shared.queue.lock().unwrap();
+                loop {
+                    if let Some(batch) = queue.take_batch(max_payload) {
+                        break batch;
+                    }
+                    queue = self.shared.changed.wait(queue).unwrap();
+                }
+            };
+            if let Err(error) = Self::send(&mut connection, tag_id, &batch) {
+                let lost = self.shared.queue.lock().unwrap().disable(batch);
+                Self::report_disabled(&output, error, lost);
+                return;
+            }
+        }
+    }
 }
 
 pub fn run_self_tests() {
@@ -191,6 +298,15 @@ pub fn run_self_tests() {
     queue.offer(b"queued".to_vec()).unwrap();
     assert_eq!(queue.disable(next), 2);
     assert_eq!(queue.offer(b"console".to_vec()), Err(b"console".to_vec()));
+
+    let mut pending = FileQueue::with_capacity(8);
+    pending.offer(b"one".to_vec()).unwrap();
+    pending.offer(b"two".to_vec()).unwrap();
+    assert_eq!(pending.disable_pending(), 2);
+    assert_eq!(
+        pending.offer(b"fallback".to_vec()),
+        Err(b"fallback".to_vec())
+    );
 
     assert_eq!(FileQueue::new().capacity, FILE_QUEUE_CAPACITY);
     println!("sys-tty forwarder self-test PASS");
