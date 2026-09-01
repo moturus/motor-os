@@ -27,6 +27,8 @@ fi
 IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 export MOTO_IMAGE=motor-os-dev.qcow2
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
+NATIVE_FIXTURE_DIR=/devtools/tmp/native-tests
+NATIVE_FIXTURES=(native-fstat.c native-temp.c native-temp.cpp)
 LORRY_VENDOR_ENV="TMPDIR=/devtools/tmp"
 if [ "$BUILD" = debug ]; then
   LORRY_VENDOR_ENV="$LORRY_VENDOR_ENV LORRY_CURL_STDERR_SPILL_LIMIT_BYTES=104857600"
@@ -51,6 +53,16 @@ SSH_OPTIONS=(
   -i "$WD/test.key"
 )
 SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+SCP_OPTIONS=(
+  -F /dev/null
+  -P 2222
+  -o IdentitiesOnly=yes
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=yes
+  -o UserKnownHostsFile="$WD/test-known-hosts"
+  -i "$WD/test.key"
+)
+SCP=(scp "${SCP_OPTIONS[@]}")
 
 vm_ssh() {
   "${SSH[@]}" "$@"
@@ -137,6 +149,10 @@ for package in moto-rt moto-sys; do
   vm_ssh "[ -f /devtools/src/motor-os/sys/lib/$package/Cargo.toml ]" ||
     fail "developer image is missing /devtools/src/motor-os/sys/lib/$package/Cargo.toml"
 done
+for source in "${NATIVE_FIXTURES[@]}"; do
+  vm_ssh "[ ! -e /devtools/src/$source ]" ||
+    fail "developer image contains test-only source /devtools/src/$source"
+done
 vm_ssh "[ -f /devtools/lorry/vendor/repository.toml ]" ||
   fail "developer image is missing the writable Lorry repository"
 vm_ssh "[ -d /devtools/lorry/cache ]" ||
@@ -161,7 +177,18 @@ case "$cc_version" in
   *"clang version"*) ;;
   *) fail "native cc --version returned unexpected output: $cc_version" ;;
 esac
-vm_ssh "/devtools/bin/cc /devtools/src/native-fstat.c -o /devtools/tmp/native-fstat"
+vm_ssh "[ ! -e $NATIVE_FIXTURE_DIR ] || /system/bin/rm -r $NATIVE_FIXTURE_DIR" ||
+  fail "cannot clear the native-fixture upload directory"
+vm_ssh "/system/bin/mkdir $NATIVE_FIXTURE_DIR" ||
+  fail "cannot create the native-fixture upload directory"
+for source in "${NATIVE_FIXTURES[@]}"; do
+  [ -f "$ROOT_DIR/src/sys/tests/$source" ] ||
+    fail "host checkout is missing src/sys/tests/$source"
+  "${SCP[@]}" "$ROOT_DIR/src/sys/tests/$source" \
+    "motor@192.168.4.2:$NATIVE_FIXTURE_DIR/$source" ||
+    fail "cannot upload src/sys/tests/$source"
+done
+vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-fstat.c -o /devtools/tmp/native-fstat"
 vm_ssh "/devtools/bin/cc /devtools/src/hello-world/hello.c -o /devtools/tmp/hello-c"
 expect_guest_mode /devtools/tmp native-fstat -rwxr-xr-- "freshly linked native-fstat"
 expect_guest_mode /devtools/tmp hello-c -rwxr-xr-- "freshly linked hello-c"
@@ -186,12 +213,13 @@ case "$bad_cc" in
   *"error:"*) ;;
   *) fail "native cc failure lost its diagnostic: $bad_cc" ;;
 esac
-vm_ssh "/devtools/bin/cc /devtools/src/native-temp.c -o /devtools/tmp/native-temp"
+vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-temp.c -o /devtools/tmp/native-temp"
 [ "$(vm_ssh /devtools/tmp/native-temp)" = "native-temp PASS" ] ||
   fail "native libc PATH, shell, or temporary-directory contract failed"
-vm_ssh "/devtools/bin/c++ /devtools/src/native-temp.cpp -o /devtools/tmp/native-temp-cpp"
+vm_ssh "/devtools/bin/c++ $NATIVE_FIXTURE_DIR/native-temp.cpp -o /devtools/tmp/native-temp-cpp"
 [ "$(vm_ssh /devtools/tmp/native-temp-cpp)" = "native-temp-cpp PASS" ] ||
   fail "native libc++ temporary-directory contract failed"
+vm_ssh "/system/bin/rm -r $NATIVE_FIXTURE_DIR"
 
 rust_temp='use std::env; fn main() { println!("{}", env::temp_dir().display()); }'
 printf '%s\n' "$rust_temp" | vm_ssh "/system/bin/rush -c 'cat >/devtools/tmp/temp-contract.rs'"

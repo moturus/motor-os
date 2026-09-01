@@ -655,7 +655,6 @@ EOF
 /system/bin/rush
 EOF
 
-	# Sample sources to compile natively in the VM.
 	cat > "$img/devtools/src/hello-world/hello.c" << 'EOF'
 #include <stdio.h>
 
@@ -681,9 +680,6 @@ int main() {
 	return 0;
 }
 EOF
-	cp "$MOTOR/src/sys/tests/native-fstat.c" "$img/devtools/src/native-fstat.c"
-	cp "$MOTOR/src/sys/tests/native-temp.c" "$img/devtools/src/native-temp.c"
-	cp "$MOTOR/src/sys/tests/native-temp.cpp" "$img/devtools/src/native-temp.cpp"
 }
 
 # cc — the C compiler / linker driver rustc uses on the image — is not built
@@ -800,6 +796,11 @@ main() {
 	log "complete Motor OS build starting"
 	log "Motor OS checkout: $MOTOR"
 	log "development root:  $MOTORH"
+
+	local test_ssh_key="$MOTOR/src/tests/test.key"
+	[ -f "$test_ssh_key" ] && [ ! -L "$test_ssh_key" ] ||
+		die "Motor test SSH key is absent or linked: $test_ssh_key"
+	chmod 400 "$test_ssh_key"
 
 	log "provisioning host packages, rustup, and VM prerequisites"
 	local base="$SCRIPT_DIR/build-base.sh"
