@@ -5,12 +5,17 @@ port, pinned to release tag `25.07.1`, commit
 `a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b`. Stage 4 remains deferred until
 the native rust-analyzer port and its Lorry project description are final.
 
-The release was committed on 2025-07-18 and reports product version
-`25.7.1`. It is intentionally older than upstream HEAD: the existing Motor
-Tokio 1.47.1 fork satisfies this release's Tokio 1.46 requirement, and this
-release still uses crossterm as its native terminal backend. Builds and
-assembly provenance use full commit hashes, never a tag or moving branch
-alone.
+The release was committed on 2025-07-18. Its Cargo package version is
+`25.7.1`, while `hx --version` reports `25.07.1` because the release build
+script zero-pads a one-digit month. It is intentionally older than upstream
+HEAD: the existing Motor Tokio 1.47.1 fork satisfies this release's Tokio 1.46
+requirement, and this release still uses crossterm as its native terminal
+backend. Builds and assembly provenance use full commit hashes, never a tag or
+moving branch alone.
+
+The deliverable is Helix running on Motor OS. Every Motor artifact is
+cross-compiled on the Linux host with the repository-selected Motor
+toolchain; compiling Helix natively on Motor OS is out of scope.
 
 Per `AGENTS.md`, this document is the planning step. Do not change product
 code while reviewing it. During implementation, keep each patch to roughly
@@ -49,20 +54,20 @@ this plan to another Helix revision.
 | --- | --- |
 | Upstream base | Tag `25.07.1`, commit `a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b` |
 | Upstream commit | 2025-07-18, `Release 25.07.1` |
-| Reported product version | `25.7.1` |
+| Reported product version | `25.07.1` (`Cargo.toml` package version `25.7.1`) |
 | Motor branch | `helix-motor-25.7.1_2026-08-31`, based directly on the pinned commit |
 | Rust toolchain | Release pins 1.82.0; update the fork pin to 1.90.0 because crossterm 0.29 requires Rust 1.85 or newer |
 | Terminal backend | Crossterm 0.28.1 on all supported hosts; keep that architecture and update to the Motor crossterm 0.29.0 fork |
 | Helix default features | `helix-term` defaults to `git`; every Motor invocation must use `--no-default-features` |
 | Grammar auto-build | `helix-term/build.rs` fetches and builds grammars unless `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1` |
 | Static linking | `.cargo/config.toml` adds `-C target-feature=-crt-static`; remove only that pair and retain `--cfg tokio_unstable` |
-| crossterm | Motor branch `motor-os-support`, commit `610d8b0f6cf602695208204002dfed120fccc4df`, crate version 0.29.0 |
+| crossterm | Motor branch `motor-os-support`, commit `94317189d1be68cd409d13380b8f4f94af9bc08c` (the branch head, also pinned by `src/sys/Cargo.lock`), crate version 0.29.0 |
 | mio | Motor branch `mio-motor-v1.0.4_2025-10-07`, commit `907466acd6bd9fcccfb4f9c097dcda60c55157c4` |
 | Tokio | Release locks 1.46.1 and requires `^1.46`; pin Motor branch `tokio-motor-1.47.1_2025-10-07`, commit `f9d26ea874753c0b5126401e77daee9e6222c359` |
 | tree-house | Keep `tree-house = 0.3.0`; replace locked bindings 0.2.1 with the approved 0.2.4 fork |
 | bindings base | Published `tree-house-bindings` 0.2.4 source commit `eba8670857365ff6dd4560d1f2e8df770c2c795a` |
 | static grammar API | Bindings 0.2.4 provides `TryFrom<tree_sitter_language::LanguageFn> for Grammar` behind `tree-sitter-language` |
-| random backend | Locked `tempfile 3.20.0` reaches `getrandom 0.3.1`, which has no automatic Motor backend; select its supported `rdrand` backend for Motor |
+| random backend | `tempfile 3.20.0` gates its `getrandom 0.3.1` dependency to `cfg(any(unix, windows, target_os = "wasi"))`, which excludes Motor; no backend cfg is needed |
 | image placement | Development image only: binary `/devtools/helix/hx`, runtime `/devtools/helix/runtime` |
 
 Do not introduce Termina from newer Helix. This release already uses the
@@ -79,6 +84,8 @@ crate.
   not replace or weaken an existing host implementation.
 - Motor artifacts are static PIE. Do not add `-crt-static`; the
   `motor-rust-cc` linker wrapper supplies the correct static-PIE link mode.
+- All Motor builds are cross-builds on the Linux host. Do not add or test a
+  native on-Motor Helix build path.
 - No grammar fetch, Cargo registry access, or Git network access occurs in a
   regular test. Network acquisition is a distinct setup/build action, after
   which all Cargo test/build commands use `--locked --offline`.
@@ -214,6 +221,7 @@ env \
   CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-rust-cc" \
   CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
   CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
+  CXXSTDLIB_x86_64_unknown_motor="c++" \
   AR_x86_64_unknown_motor="$B/llvm-ar" \
   ARFLAGS_x86_64_unknown_motor="" \
   CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix" \
@@ -235,19 +243,29 @@ last Cargo invocation with:
 ```sh
 "$MOTOR_CARGO" check \
   --workspace --target x86_64-unknown-motor \
-  --locked --offline --no-default-features
+  --exclude xtask --locked --offline --no-default-features
 ```
+
+The workspace includes `xtask`, host-only release tooling which depends on
+`helix-term` with its default features. Exclude it unconditionally from every
+Motor `--workspace` command: otherwise that dependency edge re-enables
+Helix's `git` feature despite `--no-default-features`. Record the exclusion in
+`MOTOR.md`; do not modify xtask itself. References below to a full-workspace
+Motor check mean this workspace-minus-xtask command.
 
 `DISABLED_TS_BUILD=1` only suppresses tree-house-bindings' vendored C build.
 It does not remove its unconditional `libloading` import. Complete
 Prerequisite 0 before the first full-workspace Motor check.
 
-After Patch 1.1, `.cargo/config.toml` selects
-`getrandom_backend="rdrand"` only for `x86_64-unknown-motor`. This is required
-by the locked `tempfile -> getrandom 0.3.1` path and matches the hardware
-backend already used by Motor's getrandom ports. The exact Motor target entry
-must also repeat `--cfg tokio_unstable`: an exact-target `rustflags` entry
-overrides the current `cfg(all())` entry instead of inheriting it.
+After Patch 1.1, `.cargo/config.toml` differs from upstream only by dropping
+`-C target-feature=-crt-static`; its `cfg(all())` entry, including
+`--cfg tokio_unstable`, applies to the Motor target unchanged. No getrandom
+backend cfg exists: the locked `tempfile 3.20.0` gates its `getrandom 0.3.1`
+dependency to `cfg(any(unix, windows, target_os = "wasi"))`, which excludes
+Motor. `CXXSTDLIB_x86_64_unknown_motor=c++` is part of the convention
+because `cc` otherwise emits `stdc++` link metadata for targets it does not
+recognize, while the Motor sysroot provides libc++ — the library
+`motor-rust-cc` already places in its default link group.
 
 At the Stage 1 exit gate, save and inspect this target-filtered graph:
 
@@ -265,9 +283,10 @@ with the temporary path override removed. The authoritative graph must show
 only the exact pinned Tokio 1.47.1, mio 1.0.4, crossterm 0.29.0, and approved
 tree-house-bindings 0.2.4 Git revisions. It must not contain a path or
 registry copy of those packages, nor `libloading`, Termini, `home`,
-`signal-hook`, `signal-hook-tokio`, or `open`. The graph will still contain
-`getrandom 0.3.1`; the compile gate proves that the explicit RDRAND backend is
-selected for it.
+`signal-hook`, `signal-hook-tokio`, or `open`. The graph must not contain
+`getrandom 0.3.1` either: its only dependent, `tempfile`, gates that
+dependency to `cfg(any(unix, windows, target_os = "wasi"))`, which excludes
+Motor.
 
 ## Prerequisite 0 — approved bindings fork
 
@@ -324,22 +343,18 @@ Files: `rust-toolchain.toml`, `.cargo/config.toml`, root `Cargo.toml`,
    `rust-src`, and `clippy`. This is required by crossterm 0.29's Rust 1.85
    minimum and makes host formatting reproducible. Do not remove the pin.
 3. In `.cargo/config.toml`, remove only
-   `-C target-feature=-crt-static` from the existing `cfg(all())` flags. Add
-   an exact `[target.x86_64-unknown-motor]` `rustflags` entry containing both
-   `--cfg tokio_unstable` and `--cfg getrandom_backend="rdrand"`. Repeating
-   `tokio_unstable` is intentional because the exact-target entry takes
-   precedence. Do not put the random backend on host targets or add a linker
-   path to this file:
+   `-C target-feature=-crt-static` from the existing `cfg(all())` flags,
+   leaving `--cfg tokio_unstable` in place. Add no Motor-specific
+   `rustflags` entry: `cfg(all())` matches the Motor target as well (Cargo
+   joins matching cfg and exact-target entries; neither overrides the
+   other), and no getrandom backend cfg is needed because the locked
+   `tempfile 3.20.0` gates its `getrandom 0.3.1` dependency to
+   `cfg(any(unix, windows, target_os = "wasi"))`, which excludes Motor. Do
+   not add a linker path to this file:
 
    ```toml
    [target."cfg(all())"]
    rustflags = ["--cfg", "tokio_unstable"]
-
-   [target.x86_64-unknown-motor]
-   rustflags = [
-     "--cfg", "tokio_unstable",
-     "--cfg", 'getrandom_backend="rdrand"',
-   ]
    ```
 4. Pin Tokio to
    `f9d26ea874753c0b5126401e77daee9e6222c359` and mio to
@@ -376,7 +391,8 @@ Files: `rust-toolchain.toml`, `.cargo/config.toml`, root `Cargo.toml`,
    language ID. Do not use `markdown-inline`.
 8. Add `MOTOR.md` with the exact offline host and Motor command templates,
    the explicit grammar acquisition command from Stage 2, image paths, base
-   and final commit terminology, unsupported v1 features, and the
+   and final commit terminology, unsupported v1 features, the
+   cross-compile-only build scope (no native on-Motor builds), and the
    human-publication workflow. State that agents may clone/fetch and edit the
    three local repositories but may not create forks or push, and that no
    temporary path source is allowed in the published Helix commit.
@@ -456,8 +472,11 @@ Files: root `Cargo.toml`, `Cargo.lock`, `helix-tui/Cargo.toml`,
 `helix-tui/src/backend/crossterm.rs`, and the existing conversion tests.
 
 1. Pin crossterm to
-   `610d8b0f6cf602695208204002dfed120fccc4df` and update every direct
-   requirement from 0.28 to 0.29. Use `default-features = false`.
+   `94317189d1be68cd409d13380b8f4f94af9bc08c`, the `motor-os-support` head
+   that `src/sys/Cargo.lock` already pins, and update every direct
+   requirement from 0.28 to 0.29. Use `default-features = false`. This
+   branch has been rebased before; confirm the head still matches the
+   Motor OS lockfile before pinning, and stop if they diverge.
 2. Enable the common features actually used by Helix: `events`,
    `event-stream`, and `bracketed-paste`, with `event-stream` needed only by
    `helix-term`. Preserve crossterm's `windows` feature for Windows. Preserve
@@ -686,10 +705,14 @@ and focused tests.
    `cc::Build::cpp(true)` and a second unique archive; never compile
    `parser.c` as C++. Add that grammar's `src` directory as the include path
    for `tree_sitter/parser.h`.
-4. Let `cc` select and emit the target C++ standard-library link metadata;
-   do not hard-code `stdc++` because the Motor sysroot uses its configured C++
-   runtime. Honor Cargo's profile optimization and the `CC_`, `CXX_`, `AR_`,
-   and `ARFLAGS_` environment from the command convention.
+4. Do not let `cc` pick the C++ standard library for Motor: for a target it
+   does not recognize it emits `stdc++` link metadata, and the Motor sysroot
+   provides libc++, not libstdc++. The command convention's
+   `CXXSTDLIB_x86_64_unknown_motor=c++` makes it emit `c++` instead, which
+   `motor-rust-cc` already links in its default group; the duplicate is
+   harmless. Do not hard-code a standard library in `build.rs`. Honor
+   Cargo's profile optimization and the `CC_`, `CXX_`, `AR_`, `ARFLAGS_`,
+   and `CXXSTDLIB_` environment from the command convention.
 5. Never invoke the release's shared-library grammar builder for a Motor
    target. `helix-term/build.rs` must inspect `CARGO_CFG_TARGET_OS=motor` and
    skip its fetch/shared-build path; normal commands still set
@@ -913,9 +936,11 @@ Set `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `TMPDIR` to fresh directories
 under `/devtools/tmp` so user configuration cannot affect keymaps or
 defaults. Invoke `/devtools/helix/hx` by its full path. Add these assertions:
 
-1. `hx --version` exits zero, reports 25.07.1, and includes the final pinned
-   Motor fork hash. Compare the short hash to `HELIX_REV`; do not accept the
-   upstream release hash after Motor commits exist.
+1. `hx --version` exits zero, reports product version 25.07.1 (the release
+   build script zero-pads the `25.7.1` Cargo package version's one-digit
+   month), and includes the final pinned Motor fork hash. Compare the short
+   hash to `HELIX_REV`; do not accept the upstream release hash after Motor
+   commits exist.
 2. General `hx --health` output includes `/devtools/helix/runtime`. For each
    curated language ID (`rust`, `toml`, `markdown`, `markdown.inline`, `c`,
    `cpp`, `json`, `yaml`, `bash`, and `lua`), run language health and require
@@ -942,8 +967,12 @@ defaults. Invoke `/devtools/helix/hx` by its full path. Add these assertions:
 9. Repeat edit/save/clean-exit inside an rmux pane and compare the saved file
    on the guest.
 
-Use existing bounded marker waits. Do not add retries, extend the script
-timeout, ignore a missing escape sequence, or accept multiple exit statuses.
+Use existing bounded marker waits and keep `test-tui.sh`'s hard 600-second
+self-timeout unchanged. Keep the outer release-suite timeout unchanged as
+well. If measured legitimate work cannot fit either existing budget, stop and
+report per-phase timings for separate review; do not change a timeout as part
+of this patch. Do not add retries, ignore a missing escape sequence, or accept
+multiple exit statuses.
 
 Focused gate against the already-built development image:
 
