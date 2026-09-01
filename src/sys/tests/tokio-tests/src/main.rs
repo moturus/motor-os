@@ -2,6 +2,7 @@ mod process;
 mod rt_basic;
 mod rt_common;
 mod rt_handle;
+mod rt_idle;
 
 pub mod support {
     pub mod mpsc_stream;
@@ -35,11 +36,19 @@ fn rt_churn(iters: u64) -> ! {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("rt-churn") {
+    let mode = args.next();
+    if mode.as_deref() == Some("rt-churn") {
         let iters = args.next().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
         rt_churn(iters);
     }
+    if mode.as_deref() == Some("rt-idle") {
+        rt_idle::run_all_tests();
+        println!("tokio-tests rt-idle PASS");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        return;
+    }
 
+    rt_idle::run_all_tests();
     process::run_all_tests();
     rt_basic::run_all_tests();
     rt_common::run_all_tests();

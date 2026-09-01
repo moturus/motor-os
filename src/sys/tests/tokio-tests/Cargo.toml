@@ -7,10 +7,14 @@ edition = "2021"
 futures = "0.3.31"
 pin-project-lite = "0.2.16"
 # NOTE: tokio is patched in the workspace Cargo.toml
-tokio = { version = "1.47.1", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "process", "sync", "time" ] }
+tokio = { version = "1.47.1", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "parking_lot", "process", "sync", "time" ] }
 tokio-stream = "0.1"
 tokio-metrics = "0.4.2"
 tokio-test = "0.4.4"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-stats = { path = "../../lib/moto-stats" }
+moto-sys = { path = "../../lib/moto-sys" }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(tokio_unstable)'] }

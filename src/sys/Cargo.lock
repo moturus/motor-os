@@ -1803,6 +1803,7 @@ dependencies = [
  "libc",
  "mio",
  "moto-rt",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -1859,6 +1860,8 @@ name = "tokio-tests"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "moto-stats",
+ "moto-sys",
  "pin-project-lite",
  "tokio",
  "tokio-metrics",
