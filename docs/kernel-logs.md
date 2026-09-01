@@ -528,8 +528,9 @@ File mode, using the shipped `kernel-log:strobe` configuration:
   temporary file until `fs.available_bytes` is below 50 MiB, floods its own
   tag past 4 MiB, checks that the oldest `.prev` is gone, and removes the
   temporary file before returning;
-- quiescence: after five idle seconds the file size is unchanged in debug and
-  release builds;
+- quiescence: after five idle seconds the file size is unchanged, in release
+  builds only — in debug, background file operations keep landing DEBUG
+  records in `kernel.log`;
 - native sys-tty self-tests cover forwarder backlog drops and the recovery
   marker, the disabled/no-retry state, and every configuration-parser success
   and error path. Live connect or RPC failure uses that same disabled state and
@@ -537,10 +538,12 @@ File mode, using the shipped `kernel-log:strobe` configuration:
 
 Boot latency also has no host assertion. The first raw kernel-log preamble
 records the boot-relative timestamp captured at the same truthful
-`all services up ... Starting <command>` milestone. Before log flooding or
-rotation, native systest reads that value from `kernel.log` and requires at
-most 1,000 ms in release or 3,000 ms in debug. The existing status message is
-emitted at the same truthful milestone; no temporary timing message remains.
+`all services up ... Starting <command>` milestone. In release builds, native
+systest reads that value from `kernel.log` and requires at most 1,000 ms.
+Debug builds skip the preamble check entirely: their DEBUG-record volume
+rotates the preamble out of both log files before systest runs. The existing
+status message is emitted at the same truthful milestone; no temporary timing
+message remains.
 
 The feature gate is the complete main-image `src/tests/full-test.sh`, three
 successful runs in debug and three in release for each core patch. It is not

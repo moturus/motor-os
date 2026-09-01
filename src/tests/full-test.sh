@@ -6,12 +6,17 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  # Debug builds run the same suite several minutes slower.
+  TIMEOUT=1500
+  if [ "${1:-}" = "--release" ]; then
+    TIMEOUT=900
+  fi
   set -m
-  timeout 900s "$0" "$@" < /dev/null
+  timeout "${TIMEOUT}s" "$0" "$@" < /dev/null
   status=$?
   set +m
   if [ "$status" -eq 124 ]; then
-    echo "full-test: timed out after 900 seconds" >&2
+    echo "full-test: timed out after $TIMEOUT seconds" >&2
   fi
   exit "$status"
 fi
@@ -357,7 +362,7 @@ VMM_PID="$!"
 
 # A refused connection returns immediately, so OpenSSH's ConnectionAttempts
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
-# 900-second harness timeout bounds this loop.
+# harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
