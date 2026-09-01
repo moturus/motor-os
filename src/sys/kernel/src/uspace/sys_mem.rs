@@ -34,7 +34,7 @@ fn sys_mmio_map(
 /// The conservative admission charge for an OP_MAP, mirroring the dispatch in
 /// `sys_map` below. Requests that no branch accepts get an ordinary eager
 /// charge and are rejected later on their merits.
-fn map_charge(flags: u32, page_size: u64, num_pages: u64) -> u64 {
+fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64 {
     const MMIO: u32 = SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO;
 
     let (data_pages, descriptor_pages) = if flags == MMIO || page_size == sys_mem::PAGE_SIZE_MID {
@@ -45,7 +45,11 @@ fn map_charge(flags: u32, page_size: u64, num_pages: u64) -> u64 {
         // No physical pages yet: each lazy fault is charged when it happens.
         (0, num_pages)
     } else if (flags & SysMem::F_SHARE_SELF) != 0 {
-        (num_pages, num_pages.saturating_mul(2)) // Descriptors at both ends.
+        if phys_addr == u64::MAX {
+            (num_pages, num_pages.saturating_mul(2)) // Descriptors at both ends.
+        } else {
+            (0, num_pages) // The caller's existing frames: descriptors only.
+        }
     } else {
         (num_pages, num_pages)
     };
@@ -78,7 +82,7 @@ fn sys_map(
     // mid-page, contiguous) participate too, at the sys-io floor.
     let _admission = match crate::mm::admission::admit(
         address_space.mem_class(),
-        map_charge(flags, page_size, num_pages),
+        map_charge(flags, phys_addr, page_size, num_pages),
     ) {
         Ok(admission) => admission,
         Err(_) => {
@@ -238,12 +242,12 @@ fn sys_map(
     }
 
     if (flags & SysMem::F_SHARE_SELF) != 0 {
-        // This is used to load a binary into an address space.
-        if phys_addr != u64::MAX {
-            log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
-        }
-
+        // Two shapes. With phys_addr unset: allocate in the target and alias
+        // the frames into the caller R+W, which is how a loader writes a
+        // binary into an address space. With phys_addr set: map the caller's
+        // existing segment at that address into the target at virt_addr,
+        // read-only or read+execute, for pages every process has identical
+        // (the vdso's text and read-only data).
         let mut flags = flags & !SysMem::F_SHARE_SELF;
         let mut opts = MappingOptions::USER_ACCESSIBLE;
         if (flags & SysMem::F_READABLE) != 0 {
@@ -282,6 +286,18 @@ fn sys_map(
             return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
 
+        if phys_addr != u64::MAX {
+            return sys_share_existing(
+                curr_thread,
+                address_space,
+                target_is_self,
+                opts,
+                phys_addr,
+                virt_addr,
+                num_pages,
+            );
+        }
+
         return match address_space.alloc_user_shared(
             virt_addr,
             num_pages,
@@ -295,6 +311,40 @@ fn sys_map(
 
     log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
     ResultBuilder::invalid_argument()
+}
+
+/// Maps the caller's segment at `local_addr` into `address_space` at
+/// `virt_addr`. Both addresses are fixed and the segments must be the same
+/// size; the target mapping is never writable.
+fn sys_share_existing(
+    curr_thread: &super::process::Thread,
+    address_space: &UserAddressSpace,
+    target_is_self: bool,
+    opts: MappingOptions,
+    local_addr: u64,
+    virt_addr: u64,
+    num_pages: u64,
+) -> SyscallResult {
+    let page_mask = sys_mem::PAGE_SIZE_SMALL - 1;
+    if target_is_self
+        || opts.contains(MappingOptions::WRITABLE)
+        || virt_addr == u64::MAX
+        || (local_addr | virt_addr) & page_mask != 0
+    {
+        log::debug!("sys_mem_impl: bad share arguments");
+        return ResultBuilder::invalid_argument();
+    }
+
+    match address_space.share_from(
+        curr_thread.owner().address_space(),
+        local_addr,
+        virt_addr,
+        num_pages,
+        opts,
+    ) {
+        Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
+        Err(err) => ResultBuilder::result(err),
+    }
 }
 
 fn sys_unmap(

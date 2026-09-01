@@ -19,32 +19,22 @@ pub fn load_vdso(address_space: u64) -> ErrorCode {
 }
 
 fn init_remote_vdso(address_space: SysHandle, entry_point: u64) -> Result<(), ErrorCode> {
-    // Map/copy VDSO bytes.
-    // TODO: instead of copying VDSO bytes, map the pages.
-    let flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE;
+    // The vdso bytes: a child needs them to load the vdso into its own
+    // children, and every process holds the same bytes at the same address,
+    // so share ours read-only instead of copying.
     let vdso_bytes_sz = moto_rt::RtVdsoVtable::get()
         .vdso_bytes_sz
         .load(Ordering::Relaxed);
     let num_pages = (vdso_bytes_sz + sys_mem::PAGE_SIZE_SMALL - 1) >> sys_mem::PAGE_SIZE_SMALL_LOG2;
-
-    let (remote, local) = SysMem::map2(
+    let remote = SysMem::map(
         address_space,
-        flags,
-        u64::MAX,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE,
+        moto_rt::RT_VDSO_BYTES_ADDR,
         moto_rt::RT_VDSO_BYTES_ADDR,
         sys_mem::PAGE_SIZE_SMALL,
         num_pages,
     )?;
     assert_eq!(remote, moto_rt::RT_VDSO_BYTES_ADDR);
-
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            moto_rt::RT_VDSO_BYTES_ADDR as usize as *const u8,
-            local as usize as *mut u8,
-            vdso_bytes_sz as usize,
-        );
-    }
-    SysMem::unmap(SysHandle::SELF, 0, u64::MAX, local).unwrap();
 
     // Write entry_point and vdso_bytes_sz.
     let flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE;
@@ -104,6 +94,7 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
         relocated: false,
         offset: moto_rt::RT_VDSO_START,
         mapped_regions: BTreeMap::default(),
+        shared_regions: BTreeMap::default(),
     };
 
     if elf_binary.load(&mut elf_loader).is_err() {
@@ -118,40 +109,40 @@ struct RemoteLoader {
     relocated: bool,
     offset: u64,
 
-    // Map of allocated pages: remote addr -> (local addr, num_pages).
+    // Copied (writable) segments: unoffset vaddr -> (local RW alias, num_pages).
     mapped_regions: BTreeMap<u64, (u64, u64)>,
+    // Segments mapped from this process's own vdso instead of copied:
+    // unoffset vaddr -> num_pages. Nothing is ever written to these.
+    shared_regions: BTreeMap<u64, u64>,
 }
 
 impl RemoteLoader {
-    unsafe fn write_remotely(&mut self, dst: u64, src: *const u8, sz: u64) {
-        // There shouldn't be too many entries in the map, so we can just linearly iterate.
-        let mut region: Option<(u64, u64, u64)> = None;
-        for entry in &self.mapped_regions {
-            if *entry.0 <= dst {
-                region = Some((*entry.0, entry.1.0, entry.1.1));
-            } else {
-                break;
-            }
+    fn in_shared_region(&self, dst: u64, sz: u64) -> bool {
+        self.shared_regions
+            .range(..=dst)
+            .next_back()
+            .is_some_and(|(start, pages)| {
+                dst + sz <= start + (pages << sys_mem::PAGE_SIZE_SMALL_LOG2)
+            })
+    }
+
+    // Writes into a copied segment through its local alias. Fails for any
+    // other address, a shared segment included.
+    unsafe fn write_remotely(&mut self, dst: u64, src: *const u8, sz: u64) -> Result<(), ()> {
+        let Some((start, (alias, pages))) = self.mapped_regions.range(..=dst).next_back() else {
+            return Err(());
+        };
+        if dst + sz > start + (pages << sys_mem::PAGE_SIZE_SMALL_LOG2) {
+            return Err(());
         }
-
-        let region = region.unwrap();
-
-        let remote_region_start = region.0;
-        let local_region_start = region.1;
-        let region_sz = region.2 << sys_mem::PAGE_SIZE_SMALL_LOG2;
-
-        assert!(remote_region_start <= dst);
-        assert!((dst + sz) <= (region.0 + region_sz));
-
-        let offset = dst - remote_region_start;
-
         unsafe {
             core::ptr::copy_nonoverlapping(
                 src,
-                (local_region_start + offset) as usize as *mut u8,
+                (alias + (dst - start)) as usize as *mut u8,
                 sz as usize,
             )
         };
+        Ok(())
     }
 }
 
@@ -178,33 +169,44 @@ impl elfloader::ElfLoader for RemoteLoader {
                 header.virtual_addr() + header.mem_size(),
                 sys_mem::PAGE_SIZE_SMALL,
             );
-
-            let mut flags = SysMem::F_SHARE_SELF;
-            if header.flags().is_read() {
-                flags |= SysMem::F_READABLE;
-            }
-            if header.flags().is_write() {
-                flags |= SysMem::F_WRITABLE;
-            }
-            // W^X: the remote side of text is R+X; segment bytes are
-            // written through our local side, which is always R+W.
-            if header.flags().is_execute() {
-                flags |= SysMem::F_EXECUTABLE;
-            }
-
             let num_pages = (vaddr_end - vaddr_start) >> sys_mem::PAGE_SIZE_SMALL_LOG2;
+            let remote_start = vaddr_start + self.offset;
 
+            if !header.flags().is_write() {
+                // Every process maps the vdso at the same address, and all
+                // of its relocations land in the writable segment, so the
+                // read-only segments are identical everywhere: map ours into
+                // the child instead of allocating and copying.
+                let mut flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE;
+                if header.flags().is_execute() {
+                    flags |= SysMem::F_EXECUTABLE;
+                }
+                let remote = SysMem::map(
+                    self.address_space,
+                    flags,
+                    remote_start,
+                    remote_start,
+                    sys_mem::PAGE_SIZE_SMALL,
+                    num_pages,
+                )
+                .map_err(|_| elfloader::ElfLoaderErr::OutOfMemory)?;
+                assert_eq!(remote, remote_start);
+                self.shared_regions.insert(vaddr_start, num_pages);
+                continue;
+            }
+
+            // The writable segment gets fresh pages, written through a local
+            // R+W alias of the same frames.
             let (remote, local) = SysMem::map2(
                 self.address_space,
-                flags,
+                SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
                 u64::MAX,
-                vaddr_start + self.offset,
+                remote_start,
                 sys_mem::PAGE_SIZE_SMALL,
                 num_pages,
             )
             .map_err(|_| elfloader::ElfLoaderErr::OutOfMemory)?;
-
-            assert_eq!(remote, vaddr_start + self.offset);
+            assert_eq!(remote, remote_start);
             self.mapped_regions.insert(vaddr_start, (local, num_pages));
         }
         Ok(())
@@ -216,11 +218,11 @@ impl elfloader::ElfLoader for RemoteLoader {
         base: elfloader::VAddr,
         region: &[u8],
     ) -> Result<(), elfloader::ElfLoaderErr> {
-        unsafe {
-            self.write_remotely(base, region.as_ptr(), region.len() as u64);
+        if self.in_shared_region(base, region.len() as u64) {
+            return Ok(()); // Already there.
         }
-
-        Ok(())
+        unsafe { self.write_remotely(base, region.as_ptr(), region.len() as u64) }
+            .map_err(|_| elfloader::ElfLoaderErr::UnsupportedElfFormat)
     }
 
     fn relocate(
@@ -240,14 +242,16 @@ impl elfloader::ElfLoader for RemoteLoader {
                         .addend
                         .ok_or(elfloader::ElfLoaderErr::UnsupportedRelocationEntry)?;
 
-                // Need to write (addend + base) into addr.
+                // Need to write (addend + base) into addr. A relocation into a
+                // shared segment cannot be applied and fails the load.
                 unsafe {
                     self.write_remotely(
                         remote_addr,
                         &addend as *const _ as *const u8,
                         core::mem::size_of::<u64>() as u64,
-                    );
+                    )
                 }
+                .map_err(|_| elfloader::ElfLoaderErr::UnsupportedRelocationEntry)?;
 
                 self.relocated = true;
 

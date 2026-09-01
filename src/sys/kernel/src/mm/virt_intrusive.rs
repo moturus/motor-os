@@ -577,8 +577,11 @@ impl VmemSegment {
             let this_page = self_page.unwrap();
             let that_page = other_page.unwrap();
 
-            assert!(!this_page.frame.is_null());
-            // assert!(that_page.frame.is_null());
+            // Lazy and guard pages have no frame to share; a caller naming
+            // such a segment gets an error, not a kernel panic.
+            if this_page.frame.is_null() {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
             if !that_page.frame.is_null() {
                 other.address_space().page_table.unmap_page(
                     that_page.frame.get().unwrap().start(),

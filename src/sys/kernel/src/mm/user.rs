@@ -430,6 +430,36 @@ impl UserAddressSpace {
         })
     }
 
+    /// Maps `source`'s segment at `source_addr` into this address space at
+    /// `vaddr`, sharing its frames. The segments must be the same size, and
+    /// nothing may be mapped at `vaddr` yet.
+    pub fn share_from(
+        &self,
+        source: &UserAddressSpace,
+        source_addr: u64,
+        vaddr: u64,
+        num_pages: u64,
+        mapping_options: super::MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+
+        // A reservation without frames; share_with() fills it.
+        if let Err(err) =
+            self.inner
+                .vmem_allocate_user_fixed(vaddr, num_pages, super::MappingOptions::empty())
+        {
+            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            return Err(err);
+        }
+
+        source
+            .inner
+            .share_with(source_addr, &self.inner, vaddr, mapping_options)
+            .inspect_err(|_| {
+                let _ = self.unmap(vaddr); // Gives the stats back too.
+            })
+    }
+
     pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
