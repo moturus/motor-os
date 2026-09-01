@@ -801,6 +801,11 @@ mod tests {
         );
         assert_eq!(config.assembly_dirs, ["libc", "rg"]);
         assert_eq!(config.assembly_required_executables, ["rg/system/bin/rg"]);
+        assert!(!config.assembly_dirs.iter().any(|path| path == "helix"));
+        assert!(!config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path.ends_with("/helix/hx")));
         assert!(config
             .directories
             .iter()
@@ -865,8 +870,11 @@ mod tests {
                 "img_files/motor-os-dev"
             ]
         );
-        assert_eq!(config.assembly_dirs, ["libc", "rg", "llvm", "rustc"]);
-        assert_eq!(config.assembly_required_executables.len(), 6);
+        assert_eq!(
+            config.assembly_dirs,
+            ["libc", "rg", "llvm", "rustc", "helix"]
+        );
+        assert_eq!(config.assembly_required_executables.len(), 7);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -875,6 +883,10 @@ mod tests {
             .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rg")));
+        assert!(config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path == "helix/devtools/helix/hx"));
         assert!(config
             .directories
             .iter()

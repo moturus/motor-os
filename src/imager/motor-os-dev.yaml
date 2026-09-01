@@ -72,6 +72,7 @@ assembly_dirs:
   - "rg"
   - "llvm"
   - "rustc"
+  - "helix"
 assembly_required_executables:
   - "rg/system/bin/rg"
   - "llvm/devtools/bin/cc"
@@ -79,6 +80,7 @@ assembly_required_executables:
   - "llvm/devtools/llvm/bin/llvm"
   - "rustc/devtools/bin/rustc"
   - "rustc/devtools/rust/bin/rustc"
+  - "helix/devtools/helix/hx"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/motor-os/bin/red"
