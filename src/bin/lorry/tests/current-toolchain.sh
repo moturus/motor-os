@@ -17,8 +17,8 @@ lorry_manifest_value() {
 lorry_load_current_toolchain() {
     local script_dir repository_root toolchain_file toolchain_key
     local prefix prefix_manifest cargo_verbose rustc_verbose
-    local assembly_manifest assembly_root assembly_key candidate
-    local -a candidates=()
+    local assembly_selector assembly_images
+    local assembly_manifest assembly_root assembly_key
 
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return
     repository_root="${LORRY_REPOSITORY_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
@@ -80,17 +80,25 @@ lorry_load_current_toolchain() {
         lorry_toolchain_fail "rustc does not report $MOTOR_RUST_REV" || return
 
     if [ -n "${LORRY_ASSEMBLY_MANIFEST:-}" ]; then
-        candidates+=("$LORRY_ASSEMBLY_MANIFEST")
-    elif [ -d "$repository_root/../assemblies" ]; then
-        while IFS= read -r candidate; do
-            [ "$(lorry_manifest_value "$candidate" toolchain_key 2>/dev/null || true)" = \
-                "$toolchain_key" ] && candidates+=("$candidate")
-        done < <(find "$repository_root/../assemblies" -mindepth 2 -maxdepth 2 \
-            -type f -name MOTOR-ASSEMBLY-MANIFEST -print | LC_ALL=C sort)
+        assembly_manifest="$LORRY_ASSEMBLY_MANIFEST"
+    else
+        assembly_selector="$repository_root/src/select-toolchain-assembly.sh"
+        [ -x "$assembly_selector" ] ||
+            lorry_toolchain_fail "canonical assembly selector is absent: $assembly_selector" || return
+        assembly_images="$("$assembly_selector" --resolve)" || return
+        case "$assembly_images" in
+            *$'\n'*)
+                lorry_toolchain_fail "canonical assembly selector returned multiple paths" || return
+                ;;
+            /*/images) ;;
+            *)
+                lorry_toolchain_fail \
+                    "canonical assembly selector returned an invalid image root: $assembly_images" || return
+                ;;
+        esac
+        assembly_manifest="${assembly_images%/images}/MOTOR-ASSEMBLY-MANIFEST"
     fi
-    [ "${#candidates[@]}" -eq 1 ] ||
-        lorry_toolchain_fail "expected one assembly manifest for $toolchain_key; set LORRY_ASSEMBLY_MANIFEST explicitly" || return
-    assembly_manifest="$(realpath "${candidates[0]}")" || return
+    assembly_manifest="$(realpath "$assembly_manifest")" || return
     assembly_root="$(dirname "$assembly_manifest")"
     assembly_key="$(lorry_manifest_value "$assembly_manifest" assembly_key)" || return
     [ "$(basename "$assembly_root")" = "$assembly_key" ] ||

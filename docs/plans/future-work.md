@@ -116,20 +116,6 @@ The former sys-tty/kernel-log interleaving item is complete; see
     ships with the next moto-sys bump. Gain: correct per-CPU statistics for
     `top` and the benchmarks, and no latent panic.
 
-10. **The dev-image suite refuses a host with two assemblies.**
-    `full-test-dev.sh` passes the main suite and TEST-DEV-SOURCES, but
-    Lorry's `current-toolchain.sh` refuses when two assemblies exist for the
-    toolchain key under `assemblies/` ("expected one assembly manifest ...;
-    set LORRY_ASSEMBLY_MANIFEST explicitly"), and setting that variable makes
-    `current-toolchain-contract.sh` fail silently because the contract test
-    inherits it. Older assemblies are retained on purpose
-    (`docs/assembly-selection.md`), so every host that has rebuilt one after
-    a runtime-input commit is affected. Fix: prefer the assembly the checkout
-    selected (`.motor-os/assembly-pins`) over directory discovery, and
-    `unset LORRY_ASSEMBLY_MANIFEST` at the top of the contract test. Gain:
-    the dev-image suite runs on such hosts again, which AGENTS.md asks to
-    run in release mode for all non-Lorry work.
-
 ## Performance follow-ups from the same run (not scheduled)
 
 What landed on 2026-08-29: kernel halt polling with IPI elision, the tree

@@ -9,10 +9,13 @@ repository="$temporary/motor-os"
 prefix="$temporary/prefix"
 key="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 assembly_key="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+historical_key="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 assembly="$temporary/assemblies/$assembly_key"
+historical="$temporary/assemblies/$historical_key"
 mkdir -p "$repository/src" "$prefix/bin" "$prefix/lib/rustlib" \
     "$assembly/sysroot/bin" \
     "$assembly/images/rustc/devtools/rust/lib/rustlib/x86_64-unknown-motor" \
+    "$historical" \
     "$temporary/bin"
 cp "$ROOT_DIR/src/toolchain-versions.sh" "$repository/src/"
 . "$repository/src/toolchain-versions.sh"
@@ -62,18 +65,45 @@ rustup_toolchain=$toolchain
 effective_rust_rev=$MOTOR_RUST_REV
 effective_llvm_rev=$MOTOR_LLVM_REV
 EOF
+cat > "$historical/MOTOR-ASSEMBLY-MANIFEST" <<EOF
+schema=$MOTOR_GENERATED_MANIFEST_SCHEMA
+toolchain_key=$key
+assembly_key=$historical_key
+rustup_toolchain=$toolchain
+effective_rust_rev=$MOTOR_RUST_REV
+effective_llvm_rev=$MOTOR_LLVM_REV
+EOF
 printf '#!/bin/sh\nexit 0\n' > "$assembly/sysroot/bin/motor-clang"
 chmod +x "$assembly/sysroot/bin/motor-clang"
+cat > "$repository/src/select-toolchain-assembly.sh" <<EOF
+#!/usr/bin/env bash
+[ "\$#" -eq 1 ] && [ "\$1" = --resolve ] || exit 2
+printf '%s\n' resolve >> '$temporary/selector-invocations'
+printf '%s\n' '$assembly/images'
+EOF
+chmod +x "$repository/src/select-toolchain-assembly.sh"
 
 export PATH="$temporary/bin:$PATH"
 export LORRY_REPOSITORY_ROOT="$repository"
-LORRY_ASSEMBLY_MANIFEST="$assembly/MOTOR-ASSEMBLY-MANIFEST"
+unset LORRY_ASSEMBLY_MANIFEST
 . "$SCRIPT_DIR/current-toolchain.sh"
 lorry_load_current_toolchain >"$temporary/output" 2>"$temporary/log"
 [ "$LORRY_MOTOR_TOOLCHAIN" = "$toolchain" ]
 [ "$LORRY_TEST_CARGO" = "$prefix/bin/cargo" ]
 [ "$LORRY_MOTOR_LINKER" = "$assembly/sysroot/bin/motor-clang" ]
+[ "$LORRY_ASSEMBLY_MANIFEST" = "$assembly/MOTOR-ASSEMBLY-MANIFEST" ]
+[ "$(wc -l < "$temporary/selector-invocations")" -eq 1 ]
 grep -Fqx "commit-hash: $MOTOR_CARGO_REV" "$temporary/log"
+
+if ! (LORRY_ASSEMBLY_MANIFEST="$assembly/MOTOR-ASSEMBLY-MANIFEST" \
+        lorry_load_current_toolchain) >/dev/null 2>&1; then
+    echo "current-toolchain-contract: explicit assembly manifest was rejected" >&2
+    exit 1
+fi
+[ "$(wc -l < "$temporary/selector-invocations")" -eq 1 ] || {
+    echo "current-toolchain-contract: explicit assembly manifest did not bypass selection" >&2
+    exit 1
+}
 
 if (BAD_CARGO_REV=wrong LORRY_ASSEMBLY_MANIFEST= lorry_load_current_toolchain) \
         >/dev/null 2>&1; then
