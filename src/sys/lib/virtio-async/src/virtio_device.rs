@@ -731,7 +731,7 @@ pub fn discover_virtio_devices(
 
     unsafe { MAPPER = Some(mapper) };
 
-    let pci_devices = pci::brute_force_scan();
+    let pci_devices = pci::scan();
     let mut devices = vec![];
 
     for dev in &pci_devices {

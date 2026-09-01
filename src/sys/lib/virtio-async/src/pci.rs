@@ -144,6 +144,11 @@ impl PciDeviceID {
         ((res >> 16) & 0xFF) as u8
     }
 
+    /// For a PCI-to-PCI bridge (header type 1): the bus behind it.
+    fn secondary_bus(&self) -> u8 {
+        self.read_config_u8(0x19)
+    }
+
     // See __pci_find_next_cap_ttl()
     // https://elixir.bootlin.com/linux/v5.16.1/source/drivers/pci/pci.c#L412
     pub fn find_capabilities(&self, capability: u8) -> Vec<u8> {
@@ -339,29 +344,47 @@ impl PciDevice {
     }
 }
 
-pub(super) fn brute_force_scan() -> Vec<PciDeviceID> {
+/// Enumerate PCI functions: bus 0, plus any bus behind a PCI-to-PCI bridge.
+///
+/// Every config-space access is a VM exit (~14us on KVM), so the scan is
+/// kept to the buses that can hold a device: probing all 256 buses cost
+/// 235ms of every boot, while cloud-hypervisor, Firecracker, and QEMU
+/// place the virtio devices on bus 0.
+pub(super) fn scan() -> Vec<PciDeviceID> {
     // Make sure the scan happens only once.
     static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     assert!(!ONCE.swap(true, core::sync::atomic::Ordering::Relaxed));
 
+    const HEADER_TYPE_MASK: u8 = 0x7f;
+    const HEADER_TYPE_BRIDGE: u8 = 1;
+    const MULTI_FUNCTION: u8 = 0x80;
+
     let mut result = Vec::new();
-    for bus in 0u8..=255 {
+    let mut scanned = [false; 256];
+    let mut pending = vec![0u8];
+    while let Some(bus) = pending.pop() {
+        if core::mem::replace(&mut scanned[bus as usize], true) {
+            continue;
+        }
         for slot in 0u8..32 {
             let dev = PciDeviceID::new(bus, slot, 0);
             if !dev.valid() {
                 continue;
             }
-
-            result.push(dev);
-
-            if (dev.header_type() & 0x80) != 0 {
-                // Multi-function: check functions 1 to 7.
-                for func in 1u8..8 {
-                    let dev = PciDeviceID::new(bus, slot, func);
-                    if dev.valid() {
-                        result.push(dev)
-                    }
+            let functions = if (dev.header_type() & MULTI_FUNCTION) != 0 {
+                8
+            } else {
+                1
+            };
+            for func in 0..functions {
+                let dev = PciDeviceID::new(bus, slot, func);
+                if func != 0 && !dev.valid() {
+                    continue;
                 }
+                if (dev.header_type() & HEADER_TYPE_MASK) == HEADER_TYPE_BRIDGE {
+                    pending.push(dev.secondary_bus());
+                }
+                result.push(dev);
             }
         }
     }
