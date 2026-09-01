@@ -454,19 +454,20 @@ started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
   <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
   <tr><td><code>/devtools/rust</code></td><td>Native rustc with a full <code>x86_64-unknown-motor</code> sysroot. There is no cargo on the image; Lorry is the build driver.</td></tr>
-  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources (<code>hello.c</code>, <code>hello.cpp</code>, <code>hello.rs</code>) and snapshots of red, lorry, gears, moto-rt, and moto-sys, so that those can be rebuilt natively.</td></tr>
+  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and snapshots of red, lorry, gears, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
   <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>, and <code>gears/gears-mock-provider</code>.</td></tr>
   <tr><td><code>/devtools/tmp</code></td><td>Build and test scratch, writable by every role.</td></tr>
-  <tr><td><code>/devtools/cfg</code>, <code>/devtools/lorry</code></td><td>Clang driver configuration and Lorry's installed state.</td></tr>
+  <tr><td><code>/devtools/cfg</code></td><td>System configuration for Clang and Lorry.</td></tr>
+  <tr><td><code>/devtools/lorry</code></td><td>Lorry's writable dependency repository and compiled-unit cache.</td></tr>
   <tr><td><code>/system/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
 </table>
 </div>
 <p><code>/devtools</code> itself is System-owned; Interactive sessions write under
-<code>/devtools/src</code> and <code>/devtools/tmp</code>, and may edit the launcher
+<code>/devtools/src</code>, <code>/devtools/lorry</code>, and <code>/devtools/tmp</code>, and may edit the launcher
 scripts in <code>/devtools/bin</code> in place but not add or remove entries there.</p>
 
 <h2>Compiling natively</h2>
-<pre><code>cd /devtools/src
+<pre><code>cd /devtools/src/hello-world
 cc hello.c -o /devtools/tmp/hello && /devtools/tmp/hello
 c++ hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp
 rustc hello.rs -o /devtools/tmp/hello-rs && /devtools/tmp/hello-rs</code></pre>

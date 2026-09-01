@@ -879,17 +879,34 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tmp"));
+        for path in [
+            "/devtools/lorry/cache",
+            "/devtools/lorry/vendor",
+            "/devtools/lorry/vendor/.staging",
+        ] {
+            assert!(config.directories.iter().any(|candidate| candidate == path));
+        }
+        assert!(!config
+            .directories
+            .iter()
+            .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
         assert!(config
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
         assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
-            ("src/bin/red", "/devtools/src/src/bin/red"),
-            ("src/bin/lorry", "/devtools/src/src/bin/lorry"),
-            ("src/bin/gears", "/devtools/src/src/bin/gears"),
-            ("src/sys/lib/moto-rt", "/devtools/src/src/sys/lib/moto-rt"),
-            ("src/sys/lib/moto-sys", "/devtools/src/src/sys/lib/moto-sys"),
+            ("src/bin/red", "/devtools/src/motor-os/bin/red"),
+            ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
+            ("src/bin/gears", "/devtools/src/motor-os/bin/gears"),
+            (
+                "src/sys/lib/moto-rt",
+                "/devtools/src/motor-os/sys/lib/moto-rt",
+            ),
+            (
+                "src/sys/lib/moto-sys",
+                "/devtools/src/motor-os/sys/lib/moto-sys",
+            ),
         ] {
             assert!(config
                 .source_dirs

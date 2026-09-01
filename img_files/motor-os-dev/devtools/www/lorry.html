@@ -551,8 +551,8 @@ is no <code>lorry clippy</code>.</p>
   <tr><th>On Motor OS</th><th>Purpose</th></tr>
   <tr><td><code>/devtools/cfg/lorry.toml</code></td><td>System configuration: the Cargo compatibility version (1.99), the curl program and CA bundle, vendor targets, policy limits, native C tools, and the reviewed grants for build scripts and procedural macros.</td></tr>
   <tr><td><code>/user/cfg/lorry.toml</code></td><td>User configuration; on the image it names the user repository.</td></tr>
-  <tr><td><code>/user/cfg/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code> and <code>objects/seeded-git/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
-  <tr><td><code>/user/cfg/lorry/cache</code></td><td>The cache of compiled dependency units, shared between projects.</td></tr>
+  <tr><td><code>/devtools/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code> and <code>objects/seeded-git/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
+  <tr><td><code>/devtools/lorry/cache</code></td><td>The cache of compiled dependency units, shared between projects.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
   <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
   <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for the root package.</td></tr>

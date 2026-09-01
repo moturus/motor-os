@@ -164,7 +164,7 @@ entries.
   need `sh` explicitly configure its directory. Add a real external-`ls` tool
   round without contacting the Internet.
 - Ensure the development image retains the two directories at a documented
-  path. If the existing `/devtools/src/src/bin/gears/tools/` copy already
+  path. If the existing `/devtools/src/motor-os/bin/gears/tools/` copy already
   provides them, test that path rather than adding a second installed copy.
 - Update `README.md`, `redesign.md`, `redesign-plan.md`, and mock-provider help
   where they still describe `sh` as built in or always present.

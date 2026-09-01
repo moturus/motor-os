@@ -553,7 +553,7 @@ prebuilt crates: <code>std</code>, <code>core</code>, <code>alloc</code>,
 <code>moto_rt</code>, and their dependencies, each as an <code>.rlib</code> with its
 metadata. <code>/devtools/bin/rustc</code>, the command on <code>PATH</code>, is a two-line
 script that sets <code>TMPDIR=/devtools/tmp</code> and runs it.</p>
-<pre><code>rustc -O hello.rs -o /devtools/tmp/hello && /devtools/tmp/hello</code></pre>
+<pre><code>rustc -O /devtools/src/hello-world/hello.rs -o /devtools/tmp/hello &amp;&amp; /devtools/tmp/hello</code></pre>
 <p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
 the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
 no Cargo, Clippy, rustfmt, or rustdoc on the image; packages with dependencies are built

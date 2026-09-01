@@ -72,6 +72,7 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/user/cfg` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive configuration and credentials hidden from None |
 | `/user/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Scratch for every role and the default `TMPDIR` |
 | `/devtools/bin` | `rwxr-xr-x` | `rw-r--r--` | `rwxrwxr-x` | `r-xr-xr-x` | Fixed installed tools and Interactive-editable launcher scripts |
+| `/devtools/lorry` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive-owned Lorry repository and cache, hidden from None |
 | `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |
 | `/devtools/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Native build and test scratch |
 
@@ -99,9 +100,11 @@ Several installed trees deliberately use the default rule:
 - Most of `/system/cfg`, including the implicit `/system/cfg/ssl` directory,
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
-- `/devtools/cfg`, `/devtools/llvm`, `/devtools/lorry`, `/devtools/rust`,
-  `/devtools/tests`, and `/devtools/www` are installed content. Guest build and
-  test writes belong under `/devtools/src` or `/devtools/tmp`.
+- `/devtools/cfg`, `/devtools/llvm`, `/devtools/rust`, `/devtools/tests`, and
+  `/devtools/www` are installed content. `/devtools/lorry` is the private,
+  Interactive-writable repository and cache for the installed Lorry tool.
+  Other guest build and test writes belong under `/devtools/src` or
+  `/devtools/tmp`.
 - Development source trees staged in `/devtools/src` are consumed in place;
   project build output belongs under `/devtools/src` and scratch output under
   `/devtools/tmp`. Git dependencies are fetched by the build tool rather than

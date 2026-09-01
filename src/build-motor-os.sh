@@ -569,7 +569,8 @@ llvm_stage_image() {
 	local img="$LLVM_IMG"
 	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
 		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
-	mkdir -p "$img/devtools/bin" "$img/devtools/src" "$img/$TOOLS/bin" "$img/$TOOLS/lib" \
+	mkdir -p "$img/devtools/bin" "$img/devtools/src/hello-world" \
+		"$img/$TOOLS/bin" "$img/$TOOLS/lib" \
 		"$img/$CFG_LLVM" "$LIBC_IMG/$CFG_LIBC"
 
 	# Headers: mlibc + libc++'s c++/v1 in the fresh keyed image root.
@@ -655,7 +656,7 @@ EOF
 EOF
 
 	# Sample sources to compile natively in the VM.
-	cat > "$img/devtools/src/hello.c" << 'EOF'
+	cat > "$img/devtools/src/hello-world/hello.c" << 'EOF'
 #include <stdio.h>
 
 int main(void) {
@@ -663,7 +664,7 @@ int main(void) {
 	return 0;
 }
 EOF
-	cat > "$img/devtools/src/hello.cpp" << 'EOF'
+	cat > "$img/devtools/src/hello-world/hello.cpp" << 'EOF'
 #include <iostream>
 #include <string>
 #include <vector>
@@ -698,7 +699,7 @@ rustc_stage_image() {
 	[ ! -e "$RUSTC_IMG" ] ||
 		die "Rust image staging already exists without validated reuse: $RUSTC_IMG"
 	local rust_img="$RUSTC_IMG/devtools/rust"
-	mkdir -p "$RUSTC_IMG/devtools/bin" "$RUSTC_IMG/devtools/src" "$rust_img/bin" \
+	mkdir -p "$RUSTC_IMG/devtools/bin" "$RUSTC_IMG/devtools/src/hello-world" "$rust_img/bin" \
 		"$rust_img/lib/rustlib/$TARGET"
 
 	# The compiler, stripped (~154 MB -> ~98 MB).
@@ -728,7 +729,7 @@ EOF
 	# LLVM stage — nothing to stage here.)
 
 	# A sample source exercising HashMap, sorting, and thread spawn/join.
-	cat > "$RUSTC_IMG/devtools/src/hello.rs" << 'EOF'
+	cat > "$RUSTC_IMG/devtools/src/hello-world/hello.rs" << 'EOF'
 use std::collections::HashMap;
 
 fn main() {

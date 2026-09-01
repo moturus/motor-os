@@ -489,6 +489,17 @@ trees:
             "rwxrwx---"
         );
         assert_eq!(
+            mode_string(policy.directory_permissions(Path::new("/devtools/lorry/cache"))),
+            "rwxrwx---"
+        );
+        assert_eq!(
+            mode_string(policy.file_permissions(
+                Path::new("/devtools/lorry/vendor/repository.toml"),
+                FileClass::Regular
+            )),
+            "rw-rw----"
+        );
+        assert_eq!(
             mode_string(
                 policy.file_permissions(Path::new("/system/cfg/sshd.toml"), FileClass::Regular)
             ),

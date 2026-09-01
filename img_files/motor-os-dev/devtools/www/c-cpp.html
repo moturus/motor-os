@@ -527,8 +527,8 @@ below are deliberate properties of the system, described in detail on the
 <p><code>cc</code> and <code>c++</code> in <code>/devtools/bin</code> are short scripts over
 the LLVM multicall binary in <code>/devtools/llvm/bin</code>; headers are under
 <code>/devtools/llvm/include</code> and the libraries under <code>/devtools/llvm/lib</code>.
-The samples in <code>/devtools/src</code> build like this:</p>
-<pre><code>cd /devtools/src
+The samples in <code>/devtools/src/hello-world</code> build like this:</p>
+<pre><code>cd /devtools/src/hello-world
 cc -O2 hello.c -o /devtools/tmp/hello && /devtools/tmp/hello
 c++ -O2 hello.cpp -o /devtools/tmp/hello-cpp && /devtools/tmp/hello-cpp</code></pre>
 <p>A freshly linked program is executable by its creator and by higher roles, so it can

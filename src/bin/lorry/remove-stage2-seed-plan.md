@@ -26,7 +26,7 @@ The image will ship a small `/devtools/cfg/lorry.toml` that configures:
   required by Lorry's security model.
 
 The user layer, `/user/cfg/lorry.toml`, configures
-`/user/cfg/lorry/vendor` as the writable dependency repository.
+`/devtools/lorry/vendor` as the writable dependency repository.
 
 It will not configure a system dependency repository or pre-approve ordinary
 package identities. From a newly booted image, each supported native source
@@ -60,7 +60,7 @@ the explicit executable-code grants in the installed configuration.
    capability grants described above.
 2. Stop `src/build-motor-os.sh` from checking for or invoking the Stage 2 seed
    installer. The generated Rust toolchain root will contain rustc and its
-   sysroot, but no `/devtools/lorry/vendor` payload or generated Lorry policy.
+   sysroot, but no preinstalled dependency objects or generated Lorry policy.
 3. Eliminate `prepare_dev_sources.py`. Point the imager directly at the
    supported canonical source directories and preserve their repository-relative layout
    below `/devtools/src`, so their `moto-rt` and `moto-sys` paths need no Python

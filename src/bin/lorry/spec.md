@@ -167,7 +167,7 @@ root compilation, freshness validation, and artifact publication.
   Project cleaning never removes the per-user immutable-unit cache.
 - `cache clean` requires no current package and removes exactly
   the configured global cache directory. Its default is `$HOME/.cache/lorry`
-  on Linux and `/user/cfg/lorry/cache` on Motor. An absent cache is success. A
+  on Linux and `/devtools/lorry/cache` on Motor. An absent cache is success. A
   cache root that is a file or symbolic link is rejected rather than traversed
   or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
@@ -638,7 +638,7 @@ tools, admission rules/limits, required patches, and system constraints.
 
 `cache.directory` is an absolute normalized path owned by system or user
 configuration; repository-local configuration cannot set it. It defaults to
-`$HOME/.cache/lorry` on Linux and `/user/cfg/lorry/cache` on Motor. It must not
+`$HOME/.cache/lorry` on Linux and `/devtools/lorry/cache` on Motor. It must not
 be a filesystem root or overlap a dependency repository. Lorry creates it on
 the first build that needs cache storage.
 
@@ -993,7 +993,7 @@ Lorry stores verified library and procedural-macro outputs plus build-script
 Immutable crates.io units and reviewed required-patch units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
-`/user/cfg/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
+`/devtools/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
 selects another root. Mutable path-package units are stored in the project
 below `target/lorry/.cache/v1/units/sha256/`. Root linked artifacts, tests, and
 incremental state are not unit-cache entries.
@@ -1055,10 +1055,11 @@ manifest, and executable modes.
 Lorry's executable does not bootstrap an OS image. Motor's development image
 installs a user configuration for its writable repository and a system
 configuration for network and native-tool paths, limits, and exact
-executable-code grants. It installs no
-dependency repository: a fresh project must run networked `vendor` before its
-offline build. Imager inputs, debug/release image selection, VM launch, and
-layout validation remain outside this product boundary.
+executable-code grants. It installs an empty writable repository under
+`/devtools/lorry/vendor`, but no dependency objects: a fresh project must run
+networked `vendor` before its offline build. Imager inputs, debug/release image
+selection, VM launch, and layout validation remain outside this product
+boundary.
 
 The original dependency-free source was directly bootstrap-compilable with
 rustc. The current source pins the reviewed

@@ -370,7 +370,7 @@ fn current_environment() -> BTreeMap<String, String> {
 
 fn default_cache_directory(environment: &BTreeMap<String, String>, motor: bool) -> Result<PathBuf> {
     if motor {
-        return Ok(PathBuf::from("/user/cfg/lorry/cache"));
+        return Ok(PathBuf::from("/devtools/lorry/cache"));
     }
     let home = environment.get("HOME").ok_or_else(|| {
         Error::failure("HOME is required to locate Lorry's global build cache")
@@ -2117,7 +2117,7 @@ mod tests {
         );
         assert_eq!(
             default_cache_directory(&BTreeMap::new(), true).unwrap(),
-            Path::new("/user/cfg/lorry/cache")
+            Path::new("/devtools/lorry/cache")
         );
         assert!(default_cache_directory(&BTreeMap::new(), false).is_err());
     }

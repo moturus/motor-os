@@ -124,21 +124,32 @@ done
 
 echo "-- Developer source trees --"
 for package in red lorry; do
-  vm_ssh "[ -f /devtools/src/src/bin/$package/Cargo.toml ]" ||
-    fail "developer image is missing /devtools/src/src/bin/$package/Cargo.toml"
-  vm_ssh "[ ! -d /devtools/src/src/bin/$package/target ]" ||
-    fail "developer image contains /devtools/src/src/bin/$package/target"
-  vm_ssh "[ ! -d /devtools/src/src/bin/$package/.lorry/vendor ]" ||
+  vm_ssh "[ -f /devtools/src/motor-os/bin/$package/Cargo.toml ]" ||
+    fail "developer image is missing /devtools/src/motor-os/bin/$package/Cargo.toml"
+  vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/target ]" ||
+    fail "developer image contains /devtools/src/motor-os/bin/$package/target"
+  vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/.lorry/vendor ]" ||
     fail "developer image contains materialized dependencies for $package"
 done
-vm_ssh "[ ! -e /devtools/src/src/bin/curl ]" ||
+vm_ssh "[ ! -e /devtools/src/motor-os/bin/curl ]" ||
   fail "developer image exposes curl as a Motor-native source project"
 for package in moto-rt moto-sys; do
-  vm_ssh "[ -f /devtools/src/src/sys/lib/$package/Cargo.toml ]" ||
-    fail "developer image is missing /devtools/src/src/sys/lib/$package/Cargo.toml"
+  vm_ssh "[ -f /devtools/src/motor-os/sys/lib/$package/Cargo.toml ]" ||
+    fail "developer image is missing /devtools/src/motor-os/sys/lib/$package/Cargo.toml"
 done
-vm_ssh "[ ! -e /devtools/lorry/vendor ]" ||
-  fail "developer image still contains a Lorry system seed"
+vm_ssh "[ -f /devtools/lorry/vendor/repository.toml ]" ||
+  fail "developer image is missing the writable Lorry repository"
+vm_ssh "[ -d /devtools/lorry/cache ]" ||
+  fail "developer image is missing the Lorry cache directory"
+vm_ssh "[ ! -e /user/cfg/lorry ]" ||
+  fail "developer image still contains the old Lorry state directory"
+vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/vendor/objects -type f)\" ]" ||
+  fail "developer image contains preinstalled Lorry dependency objects"
+vm_ssh "[ -f /devtools/lorry/readme.txt ]" ||
+  fail "developer image is missing /devtools/lorry/readme.txt"
+expect_guest_mode /devtools lorry drwxrwx--- "Lorry state directory"
+expect_guest_mode /devtools/lorry vendor drwxrwx--- "Lorry repository directory"
+expect_guest_mode /devtools/lorry cache drwxrwx--- "Lorry cache directory"
 vm_ssh "[ -r /system/cfg/ssl/ca-certificates.crt ]" ||
   fail "developer image is missing the public CA trust bundle"
 vm_ssh "[ -f /user/cfg/lorry.toml ]" ||
@@ -151,13 +162,13 @@ case "$cc_version" in
   *) fail "native cc --version returned unexpected output: $cc_version" ;;
 esac
 vm_ssh "/devtools/bin/cc /devtools/src/native-fstat.c -o /devtools/tmp/native-fstat"
-vm_ssh "/devtools/bin/cc /devtools/src/hello.c -o /devtools/tmp/hello-c"
+vm_ssh "/devtools/bin/cc /devtools/src/hello-world/hello.c -o /devtools/tmp/hello-c"
 expect_guest_mode /devtools/tmp native-fstat -rwxr-xr-- "freshly linked native-fstat"
 expect_guest_mode /devtools/tmp hello-c -rwxr-xr-- "freshly linked hello-c"
 vm_ssh /devtools/tmp/hello-c
-vm_ssh "/devtools/bin/c++ /devtools/src/hello.cpp -o /devtools/tmp/hello-cpp"
+vm_ssh "/devtools/bin/c++ /devtools/src/hello-world/hello.cpp -o /devtools/tmp/hello-cpp"
 vm_ssh /devtools/tmp/hello-cpp
-vm_ssh "/devtools/bin/rustc /devtools/src/hello.rs -o /devtools/tmp/hello-rust"
+vm_ssh "/devtools/bin/rustc /devtools/src/hello-world/hello.rs -o /devtools/tmp/hello-rust"
 vm_ssh /devtools/tmp/hello-rust
 [ "$(vm_ssh /devtools/tmp/native-fstat)" = "native-fstat PASS" ] ||
   fail "native non-PTY fstat fixture failed"
@@ -193,20 +204,26 @@ vm_ssh "/devtools/bin/rustc /devtools/tmp/temp-contract.rs -o /devtools/tmp/temp
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
 for package in red; do
-  vm_ssh "cd /devtools/src/src/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
-    fail "developer image cannot vendor /devtools/src/src/bin/$package"
-  vm_ssh "cd /devtools/src/src/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
+  vm_ssh "cd /devtools/src/motor-os/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
+    fail "developer image cannot vendor /devtools/src/motor-os/bin/$package"
+  vm_ssh "cd /devtools/src/motor-os/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
     fail "developer image cannot natively build /devtools/src/$package"
-  expect_nested_guest_mode "/devtools/src/src/bin/$package/target/lorry/debug/build" \
+  expect_nested_guest_mode "/devtools/src/motor-os/bin/$package/target/lorry/debug/build" \
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
-  vm_ssh "/system/bin/rm -r /devtools/src/src/bin/$package/target"
+  vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
 done
-vm_ssh "cd /devtools/src/src/bin/lorry && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
-  fail "developer image cannot vendor /devtools/src/src/bin/lorry"
-vm_ssh "cd /devtools/src/src/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
+vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/vendor/objects -type f)\" ]" ||
+  fail "Lorry did not populate /devtools/lorry/vendor"
+vm_ssh "[ -n \"\$(/system/bin/find /devtools/lorry/cache -type f)\" ]" ||
+  fail "Lorry did not populate /devtools/lorry/cache"
+vm_ssh "[ ! -e /user/cfg/lorry ]" ||
+  fail "Lorry recreated its old state directory"
+vm_ssh "cd /devtools/src/motor-os/bin/lorry && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
+  fail "developer image cannot vendor /devtools/src/motor-os/bin/lorry"
+vm_ssh "cd /devtools/src/motor-os/bin/lorry && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
   fail "developer image cannot natively build /devtools/src/lorry"
-vm_ssh "/system/bin/cp /devtools/src/src/bin/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
-vm_ssh "/system/bin/rm -r /devtools/src/src/bin/lorry/target"
+vm_ssh "/system/bin/cp /devtools/src/motor-os/bin/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
+vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/lorry/target"
 
 stop_vm "$VMM_PID"
 VMM_PID=""

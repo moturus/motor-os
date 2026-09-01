@@ -129,7 +129,7 @@ Inside the development VM:
 
 ```sh
 /devtools/bin/rustc --version
-/devtools/bin/rustc /devtools/src/hello.rs -o /user/tmp/hello
+/devtools/bin/rustc /devtools/src/hello-world/hello.rs -o /user/tmp/hello
 /user/tmp/hello
 ```
 
