@@ -894,25 +894,21 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 5);
+        assert_eq!(config.source_dirs.len(), 3);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
             ("src/bin/gears", "/devtools/src/motor-os/bin/gears"),
-            (
-                "src/sys/lib/moto-rt",
-                "/devtools/src/motor-os/sys/lib/moto-rt",
-            ),
-            (
-                "src/sys/lib/moto-sys",
-                "/devtools/src/motor-os/sys/lib/moto-sys",
-            ),
         ] {
             assert!(config
                 .source_dirs
                 .iter()
                 .any(|dir| dir.source == source && dir.destination == destination));
         }
+        assert!(config
+            .source_dirs
+            .iter()
+            .all(|dir| !dir.destination.starts_with("/devtools/src/motor-os/sys")));
     }
 
     #[test]

@@ -135,7 +135,7 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
 done
 
 echo "-- Developer source trees --"
-for package in red lorry; do
+for package in red gears lorry; do
   vm_ssh "[ -f /devtools/src/motor-os/bin/$package/Cargo.toml ]" ||
     fail "developer image is missing /devtools/src/motor-os/bin/$package/Cargo.toml"
   vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/target ]" ||
@@ -145,10 +145,8 @@ for package in red lorry; do
 done
 vm_ssh "[ ! -e /devtools/src/motor-os/bin/curl ]" ||
   fail "developer image exposes curl as a Motor-native source project"
-for package in moto-rt moto-sys; do
-  vm_ssh "[ -f /devtools/src/motor-os/sys/lib/$package/Cargo.toml ]" ||
-    fail "developer image is missing /devtools/src/motor-os/sys/lib/$package/Cargo.toml"
-done
+vm_ssh "[ ! -e /devtools/src/motor-os/sys ]" ||
+  fail "developer image stages Motor OS library sources under /devtools/src/motor-os/sys"
 for source in "${NATIVE_FIXTURES[@]}"; do
   vm_ssh "[ ! -e /devtools/src/$source ]" ||
     fail "developer image contains test-only source /devtools/src/$source"
@@ -231,7 +229,7 @@ vm_ssh "/devtools/bin/rustc /devtools/tmp/temp-contract.rs -o /devtools/tmp/temp
 
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
-for package in red; do
+for package in red gears; do
   vm_ssh "cd /devtools/src/motor-os/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
     fail "developer image cannot vendor /devtools/src/motor-os/bin/$package"
   vm_ssh "cd /devtools/src/motor-os/bin/$package && TMPDIR=/devtools/tmp /devtools/bin/lorry build" ||
