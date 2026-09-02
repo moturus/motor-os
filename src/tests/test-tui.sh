@@ -59,6 +59,7 @@ RMUX_TMPDIR="$TEST_TMP/test-tui-rmux"
 GUEST_KEY="$TEST_TMP/test-tui.key"
 GUEST_KNOWN="$TEST_TMP/test-tui-known-hosts"
 GUEST_STREAM_HELPER="$TEST_TMP/test-tui-stream-child.sh"
+GUEST_HELIX_ROOT=""
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -125,6 +126,14 @@ remove_test_root() {
   fi
 }
 
+remove_helix_fixtures() {
+  if [ -n "$GUEST_HELIX_ROOT" ] && [ -n "$VMM_PID" ] &&
+    kill -0 "$VMM_PID" 2>/dev/null; then
+    vm_ssh "/system/bin/rm -r $GUEST_HELIX_ROOT" >/dev/null 2>&1 || true
+    GUEST_HELIX_ROOT=""
+  fi
+}
+
 cleanup() {
   set +e
   if [ -n "$PTY_IN_FD" ]; then
@@ -138,6 +147,7 @@ cleanup() {
     wait "$PTY_PID" 2>/dev/null
   fi
   remove_ssh_fixtures
+  remove_helix_fixtures
   remove_test_root
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -321,6 +331,23 @@ start_nested_pty() {
   local command="$1"
 
   start_pty "$command; nested_status=\$?; printf '\\033[?2048\\044p'; printf MODE_QUERY_READY; read -r mode_state; printf '\\nMODE_STATE=%s NESTED_STATUS=%s\\n' \"\$mode_state\" \"\$nested_status\"; exit \"\$nested_status\""
+}
+
+check_helix_terminal_restore() {
+  local label="$1"
+  local mode
+
+  for mode in 1049 1004 2004; do
+    case "$HELIX_TERMINAL_OUTPUT" in
+      *$'\033'"[?${mode}h"*$'\033'"[?${mode}l"*) ;;
+      *) fail "$label did not enable and restore terminal mode $mode" ;;
+    esac
+  done
+  for mode in 1000 1002 1003 1006; do
+    case "$HELIX_TERMINAL_OUTPUT" in
+      *$'\033'"[?${mode}h"*) fail "$label enabled mouse mode $mode" ;;
+    esac
+  done
 }
 
 finish_nested_pty() {
@@ -516,6 +543,115 @@ start_pty "$GUEST_SSH -T motor@127.0.0.1 TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl
 wait_pty_output "CTRL_C_DEFAULT_READY" "nested ssh non-pty Ctrl+C"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "nested ssh non-pty Ctrl+C"
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  echo "-- Helix editor --"
+  . "$ROOT_DIR/src/toolchain-versions.sh"
+  [ -n "${HELIX_REV:-}" ] || fail "HELIX_REV is not configured"
+
+  helix_bin=/devtools/helix/hx
+  helix_short_rev="${HELIX_REV:0:8}"
+  GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
+  helix_config="$GUEST_HELIX_ROOT/config"
+  helix_cache="$GUEST_HELIX_ROOT/cache"
+  helix_tmp="$GUEST_HELIX_ROOT/tmp"
+  helix_env="XDG_CONFIG_HOME=$helix_config XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
+  helix_health_env="$helix_env NO_COLOR=1"
+  for path in "$GUEST_HELIX_ROOT" "$helix_config" "$helix_cache" "$helix_tmp"; do
+    vm_ssh "/system/bin/mkdir $path" || fail "cannot create Helix fixture directory $path"
+  done
+
+  out="$(vm_ssh "$helix_env $helix_bin --version")"
+  case "$out" in
+    *"helix 25.07.1 ($helix_short_rev)"*) ;;
+    *) fail "Helix version does not identify the pinned fork: '$out'" ;;
+  esac
+  out="$(vm_ssh "$helix_health_env $helix_bin --health")"
+  printf '%s\n' "$out" | grep -Fq '/devtools/helix/runtime' ||
+    fail "Helix health omitted the compiled runtime path: '$out'"
+  for language in rust toml markdown markdown.inline c cpp json yaml bash lua; do
+    out="$(vm_ssh "$helix_health_env $helix_bin --health $language")"
+    printf '%s\n' "$out" | grep -Fxq 'Tree-sitter parser: ✓' ||
+      fail "Helix $language health did not load its static parser: '$out'"
+  done
+
+  helix_edit="$GUEST_HELIX_ROOT/helix-ssh-edit.rs"
+  vm_ssh "printf '' > $helix_edit"
+  start_pty "$helix_env $helix_bin $helix_edit"
+  wait_pty_output "helix-ssh-edit.rs" "Helix SSH edit"
+  printf 'iHELIX_SAVE_OK' >&"$PTY_IN_FD"
+  wait_pty_output "INS" "Helix SSH insert mode"
+  HELIX_TERMINAL_OUTPUT="$PTY_OUTPUT"
+  PTY_OUTPUT=""
+  printf '\033' >&"$PTY_IN_FD"
+  wait_pty_output "NOR" "Helix SSH normal mode"
+  printf ':wq\r' >&"$PTY_IN_FD"
+  finish_pty 0 "Helix SSH edit"
+  HELIX_TERMINAL_OUTPUT+="$PTY_OUTPUT"
+  check_helix_terminal_restore "Helix SSH edit"
+  vm_ssh "[ \"\$(cat $helix_edit)\" = HELIX_SAVE_OK ] && [ \"\$(wc -c < $helix_edit)\" = 14 ]" ||
+    fail "Helix SSH save did not preserve the exact bytes"
+
+  helix_ctrl="$GUEST_HELIX_ROOT/helix-ctrl-c.rs"
+  vm_ssh "echo HELIX_CTRL_C_PROBE > $helix_ctrl"
+  start_pty "$helix_env $helix_bin $helix_ctrl"
+  wait_pty_output "helix-ctrl-c.rs" "Helix Ctrl+C"
+  PTY_OUTPUT=""
+  printf '\003' >&"$PTY_IN_FD"
+  wait_pty_output "[+]" "Helix Ctrl+C redraw"
+  printf ':q!\r' >&"$PTY_IN_FD"
+  finish_pty 0 "Helix Ctrl+C"
+
+  helix_resize="$GUEST_HELIX_ROOT/helix-resize.rs"
+  vm_ssh "echo HELIX_RESIZE_PROBE > $helix_resize"
+  start_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 $helix_env $helix_bin $helix_resize"
+  wait_pty_output "helix-resize.rs" "Helix resize startup"
+  PTY_OUTPUT=""
+  printf '\033[48;20;60;0;0t' >&"$PTY_IN_FD"
+  wait_pty_output "helix-resize.rs" "Helix resize redraw"
+  printf ':q!\r' >&"$PTY_IN_FD"
+  finish_pty 0 "Helix resize"
+
+  helix_shell="$GUEST_HELIX_ROOT/helix-shell.rs"
+  vm_ssh "echo HELIX_SHELL_PROBE > $helix_shell"
+  start_pty "$helix_env $helix_bin $helix_shell"
+  wait_pty_output "helix-shell.rs" "Helix shell command"
+  PTY_OUTPUT=""
+  printf ':' >&"$PTY_IN_FD"
+  wait_pty_output ":" "Helix shell prompt"
+  PTY_OUTPUT=""
+  printf '\033[200~sh echo HELIX_SHELL_OK\033[201~' >&"$PTY_IN_FD"
+  wait_pty_output "HELIX_SHELL_OK" "Helix shell command line"
+  PTY_OUTPUT=""
+  printf '\r' >&"$PTY_IN_FD"
+  wait_pty_output "HELIX_SHELL_OK" "Helix shell command"
+  PTY_OUTPUT=""
+  printf '\033' >&"$PTY_IN_FD"
+  wait_pty_output "  ~" "Helix shell popup dismissal"
+  printf ':q!\r' >&"$PTY_IN_FD"
+  finish_pty 0 "Helix shell command"
+
+  helix_rmux="$GUEST_HELIX_ROOT/helix-rmux-edit.rs"
+  vm_ssh "printf '' > $helix_rmux"
+  start_pty "TMPDIR=$RMUX_TMPDIR /user/bin/rmux new -s helix-tui"
+  wait_pty_output "motor-os" "Helix rmux shell"
+  printf '%s %s %s\n' "$helix_env" "$helix_bin" "$helix_rmux" >&"$PTY_IN_FD"
+  wait_pty_output "helix-rmux-edit.rs" "Helix rmux edit"
+  printf 'iHELIX_RMUX_OK' >&"$PTY_IN_FD"
+  wait_pty_output "INS" "Helix rmux insert mode"
+  PTY_OUTPUT=""
+  printf '\033' >&"$PTY_IN_FD"
+  wait_pty_output "NOR" "Helix rmux normal mode"
+  PTY_OUTPUT=""
+  printf ':wq\r' >&"$PTY_IN_FD"
+  wait_pty_output "motor-os" "Helix rmux shell restoration"
+  printf 'exit\n' >&"$PTY_IN_FD"
+  finish_pty 0 "Helix rmux edit"
+  vm_ssh "[ \"\$(cat $helix_rmux)\" = HELIX_RMUX_OK ] && [ \"\$(wc -c < $helix_rmux)\" = 14 ]" ||
+    fail "Helix rmux save did not preserve the exact bytes"
+
+  remove_helix_fixtures
+fi
 
 remove_ssh_fixtures
 remove_test_root
