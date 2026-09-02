@@ -21,7 +21,7 @@ toolchain_validate_versions
   fail "unexpected Helix repository"
 [ "$HELIX_REF" = refs/heads/helix-motor-25.7.1_2026-08-31 ] ||
   fail "unexpected Helix ref"
-[ "$HELIX_REV" = ef325fc1797466d5f764fc67b4a55001afb58942 ] ||
+[ "$HELIX_REV" = af99cdcece46ac897672dd2d2b2238be835d2018 ] ||
   fail "unexpected Helix revision"
 expected_llvm_tools='llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt'
 [ "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[*]}" = "$expected_llvm_tools" ] ||

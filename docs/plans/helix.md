@@ -1,10 +1,10 @@
 # Helix 25.07.1 on Motor OS — implementation record
 
 Stages 1-3 of the Helix port are complete. They were implemented and validated
-between 2026-08-31 and 2026-09-01. Stage 4, local rust-analyzer integration,
+between 2026-08-31 and 2026-09-02. Stage 4, local rust-analyzer integration,
 remains deliberately deferred.
 
-The result is a cross-compiled, static-PIE `hx` with ten statically linked
+The result is a cross-compiled, static-PIE `hx` with eleven statically linked
 tree-sitter grammars. It is staged only in the Motor OS development image at
 `/devtools/helix`; it is not part of the base or standard image and is not
 added to `PATH`.
@@ -29,8 +29,8 @@ the core-OS gates below.
 | Component | Branch or base | Exact revision |
 | --- | --- | --- |
 | Upstream Helix base | tag `25.07.1` | `a05c151bb6e8e9c65ec390b0ae2afe7a5efd619b` |
-| Moturus Helix | `helix-motor-25.7.1_2026-08-31` | `ef325fc1797466d5f764fc67b4a55001afb58942` |
-| Moturus Helix tree | — | `d611c1f5886dbcc3f496969651d4bcc33902fc4a` |
+| Moturus Helix | `helix-motor-25.7.1_2026-08-31` | `af99cdcece46ac897672dd2d2b2238be835d2018` |
+| Moturus Helix tree | — | `b45897570c0571599cbecb862a6c8b6f14f9cfd2` |
 | tree-house bindings base | release 0.2.4 | `eba8670857365ff6dd4560d1f2e8df770c2c795a` |
 | Moturus tree-house | `tree-house-bindings-motor-0.2.4_2026-08-31` | `06744f59815246da0d9a77fbca3d071cfe447be1` |
 | Moturus tree-house tree | — | `b88394b1ab5beb10041a44d4f30cf6211a52c0d7` |
@@ -124,12 +124,16 @@ vendored.
 | TOML | `7cff70bbcbbc62001b465603ca1ea88edd668704` |
 | Markdown | `62516e8c78380e3b51d5b55727995d2c511436d8` |
 | Markdown inline | `62516e8c78380e3b51d5b55727995d2c511436d8` |
+| HTML | `cbb91a0ff3621245e890d1c50cc811bffb77a26b` |
 | C | `7175a6dd5fc1cee660dce6fe23f6043d75af424a` |
 | C++ | `56455f4245baf4ea4e0881c5169de69d7edd5ae7` |
 | JSON | `73076754005a460947cafe8e03a8cf5fa4fa2938` |
 | YAML | `0e36bed171768908f331ff7dff9d956bae016efb` |
 | Bash | `487734f87fd87118028a65a4599352fa99c9cde8` |
 | Lua | `88e446476a1e97a8724dff7a23e2d709855077f2` |
+
+HTML was added on 2026-09-02 after the initial ten-grammar image omitted its
+parser. Its existing runtime queries required no changes.
 
 The Rust grammar was intentionally advanced from the release's
 `1f63b33efee17e833e0ea29266dd3d713e27e321` pin. The generated parser kept the
@@ -140,7 +144,7 @@ complexity.
 
 ### Static registry and network behavior
 
-`helix-static-grammars` verifies each vendored `REVISION`, compiles the ten
+`helix-static-grammars` verifies each vendored `REVISION`, compiles the eleven
 parsers into the Motor binary, and exposes a feature-gated name-to-`LanguageFn`
 registry. `helix-loader` converts that function through tree-house and never
 constructs a shared-library path on Motor. Unknown or unselected grammars
@@ -198,7 +202,7 @@ Helix assembly root and executable; the standard image explicitly does not.
 
 The existing TUI harness tests the development image without adding another
 VM boot. With isolated XDG and temporary directories it verifies the exact
-`25.07.1` version and fork revision, runtime discovery, all ten health/parser
+`25.07.1` version and fork revision, runtime discovery, all eleven health/parser
 results, SSH editing and saving, literal Ctrl+C behavior, resize redraw,
 `:sh`, absence of mouse enablement, terminal restoration, and edit/save/exit
 inside an rmux pane.

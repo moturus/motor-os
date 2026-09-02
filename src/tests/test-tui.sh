@@ -569,7 +569,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   out="$(vm_ssh "$helix_health_env $helix_bin --health")"
   printf '%s\n' "$out" | grep -Fq '/devtools/helix/runtime' ||
     fail "Helix health omitted the compiled runtime path: '$out'"
-  for language in rust toml markdown markdown.inline c cpp json yaml bash lua; do
+  for language in rust toml markdown markdown.inline html c cpp json yaml bash lua; do
     out="$(vm_ssh "$helix_health_env $helix_bin --health $language")"
     printf '%s\n' "$out" | grep -Fxq 'Tree-sitter parser: ✓' ||
       fail "Helix $language health did not load its static parser: '$out'"
