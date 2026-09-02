@@ -58,6 +58,8 @@ moto-sys-io  = { path = "lib/moto-sys-io"     }
 
 crossterm    = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
+parking_lot  = { git = "https://github.com/moturus/parking_lot.git", rev = "bae5531d97330ee51ce59e4cb4322f5d4e426305" }
+parking_lot_core = { git = "https://github.com/moturus/parking_lot.git", rev = "bae5531d97330ee51ce59e4cb4322f5d4e426305" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
 
 [profile.dev]
