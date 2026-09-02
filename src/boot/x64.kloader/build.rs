@@ -40,6 +40,11 @@ fn main() {
     println!("cargo:rerun-if-changed=kloader.json");
     println!("cargo:rerun-if-changed=layout.ld");
 
+    println!("cargo:rerun-if-env-changed=MOTO_KERNEL_ELF");
+    if let Ok(kernel) = std::env::var("MOTO_KERNEL_ELF") {
+        println!("cargo:rerun-if-changed={kernel}");
+    }
+
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     build_bootup_bsp(&out_dir);

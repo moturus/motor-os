@@ -34,6 +34,22 @@ struct KernelBootupInfo {
     num_cpus: u32,
 }
 
+// The kernel ELF is at its load address already when the VMM's PVH loader
+// placed it there from the kloader ELF (see layout.ld). VM RAM starts
+// zeroed, so the ELF magic tells that apart from the BIOS path, where
+// kloader.bin runs and the kernel is in the initrd.
+fn kernel_in_place() -> Option<&'static [u8]> {
+    let addr = crate::mm::kernel_offset() as usize as *const u8;
+    let mut magic = [0_u8; 4];
+    for (idx, byte) in magic.iter_mut().enumerate() {
+        *byte = unsafe { core::ptr::read_volatile(addr.add(idx)) };
+    }
+    if magic != *b"\x7fELF" {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts(addr, crate::KERNEL_IMAGE_LEN) })
+}
+
 pub fn load_kernel_bsp(pvh: &'static crate::pvh::PvhStartInfo, num_cpus: u32, start_tsc: u64) -> ! {
     #[cfg(debug_assertions)]
     crate::raw_log!("load_kernel_bsp start\n");
@@ -41,7 +57,9 @@ pub fn load_kernel_bsp(pvh: &'static crate::pvh::PvhStartInfo, num_cpus: u32, st
     // We just load the kernel into its high address and jump there. The rest is
     // the kernel's responsibility.
     // crate::raw_log!("loading the kernel\n");
-    let kernel_bytes = {
+    let kernel_bytes = if let Some(bytes) = kernel_in_place() {
+        bytes
+    } else {
         let initrd_bytes = pvh.initrd_bytes();
         #[cfg(debug_assertions)]
         {
@@ -155,12 +173,12 @@ impl ElfLoader for KernelLoader {
     }
 
     fn load(&mut self, _flags: Flags, base: VAddr, region: &[u8]) -> Result<(), ElfLoaderErr> {
+        let dest = (crate::mm::kernel_offset() + base) as usize as *mut u8;
+        if region.as_ptr() as usize == dest as usize {
+            return Ok(()); // Placed by the VMM: file and memory layouts agree.
+        }
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                region.as_ptr(),
-                (crate::mm::kernel_offset() + base) as usize as *mut u8,
-                region.len(),
-            );
+            core::ptr::copy_nonoverlapping(region.as_ptr(), dest, region.len());
         }
         Ok(())
     }

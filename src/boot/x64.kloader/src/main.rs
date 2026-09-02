@@ -40,6 +40,16 @@ const AP_BOOTUP_ADDR: u64 = 0xc000;
 static AP_BOOTUP_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bootup_ap"));
 static AP_READY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+// The kernel ELF, placed at KERNEL_PHYS_START by the VMM's PVH loader (see
+// layout.ld). Never read through this symbol: loader.rs checks the load
+// address for it, which in kloader.bin (the BIOS path) holds no kernel.
+// Exported rather than #[used], which would mark the section "retain" and
+// keep objcopy from dropping it out of kloader.bin.
+#[link_section = ".kernel_image"]
+#[no_mangle]
+pub static KERNEL_IMAGE: [u8; KERNEL_IMAGE_LEN] = *include_bytes!(env!("MOTO_KERNEL_ELF"));
+pub const KERNEL_IMAGE_LEN: usize = include_bytes!(env!("MOTO_KERNEL_ELF")).len();
+
 fn start_aps(num_cpus: uCpus) {
     assert!(AP_BOOTUP_CODE.len() as u64 <= PAGE_SIZE_SMALL);
     let ap_bootup_addr = AP_BOOTUP_ADDR;

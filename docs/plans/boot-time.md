@@ -24,7 +24,9 @@ savings shrink, but the ranking of the items should hold.
 | sys-io text and rodata mapped from the kernel's copy, not copied | feea1c12 | 55 -> 48 ms |
 | 2 MB MMIO page not zeroed by the kernel | 78953342 | runtime::init 5-6 ms -> 0 |
 | sys-tty spawned before strobe; immediate retries | 0ef1e2a5 | console line 43-49 -> 37-40 ms |
-| sys-io mapped from the initrd instead of copied (kernel item 1) | uncommitted, 84 lines | kernel 19-21 -> 5-7 ms; see below |
+| sys-io mapped from the initrd instead of copied (kernel item 1) | 78e8042b | kernel 19-21 -> 5-7 ms; see below |
+| hugepage backing in the launcher scripts | 16d65919 | pool used when present; see the hugepage section |
+| the VMM places the kernel (kernel item 2) | uncommitted, 63 lines | kloader 9-14 -> 2.5-6 ms on cloud-hypervisor, 7-7.6 -> 2.4-3.2 on Firecracker |
 
 The userspace phase ("kernel up" to the console line) is now 35-37 ms on
 cloud-hypervisor and Firecracker. What remains there is in the plan below
@@ -74,6 +76,46 @@ taken off the critical path instead of moved along it. About 15 lines.
 
 Validation: `full-test.sh --release` twice, 668 legs each, all passed.
 Over ssh the services list and `/user` read back as before.
+
+## Kernel item 2 done: the VMM places the kernel (2026-09-02)
+
+The kloader ELF now carries the kernel ELF as its own PT_LOAD segment at
+physical 34 MB (`src/boot/x64.kloader/layout.ld`, `.kernel_image`; the
+bytes come from `include_bytes!` of the built kernel, so `make kloader`
+depends on `kernel`). Every PVH loader (cloud-hypervisor, Firecracker,
+QEMU `-kernel`) writes the segment there while loading the kloader, at
+host speed. The kloader checks for the ELF magic at 34 MB: present, it
+parses the headers in place and its `load` callback skips the copy when
+source and destination coincide (the kernel's single segment has file
+offset 0 at virtual address 0, so the file layout is the memory layout);
+absent, as on the BIOS path where `kloader.bin` runs and the RAM is
+untouched, it copies from the initrd as before. Relocations are applied
+in place either way.
+
+`kloader.bin` (the flat image inside the initrd) is made from the ELF's
+allocated sections except `.kernel_image`; a removed section's segment
+would otherwise pad the flat image out to 34 MB. Two details in
+`layout.ld` keep the sizes right: the `.eh_frame*` and `.got` sections
+are placed explicitly, before `.data`, so nothing is placed after the kernel
+image and no read-only section sits right before it (lld would put both
+in one segment and write the 33 MB gap into the file). `build.sh` fails
+if either file grows past that.
+
+Same-sitting A/B, copy path forced against in place, TSC cycles from the
+kloader's entry to the jump into the kernel, at 2112 MHz:
+
+| launcher | copy | in place |
+|---|---|---|
+| cloud-hypervisor (4 runs) | 8.9-13.8 ms | 2.5-6.2 ms |
+| Firecracker (2 runs) | 7.1-7.6 ms | 2.4-3.2 ms |
+
+What is left in the kloader is the AP start (item 3) and the ACPI parse.
+The kloader ELF is 520 KB instead of 77 KB; the initrd is unchanged (the
+BIOS path still needs the kernel in it). All four boot paths were booted
+to the console after the change: cloud-hypervisor, Firecracker, QEMU
+`-kernel`, and QEMU through the BIOS and MBR loader from the disk image.
+
+Validation: `full-test.sh --release` twice, 668 legs each, all passed.
 
 ## Where the time goes now
 
@@ -207,14 +249,7 @@ Kernel and kloader:
    pre-read of its pages, if the 6-11 ms shift into userspace on nested
    hosts is worth 15 lines.
 
-2. Let the VMM place the kernel (3-6.5 ms). cloud-hypervisor, Firecracker
-   and QEMU's `-kernel` all load every PT_LOAD segment of the PVH ELF at
-   its physical address. If the kernel's segments are appended to the
-   kloader ELF with paddr 34 MB (a post-link step, or a second link that
-   embeds the kernel image), the VMM writes them at host speed and the
-   kloader only jumps. The BIOS path (`x64.boot` reading the initrd from
-   disk) keeps the current copy, so kloader needs both paths, selected by
-   whether the kernel is already in place.
+2. Done: the VMM places the kernel (section above).
 
 3. Start the APs in parallel and off the critical path (1.7-4.4 ms).
    Give each AP its own stack up front and let the trampoline read its
@@ -275,7 +310,7 @@ Userspace (unchanged from the morning plan):
 | item | expected saving (cloud-hypervisor / Firecracker) |
 |---|---|
 | 1 sys-io mapped from the initrd | done: 13-15 ms in the kernel, 5-8 net |
-| 2 kernel placed by the VMM | 3-6.5 ms |
+| 2 kernel placed by the VMM | done: 5-8 ms |
 | 3 APs in parallel, not waited for | 1.7-4.4 ms |
 | 4 IOAPIC entries in use only | 1.2-1.7 ms |
 | 5 phys::init | 0.4 ms (2.5 at 8 GB) |
@@ -283,7 +318,7 @@ Userspace (unchanged from the morning plan):
 | 7 sequential placement | 0 today; 55+ ms on QEMU; enables hugepages |
 | 10-13 userspace | 15-17 ms |
 
-Items 2-6 take kloader plus kernel from the current 12-20 ms to roughly
+Items 3-6 take kloader plus kernel from the current 8-13 ms to roughly
 5-8 ms.
 
 ## Launcher notes

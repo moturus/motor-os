@@ -69,7 +69,7 @@ boot.bin:
 		MOTO_BIN="$(BIN_DIR)" CARGO_TARGET_DIR="$(OBJ_DIR)/boot" \
 		./build.sh
 
-kloader:
+kloader: kernel
 	mkdir -p $(BIN_DIR)
 	cd src/boot/x64.kloader && \
 	MOTO_BIN="$(BIN_DIR)" CARGO_TARGET_DIR="$(OBJ_DIR)/kloader" \
