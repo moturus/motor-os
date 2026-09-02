@@ -79,49 +79,9 @@ fn main() {
         }
     };
 
-    // First spawn strobe, then services, then sys-tty.
-
-    if let Some(strobe) = &config.strobe {
-        // We just spawn strobe, don't track/wait. Should we?
-        #[allow(clippy::zombie_processes)]
-        let _ = std::process::Command::new(strobe.as_str())
-            .env(
-                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{:x}", moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_LOG),
-            )
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap_or_else(|_| panic!("Error spawning {strobe}"));
-
-        // The logserver has just started. It needs time to start
-        // listening, so we need to retry a few times.
-        let log_start = std::time::Instant::now();
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            let elapsed = log_start.elapsed().as_millis();
-            if elapsed > 5_000 {
-                SysRay::log("sys-init: failed to initialize logging").unwrap();
-                std::process::exit(1);
-            }
-            if moto_log::init("sys-init").is_ok() {
-                log::info!("Started strobe in {elapsed} ms.");
-                break;
-            }
-        }
-        log::set_max_level(log::LevelFilter::Info);
-    }
-
-    if !config.services.is_empty() {
-        let services = config.services;
-        std::thread::spawn(move || {
-            for (caps, cmd) in services {
-                spawn_service(caps, cmd.as_str());
-            }
-        });
-    }
-
+    // sys-tty first: the console is what the user waits for, and it needs
+    // strobe only for kernel-log forwarding, which retries on its own. Then
+    // strobe, then the services, which log to it from the start.
     let role_cap = match config.tty_role {
         TtyRole::System => moto_sys::caps::CAP_SYS,
         TtyRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
@@ -142,6 +102,46 @@ fn main() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+
+    if let Some(strobe) = &config.strobe {
+        // We just spawn strobe, don't track/wait. Should we?
+        #[allow(clippy::zombie_processes)]
+        let _ = std::process::Command::new(strobe.as_str())
+            .env(
+                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+                format!("0x{:x}", moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_LOG),
+            )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|_| panic!("Error spawning {strobe}"));
+
+        // The log server listens within a millisecond of starting: retry
+        // right away rather than sleeping between attempts.
+        let log_start = std::time::Instant::now();
+        loop {
+            if moto_log::init("sys-init").is_ok() {
+                log::info!("Started strobe in {} us.", log_start.elapsed().as_micros());
+                break;
+            }
+            if log_start.elapsed() > std::time::Duration::from_secs(5) {
+                SysRay::log("sys-init: failed to initialize logging").unwrap();
+                std::process::exit(1);
+            }
+            std::thread::yield_now();
+        }
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
+    if !config.services.is_empty() {
+        let services = config.services;
+        std::thread::spawn(move || {
+            for (caps, cmd) in services {
+                spawn_service(caps, cmd.as_str());
+            }
+        });
+    }
 
     tty.wait().unwrap();
     log::info!("tty stopped. Shutting down.");

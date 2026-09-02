@@ -126,7 +126,7 @@ fn main() {
     output.send_fmt(
         Source::Stdout,
         format_args!(
-            "   ... all services up at {:03}ms. Starting {}.\n\n",
+            "  ... most services up at {:03}ms. Starting {}.\n\n",
             millis, fname
         ),
     );

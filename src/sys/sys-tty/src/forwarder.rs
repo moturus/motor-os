@@ -234,12 +234,21 @@ impl Forwarder {
     }
 
     fn run(&self, output: Output) {
-        let (mut connection, tag_id) = match Self::connect() {
-            Ok(connected) => connected,
-            Err(error) => {
-                let lost = self.shared.queue.lock().unwrap().disable_pending();
-                Self::report_disabled(&output, error, lost);
-                return;
+        // strobe may still be starting (sys-init spawns sys-tty first), so
+        // keep trying for a while; records queue up meanwhile.
+        const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        let (mut connection, tag_id) = loop {
+            match Self::connect() {
+                Ok(connected) => break connected,
+                Err(_) if started.elapsed() < CONNECT_DEADLINE => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => {
+                    let lost = self.shared.queue.lock().unwrap().disable_pending();
+                    Self::report_disabled(&output, error, lost);
+                    return;
+                }
             }
         };
         let max_payload = connection.data().len() - size_of::<RawLogRequest>();
