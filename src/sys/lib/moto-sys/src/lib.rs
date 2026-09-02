@@ -17,7 +17,6 @@ pub use sys_obj::SysObj;
 pub use sys_ray::SysRay;
 pub use syscalls::SysHandle;
 
-#[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 use alloc::string::String;
 
@@ -40,7 +39,6 @@ pub fn align_up(addr: u64, align: u64) -> u64 {
     }
 }
 
-// #[cfg(not(feature = "rustc-dep-of-std"))]
 pub fn url_encode(url: &str) -> String {
     // Replace ':' with '&col'; '=' with '&eq'; '&' with '&amp;'.
     let amps = url.replace('&', "&amp;");
@@ -49,7 +47,6 @@ pub fn url_encode(url: &str) -> String {
     cols.replace('=', "&eq;")
 }
 
-#[cfg(not(feature = "rustc-dep-of-std"))]
 pub fn url_decode(encoded: &str) -> String {
     let eqs = encoded.replace("&eq;", "=");
     let cols = eqs.replace("&col;", ":");

@@ -1,6 +1,6 @@
 [package]
 name = "moto-sys"
-version = "0.2.4"
+version = "0.3.0"
 authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
 keywords = ["motor", "motor-os"]
@@ -10,12 +10,9 @@ description = "Motor OS system crate."
 edition = "2021"
 
 [dependencies]
-alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
-core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
-moto-rt = { path = "../moto-rt", optional = true }
+moto-rt = { version = "0.17.6", path = "../moto-rt", optional = true }
 
 [features]
 base = ["moto-rt/base"]
 default = ["userspace"]
-rustc-dep-of-std = [ "alloc", "core", "userspace" ]
 userspace = ["moto-rt"]
