@@ -79,6 +79,15 @@ MOTOR_TOOLCHAIN_KEY="$original_toolchain_key"
 toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] ||
 	fail "restored toolchain key did not restore the assembly key"
+original_helix_rev="$HELIX_REV"
+HELIX_REV=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+[ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] ||
+	fail "Helix revision did not re-key the assembly"
+HELIX_REV="$original_helix_rev"
+toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] ||
+	fail "restored Helix revision did not restore the assembly key"
 printf 'unrelated\n' > "$root/README"
 toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "unrelated source changed assembly"
@@ -122,6 +131,7 @@ mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
 	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust" \
 	"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc"
 printf libc > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
 printf cxx > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
@@ -129,10 +139,13 @@ printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
 printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
+chmod 755 "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
+printf query > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
 printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
 mkdir "${ASSEMBLY_ROOT}.building"
 toolchain_complete_assembly
-for generated in llvm rustc rg libc; do
+for generated in llvm rustc rg libc helix; do
 	manifest="$ASSEMBLY_IMAGE_ROOT/$generated/devtools/toolchain/manifest"
 	[ -f "$manifest" ] || fail "$generated generated root lacks a manifest"
 	cmp -s "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" "$manifest" ||
@@ -149,6 +162,18 @@ if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"
 fi
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
+if toolchain_claim_assembly 2>/dev/null; then
+	fail "assembly with changed Helix binary was accepted"
+fi
+printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
+printf changed >> \
+	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
+if toolchain_claim_assembly 2>/dev/null; then
+	fail "assembly with changed Helix runtime was accepted"
+fi
+printf query > \
+	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
 chmod u+w "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 if toolchain_claim_assembly 2>/dev/null; then

@@ -97,6 +97,7 @@ toolchain_assembly_key() {
 		motor_os_runtime_tree "$MOTOR_OS_RUNTIME_TREE" \
 		local_moto_rt_version "$LOCAL_MOTO_RT_VERSION" \
 		local_moto_sys_version "$LOCAL_MOTO_SYS_VERSION" \
+		helix_rev "$HELIX_REV" \
 		native_configuration_digest "$NATIVE_CONFIGURATION_DIGEST"
 }
 
@@ -175,6 +176,7 @@ toolchain_validate_assembly_outputs() {
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
 		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" \
+		"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx" \
 		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"; do
 		[ -f "$path" ] || toolchain_die "assembly output is missing: $path" || return
 	done
@@ -221,6 +223,10 @@ motor_os_rev=$producer_motor_os_rev
 motor_os_runtime_tree=$MOTOR_OS_RUNTIME_TREE
 mlibc_rev=$MOTOR_MLIBC_REV
 mlibc_tree_state=$MOTOR_MLIBC_TREE_STATE
+helix_repository=$HELIX_REPOSITORY
+helix_ref=$HELIX_REF
+helix_rev=$HELIX_REV
+helix_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" devtools/helix)
 native_configuration_digest=$NATIVE_CONFIGURATION_DIGEST
 host_rustc_verbose_base64=$(printf '%s' "$VALIDATED_RUSTC_VERBOSE" | base64 -w0)
 host_cargo_verbose_base64=$(printf '%s' "$VALIDATED_CARGO_VERBOSE" | base64 -w0)
@@ -236,7 +242,7 @@ EOF
 
 toolchain_generated_manifest_paths() {
 	local root
-	for root in llvm rustc rg libc; do
+	for root in llvm rustc rg libc helix; do
 		printf '%s/%s\n' "$ASSEMBLY_IMAGE_ROOT/$root" devtools/toolchain/manifest
 	done
 }
@@ -286,11 +292,13 @@ toolchain_validate_consumed_assembly() (
 
 	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
 		motor_os_runtime_tree mlibc_rev mlibc_tree_state local_moto_rt_version
-		local_moto_sys_version native_configuration_digest)
+		local_moto_sys_version helix_repository helix_ref helix_rev
+		native_configuration_digest)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
 		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
-		"$LOCAL_MOTO_SYS_VERSION" "$NATIVE_CONFIGURATION_DIGEST")
+		"$LOCAL_MOTO_SYS_VERSION" "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV"
+		"$NATIVE_CONFIGURATION_DIGEST")
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {
@@ -304,6 +312,16 @@ toolchain_validate_consumed_assembly() (
 	done
 
 	toolchain_validate_assembly_outputs || exit
+	expected="$(toolchain_manifest_value "$manifest" helix_tree_sha256)" || {
+		toolchain_die "assembly manifest lacks one unique helix_tree_sha256 field"
+		exit 1
+	}
+	actual="$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" \
+		devtools/helix)" || exit
+	[ "$actual" = "$expected" ] || {
+		toolchain_die "assembly Helix tree digest does not match"
+		exit 1
+	}
 	hash_fields=(native_rustc_sha256 native_llvm_sha256 ripgrep_sha256
 		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
 	hash_paths=(

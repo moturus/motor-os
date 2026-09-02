@@ -17,6 +17,12 @@ toolchain_validate_versions
   fail "unexpected toolchain key schema"
 [ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v3 ] ||
   fail "unexpected assembly key schema"
+[ "$HELIX_REPOSITORY" = https://github.com/moturus/helix.git ] ||
+  fail "unexpected Helix repository"
+[ "$HELIX_REF" = refs/heads/helix-motor-25.7.1_2026-08-31 ] ||
+  fail "unexpected Helix ref"
+[ "$HELIX_REV" = ef325fc1797466d5f764fc67b4a55001afb58942 ] ||
+  fail "unexpected Helix revision"
 expected_llvm_tools='llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt'
 [ "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[*]}" = "$expected_llvm_tools" ] ||
   fail "Rust bootstrap LLVM tool contract differs"

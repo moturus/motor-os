@@ -37,6 +37,7 @@ write_assembly() {
 		"$root/images/llvm/devtools/llvm/bin" \
 		"$root/images/rustc/devtools/rust/bin" \
 		"$root/images/rg/system/bin" \
+		"$root/images/helix/devtools/helix/runtime/themes" \
 		"$root/images/libc/system/cfg/libc"
 	printf libc > "$root/sysroot/devtools/llvm/lib/libc.a"
 	printf cxx > "$root/sysroot/devtools/llvm/lib/libc++.a"
@@ -44,6 +45,9 @@ write_assembly() {
 	printf llvm > "$root/images/llvm/devtools/llvm/bin/llvm"
 	printf rustc > "$root/images/rustc/devtools/rust/bin/rustc"
 	printf rg > "$root/images/rg/system/bin/rg"
+	printf hx > "$root/images/helix/devtools/helix/hx"
+	chmod 755 "$root/images/helix/devtools/helix/hx"
+	printf theme > "$root/images/helix/devtools/helix/runtime/themes/default.toml"
 	printf shells > "$root/images/libc/system/cfg/libc/shells"
 	manifest="$root/MOTOR-ASSEMBLY-MANIFEST"
 	{
@@ -58,6 +62,11 @@ write_assembly() {
 		printf 'mlibc_rev=%s\nmlibc_tree_state=clean\n' "$MOTOR_MLIBC_REV"
 		printf 'local_moto_rt_version=%s\n' "$LOCAL_MOTO_RT_VERSION"
 		printf 'local_moto_sys_version=%s\n' "$LOCAL_MOTO_SYS_VERSION"
+		printf 'helix_repository=%s\n' "$HELIX_REPOSITORY"
+		printf 'helix_ref=%s\n' "$HELIX_REF"
+		printf 'helix_rev=%s\n' "$HELIX_REV"
+		printf 'helix_tree_sha256=%s\n' "$(toolchain_content_tree_digest \
+			"$root/images/helix" devtools/helix)"
 		printf 'native_configuration_digest=%s\n' "$native_config"
 		printf 'native_rustc_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustc" | awk '{print $1}')"
 		printf 'native_llvm_sha256=%s\n' "$(sha256sum "$root/images/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')"
@@ -69,7 +78,7 @@ write_assembly() {
 	} > "$manifest"
 	chmod 0444 "$manifest"
 	local overlay
-	for overlay in llvm rustc rg libc; do
+	for overlay in llvm rustc rg libc helix; do
 		mkdir -p "$root/images/$overlay/devtools/toolchain"
 		cp "$manifest" "$root/images/$overlay/devtools/toolchain/manifest"
 		chmod 0444 "$root/images/$overlay/devtools/toolchain/manifest"

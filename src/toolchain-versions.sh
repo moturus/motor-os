@@ -45,6 +45,10 @@ MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
 MOTOR_MLIBC_REF="refs/heads/motor-os-rustc"
 MOTOR_MLIBC_REV="0cece7e5cfbd7f43ffb5968ced80056a655cb70f"
 
+HELIX_REPOSITORY="https://github.com/moturus/helix.git"
+HELIX_REF="refs/heads/helix-motor-25.7.1_2026-08-31"
+HELIX_REV="ef325fc1797466d5f764fc67b4a55001afb58942"
+
 STDLIB_MOTO_RT_VERSION="0.17.6"
 STDLIB_MOTO_RT_CHECKSUM="f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
 LOCAL_MOTO_RT_VERSION="0.17.6"
@@ -103,5 +107,5 @@ MOTOR_TOOLCHAIN_KEY_FIELDS=(
 
 MOTOR_ASSEMBLY_KEY_FIELDS=(
   toolchain_key mlibc_rev mlibc_tree_state motor_os_runtime_tree
-  local_moto_rt_version local_moto_sys_version native_configuration_digest
+  local_moto_rt_version local_moto_sys_version helix_rev native_configuration_digest
 )
