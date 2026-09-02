@@ -96,11 +96,21 @@ toolchain_assembly_key() {
 		mlibc_tree_state "$MOTOR_MLIBC_TREE_STATE" \
 		motor_os_runtime_tree "$MOTOR_OS_RUNTIME_TREE" \
 		local_moto_rt_version "$LOCAL_MOTO_RT_VERSION" \
+		local_moto_sys_version "$LOCAL_MOTO_SYS_VERSION" \
 		native_configuration_digest "$NATIVE_CONFIGURATION_DIGEST"
 }
 
 toolchain_derive_runtime_identity() {
-	local root="$1" cargo="$2" closure content lock_state
+	local root="$1" cargo="$2" closure content lock_state local_moto_sys_version
+	local_moto_sys_version="$(toolchain_manifest_package_version \
+		"$root/src/sys/lib/moto-sys/Cargo.toml")" || {
+		toolchain_die "cannot read the local moto-sys package version"
+		return 1
+	}
+	[ "$local_moto_sys_version" = "$LOCAL_MOTO_SYS_VERSION" ] || {
+		toolchain_die "local moto-sys version differs from the declared tuple"
+		return 1
+	}
 	closure="$(toolchain_runtime_closure "$cargo" "$root")" || return
 	content="$(toolchain_content_tree_digest "$root" \
 		"${MOTOR_OS_RUNTIME_INPUTS[@]}")" || return
@@ -206,6 +216,7 @@ stdlib_moto_rt_version=$LOCKED_MOTO_RT_VERSION
 stdlib_moto_rt_checksum=$LOCKED_MOTO_RT_CHECKSUM
 stdlib_moto_rt_package_comparison=$MOTO_RT_PACKAGE_COMPARISON
 local_moto_rt_version=$LOCAL_MOTO_RT_VERSION
+local_moto_sys_version=$LOCAL_MOTO_SYS_VERSION
 motor_os_rev=$producer_motor_os_rev
 motor_os_runtime_tree=$MOTOR_OS_RUNTIME_TREE
 mlibc_rev=$MOTOR_MLIBC_REV
@@ -275,11 +286,11 @@ toolchain_validate_consumed_assembly() (
 
 	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
 		motor_os_runtime_tree mlibc_rev mlibc_tree_state local_moto_rt_version
-		native_configuration_digest)
+		local_moto_sys_version native_configuration_digest)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
 		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
-		"$NATIVE_CONFIGURATION_DIGEST")
+		"$LOCAL_MOTO_SYS_VERSION" "$NATIVE_CONFIGURATION_DIGEST")
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {

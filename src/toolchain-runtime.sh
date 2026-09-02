@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
 # Offline identity checks between Rust std's moto-rt and the local runtime.
 
-toolchain_manifest_package_version() {
-	local manifest="$1"
-	awk '
-		$0 == "[package]" { package = 1; next }
-		/^\[/ { package = 0 }
-		package && /^[[:space:]]*version[[:space:]]*=/ {
-			line = $0
-			sub(/^[^=]*=[[:space:]]*"/, "", line)
-			sub(/"[[:space:]]*$/, "", line)
-			print line
-			n++
-		}
-		END { if (n != 1) exit 1 }
-	' "$manifest"
-}
-
 toolchain_lock_package_identity() {
 	local lock="$1" package="$2"
 	awk -v wanted="$package" '

@@ -15,7 +15,7 @@ fail() {
 toolchain_validate_versions
 [ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v2 ] ||
   fail "unexpected toolchain key schema"
-[ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v2 ] ||
+[ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v3 ] ||
   fail "unexpected assembly key schema"
 expected_llvm_tools='llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt'
 [ "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[*]}" = "$expected_llvm_tools" ] ||

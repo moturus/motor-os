@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.2.4"
+version = "0.3.0"
 
 [[package]]
 name = "rustversion"

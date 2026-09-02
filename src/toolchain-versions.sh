@@ -6,7 +6,7 @@
 
 MOTOR_GENERATED_MANIFEST_SCHEMA="motor-toolchain-manifest-v1"
 MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v2"
-MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v2"
+MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v3"
 
 MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.1"
 MOTOR_RUSTUP_TOOLCHAIN_BASE="motor-1.99.0-beta-f47d5bb-dev.1"
@@ -48,6 +48,7 @@ MOTOR_MLIBC_REV="0cece7e5cfbd7f43ffb5968ced80056a655cb70f"
 STDLIB_MOTO_RT_VERSION="0.17.6"
 STDLIB_MOTO_RT_CHECKSUM="f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
 LOCAL_MOTO_RT_VERSION="0.17.6"
+LOCAL_MOTO_SYS_VERSION="0.3.0"
 MOTOR_LUA_VERSION="5.4.8"
 
 MOTOR_BUILD_HOST="x86_64-unknown-linux-gnu"
@@ -102,5 +103,5 @@ MOTOR_TOOLCHAIN_KEY_FIELDS=(
 
 MOTOR_ASSEMBLY_KEY_FIELDS=(
   toolchain_key mlibc_rev mlibc_tree_state motor_os_runtime_tree
-  local_moto_rt_version native_configuration_digest
+  local_moto_rt_version local_moto_sys_version native_configuration_digest
 )

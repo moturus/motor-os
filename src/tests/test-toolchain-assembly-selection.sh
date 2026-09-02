@@ -57,6 +57,7 @@ write_assembly() {
 		printf 'motor_os_runtime_tree=%s\n' "$runtime_tree"
 		printf 'mlibc_rev=%s\nmlibc_tree_state=clean\n' "$MOTOR_MLIBC_REV"
 		printf 'local_moto_rt_version=%s\n' "$LOCAL_MOTO_RT_VERSION"
+		printf 'local_moto_sys_version=%s\n' "$LOCAL_MOTO_SYS_VERSION"
 		printf 'native_configuration_digest=%s\n' "$native_config"
 		printf 'native_rustc_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustc" | awk '{print $1}')"
 		printf 'native_llvm_sha256=%s\n' "$(sha256sum "$root/images/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')"

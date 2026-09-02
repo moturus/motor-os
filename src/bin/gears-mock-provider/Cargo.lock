@@ -256,7 +256,7 @@ version = "0.17.6"
 
 [[package]]
 name = "moto-sys"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "moto-rt",
 ]

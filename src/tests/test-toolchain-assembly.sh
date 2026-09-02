@@ -15,12 +15,14 @@ for repo in "$root" "$mlibc"; do
 	git -C "$repo" config user.name Test
 done
 for package in moto-rt moto-rt-cabi moto-sys; do
-	printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$package" > \
+	version=0.1.0
+	[ "$package" != moto-sys ] || version="$LOCAL_MOTO_SYS_VERSION"
+	printf '[package]\nname = "%s"\nversion = "%s"\n' "$package" "$version" > \
 		"$root/src/sys/lib/$package/Cargo.toml"
 	printf '%s source\n' "$package" > "$root/src/sys/lib/$package/src/lib.rs"
 done
 printf '[workspace]\n' > "$root/src/sys/Cargo.toml"
-cat > "$root/src/sys/Cargo.lock" <<'EOF'
+cat > "$root/src/sys/Cargo.lock" <<EOF
 version = 4
 
 [[package]]
@@ -33,7 +35,7 @@ version = "0.1.0"
 
 [[package]]
 name = "moto-sys"
-version = "0.1.0"
+version = "$LOCAL_MOTO_SYS_VERSION"
 
 [[package]]
 name = "unrelated"
@@ -49,10 +51,10 @@ MOTOR_TOOLCHAIN_KEY="$(printf toolchain | sha256sum | awk '{print $1}')"
 MOTOR_ASSEMBLY_STATE=clean
 export MOTORH="$temporary/output"
 fake_cargo="$temporary/cargo"
-cat > "$fake_cargo" <<'EOF'
+cat > "$fake_cargo" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' 'moto-rt-cabi v0.1.0 (/source)' \
-  'moto-rt v0.1.0 (/source)' 'moto-sys v0.1.0 (/source)' \
+  'moto-rt v0.1.0 (/source)' 'moto-sys v$LOCAL_MOTO_SYS_VERSION (/source)' \
   'moto-rt v0.1.0 (/source) (*)'
 EOF
 chmod +x "$fake_cargo"
@@ -61,6 +63,13 @@ toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 first_key="$MOTOR_ASSEMBLY_KEY"; first_tree="$MOTOR_OS_RUNTIME_TREE"
 toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "assembly key is unstable"
+sed -i "s/version = \"$LOCAL_MOTO_SYS_VERSION\"/version = \"9.9.9\"/" \
+	"$root/src/sys/lib/moto-sys/Cargo.toml"
+if toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo" 2>/dev/null; then
+	fail "undeclared moto-sys version was accepted"
+fi
+sed -i "s/version = \"9.9.9\"/version = \"$LOCAL_MOTO_SYS_VERSION\"/" \
+	"$root/src/sys/lib/moto-sys/Cargo.toml"
 original_toolchain_key="$MOTOR_TOOLCHAIN_KEY"
 MOTOR_TOOLCHAIN_KEY="$(printf changed-toolchain | sha256sum | awk '{print $1}')"
 toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"

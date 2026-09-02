@@ -6,6 +6,22 @@ toolchain_die() {
   return 1
 }
 
+toolchain_manifest_package_version() {
+  local manifest="$1"
+  awk '
+    $0 == "[package]" { package = 1; next }
+    /^\[/ { package = 0 }
+    package && /^[[:space:]]*version[[:space:]]*=/ {
+      line = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", line)
+      sub(/"[[:space:]]*$/, "", line)
+      print line
+      n++
+    }
+    END { if (n != 1) exit 1 }
+  ' "$manifest"
+}
+
 toolchain_require_hex() {
   local name="$1" value="$2" width="$3"
   [[ "$value" =~ ^[0-9a-f]{$width}$ ]] ||
@@ -29,6 +45,7 @@ toolchain_validate_versions() {
     MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 \
     MOTOR_MLIBC_REPOSITORY MOTOR_MLIBC_REF MOTOR_MLIBC_REV MOTOR_LUA_VERSION \
     STDLIB_MOTO_RT_VERSION STDLIB_MOTO_RT_CHECKSUM LOCAL_MOTO_RT_VERSION \
+    LOCAL_MOTO_SYS_VERSION \
     MOTOR_STANDALONE_LLVM_GENERATOR MOTOR_STANDALONE_LLVM_BUILD_TYPE \
     MOTOR_STANDALONE_LLVM_ASSERTIONS MOTOR_STANDALONE_LLVM_PROJECTS \
     MOTOR_STANDALONE_LLVM_INCLUDE_TESTS MOTOR_STANDALONE_LLVM_C_COMPILER \
