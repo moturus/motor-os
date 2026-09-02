@@ -416,12 +416,20 @@ impl UserAddressSpace {
         let phys_addr = super::phys::phys_allocate_frameless(crate::mm::PageType::MidPage)?;
         assert_eq!(phys_addr, 2 * super::ONE_MB); // For now, a single MID page can be allocated globally.
 
+        // Not zeroed here: zeroing all 2 MB touches 512 fresh pages (~5 ms
+        // at boot under a hypervisor) while the I/O manager uses a fraction
+        // of it, and it zeroes what it hands out (sys-io alloc_mmio_region).
+        // The stale contents are boot-time leftovers the I/O manager could
+        // read anyway through an MMIO mapping.
         let virt_addr = super::virt::STATIC_SYS_IO_MID_PAGE;
         self.inner.page_table_ref().map_page(
             phys_addr,
             virt_addr,
             crate::mm::PageType::MidPage,
-            MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE,
+            MappingOptions::READABLE
+                | MappingOptions::WRITABLE
+                | MappingOptions::USER_ACCESSIBLE
+                | MappingOptions::DONT_ZERO,
         )?;
 
         Ok(MemorySegment {

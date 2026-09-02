@@ -49,6 +49,10 @@ pub fn alloc_mmio_region(size: u64) -> (u64, u64) {
     let virt_addr = MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed) + start;
     let phys_addr = moto_sys::SysMem::virt_to_phys(virt_addr).unwrap();
 
+    // The kernel maps the 2M page without zeroing it (see
+    // alloc_user_mid_pages); virtqueues expect zeroed rings.
+    unsafe { core::ptr::write_bytes(virt_addr as usize as *mut u8, 0, size as usize) };
+
     (phys_addr, virt_addr)
 }
 

@@ -224,10 +224,19 @@ fn do_command(cmd: String) {
                 std::process::exit(code)
             } else {
                 // There was a bug when calling exit_process() from a non-main thread misbehaved.
-                let _ =
-                    std::thread::spawn(move || moto_sys::SysCpu::exit_process(code as u64)).join();
-                loop {
-                    core::hint::spin_loop();
+                // A flood child asked to exit at the memory floor may have its
+                // thread refused (OutOfMemory); that is not the bug this path
+                // guards against, so exit directly then.
+                let exiter = std::thread::Builder::new()
+                    .spawn(move || moto_sys::SysCpu::exit_process(code as u64));
+                match exiter {
+                    Ok(handle) => {
+                        let _ = handle.join();
+                        loop {
+                            core::hint::spin_loop();
+                        }
+                    }
+                    Err(_) => std::process::exit(code),
                 }
             }
         }
