@@ -3308,7 +3308,7 @@ members = ["ignored-member"]
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
-                && matches!(dependency.source, DependencySource::Path(_))
+                && matches!(dependency.source, DependencySource::CratesIo)
         }));
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "libc"

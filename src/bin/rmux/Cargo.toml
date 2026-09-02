@@ -29,7 +29,6 @@ libc = "0.2"
 # rest of the tree.
 [patch.crates-io]
 crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
-moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]
 panic = "abort"

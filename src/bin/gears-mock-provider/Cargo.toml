@@ -16,11 +16,10 @@ rustls-pemfile = "=2.2.0"
 
 [target.'cfg(target_os = "motor")'.dependencies]
 getrandom = { version = "=0.2.17", features = ["custom"] }
-moto-rt = { path = "../../sys/lib/moto-rt" }
+moto-rt = "0.17.6"
 
 [patch.crates-io]
 crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
-moto-rt = { path = "../../sys/lib/moto-rt" }
 ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
 
 [profile.release]

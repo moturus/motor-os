@@ -52,6 +52,8 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "moto-rt"
 version = "0.17.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
 
 [[package]]
 name = "once_cell"
