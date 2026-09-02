@@ -69,6 +69,17 @@ pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
     res
 }
 
+/// A frame for a page the allocator already holds as used: boot-time
+/// reservations such as the initrd. Dropping it frees the page, so the
+/// owner must be something that lives as long as the reservation.
+pub fn adopt_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
+    debug_assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+    let frame = PhysicalMemory::inst().slab.alloc_arc()?;
+    frame.get_mut().unwrap().start = phys_addr;
+    frame.get_mut().unwrap().kind = PageType::SmallPage;
+    Ok(frame)
+}
+
 // Allocate a physical page without allocating struct Frame.
 // Used internally in mm for page table and slab allocations.
 pub fn phys_allocate_frameless(kind: PageType) -> Result<u64, ErrorCode> {

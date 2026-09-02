@@ -289,6 +289,14 @@ const INIT_STATUS_CPU: u32 = u32::MAX;
 static INIT_STATUS: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(INIT_STATUS_NONE);
 
+// True when the initrd lies above the kernel and stays reserved in the
+// physical allocator for good; below the kernel it is freed in stage 2.
+static INITRD_RESERVED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn initrd_reserved() -> bool {
+    INITRD_RESERVED.load(Ordering::Relaxed)
+}
+
 pub(super) fn memory_initialized() -> bool {
     INIT_STATUS.load(Ordering::Relaxed) > 0
 }
@@ -365,6 +373,7 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
     let initrd_seg = boot_info.initrd_bytes_phys();
     if initrd_seg.start > bootup_heap_phys.end() {
         in_use.push(initrd_seg);
+        INITRD_RESERVED.store(true, Ordering::Relaxed);
     } else {
         assert!(initrd_seg.end() < KERNEL_PHYS_START);
     }

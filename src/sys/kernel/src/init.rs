@@ -256,7 +256,7 @@ fn start_bsp(arg: u64) -> ! {
     }
 
     let new_stack = crate::mm::init_mm_bsp_stage1(&boot_info);
-    copy_sys_io(boot_info.pvh().sys_io_bytes());
+    place_sys_io(boot_info.pvh().sys_io_bytes());
     let cpu_main_addr = cpu_main as *const fn(u64) as usize as u64;
     unsafe {
         core::arch::asm!("
@@ -293,8 +293,24 @@ fn start_ap(this_cpu: uCpus) -> ! {
 static SYS_IO_ELF_START: AtomicUsize = AtomicUsize::new(0);
 static SYS_IO_ELF_SIZE: AtomicUsize = AtomicUsize::new(0);
 
-// sys_io_bytes are in initrd which we don't hold on to; so we copy the bytes
-// to where we can have them.
+// The ELF loader maps sys-io's read-only segments straight from a
+// kernel-static copy of the file. When the initrd stays reserved (it lies
+// above the kernel), that copy is the initrd itself: its pages are adopted
+// into a kernel-static segment and nothing is copied or touched. Below the
+// kernel the initrd is freed at stage 2, so the bytes are copied out.
+fn place_sys_io(sys_io_bytes: &[u8]) {
+    let phys_start = sys_io_bytes.as_ptr() as u64 - crate::mm::PAGING_DIRECT_MAP_OFFSET;
+    let num_pages =
+        crate::mm::align_up(sys_io_bytes.len() as u64, PAGE_SIZE_SMALL) >> PAGE_SIZE_SMALL_LOG2;
+    if crate::mm::initrd_reserved() && phys_start & (PAGE_SIZE_SMALL - 1) == 0 {
+        let seg = crate::mm::virt::vmem_map_reserved_pages(phys_start, num_pages).unwrap();
+        SYS_IO_ELF_START.store(seg.start as usize, Ordering::Relaxed);
+        SYS_IO_ELF_SIZE.store(sys_io_bytes.len(), Ordering::Relaxed);
+    } else {
+        copy_sys_io(sys_io_bytes);
+    }
+}
+
 fn copy_sys_io(sys_io_bytes: &[u8]) {
     let seg = crate::mm::virt::vmem_allocate_pages(
         crate::mm::virt::VmemKind::KernelStatic,

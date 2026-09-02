@@ -167,6 +167,17 @@ pub fn vmem_allocate_pages(kind: VmemKind, num_pages: u64) -> Result<MemorySegme
     KERNEL_ADDRESS_SPACE.vmem_allocate_pages(kind, num_pages)
 }
 
+/// Read-only kernel-static mapping of reserved physical pages (see
+/// `VmemRegion::map_reserved_pages`).
+pub fn vmem_map_reserved_pages(
+    phys_start: u64,
+    num_pages: u64,
+) -> Result<MemorySegment, ErrorCode> {
+    KERNEL_ADDRESS_SPACE
+        .kernel_static
+        .map_reserved_pages(phys_start, num_pages, MappingOptions::READABLE)
+}
+
 pub fn vmem_free(addr: u64, kind: VmemKind) -> u64 {
     KERNEL_ADDRESS_SPACE.free(addr, kind)
 }
@@ -342,6 +353,40 @@ impl VmemRegion {
         unsafe { self.address_space.get() }.mem_stats.add(num_pages);
 
         Ok(MemorySegment { start, size })
+    }
+
+    // Maps `num_pages` physical pages at `phys_start`, already reserved in
+    // the physical allocator, into a new segment that adopts them as its
+    // frames. Boot-time only: a failure leaves the segment half built.
+    pub(super) fn map_reserved_pages(
+        &self,
+        phys_start: u64,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<MemorySegment, ErrorCode> {
+        debug_assert_eq!(0, phys_start & (PAGE_SIZE_SMALL - 1));
+        let memory_segment = self.allocate_pages(num_pages, MappingOptions::empty())?;
+
+        let mut segments = self.used_segments.lock(line!());
+        let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
+        let mut virt_addr = memory_segment.start;
+        let mut phys_addr = phys_start;
+        for _ in 0..num_pages {
+            let frame = super::phys::adopt_frame(phys_addr)?;
+            unsafe {
+                self.address_space.get().page_table.map_page(
+                    phys_addr,
+                    virt_addr,
+                    PageType::SmallPage,
+                    mapping_options | MappingOptions::DONT_ZERO,
+                )?;
+            }
+            vmem_segment.set_frame(virt_addr, frame);
+            virt_addr += PAGE_SIZE_SMALL;
+            phys_addr += PAGE_SIZE_SMALL;
+        }
+
+        Ok(memory_segment)
     }
 
     fn allocate_contiguous_pages(
