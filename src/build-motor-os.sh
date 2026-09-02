@@ -15,7 +15,7 @@
 #
 # The tracked img_files directories remain source-only. The standard imager
 # consumes the libc and rg roots; the development imager additionally consumes
-# the LLVM and rustc roots.
+# the LLVM, rustc, and Helix roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
 # live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
@@ -44,6 +44,7 @@ Build the complete Motor OS release environment and all three images, including:
   - host cross LLVM/Clang and the mlibc/libc++ sysroot;
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
+  - Helix as /devtools/helix/hx in the development image;
   - all standard and dev-image Motor OS binaries;
   - base, standard, and dev images under vm_images/release.
 
@@ -117,6 +118,7 @@ MLIBC="$MOTORH/mlibc"
 RUST="$MOTORH/rust"
 TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
 RIPGREP="$MOTORH/ripgrep"
+HELIX="$MOTORH/helix"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
@@ -192,6 +194,7 @@ activate_exact_assembly_paths() {
 	LLVM_IMG="$ASSEMBLY_IMAGE_ROOT/llvm"
 	RUSTC_IMG="$ASSEMBLY_IMAGE_ROOT/rustc"
 	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
+	HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
 	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
 	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
 	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
@@ -202,6 +205,7 @@ activate_exact_assembly_paths() {
 	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
 	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
 	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
+	HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
 	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
 	MOTOR_RUSTC="$TOOLCHAIN_PREFIX/bin/rustc"
 	MOTOR_RUSTDOC="$TOOLCHAIN_PREFIX/bin/rustdoc"
@@ -761,6 +765,77 @@ build_ripgrep() {
 	chmod 755 "$RG_IMG/system/bin/rg"
 }
 
+prepare_helix_source() {
+	HELIX="$TOOLCHAIN_SRC_ROOT/helix"
+	toolchain_managed_checkout "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV" \
+		"$HELIX" "$MOTORH/helix"
+}
+
+validate_helix_elf() {
+	local binary="$1" stack
+	"$B/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
+		die "Helix is not a static PIE (ELF DYN): $binary"
+	if "$B/llvm-readelf" -d "$binary" | grep -q '(NEEDED)'; then
+		die "Helix has a dynamic library dependency: $binary"
+	fi
+	if "$B/llvm-readelf" -l "$binary" | awk '$1 == "TLS" { found = 1 } END { exit !found }'; then
+		die "Helix has a loader-incompatible TLS segment: $binary"
+	fi
+	stack="$("$B/llvm-readelf" -l "$binary" | awk '$1 == "GNU_STACK" { print; found++ } END { if (found != 1) exit 1 }')" ||
+		die "Helix lacks one GNU_STACK program header: $binary"
+	case "$stack" in
+		*E*) die "Helix requests an executable stack: $binary" ;;
+	esac
+	"$B/llvm-readelf" --dyn-syms "$binary" |
+		awk '$7 == "UND" && $1 != "0:" { bad = 1 } END { exit bad }' ||
+		die "Helix has unresolved dynamic symbols: $binary"
+	if "$B/llvm-nm" -u "$binary" 2>/dev/null |
+		grep -Eq '(^|[[:space:]])(dlopen|dlsym|tree_sitter_|__cxa_|_Z)'; then
+		die "Helix has an unresolved loader, grammar, or C++ runtime symbol: $binary"
+	fi
+}
+
+stage_helix() {
+	local binary="$HELIX_TARGET_DIR/$TARGET/release/hx" component
+	[ -x "$binary" ] || die "Helix binary was not produced: $binary"
+	[ ! -e "$HELIX_IMG" ] ||
+		die "Helix image staging already exists without validated reuse: $HELIX_IMG"
+	validate_helix_elf "$binary"
+	mkdir -p "$HELIX_IMG/devtools/helix/runtime"
+	"$B/llvm-strip" -o "$HELIX_IMG/devtools/helix/hx" "$binary"
+	chmod 755 "$HELIX_IMG/devtools/helix/hx"
+	validate_helix_elf "$HELIX_IMG/devtools/helix/hx"
+	for component in queries themes tutor; do
+		[ -e "$HELIX/runtime/$component" ] ||
+			die "Helix runtime component is missing: $component"
+		cp -a "$HELIX/runtime/$component" "$HELIX_IMG/devtools/helix/runtime/"
+	done
+}
+
+build_helix() {
+	log "fetching, building, and staging Helix"
+	(
+		cd "$HELIX"
+		RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" \
+			"$MOTOR_CARGO" fetch --locked
+		env \
+			RUSTC="$MOTOR_RUSTC" \
+			RUSTDOC="$MOTOR_RUSTDOC" \
+			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-rust-cc" \
+			CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
+			CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
+			CXXSTDLIB_x86_64_unknown_motor=c++ \
+			AR_x86_64_unknown_motor="$B/llvm-ar" \
+			ARFLAGS_x86_64_unknown_motor= \
+			CARGO_TARGET_DIR="$HELIX_TARGET_DIR" \
+			HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime \
+			HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 \
+			"$MOTOR_CARGO" build --target "$TARGET" --release --locked \
+				--offline --no-default-features -p helix-term --bin hx
+	)
+	stage_helix
+}
+
 # --- fetch the locked workspace sources --------------------------------------
 # The src/sys lock pins git forks (crossterm, mio, tokio) and registry crates
 # that the Rust bootstrap never fetches; the assembly identity reads that
@@ -843,6 +918,8 @@ main() {
 		rustc_stage_image
 		update_ripgrep_source
 		build_ripgrep
+		prepare_helix_source
+		build_helix
 		toolchain_complete_assembly
 	else
 		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
@@ -862,6 +939,7 @@ main() {
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
 		"$RG_IMG/system/bin/rg"
+		"$HELIX_IMG/devtools/helix/hx"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)
