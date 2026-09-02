@@ -562,20 +562,35 @@ impl VmemSegment {
         mapping_options: MappingOptions,
     ) -> Result<(), ErrorCode> {
         debug_assert_eq!(self.segment.size, other.segment.size);
+        self.share_range_with(0, other, mapping_options)
+    }
+
+    /// Maps `other`'s size worth of this segment's pages, starting at page
+    /// `first_page`, into `other`, sharing the frames. `other` is normally a
+    /// reservation; pages it already maps are replaced.
+    pub(super) fn share_range_with(
+        &self,
+        first_page: u64,
+        other: &mut Self,
+        mapping_options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let start = self.segment.start + (first_page << PAGE_SIZE_SMALL_LOG2);
+        if start + other.segment.size > self.segment.end() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
         debug_assert!(!self.pages.is_empty());
         debug_assert!(!other.pages.is_empty());
-        debug_assert_eq!(self.segment.size, other.segment.size);
 
-        let mut self_cursor = self.pages.front();
+        let mut self_cursor = self.pages.find(&start);
         let mut other_cursor = other.pages.front();
-        while !self_cursor.is_null() {
-            let self_page = self_cursor.get();
-            let other_page = other_cursor
+        while !other_cursor.is_null() {
+            let Some(this_page) = self_cursor.get() else {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            };
+            let that_page = other_cursor
                 .clone_pointer()
-                .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() });
-
-            let this_page = self_page.unwrap();
-            let that_page = other_page.unwrap();
+                .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
+                .unwrap();
 
             // Lazy and guard pages have no frame to share; a caller naming
             // such a segment gets an error, not a kernel panic.

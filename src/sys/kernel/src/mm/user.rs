@@ -430,6 +430,25 @@ impl UserAddressSpace {
         })
     }
 
+    /// Reserves `num_pages` at `vaddr` (no frames) and lets `fill` map
+    /// shared frames into the reservation, undoing it if that fails.
+    fn fill_fixed<F>(&self, vaddr: u64, num_pages: u64, fill: F) -> Result<(), ErrorCode>
+    where
+        F: FnOnce(&UserAddressSpaceBase) -> Result<(), ErrorCode>,
+    {
+        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+        if let Err(err) =
+            self.inner
+                .vmem_allocate_user_fixed(vaddr, num_pages, super::MappingOptions::empty())
+        {
+            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            return Err(err);
+        }
+        fill(&self.inner).inspect_err(|_| {
+            let _ = self.unmap(vaddr); // Gives the stats back too.
+        })
+    }
+
     /// Maps `source`'s segment at `source_addr` into this address space at
     /// `vaddr`, sharing its frames. The segments must be the same size, and
     /// nothing may be mapped at `vaddr` yet.
@@ -441,23 +460,27 @@ impl UserAddressSpace {
         num_pages: u64,
         mapping_options: super::MappingOptions,
     ) -> Result<(), ErrorCode> {
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+        self.fill_fixed(vaddr, num_pages, |inner| {
+            source
+                .inner
+                .share_with(source_addr, inner, vaddr, mapping_options)
+        })
+    }
 
-        // A reservation without frames; share_with() fills it.
-        if let Err(err) =
-            self.inner
-                .vmem_allocate_user_fixed(vaddr, num_pages, super::MappingOptions::empty())
-        {
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-            return Err(err);
-        }
-
-        source
-            .inner
-            .share_with(source_addr, &self.inner, vaddr, mapping_options)
-            .inspect_err(|_| {
-                let _ = self.unmap(vaddr); // Gives the stats back too.
-            })
+    /// Maps `num_pages` of kernel-static memory at `kernel_vaddr` into this
+    /// address space at `vaddr`, sharing the frames (read-only or
+    /// read+execute: the ELF loader's in-place text and rodata).
+    pub fn map_kernel_static(
+        &self,
+        vaddr: u64,
+        kernel_vaddr: u64,
+        num_pages: u64,
+        mapping_options: super::MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        debug_assert!(!mapping_options.contains(super::MappingOptions::WRITABLE));
+        self.fill_fixed(vaddr, num_pages, |inner| {
+            inner.share_kernel_static(kernel_vaddr, vaddr, mapping_options)
+        })
     }
 
     pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {

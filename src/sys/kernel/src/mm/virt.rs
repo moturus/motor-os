@@ -1019,4 +1019,41 @@ impl UserAddressSpaceBase {
     pub(super) fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         self.normal_memory.fix_pagefault(pf_addr, error_code)
     }
+
+    /// Maps the kernel-static pages starting at `kernel_vaddr` into the
+    /// reservation at `vaddr` (both page-aligned; the reservation's size
+    /// says how many), sharing the frames. This is how sys-io's read-only
+    /// segments are mapped from the kernel's copy of its ELF bytes.
+    pub(super) fn share_kernel_static(
+        &self,
+        kernel_vaddr: u64,
+        vaddr: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let kernel_segments = KERNEL_ADDRESS_SPACE
+            .kernel_static
+            .used_segments
+            .lock(line!());
+        let Some(source) = kernel_segments.find(kernel_vaddr) else {
+            log::debug!("share_kernel_static: 0x{kernel_vaddr:x} is not kernel-static");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        };
+        let first_page = (kernel_vaddr - source.segment().start) >> PAGE_SIZE_SMALL_LOG2;
+
+        let mut user_segments = if self.normal_memory.segment.contains(vaddr) {
+            self.normal_memory.used_segments.lock(line!())
+        } else {
+            self.custom_memory.used_segments.lock(line!())
+        };
+        let Some(dest) = user_segments.get_mut(&vaddr) else {
+            log::debug!("share_kernel_static: no reservation at 0x{vaddr:x}");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        };
+
+        source.share_range_with(
+            first_page,
+            dest,
+            mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+        )
+    }
 }
