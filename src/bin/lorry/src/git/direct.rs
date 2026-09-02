@@ -559,10 +559,12 @@ fn approve(locked: &LockedSource, git_tree: &str, source: &Tree, accept_all: boo
     io::stderr()
         .flush()
         .map_err(|error| Error::failure(format!("failed to flush Git approval prompt: {error}")))?;
-    let mut answer = String::new();
-    io::stdin()
-        .read_line(&mut answer)
-        .map_err(|error| Error::failure(format!("failed to read Git approval: {error}")))?;
+    let answer = crate::prompt::read_answer(
+        &mut io::stdin().lock(),
+        &mut io::stderr().lock(),
+        crate::prompt::echo_required(true),
+    )
+    .map_err(|error| Error::failure(format!("failed to read Git approval: {error}")))?;
     if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
         Ok(())
     } else {

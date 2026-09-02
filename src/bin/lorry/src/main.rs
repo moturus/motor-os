@@ -30,6 +30,7 @@ mod patch;
 mod policy;
 mod process;
 mod progress;
+mod prompt;
 #[allow(dead_code)]
 mod redirect;
 mod repository;

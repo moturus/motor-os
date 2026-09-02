@@ -3,6 +3,7 @@ use std::io::{BufRead, Write};
 
 use crate::admission_state::Review;
 use crate::diagnostic::{Error, Result};
+use crate::prompt;
 
 /// Displays the dependency change for approval. With a reconstructible
 /// committed baseline this is a semantic diff. When visible input changes
@@ -109,10 +110,8 @@ pub fn approve(
     .map_err(|error| {
         Error::failure(format!("failed to write dependency change prompt: {error}"))
     })?;
-    let mut response = String::new();
-    std::io::Read::take(&mut *input, 65)
-        .read_line(&mut response)
-        .map_err(|error| {
+    let response =
+        prompt::read_answer(input, output, prompt::echo_required(terminal)).map_err(|error| {
             Error::failure(format!(
                 "failed to read dependency change approval: {error}"
             ))

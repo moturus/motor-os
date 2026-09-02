@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -11,6 +11,7 @@ use toml_edit::Item;
 use crate::atomic::AtomicFile;
 use crate::diagnostic::{Error, Result};
 use crate::lockfile::write_toml_string;
+use crate::prompt;
 use crate::toml::Document;
 
 const MAX_SITES: usize = 4096;
@@ -331,11 +332,7 @@ impl TrustPolicy {
         })
         .map_err(|error| Error::failure(format!("failed to write redirect prompt: {error}")))?;
 
-        let mut response = String::new();
-        input
-            .by_ref()
-            .take(65)
-            .read_line(&mut response)
+        let response = prompt::read_answer(input, output, prompt::echo_required(terminal))
             .map_err(|error| {
                 Error::failure(format!("failed to read redirect decision: {error}"))
             })?;

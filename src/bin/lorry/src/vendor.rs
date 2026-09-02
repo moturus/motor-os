@@ -22,6 +22,7 @@ use crate::manifest::Manifest;
 use crate::patch;
 use crate::policy::{self, PackageEvidence};
 use crate::progress::Progress;
+use crate::prompt;
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
@@ -445,7 +446,7 @@ fn prepare_networked_with_approval(
         writeln!(output, "Complete candidate review document:")
             .and_then(|()| output.write_all(&report))
             .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
-        approve_new_packages(&selected, &evidence, accept_all, input, output)?;
+        approve_new_packages(&selected, &evidence, accept_all, terminal, input, output)?;
     }
     let staged_lock = stage_lockfile(&manifest.workspace_root.join("Cargo.lock"), &lock)?;
     acquisition.publish()?;
@@ -1078,6 +1079,7 @@ fn approve_new_packages(
     resolution: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
     accept_all: bool,
+    terminal: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
@@ -1148,6 +1150,7 @@ fn approve_new_packages(
     if accept_all {
         return Ok(());
     }
+    let echo = prompt::echo_required(terminal);
     for package in packages {
         write!(
             output,
@@ -1156,9 +1159,7 @@ fn approve_new_packages(
         )
         .and_then(|()| output.flush())
         .map_err(|error| Error::failure(format!("failed to write vendor prompt: {error}")))?;
-        let mut response = String::new();
-        std::io::Read::take(&mut *input, 65)
-            .read_line(&mut response)
+        let response = prompt::read_answer(input, output, echo)
             .map_err(|error| Error::failure(format!("failed to read package approval: {error}")))?;
         if !matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
             return Err(Error::failure(format!(
@@ -1756,6 +1757,7 @@ mod tests {
             &resolution,
             &evidence,
             false,
+            false,
             &mut std::io::Cursor::new(b"yes\n"),
             &mut output,
         )
@@ -1791,6 +1793,7 @@ mod tests {
         approve_new_packages(
             &resolution,
             &evidence,
+            false,
             false,
             &mut std::io::Cursor::new(b""),
             &mut output,
