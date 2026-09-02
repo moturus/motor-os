@@ -50,11 +50,29 @@ else
   NETDEV="tap,ifname=moto-tap,script=no,downscript=no,id=nic0"
 fi
 
+# Guest RAM backing. With enough free pages in the host's hugetlbfs pool
+# (vm.nr_hugepages) and a hugetlbfs mount, the RAM comes from there,
+# preallocated. Otherwise QEMU's default anonymous RAM, which gets transparent
+# hugepages wherever the host's /sys/kernel/mm/transparent_hugepage/enabled is
+# madvise or always. MOTO_HUGEPAGES=0 skips the pool. See docs/plans/boot-time.md.
+MEMORY_BACKEND=""
+if [ "${MOTO_HUGEPAGES:-1}" != "0" ]; then
+  HP_KB="$(awk '/^Hugepagesize/ {print $2}' /proc/meminfo)"
+  HP_FREE="$(awk '/^HugePages_Free/ {print $2}' /proc/meminfo)"
+  HP_MOUNT="$(awk '$3 == "hugetlbfs" {print $2; exit}' /proc/mounts)"
+  if [ -n "$HP_MOUNT" ] && [ "${HP_FREE:-0}" -ge $(( (MEMORY_MIB * 1024 + HP_KB - 1) / HP_KB )) ]; then
+    MEMORY_BACKEND="-mem-path $HP_MOUNT -mem-prealloc"
+    echo "run-qemu: guest RAM from the hugetlbfs pool at $HP_MOUNT ($((HP_KB / 1024)) MiB pages)" >&2
+  else
+    echo "run-qemu: guest RAM from anonymous memory (no hugetlbfs pool)" >&2
+  fi
+fi
+
 # exec, so that this script's pid *is* qemu's pid. Without it /bin/sh forks
 # qemu as a child, and a harness that backgrounds this script and kills "$!"
 # kills only the wrapper: qemu is orphaned to init and keeps holding moto-tap
 # and the image, so the next run's ssh silently reaches the stale guest.
-exec $TASKSET qemu-system-x86_64 -m "${MEMORY_MIB}M" -enable-kvm -cpu host -smp "${SMP}" \
+exec $TASKSET qemu-system-x86_64 -m "${MEMORY_MIB}M" $MEMORY_BACKEND -enable-kvm -cpu host -smp "${SMP}" \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
   -drive file="$WD/$IMAGE",if=none,id=drive0,format="$IMAGE_FORMAT" \

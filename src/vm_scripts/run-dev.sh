@@ -7,6 +7,9 @@ usage: run-dev.sh [--vmm qemu|chv] [-- VMM-ARGUMENTS...]
 
 Runs motor-os-dev.qcow2 with QEMU by default. The development defaults are
 8 vCPUs and 8192 MiB of RAM. MOTO_SMP and MOTO_MEMORY_MIB override them.
+The RAM comes from the host's hugetlbfs pool when it holds enough free
+pages (vm.nr_hugepages = 4096 for 8192 MiB of 2 MiB pages); see run-qemu.sh
+and run-chv.sh.
 EOF
 }
 
