@@ -34,6 +34,38 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
     Ok(output)
 }
 
+pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Result<Output> {
+    let mut command = Command::new(program);
+    remove_cargo_client_environment(&mut command);
+    let output = command
+        .args(arguments)
+        .env_remove("RUSTC_BOOTSTRAP")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to execute {description} `{}`: {error}",
+                program.display()
+            ))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::failure(format!(
+            "{description} `{}` failed: {}",
+            program.display(),
+            stderr.trim()
+        )));
+    }
+    Ok(output)
+}
+
+pub fn remove_cargo_client_environment(command: &mut Command) {
+    command
+        .env_remove("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO_LOG");
+}
+
 pub struct RustcCommand<'a> {
     pub program: &'a Path,
     pub arguments: &'a [OsString],
@@ -59,18 +91,18 @@ impl RustcCommand<'_> {
                 display_command(self.program.as_os_str(), self.arguments)
             );
         }
-        Command::new(self.program)
+        let mut command = Command::new(self.program);
+        command
             .args(self.arguments)
             .envs(self.environment)
-            .current_dir(self.current_dir)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| {
-                Error::failure(format!(
-                    "failed to execute rustc `{}`: {error}",
-                    self.program.display()
-                ))
-            })
+            .current_dir(self.current_dir);
+        remove_cargo_client_environment(&mut command);
+        command.stdin(Stdio::null()).output().map_err(|error| {
+            Error::failure(format!(
+                "failed to execute rustc `{}`: {error}",
+                self.program.display()
+            ))
+        })
     }
 
     pub fn finish(output: &Output, color: bool) -> Result<()> {
@@ -109,17 +141,21 @@ pub fn run_child(
                 Path::new(program).display()
             ))
         })?;
+    Ok(exit_status_code(status))
+}
+
+pub fn exit_status_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
-        return Ok(code);
+        return code;
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(signal) = status.signal() {
-            return Ok(128 + signal);
+            return 128 + signal;
         }
     }
-    Ok(130)
+    130
 }
 
 fn render_rustc_output(bytes: &[u8], color: bool) {

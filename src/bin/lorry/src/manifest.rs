@@ -262,6 +262,38 @@ impl Manifest {
         Self::load_project(root, package, false)
     }
 
+    pub fn load_manifest_path(
+        manifest_path: &Path,
+        package: Option<&str>,
+        require_current_lock: bool,
+    ) -> Result<Self> {
+        let path = fs::canonicalize(manifest_path).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize manifest path `{}`: {error}",
+                manifest_path.display()
+            ))
+        })?;
+        if path.file_name().and_then(|name| name.to_str()) != Some(MANIFEST_NAME) {
+            return Err(Error::failure(format!(
+                "manifest path `{}` does not name Cargo.toml",
+                manifest_path.display()
+            )));
+        }
+        let root = path
+            .parent()
+            .ok_or_else(|| Error::failure("manifest path has no parent directory"))?;
+        let manifest = Self::load_project(root, package, require_current_lock)?;
+        if manifest.path != path {
+            return Err(Error::failure(format!(
+                "manifest path `{}` does not select package `{}`",
+                path.display(),
+                manifest.name
+            ))
+            .with_help("make --manifest-path and -p select the same exact package"));
+        }
+        Ok(manifest)
+    }
+
     pub fn with_lock_source(mut self, source: String) -> Result<Self> {
         let path = self.root.join(LOCK_NAME);
         let document = Document::parse(&path, "Cargo lockfile", source)?;

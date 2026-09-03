@@ -69,7 +69,8 @@ impl Toolchain {
         }
 
         validate_program(&rustc, "rustc")?;
-        let output = process::query(&rustc, &["--version", "--verbose"], "rustc version query")?;
+        let output =
+            process::query_rustc(&rustc, &["--version", "--verbose"], "rustc version query")?;
         let verbose_version = String::from_utf8(output.stdout)
             .map_err(|_| Error::failure("rustc version output is not Unicode"))?;
         let fields = parse_verbose_version(&verbose_version)?;
@@ -99,8 +100,8 @@ impl Toolchain {
         if let Some(target) = explicit_target {
             arguments.extend(["--target", target]);
         }
-        let output =
-            process::query(&self.rustc, &arguments, "rustc target cfg query").map_err(|error| {
+        let output = process::query_rustc(&self.rustc, &arguments, "rustc target cfg query")
+            .map_err(|error| {
                 Error::failure(format!(
                     "rustc does not support target `{}`: {error}",
                     explicit_target.unwrap_or(&self.host)

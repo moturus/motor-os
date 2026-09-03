@@ -652,7 +652,7 @@ fn sysroot_digest(
     host: &TargetInfo,
     target: &TargetInfo,
 ) -> Result<()> {
-    let output = process::query(
+    let output = process::query_rustc(
         &toolchain.rustc,
         &["--print", "sysroot"],
         "rustc sysroot query",

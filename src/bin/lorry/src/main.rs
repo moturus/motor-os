@@ -9,6 +9,7 @@ mod cargo_registry;
 mod change_review;
 mod clean;
 mod cli;
+mod compatibility;
 mod compile;
 mod config;
 #[allow(dead_code)]
@@ -110,8 +111,10 @@ where
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
         Command::CacheClean => cache_clean::execute(cli.verbosity),
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
+        Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
+        Command::RustcQuery(options) => compatibility::rustc_query(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }

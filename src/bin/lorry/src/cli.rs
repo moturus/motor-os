@@ -34,13 +34,27 @@ pub enum Command {
     Build(BuildOptions),
     CacheClean,
     Clean(BuildOptions),
+    LocateProject { manifest_path: String },
     New { path: String },
     Review,
     Run(RunOptions),
+    RustcQuery(RustcQueryOptions),
     Test(TestOptions),
     Vendor(VendorOptions),
     Help(Option<String>),
     Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RustcQueryOptions {
+    pub target: String,
+    pub kind: RustcQueryKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RustcQueryKind {
+    Cfg,
+    TargetSpecJson,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,8 +131,10 @@ impl Cli {
                 std::iter::once("lorry".to_owned()).chain(arguments.iter().cloned()),
             )
             .map_err(clap_error)?;
-        if !matches!(matches.subcommand_name(), Some("run") | Some("test"))
-            && arguments.iter().any(|argument| argument == "--")
+        if !matches!(
+            matches.subcommand_name(),
+            Some("run") | Some("rustc") | Some("test")
+        ) && arguments.iter().any(|argument| argument == "--")
         {
             return Err(Error::usage(
                 "this command does not accept arguments after `--`",
@@ -255,6 +271,7 @@ fn command_line() -> ClapCommand {
                 ),
         )
         .subcommand(build_command("clean").dont_delimit_trailing_values(true))
+        .subcommand(locate_project_command())
         .subcommand(
             ClapCommand::new("new")
                 .disable_help_flag(true)
@@ -268,6 +285,7 @@ fn command_line() -> ClapCommand {
                 .arg(package_argument()),
         )
         .subcommand(run_command())
+        .subcommand(rustc_query_command())
         .subcommand(test_command())
         .subcommand(vendor_command())
         .subcommand(
@@ -282,6 +300,56 @@ fn command_line() -> ClapCommand {
                             "help",
                         ])),
                 ),
+        )
+}
+
+fn locate_project_command() -> ClapCommand {
+    ClapCommand::new("locate-project")
+        .disable_help_flag(true)
+        .dont_delimit_trailing_values(true)
+        .arg(
+            Arg::new("workspace")
+                .long("workspace")
+                .action(ArgAction::SetTrue)
+                .required(true),
+        )
+        .arg(
+            Arg::new("manifest-path")
+                .long("manifest-path")
+                .value_name("PATH")
+                .num_args(1)
+                .required(true),
+        )
+}
+
+fn rustc_query_command() -> ClapCommand {
+    ClapCommand::new("rustc")
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("unstable-options")
+                .short('Z')
+                .value_parser(PossibleValuesParser::new(["unstable-options"]))
+                .required(true),
+        )
+        .arg(
+            Arg::new("print")
+                .long("print")
+                .value_parser(PossibleValuesParser::new(["cfg", "target-spec-json"]))
+                .required(true),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .required(true),
+        )
+        .arg(
+            Arg::new("rustc-arguments")
+                .num_args(0..)
+                .last(true)
+                .allow_hyphen_values(true)
+                .action(ArgAction::Append),
         )
 }
 
@@ -394,6 +462,12 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             None => unreachable!("Clap requires a cache subcommand"),
         },
         Some(("clean", options)) => Ok(Command::Clean(build_options(options, false))),
+        Some(("locate-project", options)) => Ok(Command::LocateProject {
+            manifest_path: options
+                .get_one::<String>("manifest-path")
+                .expect("Clap requires the manifest path")
+                .clone(),
+        }),
         Some(("new", options)) => Ok(Command::New {
             path: options
                 .get_one::<String>("path")
@@ -419,6 +493,33 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 no_run: options.get_flag("no-run"),
                 bundle: options.get_flag("bundle"),
                 arguments,
+            }))
+        }
+        Some(("rustc", options)) => {
+            let print = options
+                .get_one::<String>("print")
+                .expect("Clap requires the rustc print kind");
+            let trailing = values(options, "rustc-arguments");
+            let kind = match (print.as_str(), trailing.as_slice()) {
+                ("cfg", [optimize]) if optimize == "-O" => RustcQueryKind::Cfg,
+                ("target-spec-json", [unstable, value])
+                    if unstable == "-Z" && value == "unstable-options" =>
+                {
+                    RustcQueryKind::TargetSpecJson
+                }
+                _ => {
+                    return Err(Error::usage(
+                        "unsupported `lorry rustc` query form",
+                        "use one of the exact rust-analyzer compatibility queries",
+                    ));
+                }
+            };
+            Ok(Command::RustcQuery(RustcQueryOptions {
+                target: options
+                    .get_one::<String>("target")
+                    .expect("Clap requires the rustc target")
+                    .clone(),
+                kind,
             }))
         }
         Some(("vendor", options)) => {
@@ -565,6 +666,92 @@ mod tests {
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
         assert!(parse(&["clean", "--strict-validation"]).is_err());
         assert!(parse(&["clean", "--bin", "server"]).is_err());
+    }
+
+    #[test]
+    fn parses_exact_rust_analyzer_compatibility_queries() {
+        assert_eq!(
+            parse(&[
+                "locate-project",
+                "--workspace",
+                "--manifest-path",
+                "/project/Cargo.toml",
+            ])
+            .unwrap()
+            .command,
+            Command::LocateProject {
+                manifest_path: "/project/Cargo.toml".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "x86_64-unknown-motor",
+                "--",
+                "-O",
+            ])
+            .unwrap()
+            .command,
+            Command::RustcQuery(RustcQueryOptions {
+                target: "x86_64-unknown-motor".to_owned(),
+                kind: RustcQueryKind::Cfg,
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "rustc",
+                "-Zunstable-options",
+                "--print=target-spec-json",
+                "--target=x86_64-unknown-motor",
+                "--",
+                "-Z",
+                "unstable-options",
+            ])
+            .unwrap()
+            .command,
+            Command::RustcQuery(RustcQueryOptions {
+                target: "x86_64-unknown-motor".to_owned(),
+                kind: RustcQueryKind::TargetSpecJson,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_other_cargo_compatibility_forms() {
+        for input in [
+            &["locate-project", "--manifest-path", "/project/Cargo.toml"][..],
+            &["locate-project", "--workspace"],
+            &["rustc", "--print", "cfg", "--target", "triple", "--", "-O"],
+            &[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "triple",
+            ],
+            &[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "triple",
+                "--",
+                "--crate-type",
+                "lib",
+            ],
+            &["-Z", "unstable-options", "config", "get"],
+        ] {
+            assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
+        }
     }
 
     #[test]
