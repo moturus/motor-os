@@ -10,7 +10,12 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub fn locate_project(manifest_path: &str) -> Result<i32> {
-    let manifest = Manifest::load_manifest_path(Path::new(manifest_path), None, false)?;
+    let manifest = Manifest::load_selected_or_manifest_path(
+        Path::new("."),
+        Some(Path::new(manifest_path)),
+        None,
+        false,
+    )?;
     let path = manifest
         .path
         .to_str()

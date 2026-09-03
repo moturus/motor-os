@@ -262,6 +262,18 @@ impl Manifest {
         Self::load_project(root, package, false)
     }
 
+    pub fn load_selected_or_manifest_path(
+        root: &Path,
+        manifest_path: Option<&Path>,
+        package: Option<&str>,
+        require_current_lock: bool,
+    ) -> Result<Self> {
+        match manifest_path {
+            Some(path) => Self::load_manifest_path(path, package, require_current_lock),
+            None => Self::load_project(root, package, require_current_lock),
+        }
+    }
+
     pub fn load_manifest_path(
         manifest_path: &Path,
         package: Option<&str>,
@@ -3251,7 +3263,15 @@ unsafe_code = { level = "forbid", priority = 1 }
 
         let from_root = Manifest::load_selected(&root, Some("app")).unwrap();
         let from_member = Manifest::load(&root.join("app")).unwrap();
+        let from_path = Manifest::load_selected_or_manifest_path(
+            &root,
+            Some(&root.join("app/Cargo.toml")),
+            Some("app"),
+            true,
+        )
+        .unwrap();
         assert_eq!(from_root, from_member);
+        assert_eq!(from_root, from_path);
         assert_eq!(from_root.root, root.join("app"));
         assert_eq!(from_root.workspace_root, root);
         assert_eq!(from_root.resolver, Resolver::V2);
@@ -3261,6 +3281,24 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(from_root.lock.is_some());
         assert!(Manifest::load_selected(&from_root.workspace_root, None).is_err());
         assert!(Manifest::load_selected(&from_root.workspace_root, Some("missing")).is_err());
+        assert!(
+            Manifest::load_selected_or_manifest_path(
+                &from_root.root,
+                Some(&root.join("app/Cargo.toml")),
+                Some("shared"),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            Manifest::load_selected_or_manifest_path(
+                &from_root.root,
+                Some(&root.join("Cargo.toml")),
+                None,
+                true,
+            )
+            .is_err()
+        );
         fs::write(
             from_root.workspace_root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\", \"shared\"]\ndefault-members = [\"app\"]\n",

@@ -9,10 +9,8 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-6 in section 4.12 are complete and gated, and patch 7's exact
-`locate-project` and read-only rustc compatibility queries are implemented and
-gated. Its remaining Cargo-form options and the native rust-analyzer work have
-not started. The completed
+patches 1-7 in section 4.12 are complete and gated, while the immutable source
+view and native rust-analyzer work have not started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
 2026-09-02.
@@ -24,7 +22,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-6 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-7 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1213,11 +1211,10 @@ explicit:
    layering, including target flags replacing `build.rustflags`. Differential
    tests compare compiler argv and build-script environment against the keyed
    Cargo, including the former append and shell-word parsing bugs.
-7. **Lorry: Cargo-form selection and compatibility queries (in progress).**
-   The exact `locate-project` and two read-only `rustc` query forms are complete
-   and gated. Add the remaining `--manifest-path`, `--target-dir`,
-   `clean --target-dir`, and shared no-op options with CLI tests. Unknown
-   `cargo rustc` forms remain rejected.
+7. **Lorry: Cargo-form selection and compatibility queries (complete).** Add
+   the exact `locate-project` and two read-only `rustc` query forms,
+   `--manifest-path`, `--target-dir`, `clean --target-dir`, and the shared
+   no-op options, with CLI tests. Unknown `cargo rustc` forms remain rejected.
 8. **Lorry: source view.** Publish content-addressed immutable package sources
    below the global cache under their full source-tree SHA-256 with atomic
    publication, digest re-verification, and `cache clean` integration.

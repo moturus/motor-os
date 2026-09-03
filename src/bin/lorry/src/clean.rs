@@ -1,22 +1,28 @@
-use crate::cli::{BuildOptions, Verbosity};
+use crate::cli::{CleanOptions, Verbosity};
 use crate::config::Config;
 use crate::diagnostic::{Error, Result};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub fn execute(options: &BuildOptions, package: Option<&str>, verbosity: Verbosity) -> Result<i32> {
+pub fn execute(options: &CleanOptions, package: Option<&str>, verbosity: Verbosity) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = crate::manifest::Manifest::load_selected(&current, package)?;
-    let artifact_root = super::engine::artifact_root(&manifest);
+    let target_directory = target_directory(&current, &manifest, options.target_dir.as_deref());
+    let artifact_root = super::engine::artifact_root_in(&manifest, &target_directory);
 
-    let target = if options.release || options.target.is_some() {
-        Config::load(&manifest.root)?.selected_target(options.target.as_deref())?
+    let target = if options.build.release || options.build.target.is_some() {
+        Config::load(&manifest.root)?.selected_target(options.build.target.as_deref())?
     } else {
         None
     };
-    let removed = clean_manifest_artifacts(&manifest, options.release, target.as_deref())?;
+    let removed = clean_manifest_artifacts(
+        &manifest,
+        &target_directory,
+        options.build.release,
+        target.as_deref(),
+    )?;
     if verbosity != Verbosity::Quiet {
         if removed {
             eprintln!("Removed Lorry artifacts from `{}`", artifact_root.display());
@@ -27,54 +33,33 @@ pub fn execute(options: &BuildOptions, package: Option<&str>, verbosity: Verbosi
     Ok(0)
 }
 
+fn target_directory(
+    current: &Path,
+    manifest: &crate::manifest::Manifest,
+    requested: Option<&str>,
+) -> PathBuf {
+    match requested.map(Path::new) {
+        Some(path) if path.is_absolute() => path.to_owned(),
+        Some(path) => current.join(path),
+        None => manifest.workspace_root.join("target"),
+    }
+}
+
+#[cfg(test)]
 fn clean_artifacts(root: &Path, release: bool, target: Option<&str>) -> Result<bool> {
-    let target_parent = root.join("target");
-    if !real_directory(&target_parent, "artifact parent")? {
-        return Ok(false);
-    }
-    let lorry_root = target_parent.join("lorry");
-    if !real_directory(&lorry_root, "Lorry artifact root")? {
-        return Ok(false);
-    }
-
-    if !release && target.is_none() {
-        remove_directory(&lorry_root)?;
-        return Ok(true);
-    }
-
-    let mut selected_parent = lorry_root.clone();
-    if let Some(target) = target {
-        selected_parent.push(target);
-        real_directory(&selected_parent, "target artifact directory")?;
-    }
-    let selected = if release {
-        selected_parent.join("release")
-    } else {
-        selected_parent
-    };
-    let selected_exists = real_directory(&selected, "selected artifact directory")?;
-    let cache = lorry_root.join(".cache");
-    let cache_exists = real_directory(&cache, "Lorry artifact cache")?;
-
-    if selected_exists {
-        remove_directory(&selected)?;
-    }
-    if cache_exists && cache != selected {
-        remove_directory(&cache)?;
-    }
-    Ok(selected_exists || cache_exists)
+    clean_artifacts_root(&root.join("target/lorry"), release, target)
 }
 
 fn clean_manifest_artifacts(
     manifest: &crate::manifest::Manifest,
+    target_parent: &Path,
     release: bool,
     target: Option<&str>,
 ) -> Result<bool> {
     if manifest.root == manifest.workspace_root {
-        return clean_artifacts(&manifest.root, release, target);
+        return clean_artifacts_root(&target_parent.join("lorry"), release, target);
     }
-    let target_parent = manifest.workspace_root.join("target");
-    if !real_directory(&target_parent, "artifact parent")? {
+    if !real_directory(target_parent, "artifact parent")? {
         return Ok(false);
     }
     let lorry_root = target_parent.join("lorry");
@@ -244,10 +229,45 @@ mod tests {
         fixture.directory("target/lorry/packages/app/debug");
         fixture.directory("target/lorry/packages/other/debug");
         let manifest = crate::manifest::Manifest::load_selected(&fixture.0, Some("app")).unwrap();
+        assert_eq!(
+            target_directory(&manifest.root, &manifest, None),
+            fixture.0.join("target")
+        );
+        assert_eq!(
+            target_directory(&manifest.root, &manifest, Some("editor-target")),
+            manifest.root.join("editor-target")
+        );
 
-        assert!(clean_manifest_artifacts(&manifest, false, None).unwrap());
+        assert!(
+            clean_manifest_artifacts(&manifest, &fixture.0.join("target"), false, None).unwrap()
+        );
         assert!(!fixture.0.join("target/lorry/packages/app").exists());
         assert!(fixture.0.join("target/lorry/packages/other/debug").is_dir());
+
+        fixture.directory("editor-target/lorry/packages/app/debug");
+        fixture.directory("editor-target/lorry/packages/other/debug");
+        assert!(
+            clean_manifest_artifacts(&manifest, &fixture.0.join("editor-target"), false, None)
+                .unwrap()
+        );
+        assert!(!fixture.0.join("editor-target/lorry/packages/app").exists());
+        assert!(
+            fixture
+                .0
+                .join("editor-target/lorry/packages/other/debug")
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn cleans_a_custom_target_directory_only() {
+        let fixture = Fixture::new("custom-target");
+        fixture.directory("target/lorry/debug");
+        let custom = fixture.directory("editor-target/lorry/debug");
+
+        assert!(clean_artifacts_root(custom.parent().unwrap(), false, None).unwrap());
+        assert!(!fixture.0.join("editor-target/lorry").exists());
+        assert!(fixture.0.join("target/lorry/debug").is_dir());
     }
 
     #[cfg(unix)]

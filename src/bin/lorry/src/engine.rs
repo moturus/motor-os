@@ -411,7 +411,11 @@ fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
 }
 
 pub(crate) fn artifact_root(manifest: &Manifest) -> PathBuf {
-    let root = manifest.workspace_root.join("target/lorry");
+    artifact_root_in(manifest, &manifest.workspace_root.join("target"))
+}
+
+pub(crate) fn artifact_root_in(manifest: &Manifest, target_directory: &Path) -> PathBuf {
+    let root = target_directory.join("lorry");
     if manifest.workspace_root == manifest.root {
         root
     } else {
