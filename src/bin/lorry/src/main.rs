@@ -39,6 +39,7 @@ mod resolver;
 mod review;
 mod sandbox;
 mod source_tree;
+mod source_view;
 mod sparse;
 mod toml;
 mod toolchain;
