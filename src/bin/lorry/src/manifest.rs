@@ -145,6 +145,7 @@ pub struct LibraryTarget {
     pub proc_macro: bool,
     pub test: bool,
     pub doctest: bool,
+    pub doc: bool,
 }
 
 #[allow(dead_code)]
@@ -153,6 +154,7 @@ pub struct BinaryTarget {
     pub name: String,
     pub path: PathBuf,
     pub test: bool,
+    pub doc: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1238,6 +1240,7 @@ fn parse_library(
             proc_macro: false,
             test: true,
             doctest: true,
+            doc: true,
         }));
     };
     let table = require_table(path, document, item, "lib")?;
@@ -1323,6 +1326,7 @@ fn parse_library(
         proc_macro,
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
         doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true),
+        doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
     }))
 }
 
@@ -1380,6 +1384,7 @@ fn parse_binaries(
                 name,
                 path: root.join(relative),
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
+                doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
             };
             if !explicit_names.insert(target.name.clone()) {
                 return Err(Error::at(
@@ -1410,6 +1415,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                 name: package_name.to_owned(),
                 path: main,
                 test: true,
+                doc: true,
             },
         );
     }
@@ -1468,6 +1474,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                     name: name.clone(),
                     path: source,
                     test: true,
+                    doc: true,
                 },
             )
             .is_some()
@@ -3199,7 +3206,7 @@ unsafe_code = { level = "forbid", priority = 1 }
             root.join("Cargo.toml"),
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
              edition = \"2024\"\ndefault-run = \"worker\"\n\
-             [[bin]]\nname = \"tool\"\npath = \"src/custom.rs\"\n",
+             [[bin]]\nname = \"tool\"\npath = \"src/custom.rs\"\ndoc = false\n",
         )
         .unwrap();
         fs::write(
@@ -3219,6 +3226,9 @@ unsafe_code = { level = "forbid", priority = 1 }
             ["demo", "tool", "worker"]
         );
         assert_eq!(manifest.binaries[1].path, root.join("src/custom.rs"));
+        assert!(manifest.binaries[0].doc);
+        assert!(!manifest.binaries[1].doc);
+        assert!(manifest.binaries[2].doc);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3327,6 +3337,9 @@ autobenches = false
 name = "dependency"
 path = "src/lib.rs"
 bench = true
+test = false
+doctest = false
+doc = false
 
 [dependencies]
 normal = "1"
@@ -3372,6 +3385,10 @@ members = ["ignored-member"]
         .unwrap();
         assert_eq!(manifest.links.as_deref(), Some("native"));
         assert!(manifest.build_script.is_some());
+        let library = manifest.library.as_ref().unwrap();
+        assert!(!library.test);
+        assert!(!library.doctest);
+        assert!(!library.doc);
         assert_eq!(manifest.dependencies.len(), 3);
         assert_eq!(
             manifest
