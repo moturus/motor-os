@@ -82,6 +82,15 @@ pub(crate) fn materialize_locked_dependencies(
     if !has_git_dependency(manifest) {
         return Ok(DirectCatalog::default());
     }
+    for refresh in super::resolve_patch_refreshes(manifest, network, policy, verbose)? {
+        if refresh.changed() {
+            return Err(Error::failure(format!(
+                "Git patch `{}` (`{}`) moved from {} to {}",
+                refresh.alias, refresh.package, refresh.previous.commit, refresh.candidate.commit
+            ))
+            .with_help("review support for Git patch updates is not available yet"));
+        }
+    }
     let mut objects = BTreeMap::new();
     for locked in locked_sources(manifest)? {
         let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
@@ -545,7 +554,7 @@ fn bind_internal_dependencies(manifest: &mut Manifest, object: &Object) -> Resul
     Ok(())
 }
 
-fn object_root(workspace: &Path, cargo_source: &str) -> PathBuf {
+pub(super) fn object_root(workspace: &Path, cargo_source: &str) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(cargo_source.as_bytes());
     workspace

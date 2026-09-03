@@ -4,10 +4,12 @@ use crate::manifest::{GitDependency, GitSelector};
 mod direct;
 mod http;
 mod materialize;
+mod refresh;
 
 pub(crate) use direct::{
     DirectCatalog, configure_direct, load_locked_dependencies, materialize_locked_dependencies,
 };
+pub(crate) use refresh::resolve_patch_refreshes;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LockedSource {

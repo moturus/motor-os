@@ -9,7 +9,7 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-3 in section 4.12 are complete and gated, while Git-patch refresh and
+patches 1-4 in section 4.12 are complete and gated, while Git-patch review and
 the native rust-analyzer work have not started. The completed Lorry work makes
 `lorry vendor` keep every input `Cargo.toml` immutable and removes Lorry's
 unused required-patch feature, which U. Lasiotus authorized on 2026-09-02.
@@ -21,7 +21,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-3 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-4 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1183,7 +1183,7 @@ explicit:
    read-only/byte-identity product tests in section 4.11. Preserve legacy
    explicit path patches. Stop for review of this pre-existing behavior
    correction and update Lorry's README/spec only when the tests pass.
-4. **Lorry: Git-patch refresh resolution.** Check every mutable patch selector
+4. **Lorry: Git-patch refresh resolution (complete).** Check every mutable patch selector
    during `vendor`, compare it with the locked commit, and distinguish
    commit-ID `rev` selectors from mutable named `rev` references. Return a
    verified set of old/new source candidates without retaining or fetching
