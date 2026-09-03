@@ -74,6 +74,7 @@ CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" build \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline --release
 LORRY="$LORRY_DIR/target/release/lorry"
 "$SCRIPT_DIR/review-contract.sh" "$LORRY"
+"$SCRIPT_DIR/git-patch-contract.sh" "$LORRY"
 
 "$SCRIPT_DIR/cargo-identity.sh" "$LORRY"
 "$SCRIPT_DIR/workspace-contract.sh" "$LORRY"

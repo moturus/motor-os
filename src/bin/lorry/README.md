@@ -382,17 +382,18 @@ stores the verified snapshot below:
 .lorry/vendor/git/<cargo-source-sha256>/source
 ```
 
-A root Git patch may select a branch, tag, revision, or default HEAD without
-an existing lock entry. Vendoring resolves one exact commit, records its
-evidence, and atomically rewrites the patch to:
+A root Git patch may select a branch, tag, revision, or default HEAD. Its
+package must already have a matching exact Git source in Cargo.lock. Vendoring
+uses that commit as the immutable identity and stores the verified snapshot in
+the same content-addressed layout as a direct Git dependency:
 
 ```text
-.lorry/vendor/<patch>/source[/<package-subdirectory>]
+.lorry/vendor/git/<cargo-source-sha256>/source
 ```
 
-For a repository-root package the suffix is absent. For a monorepo or virtual
-workspace, Lorry locates the unique manifest for the patched package and
-rewrites the patch to that package directory.
+The patch remains a first-class Git source throughout resolution, review, and
+lock rendering. Lorry never modifies an input workspace or member Cargo.toml;
+legacy explicit path patches continue to use their declared paths.
 
 Both forms use a shallow fetch and record the canonical URL, requested
 selector, commit, Git tree, canonical source digest, file count, and byte

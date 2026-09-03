@@ -8,10 +8,11 @@ imager configuration on 2026-09-02, and its design questions were answered
 the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
-ready to implement. Stage 2 has not been implemented or gated. The Lorry work
-also corrects the existing `lorry vendor` Git-patch path so vendoring never
-modifies a project's input `Cargo.toml` files, and it removes Lorry's unused
-required-patch feature, which U. Lasiotus authorized on 2026-09-02.
+ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
+patches 1-3 in section 4.12 are complete and gated, while Git-patch refresh and
+the native rust-analyzer work have not started. The completed Lorry work makes
+`lorry vendor` keep every input `Cargo.toml` immutable and removes Lorry's
+unused required-patch feature, which U. Lasiotus authorized on 2026-09-02.
 
 ## 0. Status and architecture
 
@@ -20,7 +21,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | Ready to implement; not implemented |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-3 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1163,7 +1164,7 @@ mostly-deletion patch is safer than intermediate states that compile but retain
 only part of its security contract. The repositories and review stops are
 explicit:
 
-1. **Lorry: remove required patches.** Delete the feature as listed in section
+1. **Lorry: remove required patches (complete).** Delete the feature as listed in section
    4.7: the configuration table and its parser, the manifest matcher and
    resolver guard, the seeded-Git repository object type, the
    `objects/seeded-git` directories in Lorry, `src/imager/motor-os-dev.yaml`,
@@ -1171,12 +1172,12 @@ explicit:
    text, including `src/bin/lorry/full-native-build.md`. A leftover
    `required-patches` table then fails as an unknown configuration key.
    Authorized by U. Lasiotus on 2026-09-02.
-2. **Lorry: Git-patch manifest model.** Replace the vendor-only Git-patch
+2. **Lorry: Git-patch manifest model (complete).** Replace the vendor-only Git-patch
    parser with path/Git variants in the ordinary manifest model. Make the
    resolver's crates.io-patch marker independent of physical source kind and
    make lock rendering preserve a Git package identity. Cover this with pure
    manifest, resolver, and lockfile tests.
-3. **Lorry: immutable Git-patch vendoring.** Reuse the content-addressed direct
+3. **Lorry: immutable Git-patch vendoring (complete).** Reuse the content-addressed direct
    Git object machinery for patches, return an in-memory patch catalog, remove
    manifest and early lock rewriting, update admission identity, and add the
    read-only/byte-identity product tests in section 4.11. Preserve legacy
@@ -1374,7 +1375,7 @@ rely on line numbers.
 |---|---|
 | 1 remove required patches | `config.rs`: `RequiredPatch`, `merge_required_patches`, the `required_patches` field. `patch.rs`: `configure`, `configure_cargo_registry`, `load_required_patch*`, `verify_required_object`, `required_manifest_error`. `resolver.rs`: `RequiredPatchGuard`, `Catalog::register_required_patch`, `required_patch_allows`, `registry_candidate_is_patched`, `required_patch_failure`. `repository.rs`: `SeededGitObject`, `lookup_seeded_git`, `verify_seeded_git_object`, the `objects/seeded-git` layout. `src/imager/motor-os-dev.yaml`: the `seeded-git` directories. `tests/registry-contract.sh`. Docs: `README.md`, `spec.md`, `design.md`, `full-native-build.md`. |
 | 2 Git-patch manifest model | `manifest.rs`: `Manifest`, `PathPatch`, `parse_patches`. `git.rs`: `parse_git_patches`, `parse_locked_source`. `resolver.rs`: `ResolvedSource`, `Catalog::insert_path_patch`, the `patched_crates_io` marker. `lockfile.rs`: lock rendering. |
-| 3 immutable Git-patch vendoring | `git.rs`: `materialize_manifest_patches`, `rewrite_manifest`, `rewrite_materialized_lock`, `attach_locked_commits`, and the `git/` module's `materialize_one`. `vendor.rs`: `execute_reconcile` (the early call), `stage_lockfile`, the acquisition `publish`. `atomic.rs`: `AtomicFile`, `AtomicDirectory`. `repository.rs`: the direct Git object layout. `admission_state.rs`. |
+| 3 immutable Git-patch vendoring | `git/direct.rs`: `DirectCatalog`, `materialize_locked_dependencies`, `materialize_one`, `locked_package`, and the shared Git object layout. `git.rs`: `parse_locked_source`. `patch.rs`: `configure`. `resolver.rs`: `Catalog::insert_git_patch` and locked-repository patch selection. `vendor.rs`: `execute_reconcile`. `admission_state.rs`: the existing Git and crates.io-patch review records. `tests/git-patch-contract.sh`. |
 | 4, 5 refresh and review | `vendor.rs`: candidate review and approval, `VendorOptions` in `cli.rs`. `prompt.rs`. The `git/` module for selector resolution. `spec.md` and `design.md` for the `--accept-all` sentences. |
 | 6 rustflags | `config.rs`: `environment_rustflags`, `split_words`, `apply_cargo_environment`, `build_rustflags`, `target_options`. `engine.rs`: the composition after `target_options` in `execute`. `build_script.rs`: the U+001F-joined rustflags handed to scripts. |
 | 7 selection and queries | `cli.rs`: `Cli::parse`, `Command`, `BuildOptions`. `main.rs`: `run`, `print_help`. `toolchain.rs`: `Toolchain`, the `--print cfg` query, `resolve_rustup_proxy`. `process.rs`: `query`. `engine.rs`: `artifact_root`, `profile_destination`. `clean.rs`. |

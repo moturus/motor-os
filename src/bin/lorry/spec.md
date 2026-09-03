@@ -244,9 +244,9 @@ The supported manifest surface includes:
 - normal crates.io, Git, and path dependencies in string/table forms, renaming,
   optional dependencies, default-feature control, feature-to-dependency
   forwarding, and target-conditioned dependency tables;
-- exact local path `[patch.crates-io]` replacements required by policy.
-- root `[patch.crates-io]` Git entries accepted as input to `lorry vendor`,
-  which rewrites them to local path patches before resolution;
+- exact local path `[patch.crates-io]` replacements required by policy;
+- root `[patch.crates-io]` Git entries with a matching exact Git source in
+  Cargo.lock, materialized without modifying any input manifest;
 - dependency libraries declared with `[lib] proc-macro = true`; these are
   compiler-host units and require an explicit procedural-macro grant.
 
@@ -269,7 +269,7 @@ profile keys, workspace inheritance, artifact dependencies, alternative
 registries, non-crates.io patches, selecting a
 procedural-macro package as the root, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
-the user to `lorry vendor`; they never fetch or rewrite it themselves.
+the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
 omission must be reported.
 
@@ -314,10 +314,10 @@ settings must be rejected rather than adopted or ignored.
 - An explicit upgrade changes only the selected package and packages forced to
   move by its requirements. Every other compatible locked identity remains
   preferred.
-- Before normal resolution, `lorry vendor` materializes supported root
-  crates.io Git patches, locates the unique matching package manifest in each
-  snapshot, and atomically rewrites them to local path patches. It also
-  materializes exact locked direct Git sources needed by the root manifest.
+- Before normal resolution, `lorry vendor` materializes the exact locked Git
+  sources needed by direct Git dependencies and root crates.io Git patches.
+  Both retain their Cargo-compatible Git identities; no input manifest is
+  modified.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
@@ -727,19 +727,19 @@ repository snapshot. An object is published at
 `.lorry/vendor/git/<sha256-cargo-source>/source` with `git.toml` provenance.
 
 A root `[patch.crates-io]` Git entry accepts the same URL and selector surface.
-Lorry inspects it before the ordinary manifest load, retains a matching locked
-commit or resolves the requested ref once, records evidence before approval,
-publishes the source at `.lorry/vendor/<alias>/source`, and atomically rewrites
-only that manifest value to a local path patch. A later registry-vendoring
-failure may therefore leave this completed materialization in place; a rerun
-resumes from it.
+Its package must have a matching exact `git+` source in Cargo.lock. Lorry
+materializes that locked source in the same content-addressed Git object
+layout, marks the selected package as a crates.io replacement, and preserves
+the Git identity in resolution, review, and lock rendering. Input workspace
+and member manifests remain byte-identical. Legacy explicit path patches keep
+their declared path identities.
 
-Both object forms use a shallow depth-one fetch and record the canonical URL,
-request, exact commit, Git tree, canonical source SHA-256, file count, and
-bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs and
-directories only. Symbolic links, submodules, special modes, and traversal are
-rejected. Build, run, and test remain offline and verify the published source
-tree and provenance before resolving or compiling it.
+Both dependency forms use a shallow depth-one fetch and record the canonical
+URL, request, exact commit, Git tree, canonical source SHA-256, file count,
+and bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs
+and directories only. Symbolic links, submodules, special modes, and traversal
+are rejected. Build, run, and test remain offline and verify the published
+source tree and provenance before resolving or compiling it.
 
 Decline or failure before commit must expose no new object or lock. Concurrent
 publication may accept an independently published destination only after full

@@ -12,13 +12,7 @@ pub fn configure(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
     for patch in &manifest.patches {
         match &patch.source {
             PatchSource::Path(path) => load_local_patch(patch, path, catalog)?,
-            PatchSource::Git(_) => {
-                return Err(Error::failure(format!(
-                    "Git patch `{}` is not materialized for an offline build",
-                    patch.alias
-                ))
-                .with_help("run `lorry vendor [--accept-all]` to materialize the Git patch"));
-            }
+            PatchSource::Git(_) => {}
         }
     }
     Ok(())

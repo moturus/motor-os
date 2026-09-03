@@ -137,7 +137,7 @@ object at the same identity is corruption.
 The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
-2. materialize supported Git patches and locked direct Git sources;
+2. materialize locked Git sources used by direct dependencies and patches;
 3. load sparse index data on demand and resolve the complete/selected graphs;
 4. run policy preflight before archive acquisition;
 5. download missing archives with the bounded curl client;
@@ -148,9 +148,10 @@ The intended ordinary vendor flow is:
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
-Git patch declarations are parsed before the ordinary manifest load, then
-rewritten atomically to local paths. Direct Git objects retain their immutable
-Git source identity and are installed below the project-local vendor tree.
+Direct dependencies and crates.io Git patches share one verified,
+content-addressed object catalog below the project-local vendor tree. Both
+retain their immutable Git source identity; input manifests are never
+rewritten. Explicit path patches retain their declared path identity.
 
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
@@ -174,10 +175,10 @@ logical source paths, and cache keys all retain that identity rather than
 treating Git as crates.io or as an ordinary mutable path. A single snapshot
 may contribute multiple monorepo packages.
 
-Root crates.io Git patches remain a vendoring adapter. Lorry resolves and
-materializes each patch, locates its unique package manifest within the
-snapshot, rewrites that manifest entry to the package's local path, and leaves
-build, run, and test entirely offline.
+Root crates.io Git patches use the same immutable source model and verified
+objects as direct Git dependencies. The resolver marks their selected Git
+packages as crates.io replacements without changing their source identity or
+rewriting a workspace manifest. Build, run, and test remain entirely offline.
 
 Both Linux and Motor use gix for repository negotiation, pack/object
 processing, and tree traversal. A small injected blocking transport sends

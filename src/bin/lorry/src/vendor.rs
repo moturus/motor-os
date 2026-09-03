@@ -78,38 +78,27 @@ fn execute_reconcile(
             "rerun interactively without `--accept-all` to review package and capability changes",
         ));
     }
-    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
-    let config = Config::load(&initial_manifest.root)?;
+    let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
+    let config = Config::load(&manifest.root)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
-    let lock = ProjectVendorLock::acquire(&initial_manifest.workspace_root)?;
+    let lock = ProjectVendorLock::acquire(&manifest.workspace_root)?;
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
-    crate::git::materialize_manifest_patches(
-        &initial_manifest,
-        &config.network,
-        &config.policy.limits,
-        accept_all,
-        cli.verbosity == Verbosity::Verbose,
-        progress,
-    )?;
-    let initial_manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let direct = crate::git::materialize_locked_dependencies(
-        &initial_manifest,
+        &manifest,
         &config.network,
         &config.policy.limits,
         accept_all,
         cli.verbosity == Verbosity::Verbose,
         progress,
     )?;
-    let previous = CompactState::load(&initial_manifest.root)?;
-    let config = Config::load(&initial_manifest.root)?;
+    let previous = CompactState::load(&manifest.root)?;
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-    engine::check_rust_version(&initial_manifest, &toolchain)?;
+    engine::check_rust_version(&manifest, &toolchain)?;
     let host = toolchain.target_info(None)?;
     let contexts = vendor_contexts(&toolchain, &config, &host, previous.as_ref())?;
 
-    let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let forced = requested
         .map(|(package, version)| upgrade::transitive_selection(&manifest, package, version))
         .transpose()?;

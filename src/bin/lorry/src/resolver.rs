@@ -303,11 +303,14 @@ impl Catalog {
             .collect::<Vec<_>>();
         let source = repository.source.clone();
 
-        let has_path_candidate = self.records(&dependency.package).iter().any(|candidate| {
+        let has_patch_candidate = self.records(&dependency.package).iter().any(|candidate| {
             dependency.requirement.matches(&candidate.version)
                 && matches!(
                     candidate.source,
                     ResolvedSource::Path {
+                        patched_crates_io: true,
+                        ..
+                    } | ResolvedSource::Git {
                         patched_crates_io: true,
                         ..
                     }
@@ -360,7 +363,7 @@ impl Catalog {
             self.insert(record)?;
             available = true;
         }
-        if available || has_path_candidate {
+        if available || has_patch_candidate {
             return Ok(());
         }
         if missing.is_empty() {
@@ -2233,6 +2236,17 @@ mod tests {
                 },
             )
             .unwrap();
+        catalog.locked_repository = Some(LockedRepository {
+            source: LockedRegistrySource::Lorry(
+                RepositorySet::open(
+                    &crate::config::Repositories::default(),
+                    DEFAULT_TREE_LIMITS,
+                    16 * 1024 * 1024,
+                )
+                .unwrap(),
+            ),
+            packages: BTreeMap::new(),
+        });
 
         let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
         let [package] = resolution.packages.as_slice() else {
