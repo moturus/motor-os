@@ -19,7 +19,7 @@ REMOTE_BASE="/devtools/tmp/lorry-self"
 IMAGE_NAME="motor-os-dev.qcow2"
 # Native rustc builds need enough parallel memory for the VM's vCPU count.
 VM_SMP="${LORRY_VM_SMP:-8}"
-VM_MEMORY="${LORRY_VM_MEMORY:-8192M}"
+VM_MEMORY_MIB="${LORRY_VM_MEMORY_MIB:-8192}"
 # Lorry's unit concurrency inside the guest. ssh carries no environment, so
 # the only way to set it there is an explicit prefix on the remote command.
 # Empty means the guest chooses its own default (its available parallelism).
@@ -294,8 +294,8 @@ start_vm() {
             fail "a VM is already answering on the tap; stop it before running"
         fi
         MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
-            "$ROOT_DIR/vm_images/release/run-qemu.sh" \
-            -m "$VM_MEMORY" >"$QEMU_LOG" 2>&1 &
+            MOTO_MEMORY_MIB="$VM_MEMORY_MIB" \
+            "$ROOT_DIR/vm_images/release/run-qemu.sh" >"$QEMU_LOG" 2>&1 &
         VM_PID="$!"
         VM_STARTED=1
     fi
@@ -399,7 +399,7 @@ cleanup() {
         [ "$status" -eq 0 ] && echo "result: PASS" || echo "result: FAIL"
         echo "profile: release"
         echo "image: release/$IMAGE_NAME"
-        echo "vm: ${VM_SMP} vcpus, $VM_MEMORY"
+        echo "vm: ${VM_SMP} vcpus, ${VM_MEMORY_MIB} MiB"
         echo "mode: native-self"
         cat "$TIMING_LOG"
     } >"$SUMMARY"
