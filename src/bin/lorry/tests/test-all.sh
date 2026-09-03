@@ -66,6 +66,10 @@ echo "== Lorry unit and integration-style Rust tests =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" test \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline
 
+echo "== cargo_metadata 0.23.1 wire-schema test =="
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" run \
+    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline
+
 echo "== Paired Cargo resolution oracle =="
 "$SCRIPT_DIR/verify-stage2-resolution-oracle.sh"
 
