@@ -317,6 +317,11 @@ run_native() {
     remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
     remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
+    if [ "$WARM" -eq 1 ]; then
+        for executable in lorry-cross lorry-native; do
+            remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /system/bin/rm $REMOTE_ROOT/$executable"
+        done
+    fi
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
