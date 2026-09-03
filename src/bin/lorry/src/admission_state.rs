@@ -2618,7 +2618,6 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     physical_root: PathBuf::from("root"),
                     source_tree_sha256: [0; 32],
                     patched_crates_io: false,
-                    required_patch: None,
                 },
                 local_manifest: None,
                 feature_sets: BTreeMap::new(),

@@ -458,7 +458,6 @@ mod tests {
                     physical_root: local_root,
                     source_tree_sha256: [7; 32],
                     patched_crates_io: false,
-                    required_patch: None,
                 },
             ),
             package(
@@ -569,7 +568,6 @@ mod tests {
                 physical_root: local_root,
                 source_tree_sha256: [7; 32],
                 patched_crates_io: false,
-                required_patch: None,
             },
         );
         local.local_manifest = Some(local_manifest);

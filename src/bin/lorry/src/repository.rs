@@ -64,7 +64,6 @@ pub struct RepositorySet {
     /// source trees on every lookup.
     verified_registry: Arc<Mutex<BTreeMap<String, RegistryObject>>>,
     verified_registry_manifests: Arc<Mutex<BTreeMap<String, Manifest>>>,
-    verified_seeded_git: Arc<Mutex<BTreeMap<String, SeededGitObject>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -85,26 +84,6 @@ pub struct RegistryObject {
     /// The verified retained source tree, when the object retains one.
     pub source_tree: Option<Tree>,
     pub index: SparseRecord,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SeededGitObject {
-    pub layer: Layer,
-    pub root: PathBuf,
-    pub name: String,
-    pub version: Version,
-    pub cargo_source: String,
-    pub git_url: String,
-    pub requested_revision: String,
-    pub resolved_commit: String,
-    pub git_tree: String,
-    pub patch_files: Vec<String>,
-    pub upstream_crates_io_checksum: [u8; 32],
-    pub source_tree_sha256: [u8; 32],
-    pub license: String,
-    pub extracted_bytes: u64,
-    pub file_count: u64,
-    pub directory_count: u64,
 }
 
 #[derive(Debug)]
@@ -175,7 +154,6 @@ impl RepositorySet {
             validation,
             verified_registry: Arc::new(Mutex::new(BTreeMap::new())),
             verified_registry_manifests: Arc::new(Mutex::new(BTreeMap::new())),
-            verified_seeded_git: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -345,42 +323,6 @@ impl RepositorySet {
         }
         Ok(manifests)
     }
-
-    pub fn lookup_seeded_git(&self, source_tree_sha256: &str) -> Result<Option<SeededGitObject>> {
-        let digest = decode_hex::<32>(source_tree_sha256).map_err(|error| {
-            Error::failure(format!(
-                "invalid seeded-Git source-tree digest `{source_tree_sha256}`: {error}"
-            ))
-        })?;
-        if let Some(object) = lock_cache(&self.verified_seeded_git).get(source_tree_sha256) {
-            return Ok(Some(object.clone()));
-        }
-        for repository in &self.layers {
-            if !repository.present {
-                continue;
-            }
-            let object_path = repository
-                .root
-                .join("objects/seeded-git/sha256")
-                .join(&source_tree_sha256[..2])
-                .join(source_tree_sha256);
-            if !entry_exists(&object_path)? {
-                continue;
-            }
-            let object = verify_seeded_git_object(
-                repository.layer,
-                &object_path,
-                digest,
-                self.limits,
-                self.validation.is_strict(),
-            )
-            .map_err(|error| shadow_error(repository, &object_path, error))?;
-            lock_cache(&self.verified_seeded_git)
-                .insert(source_tree_sha256.to_owned(), object.clone());
-            return Ok(Some(object));
-        }
-        Ok(None)
-    }
 }
 
 /// Locks a verification cache, recovering from a poisoned lock: cache entries
@@ -457,8 +399,6 @@ impl RepositoryWriter {
             "objects",
             "objects/crates-io",
             "objects/crates-io/sha256",
-            "objects/seeded-git",
-            "objects/seeded-git/sha256",
             ".staging",
         ] {
             require_real_directory(&root.join(relative), "repository directory")?;
@@ -796,8 +736,6 @@ fn initialize_repository(root: &Path) -> Result<()> {
         "objects",
         "objects/crates-io",
         "objects/crates-io/sha256",
-        "objects/seeded-git",
-        "objects/seeded-git/sha256",
         ".staging",
     ] {
         fs::create_dir(staging.path().join(relative)).map_err(|error| {
@@ -831,8 +769,6 @@ fn persist_repository_tree(root: &Path, sync_file: &File) -> Result<()> {
     for relative in [
         "objects/crates-io/sha256",
         "objects/crates-io",
-        "objects/seeded-git/sha256",
-        "objects/seeded-git",
         "objects",
         ".staging",
         "",
@@ -1145,159 +1081,6 @@ fn verify_registry_object(
         retained_source,
         source_tree,
         index,
-    })
-}
-
-fn verify_seeded_git_object(
-    layer: Layer,
-    object_path: &Path,
-    expected_digest: [u8; 32],
-    limits: Limits,
-    strict: bool,
-) -> Result<SeededGitObject> {
-    require_real_directory(object_path, "seeded-Git object")?;
-    let expected_entries = BTreeSet::from(["package.toml", "source", "source-manifest.json"]);
-    verify_exact_entries(object_path, &expected_entries)?;
-
-    let package_path = object_path.join("package.toml");
-    require_real_file(&package_path, "seeded-Git package metadata")?;
-    let document = Document::load(&package_path, "seeded-Git repository package metadata")?;
-    const KEYS: &[&str] = &[
-        "format-version",
-        "name",
-        "version",
-        "cargo-source",
-        "git-url",
-        "requested-revision",
-        "resolved-commit",
-        "git-tree",
-        "patch-files",
-        "upstream-crates-io-checksum",
-        "source-tree-sha256",
-        "license",
-        "extracted-bytes",
-        "file-count",
-        "directory-count",
-        "retained-source",
-    ];
-    reject_unknown_keys(&package_path, &document, document.root(), KEYS)?;
-    require_exact_keys(&package_path, document.root(), KEYS)?;
-    require_format_one(&package_path, &document)?;
-
-    let name = require_nonempty_string(&package_path, &document, document.root(), "name")?;
-    validate_package_name(&package_path, &name)?;
-    let version = parse_version(&package_path, &document, document.root(), "version")?;
-    let cargo_source =
-        require_nonempty_string(&package_path, &document, document.root(), "cargo-source")?;
-    let git_url = require_nonempty_string(&package_path, &document, document.root(), "git-url")?;
-    let requested_revision = require_nonempty_string(
-        &package_path,
-        &document,
-        document.root(),
-        "requested-revision",
-    )?;
-    let resolved_commit = require_hex_string(&package_path, &document, "resolved-commit", 40)?;
-    let git_tree = require_hex_string(&package_path, &document, "git-tree", 40)?;
-    let patch_files =
-        require_string_array(&package_path, &document, document.root(), "patch-files")?;
-    if patch_files.is_empty()
-        || patch_files.iter().any(|path| {
-            path.is_empty()
-                || path.len() > 4096
-                || path.starts_with('/')
-                || path.contains('\\')
-                || path
-                    .split('/')
-                    .any(|component| component.is_empty() || component == "." || component == "..")
-        })
-        || patch_files.iter().collect::<BTreeSet<_>>().len() != patch_files.len()
-    {
-        return Err(Error::failure(format!(
-            "`{}` has invalid or duplicate Git patch paths",
-            package_path.display()
-        )));
-    }
-    let upstream_crates_io_checksum = require_digest(
-        &package_path,
-        &document,
-        document.root(),
-        "upstream-crates-io-checksum",
-    )?;
-    let source_tree_sha256 = require_digest(
-        &package_path,
-        &document,
-        document.root(),
-        "source-tree-sha256",
-    )?;
-    if source_tree_sha256 != expected_digest {
-        return Err(Error::failure(format!(
-            "`{}` source-tree digest does not match its object address",
-            package_path.display()
-        )));
-    }
-    let license = require_nonempty_string(&package_path, &document, document.root(), "license")?;
-    let extracted_bytes =
-        require_u64(&package_path, &document, document.root(), "extracted-bytes")?;
-    let file_count = require_u64(&package_path, &document, document.root(), "file-count")?;
-    let directory_count =
-        require_u64(&package_path, &document, document.root(), "directory-count")?;
-    let retained_source =
-        require_bool(&package_path, &document, document.root(), "retained-source")?;
-    if !retained_source {
-        return Err(Error::failure(format!(
-            "`{}` must retain its seeded-Git source",
-            package_path.display()
-        )));
-    }
-    if !git_url.starts_with("https://") || git_url.contains('#') || git_url.contains('?') {
-        return Err(Error::failure(format!(
-            "`{}` has a non-canonical seeded-Git URL",
-            package_path.display()
-        )));
-    }
-    let expected_cargo_source =
-        format!("git+{git_url}?branch={requested_revision}#{resolved_commit}");
-    if cargo_source != expected_cargo_source {
-        return Err(Error::failure(format!(
-            "`{}` cargo-source does not match its pinned Git provenance",
-            package_path.display()
-        )));
-    }
-    validate_recorded_tree_limits(
-        &package_path,
-        limits,
-        extracted_bytes,
-        file_count,
-        directory_count,
-    )?;
-    if strict {
-        verify_retained_tree(
-            object_path,
-            limits,
-            source_tree_sha256,
-            extracted_bytes,
-            file_count,
-            directory_count,
-        )?;
-    }
-
-    Ok(SeededGitObject {
-        layer,
-        root: object_path.to_owned(),
-        name,
-        version,
-        cargo_source,
-        git_url,
-        requested_revision,
-        resolved_commit,
-        git_tree,
-        patch_files,
-        upstream_crates_io_checksum,
-        source_tree_sha256,
-        license,
-        extracted_bytes,
-        file_count,
-        directory_count,
     })
 }
 
@@ -1950,61 +1733,6 @@ mod tests {
         (checksum, object)
     }
 
-    fn seeded_git_object(repository: &Path) -> (String, PathBuf) {
-        let staging = repository.join("seed-source");
-        fs::create_dir_all(&staging).unwrap();
-        fs::write(
-            staging.join("Cargo.toml"),
-            "[package]\nname=\"ring\"\nversion=\"0.17.14\"\n",
-        )
-        .unwrap();
-        let tree = Tree::scan(
-            &staging,
-            crate::source_tree::DEFAULT_LIMITS,
-            Exclusions::None,
-        )
-        .unwrap();
-        let digest = hex(&tree.sha256);
-        let object = repository
-            .join("objects/seeded-git/sha256")
-            .join(&digest[..2])
-            .join(&digest);
-        fs::create_dir_all(object.parent().unwrap()).unwrap();
-        fs::rename(&staging, object.join("source")).unwrap_or_else(|_| {
-            fs::create_dir_all(&object).unwrap();
-            fs::rename(&staging, object.join("source")).unwrap();
-        });
-        fs::create_dir_all(&object).unwrap();
-        fs::write(object.join("source-manifest.json"), tree.manifest_bytes()).unwrap();
-        let commit = "1111111111111111111111111111111111111111";
-        let git_tree = "2222222222222222222222222222222222222222";
-        let upstream = "3333333333333333333333333333333333333333333333333333333333333333";
-        fs::write(
-            object.join("package.toml"),
-            format!(
-                "format-version = 1\n\
-                 name = \"ring\"\n\
-                 version = \"0.17.14\"\n\
-                 cargo-source = \"git+https://github.com/moturus/ring.git?branch=motor-os-0.17.14#{commit}\"\n\
-                 git-url = \"https://github.com/moturus/ring.git\"\n\
-                 requested-revision = \"motor-os-0.17.14\"\n\
-                 resolved-commit = \"{commit}\"\n\
-                 git-tree = \"{git_tree}\"\n\
-                 patch-files = [\"build.rs\", \"src/rand.rs\"]\n\
-                 upstream-crates-io-checksum = \"{upstream}\"\n\
-                 source-tree-sha256 = \"{digest}\"\n\
-                 license = \"Apache-2.0 AND ISC\"\n\
-                 extracted-bytes = {}\n\
-                 file-count = {}\n\
-                 directory-count = {}\n\
-                 retained-source = true\n",
-                tree.total_bytes, tree.file_count, tree.directory_count,
-            ),
-        )
-        .unwrap();
-        (digest, object)
-    }
-
     fn configurations(local: Option<&Path>, system: Option<&Path>) -> Repositories {
         Repositories {
             system: system.map(Path::to_owned),
@@ -2122,11 +1850,7 @@ mod tests {
         .unwrap();
         assert_eq!(writer.root(), local);
         verify_repository_header(&local).unwrap();
-        for relative in [
-            "objects/crates-io/sha256",
-            "objects/seeded-git/sha256",
-            ".staging",
-        ] {
+        for relative in ["objects/crates-io/sha256", ".staging"] {
             assert!(local.join(relative).is_dir());
         }
 
@@ -2357,11 +2081,10 @@ mod tests {
     }
 
     #[test]
-    fn verifies_registry_and_seeded_git_objects() {
+    fn verifies_registry_objects() {
         let root = TempDir::new("valid");
         repository(&root.0);
         let (checksum, _) = registry_object(&root.0, b"archive");
-        let (digest, _) = seeded_git_object(&root.0);
         let set = RepositorySet::open(
             &configurations(Some(&root.0), None),
             crate::source_tree::DEFAULT_LIMITS,
@@ -2373,9 +2096,6 @@ mod tests {
         assert_eq!(registry.name, "demo");
         assert_eq!(registry.layer, Layer::Local);
         assert_eq!(hex(&registry.checksum), checksum);
-        let git = set.lookup_seeded_git(&digest).unwrap().unwrap();
-        assert_eq!(git.name, "ring");
-        assert_eq!(git.layer, Layer::Local);
     }
 
     #[test]
@@ -2522,7 +2242,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_external_seed_when_requested() {
+    fn verifies_external_registry_seed_when_requested() {
         let Some(root) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
             return;
         };
@@ -2538,11 +2258,6 @@ mod tests {
         assert_eq!(registry.len(), 45);
         for checksum in registry {
             set.lookup_registry(&checksum).unwrap().unwrap();
-        }
-        let seeded_git = object_identities(&root.join("objects/seeded-git/sha256"));
-        assert_eq!(seeded_git.len(), 1);
-        for digest in seeded_git {
-            set.lookup_seeded_git(&digest).unwrap().unwrap();
         }
     }
 

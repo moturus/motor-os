@@ -52,8 +52,6 @@ directories:
   - "/devtools/lorry/vendor/objects"
   - "/devtools/lorry/vendor/objects/crates-io"
   - "/devtools/lorry/vendor/objects/crates-io/sha256"
-  - "/devtools/lorry/vendor/objects/seeded-git"
-  - "/devtools/lorry/vendor/objects/seeded-git/sha256"
   - "/devtools/lorry/vendor/.staging"
   - "/devtools/rust"
   - "/devtools/rust/bin"

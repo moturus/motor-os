@@ -221,7 +221,7 @@ repository and writes member-local admission files; these are developer state,
 not image inputs and not a reason for Lorry to understand imager YAML.
 
 System policy must explicitly admit each registry/Git package, every build
-script and proc macro, required patches, and native tools. Configure
+script and proc macro, and native tools. Configure
 `max-packages` above the measured 199-dependency `russhd` closure (with review
 headroom); do not raise Lorry's global default. The default depth 16 is enough
 for the measured graphs. Aggregate download/extraction limits must be measured

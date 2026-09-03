@@ -31,7 +31,7 @@ REPOSITORY="$HOME_DIR/.config/lorry/vendor"
 CONFIG="$HOME_DIR/.config/lorry/lorry.toml"
 mkdir -p "$PROJECT/src" "$HOME_DIR/.config/lorry" \
     "$REPOSITORY/objects/crates-io/sha256" \
-    "$REPOSITORY/objects/seeded-git/sha256" "$REPOSITORY/.staging"
+    "$REPOSITORY/.staging"
 
 cat >"$PROJECT/Cargo.toml" <<'EOF'
 [package]

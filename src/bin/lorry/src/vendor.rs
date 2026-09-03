@@ -647,7 +647,7 @@ fn prepare_catalog(
     if allow_unlocked {
         catalog.allow_unlocked_registry_candidates();
     }
-    patch::configure(manifest, config, repositories, &mut catalog)?;
+    patch::configure(manifest, &mut catalog)?;
     if let Some(direct) = direct {
         direct.configure(&mut catalog)?;
     } else {

@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use semver::{Op, VersionReq};
+use semver::VersionReq;
 use toml_edit::{Item, Table};
 
 use crate::diagnostic::{Error, Result};
@@ -35,8 +35,6 @@ pub struct Config {
     pub native_tools: BTreeMap<(String, NativeToolRole), NativeTool>,
     #[allow(dead_code)]
     pub policy: Policy,
-    #[allow(dead_code)]
-    pub required_patches: BTreeMap<String, RequiredPatch>,
     constraints: Vec<Constraint>,
 }
 
@@ -221,18 +219,6 @@ pub struct PolicyRule {
     pub allow_build_script: bool,
     pub allow_proc_macro: bool,
     pub native_tools: BTreeSet<NativeToolRole>,
-    pub provenance: PathBuf,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequiredPatch {
-    pub name: String,
-    pub version: VersionReq,
-    pub upstream_checksum: String,
-    pub git_url: String,
-    pub git_commit: String,
-    pub source_tree_sha256: String,
     pub provenance: PathBuf,
 }
 
@@ -504,7 +490,6 @@ fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result
     merge_test(path, &document, config)?;
     merge_native_tools(path, &document, config)?;
     merge_policy(path, &document, config)?;
-    merge_required_patches(path, &document, config)?;
     merge_constraints(path, kind, &document, config)?;
     Ok(())
 }
@@ -521,7 +506,6 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
         "test",
         "native-tools",
         "policy",
-        "required-patches",
         "system-constraints",
     ];
     for (key, item) in document.root().iter() {
@@ -951,14 +935,15 @@ fn merge_policy_rules(
             &format!("policy.rules.{id}"),
             "source",
         )?;
-        if source.as_deref().is_some_and(|value| {
-            !matches!(value, "crates.io" | "git" | "path" | "system-vendored-path")
-        }) {
+        if source
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "crates.io" | "git" | "path"))
+        {
             return Err(Error::at(
                 path,
                 document.line_of_table(table),
                 format!("unsupported policy source `{}`", source.as_deref().unwrap()),
-                "choose crates.io, git, path, or system-vendored-path",
+                "choose crates.io, git, or path",
             ));
         }
         let checksum = optional_digest(path, document, table, id, "checksum")?;
@@ -1024,79 +1009,6 @@ fn merge_policy_rules(
                 allow_build_script,
                 allow_proc_macro,
                 native_tools,
-                provenance: path.to_path_buf(),
-            },
-        );
-    }
-    Ok(())
-}
-
-fn merge_required_patches(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
-    let Some(item) = document.root().get("required-patches") else {
-        return Ok(());
-    };
-    let root = require_table(path, document, item, "required-patches")?;
-    reject_unknown_keys(path, document, root, "required-patches", &["crates-io"])?;
-    let Some(item) = root.get("crates-io") else {
-        return Ok(());
-    };
-    let rules = require_table(path, document, item, "required-patches.crates-io")?;
-    for (id, item) in rules.iter() {
-        validate_rule_id(path, document.line_of_item(item), id)?;
-        if config.required_patches.contains_key(id) {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("required patch ID `{id}` conflicts with another layer"),
-                "use one exact requirement for each patch ID",
-            ));
-        }
-        let table = require_table(
-            path,
-            document,
-            item,
-            &format!("required-patches.crates-io.{id}"),
-        )?;
-        reject_unknown_keys(
-            path,
-            document,
-            table,
-            &format!("required-patches.crates-io.{id}"),
-            &[
-                "name",
-                "version",
-                "upstream-checksum",
-                "git-url",
-                "git-commit",
-                "source-tree-sha256",
-            ],
-        )?;
-        let name = required_string(path, document, table, id, "name")?;
-        validate_package_name(path, document.line_of_table(table), &name)?;
-        let version_text = required_string(path, document, table, id, "version")?;
-        let version = parse_exact_requirement(path, document.line_of_table(table), &version_text)?;
-        let upstream_checksum = required_digest(path, document, table, id, "upstream-checksum")?;
-        let git_url = required_string(path, document, table, id, "git-url")?;
-        validate_https_git_url(path, document.line_of_table(table), &git_url)?;
-        let git_commit = required_string(path, document, table, id, "git-commit")?;
-        if !is_hex(&git_commit, 40) {
-            return Err(Error::at(
-                path,
-                document.line_of_table(table),
-                format!("required patch `{id}` has an invalid Git commit"),
-                "pin a full 40-character lowercase Git commit ID",
-            ));
-        }
-        let source_tree_sha256 = required_digest(path, document, table, id, "source-tree-sha256")?;
-        config.required_patches.insert(
-            id.to_owned(),
-            RequiredPatch {
-                name,
-                version,
-                upstream_checksum,
-                git_url,
-                git_commit,
-                source_tree_sha256,
                 provenance: path.to_path_buf(),
             },
         );
@@ -1623,24 +1535,6 @@ fn reject_unknown_keys(
     Ok(())
 }
 
-fn required_string(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    table_name: &str,
-    key: &str,
-) -> Result<String> {
-    let item = table.get(key).ok_or_else(|| {
-        Error::at(
-            path,
-            document.line_of_table(table),
-            format!("configuration table `{table_name}` is missing `{key}`"),
-            "add the required string value",
-        )
-    })?;
-    require_string(path, document, item, &format!("{table_name}.{key}"))
-}
-
 fn optional_string(
     path: &Path,
     document: &Document,
@@ -1864,23 +1758,6 @@ fn optional_digest(
         .transpose()
 }
 
-fn required_digest(
-    path: &Path,
-    document: &Document,
-    table: &Table,
-    id: &str,
-    key: &str,
-) -> Result<String> {
-    optional_digest(path, document, table, id, key)?.ok_or_else(|| {
-        Error::at(
-            path,
-            document.line_of_table(table),
-            format!("required patch `{id}` is missing `{key}`"),
-            "pin the reviewed SHA-256 digest",
-        )
-    })
-}
-
 fn parse_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq> {
     VersionReq::parse(value).map_err(|error| {
         Error::at(
@@ -1890,23 +1767,6 @@ fn parse_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq
             "use a Cargo-compatible semantic version requirement",
         )
     })
-}
-
-fn parse_exact_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq> {
-    let requirement = parse_requirement(path, line, value)?;
-    if requirement.comparators.len() != 1
-        || requirement.comparators[0].op != Op::Exact
-        || requirement.comparators[0].minor.is_none()
-        || requirement.comparators[0].patch.is_none()
-    {
-        return Err(Error::at(
-            path,
-            line,
-            format!("required patch version `{value}` is not exact"),
-            "use `=major.minor.patch`",
-        ));
-    }
-    Ok(requirement)
 }
 
 fn validate_rule_id(path: &Path, line: usize, value: &str) -> Result<()> {
@@ -1957,23 +1817,6 @@ fn validate_package_name(path: &Path, line: usize, value: &str) -> Result<()> {
             line,
             format!("invalid package name `{value}`"),
             "use ASCII letters, digits, `-`, and `_`",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_https_git_url(path: &Path, line: usize, value: &str) -> Result<()> {
-    if !value.starts_with("https://")
-        || value.contains('@')
-        || value.contains('?')
-        || value.contains('#')
-        || value.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err(Error::at(
-            path,
-            line,
-            format!("required patch Git URL `{value}` is not a plain public HTTPS URL"),
-            "use an https:// URL without credentials, query, or fragment",
         ));
     }
     Ok(())
@@ -2272,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_complete_system_policy_and_required_patch() {
+    fn parses_complete_system_policy() {
         let temp = TempDir::new();
         let config_path = temp.0.join("lorry.toml");
         let system = temp.0.join("system");
@@ -2316,19 +2159,11 @@ max-extracted-transaction-bytes = 1073741824
 build-script-seconds = 300
 build-script-output-bytes = 8388608
 
-[required-patches.crates-io.ring-0_17_14]
-name = "ring"
-version = "=0.17.14"
-upstream-checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
-git-url = "https://github.com/moturus/ring.git"
-git-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
-source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
-
 [policy.rules.allow-ring-0_17_14]
 action = "allow"
 name = "ring"
 version = "=0.17.14"
-source = "system-vendored-path"
+source = "path"
 source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
 license = "Apache-2.0 AND ISC"
 allow-build-script = true
@@ -2337,7 +2172,6 @@ native-tools = ["c-compiler", "archiver"]
 [system-constraints]
 locked = [
   "repositories.system",
-  "required-patches.crates-io.ring-0_17_14",
   "policy.rules.allow-ring-0_17_14",
 ]
 "#,
@@ -2350,8 +2184,7 @@ locked = [
         merge_lorry_file(&config_path, LayerKind::LinuxBase, &mut config).unwrap();
         assert_eq!(config.vendor.targets.len(), 2);
         assert_eq!(config.policy.rules.len(), 1);
-        assert_eq!(config.required_patches.len(), 1);
-        assert_eq!(config.constraints.len(), 3);
+        assert_eq!(config.constraints.len(), 2);
         assert_eq!(
             config
                 .native_tools
@@ -2481,14 +2314,20 @@ locked = [
     }
 
     #[test]
-    fn required_patch_versions_are_complete_exact_versions() {
-        assert!(parse_exact_requirement(Path::new("lorry.toml"), 1, "=1.2.3").is_ok());
-        for requirement in ["=1", "=1.2", "^1.2.3", ">=1.2.3"] {
-            assert!(
-                parse_exact_requirement(Path::new("lorry.toml"), 1, requirement).is_err(),
-                "{requirement}"
-            );
-        }
+    fn rejects_removed_required_patches_table() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        fs::write(
+            &path,
+            "config-version = 1\n\
+             [required-patches.crates-io.demo]\n\
+             name = \"demo\"\n",
+        )
+        .unwrap();
+        let error =
+            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        assert!(error.to_string().contains("unsupported"));
+        assert!(error.to_string().contains("required-patches"));
     }
 
     #[test]

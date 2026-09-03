@@ -111,8 +111,8 @@ and package limits still apply.
 Every package has a logical identity independent of its installation path:
 
 - crates.io packages use name, semantic version, and archive checksum;
-- ordinary paths use their canonical source-tree digest; and
-- required patches use configured upstream and patched-tree provenance.
+- Git packages use their canonical source identity and resolved commit; and
+- ordinary paths use their canonical source-tree digest.
 
 Repository source paths are physical storage details. Compiler path remapping
 presents stable `.lorry/...` logical paths so equivalent builds do not acquire
@@ -202,9 +202,9 @@ It records only:
 The canonical review document itself is reconstructed, never stored: its
 direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
 per-context selections from offline resolution, and its source evidence from
-verified repository objects. Path dependencies and required patches remain
-governed by their source digests and configured policy rather than being
-copied into registry admission.
+verified repository objects. Path dependencies remain governed by their
+source digests and configured policy rather than being copied into immutable
+dependency admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
 be an exact reviewed context. An ordinary completed-profile record commits to
@@ -215,8 +215,8 @@ document for every recorded context and compares its digest with the
 commitment. Only then does `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow
-cannot override administrator policy, required patches, resource limits,
-integrity checks, or unavailable native-tool grants. Repository lookup during
+cannot override administrator policy, resource limits, integrity checks, or
+unavailable native-tool grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
 build cache until the commitment and policy both pass.
 
@@ -310,7 +310,7 @@ and filenames rather than the output-directory topology.
 
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
-It routes immutable crates.io and reviewed required-patch units to
+It routes immutable crates.io and Git units to
 `$HOME/.cache/lorry` on Linux or `/devtools/lorry/cache` on Motor by default,
 while mutable path units stay in the project's `target/lorry/.cache`.
 `cache.directory` may replace the global root from system or user

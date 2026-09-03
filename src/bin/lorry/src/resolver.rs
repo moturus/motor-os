@@ -22,7 +22,6 @@ use crate::toolchain::CfgSet;
 pub struct Catalog {
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
-    required_patches: Vec<RequiredPatchGuard>,
     locked_repository: Option<LockedRepository>,
     proc_macros: BTreeSet<PackageKey>,
 }
@@ -136,43 +135,12 @@ impl Catalog {
         })
     }
 
-    pub(crate) fn register_required_patch(
-        &mut self,
-        id: &str,
-        name: &str,
-        version: Version,
-        provenance: &std::path::Path,
-        failure: Option<String>,
-    ) -> Result<()> {
-        if let Some(existing) = self
-            .required_patches
-            .iter()
-            .find(|guard| guard.name == name && guard.version == version)
-        {
-            return Err(Error::failure(format!(
-                "required patch `{id}` from `{}` conflicts with `{}` from `{}`: both guard `{name} {version}`",
-                provenance.display(),
-                existing.id,
-                existing.provenance.display()
-            )));
-        }
-        self.required_patches.push(RequiredPatchGuard {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            version,
-            provenance: provenance.to_owned(),
-            failure,
-        });
-        Ok(())
-    }
-
     pub(crate) fn insert_path_patch(
         &mut self,
         manifest: Manifest,
         logical_root: PathBuf,
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
-        required_patch: Option<String>,
     ) -> Result<()> {
         let candidate = local_candidate(
             manifest,
@@ -180,7 +148,6 @@ impl Catalog {
             physical_root,
             source_tree_sha256,
             true,
-            required_patch,
         )?;
         let records = self.records.entry(candidate.name.clone()).or_default();
         if records.iter().any(|existing| {
@@ -222,7 +189,6 @@ impl Catalog {
             physical_root.clone(),
             *source_tree_sha256,
             false,
-            None,
         )?;
         candidate.source = source;
         let records = self.records.entry(candidate.name.clone()).or_default();
@@ -241,20 +207,6 @@ impl Catalog {
         records.push(candidate);
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contains_required_patch(&self, id: &str) -> bool {
-        self.records.values().flatten().any(|candidate| {
-            matches!(
-                &candidate.source,
-                ResolvedSource::Path {
-                    patched_crates_io: true,
-                    required_patch: Some(required),
-                    ..
-                } if required == id
-            )
-        })
     }
 
     fn prepare(&mut self, dependency: &mut CandidateDependency) -> Result<()> {
@@ -304,14 +256,8 @@ impl Catalog {
         if self.paths.insert(canonical.clone(), key.clone()).is_some() {
             return Ok(());
         }
-        let candidate = local_candidate(
-            manifest,
-            canonical.clone(),
-            canonical,
-            tree.sha256,
-            false,
-            None,
-        )?;
+        let candidate =
+            local_candidate(manifest, canonical.clone(), canonical, tree.sha256, false)?;
         debug_assert_eq!(candidate.version, version);
         let records = self.records.entry(candidate.name.clone()).or_default();
         records.push(candidate);
@@ -481,7 +427,6 @@ fn local_candidate(
     physical_root: PathBuf,
     source_tree_sha256: [u8; 32],
     patched_crates_io: bool,
-    required_patch: Option<String>,
 ) -> Result<Candidate> {
     let version = Version::parse(&manifest.version.original).map_err(|error| {
         Error::failure(format!(
@@ -545,7 +490,6 @@ fn local_candidate(
             physical_root,
             source_tree_sha256,
             patched_crates_io,
-            required_patch,
         },
         proc_macro: manifest
             .library
@@ -562,15 +506,6 @@ struct Candidate {
     source: ResolvedSource,
     local_manifest: Option<Manifest>,
     proc_macro: bool,
-}
-
-#[derive(Clone, Debug)]
-struct RequiredPatchGuard {
-    id: String,
-    name: String,
-    version: Version,
-    provenance: PathBuf,
-    failure: Option<String>,
 }
 
 impl std::ops::Deref for Candidate {
@@ -720,7 +655,6 @@ pub enum ResolvedSource {
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
         patched_crates_io: bool,
-        required_patch: Option<String>,
     },
     Git {
         cargo_source: String,
@@ -1517,14 +1451,12 @@ fn solve(
         }
     }
 
-    Err(required_patch_failure(catalog, &event)
-        .or(last_failure)
-        .unwrap_or_else(|| {
-            Failure::new(format!(
-                "no version of `{}` matches `{}`",
-                event.dependency.package, event.dependency.requirement
-            ))
-        }))
+    Err(last_failure.unwrap_or_else(|| {
+        Failure::new(format!(
+            "no version of `{}` matches `{}`",
+            event.dependency.package, event.dependency.requirement
+        ))
+    }))
 }
 
 fn fulfill(
@@ -1787,7 +1719,6 @@ fn candidates(
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
         .filter(|record| event.dependency.requirement.matches(&record.version))
-        .filter(|candidate| required_patch_allows(catalog, event, candidate))
         .filter(|candidate| !registry_candidate_is_patched(catalog, event, candidate))
         .filter(|record| {
             !record.yanked
@@ -1826,24 +1757,6 @@ fn candidates(
     candidates
 }
 
-fn required_patch_allows(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
-    if event.dependency.source != RequirementSource::CratesIo {
-        return true;
-    }
-    let Some(guard) = catalog.required_patches.iter().find(|guard| {
-        guard.name == candidate.name && same_semver_identity(&guard.version, &candidate.version)
-    }) else {
-        return true;
-    };
-    matches!(
-        &candidate.source,
-        ResolvedSource::Path {
-            required_patch: Some(required),
-            ..
-        } if required == &guard.id
-    )
-}
-
 fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
     if event.dependency.source != RequirementSource::CratesIo
         || !matches!(candidate.source, ResolvedSource::CratesIo { .. })
@@ -1859,24 +1772,7 @@ fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &C
                     ..
                 }
             )
-            && required_patch_allows(catalog, event, replacement)
     })
-}
-
-fn required_patch_failure(catalog: &Catalog, event: &Event) -> Option<Failure> {
-    if event.dependency.source != RequirementSource::CratesIo {
-        return None;
-    }
-    catalog
-        .required_patches
-        .iter()
-        .find(|guard| {
-            guard.name == event.dependency.package
-                && event.dependency.requirement.matches(&guard.version)
-                && guard.failure.is_some()
-        })
-        .and_then(|guard| guard.failure.as_deref())
-        .map(Failure::new)
 }
 
 fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
@@ -2966,7 +2862,6 @@ mod tests {
                 physical_root,
                 source_tree_sha256,
                 patched_crates_io,
-                required_patch,
             } = &package.source
             else {
                 panic!("local fixture resolved as a registry package");
@@ -2975,7 +2870,6 @@ mod tests {
             assert_eq!(logical_root, physical_root);
             assert_ne!(*source_tree_sha256, [0_u8; 32]);
             assert!(!patched_crates_io);
-            assert!(required_patch.is_none());
             assert_eq!(
                 package.local_manifest.as_ref().unwrap().name,
                 package.key.name

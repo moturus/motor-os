@@ -100,14 +100,6 @@ pub struct SourceRemap {
 }
 
 impl SourceRemap {
-    pub fn required_patch(
-        workspace_root: &Path,
-        logical_root: &Path,
-        physical_root: &Path,
-    ) -> Result<Self> {
-        Self::new(workspace_root, logical_root, physical_root)
-    }
-
     pub fn registry(
         workspace_root: &Path,
         checksum: &[u8; 32],
@@ -1277,32 +1269,6 @@ mod tests {
     }
 
     #[test]
-    fn required_patch_remap_restores_rustc_presented_paths() {
-        let remap = SourceRemap::required_patch(
-            Path::new("/workspace"),
-            Path::new("/workspace/.lorry/vendor/ring/source"),
-            Path::new("/repository/objects/ring/source"),
-        )
-        .unwrap();
-        assert_eq!(
-            remap.rustc_argument(),
-            "/repository/objects/ring/source=.lorry/vendor/ring/source"
-        );
-        assert_eq!(
-            remap.restore_physical_path(Path::new(".lorry/vendor/ring/source/src/lib.rs")),
-            Some(PathBuf::from("/repository/objects/ring/source/src/lib.rs"))
-        );
-        assert_eq!(
-            remap.restore_physical_path(Path::new("/workspace/.lorry/vendor/ring/source/build.rs")),
-            Some(PathBuf::from("/repository/objects/ring/source/build.rs"))
-        );
-        assert_eq!(
-            remap.restore_physical_path(Path::new("/workspace/src/main.rs")),
-            None
-        );
-    }
-
-    #[test]
     fn registry_remap_uses_locked_content_identity() {
         let remap = SourceRemap::registry(
             Path::new("/workspace"),
@@ -1488,7 +1454,6 @@ mod tests {
                     physical_root: Path::new("/cycle").to_owned(),
                     source_tree_sha256: [0; 32],
                     patched_crates_io: false,
-                    required_patch: None,
                 },
                 local_manifest: None,
                 feature_sets: BTreeMap::new(),
