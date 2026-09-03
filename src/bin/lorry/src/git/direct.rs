@@ -464,6 +464,7 @@ fn locked_package(
             logical_root,
             physical_root: root.clone(),
             source_tree_sha256: package_tree.sha256,
+            patched_crates_io: false,
         },
         package_tree,
     ))
@@ -655,6 +656,7 @@ mod tests {
             logical_root: source.join("first"),
             physical_root: source.join("first"),
             source_tree_sha256: package_tree.sha256,
+            patched_crates_io: false,
         };
         let key = PackageKey {
             name: "first".to_owned(),

@@ -131,6 +131,10 @@ impl Catalog {
                             patched_crates_io: true,
                             ..
                         }
+                        | ResolvedSource::Git {
+                            patched_crates_io: true,
+                            ..
+                        }
                 )
         })
     }
@@ -154,6 +158,9 @@ impl Catalog {
             matches!(
                 existing.source,
                 ResolvedSource::Path {
+                    patched_crates_io: true,
+                    ..
+                } | ResolvedSource::Git {
                     patched_crates_io: true,
                     ..
                 }
@@ -207,6 +214,23 @@ impl Catalog {
         records.push(candidate);
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
+    }
+
+    pub(crate) fn insert_git_patch(
+        &mut self,
+        manifest: Manifest,
+        mut source: ResolvedSource,
+    ) -> Result<()> {
+        let ResolvedSource::Git {
+            patched_crates_io, ..
+        } = &mut source
+        else {
+            return Err(Error::failure(
+                "internal Git patch candidate has a non-Git source",
+            ));
+        };
+        *patched_crates_io = true;
+        self.insert_git(manifest, source)
     }
 
     fn prepare(&mut self, dependency: &mut CandidateDependency) -> Result<()> {
@@ -667,6 +691,7 @@ pub enum ResolvedSource {
         logical_root: PathBuf,
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
+        patched_crates_io: bool,
     },
 }
 
@@ -1770,6 +1795,9 @@ fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &C
                 ResolvedSource::Path {
                     patched_crates_io: true,
                     ..
+                } | ResolvedSource::Git {
+                    patched_crates_io: true,
+                    ..
                 }
             )
     })
@@ -1829,6 +1857,14 @@ fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> b
             },
             RequirementSource::CratesIo,
         ) => *patched_crates_io && !logical_root.as_os_str().is_empty(),
+        (
+            ResolvedSource::Git {
+                logical_root,
+                patched_crates_io,
+                ..
+            },
+            RequirementSource::CratesIo,
+        ) => *patched_crates_io && !logical_root.as_os_str().is_empty(),
         (ResolvedSource::Path { logical_root, .. }, RequirementSource::Path(required)) => {
             logical_root == required
         }
@@ -1841,9 +1877,7 @@ fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> b
             RequirementSource::Path(_) | RequirementSource::Git(_),
         )
         | (ResolvedSource::Path { .. }, RequirementSource::Git(_))
-        | (ResolvedSource::Git { .. }, RequirementSource::CratesIo | RequirementSource::Path(_)) => {
-            false
-        }
+        | (ResolvedSource::Git { .. }, RequirementSource::Path(_)) => false,
     }
 }
 
@@ -2165,6 +2199,56 @@ mod tests {
         assert_eq!(resolution.packages.len(), 2);
         assert_eq!(selected(&resolution, "a").len(), 1);
         assert_eq!(selected(&resolution, "b").len(), 1);
+    }
+
+    #[test]
+    fn git_patch_satisfies_crates_io_without_losing_git_identity() {
+        let root = manifest("demo = \"=1.2.3\"", "", "2");
+        let patched = Manifest::parse(
+            Path::new("/git/demo"),
+            Path::new("/git/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let cargo_source = "git+https://example.com/demo.git?branch=motor#0123456789abcdef0123456789abcdef01234567";
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record("demo", "1.2.3", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert_git_patch(
+                patched,
+                ResolvedSource::Git {
+                    cargo_source: cargo_source.to_owned(),
+                    git_url: "https://example.com/demo.git".to_owned(),
+                    requested_revision: "motor".to_owned(),
+                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    git_tree: "1".repeat(40),
+                    repository_tree_sha256: [2; 32],
+                    package_path: String::new(),
+                    logical_root: PathBuf::from("/git/demo"),
+                    physical_root: PathBuf::from("/git/demo"),
+                    source_tree_sha256: [3; 32],
+                    patched_crates_io: false,
+                },
+            )
+            .unwrap();
+
+        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let [package] = resolution.packages.as_slice() else {
+            panic!("expected one patched package");
+        };
+        assert_eq!(
+            package.key.source,
+            PackageSourceKey::Git(cargo_source.to_owned())
+        );
+        assert!(matches!(
+            package.source,
+            ResolvedSource::Git {
+                patched_crates_io: true,
+                ..
+            }
+        ));
     }
 
     #[test]

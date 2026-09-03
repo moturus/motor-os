@@ -1032,6 +1032,7 @@ mod tests {
                 logical_root: root.to_owned(),
                 physical_root: root.to_owned(),
                 source_tree_sha256: tree.sha256,
+                patched_crates_io: false,
             },
             local_manifest: Some(manifest),
             feature_sets: BTreeMap::new(),

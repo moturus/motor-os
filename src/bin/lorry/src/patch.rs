@@ -1,25 +1,35 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::path::Path;
 
 use crate::diagnostic::{Error, Result};
-use crate::manifest::{Manifest, PathPatch};
+use crate::manifest::{Manifest, Patch, PatchSource};
 use crate::resolver::Catalog;
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 
 pub fn configure(manifest: &Manifest, catalog: &mut Catalog) -> Result<()> {
     for patch in &manifest.patches {
-        load_local_patch(patch, catalog)?;
+        match &patch.source {
+            PatchSource::Path(path) => load_local_patch(patch, path, catalog)?,
+            PatchSource::Git(_) => {
+                return Err(Error::failure(format!(
+                    "Git patch `{}` is not materialized for an offline build",
+                    patch.alias
+                ))
+                .with_help("run `lorry vendor [--accept-all]` to materialize the Git patch"));
+            }
+        }
     }
     Ok(())
 }
 
-fn load_local_patch(patch: &PathPatch, catalog: &mut Catalog) -> Result<()> {
-    let physical_root = fs::canonicalize(&patch.path).map_err(|error| {
+fn load_local_patch(patch: &Patch, path: &Path, catalog: &mut Catalog) -> Result<()> {
+    let physical_root = fs::canonicalize(path).map_err(|error| {
         Error::failure(format!(
             "failed to resolve local patch `{}` at `{}`: {error}",
             patch.alias,
-            patch.path.display()
+            path.display()
         ))
     })?;
     let manifest = Manifest::load_path_dependency(&physical_root)?;

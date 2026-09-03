@@ -3,13 +3,12 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 
-use toml_edit::Item;
-use toml_edit::{ImDocument, Value};
+use toml_edit::{ImDocument, Item};
 
 use crate::atomic::AtomicFile;
 use crate::config::{NetworkConfig, PolicyLimits};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::{GitDependency, GitSelector};
+use crate::manifest::{GitDependency, GitSelector, Manifest, PatchSource};
 use crate::progress::Progress;
 
 mod direct;
@@ -125,26 +124,9 @@ struct GitPatch {
     alias: String,
     package: Option<String>,
     url: String,
-    selector: Selector,
+    selector: GitSelector,
     locked_commit: Option<String>,
     span: Range<usize>,
-}
-
-#[derive(Clone, Debug)]
-enum Selector {
-    Head,
-    Branch(String),
-    Tag(String),
-    Revision(String),
-}
-
-impl Selector {
-    fn requested(&self) -> &str {
-        match self {
-            Self::Head => "HEAD",
-            Self::Branch(value) | Self::Tag(value) | Self::Revision(value) => value,
-        }
-    }
 }
 
 struct Materialized {
@@ -152,13 +134,14 @@ struct Materialized {
 }
 
 pub fn materialize_manifest_patches(
-    root: &Path,
+    manifest: &Manifest,
     network: &NetworkConfig,
     limits: &PolicyLimits,
     accept_all: bool,
     verbose: bool,
     progress: Progress,
 ) -> Result<bool> {
+    let root = &manifest.workspace_root;
     let manifest_path = root.join("Cargo.toml");
     let source = fs::read_to_string(&manifest_path).map_err(|error| {
         Error::failure(format!(
@@ -172,7 +155,7 @@ pub fn materialize_manifest_patches(
             manifest_path.display()
         ))
     })?;
-    let patches = parse_git_patches(root, &document)?;
+    let patches = git_patches(manifest, &document)?;
     if patches.is_empty() {
         return Ok(false);
     }
@@ -211,82 +194,40 @@ pub fn materialize_manifest_patches(
     Ok(true)
 }
 
-fn parse_git_patches(root: &Path, document: &ImDocument<String>) -> Result<Vec<GitPatch>> {
-    let Some(patch) = document.get("patch") else {
-        return Ok(Vec::new());
-    };
-    let patch = patch.as_table().ok_or_else(|| {
-        Error::failure("Cargo manifest `[patch]` must be a table before Git vendoring")
-    })?;
-    let Some(crates_io) = patch.get("crates-io") else {
-        return Ok(Vec::new());
-    };
-    let crates_io = crates_io
-        .as_table()
-        .ok_or_else(|| Error::failure("Cargo manifest `[patch.crates-io]` must be a table"))?;
+fn git_patches(manifest: &Manifest, document: &ImDocument<String>) -> Result<Vec<GitPatch>> {
+    let crates_io = document
+        .get("patch")
+        .and_then(Item::as_table)
+        .and_then(|patch| patch.get("crates-io"))
+        .and_then(Item::as_table);
     let mut result = Vec::new();
-    for (alias, item) in crates_io.iter() {
-        let Some(table) = item.as_inline_table() else {
+    for patch in &manifest.patches {
+        let PatchSource::Git(git) = &patch.source else {
             continue;
         };
-        let Some(git) = table.get("git") else {
-            continue;
-        };
-        let url = git.as_str().ok_or_else(|| {
-            Error::failure(format!("Git patch `{alias}` git URL must be a string"))
-        })?;
-        validate_alias(alias)?;
-        validate_git_url(url)?;
-        for (key, _) in table.iter() {
-            if !matches!(key, "git" | "branch" | "tag" | "rev" | "package") {
-                return Err(Error::failure(format!(
-                    "Git patch `{alias}` contains unsupported key `{key}`"
+        let item = crates_io
+            .and_then(|table| table.get(&patch.alias))
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "Git patch `{}` disappeared while preparing vendoring",
+                    patch.alias
                 ))
-                .with_help("use only git, one optional branch/tag/rev, and optional package"));
-            }
-        }
-        let selectors = ["branch", "tag", "rev"]
-            .into_iter()
-            .filter_map(|key| {
-                table
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(|value| (key, value))
-            })
-            .collect::<Vec<_>>();
-        if selectors.len() > 1 {
-            return Err(Error::failure(format!(
-                "Git patch `{alias}` selects more than one of branch, tag, and rev"
-            )));
-        }
-        let selector = match selectors.as_slice() {
-            [] => Selector::Head,
-            [("branch", value)] => Selector::Branch((*value).to_owned()),
-            [("tag", value)] => Selector::Tag((*value).to_owned()),
-            [("rev", value)] => Selector::Revision((*value).to_owned()),
-            _ => unreachable!(),
-        };
-        validate_revision(selector.requested())?;
-        let package = table
-            .get("package")
-            .map(|value| {
-                value.as_str().map(str::to_owned).ok_or_else(|| {
-                    Error::failure(format!("Git patch `{alias}` package must be a string"))
-                })
-            })
-            .transpose()?;
+            })?;
         result.push(GitPatch {
-            alias: alias.to_owned(),
-            package,
-            url: url.to_owned(),
-            selector,
+            alias: patch.alias.clone(),
+            package: item
+                .as_inline_table()
+                .and_then(|table| table.get("package"))
+                .map(|_| patch.package.clone()),
+            url: git.url.clone(),
+            selector: git.selector.clone(),
             locked_commit: None,
-            span: item
-                .span()
-                .ok_or_else(|| Error::failure(format!("Git patch `{alias}` has no source span")))?,
+            span: item.span().ok_or_else(|| {
+                Error::failure(format!("Git patch `{}` has no source span", patch.alias))
+            })?,
         });
     }
-    if !result.is_empty() && !root.is_absolute() {
+    if !result.is_empty() && !manifest.workspace_root.is_absolute() {
         return Err(Error::failure(
             "Git vendoring requires an absolute package root",
         ));
@@ -501,21 +442,6 @@ fn toml_string(value: &str) -> String {
     quoted
 }
 
-fn validate_alias(alias: &str) -> Result<()> {
-    if alias.is_empty()
-        || alias.len() > 64
-        || !alias
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || !alias.bytes().any(|byte| byte.is_ascii_alphabetic())
-    {
-        return Err(Error::failure(format!(
-            "Git patch alias `{alias}` is not safe for a vendored path"
-        )));
-    }
-    Ok(())
-}
-
 fn validate_git_url(url: &str) -> Result<()> {
     if !url.starts_with("https://")
         || !url.is_ascii()
@@ -526,7 +452,7 @@ fn validate_git_url(url: &str) -> Result<()> {
         || url[8..].contains('@')
     {
         return Err(Error::failure(format!(
-            "Git patch URL `{url}` is not a canonical anonymous HTTPS URL"
+            "Git URL `{url}` is not a canonical anonymous HTTPS URL"
         )));
     }
     Ok(())
@@ -543,7 +469,7 @@ fn validate_revision(value: &str) -> Result<()> {
         || value.contains("@{")
     {
         return Err(Error::failure(format!(
-            "Git patch revision `{value}` is not a safe branch, tag, or revision"
+            "Git revision `{value}` is not safe"
         )));
     }
     Ok(())
@@ -552,7 +478,6 @@ fn validate_revision(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn document(source: &str) -> ImDocument<String> {
         ImDocument::parse(source.to_owned()).unwrap()
@@ -565,10 +490,18 @@ mod tests {
                       crossterm = { git = \"https://example.com/crossterm.git\", branch = \"motor\" }\n\
                       tokio = { git = \"https://example.com/tokio.git\", branch = \"motor\" }\n\
                       renamed = { git = \"https://example.com/actual.git\", rev = \"abc123\", package = \"actual\" }\n";
-        let patches = parse_git_patches(Path::new("/fixture"), &document(source)).unwrap();
+        let manifest = Manifest::parse(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            source,
+        )
+        .unwrap();
+        let patches = git_patches(&manifest, &document(source)).unwrap();
         assert_eq!(patches.len(), 3);
-        assert!(matches!(patches[0].selector, Selector::Branch(ref value) if value == "motor"));
-        assert!(matches!(patches[2].selector, Selector::Revision(ref value) if value == "abc123"));
+        assert!(matches!(patches[0].selector, GitSelector::Branch(ref value) if value == "motor"));
+        assert!(
+            matches!(patches[2].selector, GitSelector::Revision(ref value) if value == "abc123")
+        );
         let rewritten = rewrite_manifest(
             source,
             &patches,
@@ -625,7 +558,7 @@ mod tests {
             alias: "patched".to_owned(),
             package: None,
             url: "https://example.com/patched.git".to_owned(),
-            selector: Selector::Branch("main".to_owned()),
+            selector: GitSelector::Branch("main".to_owned()),
             locked_commit: None,
             span: 0..0,
         }];
@@ -654,7 +587,7 @@ mod tests {
             alias: "patched".to_owned(),
             package: None,
             url: "https://example.com/patched.git".to_owned(),
-            selector: Selector::Branch("main".to_owned()),
+            selector: GitSelector::Branch("main".to_owned()),
             locked_commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
             span: 0..0,
         }];
@@ -665,16 +598,6 @@ mod tests {
         assert!(rewritten.contains("dependencies = [\"helper 1.0.0\"]"));
         assert_eq!(rewritten.matches("source = ").count(), 1);
         ImDocument::parse(rewritten).unwrap();
-    }
-
-    #[test]
-    fn rejects_credentialed_urls_and_ambiguous_selectors() {
-        for source in [
-            "[patch.crates-io]\nx = { git = \"https://user@example.com/x\" }\n",
-            "[patch.crates-io]\nx = { git = \"https://example.com/x\", branch = \"main\", tag = \"v1\" }\n",
-        ] {
-            assert!(parse_git_patches(&PathBuf::from("/fixture"), &document(source)).is_err());
-        }
     }
 
     #[test]

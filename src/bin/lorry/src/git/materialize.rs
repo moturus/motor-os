@@ -10,13 +10,13 @@ use crate::config::{NetworkConfig, PolicyLimits};
 use crate::curl::Client;
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
-use crate::manifest::Manifest;
+use crate::manifest::{GitSelector, Manifest};
 use crate::redirect::TrustPolicy;
 use crate::source_tree::{EntryKind, Exclusions, Limits, Tree};
 use crate::toml::Document;
 
 use super::http::Remote;
-use super::{GitPatch, Materialized, Selector};
+use super::{GitPatch, Materialized};
 
 pub(super) fn materialize_one(
     root: &Path,
@@ -122,7 +122,7 @@ pub(super) fn materialize_one(
         "format-version = 1\nalias = {:?}\ngit-url = {:?}\nrequested-revision = {:?}\nresolved-commit = {:?}\ngit-tree = {:?}\nsource-tree-sha256 = {:?}\n",
         patch.alias,
         patch.url,
-        patch.selector.requested(),
+        requested(&patch.selector),
         commit_id,
         tree_id,
         hex(&source_tree.sha256),
@@ -195,16 +195,16 @@ fn select_revision(
         .as_deref()
         .map(str::to_owned)
         .or_else(|| match &patch.selector {
-            Selector::Head => Some("HEAD".to_owned()),
-            Selector::Branch(value) => Some(format!("refs/heads/{value}")),
-            Selector::Tag(value) => Some(format!("refs/tags/{value}")),
-            Selector::Revision(value) if is_object_id(value) => Some(value.clone()),
-            Selector::Revision(_) => None,
+            GitSelector::Head => Some("HEAD".to_owned()),
+            GitSelector::Branch(value) => Some(format!("refs/heads/{value}")),
+            GitSelector::Tag(value) => Some(format!("refs/tags/{value}")),
+            GitSelector::Revision(value) if is_object_id(value) => Some(value.clone()),
+            GitSelector::Revision(_) => None,
         });
     if let Some(revision) = revision {
         return prepare.with_revision(Some(revision)).map_err(gix_error);
     }
-    let Selector::Revision(revision) = &patch.selector else {
+    let GitSelector::Revision(revision) = &patch.selector else {
         unreachable!()
     };
     prepare
@@ -214,7 +214,16 @@ fn select_revision(
 
 fn can_fetch_shallow(patch: &GitPatch) -> bool {
     patch.locked_commit.is_none()
-        && !matches!(&patch.selector, Selector::Revision(value) if is_object_id(value))
+        && !matches!(&patch.selector, GitSelector::Revision(value) if is_object_id(value))
+}
+
+fn requested(selector: &GitSelector) -> &str {
+    match selector {
+        GitSelector::Head => "HEAD",
+        GitSelector::Branch(value) | GitSelector::Tag(value) | GitSelector::Revision(value) => {
+            value
+        }
+    }
 }
 
 pub(super) fn extract_tree(
@@ -448,7 +457,7 @@ fn approve(
         "Git patch {}\n  URL: {}\n  requested: {}\n  commit: {}\n  tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
         patch.alias,
         patch.url,
-        patch.selector.requested(),
+        requested(&patch.selector),
         commit,
         tree,
         hex(&source.sha256),
@@ -635,7 +644,7 @@ mod tests {
             alias: "tokio".to_owned(),
             package: None,
             url: "https://example.com/tokio.git".to_owned(),
-            selector: Selector::Branch("motor".to_owned()),
+            selector: GitSelector::Branch("motor".to_owned()),
             locked_commit: None,
             span: 0..0,
         };
@@ -659,17 +668,17 @@ mod tests {
             span: 0..0,
         };
 
-        assert!(can_fetch_shallow(&patch(Selector::Head, None)));
+        assert!(can_fetch_shallow(&patch(GitSelector::Head, None)));
         assert!(can_fetch_shallow(&patch(
-            Selector::Branch("main".to_owned()),
+            GitSelector::Branch("main".to_owned()),
             None,
         )));
         assert!(!can_fetch_shallow(&patch(
-            Selector::Revision("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            GitSelector::Revision("0123456789abcdef0123456789abcdef01234567".to_owned()),
             None,
         )));
         assert!(!can_fetch_shallow(&patch(
-            Selector::Branch("main".to_owned()),
+            GitSelector::Branch("main".to_owned()),
             Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
         )));
     }
@@ -685,7 +694,7 @@ mod tests {
             alias: "tokio".to_owned(),
             package: None,
             url: "https://github.com/moturus/tokio.git".to_owned(),
-            selector: Selector::Branch("tokio-motor-1.47.1_2025-10-07".to_owned()),
+            selector: GitSelector::Branch("tokio-motor-1.47.1_2025-10-07".to_owned()),
             locked_commit: Some("f9d26ea874753c0b5126401e77daee9e6222c359".to_owned()),
             span: 0..0,
         };

@@ -86,7 +86,7 @@ fn execute_reconcile(
         eprintln!("Locked {}", lock.path().display());
     }
     crate::git::materialize_manifest_patches(
-        &initial_manifest.workspace_root,
+        &initial_manifest,
         &config.network,
         &config.policy.limits,
         accept_all,
