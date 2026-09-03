@@ -94,6 +94,33 @@ expect_failure() {
 echo "== Creating deterministic local dependency state =="
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all >/dev/null)
 
+echo "== Applying an unrelated candidate only with explicit automation approval =="
+cat >>"$PROJECT/Cargo.toml" <<'EOF'
+
+[features]
+automated-change = []
+EOF
+manifest_hash="$(sha256sum "$PROJECT/Cargo.toml")"
+lock_hash="$(sha256sum "$PROJECT/Cargo.lock")"
+state_hash="$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")"
+if (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor </dev/null) \
+    >"$WORK/unapproved.stdout" 2>"$WORK/unapproved.stderr"; then
+    echo "review-contract: non-interactive vendor approved an unrelated change" >&2
+    exit 1
+fi
+grep -F 'no interactive terminal is available' "$WORK/unapproved.stderr" >/dev/null
+[ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+[ "$(sha256sum "$PROJECT/Cargo.lock")" = "$lock_hash" ]
+[ "$(sha256sum "$PROJECT/.lorry/dependencies-v2.toml")" = "$state_hash" ]
+(cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
+    >"$WORK/automated.stdout" 2>"$WORK/automated.stderr"
+grep -F 'automated-change' "$WORK/automated.stderr" >/dev/null
+if grep -F '[y/N]' "$WORK/automated.stderr" >/dev/null; then
+    echo "review-contract: --accept-all prompted for an unrelated change" >&2
+    exit 1
+fi
+[ "$(sha256sum "$PROJECT/Cargo.toml")" = "$manifest_hash" ]
+
 echo "== Proving review is read-only and committed =="
 before="$(find "$PROJECT" "$REPOSITORY" -printf '%y %p %s %T@\n' | sort | sha256sum)"
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >"$WORK/review.toml"

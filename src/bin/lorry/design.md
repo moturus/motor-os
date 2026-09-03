@@ -137,14 +137,15 @@ object at the same identity is corruption.
 The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
-2. materialize locked Git sources used by direct dependencies and patches;
+2. refresh mutable Git-patch selectors and materialize the candidate's locked
+   Git sources;
 3. load sparse index data on demand and resolve the complete/selected graphs;
 4. run policy preflight before archive acquisition;
 5. download missing archives with the bounded curl client;
 6. verify checksum, archive structure, manifest identity, license, sizes, and
    canonical source-tree digest;
-7. show a semantic diff when the committed review remains reconstructible, or
-   otherwise the prior commitment and complete candidate, and obtain approval;
+7. show one combined Git/dependency/capability review when required and obtain
+   one interactive approval, or apply `--accept-all` to the complete candidate;
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
@@ -179,6 +180,11 @@ Root crates.io Git patches use the same immutable source model and verified
 objects as direct Git dependencies. The resolver marks their selected Git
 packages as crates.io replacements without changing their source identity or
 rewriting a workspace manifest. Build, run, and test remain entirely offline.
+Networked vendoring advertises mutable patch refs without fetching history,
+then resolves moved commits in an in-memory lock candidate. Exact hexadecimal
+`rev` selectors remain pinned. Candidate objects are verified before one
+default-no review; a moved tag is labeled as retargeted. Only acceptance
+commits the candidate lock and admission state.
 
 Both Linux and Motor use gix for repository negotiation, pack/object
 processing, and tree traversal. A small injected blocking transport sends
@@ -247,8 +253,8 @@ Dependency change review temporarily supplies exact candidate allow rules so ful
 evidence can be collected under default-deny policy. Explicit denies and all
 other constraints remain active. The review shows requirement, locked graph,
 admission evidence, build-script, and native-tool changes. `--accept-all`
-cannot approve a change to existing admission; one interactive confirmation
-authorizes the shown identity and capability changes.
+approves the complete displayed candidate without a prompt; one interactive
+confirmation otherwise authorizes the shown identity and capability changes.
 
 Vendoring stages the lockfile, publishes verified immutable repository objects,
 atomically installs Cargo.lock when it changed, and atomically writes compact

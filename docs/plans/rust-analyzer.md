@@ -9,10 +9,11 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-4 in section 4.12 are complete and gated, while Git-patch review and
-the native rust-analyzer work have not started. The completed Lorry work makes
-`lorry vendor` keep every input `Cargo.toml` immutable and removes Lorry's
-unused required-patch feature, which U. Lasiotus authorized on 2026-09-02.
+patches 1-5 in section 4.12 are complete and gated, while Cargo-compatibility
+queries and the native rust-analyzer work have not started. The completed
+Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
+removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
+2026-09-02.
 
 ## 0. Status and architecture
 
@@ -21,7 +22,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-4 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-5 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1190,7 +1191,7 @@ explicit:
    history for ancestry classification. Unit-test the default branch, an
    explicit branch, a tag, a named remote `rev`, full and abbreviated commit
    IDs, first materialization, and an unchanged remote.
-5. **Lorry: Git-patch review and automation.** Feed all refreshed candidates
+5. **Lorry: Git-patch review and automation (complete).** Feed all refreshed candidates
    through one complete vendor review and implement the interactive default-no
    and non-interactive `--accept-all` contract from section 4.7. Change
    Lorry's design/spec wording so `--accept-all` approves the whole displayed

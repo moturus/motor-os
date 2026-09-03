@@ -307,7 +307,7 @@ settings must be rejected rather than adopted or ignored.
   lock byte-for-byte and writes canonical version 4 when creation or repair is
   required. When portable admission state exists, an ordinary vendor operation
   reconciles dependency-intent or lock-graph drift only after interactive
-  review; `--accept-all` cannot approve a change.
+  review or complete-candidate approval with `--accept-all`.
   If the visible inputs no longer reconstruct the committed review, it shows
   the prior commitment and complete verified candidate instead of claiming a
   semantic diff.
@@ -590,9 +590,9 @@ licenses, source digests, build scripts, and native-tool roles.
 An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
 package and capability changes. A new native-tool role requires an existing
-administrator grant. `--accept-all` cannot approve a change to existing
-admission or grant a new build-script, procedural-macro, or native-tool
-capability.
+administrator grant. `--accept-all` approves all displayed package and
+capability changes that survive explicit policy, integrity, and resource-limit
+checks; it grants no capability that those checks reject.
 
 Verified immutable repository objects may be published before project files.
 Vendoring atomically replaces Cargo.lock when needed and writes portable state
@@ -734,6 +734,17 @@ the Git identity in resolution, review, and lock rendering. Input workspace
 and member manifests remain byte-identical. Legacy explicit path patches keep
 their declared path identities.
 
+On every networked vendor run, default HEAD, branch, tag, and named `rev`
+patch selectors are resolved from the advertised remote refs. A 7- through
+40-digit hexadecimal `rev` is an exact pinned commit and is not advanced.
+Moved selectors and first materializations are verified as one candidate.
+The review lists each affected patch, its old and new full commit, Git tree,
+source digest, and graph/capability effects; a moved tag is prominently marked
+as retargeted. An interactive run asks once and defaults to no. A
+non-interactive changed candidate fails unless `--accept-all` approves the
+whole candidate. Explicit policy denials, integrity checks, and limits always
+retain precedence.
+
 Both dependency forms use a shallow depth-one fetch and record the canonical
 URL, request, exact commit, Git tree, canonical source SHA-256, file count,
 and bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs
@@ -741,10 +752,11 @@ and directories only. Symbolic links, submodules, special modes, and traversal
 are rejected. Build, run, and test remain offline and verify the published
 source tree and provenance before resolving or compiling it.
 
-Decline or failure before commit must expose no new object or lock. Concurrent
-publication may accept an independently published destination only after full
-identity verification. A corrupt higher-priority object is a hard error, not
-a reason to fall through or repair.
+A decline or failure may leave an unreferenced, completely verified immutable
+Git object, but exposes no changed manifest, lock, or admission state.
+Concurrent publication may accept an independently published destination only
+after full identity verification. A corrupt higher-priority object is a hard
+error, not a reason to fall through or repair.
 
 New non-path packages are default-deny. Any matching deny vetoes admission;
 with default deny, at least one allow must match. Integrity checks cannot be

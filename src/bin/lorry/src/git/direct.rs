@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,6 +38,17 @@ struct Object {
 pub(crate) struct DirectCatalog {
     packages: Vec<(Manifest, ResolvedSource)>,
     evidence: BTreeMap<PackageKey, PackageEvidence>,
+    sources: BTreeMap<String, GitSourceEvidence>,
+    materialized: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GitSourceEvidence {
+    pub(crate) locked: LockedSource,
+    pub(crate) git_tree: String,
+    pub(crate) source_tree_sha256: [u8; 32],
+    pub(crate) file_count: usize,
+    pub(crate) total_bytes: u64,
 }
 
 impl DirectCatalog {
@@ -69,47 +79,58 @@ impl DirectCatalog {
         check_evidence_identity(package, evidence)?;
         Ok(evidence.clone())
     }
+
+    pub(crate) fn source(&self, cargo_source: &str) -> Result<&GitSourceEvidence> {
+        self.sources.get(cargo_source).ok_or_else(|| {
+            Error::failure(format!(
+                "verified Git catalog has no source evidence for `{cargo_source}`"
+            ))
+        })
+    }
+
+    pub(crate) fn was_materialized(&self, cargo_source: &str) -> bool {
+        self.materialized.contains(cargo_source)
+    }
+
+    pub(crate) fn materialized_sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
+        self.materialized
+            .iter()
+            .filter_map(|source| self.sources.get(source))
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
+        self.sources.values()
+    }
+
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
 }
 
 pub(crate) fn materialize_locked_dependencies(
     manifest: &Manifest,
     network: &NetworkConfig,
     policy: &PolicyLimits,
-    accept_all: bool,
     verbose: bool,
     progress: Progress,
 ) -> Result<DirectCatalog> {
     if !has_git_dependency(manifest) {
         return Ok(DirectCatalog::default());
     }
-    for refresh in super::resolve_patch_refreshes(manifest, network, policy, verbose)? {
-        if refresh.changed() {
-            return Err(Error::failure(format!(
-                "Git patch `{}` (`{}`) moved from {} to {}",
-                refresh.alias, refresh.package, refresh.previous.commit, refresh.candidate.commit
-            ))
-            .with_help("review support for Git patch updates is not available yet"));
-        }
-    }
     let mut objects = BTreeMap::new();
+    let mut materialized = BTreeSet::new();
     for locked in locked_sources(manifest)? {
         let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
         let object = if destination.exists() {
             load_object(&manifest.workspace_root, &locked, policy)?
         } else {
             progress.report(format_args!("Fetching Git source `{}`", locked.url))?;
-            materialize_one(
-                &manifest.workspace_root,
-                &locked,
-                network,
-                policy,
-                accept_all,
-                verbose,
-            )?
+            materialized.insert(locked.cargo_source.clone());
+            materialize_one(&manifest.workspace_root, &locked, network, policy, verbose)?
         };
         objects.insert(locked.cargo_source.clone(), object);
     }
-    direct_catalog(manifest, policy, &objects)
+    direct_catalog(manifest, policy, &objects, materialized)
 }
 
 pub(crate) fn configure_direct(
@@ -147,13 +168,14 @@ pub(crate) fn load_locked_dependencies(
             );
         }
     }
-    direct_catalog(manifest, policy, &objects)
+    direct_catalog(manifest, policy, &objects, BTreeSet::new())
 }
 
 fn direct_catalog(
     manifest: &Manifest,
     policy: &PolicyLimits,
     objects: &BTreeMap<String, Object>,
+    materialized: BTreeSet<String>,
 ) -> Result<DirectCatalog> {
     let mut packages = Vec::new();
     let mut evidence = BTreeMap::new();
@@ -197,7 +219,27 @@ fn direct_catalog(
         }
         packages.push((inspected, source));
     }
-    Ok(DirectCatalog { packages, evidence })
+    let sources = objects
+        .iter()
+        .map(|(cargo_source, object)| {
+            (
+                cargo_source.clone(),
+                GitSourceEvidence {
+                    locked: object.locked.clone(),
+                    git_tree: object.git_tree.clone(),
+                    source_tree_sha256: object.source_tree.sha256,
+                    file_count: object.source_tree.file_count,
+                    total_bytes: object.source_tree.total_bytes,
+                },
+            )
+        })
+        .collect();
+    Ok(DirectCatalog {
+        packages,
+        evidence,
+        sources,
+        materialized,
+    })
 }
 
 fn has_git_dependency(manifest: &Manifest) -> bool {
@@ -271,7 +313,6 @@ fn materialize_one(
     locked: &LockedSource,
     network: &NetworkConfig,
     policy: &PolicyLimits,
-    accept_all: bool,
     verbose: bool,
 ) -> Result<Object> {
     let destination = object_root(workspace, &locked.cargo_source);
@@ -347,7 +388,6 @@ fn materialize_one(
         ))
     })?;
     let source_tree = Tree::scan(&source, limits, Exclusions::None)?;
-    approve(locked, &git_tree, &source_tree, accept_all)?;
     fs::write(
         staging.path().join("git.toml"),
         provenance(locked, &git_tree, &source_tree),
@@ -599,43 +639,6 @@ fn requested(selector: &GitSelector) -> &str {
     }
 }
 
-fn approve(locked: &LockedSource, git_tree: &str, source: &Tree, accept_all: bool) -> Result<()> {
-    eprintln!(
-        "Git source\n  URL: {}\n  requested: {}\n  commit: {}\n  tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
-        locked.url,
-        requested(&locked.selector),
-        locked.commit,
-        git_tree,
-        hex(&source.sha256),
-        source.file_count,
-        source.total_bytes,
-    );
-    if accept_all {
-        return Ok(());
-    }
-    if !io::stdin().is_terminal() {
-        return Err(
-            Error::failure("Git source requires approval on non-interactive input")
-                .with_help("review the evidence, then rerun `lorry vendor --accept-all`"),
-        );
-    }
-    eprint!("Materialize this Git source? [y/N] ");
-    io::stderr()
-        .flush()
-        .map_err(|error| Error::failure(format!("failed to flush Git approval prompt: {error}")))?;
-    let answer = crate::prompt::read_answer(
-        &mut io::stdin().lock(),
-        &mut io::stderr().lock(),
-        crate::prompt::echo_required(true),
-    )
-    .map_err(|error| Error::failure(format!("failed to read Git approval: {error}")))?;
-    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
-        Ok(())
-    } else {
-        Err(Error::failure("Git source was not approved"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,6 +744,7 @@ mod tests {
         let direct = DirectCatalog {
             packages: vec![(manifest, resolved)],
             evidence: BTreeMap::from([(key, recorded.clone())]),
+            ..DirectCatalog::default()
         };
         direct.configure(&mut Catalog::default()).unwrap();
         assert_eq!(direct.evidence(&package).unwrap(), recorded);

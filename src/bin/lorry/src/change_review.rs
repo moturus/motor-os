@@ -5,6 +5,13 @@ use crate::admission_state::Review;
 use crate::diagnostic::{Error, Result};
 use crate::prompt;
 
+#[derive(Clone, Copy)]
+pub enum Mode {
+    Change,
+    Forced,
+    AcceptAll,
+}
+
 /// Displays the dependency change for approval. With a reconstructible
 /// committed baseline this is a semantic diff. When visible input changes
 /// prevent reconstruction, the prior commitment and complete candidate are
@@ -13,72 +20,20 @@ pub fn approve(
     previous: Option<&Review>,
     previous_sha256: &str,
     next: &Review,
+    mode: Mode,
     terminal: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
     match previous {
-        Some(previous) if previous == next => return Ok(()),
+        Some(previous) if previous == next && matches!(mode, Mode::Change) => return Ok(()),
         Some(previous) => {
-            writeln!(output, "Dependency change review:").map_err(|error| {
-                Error::failure(format!("failed to write dependency change review: {error}"))
-            })?;
-            write_difference(
-                output,
-                "direct requirement",
-                &previous.direct_registry,
-                &next.direct_registry,
-                |value| (value.alias.clone(), value.kind, value.target.clone()),
-            )?;
-            write_difference(
-                output,
-                "root feature",
-                &previous.root_features,
-                &next.root_features,
-                |value| value.name.clone(),
-            )?;
-            write_difference(
-                output,
-                "crates.io patch",
-                &previous.crates_io_patches,
-                &next.crates_io_patches,
-                |value| value.alias.clone(),
-            )?;
-            write_difference(
-                output,
-                "locked package",
-                &previous.locked_registry,
-                &next.locked_registry,
-                |value| value.name.clone(),
-            )?;
-            write_difference(
-                output,
-                "context",
-                &previous.contexts,
-                &next.contexts,
-                |value| (value.host.clone(), value.target.clone()),
-            )?;
-            write_difference(
-                output,
-                "context package",
-                &previous.context_registry,
-                &next.context_registry,
-                |value| (value.host.clone(), value.target.clone(), value.name.clone()),
-            )?;
-            write_difference(
-                output,
-                "source evidence",
-                &previous.registry_sources,
-                &next.registry_sources,
-                |value| value.name.clone(),
-            )?;
-            write_difference(
-                output,
-                "capability",
-                &previous.capabilities,
-                &next.capabilities,
-                |value| value.package.clone(),
-            )?;
+            if previous != next {
+                writeln!(output, "Dependency change review:").map_err(|error| {
+                    Error::failure(format!("failed to write dependency change review: {error}"))
+                })?;
+                write_review_difference(output, previous, next)?;
+            }
         }
         None => {
             let report = next.render()?;
@@ -93,6 +48,9 @@ pub fn approve(
                 Error::failure(format!("failed to write dependency change review: {error}"))
             })?;
         }
+    }
+    if matches!(mode, Mode::AcceptAll) {
+        return Ok(());
     }
     if !terminal {
         return Err(Error::failure(
@@ -121,6 +79,97 @@ pub fn approve(
     } else {
         Err(Error::failure("dependency change approval was declined"))
     }
+}
+
+fn write_review_difference(
+    output: &mut impl Write,
+    previous: &Review,
+    next: &Review,
+) -> Result<()> {
+    write_difference(
+        output,
+        "direct requirement",
+        &previous.direct_registry,
+        &next.direct_registry,
+        |value| (value.alias.clone(), value.kind, value.target.clone()),
+    )?;
+    write_difference(
+        output,
+        "direct Git requirement",
+        &previous.direct_git,
+        &next.direct_git,
+        |value| (value.alias.clone(), value.kind, value.target.clone()),
+    )?;
+    write_difference(
+        output,
+        "root feature",
+        &previous.root_features,
+        &next.root_features,
+        |value| value.name.clone(),
+    )?;
+    write_difference(
+        output,
+        "crates.io patch",
+        &previous.crates_io_patches,
+        &next.crates_io_patches,
+        |value| value.alias.clone(),
+    )?;
+    write_difference(
+        output,
+        "locked package",
+        &previous.locked_registry,
+        &next.locked_registry,
+        |value| value.name.clone(),
+    )?;
+    write_difference(
+        output,
+        "locked Git package",
+        &previous.locked_git,
+        &next.locked_git,
+        |value| value.name.clone(),
+    )?;
+    write_difference(
+        output,
+        "context",
+        &previous.contexts,
+        &next.contexts,
+        |value| (value.host.clone(), value.target.clone()),
+    )?;
+    write_difference(
+        output,
+        "context package",
+        &previous.context_registry,
+        &next.context_registry,
+        |value| (value.host.clone(), value.target.clone(), value.name.clone()),
+    )?;
+    write_difference(
+        output,
+        "Git context package",
+        &previous.context_git,
+        &next.context_git,
+        |value| (value.host.clone(), value.target.clone(), value.name.clone()),
+    )?;
+    write_difference(
+        output,
+        "source evidence",
+        &previous.registry_sources,
+        &next.registry_sources,
+        |value| value.name.clone(),
+    )?;
+    write_difference(
+        output,
+        "Git source evidence",
+        &previous.git_sources,
+        &next.git_sources,
+        |value| value.name.clone(),
+    )?;
+    write_difference(
+        output,
+        "capability",
+        &previous.capabilities,
+        &next.capabilities,
+        |value| value.package.clone(),
+    )
 }
 
 fn write_difference<T, K>(
@@ -234,6 +283,7 @@ mod tests {
             Some(&previous),
             &"0".repeat(64),
             &next,
+            Mode::Change,
             false,
             &mut "".as_bytes(),
             &mut output,
@@ -247,5 +297,39 @@ mod tests {
         assert!(removal < changed_addition);
         assert!(changed_addition < unpaired_addition, "{output}");
         assert!(!output[removal..changed_addition].contains("new-package"));
+    }
+
+    #[test]
+    fn forced_review_prompts_once_and_automation_approves_without_input() {
+        let review = Review::default();
+        let mut output = Vec::new();
+        let error = approve(
+            Some(&review),
+            &"0".repeat(64),
+            &review,
+            Mode::Forced,
+            true,
+            &mut "\n".as_bytes(),
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(error.render().contains("approval was declined"));
+        assert_eq!(
+            String::from_utf8(output).unwrap().matches("[y/N]").count(),
+            1
+        );
+
+        let mut output = Vec::new();
+        approve(
+            Some(&review),
+            &"0".repeat(64),
+            &review,
+            Mode::AcceptAll,
+            false,
+            &mut "".as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.is_empty());
     }
 }

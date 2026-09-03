@@ -9,7 +9,7 @@ mod refresh;
 pub(crate) use direct::{
     DirectCatalog, configure_direct, load_locked_dependencies, materialize_locked_dependencies,
 };
-pub(crate) use refresh::resolve_patch_refreshes;
+pub(crate) use refresh::{PatchRefresh, resolve_patch_refreshes};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LockedSource {

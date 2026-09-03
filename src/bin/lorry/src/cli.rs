@@ -633,6 +633,20 @@ mod tests {
                 }),
             })
         );
+        let Command::Vendor(automated) = parse(&[
+            "vendor",
+            "--accept-all",
+            "upgrade",
+            "libc",
+            "--to",
+            "0.2.187",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected vendor upgrade");
+        };
+        assert!(automated.accept_all);
         for input in [
             &["vendor", "upgrade"][..],
             &["vendor", "upgrade", "libc"],

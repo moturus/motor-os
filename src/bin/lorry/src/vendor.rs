@@ -72,12 +72,6 @@ fn execute_reconcile(
     accept_all: bool,
     requested: Option<(&str, &str)>,
 ) -> Result<i32> {
-    if requested.is_some() && accept_all {
-        return Err(Error::usage(
-            "`--accept-all` cannot approve a dependency upgrade",
-            "rerun interactively without `--accept-all` to review package and capability changes",
-        ));
-    }
     let manifest = Manifest::load_for_vendor_selected(current, selected_package)?;
     let config = Config::load(&manifest.root)?;
     let progress = Progress::new(cli.verbosity != Verbosity::Quiet);
@@ -85,11 +79,17 @@ fn execute_reconcile(
     if cli.verbosity == Verbosity::Verbose {
         eprintln!("Locked {}", lock.path().display());
     }
-    let direct = crate::git::materialize_locked_dependencies(
+    let refreshes = crate::git::resolve_patch_refreshes(
         &manifest,
         &config.network,
         &config.policy.limits,
-        accept_all,
+        cli.verbosity == Verbosity::Verbose,
+    )?;
+    let candidate_manifest = apply_patch_refreshes(&manifest, &refreshes)?;
+    let direct = crate::git::materialize_locked_dependencies(
+        &candidate_manifest,
+        &config.network,
+        &config.policy.limits,
         cli.verbosity == Verbosity::Verbose,
         progress,
     )?;
@@ -111,6 +111,7 @@ fn execute_reconcile(
         );
     }
     let changed = prepare_networked(
+        &candidate_manifest,
         &manifest,
         &config,
         &toolchain,
@@ -118,6 +119,7 @@ fn execute_reconcile(
         forced.as_ref(),
         previous.as_ref(),
         Some(&direct),
+        &refreshes,
         accept_all,
         progress,
     )?;
@@ -129,6 +131,44 @@ fn execute_reconcile(
         );
     }
     Ok(0)
+}
+
+fn apply_patch_refreshes(
+    manifest: &Manifest,
+    refreshes: &[crate::git::PatchRefresh],
+) -> Result<Manifest> {
+    let mut candidate = manifest.clone();
+    if !refreshes.iter().any(crate::git::PatchRefresh::changed) {
+        return Ok(candidate);
+    }
+    let lock = candidate
+        .lock
+        .as_mut()
+        .ok_or_else(|| Error::failure("Git patches require Cargo.lock"))?;
+    for refresh in refreshes.iter().filter(|refresh| refresh.changed()) {
+        let mut replaced = false;
+        for package in &mut lock.packages {
+            if package.source.as_deref() == Some(&refresh.previous.cargo_source) {
+                package.source = Some(refresh.candidate.cargo_source.clone());
+                replaced = true;
+            }
+            for dependency in &mut package.dependencies {
+                if dependency.contains(&refresh.previous.cargo_source) {
+                    *dependency = dependency.replace(
+                        &refresh.previous.cargo_source,
+                        &refresh.candidate.cargo_source,
+                    );
+                }
+            }
+        }
+        if !replaced {
+            return Err(Error::failure(format!(
+                "Git patch `{}` has no locked source to refresh",
+                refresh.alias
+            )));
+        }
+    }
+    Ok(candidate)
 }
 
 fn vendor_contexts(
@@ -262,24 +302,28 @@ fn test_contexts(host: &TargetInfo, targets: &[TargetInfo]) -> Vec<VendorContext
 #[allow(clippy::too_many_arguments)]
 fn prepare_networked(
     manifest: &Manifest,
+    committed_manifest: &Manifest,
     config: &Config,
     toolchain: &Toolchain,
     contexts: &[VendorContext],
     forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
     direct: Option<&crate::git::DirectCatalog>,
+    refreshes: &[crate::git::PatchRefresh],
     accept_all: bool,
     progress: Progress,
 ) -> Result<bool> {
     let stdin = io::stdin();
     prepare_networked_with_approval(
         manifest,
+        committed_manifest,
         config,
         toolchain,
         contexts,
         forced,
         previous,
         direct,
+        refreshes,
         accept_all,
         stdin.is_terminal(),
         &mut stdin.lock(),
@@ -291,12 +335,14 @@ fn prepare_networked(
 #[allow(clippy::too_many_arguments)]
 fn prepare_networked_with_approval(
     manifest: &Manifest,
+    committed_manifest: &Manifest,
     config: &Config,
     toolchain: &Toolchain,
     contexts: &[VendorContext],
     forced: Option<&upgrade::Selection>,
     previous: Option<&CompactState>,
     direct: Option<&crate::git::DirectCatalog>,
+    refreshes: &[crate::git::PatchRefresh],
     accept_all: bool,
     terminal: bool,
     input: &mut impl BufRead,
@@ -306,26 +352,23 @@ fn prepare_networked_with_approval(
     progress.report("Checking dependency repository state")?;
     let mut acquisition = Acquisition::new(config, manifest, progress)?;
     let repositories = acquisition.repositories().clone();
-    // The committed document is needed only to display an interactive diff.
-    // Reconstructing it verifies and inventories every dependency source, so
-    // avoid that work when --accept-all would reject a changed graph anyway.
-    let committed = if accept_all {
-        None
-    } else {
-        previous
-            .map(|previous| {
-                try_reconstruct_committed_review(
-                    manifest,
-                    config,
-                    toolchain,
-                    &repositories,
-                    previous,
-                    direct,
-                )
-            })
-            .transpose()?
-            .flatten()
-    };
+    let committed = previous
+        .map(|previous| {
+            try_reconstruct_committed_review(
+                committed_manifest,
+                config,
+                toolchain,
+                &repositories,
+                previous,
+                if committed_manifest.lock == manifest.lock {
+                    direct
+                } else {
+                    None
+                },
+            )
+        })
+        .transpose()?
+        .flatten();
     let forced = forced.map(upgrade::Selection::as_resolver_input);
     let base_catalog = prepare_catalog(manifest, config, &repositories, forced.is_some(), direct)?;
     let mut known_proc_macros = previous
@@ -363,8 +406,6 @@ fn prepare_networked_with_approval(
             add_change_review_rules(&mut review_policy, previous, &selected)?;
         }
         let preflight = policy::preflight(&review_policy, &selected)?;
-        let missing = acquisition.missing_selected(&selected)?;
-        require_approval_mode(missing, accept_all, terminal)?;
         acquisition.stage_selected(&selected)?;
         let identity = selected
             .packages
@@ -413,18 +454,35 @@ fn prepare_networked_with_approval(
             && previous.contexts == recorded
             && previous.capabilities == capabilities
     });
+    let initial_git_review =
+        previous.is_none() && direct.is_some_and(|direct| direct.has_sources());
+    let git_review = initial_git_review
+        || direct.is_some_and(|direct| {
+            refreshes.iter().any(|refresh| {
+                refresh.changed() || direct.was_materialized(&refresh.candidate.cargo_source)
+            }) || direct.materialized_sources().next().is_some()
+        });
+    if git_review {
+        write_git_review(
+            refreshes,
+            direct.expect("Git review has a catalog"),
+            initial_git_review,
+            output,
+        )?;
+    }
     if let Some(previous) = previous {
-        if !unchanged {
-            if accept_all {
-                return Err(Error::usage(
-                    "`--accept-all` cannot approve a dependency change",
-                    "rerun interactively without `--accept-all` to review the complete candidate",
-                ));
-            }
+        if !unchanged || git_review {
             change_review::approve(
                 committed.as_ref(),
                 &previous.review_sha256,
                 &candidate,
+                if accept_all {
+                    change_review::Mode::AcceptAll
+                } else if git_review {
+                    change_review::Mode::Forced
+                } else {
+                    change_review::Mode::Change
+                },
                 terminal,
                 input,
                 output,
@@ -435,7 +493,9 @@ fn prepare_networked_with_approval(
         writeln!(output, "Complete candidate review document:")
             .and_then(|()| output.write_all(&report))
             .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
-        approve_new_packages(&selected, &evidence, accept_all, terminal, input, output)?;
+        approve_new_packages(
+            &selected, &evidence, git_review, accept_all, terminal, input, output,
+        )?;
     }
     let staged_lock = stage_lockfile(&manifest.workspace_root.join("Cargo.lock"), &lock)?;
     acquisition.publish()?;
@@ -853,22 +913,6 @@ impl<'a> Acquisition<'a> {
         })
     }
 
-    fn missing_selected(&self, resolution: &Resolution) -> Result<usize> {
-        let repositories = &self.repositories;
-        let mut missing = 0;
-        for package in &resolution.packages {
-            let ResolvedSource::CratesIo { checksum } = package.source else {
-                continue;
-            };
-            if repositories.lookup_registry(&hex(&checksum))?.is_none()
-                && !self.has_staged_registry(checksum)
-            {
-                missing += 1;
-            }
-        }
-        Ok(missing)
-    }
-
     fn evidence(
         &mut self,
         resolution: &Resolution,
@@ -1053,20 +1097,10 @@ impl<'a> Acquisition<'a> {
     }
 }
 
-fn require_approval_mode(missing: usize, accept_all: bool, terminal: bool) -> Result<()> {
-    if missing == 0 || accept_all || terminal {
-        return Ok(());
-    }
-    Err(Error::failure(format!(
-        "{missing} new package{} require approval, but no interactive terminal is available",
-        if missing == 1 { "" } else { "s" }
-    ))
-    .with_help("rerun `lorry vendor --accept-all` to approve every policy-compliant package"))
-}
-
 fn approve_new_packages(
     resolution: &Resolution,
     evidence: &BTreeMap<PackageKey, PackageEvidence>,
+    force: bool,
     accept_all: bool,
     terminal: bool,
     input: &mut impl BufRead,
@@ -1085,11 +1119,13 @@ fn approve_new_packages(
         }
     }
     packages.sort_unstable_by(|left, right| left.key.cmp(&right.key));
-    if packages.is_empty() {
+    if packages.is_empty() && !force {
         return Ok(());
     }
-    writeln!(output, "New crates.io packages ({}):", packages.len())
-        .map_err(|error| Error::failure(format!("failed to write vendor summary: {error}")))?;
+    if !packages.is_empty() {
+        writeln!(output, "New crates.io packages ({}):", packages.len())
+            .map_err(|error| Error::failure(format!("failed to write vendor summary: {error}")))?;
+    }
     for package in &packages {
         let package_evidence = &evidence[&package.key];
         let ResolvedSource::CratesIo { checksum } = package.source else {
@@ -1139,25 +1175,95 @@ fn approve_new_packages(
     if accept_all {
         return Ok(());
     }
-    let echo = prompt::echo_required(terminal);
-    for package in packages {
-        write!(
-            output,
-            "Approve {} {}? [y/N]: ",
-            package.key.name, package.key.version
+    if !terminal {
+        return Err(Error::failure(
+            "dependency change requires confirmation, but no interactive terminal is available",
         )
-        .and_then(|()| output.flush())
-        .map_err(|error| Error::failure(format!("failed to write vendor prompt: {error}")))?;
-        let response = prompt::read_answer(input, output, echo)
-            .map_err(|error| Error::failure(format!("failed to read package approval: {error}")))?;
-        if !matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            return Err(Error::failure(format!(
-                "approval declined for package `{} {}`",
-                package.key.name, package.key.version
-            )));
-        }
+        .with_help("rerun `lorry vendor --accept-all` to approve the complete candidate"));
+    }
+    write!(
+        output,
+        "Approve this dependency and capability change? [y/N]: "
+    )
+    .and_then(|()| output.flush())
+    .map_err(|error| Error::failure(format!("failed to write vendor prompt: {error}")))?;
+    let response = prompt::read_answer(input, output, prompt::echo_required(terminal))
+        .map_err(|error| Error::failure(format!("failed to read vendor approval: {error}")))?;
+    if !matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(Error::failure("dependency change approval was declined"));
     }
     Ok(())
+}
+
+fn write_git_review(
+    refreshes: &[crate::git::PatchRefresh],
+    direct: &crate::git::DirectCatalog,
+    include_all: bool,
+    output: &mut impl Write,
+) -> Result<()> {
+    let mut covered = BTreeSet::new();
+    for refresh in refreshes {
+        if !include_all
+            && !refresh.changed()
+            && !direct.was_materialized(&refresh.candidate.cargo_source)
+        {
+            continue;
+        }
+        let source = direct.source(&refresh.candidate.cargo_source)?;
+        writeln!(
+            output,
+            "Git patch candidate: {} (`{}`){}\n  canonical source: {}\n  URL: {}\n  selector: {}\n  old commit: {}\n  new commit: {}\n  Git tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
+            refresh.alias,
+            refresh.package,
+            if refresh.retargeted_tag {
+                " [WARNING: RETARGETED TAG]"
+            } else {
+                ""
+            },
+            source.locked.cargo_source,
+            source.locked.url,
+            git_selector(&source.locked.selector),
+            refresh.previous.commit,
+            refresh.candidate.commit,
+            source.git_tree,
+            hex(&source.source_tree_sha256),
+            source.file_count,
+            source.total_bytes,
+        )
+        .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
+        covered.insert(refresh.candidate.cargo_source.as_str());
+    }
+    for source in direct
+        .sources()
+        .filter(|source| include_all || direct.was_materialized(&source.locked.cargo_source))
+    {
+        if covered.contains(source.locked.cargo_source.as_str()) {
+            continue;
+        }
+        writeln!(
+            output,
+            "Git source candidate:\n  canonical source: {}\n  URL: {}\n  selector: {}\n  commit: {}\n  Git tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
+            source.locked.cargo_source,
+            source.locked.url,
+            git_selector(&source.locked.selector),
+            source.locked.commit,
+            source.git_tree,
+            hex(&source.source_tree_sha256),
+            source.file_count,
+            source.total_bytes,
+        )
+        .map_err(|error| Error::failure(format!("failed to write vendor review: {error}")))?;
+    }
+    Ok(())
+}
+
+fn git_selector(selector: &crate::manifest::GitSelector) -> &str {
+    match selector {
+        crate::manifest::GitSelector::Head => "HEAD",
+        crate::manifest::GitSelector::Branch(value)
+        | crate::manifest::GitSelector::Tag(value)
+        | crate::manifest::GitSelector::Revision(value) => value,
+    }
 }
 
 #[cfg(test)]
@@ -1388,12 +1494,14 @@ mod tests {
         assert!(
             prepare_networked(
                 &manifest,
+                &manifest,
                 &config,
                 &toolchain(),
                 &contexts,
                 None,
                 None,
                 None,
+                &[],
                 true,
                 Progress::new(false),
             )
@@ -1408,12 +1516,14 @@ mod tests {
         assert!(
             !prepare_networked(
                 &locked,
+                &locked,
                 &config,
                 &toolchain(),
                 &contexts,
                 None,
                 Some(&written),
                 None,
+                &[],
                 true,
                 Progress::new(false),
             )
@@ -1450,18 +1560,73 @@ mod tests {
         assert!(
             !prepare_networked(
                 &manifest,
+                &manifest,
                 &config,
                 &toolchain(),
                 &contexts,
                 None,
                 None,
                 None,
+                &[],
                 true,
                 Progress::new(false),
             )
             .unwrap()
         );
         assert_eq!(fs::read(fixture.0.join("Cargo.lock")).unwrap(), lock);
+    }
+
+    #[test]
+    fn git_patch_refresh_changes_only_the_in_memory_lock() {
+        const OLD: &str = "0123456789abcdef0123456789abcdef01234567";
+        const NEW: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        let fixture = Fixture::new("git-refresh-lock");
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\ndemo = \"=1.2.3\"\n\
+             [patch.crates-io]\ndemo = { git = \"https://example.com/repo\", branch = \"main\" }\n",
+        )
+        .unwrap();
+        let old_source = format!("git+https://example.com/repo?branch=main#{OLD}");
+        let new_source = format!("git+https://example.com/repo?branch=main#{NEW}");
+        let lock = format!(
+            "version = 4\n\n[[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             dependencies = [\"demo 1.2.3 ({old_source})\"]\n\n\
+             [[package]]\nname = \"demo\"\nversion = \"1.2.3\"\nsource = \"{old_source}\"\n"
+        );
+        fs::write(fixture.0.join("Cargo.lock"), &lock).unwrap();
+        let manifest = fixture.manifest();
+        let refresh = crate::git::PatchRefresh {
+            alias: "demo".to_owned(),
+            package: "demo".to_owned(),
+            previous: crate::git::parse_locked_source(&old_source).unwrap(),
+            candidate: crate::git::parse_locked_source(&new_source).unwrap(),
+            needs_materialization: true,
+            retargeted_tag: false,
+        };
+
+        let candidate = apply_patch_refreshes(&manifest, &[refresh]).unwrap();
+        let packages = &candidate.lock.as_ref().unwrap().packages;
+        assert!(packages.iter().all(|package| {
+            package.source.as_deref() != Some(&old_source)
+                && package
+                    .dependencies
+                    .iter()
+                    .all(|dependency| !dependency.contains(&old_source))
+        }));
+        assert!(packages.iter().any(|package| {
+            package.source.as_deref() == Some(&new_source)
+                || package
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.contains(&new_source))
+        }));
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("Cargo.lock")).unwrap(),
+            lock
+        );
+        assert_eq!(manifest.lock.unwrap().packages[1].source, Some(old_source));
     }
 
     #[test]
@@ -1476,14 +1641,17 @@ mod tests {
         let target = target();
         let contexts = test_contexts(&target, std::slice::from_ref(&target));
         let mut initial_output = Vec::new();
+        let initial = fixture.manifest();
         prepare_networked_with_approval(
-            &fixture.manifest(),
+            &initial,
+            &initial,
             &config,
             &toolchain(),
             &contexts,
             None,
             None,
             None,
+            &[],
             true,
             false,
             &mut "".as_bytes(),
@@ -1504,13 +1672,15 @@ mod tests {
         let edited = fixture.manifest();
         let error = prepare_networked_with_approval(
             &edited,
+            &edited,
             &config,
             &toolchain(),
             &contexts,
             None,
             Some(&previous),
             None,
-            true,
+            &[],
+            false,
             false,
             &mut "".as_bytes(),
             &mut Vec::new(),
@@ -1520,7 +1690,7 @@ mod tests {
         assert!(
             error
                 .render()
-                .contains("cannot approve a dependency change")
+                .contains("no interactive terminal is available")
         );
         assert_eq!(
             fs::read(CompactState::path(&fixture.0)).unwrap(),
@@ -1535,12 +1705,14 @@ mod tests {
         assert!(
             !prepare_networked_with_approval(
                 &edited,
+                &edited,
                 &config,
                 &toolchain(),
                 &contexts,
                 None,
                 Some(&previous),
                 None,
+                &[],
                 false,
                 true,
                 &mut "yes\n".as_bytes(),
@@ -1559,6 +1731,35 @@ mod tests {
             fs::read(fixture.0.join("Cargo.lock")).unwrap(),
             previous_lock
         );
+
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [features]\nautomated-change = []\n",
+        )
+        .unwrap();
+        let mut automated_output = Vec::new();
+        let automated = fixture.manifest();
+        prepare_networked_with_approval(
+            &automated,
+            &automated,
+            &config,
+            &toolchain(),
+            &contexts,
+            None,
+            Some(&current),
+            None,
+            &[],
+            true,
+            false,
+            &mut "".as_bytes(),
+            &mut automated_output,
+            Progress::new(false),
+        )
+        .unwrap();
+        let automated_output = String::from_utf8(automated_output).unwrap();
+        assert!(automated_output.contains("automated-change"));
+        assert!(!automated_output.contains("[y/N]"));
     }
 
     #[test]
@@ -1713,8 +1914,6 @@ mod tests {
             .unwrap();
         assert!(catalog.contains_registry("demo", &version));
         assert!(acquisition.state.is_none());
-        assert!(require_approval_mode(1, false, false).is_err());
-
         let staged = acquisition
             .stage_selected_with(&resolution, |state, _, record| {
                 state.transaction.stage_registry(record, &archive)?;
@@ -1722,7 +1921,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(staged, 1);
-        assert_eq!(acquisition.missing_selected(&resolution).unwrap(), 0);
         assert_eq!(
             acquisition
                 .stage_selected_with(&resolution, |_, _, _| {
@@ -1747,6 +1945,7 @@ mod tests {
             &evidence,
             false,
             false,
+            true,
             &mut std::io::Cursor::new(b"yes\n"),
             &mut output,
         )
@@ -1754,7 +1953,7 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("source=crates.io"));
         assert!(output.contains("license=MIT"));
-        assert!(output.contains("Approve demo 1.2.3?"));
+        assert!(output.contains("Approve this dependency and capability change?"));
         acquisition.publish().unwrap();
 
         let mut warm = Acquisition::new(&config, &manifest, Progress::new(false)).unwrap();
@@ -1782,6 +1981,7 @@ mod tests {
         approve_new_packages(
             &resolution,
             &evidence,
+            false,
             false,
             false,
             &mut std::io::Cursor::new(b""),

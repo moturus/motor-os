@@ -36,6 +36,13 @@ pub(crate) fn resolve_patch_refreshes(
     policy: &PolicyLimits,
     verbose: bool,
 ) -> Result<Vec<PatchRefresh>> {
+    if !manifest
+        .patches
+        .iter()
+        .any(|patch| matches!(patch.source, PatchSource::Git(_)))
+    {
+        return Ok(Vec::new());
+    }
     let patches = locked_patches(manifest)?;
     if patches.is_empty() {
         return Ok(Vec::new());
