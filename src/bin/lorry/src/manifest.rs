@@ -1289,19 +1289,18 @@ fn parse_library(
         .get("crate-type")
         .map(|item| string_array(path, document, item, "lib.crate-type"))
         .transpose()?;
-    if let Some(values) = &declared_crate_types {
-        if values.is_empty()
+    if let Some(values) = &declared_crate_types
+        && (values.is_empty()
             || values
                 .iter()
-                .any(|value| !matches!(value.as_str(), "lib" | "rlib"))
-        {
-            return Err(Error::at(
-                path,
-                document.line_of_item(table.get("crate-type").unwrap()),
-                "custom library crate types are not supported in Stage 2",
-                "use `lib` or `rlib` only",
-            ));
-        }
+                .any(|value| !matches!(value.as_str(), "lib" | "rlib")))
+    {
+        return Err(Error::at(
+            path,
+            document.line_of_item(table.get("crate-type").unwrap()),
+            "custom library crate types are not supported in Stage 2",
+            "use `lib` or `rlib` only",
+        ));
     }
     let proc_macro = optional_bool(path, document, table, "lib", "proc-macro")?.unwrap_or(false);
     if mode == ManifestMode::Root && proc_macro {

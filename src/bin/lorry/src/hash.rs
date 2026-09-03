@@ -72,7 +72,9 @@ pub fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
         )));
     }
     let mut output = [0; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (index, pair) in pairs.iter().enumerate() {
         output[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(output)
@@ -175,14 +177,13 @@ fn siphash_128(input: &[u8]) -> [u64; 2] {
         v2: 0x6c7967656e657261,
         v3: 0x7465646279746573,
     };
-    let mut chunks = input.chunks_exact(8);
-    for chunk in chunks.by_ref() {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap());
+    let (chunks, remainder) = input.as_chunks::<8>();
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         state.v3 ^= word;
         state.round();
         state.v0 ^= word;
     }
-    let remainder = chunks.remainder();
     let mut final_word = (input.len() as u64 & 0xff) << 56;
     for (shift, byte) in remainder.iter().enumerate() {
         final_word |= (*byte as u64) << (shift * 8);
