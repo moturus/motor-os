@@ -143,6 +143,7 @@ pub struct LibraryTarget {
     pub name: String,
     pub path: PathBuf,
     pub proc_macro: bool,
+    pub crate_types: Vec<String>,
     pub test: bool,
     pub doctest: bool,
     pub doc: bool,
@@ -1238,6 +1239,7 @@ fn parse_library(
             name: package_name.replace('-', "_"),
             path: root.join("src/lib.rs"),
             proc_macro: false,
+            crate_types: vec!["lib".to_owned()],
             test: true,
             doctest: true,
             doc: true,
@@ -1283,15 +1285,19 @@ fn parse_library(
             }
         }
     }
-    if let Some(crate_types) = table.get("crate-type") {
-        let values = string_array(path, document, crate_types, "lib.crate-type")?;
-        if values
-            .iter()
-            .any(|value| !matches!(value.as_str(), "lib" | "rlib"))
+    let declared_crate_types = table
+        .get("crate-type")
+        .map(|item| string_array(path, document, item, "lib.crate-type"))
+        .transpose()?;
+    if let Some(values) = &declared_crate_types {
+        if values.is_empty()
+            || values
+                .iter()
+                .any(|value| !matches!(value.as_str(), "lib" | "rlib"))
         {
             return Err(Error::at(
                 path,
-                document.line_of_item(crate_types),
+                document.line_of_item(table.get("crate-type").unwrap()),
                 "custom library crate types are not supported in Stage 2",
                 "use `lib` or `rlib` only",
             ));
@@ -1324,6 +1330,11 @@ fn parse_library(
         name,
         path: root.join(relative),
         proc_macro,
+        crate_types: if proc_macro {
+            vec!["proc-macro".to_owned()]
+        } else {
+            declared_crate_types.unwrap_or_else(|| vec!["lib".to_owned()])
+        },
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
         doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true),
         doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
@@ -3337,6 +3348,7 @@ autobenches = false
 name = "dependency"
 path = "src/lib.rs"
 bench = true
+crate-type = ["rlib"]
 test = false
 doctest = false
 doc = false
@@ -3386,6 +3398,7 @@ members = ["ignored-member"]
         assert_eq!(manifest.links.as_deref(), Some("native"));
         assert!(manifest.build_script.is_some());
         let library = manifest.library.as_ref().unwrap();
+        assert_eq!(library.crate_types, ["rlib"]);
         assert!(!library.test);
         assert!(!library.doctest);
         assert!(!library.doc);
