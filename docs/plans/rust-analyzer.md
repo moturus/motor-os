@@ -9,7 +9,7 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-5 in section 4.12 are complete and gated, while Cargo-compatibility
+patches 1-6 in section 4.12 are complete and gated, while Cargo-compatibility
 queries and the native rust-analyzer work have not started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
@@ -22,7 +22,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-5 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-6 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -822,6 +822,11 @@ then `RUSTFLAGS`, then the nonempty concatenation of the exact
 encoded or plain environment value selects no flags; an empty target
 concatenation falls through to the build value, as Cargo does. In particular,
 nonempty target flags replace rather than append to `build.rustflags`.
+Within a configuration source, Cargo environment contributions append to the
+file values: `CARGO_BUILD_RUSTFLAGS` extends `build.rustflags`, and an exact
+`CARGO_TARGET_<TRIPLE>_RUSTFLAGS` value extends that exact target entry before
+the sorted matching cfg entries. This configuration layering does not change
+the mutually exclusive precedence above.
 Decode `CARGO_ENCODED_RUSTFLAGS` by U+001F separators. Parse plain `RUSTFLAGS`
 exactly as the selected Cargo does: split on literal ASCII spaces, trim and
 discard empty pieces, and do not apply shell quoting or escape processing.
@@ -1200,12 +1205,12 @@ explicit:
    unrelated changes alone and simultaneous with Git movement, moved-tag
    labeling, explicit denial, decline, non-interactive failure, and atomic
    publication/failure.
-6. **Lorry: Cargo-compatible rustflags.** Introduce one effective-rustflags
-   helper used by the existing build paths and the two planned queries. Match
-   Cargo's mutually exclusive precedence, including target flags replacing
-   `build.rustflags`, and differential-test argv and environment against the
-   keyed Cargo. Treat the current append behavior as a compatibility bug fixed
-   by this patch.
+6. **Lorry: Cargo-compatible rustflags (complete).** One effective-rustflags
+   helper is used by the existing build paths and is ready for the two planned
+   queries. It matches Cargo's mutually exclusive precedence and configuration
+   layering, including target flags replacing `build.rustflags`. Differential
+   tests compare compiler argv and build-script environment against the keyed
+   Cargo, including the former append and shell-word parsing bugs.
 7. **Lorry: Cargo-form selection and compatibility queries.** Add the exact
    `locate-project` and two read-only `rustc` query forms, `--manifest-path`,
    `--target-dir`, `clean --target-dir`, and the shared no-op options, with CLI

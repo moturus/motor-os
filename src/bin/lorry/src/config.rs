@@ -1256,7 +1256,7 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                     config.default_target = Some(value);
                 }
                 "rustflags" => {
-                    config.build_rustflags.extend(argument_words(
+                    config.build_rustflags.extend(rustflags_words(
                         path,
                         &document,
                         item,
@@ -1317,7 +1317,7 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
                             .into_owned();
                         options.runner = Some(value);
                     }
-                    "rustflags" => options.rustflags.extend(argument_words(
+                    "rustflags" => options.rustflags.extend(rustflags_words(
                         path,
                         &document,
                         item,
@@ -1358,9 +1358,7 @@ fn apply_cargo_environment(
         config.default_target = Some(target.clone());
     }
     if let Some(flags) = environment.get("CARGO_BUILD_RUSTFLAGS") {
-        config.build_rustflags = split_words(flags).map_err(|message| {
-            Error::failure(format!("invalid `CARGO_BUILD_RUSTFLAGS`: {message}"))
-        })?;
+        config.build_rustflags.extend(split_config_words(flags));
     }
     if let Some(value) = environment.get("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS") {
         config.incompatible_rust_versions = Some(match value.as_str() {
@@ -1412,8 +1410,7 @@ fn apply_cargo_environment(
                     })?);
             }
             "rustflags" => {
-                options.rustflags = split_words(value)
-                    .map_err(|message| Error::failure(format!("invalid `{key}`: {message}")))?;
+                options.rustflags.extend(split_config_words(value));
             }
             _ => unreachable!(),
         }
@@ -1440,22 +1437,74 @@ fn parse_incompatible_rust_versions(
     }
 }
 
-pub fn environment_rustflags() -> Result<Option<Vec<String>>> {
+pub fn effective_rustflags(config: &Config, target: &TargetOptions) -> Result<Vec<String>> {
+    Ok(select_effective_rustflags(
+        config,
+        target,
+        process_environment_rustflags()?,
+    ))
+}
+
+#[cfg(test)]
+fn effective_rustflags_with_environment(
+    config: &Config,
+    target: &TargetOptions,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    Ok(select_effective_rustflags(
+        config,
+        target,
+        environment_rustflags(environment),
+    ))
+}
+
+fn select_effective_rustflags(
+    config: &Config,
+    target: &TargetOptions,
+    environment: Option<Vec<String>>,
+) -> Vec<String> {
+    if let Some(flags) = environment {
+        return flags;
+    }
+    if !target.rustflags.is_empty() {
+        return target.rustflags.clone();
+    }
+    config.build_rustflags.clone()
+}
+
+#[cfg(test)]
+fn environment_rustflags(environment: &BTreeMap<String, String>) -> Option<Vec<String>> {
+    if let Some(encoded) = environment.get("CARGO_ENCODED_RUSTFLAGS") {
+        return Some(decode_encoded_rustflags(encoded));
+    }
+    if let Some(flags) = environment.get("RUSTFLAGS") {
+        return Some(split_plain_rustflags(flags));
+    }
+    None
+}
+
+fn process_environment_rustflags() -> Result<Option<Vec<String>>> {
     if let Some(encoded) = env::var_os("CARGO_ENCODED_RUSTFLAGS") {
         let encoded = encoded
             .into_string()
             .map_err(|_| Error::failure("`CARGO_ENCODED_RUSTFLAGS` contains non-Unicode data"))?;
-        return Ok(Some(encoded.split('\u{1f}').map(str::to_owned).collect()));
+        return Ok(Some(decode_encoded_rustflags(&encoded)));
     }
     if let Some(flags) = env::var_os("RUSTFLAGS") {
         let flags = flags
             .into_string()
             .map_err(|_| Error::failure("`RUSTFLAGS` contains non-Unicode data"))?;
-        return split_words(&flags)
-            .map(Some)
-            .map_err(|message| Error::failure(format!("invalid `RUSTFLAGS`: {message}")));
+        return Ok(Some(split_plain_rustflags(&flags)));
     }
     Ok(None)
+}
+
+fn decode_encoded_rustflags(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        value.split('\u{1f}').map(str::to_owned).collect()
+    }
 }
 
 fn parse_target_selector(path: &Path, line: usize, value: &str) -> Result<TargetSelector> {
@@ -1622,6 +1671,40 @@ fn argument_words(
             "a string or string array",
         ))
     }
+}
+
+fn rustflags_words(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    name: &str,
+) -> Result<Vec<String>> {
+    if item.as_array().is_some() {
+        require_string_array(path, document, item, name)
+    } else if let Some(value) = item.as_str() {
+        Ok(split_config_words(value))
+    } else {
+        Err(type_error(
+            path,
+            document,
+            item,
+            name,
+            "a string or string array",
+        ))
+    }
+}
+
+fn split_config_words(value: &str) -> Vec<String> {
+    value.split_whitespace().map(str::to_owned).collect()
+}
+
+fn split_plain_rustflags(value: &str) -> Vec<String> {
+    value
+        .split(' ')
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn absolute_path(path: &Path, document: &Document, item: &Item, name: &str) -> Result<PathBuf> {
@@ -2311,6 +2394,120 @@ locked = [
             ["one", "two words", "three words", "four five"]
         );
         assert!(split_words("'unterminated").is_err());
+    }
+
+    #[test]
+    fn selects_cargo_compatible_rustflags() {
+        let mut config = Config {
+            build_rustflags: vec!["--cfg=build".to_owned()],
+            ..Config::default()
+        };
+        config.targets.insert(
+            TargetSelector::Cfg("cfg(unix)".to_owned()),
+            TargetOptions {
+                rustflags: vec!["--cfg=unix".to_owned()],
+                ..TargetOptions::default()
+            },
+        );
+        config.targets.insert(
+            TargetSelector::Cfg("cfg(target_pointer_width = \"64\")".to_owned()),
+            TargetOptions {
+                rustflags: vec!["--cfg=pointer".to_owned()],
+                ..TargetOptions::default()
+            },
+        );
+        config.targets.insert(
+            TargetSelector::Triple("x86_64-unknown-linux-gnu".to_owned()),
+            TargetOptions {
+                rustflags: vec!["--cfg=exact".to_owned()],
+                ..TargetOptions::default()
+            },
+        );
+
+        let target = config
+            .target_options(
+                "x86_64-unknown-linux-gnu",
+                &[
+                    "cfg(unix)".to_owned(),
+                    "cfg(target_pointer_width = \"64\")".to_owned(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            target.rustflags,
+            ["--cfg=exact", "--cfg=pointer", "--cfg=unix"]
+        );
+        assert_eq!(
+            effective_rustflags_with_environment(&config, &target, &BTreeMap::new()).unwrap(),
+            target.rustflags
+        );
+        let mut layered = config.clone();
+        apply_cargo_environment(
+            &BTreeMap::from([
+                (
+                    "CARGO_BUILD_RUSTFLAGS".to_owned(),
+                    "--cfg=build-env".to_owned(),
+                ),
+                (
+                    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS".to_owned(),
+                    "--cfg=target-env".to_owned(),
+                ),
+            ]),
+            &mut layered,
+        )
+        .unwrap();
+        assert_eq!(layered.build_rustflags, ["--cfg=build", "--cfg=build-env"]);
+        assert_eq!(
+            layered
+                .target_options("x86_64-unknown-linux-gnu", &["cfg(unix)".to_owned()],)
+                .unwrap()
+                .rustflags,
+            ["--cfg=exact", "--cfg=target-env", "--cfg=unix"]
+        );
+        assert_eq!(
+            effective_rustflags_with_environment(
+                &config,
+                &TargetOptions::default(),
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+            config.build_rustflags
+        );
+
+        let plain = BTreeMap::from([(
+            "RUSTFLAGS".to_owned(),
+            "  --cfg=plain  --cfg=quote\"literal --cfg=back\\slash --cfg=tab\tinside  ".to_owned(),
+        )]);
+        assert_eq!(
+            effective_rustflags_with_environment(&config, &target, &plain).unwrap(),
+            [
+                "--cfg=plain",
+                "--cfg=quote\"literal",
+                "--cfg=back\\slash",
+                "--cfg=tab\tinside",
+            ]
+        );
+
+        let encoded = BTreeMap::from([
+            ("RUSTFLAGS".to_owned(), "--cfg=ignored".to_owned()),
+            (
+                "CARGO_ENCODED_RUSTFLAGS".to_owned(),
+                "--cfg=one\u{1f}--cfg=two words".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            effective_rustflags_with_environment(&config, &target, &encoded).unwrap(),
+            ["--cfg=one", "--cfg=two words"]
+        );
+        assert!(
+            effective_rustflags_with_environment(
+                &config,
+                &target,
+                &BTreeMap::from([("CARGO_ENCODED_RUSTFLAGS".to_owned(), String::new())]),
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]

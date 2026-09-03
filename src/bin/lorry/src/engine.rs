@@ -4,7 +4,7 @@ use crate::bundle;
 use crate::cache;
 use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, Color, Command, Verbosity};
-use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environment_rustflags};
+use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, effective_rustflags};
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
@@ -95,11 +95,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     let target_options = config.target_options(&target_info.triple, &target_matching_cfgs)?;
     let host_matching_cfgs = matching_cfgs(&config, &host_info)?;
     let host_options = config.target_options(&host_info.triple, &host_matching_cfgs)?;
-    let rustflags = environment_rustflags()?.unwrap_or_else(|| {
-        let mut flags = config.build_rustflags.clone();
-        flags.extend(target_options.rustflags.iter().cloned());
-        flags
-    });
+    let rustflags = effective_rustflags(&config, &target_options)?;
     let logical_target = if physical_target.is_some() {
         physical_target.as_deref()
     } else if cfg!(target_os = "motor") {
