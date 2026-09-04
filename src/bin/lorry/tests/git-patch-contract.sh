@@ -361,6 +361,8 @@ chmod 000 "$WORK/bin/git-curl"
     HOME="$HOME_DIR" "$LORRY" review -p app >"$WORK/review.toml"
     HOME="$HOME_DIR" "$LORRY" metadata -p app --format-version 1 \
         --filter-platform x86_64-unknown-linux-gnu --locked >"$WORK/metadata.json"
+    HOME="$HOME_DIR" "$LORRY" tree -p app \
+        --target x86_64-unknown-linux-gnu >"$WORK/git.tree"
 )
 grep -F '[[locked-git]]' "$WORK/review.toml" >/dev/null ||
     fail "review omitted the locked Git identity"
@@ -382,6 +384,17 @@ DEMO_VIEW="$(find "$WORK/cache/sources" -mindepth 1 -maxdepth 1 \
 grep -F "\"manifest_path\":\"$DEMO_VIEW/Cargo.toml\"" \
     "$WORK/metadata.json" >/dev/null ||
     fail "metadata did not reference the stable Git source view"
+SHORT_BATCH="${BATCH_COMMIT:0:8}"
+SHORT_PINNED="${COMMIT:0:8}"
+for selector in \
+    "?branch=main#$SHORT_BATCH" \
+    "#$SHORT_BATCH" \
+    "?tag=v1#$SHORT_BATCH" \
+    "?rev=refs%2Fheads%2Ftopic#$SHORT_BATCH" \
+    "?rev=$COMMIT#$SHORT_PINNED"; do
+    grep -F "($GIT_URL$selector)" "$WORK/git.tree" >/dev/null ||
+        fail "tree omitted Git selector $selector"
+done
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] || fail "an offline command changed a manifest"
 
-echo "PASS: Git patches keep manifests immutable and publish stable metadata identity"
+echo "PASS: Git patches keep manifests immutable and publish stable metadata/tree identity"

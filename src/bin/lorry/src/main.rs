@@ -46,6 +46,7 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod trace;
+mod tree;
 mod unit;
 mod upgrade;
 mod validation;
@@ -53,7 +54,7 @@ mod vendor;
 mod vendor_lock;
 
 use cli::{Cli, Command};
-use diagnostic::{Error, Result};
+use diagnostic::Result;
 
 const VERSION: &str = "0.1.0";
 
@@ -117,9 +118,7 @@ where
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
         Command::Metadata(options) => metadata::execute(&cli, options),
-        Command::Tree(_) => Err(Error::failure(
-            "this Cargo-compatible command is not implemented yet",
-        )),
+        Command::Tree(options) => tree::execute(&cli, options),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::RustcQuery(options) => compatibility::rustc_query(&cli, options),

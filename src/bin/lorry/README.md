@@ -1,8 +1,9 @@
 # Lorry
 
 Lorry is Motor OS's small, strict Rust package builder. It creates, vendors,
-builds, runs, and tests a deliberately limited Cargo-compatible package model
-on Linux and Motor OS. Unsupported Cargo behavior is rejected explicitly.
+inspects, builds, checks, runs, and tests a deliberately limited
+Cargo-compatible package model on Linux and Motor OS. Unsupported Cargo
+behavior is rejected explicitly.
 
 Lorry never invokes Cargo during normal operation. Builds are offline and use
 only verified sources already present in configured Lorry repositories.
@@ -19,10 +20,10 @@ supported parts of Lorry and Cargo configuration, a rustc toolchain, and
 configured Lorry repositories. `lorry vendor` additionally uses the configured
 curl executable for sparse-registry and Git smart-HTTP traffic. With the
 explicit `--use-cargo-registry`
-option, build, run, and test may instead verify and read an already populated
-local Cargo archive/source cache. Lorry records its evidence on first use and
-trusts that evidence during later ordinary builds. None of these operations
-invokes Cargo.
+option, build, check, run, test, metadata, and tree may instead verify and read
+an already populated local Cargo archive/source cache. Lorry records its
+evidence on first use and trusts that evidence during later ordinary builds.
+None of these operations invokes Cargo.
 
 Motor development images install Lorry, curl, the native toolchain, supported
 first-party source snapshots, and small system and user configurations. Curl is
@@ -46,8 +47,9 @@ self-host generations likewise belong to the test harness under `tests/` and
 Run Lorry from the directory containing the package's `Cargo.toml`, or from an
 explicit workspace root with `-p NAME`. From a declared member directory,
 Lorry discovers its workspace root only to obtain shared workspace inputs.
-It does not perform general parent package discovery and does not support
-`--manifest-path`.
+It does not perform general parent package discovery. `metadata`, `check`, and
+`tree` accept `--manifest-path` only when it names the selected package's own
+`Cargo.toml`.
 
 A supported package has:
 
@@ -60,8 +62,8 @@ A supported package has:
 
 The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
-build scripts, procedural-macro dependencies, and configured required local
-patches. Root build scripts and root build-dependencies are not operationally
+build scripts, procedural-macro dependencies, and root crates.io patches.
+Root build scripts and root build-dependencies are not operationally
 supported. The current parser accepts a dependency-free root `build.rs`, but
 the engine does not run it; do not use Lorry for such a package until that
 known conformance defect is fixed. Alternative registries, selecting a
@@ -90,13 +92,12 @@ lorry test  [--release|-r] [--target TRIPLE] [--strict-validation]
             [--test NAME] [--no-run] [--bundle] [-- ARGS...]
 ```
 
-Build, run, test, clean, vendor, and review accept `-p NAME`/`--package NAME`
-to select one exact workspace member. Without it, a member directory selects
-itself; a virtual workspace root is ambiguous. W1 workspaces require explicit
-non-glob member paths and share the root lockfile, resolver, dev and release
-profiles, patches, and target ownership. Workspace-wide commands, default
-members, exclusions, inheritance, and implicit or external members are not
-supported.
+Package commands accept `-p NAME`/`--package NAME` to select one exact
+workspace member. Without it, a member directory selects itself; a virtual
+workspace root is ambiguous. W1 workspaces require explicit non-glob member
+paths and share the root lockfile, resolver, dev and release profiles,
+patches, and target ownership. Workspace-wide commands, default members,
+exclusions, inheritance, and implicit or external members are not supported.
 
 The dev profile accepts `panic = "unwind"` or `panic = "abort"`. The release
 profile additionally accepts Lorry's documented `lto`, `strip`, and
@@ -182,9 +183,40 @@ not force immutable dependencies to be recompiled. `lorry cache clean` may be
 run outside a package and removes the configured global Lorry cache. It
 succeeds when the cache is already absent.
 
+## Inspect and check
+
+```text
+lorry metadata --format-version 1 [--manifest-path PATH] [--no-deps]
+               [--filter-platform TRIPLE] [--locked]
+lorry tree [--manifest-path PATH] [--target TRIPLE]
+lorry check [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE]
+            [--workspace] [-q|--quiet] [--keep-going]
+            [--all-targets|--lib|--bins|--examples]
+            [--message-format json|json-diagnostic-rendered-ansi]
+```
+
+`metadata` emits the Cargo metadata version-1 schema. `--no-deps` describes
+only the selected package; otherwise the command verifies and resolves the
+admitted graph and publishes stable content-addressed source views needed by
+consumers such as rust-analyzer. `--locked` is accepted because Lorry is
+always locked.
+
+`tree` prints the selected target's resolved normal and build dependency graph
+in Cargo's deterministic text form. It includes path and Git identities,
+marks procedural macros, groups build dependencies, and uses `(*)` when an
+already displayed non-leaf subtree repeats. It emits no color.
+
+`check` uses the ordinary development dependency plan, then compiles selected
+root targets to metadata without linking them. `--all-targets` includes the
+library, binaries, integration tests, and test-mode library and binaries;
+`--keep-going` continues independent root targets after an error. An explicit
+target directory owns a separate `DIRECTORY/lorry/check` profile. The two JSON
+message formats produce newline-delimited Cargo-compatible messages on stdout
+and keep progress on stderr; the ANSI form changes only rendered diagnostics.
+
 ## Vendor dependencies
 
-Build, run, and test never use the network. Populate the configured immutable
+Ordinary commands never use the network. Populate the configured immutable
 repository and create or repair Cargo.lock with:
 
 ```sh
@@ -245,10 +277,10 @@ context, verified source evidence, and explicit execution grants. It is not
 checked in, because doing so would recreate the large synchronized state that
 the compact format removes.
 
-Build, run, and test require their exact host/target pair to be reviewed and
-verify the commitment for every recorded context before generating dependency
-allow rules or compiling anything. Because motor contexts are recorded, these
-commands need a Motor-capable rustc even for host-only builds. Cargo.lock
+Offline graph commands require their exact host/target pair to be reviewed and
+verify the commitment for every recorded context before using dependency
+state. Because Motor contexts are recorded, these commands need a Motor-capable
+rustc even for host-only builds. Cargo.lock
 remains the graph authority, repository objects remain the source-integrity
 authority, and explicit policy denials continue to override committed
 admission. The compact commitment is not a signature; authorization against
@@ -282,8 +314,8 @@ lorry vendor
 Lorry independently resolves and updates Cargo.lock, acquires and verifies new
 sources, shows the previous admission commitment and complete candidate for
 review, and updates `.lorry` state after interactive approval. Compatible
-unrelated locked packages are preserved. Build, run, and test remain read-only
-and reject the edited manifest until vendoring completes.
+unrelated locked packages are preserved. Offline graph commands remain
+read-only and reject the edited manifest until vendoring completes.
 
 The explicit upgrade form selects only a transitive locked crates.io package
 when its dependency requirements permit the requested version. If Cargo.lock
@@ -359,12 +391,12 @@ trust their bounded metadata and recorded digests; `--strict-validation`
 rehashes retained archive and source contents before use.
 
 The global `--use-cargo-registry` option is a special offline compatibility
-mode for build, run, and test. Its first use verifies Cargo's already populated
-archive/source cache and atomically records Lorry evidence below
-`target/lorry/.cargo-evidence`; later ordinary builds trust Cargo's completion
-marker and that evidence. Strict validation performs the archive/source
-comparison again. Lorry never fetches or repairs this cache, and it is not the
-normal Lorry repository workflow.
+mode for build, check, run, test, metadata, and tree. Its first use verifies
+Cargo's already populated archive/source cache and atomically records Lorry
+evidence below `target/lorry/.cargo-evidence`; later ordinary builds trust
+Cargo's completion marker and that evidence. Strict validation performs the
+archive/source comparison again. Lorry never fetches or repairs this cache,
+and it is not the normal Lorry repository workflow.
 
 ## Git dependencies and patches
 
@@ -410,8 +442,8 @@ requested exactly once. Non-interactive changed runs fail unless
 Both forms use a shallow fetch and record the canonical URL, requested
 selector, commit, Git tree, canonical source digest, file count, and byte
 count. Materialization accepts only bounded regular files and directories;
-submodules and symbolic links are rejected. Build, run, and test remain
-offline and verify the materialized source and provenance before use.
+submodules and symbolic links are rejected. Offline graph commands verify the
+materialized source and provenance before use.
 
 ## Package build-script security
 

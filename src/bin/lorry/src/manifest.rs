@@ -535,6 +535,11 @@ impl Manifest {
         } else {
             Vec::new()
         };
+        let integration_tests = if mode == ManifestMode::Dependency {
+            parse_dependency_integration_tests(path, document, root, package)?
+        } else {
+            Vec::new()
+        };
         let mut dependencies = Vec::new();
         if let Some(item) = document.root().get("dependencies") {
             let table = require_table(path, document, item, "dependencies")?;
@@ -603,7 +608,7 @@ impl Manifest {
             build_script,
             library,
             binaries,
-            integration_tests: Vec::new(),
+            integration_tests,
             dependencies,
             features,
             patches,
@@ -1514,6 +1519,14 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
             )));
         }
     }
+    for test in &manifest.integration_tests {
+        if !test.path.is_file() {
+            return Err(Error::failure(format!(
+                "integration-test target `{}` does not exist",
+                test.path.display()
+            )));
+        }
+    }
     if manifest.library.is_none() && manifest.binaries.is_empty() {
         return Err(Error::failure(format!(
             "package `{}` has no supported library or binary target",
@@ -1533,6 +1546,76 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
         .with_help("choose one of the package's binary target names"));
     }
     Ok(())
+}
+
+fn parse_dependency_integration_tests(
+    path: &Path,
+    document: &Document,
+    root: &Path,
+    package: &Table,
+) -> Result<Vec<IntegrationTestTarget>> {
+    let mut targets = if package.get("autotests").and_then(Item::as_bool) == Some(false) {
+        BTreeMap::new()
+    } else {
+        discover_integration_tests(root)?
+            .into_iter()
+            .map(|target| (target.name.clone(), target))
+            .collect()
+    };
+    if let Some(item) = document.root().get("test") {
+        let mut explicit_names = BTreeSet::new();
+        let tables = item.as_array_of_tables().ok_or_else(|| {
+            type_error(
+                path,
+                document.line_of_item(item),
+                "test",
+                "an array of tables",
+            )
+        })?;
+        for table in tables {
+            let name = required_string(path, document, table, "test", "name")?;
+            validate_package_name(path, document.line_of_table(table), &name)?;
+            let relative = optional_string(path, document, table, "test", "path")?
+                .unwrap_or_else(|| format!("tests/{name}.rs"));
+            validate_relative_path(path, document.line_of_table(table), "test.path", &relative)?;
+            let crate_name = name.replace('-', "_");
+            if !explicit_names.insert(crate_name.clone()) {
+                return Err(Error::at(
+                    path,
+                    document.line_of_table(table),
+                    format!("duplicate integration-test crate name `{crate_name}`"),
+                    "give every `[[test]]` target a distinct name",
+                ));
+            }
+            let target_path = root.join(relative);
+            targets.retain(|_, target| {
+                target.path != target_path && target.name.replace('-', "_") != crate_name
+            });
+            targets.insert(
+                name.clone(),
+                IntegrationTestTarget {
+                    name,
+                    path: target_path,
+                },
+            );
+        }
+    }
+    if targets.len() > MAX_BINARY_TARGETS {
+        return Err(Error::failure(format!(
+            "package describes more than {MAX_BINARY_TARGETS} integration-test targets"
+        )));
+    }
+    let mut crate_names = BTreeSet::new();
+    for target in targets.values() {
+        let crate_name = target.name.replace('-', "_");
+        if !crate_names.insert(crate_name.clone()) {
+            return Err(Error::failure(format!(
+                "integration-test target `{}` has duplicate crate name `{crate_name}`",
+                target.name
+            )));
+        }
+    }
+    Ok(targets.into_values().collect())
 }
 
 fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>> {
@@ -3396,6 +3479,12 @@ members = ["ignored-member"]
         .unwrap();
         assert_eq!(manifest.links.as_deref(), Some("native"));
         assert!(manifest.build_script.is_some());
+        assert_eq!(manifest.integration_tests.len(), 1);
+        assert_eq!(manifest.integration_tests[0].name, "ignored-test");
+        assert_eq!(
+            manifest.integration_tests[0].path,
+            Path::new("/dependency/tests/ignored.rs")
+        );
         let library = manifest.library.as_ref().unwrap();
         assert_eq!(library.crate_types, ["rlib"]);
         assert!(!library.test);
@@ -3583,6 +3672,31 @@ members = ["ignored-member"]
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
         assert!(Manifest::load(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_dependency_test_overrides_its_normalized_discovery() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lorry-explicit-dependency-test-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"dependency\"\nversion = \"1.0.0\"\n\n\
+             [[test]]\nname = \"auto-test\"\npath = \"tests/auto_test.rs\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("tests/auto_test.rs"), "").unwrap();
+
+        let manifest = Manifest::load_path_dependency(&root).unwrap();
+        assert_eq!(manifest.integration_tests.len(), 1);
+        assert_eq!(manifest.integration_tests[0].name, "auto-test");
         fs::remove_dir_all(root).unwrap();
     }
 

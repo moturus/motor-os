@@ -88,7 +88,7 @@ pub(super) fn map(
         license: nonempty(&manifest.metadata.license),
         license_file: nonempty(&manifest.metadata.license_file),
         targets: map_targets(manifest, &root)?,
-        features: manifest.features.clone(),
+        features: cargo_features(manifest),
         manifest_path: canonical_utf8(&root.join("Cargo.toml"), "package manifest")?,
         categories: Vec::new(),
         keywords: Vec::new(),
@@ -103,6 +103,24 @@ pub(super) fn map(
         default_run: manifest.default_run.clone(),
         rust_version: nonempty(&manifest.metadata.rust_version),
     })
+}
+
+fn cargo_features(manifest: &Manifest) -> BTreeMap<String, Vec<String>> {
+    let mut features = manifest.features.clone();
+    let namespaced = manifest
+        .features
+        .values()
+        .flatten()
+        .filter_map(|reference| reference.strip_prefix("dep:"))
+        .collect::<std::collections::BTreeSet<_>>();
+    for dependency in &manifest.dependencies {
+        if dependency.optional && !namespaced.contains(dependency.alias.as_str()) {
+            features
+                .entry(dependency.alias.clone())
+                .or_insert_with(|| vec![format!("dep:{}", dependency.alias)]);
+        }
+    }
+    features
 }
 
 fn validate_aliases(manifest: &Manifest) -> Result<()> {
@@ -397,6 +415,32 @@ mod tests {
             ),
             "git+https://example.test/demo.git#demo@1.0.0"
         );
+    }
+
+    #[test]
+    fn metadata_includes_cargo_implicit_optional_features() {
+        let manifest = Manifest::parse_dependency(
+            Path::new("/dependency"),
+            Path::new("/dependency/Cargo.toml"),
+            r#"
+[package]
+name = "dependency"
+version = "1.0.0"
+
+[dependencies]
+implicit = { version = "1", optional = true }
+namespaced = { version = "1", optional = true }
+
+[features]
+uses-namespaced = ["dep:namespaced"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cargo_features(&manifest)["implicit"],
+            ["dep:implicit".to_owned()]
+        );
+        assert!(!cargo_features(&manifest).contains_key("namespaced"));
     }
 
     #[cfg(unix)]

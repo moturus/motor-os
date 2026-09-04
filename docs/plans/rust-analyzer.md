@@ -9,10 +9,10 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-13 in section 4.12 are complete and gated. `lorry metadata` and
-`lorry check`, including Cargo-compatible JSON messages, are implemented, and
-the pinned host rust-analyzer passes the exact Lorry acceptance contract;
-`lorry tree` and native rust-analyzer work have not started. The completed
+patches 1-14 in section 4.12 are complete and gated. `lorry metadata`,
+`lorry check`, including Cargo-compatible JSON messages, and `lorry tree` are
+implemented, and the pinned host rust-analyzer passes the exact Lorry
+acceptance contract; native rust-analyzer work has not started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
 2026-09-02.
@@ -24,7 +24,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-13 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-14 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1251,7 +1251,7 @@ explicit:
     load, build-script data, and flycheck before introducing guest variables.
     This is a Stage 2 test on Linux, not a supported Linux configuration; it
     expects exactly the two sysroot metadata errors described in section 4.11.
-14. **Lorry: `tree` and differential tests.** Add the required `tree` command,
+14. **Lorry: `tree` and differential tests (complete).** Add the required `tree` command,
     the complete Linux differential fixture against keyed Cargo, and README
     documentation.
 15. **Lorry native equivalence.** Extend the native product fixture to the
