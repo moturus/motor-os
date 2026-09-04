@@ -90,7 +90,7 @@ pub struct Dependency {
     pub path: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Target {
     pub name: String,
     pub kind: Vec<String>,

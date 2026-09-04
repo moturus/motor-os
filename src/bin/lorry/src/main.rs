@@ -7,6 +7,7 @@ mod cache;
 mod cache_clean;
 mod cargo_registry;
 mod change_review;
+mod check_message;
 mod clean;
 mod cli;
 mod compatibility;

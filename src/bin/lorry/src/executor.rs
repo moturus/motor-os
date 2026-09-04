@@ -21,7 +21,21 @@ use crate::resolver::{CompileKind, PackageKey};
 use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
-use crate::unit::{CompilationPlan, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
+
+pub trait EventReporter: Sync {
+    fn compiler_messages(&self, key: &UnitKey, output: &std::process::Output) -> Result<()>;
+
+    fn compiler_artifact(
+        &self,
+        key: &UnitKey,
+        planned: &PlannedUnit,
+        output: &RustcOutput,
+        fresh: bool,
+    ) -> Result<()>;
+
+    fn build_script_executed(&self, key: &UnitKey, output: &ExecutedBuildScript) -> Result<()>;
+}
 
 pub struct Options<'a> {
     pub cargo: &'a Path,
@@ -50,6 +64,7 @@ pub struct Options<'a> {
     /// Maximum number of units executed concurrently; 1 preserves strict
     /// plan-order execution.
     pub jobs: usize,
+    pub reporter: Option<&'a dyn EventReporter>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -485,13 +500,17 @@ fn execute_unit(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     render_build_script_output(key, &build_output);
                 }
-                Ok(Executed::BuildScript(ExecutedBuildScript {
+                let executed = ExecutedBuildScript {
                     output: build_output,
                     environment,
                     executable_sha256: sha256_file(executable)?,
                     out_dir,
                     temp_dir,
-                }))
+                };
+                if let Some(reporter) = options.reporter {
+                    reporter.build_script_executed(key, &executed)?;
+                }
+                Ok(Executed::BuildScript(executed))
             }
             UnitKind::Library | UnitKind::ProcMacro | UnitKind::BuildScriptCompile => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -564,6 +583,9 @@ fn execute_unit(
                                 key.package.name, key.package.version
                             );
                         }
+                        if let Some(reporter) = options.reporter {
+                            reporter.compiler_artifact(key, planned, &invocation.output, true)?;
+                        }
                         return Ok(Executed::Artifact {
                             output: invocation.output,
                             cache_key: Some(cache_key),
@@ -608,7 +630,10 @@ fn execute_unit(
                     color: options.color,
                 }
                 .execute()?;
-                {
+                if let Some(reporter) = options.reporter {
+                    reporter.compiler_messages(key, &rustc_output)?;
+                    RustcCommand::require_success(&rustc_output)?;
+                } else {
                     let _guard = print
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -635,6 +660,9 @@ fn execute_unit(
                 } = &invocation.output
                 {
                     install_unhashed(executable, unhashed_executable)?;
+                }
+                if let Some(reporter) = options.reporter {
+                    reporter.compiler_artifact(key, planned, &invocation.output, false)?;
                 }
                 Ok(Executed::Artifact {
                     output: invocation.output,
@@ -1165,6 +1193,7 @@ mod tests {
                 admission: &admission,
                 native_tools: &native_tools,
                 jobs: 2,
+                reporter: None,
             },
         )
         .unwrap();

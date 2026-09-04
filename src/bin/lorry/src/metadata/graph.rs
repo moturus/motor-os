@@ -27,7 +27,7 @@ pub(super) fn no_dependencies(manifest: &Manifest) -> Result<wire::Metadata> {
     )
 }
 
-pub(super) fn resolved(
+pub(crate) fn resolved(
     manifest: &Manifest,
     prepared: &PreparedGraph,
     plan: &CompilationPlan,

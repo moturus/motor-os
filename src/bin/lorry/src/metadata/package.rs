@@ -14,12 +14,12 @@ use super::wire;
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 #[derive(Clone, Copy)]
-pub(super) enum Identity<'a> {
+pub(crate) enum Identity<'a> {
     Root,
     Resolved(&'a ResolvedPackage),
 }
 
-pub(super) fn package_id(manifest: &Manifest, identity: Identity<'_>) -> Result<String> {
+pub(crate) fn package_id(manifest: &Manifest, identity: Identity<'_>) -> Result<String> {
     match identity {
         Identity::Root => {
             path_package_id(&manifest.root, &manifest.name, &manifest.version.original)

@@ -37,10 +37,18 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     if let Command::Check(options) = &cli.command
         && options.message_format != MessageFormat::Human
     {
-        return Err(Error::failure(
-            "JSON check messages are not implemented yet",
-        ));
+        let result = execute_inner(cli);
+        let finished = crate::check_message::build_finished(matches!(&result, Ok(0)));
+        return match (result, finished) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        };
     }
+    execute_inner(cli)
+}
+
+fn execute_inner(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = match &cli.command {
@@ -716,6 +724,29 @@ fn build_inner(
             rustflags: build.rustflags,
         })
     };
+    let message_reporter = match check {
+        Some((_, options)) if options.message_format != MessageFormat::Human => {
+            let roots =
+                crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
+            let metadata_plan = dependency_plan(false)?;
+            let metadata = crate::metadata::graph::resolved(
+                build.manifest,
+                &prepared,
+                &metadata_plan,
+                &roots,
+                build.config.policy.limits.max_packages,
+            )?;
+            Some(crate::check_message::Reporter::new(
+                build.manifest,
+                &prepared,
+                metadata,
+                staging.path(),
+                &destination,
+                options.message_format,
+            )?)
+        }
+        _ => None,
+    };
     let host_profile = if build.physical_target.is_some() {
         staging.path().join(".host")
     } else {
@@ -777,6 +808,9 @@ fn build_inner(
         admission: &prepared.admission,
         native_tools: &build.config.native_tools,
         jobs: compile_jobs(),
+        reporter: message_reporter
+            .as_ref()
+            .map(|reporter| reporter as &dyn executor::EventReporter),
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
@@ -839,23 +873,12 @@ fn build_inner(
             normal_dependencies,
             test_dependencies.as_deref().unwrap_or(&[]),
             options,
+            message_reporter.as_ref(),
         )?;
         crate::trace::event("checked root targets");
         drop(prepared);
         if !success {
             return Ok(BuildOutcome::Check(101));
-        }
-        if build.physical_target.is_some() {
-            match fs::remove_dir_all(&host_profile) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(Error::failure(format!(
-                        "failed to remove temporary host dependency output `{}`: {error}",
-                        host_profile.display()
-                    )));
-                }
-            }
         }
         staging.commit(&destination)?;
         if build.verbosity != Verbosity::Quiet {
@@ -1897,6 +1920,7 @@ fn compile_check_targets(
     normal_dependencies: &[RootDependency],
     test_dependencies: &[RootDependency],
     options: &CheckOptions,
+    reporter: Option<&crate::check_message::Reporter>,
 ) -> Result<bool> {
     let features = selected_root_features(build.manifest)?
         .into_iter()
@@ -1919,6 +1943,7 @@ fn compile_check_targets(
                     &features,
                     false,
                     incremental_target,
+                    reporter,
                     None,
                     &[],
                 )
@@ -1952,6 +1977,7 @@ fn compile_check_targets(
                 &features,
                 false,
                 incremental_target,
+                reporter,
                 None,
                 &[],
             )? {
@@ -1981,6 +2007,7 @@ fn compile_check_targets(
             &features,
             true,
             incremental_target,
+            reporter,
             None,
             &[],
         )?
@@ -2004,6 +2031,7 @@ fn compile_check_targets(
                 &features,
                 true,
                 incremental_target,
+                reporter,
                 None,
                 &[],
             )?
@@ -2036,6 +2064,7 @@ fn compile_check_targets(
                 &features,
                 true,
                 incremental_target,
+                reporter,
                 Some(integration_environment.clone()),
                 &binary_identities,
             )?
@@ -2062,6 +2091,7 @@ fn check_root_target(
     features: &[String],
     test_profile: bool,
     incremental_target: &Path,
+    reporter: Option<&crate::check_message::Reporter>,
     integration_environment: Option<IntegrationEnvironment<'_>>,
     artifact_dependencies: &[Identity],
 ) -> Result<Option<RootLibraryArtifact>> {
@@ -2097,7 +2127,13 @@ fn check_root_target(
         &arguments,
         integration_environment,
     )?;
-    if let Err(error) = RustcCommand::finish(&output, build.color) {
+    let finished = if let Some(reporter) = reporter {
+        reporter.root_compiler_messages(target.kind(), target.name(), &output)?;
+        RustcCommand::require_success(&output)
+    } else {
+        RustcCommand::finish(&output, build.color)
+    };
+    if let Err(error) = finished {
         eprint!("{}", error.render());
         return Ok(None);
     }
@@ -2105,6 +2141,9 @@ fn check_root_target(
     let metadata = output_dir.join(format!("lib{stem}.rmeta"));
     let dep_info = output_dir.join(format!("{stem}.d"));
     verify_artifacts([&metadata, &dep_info])?;
+    if let Some(reporter) = reporter {
+        reporter.root_artifact(target.kind(), target.name(), test, features, &metadata)?;
+    }
     Ok(Some(RootLibraryArtifact {
         identity,
         extern_path: metadata,

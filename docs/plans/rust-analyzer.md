@@ -9,9 +9,9 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-11 in section 4.12 are complete and gated. `lorry metadata` and the
-rendered-output form of `lorry check` are implemented; JSON check messages,
-`lorry tree`, and native rust-analyzer work have not started. The completed
+patches 1-12 in section 4.12 are complete and gated. `lorry metadata` and
+`lorry check`, including Cargo-compatible JSON messages, are implemented;
+`lorry tree` and native rust-analyzer work have not started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
 2026-09-02.
@@ -23,7 +23,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-11 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-12 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1238,9 +1238,9 @@ explicit:
    normalization.
 11. **Lorry: `check` (complete).** Add the command with rendered output, root
    `--emit=metadata`, `--all-targets`, `--keep-going`, and no-link tests.
-12. **Lorry: `check --message-format=json`.** Add complete message types, the
-   ANSI variant, restored-result emission, killed-child semantics, and tests
-   that parse every line with `cargo_metadata` 0.23.1.
+12. **Lorry: `check --message-format=json` (complete).** Add complete message
+   types, the ANSI variant, restored-result emission, killed-child semantics,
+   and tests that parse every line with `cargo_metadata` 0.23.1.
 13. **Host rust-analyzer/Lorry acceptance.** Drive Lorry with the pinned Stage 1
     server on Linux, capture the actual invocation contract, and prove project
     load, build-script data, and flycheck before introducing guest variables.
