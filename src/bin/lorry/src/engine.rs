@@ -3,7 +3,7 @@ use crate::atomic::AtomicDirectory;
 use crate::bundle;
 use crate::cache;
 use crate::cargo_registry::CargoRegistry;
-use crate::cli::{Cli, Color, Command, Verbosity};
+use crate::cli::{CheckOptions, Cli, Color, Command, MessageFormat, Verbosity};
 use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, effective_rustflags};
 use crate::dependency;
 use crate::diagnostic::{Error, Result};
@@ -34,9 +34,40 @@ use std::time::{Duration, UNIX_EPOCH};
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
 pub fn execute(cli: &Cli) -> Result<i32> {
+    if let Command::Check(options) = &cli.command
+        && options.message_format != MessageFormat::Human
+    {
+        return Err(Error::failure(
+            "JSON check messages are not implemented yet",
+        ));
+    }
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
-    let manifest = Manifest::load_selected(&current, cli.package.as_deref())?;
+    let manifest = match &cli.command {
+        Command::Check(options) => Manifest::load_selected_or_manifest_path(
+            &current,
+            options.manifest_path.as_deref().map(Path::new),
+            cli.package.as_deref(),
+            true,
+        )?,
+        _ => Manifest::load_selected(&current, cli.package.as_deref())?,
+    };
+    if let Command::Check(options) = &cli.command
+        && options.lib
+        && manifest.library.is_none()
+    {
+        return Err(Error::failure(format!(
+            "no library targets found in package `{}`",
+            manifest.name
+        )));
+    }
+    let target_directory = match &cli.command {
+        Command::Check(options) => {
+            selected_target_directory(&current, &manifest, options.target_dir.as_deref())
+        }
+        _ => manifest.workspace_root.join("target"),
+    };
+    let target_root = artifact_root_in(&manifest, &target_directory);
     let compact_state = CompactState::load(&manifest.root)?;
     let mut config = Config::load(&manifest.root)?;
     crate::trace::event("loaded manifest, admission state, and configuration");
@@ -63,6 +94,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             options.build.target.as_deref(),
             options.build.validation,
         ),
+        Command::Check(options) => (false, options.target.as_deref(), ValidationMode::Trusted),
         Command::Test(options) => (
             options.build.release,
             options.build.target.as_deref(),
@@ -72,7 +104,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let binary_selection = match &cli.command {
         Command::Build(options) => validate_binary_selection(&manifest, options.bin.as_deref())?,
-        Command::Run(_) | Command::Test(_) => None,
+        Command::Check(_) | Command::Run(_) | Command::Test(_) => None,
         _ => unreachable!(),
     };
     let run_binary = match &cli.command {
@@ -109,7 +141,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     let ordinary_freshness_base = (!validation.is_strict()
-        && !matches!(&cli.command, Command::Test(_)))
+        && matches!(&cli.command, Command::Build(_) | Command::Run(_)))
     .then(|| {
         trusted_freshness_base(&TrustedFreshness {
             manifest: &manifest,
@@ -132,7 +164,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     .transpose()?;
     if let Some(base) = ordinary_freshness_base
         && let Some(artifacts) = restore_fresh_profile(
-            &profile_destination(&manifest, physical_target.as_deref(), release),
+            &profile_destination(&target_root, physical_target.as_deref(), release),
             &manifest.root,
             base,
             validation,
@@ -183,7 +215,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             admission_staging.path(),
             &config.policy.limits,
             validation,
-            Some(&artifact_root(&manifest).join(".cargo-evidence")),
+            Some(&target_root.join(".cargo-evidence")),
         )?)
     } else {
         None
@@ -250,6 +282,34 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             })?;
             Ok(0)
         }
+        Command::Check(options) => check(
+            Build {
+                manifest: &manifest,
+                global_cache_root: &global_cache_root,
+                config: &config,
+                toolchain: &toolchain,
+                host: &host_info,
+                target: &target_info,
+                host_options: &host_options,
+                target_options: &target_options,
+                physical_target: physical_target.as_deref(),
+                logical_target,
+                rustflags: &rustflags,
+                release: false,
+                test: false,
+                test_name: None,
+                color,
+                verbosity: cli.verbosity,
+                use_cargo_registry: cli.use_cargo_registry,
+                source: Some((source, &direct, verified_resolution)),
+                bundle: false,
+                validation,
+                ordinary_freshness_base: None,
+                binary_selection: None,
+            },
+            &target_root,
+            options,
+        ),
         Command::Run(options) => {
             let artifacts = build(Build {
                 manifest: &manifest,
@@ -403,7 +463,11 @@ struct IncrementalRoots {
 }
 
 fn incremental_roots(build: &Build<'_>) -> IncrementalRoots {
-    let root = artifact_root(build.manifest).join(".incremental");
+    incremental_roots_in(build, &artifact_root(build.manifest))
+}
+
+fn incremental_roots_in(build: &Build<'_>, target_root: &Path) -> IncrementalRoots {
+    let root = target_root.join(".incremental");
     IncrementalRoots {
         host: root.join(&build.host.triple),
         target: root.join(&build.target.triple),
@@ -424,16 +488,28 @@ pub(crate) fn artifact_root_in(manifest: &Manifest, target_directory: &Path) -> 
 }
 
 fn profile_destination(
-    manifest: &Manifest,
+    target_root: &Path,
     physical_target: Option<&str>,
     release: bool,
 ) -> PathBuf {
-    let mut profile = artifact_root(manifest);
+    let mut profile = target_root.to_owned();
     if let Some(target) = physical_target {
         profile.push(target);
     }
     profile.push(if release { "release" } else { "debug" });
     profile
+}
+
+fn selected_target_directory(
+    current: &Path,
+    manifest: &Manifest,
+    requested: Option<&str>,
+) -> PathBuf {
+    match requested.map(Path::new) {
+        Some(path) if path.is_absolute() => path.to_owned(),
+        Some(path) => current.join(path),
+        None => manifest.workspace_root.join("target"),
+    }
 }
 
 fn validate_binary_selection<'a>(
@@ -485,7 +561,29 @@ fn unknown_binary(manifest: &Manifest, name: &str) -> Error {
     })
 }
 
-fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
+enum BuildOutcome {
+    Artifacts(BuildArtifacts),
+    Check(i32),
+}
+
+fn build(build: Build<'_>) -> Result<BuildArtifacts> {
+    match build_inner(build, None)? {
+        BuildOutcome::Artifacts(artifacts) => Ok(artifacts),
+        BuildOutcome::Check(_) => unreachable!("ordinary build returned a check result"),
+    }
+}
+
+fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result<i32> {
+    match build_inner(build, Some((target_root, options)))? {
+        BuildOutcome::Check(code) => Ok(code),
+        BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),
+    }
+}
+
+fn build_inner(
+    mut build: Build<'_>,
+    check: Option<(&Path, &CheckOptions)>,
+) -> Result<BuildOutcome> {
     if let Some(name) = build.test_name
         && !build
             .manifest
@@ -495,8 +593,9 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     {
         return Err(unknown_integration_test(build.manifest, name));
     }
-    let target_root = artifact_root(build.manifest);
-    let incremental = incremental_roots(&build);
+    let default_target_root = artifact_root(build.manifest);
+    let target_root = check.map_or(default_target_root.as_path(), |(root, _)| root);
+    let incremental = incremental_roots_in(&build, target_root);
     if !build.release {
         fs::create_dir_all(&incremental.host).map_err(|error| {
             Error::failure(format!(
@@ -513,9 +612,17 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     }
     let profile_parent = match build.physical_target {
         Some(target) => target_root.join(target),
-        None => target_root.clone(),
+        None => target_root.to_owned(),
     };
-    let destination = profile_destination(build.manifest, build.physical_target, build.release);
+    let destination = if check.is_some() {
+        let mut destination = target_root.to_owned();
+        if let Some(target) = build.physical_target {
+            destination.push(target);
+        }
+        destination.join("check")
+    } else {
+        profile_destination(target_root, build.physical_target, build.release)
+    };
     let staging = AtomicDirectory::new_compact(&profile_parent)?;
     crate::trace::event("created build staging directory");
 
@@ -582,7 +689,7 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
         .collect::<BTreeMap<_, _>>();
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let freshness_base = (!build.test)
+    let freshness_base = (check.is_none() && !build.test)
         .then(|| freshness_base(&build, &prepared, &cargo))
         .transpose()?;
     if let Some(base) = freshness_base {
@@ -593,7 +700,7 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
             crate::trace::event("validated fresh root profile");
             finish_build(&build, &artifacts)?;
             crate::trace::event("reported build result");
-            return Ok(artifacts);
+            return Ok(BuildOutcome::Artifacts(artifacts));
         }
         crate::trace::event("root profile requires rebuilding");
     }
@@ -673,8 +780,10 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
-    let needs_normal_plan =
-        !build.test || (selected_integration && !build.manifest.binaries.is_empty());
+    let needs_normal_plan = match check {
+        Some((_, options)) => options.selects_normal_targets(),
+        None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
+    };
     let normal = if needs_normal_plan {
         let plan = dependency_plan(false)?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
@@ -687,7 +796,8 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     } else {
         None
     };
-    let test_dependencies = if build.test {
+    let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.all_targets);
+    let test_dependencies = if needs_test_plan {
         let test_plan = dependency_plan(true)?;
         let outputs = match normal.as_ref() {
             Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
@@ -721,6 +831,39 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
         )?)?;
         crate::trace::event("revalidated dependency sources");
     }
+    if let Some((_, options)) = check {
+        let success = compile_check_targets(
+            &build,
+            staging.path(),
+            &incremental.target,
+            normal_dependencies,
+            test_dependencies.as_deref().unwrap_or(&[]),
+            options,
+        )?;
+        crate::trace::event("checked root targets");
+        drop(prepared);
+        if !success {
+            return Ok(BuildOutcome::Check(101));
+        }
+        if build.physical_target.is_some() {
+            match fs::remove_dir_all(&host_profile) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Error::failure(format!(
+                        "failed to remove temporary host dependency output `{}`: {error}",
+                        host_profile.display()
+                    )));
+                }
+            }
+        }
+        staging.commit(&destination)?;
+        if build.verbosity != Verbosity::Quiet {
+            eprintln!("Finished `check` profile");
+        }
+        crate::trace::event("published check profile");
+        return Ok(BuildOutcome::Check(0));
+    }
     let compiled = if build.test {
         compile_test_targets(
             &build,
@@ -730,7 +873,7 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
             test_dependencies.as_ref().unwrap(),
             &TestOutput {
                 destination: &destination,
-                target_root: &target_root,
+                target_root,
                 bundle_layout: bundle_layout.as_ref(),
             },
         )?
@@ -806,7 +949,7 @@ fn build(mut build: Build<'_>) -> Result<BuildArtifacts> {
     crate::trace::event("published build profile");
     finish_build(&build, &artifacts)?;
     crate::trace::event("reported build result");
-    Ok(artifacts)
+    Ok(BuildOutcome::Artifacts(artifacts))
 }
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
@@ -1711,7 +1854,7 @@ impl<'a> RootTarget<'a> {
 
 struct RootLibraryArtifact {
     identity: Identity,
-    rlib: PathBuf,
+    extern_path: PathBuf,
     dep_info: PathBuf,
 }
 
@@ -1727,6 +1870,246 @@ struct TestOutput<'a> {
     destination: &'a Path,
     target_root: &'a Path,
     bundle_layout: Option<&'a bundle::Layout>,
+}
+
+impl CheckOptions {
+    fn has_target_selector(&self) -> bool {
+        self.all_targets || self.lib || self.bins || self.examples
+    }
+
+    fn selects_library(&self) -> bool {
+        self.all_targets || self.lib || !self.has_target_selector()
+    }
+
+    fn selects_binaries(&self) -> bool {
+        self.all_targets || self.bins || !self.has_target_selector()
+    }
+
+    fn selects_normal_targets(&self) -> bool {
+        self.selects_library() || self.selects_binaries()
+    }
+}
+
+fn compile_check_targets(
+    build: &Build<'_>,
+    staging: &Path,
+    incremental_target: &Path,
+    normal_dependencies: &[RootDependency],
+    test_dependencies: &[RootDependency],
+    options: &CheckOptions,
+) -> Result<bool> {
+    let features = selected_root_features(build.manifest)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut success = true;
+
+    let normal_library = if options.selects_normal_targets() {
+        build
+            .manifest
+            .library
+            .as_ref()
+            .map(|target| {
+                check_root_target(
+                    build,
+                    RootTarget::Library(target),
+                    false,
+                    staging,
+                    normal_dependencies,
+                    None,
+                    &features,
+                    false,
+                    incremental_target,
+                    None,
+                    &[],
+                )
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if build.manifest.library.is_some()
+        && options.selects_normal_targets()
+        && normal_library.is_none()
+    {
+        success = false;
+        if !options.keep_going {
+            return Ok(false);
+        }
+    }
+
+    let mut binary_identities = Vec::new();
+    if options.selects_binaries() && (build.manifest.library.is_none() || normal_library.is_some())
+    {
+        for target in &build.manifest.binaries {
+            match check_root_target(
+                build,
+                RootTarget::Binary(target),
+                false,
+                staging,
+                normal_dependencies,
+                normal_library.as_ref(),
+                &features,
+                false,
+                incremental_target,
+                None,
+                &[],
+            )? {
+                Some(artifact) => binary_identities.push(artifact.identity),
+                None => {
+                    success = false;
+                    if !options.keep_going {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
+    if !options.all_targets {
+        return Ok(success);
+    }
+
+    if let Some(target) = build.manifest.library.as_ref().filter(|target| target.test)
+        && check_root_target(
+            build,
+            RootTarget::Library(target),
+            true,
+            staging,
+            test_dependencies,
+            None,
+            &features,
+            true,
+            incremental_target,
+            None,
+            &[],
+        )?
+        .is_none()
+    {
+        success = false;
+        if !options.keep_going {
+            return Ok(false);
+        }
+    }
+
+    if build.manifest.library.is_none() || normal_library.is_some() {
+        for target in build.manifest.binaries.iter().filter(|target| target.test) {
+            if check_root_target(
+                build,
+                RootTarget::Binary(target),
+                true,
+                staging,
+                test_dependencies,
+                normal_library.as_ref(),
+                &features,
+                true,
+                incremental_target,
+                None,
+                &[],
+            )?
+            .is_none()
+            {
+                success = false;
+                if !options.keep_going {
+                    return Ok(false);
+                }
+            }
+        }
+
+        let integration_environment = IntegrationEnvironment {
+            binaries: build
+                .manifest
+                .binaries
+                .iter()
+                .map(|binary| (binary.name.as_str(), staging.join(&binary.name)))
+                .collect(),
+            temporary_directory: staging,
+        };
+        for target in &build.manifest.integration_tests {
+            if check_root_target(
+                build,
+                RootTarget::IntegrationTest(target),
+                true,
+                staging,
+                test_dependencies,
+                normal_library.as_ref(),
+                &features,
+                true,
+                incremental_target,
+                Some(integration_environment.clone()),
+                &binary_identities,
+            )?
+            .is_none()
+            {
+                success = false;
+                if !options.keep_going {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(success)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_root_target(
+    build: &Build<'_>,
+    target: RootTarget<'_>,
+    test: bool,
+    staging: &Path,
+    dependencies: &[RootDependency],
+    library: Option<&RootLibraryArtifact>,
+    features: &[String],
+    test_profile: bool,
+    incremental_target: &Path,
+    integration_environment: Option<IntegrationEnvironment<'_>>,
+    artifact_dependencies: &[Identity],
+) -> Result<Option<RootLibraryArtifact>> {
+    let mut identities = dependencies
+        .iter()
+        .map(|dependency| dependency.identity.clone())
+        .collect::<Vec<_>>();
+    if let Some(library) = library {
+        identities.push(library.identity.clone());
+    }
+    identities.extend_from_slice(artifact_dependencies);
+    let identity = root_identity(build, target, test, test_profile, features, &identities);
+    let output_dir = root_output_directory(staging, &build.manifest.name, &identity);
+    create_directory(&output_dir, "root rustc output directory")?;
+    let arguments = rustc_arguments(
+        build,
+        target,
+        test,
+        &identity,
+        staging,
+        dependencies,
+        library,
+        features,
+        test_profile,
+        true,
+        Some(incremental_target),
+    );
+    let output = execute_root_rustc(
+        build,
+        target,
+        test,
+        dependencies,
+        &arguments,
+        integration_environment,
+    )?;
+    if let Err(error) = RustcCommand::finish(&output, build.color) {
+        eprint!("{}", error.render());
+        return Ok(None);
+    }
+    let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
+    let metadata = output_dir.join(format!("lib{stem}.rmeta"));
+    let dep_info = output_dir.join(format!("{stem}.d"));
+    verify_artifacts([&metadata, &dep_info])?;
+    Ok(Some(RootLibraryArtifact {
+        identity,
+        extern_path: metadata,
+        dep_info,
+    }))
 }
 
 fn compile_root_targets(
@@ -1799,7 +2182,7 @@ fn compile_root_targets(
         ))
     })?;
     Ok(StagedArtifacts {
-        primary: library.rlib,
+        primary: library.extern_path,
         binaries,
         harnesses: Vec::new(),
         bundle: None,
@@ -2052,6 +2435,8 @@ fn compile_root_library(
         None,
         features,
         test_profile,
+        false,
+        None,
     );
     run_root_rustc(build, target, false, dependencies, &arguments, None)?;
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
@@ -2061,7 +2446,7 @@ fn compile_root_library(
     verify_artifacts([&rlib, &rmeta, &dep_info])?;
     Ok(RootLibraryArtifact {
         identity,
-        rlib,
+        extern_path: rlib,
         dep_info,
     })
 }
@@ -2099,6 +2484,8 @@ fn compile_root_binary(
         library,
         features,
         test_profile,
+        false,
+        None,
     );
     run_root_rustc(build, target, test, dependencies, &arguments, None)?;
     let hashed = output_dir.join(format!(
@@ -2162,6 +2549,8 @@ fn compile_root_harness(
         library,
         features,
         true,
+        false,
+        None,
     );
     run_root_rustc(
         build,
@@ -2222,6 +2611,25 @@ fn run_root_rustc(
     arguments: &[OsString],
     integration_environment: Option<IntegrationEnvironment<'_>>,
 ) -> Result<()> {
+    let output = execute_root_rustc(
+        build,
+        target,
+        test,
+        dependencies,
+        arguments,
+        integration_environment,
+    )?;
+    RustcCommand::finish(&output, build.color)
+}
+
+fn execute_root_rustc(
+    build: &Build<'_>,
+    target: RootTarget<'_>,
+    test: bool,
+    dependencies: &[RootDependency],
+    arguments: &[OsString],
+    integration_environment: Option<IntegrationEnvironment<'_>>,
+) -> Result<std::process::Output> {
     if build.verbosity != Verbosity::Quiet {
         let target_kind = if test {
             "test"
@@ -2254,7 +2662,7 @@ fn run_root_rustc(
         verbose: build.verbosity == Verbosity::Verbose,
         color: build.color,
     }
-    .run()
+    .execute()
 }
 
 fn verify_artifacts<'a>(artifacts: impl IntoIterator<Item = &'a PathBuf>) -> Result<()> {
@@ -2301,6 +2709,8 @@ fn rustc_arguments(
     root_library: Option<&RootLibraryArtifact>,
     features: &[String],
     test_profile: bool,
+    metadata_only: bool,
+    incremental_target: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args = Vec::new();
     push(&mut args, "--crate-name");
@@ -2334,7 +2744,9 @@ fn rustc_arguments(
     }
     push(
         &mut args,
-        if target.kind() == RootTargetKind::Library && !test {
+        if metadata_only {
+            "--emit=dep-info,metadata"
+        } else if target.kind() == RootTargetKind::Library && !test {
             "--emit=dep-info,metadata,link"
         } else {
             "--emit=dep-info,link"
@@ -2400,10 +2812,17 @@ fn rustc_arguments(
         push(&mut args, target);
     }
     if !build.release {
-        let incremental = incremental_roots(build);
+        let default_incremental;
+        let incremental_target = match incremental_target {
+            Some(path) => path,
+            None => {
+                default_incremental = incremental_roots(build);
+                &default_incremental.target
+            }
+        };
         codegen(
             &mut args,
-            &format!("incremental={}", incremental.target.display()),
+            &format!("incremental={}", incremental_target.display()),
         );
     }
     if build.release {
@@ -2446,7 +2865,7 @@ fn rustc_arguments(
             .name
             .replace('-', "_");
         push(&mut args, "--extern");
-        args.push(format!("{name}={}", library.rlib.display()).into());
+        args.push(format!("{name}={}", library.extern_path.display()).into());
     }
     args.extend(build.rustflags.iter().map(OsString::from));
     push(&mut args, "--verbose");

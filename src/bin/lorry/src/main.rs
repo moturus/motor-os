@@ -93,6 +93,7 @@ where
     let cli = Cli::parse(arguments)?;
     let command = match &cli.command {
         Command::Build(_) => Some("build started"),
+        Command::Check(_) => Some("check started"),
         Command::Run(_) => Some("run started"),
         Command::Test(_) => Some("test started"),
         _ => None,
@@ -115,13 +116,15 @@ where
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
         Command::Metadata(options) => metadata::execute(&cli, options),
-        Command::Check(_) | Command::Tree(_) => Err(Error::failure(
+        Command::Tree(_) => Err(Error::failure(
             "this Cargo-compatible command is not implemented yet",
         )),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::RustcQuery(options) => compatibility::rustc_query(&cli, options),
-        Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
+        Command::Build(_) | Command::Check(_) | Command::Run(_) | Command::Test(_) => {
+            engine::execute(&cli)
+        }
     }
 }
 
