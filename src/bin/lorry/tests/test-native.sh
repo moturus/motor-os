@@ -29,6 +29,7 @@ KEEP=0
 REUSE_VM=0
 WARM=0
 CROSS_CHANGED=1
+HOST_TOOLCHAIN_SYSROOT=""
 
 usage() {
     cat <<'EOF'
@@ -207,6 +208,45 @@ download_file() {
         >>"$NATIVE_LOG" 2>&1
 }
 
+normalize_equivalence_output() {
+    local input="$1"
+    local output="$2"
+    local line
+    : >"$output"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line//"$WORK/native-fixture"/<fixture>}"
+        line="${line//"$REMOTE_ROOT/native-fixture"/<fixture>}"
+        line="${line//"$WORK/native-equivalence-target"/<target>}"
+        line="${line//"$REMOTE_ROOT/native-equivalence-target"/<target>}"
+        line="${line//"$WORK/host-home/.cache/lorry"/<cache>}"
+        line="${line//\/devtools\/lorry\/cache/<cache>}"
+        line="${line//"$HOST_TOOLCHAIN_SYSROOT"/<sysroot>}"
+        line="${line//\/devtools\/rust/<sysroot>}"
+        printf '%s\n' "$line" >>"$output"
+    done <"$input"
+}
+
+compare_equivalence_output() {
+    local name="$1"
+    local ordering="${2:-exact}"
+    local host="$WORK/equivalence-$name.host"
+    local native="$WORK/equivalence-$name.native"
+    normalize_equivalence_output "$host" "$host.normalized"
+    normalize_equivalence_output "$native" "$native.normalized"
+    host="$host.normalized"
+    native="$native.normalized"
+    if [ "$ordering" = set ]; then
+        LC_ALL=C sort "$host" >"$host.sorted"
+        LC_ALL=C sort "$native" >"$native.sorted"
+        host="$host.sorted"
+        native="$native.sorted"
+    fi
+    if ! cmp "$host" "$native"; then
+        diff -u "$host" "$native" >&2 || true
+        fail "Linux-cross and Motor-native $name output differs"
+    fi
+}
+
 build_image() {
     [ "$REUSE_VM" -eq 0 ] || return 0
     [ -x "$ROOT_DIR/vm_images/release/run-qemu.sh" ] ||
@@ -232,6 +272,7 @@ prepare_host() {
     host_rustc="$LORRY_TEST_RUSTC"
     motor_rustc="$LORRY_TEST_RUSTC"
     motor_toolchain_sysroot="$($motor_rustc --print sysroot)"
+    HOST_TOOLCHAIN_SYSROOT="$motor_toolchain_sysroot"
     [ -x "$MOTOR_LINKER" ] || fail "Motor linker '$MOTOR_LINKER' is absent"
     [ -x "$host_curl" ] || fail "host curl is absent"
     [ -f "$host_ca_bundle" ] || fail "host CA bundle '$host_ca_bundle' is absent"
@@ -283,6 +324,39 @@ prepare_host() {
     fi
     cp "$CROSS_LORRY" "$WORK/lorry-cross"
     rm -rf "$source/.cargo"
+
+    local fixture="$WORK/native-fixture"
+    local target="$WORK/native-equivalence-target"
+    rm -rf "$target"
+    (
+        cd "$fixture"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" locate-project --workspace \
+            --manifest-path "$fixture/Cargo.toml" \
+            >"$WORK/equivalence-locate.host"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly \
+            "$WORK/lorry-seed" rustc -Z unstable-options --print cfg \
+            --target "$MOTOR_TARGET" -- -O >"$WORK/equivalence-cfg.host"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" rustc -Z unstable-options \
+            --print target-spec-json --target "$MOTOR_TARGET" -- \
+            -Z unstable-options >"$WORK/equivalence-target-spec.host"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" metadata --format-version 1 --locked \
+            --filter-platform "$MOTOR_TARGET" \
+            --manifest-path "$fixture/Cargo.toml" \
+            >"$WORK/equivalence-metadata.host"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" tree --target "$MOTOR_TARGET" \
+            --manifest-path "$fixture/Cargo.toml" \
+            >"$WORK/equivalence-tree.host"
+        HOME="$host_home" RUSTC="$motor_rustc" \
+            "$WORK/lorry-seed" check --lib --quiet --keep-going \
+            --message-format=json --target "$MOTOR_TARGET" \
+            --target-dir "$target" --manifest-path "$fixture/Cargo.toml" \
+            >"$WORK/equivalence-messages.host"
+    )
 }
 
 start_vm() {
@@ -354,6 +428,23 @@ run_native() {
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
+    local equivalence_target="$REMOTE_ROOT/native-equivalence-target"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native locate-project --workspace --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-locate.native"
+    remote_command "cd $fixture && __CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS=nightly $REMOTE_ROOT/lorry-native rustc -Z unstable-options --print cfg --target $MOTOR_TARGET -- -O > $REMOTE_ROOT/equivalence-cfg.native"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native rustc -Z unstable-options --print target-spec-json --target $MOTOR_TARGET -- -Z unstable-options > $REMOTE_ROOT/equivalence-target-spec.native"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native metadata --format-version 1 --locked --filter-platform $MOTOR_TARGET --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-metadata.native"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native tree --target $MOTOR_TARGET --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-tree.native"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native clean --target-dir $equivalence_target"
+    remote_command "cd $fixture && $REMOTE_ROOT/lorry-native check --lib --quiet --keep-going --message-format=json --target $MOTOR_TARGET --target-dir $equivalence_target --manifest-path $fixture/Cargo.toml > $REMOTE_ROOT/equivalence-messages.native"
+    local output
+    for output in locate cfg target-spec metadata tree messages; do
+        download_file "$REMOTE_ROOT/equivalence-$output.native" \
+            "$WORK/equivalence-$output.native"
+    done
+    for output in locate cfg target-spec metadata tree; do
+        compare_equivalence_output "$output"
+    done
+    compare_equivalence_output messages set
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native test --release -- --quiet"
