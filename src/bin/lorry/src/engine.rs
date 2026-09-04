@@ -2619,7 +2619,7 @@ fn run_artifact(
     )
 }
 
-fn matching_cfgs(config: &Config, target: &TargetInfo) -> Result<Vec<String>> {
+pub(crate) fn matching_cfgs(config: &Config, target: &TargetInfo) -> Result<Vec<String>> {
     let selectors = config.targets.keys().filter_map(|selector| match selector {
         TargetSelector::Cfg(expression) => Some(expression.as_str()),
         TargetSelector::Triple(_) => None,

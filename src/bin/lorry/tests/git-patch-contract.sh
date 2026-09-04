@@ -147,6 +147,9 @@ curl = "$WORK/bin/git-curl"
 [repositories]
 user = "$REPOSITORY"
 
+[cache]
+directory = "$WORK/cache"
+
 [policy]
 default = "allow"
 
@@ -356,6 +359,8 @@ chmod 000 "$WORK/bin/git-curl"
     [ "$(HOME="$HOME_DIR" "$LORRY" run -p app)" = 44 ]
     HOME="$HOME_DIR" "$LORRY" test -p app -- --quiet
     HOME="$HOME_DIR" "$LORRY" review -p app >"$WORK/review.toml"
+    HOME="$HOME_DIR" "$LORRY" metadata -p app --format-version 1 \
+        --filter-platform x86_64-unknown-linux-gnu --locked >"$WORK/metadata.json"
 )
 grep -F '[[locked-git]]' "$WORK/review.toml" >/dev/null ||
     fail "review omitted the locked Git identity"
@@ -365,6 +370,18 @@ grep -F "source = \"$CARGO_SOURCE\"" "$WORK/review.toml" >/dev/null ||
     fail "review omitted the exact Cargo Git source"
 grep -F '[[git-source]]' "$WORK/review.toml" >/dev/null ||
     fail "review omitted verified Git evidence"
+grep -F "\"source\":\"$CARGO_SOURCE\"" "$WORK/metadata.json" >/dev/null ||
+    fail "metadata omitted the exact Git source identity"
+grep -F "\"id\":\"git+$GIT_URL?branch=main#demo@1.2.3\"" \
+    "$WORK/metadata.json" >/dev/null ||
+    fail "metadata emitted the wrong Cargo Git package ID"
+[ "$(find "$WORK/cache/sources" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 5 ] ||
+    fail "metadata did not publish one source view per Git package"
+DEMO_VIEW="$(find "$WORK/cache/sources" -mindepth 1 -maxdepth 1 \
+    -type d -name 'demo-1.2.3-*' -print -quit)"
+grep -F "\"manifest_path\":\"$DEMO_VIEW/Cargo.toml\"" \
+    "$WORK/metadata.json" >/dev/null ||
+    fail "metadata did not reference the stable Git source view"
 [ "$(manifest_hashes)" = "$MANIFEST_HASHES" ] || fail "an offline command changed a manifest"
 
-echo "PASS: Git patches keep manifests immutable and retain Git identity"
+echo "PASS: Git patches keep manifests immutable and publish stable metadata identity"

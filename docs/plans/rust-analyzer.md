@@ -9,8 +9,9 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-9 in section 4.12 are complete and gated, while metadata graph mapping,
-the commands, and native rust-analyzer work have not started. The completed
+patches 1-10 in section 4.12 are complete and gated. `lorry metadata` is
+implemented; `lorry check`, `lorry tree`, and native rust-analyzer work have not
+started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
 2026-09-02.
@@ -22,7 +23,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-9 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-10 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -862,8 +863,11 @@ source trees cannot collide by path. Publication is atomic and re-verified
 against that source-tree digest before reuse; `lorry cache clean` removes the
 tree.
 Selected workspace packages and path dependencies are described at their
-admitted live roots so edits remain visible. All paths in the document are
-canonical absolute UTF-8 paths; non-UTF-8 or escaping paths are rejected.
+admitted live roots so edits remain visible. Filesystem locations consumed as
+paths are canonical absolute UTF-8 paths; non-UTF-8 or escaping paths are
+rejected. Cargo reports the descriptive `license_file` and `readme` values in
+their manifest-relative spelling, so those two manifest strings are
+deliberately not absolutized.
 
 **`lorry check`.** Prepares the graph and executes the development
 dependency plan exactly as a non-release `lorry build` does, with the same
@@ -927,7 +931,7 @@ is:
 | `dependencies[]` | Each declared dependency: `name` as declared, `req`, `kind` null, `dev`, or `build`, `optional`, `uses_default_features`, `features`, `target` cfg expression or null, `rename`, `path` for path dependencies, and `source`; `registry` null. |
 | `resolve.nodes[]` | One node per resolved package id. `deps[].name` is the rustc-visible crate name after renaming and dash-to-underscore normalization; `deps[].pkg` the dependency id; `dep_kinds[]` the `{kind, target}` pairs from Lorry's edges; `dependencies[]` the dependency ids; `features` the activated set. Lorry keeps host and target feature contexts separate while this schema has one node per id; emit the union, which is what `cargo metadata` reports for resolver 2 packages. |
 | `metadata` on the workspace and on packages | Null. |
-| Descriptive package fields | Preserve `authors`, `description`, `license`, `license_file`, `readme`, `repository`, `homepage`, `documentation`, `rust_version`, `links`, and `default_run` from Lorry's prepared manifest. Resolve file paths against the physical package root as Cargo does. |
+| Descriptive package fields | Preserve `authors`, `description`, `license`, `license_file`, `readme`, `repository`, `homepage`, `documentation`, `rust_version`, `links`, and `default_run` from Lorry's prepared manifest. Preserve Cargo's manifest-relative spelling for `license_file` and `readme`; they are descriptive manifest values, not source locations consumed by rust-analyzer. |
 | Recognized but unretained fields | `categories` and `keywords` are empty and `publish` is null. These fields do not affect rust-analyzer or Lorry's build model; retaining them later is a compatible fidelity improvement. |
 
 Serialize with Lorry's existing `serde` and `serde_json` dependencies and
@@ -937,8 +941,12 @@ dedicated private output structs; this adds no product dependency. Use manual
 test crate under `src/bin/lorry/tests/`, with its own lockfile, depends on
 exactly `cargo_metadata` 0.23.1 and deserializes every golden document before
 inspecting it; Lorry's own manifest and lockfile gain no dependency, so its
-review state and native self-build are unaffected. Serialize vectors in defined order and
-maps from `BTreeMap`. Reject a package count above Lorry's existing limit, an
+review state and native self-build are unaffected. Order packages and resolve
+nodes by package id. Package targets and declared dependencies retain the
+prepared manifest's deterministic order; node dependencies are ordered by
+normalized crate name and package id, dependency ids lexicographically, dependency
+kinds as normal/dev/build and then target, and activated features lexicographically.
+Build maps from `BTreeMap`. Reject a package count above Lorry's existing limit, an
 edge to an unresolved package, an alias that collides after normalization, an
 unsupported custom target, or a path or value that cannot be represented
 losslessly in JSON.
@@ -1224,7 +1232,7 @@ explicit:
 9. **Lorry: metadata wire types (complete).** Add complete private output types and, in
    a separate test crate, deserialize golden documents with `cargo_metadata`
    0.23.1.
-10. **Lorry: metadata graph mapping.** Add the section 4.8 mapping,
+10. **Lorry: metadata graph mapping (complete).** Add the section 4.8 mapping,
    `--no-deps`, and `--filter-platform`, with Cargo differential and negative
    tests. Stop for review of the schema mapping and every documented
    normalization.

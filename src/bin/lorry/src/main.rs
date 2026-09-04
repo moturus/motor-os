@@ -114,7 +114,8 @@ where
         Command::CacheClean => cache_clean::execute(cli.verbosity),
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
-        Command::Check(_) | Command::Metadata(_) | Command::Tree(_) => Err(Error::failure(
+        Command::Metadata(options) => metadata::execute(&cli, options),
+        Command::Check(_) | Command::Tree(_) => Err(Error::failure(
             "this Cargo-compatible command is not implemented yet",
         )),
         Command::Review => review::execute(&cli),

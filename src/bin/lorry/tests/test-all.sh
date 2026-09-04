@@ -82,6 +82,7 @@ LORRY="$LORRY_DIR/target/release/lorry"
 
 "$SCRIPT_DIR/rustflags-contract.sh" "$LORRY"
 "$SCRIPT_DIR/compatibility-query-contract.sh" "$LORRY"
+"$SCRIPT_DIR/metadata-contract.sh" "$LORRY"
 "$SCRIPT_DIR/cargo-identity.sh" "$LORRY"
 "$SCRIPT_DIR/workspace-contract.sh" "$LORRY"
 "$SCRIPT_DIR/proc-macro-contract.sh" "$LORRY"
