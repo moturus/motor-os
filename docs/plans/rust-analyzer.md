@@ -9,13 +9,14 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-15 in section 4.12 are complete and gated. `lorry metadata`,
+patches 1-16 in section 4.12 are complete and gated. `lorry metadata`,
 `lorry check`, including Cargo-compatible JSON messages, and `lorry tree` are
 implemented, and the pinned host rust-analyzer passes the exact Lorry
-acceptance contract; native rust-analyzer work has not started. The completed
-Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
-removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
-2026-09-02.
+acceptance contract. The first Motor Rust portability patch excludes the
+native config-directory dependency and stitches the native sysroot without a
+Cargo query. The completed Lorry work makes `lorry vendor` keep every input
+`Cargo.toml` immutable and removes Lorry's unused required-patch feature,
+which U. Lasiotus authorized on 2026-09-02.
 
 ## 0. Status and architecture
 
@@ -24,7 +25,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-15 complete |
+| 2. Guest | Motor OS | Motor only | In progress; patches 1-16 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1256,7 +1257,7 @@ explicit:
     documentation.
 15. **Lorry native equivalence (complete).** Extend the native product fixture to the
     compatibility queries and all three required commands.
-16. **Motor Rust: configuration and sysroot.** Make `dirs` non-Motor, return
+16. **Motor Rust: configuration and sysroot (complete).** Make `dirs` non-Motor, return
     no native implicit config directory, and skip the sysroot `cargo metadata`
     attempt on Motor.
 17. **URL fork and lock.** Add lossless Motor file-path conversion and tests;
