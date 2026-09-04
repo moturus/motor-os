@@ -1,4 +1,5 @@
 pub mod case;
+pub mod lorry;
 pub mod process;
 pub mod semantic;
 pub mod session;

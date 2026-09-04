@@ -9,8 +9,9 @@ the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
 `lorry check --message-format=json`; section 4 reflects that scope. It is
 ready to implement. Stage 2 implementation is in progress: Lorry prerequisite
-patches 1-12 in section 4.12 are complete and gated. `lorry metadata` and
-`lorry check`, including Cargo-compatible JSON messages, are implemented;
+patches 1-13 in section 4.12 are complete and gated. `lorry metadata` and
+`lorry check`, including Cargo-compatible JSON messages, are implemented, and
+the pinned host rust-analyzer passes the exact Lorry acceptance contract;
 `lorry tree` and native rust-analyzer work have not started. The completed
 Lorry work makes `lorry vendor` keep every input `Cargo.toml` immutable and
 removes Lorry's unused required-patch feature, which U. Lasiotus authorized on
@@ -23,7 +24,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-12 complete |
+| 2. Guest | Motor OS | Motor only | In progress; Lorry patches 1-13 complete |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -630,7 +631,9 @@ cache already shortens. `procMacro.enable` is off for the reason in section
 away from `target/lorry`; Lorry's global unit cache makes that second
 artifact tree cheap. `check.workspace` keeps its default of true; the
 single-package `-p` form that rust-analyzer emits when it is false is not
-accepted by Lorry. The Motor fork changes no defaults.
+accepted by Lorry. The Motor fork changes no defaults. The acceptance client
+advertises the experimental `colorDiagnosticOutput` capability, which selects
+the ANSI flycheck form; clients without it use the supported plain-JSON form.
 
 Sysroot discovery runs `rustc --print sysroot` through `PATH` and yields
 `/devtools/rust`; the fork then stitches `rust-src` without Cargo. Project
@@ -1092,9 +1095,11 @@ The tests are layered so a failure is attributable before a full image run.
   revision changes. The Linux server carries no Motor sysroot patch, so it
   asks Lorry for `metadata` on the sysroot's `library/Cargo.toml`; Lorry
   rejects that virtual workspace manifest with its ordinary error, and
-  rust-analyzer logs one sysroot error and stitches `rust-src`. The test
-  expects exactly that one error and nothing else on the sysroot path; the
-  rejection must be immediate, with no resolution, network, or vendor access.
+  rust-analyzer logs a sysroot error and stitches `rust-src`. The selected
+  server loads the sysroot once initially and once after applying build-script
+  results, so the acceptance test expects exactly those two identical errors
+  and nothing else on the sysroot path. The rejection must be immediate, with
+  no resolution, network, or vendor access.
 - Add a Linux differential fixture with a verified registry dependency, a
   path dependency, a build script that emits `rustc-cfg`, `rustc-env`, and
   generated `OUT_DIR` Rust, a proc-macro dependency, and one deliberate
@@ -1241,11 +1246,11 @@ explicit:
 12. **Lorry: `check --message-format=json` (complete).** Add complete message
    types, the ANSI variant, restored-result emission, killed-child semantics,
    and tests that parse every line with `cargo_metadata` 0.23.1.
-13. **Host rust-analyzer/Lorry acceptance.** Drive Lorry with the pinned Stage 1
+13. **Host rust-analyzer/Lorry acceptance (complete).** Drive Lorry with the pinned Stage 1
     server on Linux, capture the actual invocation contract, and prove project
     load, build-script data, and flycheck before introducing guest variables.
     This is a Stage 2 test on Linux, not a supported Linux configuration; it
-    expects exactly the one sysroot metadata error described in section 4.11.
+    expects exactly the two sysroot metadata errors described in section 4.11.
 14. **Lorry: `tree` and differential tests.** Add the required `tree` command,
     the complete Linux differential fixture against keyed Cargo, and README
     documentation.

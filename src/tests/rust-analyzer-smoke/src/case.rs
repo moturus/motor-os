@@ -32,6 +32,16 @@ impl SemanticCase {
         if let Ok(log) = std::env::var("MOTOR_RA_SMOKE_LOG") {
             command.env("RA_LOG", log);
         }
+        Self::start_command(command, root, folders, initialization_options, deadline)
+    }
+
+    pub fn start_command(
+        mut command: Command,
+        root: &Path,
+        folders: &[(&str, &Path)],
+        initialization_options: Value,
+        deadline: Instant,
+    ) -> io::Result<Self> {
         let mut session = LspSession::spawn(&mut command)?;
         let workspace_folders: Vec<_> = folders
             .iter()
@@ -47,7 +57,10 @@ impl SemanticCase {
                 "capabilities": {
                     "window": {"workDoneProgress": true},
                     "workspace": {"workspaceFolders": true},
-                    "experimental": {"serverStatusNotification": true}
+                    "experimental": {
+                        "colorDiagnosticOutput": true,
+                        "serverStatusNotification": true
+                    }
                 },
                 "initializationOptions": initialization_options
             }),
@@ -165,6 +178,10 @@ impl SemanticCase {
                 && notification.params["uri"] == uri)
                 .then_some(&notification.params["diagnostics"])
         })
+    }
+
+    pub fn stderr_tail(&self) -> String {
+        self.session.stderr_tail()
     }
 
     pub fn shutdown(&mut self) -> io::Result<()> {
