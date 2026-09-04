@@ -1,27 +1,26 @@
-# red - A Vim-like Terminal Editor in Pure Rust (`std`)
+# red - A Vim-like Terminal Editor in Rust
 
-**red** is a lightweight, high-performance, terminal-based text editor written in Rust. It behaves like `vi`/`vim` and is built **entirely from scratch using only the Rust standard library (`std`)**, with absolutely zero external crate dependencies.
+**red** is a lightweight, high-performance, terminal-based text editor written in Rust. It behaves like `vi`/`vim` and uses [`crossterm`](https://crates.io/crates/crossterm) for terminal input and control. On Motor OS, the repository selects a patched `crossterm` backend with native Motor OS support.
 
 ---
 
 ## Core Architectural Highlights
 
-*   **Zero Dependencies**: Written without crates like `crossterm`, `termion`, `libc`, or `nix`. It is powered entirely by raw, standard ANSI/ASCII escape sequences.
+*   **Small Dependency Set**: The editor's only runtime crate dependency is `crossterm`. Unix-hosted tests also use `libc` to drive pseudo-terminal resize tests; `libc` is not part of the Motor OS or release build.
 *   **Cell-Level Frame Diffing**:
     *   Every cycle, the editor renders the whole screen into an in-memory grid of `Cell`s (each cell is a character plus a self-contained SGR style sequence) and diffs it against the previously drawn frame.
     *   Only the columns that actually changed are repainted: typing rewrites just the edited line from the first divergent column onward, and a cursor move rewrites only the digits of the cursor readout in the status bar — the text area is never touched.
     *   The cursor is hidden only while cells are actually being repainted, so it never visibly skips around, and the entire update is flushed as a single batched write.
     *   A full clear-and-repaint happens only when the row count changes (first paint or a terminal resize), so a stable window never flickers.
-*   **Dynamic Terminal Resizing (Pure ANSI Query)**:
-    *   Queries terminal size on resize events using a pure ANSI escape sequence query (`\x1b[9999;9999H\x1b[6n`) that moves the cursor to the bottom-right and queries its coordinates.
-    *   Performs this query invisibly (hiding the cursor during the check to prevent flashing) and only when handling events (0% CPU idle overhead).
+*   **Dynamic Terminal Resizing**:
+    *   Receives resize events and obtains terminal dimensions through `crossterm`.
+    *   On Motor OS, `crossterm`'s backend consumes in-band size reports from the terminal; querying the cached size does not block or poll the terminal.
     *   The editor viewport scales and re-layouts in real-time.
-*   **Zero-Dependency Raw Mode & Timeout Hack**:
-    *   Configures the terminal driver using the system `stty` utility (`stty raw -echo min 0 time 1`).
-    *   The `min 0 time 1` configuration makes read operations non-blocking with a 100ms timeout, allowing synchronous parsing of multi-byte escape sequences (like Arrow keys or Page keys) without blocking on a standalone `Esc` keypress.
+*   **Terminal Input and Raw Mode**:
+    *   Uses `crossterm` to enable raw mode and decode key and resize events on each supported platform.
 *   **Terminal Guard & Alt-Screen Buffer**:
-    *   Uses a `TerminalGuard` implementing the `Drop` trait alongside a custom panic hook to guarantee that the terminal is *always* safely restored to normal cooked mode (`stty -raw echo`), even if the editor crashes or panics.
-    *   Launches in the terminal's Alternate Screen Buffer (`\x1b[?1049h`), leaving the user's terminal scrollback history perfectly clean upon exit.
+    *   Uses a `TerminalGuard` implementing the `Drop` trait alongside a custom panic hook to restore raw mode and terminal state through `crossterm` when the editor exits or panics.
+    *   Launches in the terminal's alternate screen buffer, leaving the user's terminal scrollback history clean upon exit.
 *   **UTF-8 & Tab rendering**:
     *   Fully decodes multi-byte UTF-8 characters from raw stdin bytes.
     *   Converts tabs (`\t`) to dynamic tab stops (`tabstop` columns wide, see [Configuration](#configuration)) during screen rendering, while preserving raw tab characters in the buffer.
@@ -137,8 +136,8 @@ Like Vim, **red** operates in five distinct modes:
 
 The project has been refactored into a highly clean and modular structure:
 *   `src/main.rs`: The application entrypoint. Declares modules, instantiates the `TerminalGuard`, and runs the primary interactive event loop.
-*   `src/terminal.rs`: Contains the `TerminalGuard` drop-restoration logic, panic hook, and raw mode command triggers. Exposes the pure ANSI-based `get_terminal_size()` size query engine.
-*   `src/input.rs`: Contains the raw byte reader and escape sequence parser. Converts stdin into semantic `Key` events and decodes UTF-8.
+*   `src/terminal.rs`: Contains the `TerminalGuard` drop-restoration logic, panic hook, raw mode control, and terminal-size lookup built on `crossterm`.
+*   `src/input.rs`: Converts `crossterm` input and resize events into the semantic events used by the editor.
 *   `src/buffer.rs`: Defines the `Line` struct wrapping a `Vec<char>` for safe, indexable UTF-8 editing.
 *   `src/editor.rs`: The heart of the editor. Manages state, handles keypress processing for all modes, calculates scroll offsets, and implements the highly optimized viewport rendering engine. Also houses the core unit tests.
 *   `src/syntax/`: Contains the language-specific tokenizer engines and the unified `SyntaxManager`.
@@ -166,13 +165,13 @@ tabstop = 4
 expandtab = true
 ```
 
-Only the `key = value` subset of TOML is understood (plus `#` comments) — red has no dependencies, so there is no TOML crate behind this. A malformed entry is skipped and reported in the status bar; the rest of the file still applies.
+Only the `key = value` subset of TOML is understood (plus `#` comments). The parser is built into red rather than using a TOML crate. A malformed entry is skipped and reported in the status bar; the rest of the file still applies.
 
 ---
 
 ## Syntax Highlighting
 
-**red** comes with a high-performance, zero-dependency, **State-Cascading Incremental Syntax Highlighting** engine!
+**red** comes with a built-in, high-performance, **State-Cascading Incremental Syntax Highlighting** engine!
 
 *   **Incremental Highlighting**: Only tokenizes and highlights the **currently edited line** when typing, keeping input latency virtually zero.
 *   **State-Cascading**: For block structures (like multi-line `/* ... */` comments in Rust), each line maintains a lexer state at its end. If an edit changes a line's ending state, the highlighter cascades the calculations down subsequent lines, stopping immediately when the state stabilizes.
