@@ -150,8 +150,8 @@ Debug root crates and mutable path dependencies use persistent rustc state
 below `target/lorry/.incremental/<target-triple>/`; release and immutable
 registry units do not use incremental compilation.
 
-Compiled crates.io dependencies, including host procedural-macro dynamic
-libraries, and reviewed required-patch dependencies are reused from the
+Compiled crates.io and Git dependencies, including host procedural-macro
+dynamic libraries, are reused from the
 per-user cache at `$HOME/.cache/lorry` on Linux and
 `/devtools/lorry/cache` on Motor. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
@@ -206,9 +206,11 @@ least 2097152.
 
 New packages are displayed with their exact version, checksum, license,
 build-script and procedural-macro status, sizes, and new dependency edges.
-Interactive approval is required unless every candidate already exists.
-`--accept-all` approves all policy-compliant packages, but it cannot bypass
-integrity checks, policy denials, redirect trust, or native-tool restrictions.
+Interactive approval is required whenever the complete candidate differs from
+committed admission, even if its immutable objects already exist.
+`--accept-all` approves every policy-compliant dependency and capability
+change, but it cannot bypass integrity checks, policy denials, redirect trust,
+or native-tool restrictions.
 
 `src/tests/full-test.sh` does not run Lorry tests. Test selection and VM-image
 coverage are contributor-validation concerns described by `AGENTS.md`; they
@@ -309,8 +311,9 @@ Restore Cargo.toml and Cargo.lock to the old version if the change was not
 intentional.
 
 Dependency changes to an existing admission record require one interactive
-confirmation of the displayed identity and capability changes. `--accept-all`
-cannot approve them.
+confirmation of the displayed identity and capability changes. In automation,
+`--accept-all` approves the complete policy-compliant candidate without a
+prompt.
 
 ## Toolchains and targets
 
@@ -382,17 +385,27 @@ stores the verified snapshot below:
 .lorry/vendor/git/<cargo-source-sha256>/source
 ```
 
-A root Git patch may select a branch, tag, revision, or default HEAD without
-an existing lock entry. Vendoring resolves one exact commit, records its
-evidence, and atomically rewrites the patch to:
+A root Git patch may select a branch, tag, revision, or default HEAD. Its
+package must already have a matching exact Git source in Cargo.lock. Vendoring
+uses that commit as the immutable identity and stores the verified snapshot in
+the same content-addressed layout as a direct Git dependency:
 
 ```text
-.lorry/vendor/<patch>/source[/<package-subdirectory>]
+.lorry/vendor/git/<cargo-source-sha256>/source
 ```
 
-For a repository-root package the suffix is absent. For a monorepo or virtual
-workspace, Lorry locates the unique manifest for the patched package and
-rewrites the patch to that package directory.
+The patch remains a first-class Git source throughout resolution, review, and
+lock rendering. Lorry never modifies an input workspace or member Cargo.toml;
+legacy explicit path patches continue to use their declared paths.
+
+Every networked `lorry vendor` checks mutable Git-patch selectors: default
+HEAD, branches, tags, and named `rev` references. Full or abbreviated
+hexadecimal commit `rev` values remain pinned. If a selector moves, or a
+locked Git object needs first materialization, Lorry verifies every candidate
+and presents one combined dependency and capability review; moved tags carry
+an explicit retargeting warning. Interactive approval defaults to no and is
+requested exactly once. Non-interactive changed runs fail unless
+`--accept-all` approves the complete policy-compliant candidate.
 
 Both forms use a shallow fetch and record the canonical URL, requested
 selector, commit, Git tree, canonical source digest, file count, and byte

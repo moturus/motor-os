@@ -86,31 +86,15 @@ impl PreparedGraph {
                     logical_root,
                     physical_root,
                     source_tree_sha256,
-                    required_patch,
                     ..
                 } => {
-                    if required_patch.is_some() {
-                        complete_source_trees.insert(package.key.clone());
-                    }
                     if self.cargo_registry_mode {
                         None
                     } else if logical_root != physical_root {
-                        let id = required_patch.as_deref().ok_or_else(|| {
-                            Error::failure(format!(
-                                "path package `{} {}` has distinct logical and physical roots without a required-patch identity",
-                                package.key.name, package.key.version
-                            ))
-                        })?;
-                        Some(
-                            SourceRemap::required_patch(
-                                options.workspace_root,
-                                logical_root,
-                                physical_root,
-                            )
-                            .map_err(|error| {
-                                Error::failure(format!("required patch `{id}`: {error}"))
-                            })?,
-                        )
+                        return Err(Error::failure(format!(
+                            "path package `{} {}` has distinct logical and physical roots",
+                            package.key.name, package.key.version
+                        )));
                     } else {
                         Some(SourceRemap::path(
                             options.workspace_root,
@@ -434,14 +418,7 @@ fn locked_catalog(
         }
         RegistrySource::Cargo(registry) => Catalog::from_locked_cargo_registry(manifest, registry)?,
     };
-    match source {
-        RegistrySource::Lorry(repositories) => {
-            patch::configure(manifest, config, repositories, &mut catalog)?
-        }
-        RegistrySource::Cargo(_) => {
-            patch::configure_cargo_registry(manifest, config, &mut catalog)?
-        }
-    }
+    patch::configure(manifest, &mut catalog)?;
     if let Some(direct) = direct {
         direct.configure(&mut catalog)?;
     } else {
@@ -1055,6 +1032,7 @@ mod tests {
                 logical_root: root.to_owned(),
                 physical_root: root.to_owned(),
                 source_tree_sha256: tree.sha256,
+                patched_crates_io: false,
             },
             local_manifest: Some(manifest),
             feature_sets: BTreeMap::new(),

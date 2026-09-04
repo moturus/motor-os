@@ -274,11 +274,20 @@ Kernel and kloader:
    loop; print less.
 
 7. Sequential frame placement (prerequisite for hugepages anywhere; ~55 ms
-   in the kernel alone on QEMU today). Keep a cursor to the last segment
-   with free pages and advance it; if the random pick exists for lock
-   spreading, use per-CPU cursors instead of a random segment per
-   allocation. This also makes the userspace first-touch items shrink
-   under hugepages, which the earlier QEMU numbers already showed.
+   in the kernel alone on QEMU today). Replace the random 256 KB unit pick
+   with a cursor that fills one unit before moving to the next, so runs of
+   allocations stay inside one 2 MB region. The random pick buys no
+   security: the generator is never seeded (it starts from the same
+   constant every boot) and physical addresses are invisible to
+   processes anyway. Add a second-level bitmap, one bit per unit meaning
+   "has a free frame", so that a nearly full system finds a frame by
+   scanning words instead of walking thousands of units from index zero
+   on every allocation, which is what the current linear fallback does
+   (0.2-0.6 ms per allocation at 8 GB when the free frames sit high).
+   A free sets its unit's bit; an allocation that finds a unit full
+   clears it and re-checks. About 50 lines, no change to the unit
+   format. If unpredictability is wanted later, randomize the order of
+   2 MB regions, not of frames.
 
 8. Report boot time from the kloader entry (no speedup, correct
    attribution): use `KernelBootupInfo.start_tsc` for the "kernel up"

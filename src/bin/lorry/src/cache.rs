@@ -584,13 +584,13 @@ impl BuildCaches {
 }
 
 fn globally_cacheable(planned: &PlannedUnit) -> bool {
-    globally_cacheable_source(&planned.unit.key.package.source, planned.source_exclusions)
+    globally_cacheable_source(&planned.unit.key.package.source)
 }
 
-fn globally_cacheable_source(source: &PackageSourceKey, exclusions: Exclusions) -> bool {
+fn globally_cacheable_source(source: &PackageSourceKey) -> bool {
     match source {
         PackageSourceKey::CratesIo | PackageSourceKey::Git(_) => true,
-        PackageSourceKey::Path(_) => exclusions == Exclusions::None,
+        PackageSourceKey::Path(_) => false,
     }
 }
 
@@ -652,7 +652,7 @@ fn sysroot_digest(
     host: &TargetInfo,
     target: &TargetInfo,
 ) -> Result<()> {
-    let output = process::query(
+    let output = process::query_rustc(
         &toolchain.rustc,
         &["--print", "sysroot"],
         "rustc sysroot query",
@@ -1527,18 +1527,13 @@ mod tests {
 
     #[test]
     fn routes_immutable_units_to_the_per_user_cache() {
-        assert!(globally_cacheable_source(
-            &PackageSourceKey::CratesIo,
-            Exclusions::CargoRegistryMarker
-        ));
-        assert!(globally_cacheable_source(
-            &PackageSourceKey::Path(PathBuf::from("reviewed-patch")),
-            Exclusions::None
-        ));
-        assert!(!globally_cacheable_source(
-            &PackageSourceKey::Path(PathBuf::from("local")),
-            Exclusions::GitAndTarget
-        ));
+        assert!(globally_cacheable_source(&PackageSourceKey::CratesIo));
+        assert!(globally_cacheable_source(&PackageSourceKey::Git(
+            "git+https://example.invalid/demo#commit".to_owned()
+        )));
+        assert!(!globally_cacheable_source(&PackageSourceKey::Path(
+            PathBuf::from("local")
+        )));
     }
 
     #[test]

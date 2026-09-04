@@ -1217,12 +1217,13 @@ mod tests {
                 .any(|args| args == ["-C", "linker=/host-cc"])
         );
 
-        let remap = crate::unit::SourceRemap::required_patch(
+        let remap = crate::unit::SourceRemap::registry(
             &fixture.0,
-            &fixture.0.join(".lorry/vendor/version_check/source"),
+            &[1; 32],
             &manifests[&version_check].root,
         )
         .unwrap();
+        let expected_remap = remap.rustc_argument().into_string().unwrap();
         let mut remapped_plan = plan.clone();
         remapped_plan
             .units
@@ -1234,10 +1235,6 @@ mod tests {
                 .unwrap()
                 .unwrap();
         let arguments = string_arguments(&remapped);
-        let expected_remap = format!(
-            "{}=.lorry/vendor/version_check/source",
-            manifests[&version_check].root.display()
-        );
         assert!(
             arguments
                 .windows(2)

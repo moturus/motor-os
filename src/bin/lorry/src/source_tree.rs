@@ -893,7 +893,7 @@ mod tests {
             let expected =
                 decode_hex::<32>(value.get("sha256").and_then(Value::as_str).unwrap()).unwrap();
             let mut bytes = Vec::new();
-            for pair in content.as_bytes().chunks_exact(2) {
+            for pair in content.as_bytes().as_chunks::<2>().0 {
                 bytes.push((nibble(pair[0]) << 4) | nibble(pair[1]));
             }
             let mut hasher = Sha256::new();

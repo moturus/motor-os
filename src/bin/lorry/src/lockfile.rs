@@ -431,6 +431,53 @@ mod tests {
     }
 
     #[test]
+    fn renders_a_crates_io_patch_with_its_git_identity() {
+        let fixture = Fixture::new();
+        let source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                      [dependencies]\ndemo = \"=1.2.3\"\n\
+                      [patch.crates-io]\ndemo = { git = \"https://example.com/demo.git\", branch = \"motor\" }\n";
+        let manifest = Manifest::parse(&fixture.0, &fixture.0.join("Cargo.toml"), source).unwrap();
+        let cargo_source = "git+https://example.com/demo.git?branch=motor#0123456789abcdef0123456789abcdef01234567";
+        let key = PackageKey {
+            name: "demo".to_owned(),
+            version: Version::parse("1.2.3").unwrap(),
+            source: PackageSourceKey::Git(cargo_source.to_owned()),
+        };
+        let resolution = Resolution {
+            root_edges: vec![ResolvedEdge {
+                dependency_index: 0,
+                alias: "demo".to_owned(),
+                kind: crate::sparse::DependencyKind::Normal,
+                parent_compile_kind: None,
+                compile_kind: crate::resolver::CompileKind::Target,
+                context: FeatureContext::Target(String::new()),
+                package: key.clone(),
+            }],
+            packages: vec![package(
+                key,
+                ResolvedSource::Git {
+                    cargo_source: cargo_source.to_owned(),
+                    git_url: "https://example.com/demo.git".to_owned(),
+                    requested_revision: "motor".to_owned(),
+                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    git_tree: "1".repeat(40),
+                    repository_tree_sha256: [2; 32],
+                    package_path: String::new(),
+                    logical_root: fixture.0.join(".lorry/git/demo/source"),
+                    physical_root: fixture.0.join("object/source"),
+                    source_tree_sha256: [3; 32],
+                    patched_crates_io: true,
+                },
+            )],
+        };
+
+        let rendered = String::from_utf8(render(&manifest, &resolution).unwrap()).unwrap();
+        assert!(rendered.contains(&format!("source = \"{cargo_source}\"")));
+        assert!(!rendered.contains("checksum ="));
+        assert!(rendered.contains("dependencies = [\n \"demo\",\n]"));
+    }
+
+    #[test]
     fn renders_cargo_v4_path_and_registry_disambiguation_and_round_trips() {
         let fixture = Fixture::new();
         let local_root = fixture.0.join("local");
@@ -458,7 +505,6 @@ mod tests {
                     physical_root: local_root,
                     source_tree_sha256: [7; 32],
                     patched_crates_io: false,
-                    required_patch: None,
                 },
             ),
             package(
@@ -569,7 +615,6 @@ mod tests {
                 physical_root: local_root,
                 source_tree_sha256: [7; 32],
                 patched_crates_io: false,
-                required_patch: None,
             },
         );
         local.local_manifest = Some(local_manifest);

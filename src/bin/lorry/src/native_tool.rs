@@ -331,12 +331,14 @@ mod tests {
                 },
             ),
         ]);
-        let remap = SourceRemap::required_patch(
+        let remap = SourceRemap::registry(
             PathBuf::from("/workspace").as_path(),
-            PathBuf::from("/workspace/.lorry/vendor/ring/source").as_path(),
+            &[1; 32],
             PathBuf::from("/repository/ring/source").as_path(),
         )
         .unwrap();
+        let mut expected_flags = OsString::from("-O2 -ffile-prefix-map=");
+        expected_flags.push(remap.rustc_argument());
         let projection = project(
             &configured,
             &BTreeSet::from([NativeToolRole::CCompiler, NativeToolRole::Archiver]),
@@ -346,7 +348,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             projection.environment["CFLAGS_x86_64_unknown_linux_gnu"],
-            "-O2 -ffile-prefix-map=/repository/ring/source=.lorry/vendor/ring/source"
+            expected_flags
         );
         assert_eq!(
             projection.environment["ARFLAGS_x86_64_unknown_linux_gnu"],

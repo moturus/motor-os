@@ -1793,7 +1793,9 @@ mod tests {
         assert!(
             captured
                 .stderr
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .all(|chunk| chunk == b"12345678")
         );
         fs::remove_file(path).unwrap();

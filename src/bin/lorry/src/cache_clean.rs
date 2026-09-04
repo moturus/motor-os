@@ -77,6 +77,7 @@ mod tests {
         let fixture = Fixture::new("root");
         let root = fixture.0.join(".cache/lorry");
         fs::create_dir_all(root.join("v1/units")).unwrap();
+        fs::create_dir_all(root.join("sources/demo-1.0.0-digest")).unwrap();
         fs::write(fixture.0.join("keep"), "unrelated").unwrap();
 
         assert!(clean(&root).unwrap());

@@ -9,6 +9,7 @@ mod cargo_registry;
 mod change_review;
 mod clean;
 mod cli;
+mod compatibility;
 mod compile;
 mod config;
 #[allow(dead_code)]
@@ -23,6 +24,7 @@ mod identity;
 mod json;
 mod lockfile;
 mod manifest;
+mod metadata;
 mod native_tool;
 mod new_package;
 mod offline;
@@ -38,6 +40,7 @@ mod resolver;
 mod review;
 mod sandbox;
 mod source_tree;
+mod source_view;
 mod sparse;
 mod toml;
 mod toolchain;
@@ -49,7 +52,7 @@ mod vendor;
 mod vendor_lock;
 
 use cli::{Cli, Command};
-use diagnostic::Result;
+use diagnostic::{Error, Result};
 
 const VERSION: &str = "0.1.0";
 
@@ -110,8 +113,14 @@ where
         Command::New { path } => new_package::execute(path, cli.verbosity == cli::Verbosity::Quiet),
         Command::CacheClean => cache_clean::execute(cli.verbosity),
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
+        Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
+        Command::Metadata(options) => metadata::execute(&cli, options),
+        Command::Check(_) | Command::Tree(_) => Err(Error::failure(
+            "this Cargo-compatible command is not implemented yet",
+        )),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
+        Command::RustcQuery(options) => compatibility::rustc_query(&cli, options),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
@@ -125,7 +134,13 @@ fn print_help(topic: Option<&str>) {
             "Manage the global Lorry cache\n\nUsage: lorry [+toolchain] [GLOBAL] cache clean"
         ),
         Some("clean") => println!(
-            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE]"
+            "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE] [--target-dir DIRECTORY]"
+        ),
+        Some("check") => println!(
+            "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--examples] [--message-format FORMAT]"
+        ),
+        Some("metadata") => println!(
+            "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] --format-version 1 [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked]"
         ),
         Some("new") => {
             println!("Create a binary package\n\nUsage: lorry [+toolchain] [GLOBAL] new PATH")
@@ -138,6 +153,9 @@ fn print_help(topic: Option<&str>) {
         ),
         Some("test") => println!(
             "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [-p NAME] [--release|-r] [--target TRIPLE] [--strict-validation] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
+        ),
+        Some("tree") => println!(
+            "Display a package dependency tree\n\nUsage: lorry [+toolchain] [GLOBAL] tree [-p NAME] [--manifest-path PATH] [--target TRIPLE]"
         ),
         Some("vendor") => println!(
             "Vendor dependencies or select a transitive update\n\nUsage:\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] [--accept-all]\n  lorry [+toolchain] [GLOBAL] vendor [-p NAME] upgrade PACKAGE[@OLD_VERSION] --to VERSION"
@@ -158,11 +176,14 @@ fn print_help(topic: Option<&str>) {
              Commands:\n  \
              build                       Build the package\n  \
              cache                       Manage the global Lorry cache\n  \
+             check                       Check a package without linking\n  \
              clean                       Remove generated Lorry artifacts\n  \
+             metadata                    Describe a package graph\n  \
              new                         Create a binary package\n  \
              review                      Write the verified dependency review\n  \
              run                         Build and run its binary\n  \
              test                        Build and run unit and integration tests\n  \
+             tree                        Display a package dependency tree\n  \
              vendor                      Vendor dependencies (Stage 2)\n  \
              help                        Show this help"
         ),

@@ -22,7 +22,6 @@ use crate::toolchain::CfgSet;
 pub struct Catalog {
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
-    required_patches: Vec<RequiredPatchGuard>,
     locked_repository: Option<LockedRepository>,
     proc_macros: BTreeSet<PackageKey>,
 }
@@ -132,38 +131,12 @@ impl Catalog {
                             patched_crates_io: true,
                             ..
                         }
+                        | ResolvedSource::Git {
+                            patched_crates_io: true,
+                            ..
+                        }
                 )
         })
-    }
-
-    pub(crate) fn register_required_patch(
-        &mut self,
-        id: &str,
-        name: &str,
-        version: Version,
-        provenance: &std::path::Path,
-        failure: Option<String>,
-    ) -> Result<()> {
-        if let Some(existing) = self
-            .required_patches
-            .iter()
-            .find(|guard| guard.name == name && guard.version == version)
-        {
-            return Err(Error::failure(format!(
-                "required patch `{id}` from `{}` conflicts with `{}` from `{}`: both guard `{name} {version}`",
-                provenance.display(),
-                existing.id,
-                existing.provenance.display()
-            )));
-        }
-        self.required_patches.push(RequiredPatchGuard {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            version,
-            provenance: provenance.to_owned(),
-            failure,
-        });
-        Ok(())
     }
 
     pub(crate) fn insert_path_patch(
@@ -172,7 +145,6 @@ impl Catalog {
         logical_root: PathBuf,
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
-        required_patch: Option<String>,
     ) -> Result<()> {
         let candidate = local_candidate(
             manifest,
@@ -180,13 +152,15 @@ impl Catalog {
             physical_root,
             source_tree_sha256,
             true,
-            required_patch,
         )?;
         let records = self.records.entry(candidate.name.clone()).or_default();
         if records.iter().any(|existing| {
             matches!(
                 existing.source,
                 ResolvedSource::Path {
+                    patched_crates_io: true,
+                    ..
+                } | ResolvedSource::Git {
                     patched_crates_io: true,
                     ..
                 }
@@ -222,7 +196,6 @@ impl Catalog {
             physical_root.clone(),
             *source_tree_sha256,
             false,
-            None,
         )?;
         candidate.source = source;
         let records = self.records.entry(candidate.name.clone()).or_default();
@@ -243,18 +216,21 @@ impl Catalog {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn contains_required_patch(&self, id: &str) -> bool {
-        self.records.values().flatten().any(|candidate| {
-            matches!(
-                &candidate.source,
-                ResolvedSource::Path {
-                    patched_crates_io: true,
-                    required_patch: Some(required),
-                    ..
-                } if required == id
-            )
-        })
+    pub(crate) fn insert_git_patch(
+        &mut self,
+        manifest: Manifest,
+        mut source: ResolvedSource,
+    ) -> Result<()> {
+        let ResolvedSource::Git {
+            patched_crates_io, ..
+        } = &mut source
+        else {
+            return Err(Error::failure(
+                "internal Git patch candidate has a non-Git source",
+            ));
+        };
+        *patched_crates_io = true;
+        self.insert_git(manifest, source)
     }
 
     fn prepare(&mut self, dependency: &mut CandidateDependency) -> Result<()> {
@@ -304,14 +280,8 @@ impl Catalog {
         if self.paths.insert(canonical.clone(), key.clone()).is_some() {
             return Ok(());
         }
-        let candidate = local_candidate(
-            manifest,
-            canonical.clone(),
-            canonical,
-            tree.sha256,
-            false,
-            None,
-        )?;
+        let candidate =
+            local_candidate(manifest, canonical.clone(), canonical, tree.sha256, false)?;
         debug_assert_eq!(candidate.version, version);
         let records = self.records.entry(candidate.name.clone()).or_default();
         records.push(candidate);
@@ -333,11 +303,14 @@ impl Catalog {
             .collect::<Vec<_>>();
         let source = repository.source.clone();
 
-        let has_path_candidate = self.records(&dependency.package).iter().any(|candidate| {
+        let has_patch_candidate = self.records(&dependency.package).iter().any(|candidate| {
             dependency.requirement.matches(&candidate.version)
                 && matches!(
                     candidate.source,
                     ResolvedSource::Path {
+                        patched_crates_io: true,
+                        ..
+                    } | ResolvedSource::Git {
                         patched_crates_io: true,
                         ..
                     }
@@ -390,7 +363,7 @@ impl Catalog {
             self.insert(record)?;
             available = true;
         }
-        if available || has_path_candidate {
+        if available || has_patch_candidate {
             return Ok(());
         }
         if missing.is_empty() {
@@ -481,7 +454,6 @@ fn local_candidate(
     physical_root: PathBuf,
     source_tree_sha256: [u8; 32],
     patched_crates_io: bool,
-    required_patch: Option<String>,
 ) -> Result<Candidate> {
     let version = Version::parse(&manifest.version.original).map_err(|error| {
         Error::failure(format!(
@@ -545,7 +517,6 @@ fn local_candidate(
             physical_root,
             source_tree_sha256,
             patched_crates_io,
-            required_patch,
         },
         proc_macro: manifest
             .library
@@ -562,15 +533,6 @@ struct Candidate {
     source: ResolvedSource,
     local_manifest: Option<Manifest>,
     proc_macro: bool,
-}
-
-#[derive(Clone, Debug)]
-struct RequiredPatchGuard {
-    id: String,
-    name: String,
-    version: Version,
-    provenance: PathBuf,
-    failure: Option<String>,
 }
 
 impl std::ops::Deref for Candidate {
@@ -720,7 +682,6 @@ pub enum ResolvedSource {
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
         patched_crates_io: bool,
-        required_patch: Option<String>,
     },
     Git {
         cargo_source: String,
@@ -733,6 +694,7 @@ pub enum ResolvedSource {
         logical_root: PathBuf,
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
+        patched_crates_io: bool,
     },
 }
 
@@ -1517,14 +1479,12 @@ fn solve(
         }
     }
 
-    Err(required_patch_failure(catalog, &event)
-        .or(last_failure)
-        .unwrap_or_else(|| {
-            Failure::new(format!(
-                "no version of `{}` matches `{}`",
-                event.dependency.package, event.dependency.requirement
-            ))
-        }))
+    Err(last_failure.unwrap_or_else(|| {
+        Failure::new(format!(
+            "no version of `{}` matches `{}`",
+            event.dependency.package, event.dependency.requirement
+        ))
+    }))
 }
 
 fn fulfill(
@@ -1787,7 +1747,6 @@ fn candidates(
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
         .filter(|record| event.dependency.requirement.matches(&record.version))
-        .filter(|candidate| required_patch_allows(catalog, event, candidate))
         .filter(|candidate| !registry_candidate_is_patched(catalog, event, candidate))
         .filter(|record| {
             !record.yanked
@@ -1826,24 +1785,6 @@ fn candidates(
     candidates
 }
 
-fn required_patch_allows(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
-    if event.dependency.source != RequirementSource::CratesIo {
-        return true;
-    }
-    let Some(guard) = catalog.required_patches.iter().find(|guard| {
-        guard.name == candidate.name && same_semver_identity(&guard.version, &candidate.version)
-    }) else {
-        return true;
-    };
-    matches!(
-        &candidate.source,
-        ResolvedSource::Path {
-            required_patch: Some(required),
-            ..
-        } if required == &guard.id
-    )
-}
-
 fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
     if event.dependency.source != RequirementSource::CratesIo
         || !matches!(candidate.source, ResolvedSource::CratesIo { .. })
@@ -1857,26 +1798,12 @@ fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &C
                 ResolvedSource::Path {
                     patched_crates_io: true,
                     ..
+                } | ResolvedSource::Git {
+                    patched_crates_io: true,
+                    ..
                 }
             )
-            && required_patch_allows(catalog, event, replacement)
     })
-}
-
-fn required_patch_failure(catalog: &Catalog, event: &Event) -> Option<Failure> {
-    if event.dependency.source != RequirementSource::CratesIo {
-        return None;
-    }
-    catalog
-        .required_patches
-        .iter()
-        .find(|guard| {
-            guard.name == event.dependency.package
-                && event.dependency.requirement.matches(&guard.version)
-                && guard.failure.is_some()
-        })
-        .and_then(|guard| guard.failure.as_deref())
-        .map(Failure::new)
 }
 
 fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
@@ -1933,6 +1860,14 @@ fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> b
             },
             RequirementSource::CratesIo,
         ) => *patched_crates_io && !logical_root.as_os_str().is_empty(),
+        (
+            ResolvedSource::Git {
+                logical_root,
+                patched_crates_io,
+                ..
+            },
+            RequirementSource::CratesIo,
+        ) => *patched_crates_io && !logical_root.as_os_str().is_empty(),
         (ResolvedSource::Path { logical_root, .. }, RequirementSource::Path(required)) => {
             logical_root == required
         }
@@ -1945,9 +1880,7 @@ fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> b
             RequirementSource::Path(_) | RequirementSource::Git(_),
         )
         | (ResolvedSource::Path { .. }, RequirementSource::Git(_))
-        | (ResolvedSource::Git { .. }, RequirementSource::CratesIo | RequirementSource::Path(_)) => {
-            false
-        }
+        | (ResolvedSource::Git { .. }, RequirementSource::Path(_)) => false,
     }
 }
 
@@ -2269,6 +2202,67 @@ mod tests {
         assert_eq!(resolution.packages.len(), 2);
         assert_eq!(selected(&resolution, "a").len(), 1);
         assert_eq!(selected(&resolution, "b").len(), 1);
+    }
+
+    #[test]
+    fn git_patch_satisfies_crates_io_without_losing_git_identity() {
+        let root = manifest("demo = \"=1.2.3\"", "", "2");
+        let patched = Manifest::parse(
+            Path::new("/git/demo"),
+            Path::new("/git/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let cargo_source = "git+https://example.com/demo.git?branch=motor#0123456789abcdef0123456789abcdef01234567";
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record("demo", "1.2.3", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert_git_patch(
+                patched,
+                ResolvedSource::Git {
+                    cargo_source: cargo_source.to_owned(),
+                    git_url: "https://example.com/demo.git".to_owned(),
+                    requested_revision: "motor".to_owned(),
+                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    git_tree: "1".repeat(40),
+                    repository_tree_sha256: [2; 32],
+                    package_path: String::new(),
+                    logical_root: PathBuf::from("/git/demo"),
+                    physical_root: PathBuf::from("/git/demo"),
+                    source_tree_sha256: [3; 32],
+                    patched_crates_io: false,
+                },
+            )
+            .unwrap();
+        catalog.locked_repository = Some(LockedRepository {
+            source: LockedRegistrySource::Lorry(
+                RepositorySet::open(
+                    &crate::config::Repositories::default(),
+                    DEFAULT_TREE_LIMITS,
+                    16 * 1024 * 1024,
+                )
+                .unwrap(),
+            ),
+            packages: BTreeMap::new(),
+        });
+
+        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let [package] = resolution.packages.as_slice() else {
+            panic!("expected one patched package");
+        };
+        assert_eq!(
+            package.key.source,
+            PackageSourceKey::Git(cargo_source.to_owned())
+        );
+        assert!(matches!(
+            package.source,
+            ResolvedSource::Git {
+                patched_crates_io: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2966,7 +2960,6 @@ mod tests {
                 physical_root,
                 source_tree_sha256,
                 patched_crates_io,
-                required_patch,
             } = &package.source
             else {
                 panic!("local fixture resolved as a registry package");
@@ -2975,7 +2968,6 @@ mod tests {
             assert_eq!(logical_root, physical_root);
             assert_ne!(*source_tree_sha256, [0_u8; 32]);
             assert!(!patched_crates_io);
-            assert!(required_patch.is_none());
             assert_eq!(
                 package.local_manifest.as_ref().unwrap().name,
                 package.key.name

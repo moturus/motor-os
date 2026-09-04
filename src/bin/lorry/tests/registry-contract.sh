@@ -31,7 +31,7 @@ REPOSITORY="$HOME_DIR/.config/lorry/vendor"
 CONFIG="$HOME_DIR/.config/lorry/lorry.toml"
 mkdir -p "$PROJECT/src" "$HOME_DIR/.config/lorry" \
     "$REPOSITORY/objects/crates-io/sha256" \
-    "$REPOSITORY/objects/seeded-git/sha256" "$REPOSITORY/.staging"
+    "$REPOSITORY/.staging"
 
 cat >"$PROJECT/Cargo.toml" <<'EOF'
 [package]
@@ -73,6 +73,9 @@ user = "$REPOSITORY"
 
 [network]
 curl = "$WORK/crates-io/curl"
+
+[cache]
+directory = "$WORK/cache"
 
 [policy]
 default = "allow"
@@ -120,4 +123,19 @@ if [ -f "$ARGS" ] && grep -F "https://static.crates.io/" "$ARGS" >/dev/null; the
     fail "warm acquisition attempted to download the selected archive"
 fi
 
-echo "PASS: cached crates.io acquisition published and reused a verified object"
+echo "== Publishing a stable metadata source view =="
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" metadata --format-version 1 \
+    --filter-platform x86_64-unknown-linux-gnu --locked) >"$WORK/metadata.json"
+SOURCE_VIEW="$(find "$WORK/cache/sources" -mindepth 1 -maxdepth 1 \
+    -type d -name 'cfg-if-1.0.4-*' -print -quit)"
+[ -n "$SOURCE_VIEW" ] || fail "metadata did not publish the registry source view"
+grep -F "\"manifest_path\":\"$SOURCE_VIEW/Cargo.toml\"" \
+    "$WORK/metadata.json" >/dev/null ||
+    fail "metadata did not reference the stable registry source view"
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" metadata --format-version 1 \
+    --filter-platform x86_64-unknown-linux-gnu --locked) >"$WORK/metadata-again.json"
+cmp "$WORK/metadata.json" "$WORK/metadata-again.json"
+
+echo "PASS: cached crates.io acquisition and metadata source views are stable"

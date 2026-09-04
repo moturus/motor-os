@@ -51,7 +51,6 @@ enum SourceKind {
     CratesIo,
     Git,
     Path,
-    SystemVendoredPath,
 }
 
 impl SourceKind {
@@ -60,7 +59,6 @@ impl SourceKind {
             Self::CratesIo => "crates.io",
             Self::Git => "git",
             Self::Path => "path",
-            Self::SystemVendoredPath => "system-vendored-path",
         }
     }
 }
@@ -368,7 +366,6 @@ impl PackageEvidence {
         let ResolvedSource::Path {
             physical_root,
             source_tree_sha256,
-            required_patch,
             ..
         } = &package.source
         else {
@@ -398,12 +395,7 @@ impl PackageEvidence {
                 package.key.name, package.key.version
             )));
         }
-        let exclusions = if required_patch.is_some() {
-            Exclusions::None
-        } else {
-            Exclusions::GitAndTarget
-        };
-        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, exclusions)?;
+        let tree = Tree::scan(physical_root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
         if tree.sha256 != *source_tree_sha256 {
             return Err(Error::failure(format!(
                 "path source for `{} {}` changed after resolution",
@@ -479,16 +471,10 @@ fn preliminary_facts(package: &ResolvedPackage) -> Facts<'_> {
             license: Fact::Unknown,
         },
         ResolvedSource::Path {
-            source_tree_sha256,
-            required_patch,
-            ..
+            source_tree_sha256, ..
         } => Facts {
             package,
-            source: if required_patch.is_some() {
-                SourceKind::SystemVendoredPath
-            } else {
-                SourceKind::Path
-            },
+            source: SourceKind::Path,
             checksum: Fact::Absent,
             source_tree_sha256: Fact::Value(hex(source_tree_sha256)),
             license: package
@@ -534,27 +520,17 @@ fn source_kind(package: &ResolvedPackage) -> SourceKind {
     match &package.source {
         ResolvedSource::CratesIo { .. } => SourceKind::CratesIo,
         ResolvedSource::Git { .. } => SourceKind::Git,
-        ResolvedSource::Path {
-            required_patch: Some(_),
-            ..
-        } => SourceKind::SystemVendoredPath,
         ResolvedSource::Path { .. } => SourceKind::Path,
     }
 }
 
 fn base_requires_allow(policy: &Policy, source: SourceKind) -> bool {
-    source == SourceKind::SystemVendoredPath
-        || (matches!(source, SourceKind::CratesIo | SourceKind::Git)
-            && policy.default == PolicyDefault::Deny)
+    matches!(source, SourceKind::CratesIo | SourceKind::Git)
+        && policy.default == PolicyDefault::Deny
 }
 
 fn check_path_root(policy: &Policy, package: &ResolvedPackage) -> Result<()> {
-    let ResolvedSource::Path {
-        physical_root,
-        required_patch: None,
-        ..
-    } = &package.source
-    else {
+    let ResolvedSource::Path { physical_root, .. } = &package.source else {
         return Ok(());
     };
     if policy.path_roots.is_empty()
@@ -633,9 +609,7 @@ fn script_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
     match source {
         SourceKind::CratesIo => true,
-        SourceKind::Git | SourceKind::Path | SourceKind::SystemVendoredPath => {
-            rule.source.as_deref() == Some(source.policy_name())
-        }
+        SourceKind::Git | SourceKind::Path => rule.source.as_deref() == Some(source.policy_name()),
     }
 }
 
@@ -645,9 +619,7 @@ fn proc_macro_rule_authorizes(rule: &PolicyRule, source: SourceKind) -> bool {
     }
     match source {
         SourceKind::CratesIo => true,
-        SourceKind::Git | SourceKind::Path | SourceKind::SystemVendoredPath => {
-            rule.source.as_deref() == Some(source.policy_name())
-        }
+        SourceKind::Git | SourceKind::Path => rule.source.as_deref() == Some(source.policy_name()),
     }
 }
 
@@ -974,7 +946,6 @@ mod tests {
                 physical_root: root.to_owned(),
                 source_tree_sha256: checksum(7),
                 patched_crates_io: false,
-                required_patch: None,
             },
             local_manifest: Some(manifest),
             feature_sets: BTreeMap::new(),
@@ -1298,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn admits_every_object_with_the_external_generated_policy_when_requested() {
+    fn admits_every_registry_object_with_the_external_policy_when_requested() {
         let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
             return;
         };
@@ -1366,41 +1337,10 @@ mod tests {
             }
         }
 
-        let rule = &config.required_patches["ring-0_17_14"];
-        let object = repositories
-            .lookup_seeded_git(&rule.source_tree_sha256)
-            .unwrap()
-            .unwrap();
-        let manifest = Manifest::load_path_dependency(&object.root.join("source")).unwrap();
-        let logical_root = PathBuf::from("/fixture/.lorry/vendor/ring-0_17_14/source");
-        let ring = ResolvedPackage {
-            key: PackageKey {
-                name: object.name.clone(),
-                version: object.version.clone(),
-                source: PackageSourceKey::Path(logical_root.clone()),
-            },
-            source: ResolvedSource::Path {
-                logical_root,
-                physical_root: manifest.root.clone(),
-                source_tree_sha256: object.source_tree_sha256,
-                patched_crates_io: true,
-                required_patch: Some("ring-0_17_14".to_owned()),
-            },
-            local_manifest: Some(manifest),
-            feature_sets: BTreeMap::new(),
-            compile_kinds: [crate::resolver::CompileKind::Target].into(),
-            target_features: BTreeSet::new(),
-            host_features: BTreeSet::new(),
-            edges: Vec::new(),
-            lock_edges: Vec::new(),
-        };
-        evidence.insert(ring.key.clone(), PackageEvidence::from_path(&ring).unwrap());
-        packages.push(ring);
-
         packages.sort_by(|left, right| left.key.cmp(&right.key));
         let resolution = make_resolution(packages);
         let pass = preflight(&config.policy, &resolution).unwrap();
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(admission.packages.len(), 46);
+        assert_eq!(admission.packages.len(), 45);
     }
 }

@@ -244,9 +244,9 @@ The supported manifest surface includes:
 - normal crates.io, Git, and path dependencies in string/table forms, renaming,
   optional dependencies, default-feature control, feature-to-dependency
   forwarding, and target-conditioned dependency tables;
-- exact local path `[patch.crates-io]` replacements required by policy.
-- root `[patch.crates-io]` Git entries accepted as input to `lorry vendor`,
-  which rewrites them to local path patches before resolution;
+- exact local path `[patch.crates-io]` replacements required by policy;
+- root `[patch.crates-io]` Git entries with a matching exact Git source in
+  Cargo.lock, materialized without modifying any input manifest;
 - dependency libraries declared with `[lib] proc-macro = true`; these are
   compiler-host units and require an explicit procedural-macro grant.
 
@@ -269,7 +269,7 @@ profile keys, workspace inheritance, artifact dependencies, alternative
 registries, non-crates.io patches, selecting a
 procedural-macro package as the root, and CLI feature-selection flags.
 Build, run, and test reject an unmaterialized crates.io Git patch and direct
-the user to `lorry vendor`; they never fetch or rewrite it themselves.
+the user to `lorry vendor`; they never fetch or modify it themselves.
 Documentation tests are not run because native Motor has no `rustdoc`; the
 omission must be reported.
 
@@ -307,17 +307,17 @@ settings must be rejected rather than adopted or ignored.
   lock byte-for-byte and writes canonical version 4 when creation or repair is
   required. When portable admission state exists, an ordinary vendor operation
   reconciles dependency-intent or lock-graph drift only after interactive
-  review; `--accept-all` cannot approve a change.
+  review or complete-candidate approval with `--accept-all`.
   If the visible inputs no longer reconstruct the committed review, it shows
   the prior commitment and complete verified candidate instead of claiming a
   semantic diff.
 - An explicit upgrade changes only the selected package and packages forced to
   move by its requirements. Every other compatible locked identity remains
   preferred.
-- Before normal resolution, `lorry vendor` materializes supported root
-  crates.io Git patches, locates the unique matching package manifest in each
-  snapshot, and atomically rewrites them to local path patches. It also
-  materializes exact locked direct Git sources needed by the root manifest.
+- Before normal resolution, `lorry vendor` materializes the exact locked Git
+  sources needed by direct Git dependencies and root crates.io Git patches.
+  Both retain their Cargo-compatible Git identities; no input manifest is
+  modified.
 - Resolver versions 1, 2, and 3 must follow Cargo-compatible feature,
   target, yanked-version, candidate-ordering/backtracking, and Rust-version
   behavior for the supported single-root model.
@@ -346,21 +346,13 @@ settings must be rejected rather than adopted or ignored.
   command or normal packaging input. Those entries must not enter Lorry's
   production repository, repository fingerprint, or admission policy.
 
-Required source rules are layered `lorry.toml` data, not hard-coded crate
-exceptions. A selected required patch must have a semantically matching root
-`[patch.crates-io]` path entry and Cargo.lock path-package node. Its logical
-path is `.lorry/vendor/<rule-id>/source`; Lorry resolves that exact identity
-through its repositories without materializing the path in the project.
-Build/run/test must reject missing or incorrect declarations and must not edit
-them. `Lorry.lock` is unsupported and must be rejected.
+`Lorry.lock` is unsupported and must be rejected.
 
 Normal repository builds must present immutable dependency sources through
 host-independent logical paths without changing their physical storage:
 
 - each crates.io object has the logical root
   `.lorry/registry/sha256/<locked-checksum>/source`;
-- a required patch retains its declared
-  `.lorry/vendor/<rule-id>/source` logical root;
 - each ordinary non-root path dependency has the logical root
   `.lorry/path/sha256/<source-tree-sha256>/source`;
 - dependency rustc runs from the workspace root and receives an internal
@@ -499,9 +491,9 @@ The sections record, respectively, reviewed build contexts; direct registry
 and Git semantics; root feature definitions; crates.io patch aliasing; every
 registry and Git lock node including inactive nodes; per-context selection,
 compile kinds, and features; verified evidence for the union of selected
-immutable identities; and explicit execution grants. Path packages and
-required patches remain outside portable admission and retain their
-independent policy and source-tree checks.
+immutable identities; and explicit execution grants. Path packages remain
+outside portable admission and retain their independent policy and source-tree
+checks.
 
 The `registry-source` and `git-source` booleans are verified manifest evidence.
 The matching `capability` booleans are explicit grants and may be true only
@@ -563,8 +555,8 @@ returns a truncated document.
 
 Build, run, and test never create or modify portable state. Before source
 lookup or compilation, they compare it with registry/Git dependency semantics,
-the Cargo.lock immutable-source graph, and the selected target. Required patches and
-ordinary paths remain exact policy/source inputs outside this registry state.
+the Cargo.lock immutable-source graph, and the selected target. Ordinary paths
+remain exact policy/source inputs outside this registry state.
 A mismatch fails closed and reports the
 old and new exact package identities and directs the user to `lorry vendor`.
 Formatting-only changes to Cargo.toml or Cargo.lock do not invalidate semantic
@@ -572,8 +564,8 @@ state.
 
 Exact state entries act as generated allow rules during policy evaluation.
 They may satisfy default-deny admission but must never override an explicit
-deny, system constraint, required-patch rule, resource limit, source-integrity
-check, or native-tool restriction. Prepared source evidence must reproduce the
+deny, system constraint, resource limit, source-integrity check, or native-tool
+restriction. Prepared source evidence must reproduce the
 state exactly. A project without portable state uses the existing configured
 policy as a compatibility mode; its next successful ordinary vendor operation
 creates state.
@@ -590,17 +582,17 @@ transitive crates.io identity and must appear at the requested version in the
 resulting graph.
 
 Before visible project changes, vendoring enforces explicit denies, system
-constraints, required patches, HTTPS and archive integrity, source identity,
-and all resource limits. Lorry presents a deterministic graph and evidence
+constraints, HTTPS and archive integrity, source identity, and all resource
+limits. Lorry presents a deterministic graph and evidence
 difference including requirements, package additions/removals, checksums,
 licenses, source digests, build scripts, and native-tool roles.
 
 An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
 package and capability changes. A new native-tool role requires an existing
-administrator grant. `--accept-all` cannot approve a change to existing
-admission or grant a new build-script, procedural-macro, or native-tool
-capability.
+administrator grant. `--accept-all` approves all displayed package and
+capability changes that survive explicit policy, integrity, and resource-limit
+checks; it grants no capability that those checks reject.
 
 Verified immutable repository objects may be published before project files.
 Vendoring atomically replaces Cargo.lock when needed and writes portable state
@@ -627,14 +619,14 @@ Linux merges:
 
 Linux must not read or write `/etc` or redirect its control root through
 `XDG_CONFIG_HOME`. Tables merge recursively; later scalars/arrays replace
-earlier values. Policy rule and required-patch IDs accumulate and cannot erase
-earlier denies/requirements. System constraints may lock keys or table
-prefixes against weaker later configuration.
+earlier values. Policy rule IDs accumulate and cannot erase earlier denies.
+System constraints may lock keys or table prefixes against weaker later
+configuration.
 
 Configuration version 1 defines compiler selection, the three repository
 roles, retention flags, the global cache directory, vendor targets/host
 inclusion, curl and CA paths, test extraction root, target-specific native
-tools, admission rules/limits, required patches, and system constraints.
+tools, admission rules/limits, and system constraints.
 
 `cache.directory` is an absolute normalized path owned by system or user
 configuration; repository-local configuration cannot set it. It defaults to
@@ -661,14 +653,11 @@ Repository format 1 uses SHA-256-addressed immutable objects:
   repository.toml
   objects/
     crates-io/sha256/<prefix>/<archive-sha256>/
-    seeded-git/sha256/<prefix>/<source-tree-sha256>/
   .staging/  # writable repositories only
 ```
 
 Crates.io objects record canonical package metadata, the exact sparse-index
-record, and retained archive/source forms. Seeded Git provenance objects
-record the pinned URL, commit/tree evidence, patch inputs, and resulting
-source-tree digest. Complete source trees use the canonical
+record, and retained archive/source forms. Complete source trees use the canonical
 `lorry-source-tree-v1` digest and manifest. Ordinary builds trust bounded
 object metadata and the digest established by immutable publication. Strict
 builds fully reverify every retained archive and source tree before use.
@@ -738,24 +727,36 @@ repository snapshot. An object is published at
 `.lorry/vendor/git/<sha256-cargo-source>/source` with `git.toml` provenance.
 
 A root `[patch.crates-io]` Git entry accepts the same URL and selector surface.
-Lorry inspects it before the ordinary manifest load, retains a matching locked
-commit or resolves the requested ref once, records evidence before approval,
-publishes the source at `.lorry/vendor/<alias>/source`, and atomically rewrites
-only that manifest value to a local path patch. A later registry-vendoring
-failure may therefore leave this completed materialization in place; a rerun
-resumes from it.
+Its package must have a matching exact `git+` source in Cargo.lock. Lorry
+materializes that locked source in the same content-addressed Git object
+layout, marks the selected package as a crates.io replacement, and preserves
+the Git identity in resolution, review, and lock rendering. Input workspace
+and member manifests remain byte-identical. Legacy explicit path patches keep
+their declared path identities.
 
-Both object forms use a shallow depth-one fetch and record the canonical URL,
-request, exact commit, Git tree, canonical source SHA-256, file count, and
-bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs and
-directories only. Symbolic links, submodules, special modes, and traversal are
-rejected. Build, run, and test remain offline and verify the published source
-tree and provenance before resolving or compiling it.
+On every networked vendor run, default HEAD, branch, tag, and named `rev`
+patch selectors are resolved from the advertised remote refs. A 7- through
+40-digit hexadecimal `rev` is an exact pinned commit and is not advanced.
+Moved selectors and first materializations are verified as one candidate.
+The review lists each affected patch, its old and new full commit, Git tree,
+source digest, and graph/capability effects; a moved tag is prominently marked
+as retargeted. An interactive run asks once and defaults to no. A
+non-interactive changed candidate fails unless `--accept-all` approves the
+whole candidate. Explicit policy denials, integrity checks, and limits always
+retain precedence.
 
-Decline or failure before commit must expose no new object or lock. Concurrent
-publication may accept an independently published destination only after full
-identity verification. A corrupt higher-priority object is a hard error, not
-a reason to fall through or repair.
+Both dependency forms use a shallow depth-one fetch and record the canonical
+URL, request, exact commit, Git tree, canonical source SHA-256, file count,
+and bytes. Extraction accepts bounded portable UTF-8 paths and regular blobs
+and directories only. Symbolic links, submodules, special modes, and traversal
+are rejected. Build, run, and test remain offline and verify the published
+source tree and provenance before resolving or compiling it.
+
+A decline or failure may leave an unreferenced, completely verified immutable
+Git object, but exposes no changed manifest, lock, or admission state.
+Concurrent publication may accept an independently published destination only
+after full identity verification. A corrupt higher-priority object is a hard
+error, not a reason to fall through or repair.
 
 New non-path packages are default-deny. Any matching deny vetoes admission;
 with default deny, at least one allow must match. Integrity checks cannot be
@@ -990,7 +991,7 @@ artifact; they must not become a Lorry panic or a missing-output error.
 
 Lorry stores verified library and procedural-macro outputs plus build-script
 `OUT_DIR`/directive results.
-Immutable crates.io units and reviewed required-patch units are stored in the
+Immutable crates.io and Git units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
 `/devtools/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`

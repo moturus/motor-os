@@ -1,4 +1,4 @@
-use clap::builder::PossibleValuesParser;
+use clap::builder::{NonEmptyStringValueParser, PossibleValuesParser};
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
 
@@ -33,14 +33,31 @@ pub struct Cli {
 pub enum Command {
     Build(BuildOptions),
     CacheClean,
-    Clean(BuildOptions),
+    Check(CheckOptions),
+    Clean(CleanOptions),
+    LocateProject { manifest_path: String },
+    Metadata(MetadataOptions),
     New { path: String },
     Review,
     Run(RunOptions),
+    RustcQuery(RustcQueryOptions),
     Test(TestOptions),
+    Tree(TreeOptions),
     Vendor(VendorOptions),
     Help(Option<String>),
     Version,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RustcQueryOptions {
+    pub target: String,
+    pub kind: RustcQueryKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RustcQueryKind {
+    Cfg,
+    TargetSpecJson,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +66,46 @@ pub struct BuildOptions {
     pub target: Option<String>,
     pub bin: Option<String>,
     pub validation: ValidationMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CleanOptions {
+    pub build: BuildOptions,
+    pub target_dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataOptions {
+    pub manifest_path: Option<String>,
+    pub no_deps: bool,
+    pub filter_platform: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageFormat {
+    Human,
+    Json,
+    JsonDiagnosticRenderedAnsi,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckOptions {
+    pub manifest_path: Option<String>,
+    pub target_dir: Option<String>,
+    pub target: Option<String>,
+    pub workspace: bool,
+    pub keep_going: bool,
+    pub all_targets: bool,
+    pub lib: bool,
+    pub bins: bool,
+    pub examples: bool,
+    pub message_format: MessageFormat,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreeOptions {
+    pub manifest_path: Option<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,8 +174,10 @@ impl Cli {
                 std::iter::once("lorry".to_owned()).chain(arguments.iter().cloned()),
             )
             .map_err(clap_error)?;
-        if !matches!(matches.subcommand_name(), Some("run") | Some("test"))
-            && arguments.iter().any(|argument| argument == "--")
+        if !matches!(
+            matches.subcommand_name(),
+            Some("run") | Some("rustc") | Some("test")
+        ) && arguments.iter().any(|argument| argument == "--")
         {
             return Err(Error::usage(
                 "this command does not accept arguments after `--`",
@@ -131,7 +190,18 @@ impl Cli {
             Some("never") => Color::Never,
             Some(_) => unreachable!("Clap restricts --color values"),
         };
-        let verbosity = if matches.get_flag("quiet") {
+        let command_quiet = matches
+            .subcommand()
+            .and_then(|(_, command)| command.try_get_one::<bool>("command-quiet").ok().flatten())
+            .copied()
+            .unwrap_or(false);
+        if command_quiet && (matches.get_flag("quiet") || matches.get_flag("verbose")) {
+            return Err(Error::usage(
+                "conflicting or duplicate verbosity option",
+                "pass one of --quiet or --verbose exactly once",
+            ));
+        }
+        let verbosity = if matches.get_flag("quiet") || command_quiet {
             Verbosity::Quiet
         } else if matches.get_flag("verbose") {
             Verbosity::Verbose
@@ -254,7 +324,10 @@ fn command_line() -> ClapCommand {
                         .dont_delimit_trailing_values(true),
                 ),
         )
-        .subcommand(build_command("clean").dont_delimit_trailing_values(true))
+        .subcommand(check_command())
+        .subcommand(clean_command().dont_delimit_trailing_values(true))
+        .subcommand(locate_project_command())
+        .subcommand(metadata_command())
         .subcommand(
             ClapCommand::new("new")
                 .disable_help_flag(true)
@@ -268,7 +341,9 @@ fn command_line() -> ClapCommand {
                 .arg(package_argument()),
         )
         .subcommand(run_command())
+        .subcommand(rustc_query_command())
         .subcommand(test_command())
+        .subcommand(tree_command())
         .subcommand(vendor_command())
         .subcommand(
             ClapCommand::new("help")
@@ -278,10 +353,176 @@ fn command_line() -> ClapCommand {
                     Arg::new("topic")
                         .num_args(0..=1)
                         .value_parser(PossibleValuesParser::new([
-                            "build", "cache", "clean", "new", "review", "run", "test", "vendor",
-                            "help",
+                            "build", "cache", "check", "clean", "metadata", "new", "review", "run",
+                            "test", "tree", "vendor", "help",
                         ])),
                 ),
+        )
+}
+
+fn manifest_path_argument() -> Arg {
+    Arg::new("manifest-path")
+        .long("manifest-path")
+        .value_name("PATH")
+        .num_args(1)
+        .action(ArgAction::Set)
+        .value_parser(NonEmptyStringValueParser::new())
+}
+
+fn metadata_command() -> ClapCommand {
+    ClapCommand::new("metadata")
+        .disable_help_flag(true)
+        .dont_delimit_trailing_values(true)
+        .arg(package_argument())
+        .arg(manifest_path_argument())
+        .arg(
+            Arg::new("format-version")
+                .long("format-version")
+                .value_parser(PossibleValuesParser::new(["1"]))
+                .required(true),
+        )
+        .arg(
+            Arg::new("no-deps")
+                .long("no-deps")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("filter-platform")
+                .long("filter-platform")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+        .arg(Arg::new("locked").long("locked").action(ArgAction::SetTrue))
+}
+
+fn check_command() -> ClapCommand {
+    ClapCommand::new("check")
+        .disable_help_flag(true)
+        .dont_delimit_trailing_values(true)
+        .arg(package_argument())
+        .arg(manifest_path_argument())
+        .arg(
+            Arg::new("target-dir")
+                .long("target-dir")
+                .value_name("DIRECTORY")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+        .arg(
+            Arg::new("workspace")
+                .long("workspace")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("command-quiet")
+                .long("quiet")
+                .short('q')
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("keep-going")
+                .long("keep-going")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("all-targets")
+                .long("all-targets")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(Arg::new("lib").long("lib").action(ArgAction::SetTrue))
+        .arg(Arg::new("bins").long("bins").action(ArgAction::SetTrue))
+        .arg(
+            Arg::new("examples")
+                .long("examples")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("message-format")
+                .long("message-format")
+                .value_name("FORMAT")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(PossibleValuesParser::new([
+                    "json",
+                    "json-diagnostic-rendered-ansi",
+                ])),
+        )
+}
+
+fn tree_command() -> ClapCommand {
+    ClapCommand::new("tree")
+        .disable_help_flag(true)
+        .dont_delimit_trailing_values(true)
+        .arg(package_argument())
+        .arg(manifest_path_argument())
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+}
+
+fn locate_project_command() -> ClapCommand {
+    ClapCommand::new("locate-project")
+        .disable_help_flag(true)
+        .dont_delimit_trailing_values(true)
+        .arg(
+            Arg::new("workspace")
+                .long("workspace")
+                .action(ArgAction::SetTrue)
+                .required(true),
+        )
+        .arg(
+            Arg::new("manifest-path")
+                .long("manifest-path")
+                .value_name("PATH")
+                .num_args(1)
+                .required(true),
+        )
+}
+
+fn rustc_query_command() -> ClapCommand {
+    ClapCommand::new("rustc")
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("unstable-options")
+                .short('Z')
+                .value_parser(PossibleValuesParser::new(["unstable-options"]))
+                .required(true),
+        )
+        .arg(
+            Arg::new("print")
+                .long("print")
+                .value_parser(PossibleValuesParser::new(["cfg", "target-spec-json"]))
+                .required(true),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .required(true),
+        )
+        .arg(
+            Arg::new("rustc-arguments")
+                .num_args(0..)
+                .last(true)
+                .allow_hyphen_values(true)
+                .action(ArgAction::Append),
         )
 }
 
@@ -303,6 +544,17 @@ fn build_command(name: &'static str) -> ClapCommand {
                 .action(ArgAction::Set),
         )
         .arg(package_argument())
+}
+
+fn clean_command() -> ClapCommand {
+    build_command("clean").arg(
+        Arg::new("target-dir")
+            .long("target-dir")
+            .value_name("DIRECTORY")
+            .num_args(1)
+            .action(ArgAction::Set)
+            .value_parser(NonEmptyStringValueParser::new()),
+    )
 }
 
 fn package_argument() -> Arg {
@@ -393,7 +645,44 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
             Some((name, _)) => unreachable!("unexpected cache subcommand {name}"),
             None => unreachable!("Clap requires a cache subcommand"),
         },
-        Some(("clean", options)) => Ok(Command::Clean(build_options(options, false))),
+        Some(("check", options)) => {
+            let message_format = match options
+                .get_one::<String>("message-format")
+                .map(String::as_str)
+            {
+                None => MessageFormat::Human,
+                Some("json") => MessageFormat::Json,
+                Some("json-diagnostic-rendered-ansi") => MessageFormat::JsonDiagnosticRenderedAnsi,
+                Some(_) => unreachable!("Clap restricts --message-format values"),
+            };
+            Ok(Command::Check(CheckOptions {
+                manifest_path: options.get_one::<String>("manifest-path").cloned(),
+                target_dir: options.get_one::<String>("target-dir").cloned(),
+                target: options.get_one::<String>("target").cloned(),
+                workspace: options.get_flag("workspace"),
+                keep_going: options.get_flag("keep-going"),
+                all_targets: options.get_flag("all-targets"),
+                lib: options.get_flag("lib"),
+                bins: options.get_flag("bins"),
+                examples: options.get_flag("examples"),
+                message_format,
+            }))
+        }
+        Some(("clean", options)) => Ok(Command::Clean(CleanOptions {
+            build: build_options(options, false),
+            target_dir: options.get_one::<String>("target-dir").cloned(),
+        })),
+        Some(("locate-project", options)) => Ok(Command::LocateProject {
+            manifest_path: options
+                .get_one::<String>("manifest-path")
+                .expect("Clap requires the manifest path")
+                .clone(),
+        }),
+        Some(("metadata", options)) => Ok(Command::Metadata(MetadataOptions {
+            manifest_path: options.get_one::<String>("manifest-path").cloned(),
+            no_deps: options.get_flag("no-deps"),
+            filter_platform: options.get_one::<String>("filter-platform").cloned(),
+        })),
         Some(("new", options)) => Ok(Command::New {
             path: options
                 .get_one::<String>("path")
@@ -419,6 +708,37 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 no_run: options.get_flag("no-run"),
                 bundle: options.get_flag("bundle"),
                 arguments,
+            }))
+        }
+        Some(("tree", options)) => Ok(Command::Tree(TreeOptions {
+            manifest_path: options.get_one::<String>("manifest-path").cloned(),
+            target: options.get_one::<String>("target").cloned(),
+        })),
+        Some(("rustc", options)) => {
+            let print = options
+                .get_one::<String>("print")
+                .expect("Clap requires the rustc print kind");
+            let trailing = values(options, "rustc-arguments");
+            let kind = match (print.as_str(), trailing.as_slice()) {
+                ("cfg", [optimize]) if optimize == "-O" => RustcQueryKind::Cfg,
+                ("target-spec-json", [unstable, value])
+                    if unstable == "-Z" && value == "unstable-options" =>
+                {
+                    RustcQueryKind::TargetSpecJson
+                }
+                _ => {
+                    return Err(Error::usage(
+                        "unsupported `lorry rustc` query form",
+                        "use one of the exact rust-analyzer compatibility queries",
+                    ));
+                }
+            };
+            Ok(Command::RustcQuery(RustcQueryOptions {
+                target: options
+                    .get_one::<String>("target")
+                    .expect("Clap requires the rustc target")
+                    .clone(),
+                kind,
             }))
         }
         Some(("vendor", options)) => {
@@ -552,19 +872,226 @@ mod tests {
     #[test]
     fn parses_clean_profile_and_target_selection() {
         assert_eq!(
-            parse(&["clean", "--release", "--target=x86_64-unknown-motor",])
-                .unwrap()
-                .command,
-            Command::Clean(BuildOptions {
-                release: true,
-                target: Some("x86_64-unknown-motor".to_owned()),
-                bin: None,
-                validation: ValidationMode::Trusted,
+            parse(&[
+                "clean",
+                "--release",
+                "--target=x86_64-unknown-motor",
+                "--target-dir",
+                "/tmp/editor-target",
+            ])
+            .unwrap()
+            .command,
+            Command::Clean(CleanOptions {
+                build: BuildOptions {
+                    release: true,
+                    target: Some("x86_64-unknown-motor".to_owned()),
+                    bin: None,
+                    validation: ValidationMode::Trusted,
+                },
+                target_dir: Some("/tmp/editor-target".to_owned()),
             })
         );
         assert!(parse(&["--use-cargo-registry", "clean"]).is_err());
         assert!(parse(&["clean", "--strict-validation"]).is_err());
         assert!(parse(&["clean", "--bin", "server"]).is_err());
+        assert!(parse(&["clean", "--target-dir="]).is_err());
+    }
+
+    #[test]
+    fn parses_exact_rust_analyzer_compatibility_queries() {
+        assert_eq!(
+            parse(&[
+                "locate-project",
+                "--workspace",
+                "--manifest-path",
+                "/project/Cargo.toml",
+            ])
+            .unwrap()
+            .command,
+            Command::LocateProject {
+                manifest_path: "/project/Cargo.toml".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "x86_64-unknown-motor",
+                "--",
+                "-O",
+            ])
+            .unwrap()
+            .command,
+            Command::RustcQuery(RustcQueryOptions {
+                target: "x86_64-unknown-motor".to_owned(),
+                kind: RustcQueryKind::Cfg,
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "rustc",
+                "-Zunstable-options",
+                "--print=target-spec-json",
+                "--target=x86_64-unknown-motor",
+                "--",
+                "-Z",
+                "unstable-options",
+            ])
+            .unwrap()
+            .command,
+            Command::RustcQuery(RustcQueryOptions {
+                target: "x86_64-unknown-motor".to_owned(),
+                kind: RustcQueryKind::TargetSpecJson,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_other_cargo_compatibility_forms() {
+        for input in [
+            &["locate-project", "--manifest-path", "/project/Cargo.toml"][..],
+            &["locate-project", "--workspace"],
+            &["rustc", "--print", "cfg", "--target", "triple", "--", "-O"],
+            &[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "triple",
+            ],
+            &[
+                "rustc",
+                "-Z",
+                "unstable-options",
+                "--print",
+                "cfg",
+                "--target",
+                "triple",
+                "--",
+                "--crate-type",
+                "lib",
+            ],
+            &["-Z", "unstable-options", "config", "get"],
+        ] {
+            assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn parses_cargo_form_metadata_and_tree() {
+        let metadata = parse(&[
+            "metadata",
+            "--format-version=1",
+            "--no-deps",
+            "--manifest-path",
+            "/project/Cargo.toml",
+            "--filter-platform=x86_64-unknown-motor",
+            "--locked",
+            "-p",
+            "app",
+        ])
+        .unwrap();
+        assert_eq!(metadata.package.as_deref(), Some("app"));
+        assert_eq!(
+            metadata.command,
+            Command::Metadata(MetadataOptions {
+                manifest_path: Some("/project/Cargo.toml".to_owned()),
+                no_deps: true,
+                filter_platform: Some("x86_64-unknown-motor".to_owned()),
+            })
+        );
+
+        let tree = parse(&[
+            "tree",
+            "--manifest-path=/project/Cargo.toml",
+            "--target",
+            "x86_64-unknown-motor",
+        ])
+        .unwrap();
+        assert_eq!(
+            tree.command,
+            Command::Tree(TreeOptions {
+                manifest_path: Some("/project/Cargo.toml".to_owned()),
+                target: Some("x86_64-unknown-motor".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_both_rust_analyzer_check_forms() {
+        let check = parse(&[
+            "check",
+            "--quiet",
+            "--workspace",
+            "--message-format=json",
+            "--manifest-path=/project/Cargo.toml",
+            "--target-dir=/project/target/rust-analyzer",
+            "--target=x86_64-unknown-motor",
+            "--keep-going",
+            "--all-targets",
+        ])
+        .unwrap();
+        assert_eq!(check.verbosity, Verbosity::Quiet);
+        assert_eq!(
+            check.command,
+            Command::Check(CheckOptions {
+                manifest_path: Some("/project/Cargo.toml".to_owned()),
+                target_dir: Some("/project/target/rust-analyzer".to_owned()),
+                target: Some("x86_64-unknown-motor".to_owned()),
+                workspace: true,
+                keep_going: true,
+                all_targets: true,
+                lib: false,
+                bins: false,
+                examples: false,
+                message_format: MessageFormat::Json,
+            })
+        );
+
+        let Command::Check(flycheck) = parse(&[
+            "check",
+            "--workspace",
+            "--message-format=json-diagnostic-rendered-ansi",
+            "--all-targets",
+            "--lib",
+            "--bins",
+            "--examples",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected check");
+        };
+        assert!(flycheck.all_targets && flycheck.lib && flycheck.bins && flycheck.examples);
+        assert_eq!(
+            flycheck.message_format,
+            MessageFormat::JsonDiagnosticRenderedAnsi
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_cargo_form_options() {
+        for input in [
+            &["metadata"][..],
+            &["metadata", "--format-version", "2"],
+            &["metadata", "--format-version", "1", "--features", "x"],
+            &["check", "--message-format=short"],
+            &["check", "--example", "demo"],
+            &["check", "--features", "x"],
+            &["check", "--target-dir="],
+            &["tree", "--target-dir", "out"],
+            &["tree", "--manifest-path="],
+        ] {
+            assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
+        }
+        assert!(parse(&["--quiet", "check", "--quiet"]).is_err());
+        assert!(parse(&["--verbose", "check", "--quiet"]).is_err());
     }
 
     #[test]
@@ -633,6 +1160,20 @@ mod tests {
                 }),
             })
         );
+        let Command::Vendor(automated) = parse(&[
+            "vendor",
+            "--accept-all",
+            "upgrade",
+            "libc",
+            "--to",
+            "0.2.187",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected vendor upgrade");
+        };
+        assert!(automated.accept_all);
         for input in [
             &["vendor", "upgrade"][..],
             &["vendor", "upgrade", "libc"],

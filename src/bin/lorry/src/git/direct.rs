@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +12,9 @@ use crate::curl::Client;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, decode_hex, hex};
 use crate::lockfile::write_toml_string;
-use crate::manifest::{DependencySource, GitDependency, GitSelector, LockedPackage, Manifest};
+use crate::manifest::{
+    DependencySource, GitDependency, GitSelector, LockedPackage, Manifest, PatchSource,
+};
 use crate::policy::{PackageEvidence, check_evidence_identity};
 use crate::progress::Progress;
 use crate::redirect::TrustPolicy;
@@ -37,12 +38,33 @@ struct Object {
 pub(crate) struct DirectCatalog {
     packages: Vec<(Manifest, ResolvedSource)>,
     evidence: BTreeMap<PackageKey, PackageEvidence>,
+    sources: BTreeMap<String, GitSourceEvidence>,
+    materialized: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GitSourceEvidence {
+    pub(crate) locked: LockedSource,
+    pub(crate) git_tree: String,
+    pub(crate) source_tree_sha256: [u8; 32],
+    pub(crate) file_count: usize,
+    pub(crate) total_bytes: u64,
 }
 
 impl DirectCatalog {
     pub(crate) fn configure(&self, catalog: &mut Catalog) -> Result<()> {
         for (manifest, source) in &self.packages {
-            catalog.insert_git(manifest.clone(), source.clone())?;
+            if matches!(
+                source,
+                ResolvedSource::Git {
+                    patched_crates_io: true,
+                    ..
+                }
+            ) {
+                catalog.insert_git_patch(manifest.clone(), source.clone())?;
+            } else {
+                catalog.insert_git(manifest.clone(), source.clone())?;
+            }
         }
         Ok(())
     }
@@ -50,12 +72,38 @@ impl DirectCatalog {
     pub(crate) fn evidence(&self, package: &ResolvedPackage) -> Result<PackageEvidence> {
         let evidence = self.evidence.get(&package.key).ok_or_else(|| {
             Error::failure(format!(
-                "verified direct-Git catalog has no evidence for `{} {}`",
+                "verified Git catalog has no evidence for `{} {}`",
                 package.key.name, package.key.version
             ))
         })?;
         check_evidence_identity(package, evidence)?;
         Ok(evidence.clone())
+    }
+
+    pub(crate) fn source(&self, cargo_source: &str) -> Result<&GitSourceEvidence> {
+        self.sources.get(cargo_source).ok_or_else(|| {
+            Error::failure(format!(
+                "verified Git catalog has no source evidence for `{cargo_source}`"
+            ))
+        })
+    }
+
+    pub(crate) fn was_materialized(&self, cargo_source: &str) -> bool {
+        self.materialized.contains(cargo_source)
+    }
+
+    pub(crate) fn materialized_sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
+        self.materialized
+            .iter()
+            .filter_map(|source| self.sources.get(source))
+    }
+
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &GitSourceEvidence> {
+        self.sources.values()
+    }
+
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.sources.is_empty()
     }
 }
 
@@ -63,7 +111,6 @@ pub(crate) fn materialize_locked_dependencies(
     manifest: &Manifest,
     network: &NetworkConfig,
     policy: &PolicyLimits,
-    accept_all: bool,
     verbose: bool,
     progress: Progress,
 ) -> Result<DirectCatalog> {
@@ -71,24 +118,19 @@ pub(crate) fn materialize_locked_dependencies(
         return Ok(DirectCatalog::default());
     }
     let mut objects = BTreeMap::new();
+    let mut materialized = BTreeSet::new();
     for locked in locked_sources(manifest)? {
         let destination = object_root(&manifest.workspace_root, &locked.cargo_source);
         let object = if destination.exists() {
             load_object(&manifest.workspace_root, &locked, policy)?
         } else {
-            progress.report(format_args!("Fetching Git dependency `{}`", locked.url))?;
-            materialize_one(
-                &manifest.workspace_root,
-                &locked,
-                network,
-                policy,
-                accept_all,
-                verbose,
-            )?
+            progress.report(format_args!("Fetching Git source `{}`", locked.url))?;
+            materialized.insert(locked.cargo_source.clone());
+            materialize_one(&manifest.workspace_root, &locked, network, policy, verbose)?
         };
         objects.insert(locked.cargo_source.clone(), object);
     }
-    direct_catalog(manifest, policy, &objects)
+    direct_catalog(manifest, policy, &objects, materialized)
 }
 
 pub(crate) fn configure_direct(
@@ -110,7 +152,8 @@ pub(crate) fn load_locked_dependencies(
     let lock = manifest
         .lock
         .as_ref()
-        .ok_or_else(|| Error::failure("Git dependencies require Cargo.lock"))?;
+        .ok_or_else(|| Error::failure("Git sources require Cargo.lock"))?;
+    validate_git_patches_locked(manifest, lock)?;
     for package in &lock.packages {
         let Some(source) = package.source.as_deref() else {
             continue;
@@ -125,20 +168,22 @@ pub(crate) fn load_locked_dependencies(
             );
         }
     }
-    direct_catalog(manifest, policy, &objects)
+    direct_catalog(manifest, policy, &objects, BTreeSet::new())
 }
 
 fn direct_catalog(
     manifest: &Manifest,
     policy: &PolicyLimits,
     objects: &BTreeMap<String, Object>,
+    materialized: BTreeSet<String>,
 ) -> Result<DirectCatalog> {
     let mut packages = Vec::new();
     let mut evidence = BTreeMap::new();
     let lock = manifest
         .lock
         .as_ref()
-        .ok_or_else(|| Error::failure("Git dependencies require Cargo.lock"))?;
+        .ok_or_else(|| Error::failure("Git sources require Cargo.lock"))?;
+    validate_git_patches_locked(manifest, lock)?;
     for package in &lock.packages {
         let Some(source) = package.source.as_deref() else {
             continue;
@@ -149,7 +194,9 @@ fn direct_catalog(
         let object = objects
             .get(source)
             .ok_or_else(|| Error::failure(format!("Git source `{source}` was not prepared")))?;
-        let (inspected, source, tree) = locked_package(manifest, package, object, policy)?;
+        let patched_crates_io = is_git_patch(manifest, package, &object.locked);
+        let (inspected, source, tree) =
+            locked_package(manifest, package, object, policy, patched_crates_io)?;
         let version = semver::Version::parse(&package.version.original).map_err(|error| {
             Error::failure(format!(
                 "invalid locked Git version `{} {}`: {error}",
@@ -172,7 +219,27 @@ fn direct_catalog(
         }
         packages.push((inspected, source));
     }
-    Ok(DirectCatalog { packages, evidence })
+    let sources = objects
+        .iter()
+        .map(|(cargo_source, object)| {
+            (
+                cargo_source.clone(),
+                GitSourceEvidence {
+                    locked: object.locked.clone(),
+                    git_tree: object.git_tree.clone(),
+                    source_tree_sha256: object.source_tree.sha256,
+                    file_count: object.source_tree.file_count,
+                    total_bytes: object.source_tree.total_bytes,
+                },
+            )
+        })
+        .collect();
+    Ok(DirectCatalog {
+        packages,
+        evidence,
+        sources,
+        materialized,
+    })
 }
 
 fn has_git_dependency(manifest: &Manifest) -> bool {
@@ -180,17 +247,54 @@ fn has_git_dependency(manifest: &Manifest) -> bool {
         .dependencies
         .iter()
         .any(|dependency| matches!(dependency.source, DependencySource::Git(_)))
+        || manifest
+            .patches
+            .iter()
+            .any(|patch| matches!(patch.source, PatchSource::Git(_)))
+}
+
+fn validate_git_patches_locked(
+    manifest: &Manifest,
+    lock: &crate::manifest::Lockfile,
+) -> Result<()> {
+    for patch in &manifest.patches {
+        let PatchSource::Git(git) = &patch.source else {
+            continue;
+        };
+        let found = lock.packages.iter().any(|package| {
+            package.name == patch.package
+                && package
+                    .source
+                    .as_deref()
+                    .and_then(|source| super::parse_locked_source(source).ok())
+                    .is_some_and(|locked| locked.matches(git))
+        });
+        if !found {
+            return Err(Error::failure(format!(
+                "Git patch `{}` has no matching package in Cargo.lock",
+                patch.alias
+            ))
+            .with_help("generate a Cargo.lock that selects the declared Git patch"));
+        }
+    }
+    Ok(())
+}
+
+fn is_git_patch(manifest: &Manifest, package: &LockedPackage, locked: &LockedSource) -> bool {
+    manifest.patches.iter().any(|patch| {
+        patch.package == package.name
+            && matches!(&patch.source, PatchSource::Git(git) if locked.matches(git))
+    })
 }
 
 fn locked_sources(manifest: &Manifest) -> Result<Vec<LockedSource>> {
     let mut sources = BTreeSet::new();
-    for package in manifest
+    let lock = manifest
         .lock
         .as_ref()
-        .ok_or_else(|| Error::failure("Git dependencies require Cargo.lock"))?
-        .packages
-        .iter()
-    {
+        .ok_or_else(|| Error::failure("Git sources require Cargo.lock"))?;
+    validate_git_patches_locked(manifest, lock)?;
+    for package in &lock.packages {
         let Some(source) = package.source.as_deref() else {
             continue;
         };
@@ -209,7 +313,6 @@ fn materialize_one(
     locked: &LockedSource,
     network: &NetworkConfig,
     policy: &PolicyLimits,
-    accept_all: bool,
     verbose: bool,
 ) -> Result<Object> {
     let destination = object_root(workspace, &locked.cargo_source);
@@ -285,7 +388,6 @@ fn materialize_one(
         ))
     })?;
     let source_tree = Tree::scan(&source, limits, Exclusions::None)?;
-    approve(locked, &git_tree, &source_tree, accept_all)?;
     fs::write(
         staging.path().join("git.toml"),
         provenance(locked, &git_tree, &source_tree),
@@ -414,6 +516,7 @@ fn locked_package(
     package: &LockedPackage,
     object: &Object,
     policy: &PolicyLimits,
+    patched_crates_io: bool,
 ) -> Result<(Manifest, ResolvedSource, Tree)> {
     let matches = object
         .package_roots
@@ -464,6 +567,7 @@ fn locked_package(
             logical_root,
             physical_root: root.clone(),
             source_tree_sha256: package_tree.sha256,
+            patched_crates_io,
         },
         package_tree,
     ))
@@ -490,7 +594,7 @@ fn bind_internal_dependencies(manifest: &mut Manifest, object: &Object) -> Resul
     Ok(())
 }
 
-fn object_root(workspace: &Path, cargo_source: &str) -> PathBuf {
+pub(super) fn object_root(workspace: &Path, cargo_source: &str) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(cargo_source.as_bytes());
     workspace
@@ -532,43 +636,6 @@ fn requested(selector: &GitSelector) -> &str {
         GitSelector::Branch(value) | GitSelector::Tag(value) | GitSelector::Revision(value) => {
             value
         }
-    }
-}
-
-fn approve(locked: &LockedSource, git_tree: &str, source: &Tree, accept_all: bool) -> Result<()> {
-    eprintln!(
-        "Git dependency\n  URL: {}\n  requested: {}\n  commit: {}\n  tree: {}\n  source SHA-256: {}\n  files: {}; bytes: {}",
-        locked.url,
-        requested(&locked.selector),
-        locked.commit,
-        git_tree,
-        hex(&source.sha256),
-        source.file_count,
-        source.total_bytes,
-    );
-    if accept_all {
-        return Ok(());
-    }
-    if !io::stdin().is_terminal() {
-        return Err(
-            Error::failure("Git dependency requires approval on non-interactive input")
-                .with_help("review the evidence, then rerun `lorry vendor --accept-all`"),
-        );
-    }
-    eprint!("Materialize this Git dependency? [y/N] ");
-    io::stderr()
-        .flush()
-        .map_err(|error| Error::failure(format!("failed to flush Git approval prompt: {error}")))?;
-    let answer = crate::prompt::read_answer(
-        &mut io::stdin().lock(),
-        &mut io::stderr().lock(),
-        crate::prompt::echo_required(true),
-    )
-    .map_err(|error| Error::failure(format!("failed to read Git approval: {error}")))?;
-    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
-        Ok(())
-    } else {
-        Err(Error::failure("Git dependency was not approved"))
     }
 }
 
@@ -655,6 +722,7 @@ mod tests {
             logical_root: source.join("first"),
             physical_root: source.join("first"),
             source_tree_sha256: package_tree.sha256,
+            patched_crates_io: false,
         };
         let key = PackageKey {
             name: "first".to_owned(),
@@ -676,6 +744,7 @@ mod tests {
         let direct = DirectCatalog {
             packages: vec![(manifest, resolved)],
             evidence: BTreeMap::from([(key, recorded.clone())]),
+            ..DirectCatalog::default()
         };
         direct.configure(&mut Catalog::default()).unwrap();
         assert_eq!(direct.evidence(&package).unwrap(), recorded);
@@ -733,5 +802,86 @@ mod tests {
         assert!(error.contains("  reason: "));
         assert!(error.contains("\nhelp: run `lorry vendor [--accept-all]`"));
         fs::remove_dir_all(workspace).expect("test root is removed");
+    }
+
+    #[test]
+    fn loads_a_git_patch_offline_without_changing_its_manifest() {
+        let workspace = root("patch-object");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/lib.rs"), "").unwrap();
+        let manifest_source = "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+            [dependencies]\nrenamed = { package = \"demo\", version = \"=1.2.3\" }\n\
+            [patch.crates-io]\nrenamed = { package = \"demo\", git = \"https://example.com/repository.git\", branch = \"main\" }\n";
+        fs::write(workspace.join("Cargo.toml"), manifest_source).unwrap();
+        let locked = locked();
+        fs::write(
+            workspace.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n[[package]]\nname = \"demo\"\nversion = \"1.2.3\"\nsource = {:?}\n\n\
+                 [[package]]\nname = \"root\"\nversion = \"0.1.0\"\ndependencies = [\n \"demo 1.2.3 ({})\",\n]\n",
+                locked.cargo_source, locked.cargo_source
+            ),
+        )
+        .unwrap();
+        let root = object_root(&workspace, &locked.cargo_source);
+        let source = root.join("source");
+        fs::create_dir_all(source.join("src")).unwrap();
+        fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.2.3\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(source.join("src/lib.rs"), "pub fn demo() {}\n").unwrap();
+        let limits = PolicyLimits::default();
+        let tree = Tree::scan(&source, tree_limits(&limits).unwrap(), Exclusions::None).unwrap();
+        fs::write(
+            root.join("git.toml"),
+            provenance(&locked, &"a".repeat(40), &tree),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(workspace.join("Cargo.toml"))
+            .unwrap()
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(workspace.join("Cargo.toml"), permissions).unwrap();
+
+        let manifest = Manifest::load(&workspace).unwrap();
+        let direct = load_locked_dependencies(&manifest, &limits).unwrap();
+        let mut catalog = Catalog::default();
+        direct.configure(&mut catalog).unwrap();
+        let options = crate::resolver::Options {
+            resolver: crate::manifest::Resolver::V2,
+            incompatible_rust_versions: None,
+            rust_version: semver::Version::parse("1.85.0").unwrap(),
+            max_packages: 16,
+            max_depth: 8,
+        };
+        let resolution = crate::resolver::resolve(&manifest, &catalog, &options, &[]).unwrap();
+        assert!(resolution.packages.iter().any(|package| {
+            matches!(
+                package.source,
+                ResolvedSource::Git {
+                    patched_crates_io: true,
+                    ref cargo_source,
+                    ..
+                } if cargo_source == &locked.cargo_source
+            )
+        }));
+        let review = crate::admission_state::Review::from_graph(
+            &manifest,
+            manifest.lock.as_ref().unwrap(),
+            vec![crate::admission_state::Context {
+                host: "x86_64-unknown-linux-gnu".to_owned(),
+                target: "x86_64-unknown-linux-gnu".to_owned(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(review.locked_git[0].source, locked.cargo_source);
+        assert_eq!(
+            fs::read_to_string(workspace.join("Cargo.toml")).unwrap(),
+            manifest_source
+        );
+        assert!(!workspace.join(".lorry/vendor/renamed").exists());
+        fs::remove_dir_all(workspace).unwrap();
     }
 }

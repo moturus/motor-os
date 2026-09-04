@@ -111,8 +111,8 @@ and package limits still apply.
 Every package has a logical identity independent of its installation path:
 
 - crates.io packages use name, semantic version, and archive checksum;
-- ordinary paths use their canonical source-tree digest; and
-- required patches use configured upstream and patched-tree provenance.
+- Git packages use their canonical source identity and resolved commit; and
+- ordinary paths use their canonical source-tree digest.
 
 Repository source paths are physical storage details. Compiler path remapping
 presents stable `.lorry/...` logical paths so equivalent builds do not acquire
@@ -137,20 +137,22 @@ object at the same identity is corruption.
 The intended ordinary vendor flow is:
 
 1. take the project vendor lock;
-2. materialize supported Git patches and locked direct Git sources;
+2. refresh mutable Git-patch selectors and materialize the candidate's locked
+   Git sources;
 3. load sparse index data on demand and resolve the complete/selected graphs;
 4. run policy preflight before archive acquisition;
 5. download missing archives with the bounded curl client;
 6. verify checksum, archive structure, manifest identity, license, sizes, and
    canonical source-tree digest;
-7. show a semantic diff when the committed review remains reconstructible, or
-   otherwise the prior commitment and complete candidate, and obtain approval;
+7. show one combined Git/dependency/capability review when required and obtain
+   one interactive approval, or apply `--accept-all` to the complete candidate;
 8. publish immutable repository objects and the lockfile; and
 9. write `.lorry/dependencies-v2.toml` last from the committed graph.
 
-Git patch declarations are parsed before the ordinary manifest load, then
-rewritten atomically to local paths. Direct Git objects retain their immutable
-Git source identity and are installed below the project-local vendor tree.
+Direct dependencies and crates.io Git patches share one verified,
+content-addressed object catalog below the project-local vendor tree. Both
+retain their immutable Git source identity; input manifests are never
+rewritten. Explicit path patches retain their declared path identity.
 
 `curl.rs`, `redirect.rs`, `archive.rs`, `sparse.rs`, and `source_tree.rs`
 implement the acquisition boundary. Redirect trust is separate from package
@@ -174,10 +176,15 @@ logical source paths, and cache keys all retain that identity rather than
 treating Git as crates.io or as an ordinary mutable path. A single snapshot
 may contribute multiple monorepo packages.
 
-Root crates.io Git patches remain a vendoring adapter. Lorry resolves and
-materializes each patch, locates its unique package manifest within the
-snapshot, rewrites that manifest entry to the package's local path, and leaves
-build, run, and test entirely offline.
+Root crates.io Git patches use the same immutable source model and verified
+objects as direct Git dependencies. The resolver marks their selected Git
+packages as crates.io replacements without changing their source identity or
+rewriting a workspace manifest. Build, run, and test remain entirely offline.
+Networked vendoring advertises mutable patch refs without fetching history,
+then resolves moved commits in an in-memory lock candidate. Exact hexadecimal
+`rev` selectors remain pinned. Candidate objects are verified before one
+default-no review; a moved tag is labeled as retargeted. Only acceptance
+commits the candidate lock and admission state.
 
 Both Linux and Motor use gix for repository negotiation, pack/object
 processing, and tree traversal. A small injected blocking transport sends
@@ -202,9 +209,9 @@ It records only:
 The canonical review document itself is reconstructed, never stored: its
 direct semantics come from Cargo.toml, its locked graph from Cargo.lock, its
 per-context selections from offline resolution, and its source evidence from
-verified repository objects. Path dependencies and required patches remain
-governed by their source digests and configured policy rather than being
-copied into registry admission.
+verified repository objects. Path dependencies remain governed by their
+source digests and configured policy rather than being copied into immutable
+dependency admission.
 
 At build time `engine.rs` requires the discovered host and selected target to
 be an exact reviewed context. An ordinary completed-profile record commits to
@@ -215,8 +222,8 @@ document for every recorded context and compares its digest with the
 commitment. Only then does `admission_state.rs` translate reconstructed
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow
-cannot override administrator policy, required patches, resource limits,
-integrity checks, or unavailable native-tool grants. Repository lookup during
+cannot override administrator policy, resource limits, integrity checks, or
+unavailable native-tool grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
 build cache until the commitment and policy both pass.
 
@@ -246,8 +253,8 @@ Dependency change review temporarily supplies exact candidate allow rules so ful
 evidence can be collected under default-deny policy. Explicit denies and all
 other constraints remain active. The review shows requirement, locked graph,
 admission evidence, build-script, and native-tool changes. `--accept-all`
-cannot approve a change to existing admission; one interactive confirmation
-authorizes the shown identity and capability changes.
+approves the complete displayed candidate without a prompt; one interactive
+confirmation otherwise authorizes the shown identity and capability changes.
 
 Vendoring stages the lockfile, publishes verified immutable repository objects,
 atomically installs Cargo.lock when it changed, and atomically writes compact
@@ -310,7 +317,7 @@ and filenames rather than the output-directory topology.
 
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
-It routes immutable crates.io and reviewed required-patch units to
+It routes immutable crates.io and Git units to
 `$HOME/.cache/lorry` on Linux or `/devtools/lorry/cache` on Motor by default,
 while mutable path units stay in the project's `target/lorry/.cache`.
 `cache.directory` may replace the global root from system or user

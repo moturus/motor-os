@@ -66,6 +66,10 @@ echo "== Lorry unit and integration-style Rust tests =="
 CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" test \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline
 
+echo "== cargo_metadata 0.23.1 wire-schema test =="
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" run \
+    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" --locked --offline
+
 echo "== Paired Cargo resolution oracle =="
 "$SCRIPT_DIR/verify-stage2-resolution-oracle.sh"
 
@@ -74,7 +78,11 @@ CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTC="$RUSTC" "$CARGO" build \
     --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline --release
 LORRY="$LORRY_DIR/target/release/lorry"
 "$SCRIPT_DIR/review-contract.sh" "$LORRY"
+"$SCRIPT_DIR/git-patch-contract.sh" "$LORRY"
 
+"$SCRIPT_DIR/rustflags-contract.sh" "$LORRY"
+"$SCRIPT_DIR/compatibility-query-contract.sh" "$LORRY"
+"$SCRIPT_DIR/metadata-contract.sh" "$LORRY"
 "$SCRIPT_DIR/cargo-identity.sh" "$LORRY"
 "$SCRIPT_DIR/workspace-contract.sh" "$LORRY"
 "$SCRIPT_DIR/proc-macro-contract.sh" "$LORRY"
