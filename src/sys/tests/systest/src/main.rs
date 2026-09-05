@@ -1117,6 +1117,10 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if args.len() == 2 && args[1] == "test-tcp-teardown" {
+        tcp::test_channel_teardown_drains_staged_tcp();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-tcp-shutdown-repro" {
         tcp::test_tcp_shutdown_repro();
         return;
