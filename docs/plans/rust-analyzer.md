@@ -1577,6 +1577,30 @@ rely on line numbers.
 | 23 native LSP acceptance | `src/tests/rust-analyzer-smoke/` (the SSH transport), `src/tests/full-test.sh` (the developer-image selection and `vm_ssh`), `src/tests/full-test-dev.sh`, `src/vm_scripts/run-qemu.sh` (`MOTO_MEMORY_MIB`). |
 | 24 release integration | `src/tests/full-test-dev.sh`, `docs/build-rustc.md`, `docs/toolchain.md`, this document. |
 
+Read-only references the Lorry patches depend on, all in the pinned
+rust-analyzer tree:
+
+- `crates/project-model/src/workspace.rs`: the `locate-project` call and
+  the sysroot loading branch for Cargo workspaces;
+- `crates/project-model/src/cargo_workspace.rs`: `FetchMetadata`, the
+  `cargo metadata` argument construction, and `CargoWorkspace::from_metadata`,
+  which lists every metadata field rust-analyzer reads;
+- `crates/project-model/src/build_dependencies.rs`: the build-script `check`
+  invocation and its `Message` handling;
+- `crates/rust-analyzer/src/flycheck.rs`: `check_command` and
+  `CargoOptions::apply_on_command`;
+- `crates/project-model/src/toolchain_info/`: `rustc_cfg.rs`,
+  `target_data.rs`, `version.rs`, and `target_tuple.rs`;
+- `crates/project-model/src/cargo_config_file.rs` and `env.rs`: the config
+  probe and its tolerance of failure;
+- `crates/toolchain/src/lib.rs`: `Tool::path`, `Tool::prefer_proxy`, and
+  `cargo_use_targets`, which define how `CARGO` is found;
+- the `cargo_metadata` 0.23.1 source in the Cargo registry cache
+  (`src/lib.rs`, `src/messages.rs`, `src/dependency.rs`,
+  `src/diagnostic.rs`): the exact deserialization contract; and
+- the keyed Cargo binary itself, reached through `LORRY_TEST_CARGO`, which is
+  the differential oracle. Cargo's source is not required.
+
 ### 4.16 Stage 19 external-stack review
 
 The authoring worktree is `../toolchain-src/rust-ra-portability`, on the
@@ -1638,27 +1662,3 @@ full developer-image gate tests the published crate patches, not this still
 unselected authoring worktree. Native LSP/resource acceptance and its separate
 threshold review remain in step 23. The original unexplained native Lorry
 hang remains tracked separately as agreed above.
-
-Read-only references the Lorry patches depend on, all in the pinned
-rust-analyzer tree:
-
-- `crates/project-model/src/workspace.rs`: the `locate-project` call and
-  the sysroot loading branch for Cargo workspaces;
-- `crates/project-model/src/cargo_workspace.rs`: `FetchMetadata`, the
-  `cargo metadata` argument construction, and `CargoWorkspace::from_metadata`,
-  which lists every metadata field rust-analyzer reads;
-- `crates/project-model/src/build_dependencies.rs`: the build-script `check`
-  invocation and its `Message` handling;
-- `crates/rust-analyzer/src/flycheck.rs`: `check_command` and
-  `CargoOptions::apply_on_command`;
-- `crates/project-model/src/toolchain_info/`: `rustc_cfg.rs`,
-  `target_data.rs`, `version.rs`, and `target_tuple.rs`;
-- `crates/project-model/src/cargo_config_file.rs` and `env.rs`: the config
-  probe and its tolerance of failure;
-- `crates/toolchain/src/lib.rs`: `Tool::path`, `Tool::prefer_proxy`, and
-  `cargo_use_targets`, which define how `CARGO` is found;
-- the `cargo_metadata` 0.23.1 source in the Cargo registry cache
-  (`src/lib.rs`, `src/messages.rs`, `src/dependency.rs`,
-  `src/diagnostic.rs`): the exact deserialization contract; and
-- the keyed Cargo binary itself, reached through `LORRY_TEST_CARGO`, which is
-  the differential oracle. Cargo's source is not required.
