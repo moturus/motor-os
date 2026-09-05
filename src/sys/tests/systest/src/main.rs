@@ -33,8 +33,8 @@ mod stdio_file_relay;
 mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
-mod sysbox_cat;
 mod sys_tty;
+mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
@@ -1119,6 +1119,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-tcp-shutdown-repro" {
         tcp::test_tcp_shutdown_repro();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-loopback-peer-time-wait" {
+        tcp::test_loopback_peer_time_wait();
         return;
     }
     if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {

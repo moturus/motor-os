@@ -335,12 +335,17 @@ impl MotoSocket {
         remote_addr: SocketAddr,
     ) -> bool {
         let socket = moto_socket.borrow();
-        socket.base.device_idx == device_idx
-            && socket.base.local_addr == local_addr
-            && matches!(
-                &socket.state,
-                super::SocketState::Tcp(state) if state.remote_addr == Some(remote_addr)
-            )
+        if socket.base.device_idx != device_idx {
+            return false;
+        }
+        let super::SocketState::Tcp(state) = &socket.state else {
+            return false;
+        };
+        // A local peer can retain the reverse tuple in TIME-WAIT after the
+        // client releases its port. Reusing it sends the SYN to that retired
+        // connection instead of the listener, so reserve both orientations.
+        (socket.base.local_addr == local_addr && state.remote_addr == Some(remote_addr))
+            || (socket.base.local_addr == remote_addr && state.remote_addr == Some(local_addr))
     }
 
     fn close_handshake_complete(netstack_socket: &moto_netstack::socket::tcp::Socket<'_>) -> bool {

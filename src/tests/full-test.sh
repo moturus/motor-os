@@ -536,16 +536,9 @@ wait_for_ping_error google.com NotConnected
   >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
-resolver_restarted=0
-for _ in $(seq 1 20); do
-  if vm_ssh /system/services/dns-resolver --self-test; then
-    resolver_restarted=1
-    break
-  fi
-  sleep 0.1
-done
-[ "$resolver_restarted" = "1" ] ||
-  fail "dns-resolver did not become ready after restart"
+# The self-test waits for service discovery itself. Run assertions once so
+# a later success cannot hide a transport failure or a panic.
+vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
 
 udp_sockets="$(read_udp_socket_count)"

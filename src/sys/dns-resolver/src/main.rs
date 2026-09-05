@@ -400,13 +400,12 @@ fn client_resolve_external(
     }
 }
 
-fn ipc_self_test() {
+fn ipc_self_test(mut client: Client) {
     assert!(matches!(
         Client::connect_to("moto-dns-resolver-intentionally-missing"),
         Err(ClientError::ServiceUnavailable)
     ));
 
-    let mut client = connect_with_retry();
     let numeric = client.lookup("192.0.2.1", AddressFamily::Any).unwrap();
     assert_eq!(numeric.addresses.len(), 1);
     assert_v4(&numeric.addresses[0], [192, 0, 2, 1]);
@@ -478,9 +477,11 @@ fn main() {
     match args.next().as_deref() {
         None => run_service(),
         Some("--self-test") if args.next().is_none() => {
+            // Wait only for service discovery, never retry failed assertions.
+            let client = connect_with_retry();
             resolver_policy_self_test();
             bridge_self_test();
-            ipc_self_test();
+            ipc_self_test(client);
         }
         _ => {
             eprintln!("usage: dns-resolver [--self-test]");

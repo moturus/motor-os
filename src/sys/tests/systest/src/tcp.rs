@@ -1820,6 +1820,58 @@ fn test_simultaneous_open() {
     println!("test_simultaneous_open() PASS");
 }
 
+pub fn test_loopback_peer_time_wait() {
+    use moto_sys_io::api_net::TcpState;
+    use moto_sys_io::stats::TcpProtocolState;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+
+    for ip in ["127.0.0.1", "::1"] {
+        let listener = TcpListener::bind(SocketAddr::new(ip.parse().unwrap(), 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+
+        // The server closes first and retains TIME-WAIT; the passive client
+        // completes its close and releases its ephemeral port independently.
+        server.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+        client.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        wait_for_tcp_socket_state(
+            addr,
+            Some(client_addr),
+            TcpState::ReadOnly,
+            TcpProtocolState::TimeWait,
+        );
+        drop(client);
+        wait_for_sockets_released(client_addr);
+
+        let mut next = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).unwrap();
+        assert_ne!(next.local_addr().unwrap(), client_addr);
+        let (mut accepted, peer) = listener.accept().unwrap();
+        assert_eq!(peer, next.local_addr().unwrap());
+        next.write_all(b"new connection").unwrap();
+        accepted
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut data = [0; 14];
+        accepted.read_exact(&mut data).unwrap();
+        assert_eq!(&data, b"new connection");
+
+        // The assertion needed real TIME-WAIT. Once done, release all test
+        // sockets explicitly so retention cannot affect later gauge checks.
+        for stream in [&server, &next, &accepted] {
+            moto_rt::net::set_linger(stream.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+        }
+        drop((server, next, accepted, listener));
+        wait_for_sockets_released(peer);
+        wait_for_sockets_released(addr);
+    }
+    println!("test_loopback_peer_time_wait() PASS");
+}
+
 fn test_tcp_socket_state_transitions() {
     use moto_sys_io::api_net::TcpState;
     use moto_sys_io::stats::TcpProtocolState;
@@ -4022,6 +4074,7 @@ pub fn run_all_tests() {
     test_simultaneous_open();
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
+    test_loopback_peer_time_wait();
     test_tcp_socket_state_transitions();
     test_half_open_accounting();
     test_backlog_growth_and_shrink();
