@@ -1,3 +1,5 @@
 # Exact published inputs for rust-analyzer's locally patched dependencies.
 MOTOR_URL_VERSION=2.5.8
 MOTOR_URL_CHECKSUM=ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed
+MOTOR_INVENTORY_VERSION=0.3.24
+MOTOR_INVENTORY_CHECKSUM=a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b

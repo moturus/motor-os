@@ -25,15 +25,12 @@ for helper in lib sources runtime assembly patched-crates; do
 done
 . "$ROOT_DIR/src/patches/crates.sh"
 MOTORH="$(realpath "${MOTORH:-$ROOT_DIR/..}")"
-archive="$(toolchain_cached_crate "${CARGO_HOME:-$HOME/.cargo}" \
-	"url-$MOTOR_URL_VERSION.crate" "$MOTOR_URL_CHECKSUM")"
-source="$(toolchain_prepare_patched_crate "$MOTORH/patched-crates" url \
-	"$MOTOR_URL_VERSION" "$MOTOR_URL_CHECKSUM" "$archive" \
-	"$ROOT_DIR/src/patches/url-$MOTOR_URL_VERSION-motor.patch")"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 cargo="$(rustup which cargo)"
 export RUSTC="$(rustup which rustc)"
+assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
+linker="${assembly_images%/images}/sysroot/bin/motor-clang"
 
 # Cargo's runner receives the artifact path, avoiding assumptions about the
 # Motor toolchain's test-binary layout. Escape the path as a TOML string.
@@ -41,13 +38,25 @@ runner="$WD/test-rust-analyzer-crates.sh"
 runner="${runner//\\/\\\\}"
 runner="${runner//\"/\\\"}"
 runner_config="target.x86_64-unknown-motor.runner=[\"bash\",\"$runner\",\"--run-motor\"]"
-args=(--release --locked --offline --manifest-path "$source/Cargo.toml"
-	--test unit --target-dir "$temporary/target")
-"$cargo" test "${args[@]}"
-"$cargo" test "${args[@]}" --target x86_64-unknown-motor --config "$runner_config"
+test_crate() {
+	local name="$1" version="$2" checksum="$3" test_target="$4" archive source
+	archive="$(toolchain_cached_crate "${CARGO_HOME:-$HOME/.cargo}" \
+		"$name-$version.crate" "$checksum")"
+	source="$(toolchain_prepare_patched_crate "$MOTORH/patched-crates" "$name" \
+		"$version" "$checksum" "$archive" \
+		"$ROOT_DIR/src/patches/$name-$version-motor.patch")"
+	local args=(--release --locked --offline --manifest-path "$source/Cargo.toml"
+		--test "$test_target" --target-dir "$temporary/target")
+	"$cargo" test "${args[@]}"
+	CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$linker" \
+	CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS='-C link-self-contained=no -C default-linker-libraries=yes' \
+		"$cargo" test "${args[@]}" --target x86_64-unknown-motor --config "$runner_config"
 
-# Locked tests must not mutate the published/patched source tree either.
-toolchain_prepare_patched_crate "$MOTORH/patched-crates" url \
-	"$MOTOR_URL_VERSION" "$MOTOR_URL_CHECKSUM" "$archive" \
-	"$ROOT_DIR/src/patches/url-$MOTOR_URL_VERSION-motor.patch" >/dev/null
+	# Locked tests must not mutate the published/patched source tree either.
+	toolchain_prepare_patched_crate "$MOTORH/patched-crates" "$name" \
+		"$version" "$checksum" "$archive" \
+		"$ROOT_DIR/src/patches/$name-$version-motor.patch" >/dev/null
+}
+test_crate url "$MOTOR_URL_VERSION" "$MOTOR_URL_CHECKSUM" unit
+test_crate inventory "$MOTOR_INVENTORY_VERSION" "$MOTOR_INVENTORY_CHECKSUM" test
 echo 'test-rust-analyzer-crates PASS'

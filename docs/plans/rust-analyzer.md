@@ -1301,13 +1301,18 @@ explicit:
     only two unchanged upstream parser warnings. The full release developer-image
     gate passes after the approved resolver snapshot optimization (see below).
     The earlier unreproduced native self-build stall remains tracked separately.
-18. **Pinned inventory patch.** Check in Motor `.init_array` registration and
+18. **Pinned inventory patch (complete).** Check in Motor `.init_array` registration and
     native fixture tests; record the exact upstream version/checksum. Prepare
     both patched sources and commit the standalone rust-analyzer path-source
     lock changes, without changing ordinary-build locks at runtime.
-19. **Motor Rust: child pipes.** Add the thread-based Motor implementation and
+    The pinned patch passes both host and Motor registration tests
+    through `full-test.sh`; the full release developer-image gate passes.
+    The four-line standalone lock change validates with `--locked --offline`.
+19. **Motor Rust: child pipes (implemented; review required).** Add the thread-based Motor implementation and
     its Linux unit test. Cross-check rust-analyzer offline. Stop for review of
     the complete external patch stack.
+    Committed in the authoring worktree described below; host tests and both
+    host/Motor checks pass. Stopped at the planned external-stack review.
 20. **Toolchain/assembly identity and acquisition.** Add the standalone lock
     to toolchain identity and validation, record it in assembly manifests, add
     patched-source identity and workspace-scoped overrides for both host and
@@ -1571,6 +1576,68 @@ rely on line numbers.
 | 22 development image | `src/imager/motor-os-dev.yaml`: `assembly_dirs`, `assembly_required_executables`. `src/imager/src/`. `src/tests/test-dev-sources.sh`. |
 | 23 native LSP acceptance | `src/tests/rust-analyzer-smoke/` (the SSH transport), `src/tests/full-test.sh` (the developer-image selection and `vm_ssh`), `src/tests/full-test-dev.sh`, `src/vm_scripts/run-qemu.sh` (`MOTO_MEMORY_MIB`). |
 | 24 release integration | `src/tests/full-test-dev.sh`, `docs/build-rustc.md`, `docs/toolchain.md`, this document. |
+
+### 4.16 Stage 19 external-stack review
+
+The authoring worktree is `../toolchain-src/rust-ra-portability`, on the
+`motor-ra-portability` branch of the existing Motor Rust fork. The selected
+checkout at `../toolchain-src/rust` remains unchanged at the current toolchain
+baseline. No new GitHub fork, std, moto-rt, mlibc, or core OS change is involved.
+
+Fork commits above the selected baseline are `9ea84a28c3e` (configuration and
+sysroot), `fc3a0529b7f` (standalone path-source lock), and `f040c09547a`
+(child pipes and the config-import warning cleanup). Review their combined
+diff against `3c9729fb797`; the authoring branch is not selected for builds yet.
+
+Review the complete stack before step 20 selects it:
+
+| Change | Scope and behavior |
+|---|---|
+| Configuration and sysroot | Existing step 16 changes disable implicit native user config and sysroot Cargo metadata only on Motor. The follow-up qualifies the non-Motor `std::env` use to avoid a Motor-only unused import. |
+| URL | `src/patches/url-2.5.8-motor.patch` adds lossless slash-rooted Motor file paths. The checksum-pinned source is prepared under `../patched-crates/`; 67 host and 61 Motor tests pass. |
+| Inventory | `src/patches/inventory-0.3.24-motor.patch` adds Motor to `.init_array` registration. Two tests pass on host and Motor; registrations from separate modules must both be visible. Native tests use the same `motor-clang` and default-library flags planned for the server. |
+| Standalone lock | Only the registry source/checksum fields for URL and inventory are removed: four lines, no version changes or machine-specific paths. Both host and Motor commands receive the same workspace-scoped prepared-source overrides and use `--locked --offline`. |
+| Child pipes | `crates/stdx/src/process/portable.rs` uses two standard reader threads and a queue of at most eight 8-KiB chunks. Only the coordinator invokes callbacks. Completed readers are joined; a read/spawn/join error returns without waiting for a blocked peer, allowing the caller's existing child guard to terminate the child. Dropping the receiver stops the remaining reader at its next send. A completion guard also reports panics rather than silently losing a reader. |
+
+The portable module is compiled on Linux for tests and selected on Motor (and
+other targets without a Unix, Windows, or wasm32 implementation). Tests cover
+both EOF orders, coordinator-only callbacks, read errors and panics while the
+peer is blocked, and interleaved real-child output of 256 KiB on each pipe.
+The host `stdx` suite passes all 10 tests. A narrow test-only Clippy expectation
+allows launching its own executable with an explicit working directory;
+the higher-level `toolchain::command` helper depends on `stdx` and cannot be
+used here. No production lint suppression is added.
+
+Offline host and Motor rust-analyzer checks pass with the same patched-source
+overrides. Host and Motor Clippy pass for the pipe module and inventory tests;
+formatting passes. The inventory test ELF is an x86-64 PIE with a 64-byte
+`.init_array` and non-executable stack. Upstream's build script
+warns that it cannot locate `.git/HEAD` in a Git worktree (whose `.git` is a
+file); this authoring-layout warning is recorded, not suppressed or patched.
+The ordinary selected checkout has a `.git` directory. This cross-check is
+not a linked or executed native server, and does not validate LSP behavior.
+The host check also reports an upstream future-incompatibility warning for
+unchanged `nix` 0.31.3. Logs are `/tmp/motor-ra-{host,native}-check.log`,
+`/tmp/motor-ra-pipes-{host,clippy,native-clippy}.log`, and
+`/tmp/motor-inventory-native-clippy.log`.
+
+The full `src/tests/full-test-dev.sh --release` gate passes with inventory
+included: `/tmp/motor-ra-inventory-dev-release.log`. Its final native Lorry
+phase takes 531.632 seconds with unchanged limits and byte-identical native
+and cross-built binaries; the complete Lorry product suite takes 890 seconds.
+Evidence is in
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T210732Z-546183/`.
+This is the second passing release developer-image gate after the resolver
+optimization, not a resolution of the separately tracked original hang.
+
+**Required review decision:** approve this external stack before selecting
+the fork revision, integrating patched-source and standalone-lock identity,
+and building/publishing native rust-analyzer (steps 20–22). Carry the fork's
+portable-pipe unit tests into the selected-source test integration; the current
+full developer-image gate tests the published crate patches, not this still
+unselected authoring worktree. Native LSP/resource acceptance and its separate
+threshold review remain in step 23. The original unexplained native Lorry
+hang remains tracked separately as agreed above.
 
 Read-only references the Lorry patches depend on, all in the pinned
 rust-analyzer tree:
