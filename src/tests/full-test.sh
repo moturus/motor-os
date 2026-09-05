@@ -78,10 +78,12 @@ if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
+  bash "$WD/test-kloader-image.sh" --release
 else
   make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
+  bash "$WD/test-kloader-image.sh"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
