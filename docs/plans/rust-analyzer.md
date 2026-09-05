@@ -386,7 +386,7 @@ them without a new design review recorded there:
 - use mlibc process startup to execute `.init_array`; do not change
   `motor_start` or the Rust standard library;
 - carry the rust-analyzer changes in the selected Motor Rust fork and use
-  exact-revision Motor forks only for `url` and `inventory`;
+  pinned crates.io releases of `url` and `inventory`, patched locally;
 - change no rust-analyzer defaults in the fork; a client sends the
   configuration and the `CARGO` environment variable in section 4.6;
 - expose no implicit native user-configuration directory;
@@ -453,19 +453,41 @@ Source changes are maintained as follows:
 - the rust-analyzer target conditionals, the sysroot-loading change, and the
   Motor child-pipe implementation live in the Motor Rust fork beside the
   in-tree rust-analyzer source;
-- the locked `url` and `inventory` packages use minimal Motor forks pinned to
-  full Git revisions by the standalone rust-analyzer workspace and its
-  lockfile;
+- `url` and `inventory` use exact crates.io versions and archive SHA-256
+  checksums recorded with checked-in Motor OS patch files. Provisioning
+  unpacks and patches those releases below `$MOTORH/patched-crates/`, beside
+  the toolchains and ripgrep directories (normally `../`). These are local
+  source copies of published crates, not Git clones or new GitHub forks;
 - `dirs` is not forked: rust-analyzer does not compile it for Motor; and
 - no source is patched in place under a managed checkout, copied from `/tmp`,
   or fetched by a regular test.
 
 This explicitly requires changes outside the Motor OS repository: the Motor
-Rust fork and the exact Motor forks of `url` and `inventory`. A human creates
-the fork repositories. The changes are reviewed and landed there first, then
-selected by full revisions here. No Stage 2 change to `src/sys`, Rust std,
+Rust fork and generated patched `url` and `inventory` source directories under
+`../patched-crates/`. The patch files and provisioning recipe live in Motor
+OS; no human-created dependency forks are needed. Follow Motor OS's root
+`AGENTS.md` for this work, including work in the external sources, as directed
+by U. Lasiotus. No Stage 2 change to `src/sys`, Rust std,
 `moto-rt`, or mlibc is planned; finding that one is necessary is a
 design-review stop.
+
+Prepare each patched crate from its checksum-verified published archive in a
+fresh staging directory. Apply the checked-in patch with exact context and
+fail on mismatch; never patch the Cargo registry cache or managed Rust tree.
+Publish only a complete verified source tree, keyed by the upstream archive
+and patch digest, and verify its contents before reuse. Do not overwrite a
+modified source tree. Preserve upstream licenses. Provisioning may download
+missing archives; regular tests use local fixtures or already acquired
+archives and never download them.
+
+Select the prepared sources using Cargo `[patch.crates-io]` path overrides,
+scoped to the standalone rust-analyzer workspace. Update and commit its lock
+once during implementation to record the path sources; ordinary builds must
+not regenerate the lock. Use the same overrides for Stage 1 host bootstrap
+and the native build, preparing the sources before either begins. The path
+entries do not authenticate source contents, so the archive, patch, recipe,
+and prepared-tree digests are explicit build inputs. Do not use registry
+source replacement to represent modified crates as unchanged originals.
 
 The complete provisioning command may acquire the locked registry and Git
 sources while it is already in its managed network-enabled source-provisioning
@@ -488,10 +510,13 @@ Identity changes are fail-closed:
 - add every new Motor OS helper used by that recipe to
   `MOTOR_OS_RUNTIME_INPUTS` rather than leaving unkeyed executable logic;
 - let the effective Motor Rust revision identify the in-tree source and exact
-  fork declarations, including dirty authoring state through the existing
-  source digest; and
+  workspace declarations, including dirty authoring state through the existing
+  source digest; include the patched-crate pins, patch contents, preparation
+  logic, and prepared-tree digests in the toolchain key (not just the native
+  assembly key), because the host server uses them too; and
 - record the final version string, binary SHA-256, standalone lock SHA-256,
-  rust-src tree digest, external fork revisions, and native recipe version in
+  rust-src tree digest, patched-crate versions and archive/patch/tree digests,
+  and native recipe version in
   `MOTOR-ASSEMBLY-MANIFEST` and each assembly image manifest.
 
 An existing assembly is reusable only when those fields and the staged files
@@ -509,8 +534,8 @@ and its dependency lock move together.
 | Configuration | Compile `dirs` only for non-Motor targets and make `Config::user_config_dir_path()` return `None` on Motor. Change no other default. | The Motor dependency graph has no `dirs-sys` edge; initialization with no HOME/XDG variables succeeds and reads no implicit config file. |
 | Sysroot loading | On Motor, `Sysroot::load_workspace` does not attempt `cargo metadata` on the sysroot library manifest and stitches `rust-src` directly. The stitched sysroot lists the standard crates without std's private dependency crates, which is sufficient for userspace analysis. Project metadata still goes through `$CARGO`. | Server stderr contains no sysroot `cargo metadata` error; go-to-definition into `std::os::motor` resolves; the Linux behavior is unchanged. |
 | Child stdout/stderr | Add a Motor `read2` using two standard reader threads and a bounded chunk channel; the coordinator alone invokes callbacks and propagates the first read or join failure. Compile it as the implementation for targets with no Unix, Windows, or wasm32 branch and compile the module on every target so Linux tests cover it. Every `lorry metadata` and `lorry check` invocation on Motor streams through this path, so it is production code, not a stub. | A Linux unit test of the portable module covers interleaved output, either pipe closing first, and output above pipe capacity on each pipe. The guest acceptance test streams JSON on stdout and progress on stderr concurrently. |
-| File URIs | In the exact `url` fork, add Motor to its slash-rooted file-path implementation without making `cfg(unix)` true. Preserve the crate's existing authority, absoluteness, percent-encoding, and UTF-8 rules. | Fork unit tests round-trip root, spaces, `%`, `#`, and non-ASCII names and exercise the crate's existing negative cases; the guest semantic test opens a non-ASCII path. |
-| Salsa registration | In the exact `inventory` fork, emit Motor constructor pointers in `.init_array`. Link rust-analyzer through the assembly wrapper so mlibc startup walks the array. Do not add constructor walking to Rust startup. | A small native inventory fixture observes more than one registration; ELF validation requires nonempty `.init_array`; the LSP database reaches quiescence. |
+| File URIs | Patch the pinned `url` release to add Motor to its slash-rooted file-path implementation without making `cfg(unix)` true. Preserve the crate's existing authority, absoluteness, percent-encoding, and UTF-8 rules. | Unit tests round-trip root, spaces, `%`, `#`, and non-ASCII names and exercise the crate's existing negative cases; the guest semantic test opens a non-ASCII path. |
+| Salsa registration | Patch the pinned `inventory` release to emit Motor constructor pointers in `.init_array`. Link rust-analyzer through the assembly wrapper so mlibc startup walks the array. Do not add constructor walking to Rust startup. | A small native inventory fixture observes more than one registration; ELF validation requires nonempty `.init_array`; the LSP database reaches quiescence. |
 | Allocator and workers | Leave optional jemalloc/mimalloc features off. Verify `num_cpus` against Motor's standard-library result and use an explicit native default worker count only if the 8 GiB measurements require it. | Record available CPUs, rust-analyzer threads, and peak memory; a worker cap needs its own measured justification. |
 | Filesystem changes | Keep the upstream client-watcher mode, which is already the default. Do not add a polling watcher or port a host notify backend. | Project load performs no periodic filesystem scan or watcher child process; standard `didOpen`/`didChange`/`didSave` drive the semantic test. |
 
@@ -1044,7 +1069,7 @@ The tests are layered so a failure is attributable before a full image run.
 - Test the Motor pipe implementation with a Linux unit test covering
   interleaved output, either pipe closing first, and output above pipe
   capacity on each pipe.
-- Test the exact URL fork's path conversion helpers and the inventory fork's
+- Test the exact patched URL crate's path conversion helpers and inventory's
   registration list; do not rely only on rust-analyzer startup.
 - Assert the standalone lock remains byte-identical and the Motor graph has no
   `dirs-sys` edge or optional allocator feature.
@@ -1260,16 +1285,21 @@ explicit:
 16. **Motor Rust: configuration and sysroot (complete).** Make `dirs` non-Motor, return
     no native implicit config directory, and skip the sysroot `cargo metadata`
     attempt on Motor.
-17. **URL fork and lock.** Add lossless Motor file-path conversion and tests;
-    pin the full fork revision in the standalone rust-analyzer lock.
-18. **Inventory fork and lock.** Add Motor `.init_array` registration and
-    tests; pin the full fork revision.
+17. **Pinned URL patch and source preparation.** Add checksum-verified
+    crates.io source preparation under `../patched-crates/`, with offline
+    shell contract tests. Check in the small lossless Motor file-path patch
+    and conversion tests. Record the exact upstream version/checksum.
+18. **Pinned inventory patch.** Check in Motor `.init_array` registration and
+    native fixture tests; record the exact upstream version/checksum. Prepare
+    both patched sources and commit the standalone rust-analyzer path-source
+    lock changes, without changing ordinary-build locks at runtime.
 19. **Motor Rust: child pipes.** Add the thread-based Motor implementation and
     its Linux unit test. Cross-check rust-analyzer offline. Stop for review of
     the complete external patch stack.
 20. **Toolchain/assembly identity and acquisition.** Add the standalone lock
     to toolchain identity and validation, record it in assembly manifests, add
-    the native recipe identity, locked source fetch, and shell contract tests,
+    patched-source identity and workspace-scoped overrides for both host and
+    native builds, native recipe identity, locked source fetch, and shell contract tests,
     then select the reviewed Motor Rust revision. Keep the Stage 1
     host-component behavior unchanged.
 21. **Native build and validation.** Cross-build, strip, ELF-check, hash, and
@@ -1375,7 +1405,8 @@ review record.
 | Rustflags | Correct Lorry to use Cargo's mutually exclusive precedence for every build and both compatibility queries: encoded environment, plain environment, all matching target entries, then build configuration. Target flags replace rather than append to build flags. |
 | Toolchain environment | An explicit direct compiler wins. A Linux rustup-proxy fallback honors rust-analyzer's `RUSTUP_TOOLCHAIN` only while resolving the proxy, then descendants receive the direct compiler without that variable. Native Lorry invokes its configured compiler directly. Host acceptance sets an absolute keyed `RUSTC`. |
 | Required patches | Delete the feature: its matcher depended on the manifest rewrite, nothing in the tree uses it, no command produces its seeded objects, and policy rules already deny a package by name, version, and source. Authorized by U. Lasiotus on 2026-09-02. |
-| Rust fork | Change no rust-analyzer defaults. Skip sysroot Cargo metadata on Motor and stitch the keyed `rust-src` directly. Carry exact-revision Motor forks for `url` and `inventory`. |
+| Rust fork | Change no rust-analyzer defaults. Skip sysroot Cargo metadata on Motor and stitch the keyed `rust-src` directly. |
+| Dependency patches | As approved by U. Lasiotus on 2026-09-04, use pinned crates.io releases of `url` and `inventory`, unpack and patch them locally under `../patched-crates/`, and build against those prepared sources. Keep the patches in Motor OS; no separate forks. Record checksums and patch/tree identity, precommit the path-source lock, and preserve locked/offline builds. Motor OS's root `AGENTS.md` governs the external-source work too. |
 | Build scripts | `lorry check` may execute admitted build scripts with the same authority and policy as `lorry build`. Motor warning mode is unsandboxed, so clients enable checks only for trusted projects and reviewed Lorry state. |
 | Procedural macros | Keep direct rust-analyzer proc-macro expansion disabled and package no proc-macro server or dylibrary. A check may still execute an admitted Motor proc-macro helper as a rustc descendant. |
 | Targets and refresh | Metadata includes every supported root target; `--all-targets` checks them. Use rust-analyzer's normal client-watcher refresh and flycheck paths; add no watch mode or custom launcher. |
@@ -1409,8 +1440,8 @@ rely on line numbers.
 | 14 tree and differential tests | New module over `resolver.rs` and `unit.rs`. `tests/test-all.sh` and `tests/current-toolchain.sh` for the keyed Cargo (`LORRY_TEST_CARGO`). `tests/oracles/`. |
 | 15 native equivalence | `tests/test-native.sh` (`remote_command`, the env-prefix pattern), `tests/native-fixture/`. |
 | 16 fork: config and sysroot | `crates/rust-analyzer/src/config.rs`: `Config::user_config_dir_path`. `crates/rust-analyzer/Cargo.toml`: the `dirs` dependency. `crates/project-model/src/sysroot.rs`: `Sysroot::load_workspace`, the `CargoMetadata` branch. |
-| 17 url fork | The fork's file-path conversion module, the `cfg` list that admits slash-rooted targets. Pin in the workspace `Cargo.lock` (currently url 2.5.8). |
-| 18 inventory fork | The fork's `.init_array` section `cfg` list. Pin in the workspace `Cargo.lock` (currently inventory 0.3.24). |
+| 17 url patch | `src/toolchain-patched-crates.sh`, `src/patches/`, `src/tests/test-toolchain-patched-crates.sh`; the prepared crate's file-path conversion module and slash-rooted target conditions (currently url 2.5.8). |
+| 18 inventory patch | `src/patches/`; the prepared crate's `.init_array` section target list (currently inventory 0.3.24); native test fixture and standalone rust-analyzer `Cargo.lock`. |
 | 19 fork: child pipes | `crates/stdx/src/process.rs`: the `read2` implementations under `cfg(unix)`, `cfg(windows)`, and `cfg(target_arch = "wasm32")`, and their callers `streaming_output` and `spawn_with_streaming_output`. |
 | 20 toolchain identity | `src/toolchain-versions.sh`: the `*_LOCK_SHA256` values, `MOTOR_OS_RUNTIME_INPUTS`. `src/toolchain-state.sh`: the before/after lock check. `src/toolchain-lib.sh`: `toolchain_key`. `src/toolchain-sources.sh`: provisioning. `src/toolchain-assembly.sh`: `toolchain_render_assembly_manifest`, `toolchain_validate_assembly_outputs`. Tests: `src/tests/test-toolchain-*.sh`. |
 | 21 native build | `src/toolchain-native.sh`, `src/toolchain-assembly.sh` (the `rustc` image recipe and `ASSEMBLY_IMAGE_ROOT`), `docs/toolchain.md`, `docs/libc.md` for the startup-path statement. |
