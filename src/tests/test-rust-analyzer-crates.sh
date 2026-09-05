@@ -20,7 +20,7 @@ if [ "${1:-}" = --run-motor ]; then
 fi
 [ "$#" = 0 ] || { echo "usage: $0 [--run-motor BINARY ARGS...]" >&2; exit 2; }
 
-for helper in lib sources runtime assembly patched-crates; do
+for helper in lib sources runtime assembly patched-crates rust-analyzer; do
 	. "$ROOT_DIR/src/toolchain-$helper.sh"
 done
 . "$ROOT_DIR/src/patches/crates.sh"
@@ -39,12 +39,9 @@ runner="${runner//\\/\\\\}"
 runner="${runner//\"/\\\"}"
 runner_config="target.x86_64-unknown-motor.runner=[\"bash\",\"$runner\",\"--run-motor\"]"
 test_crate() {
-	local name="$1" version="$2" checksum="$3" test_target="$4" archive source
-	archive="$(toolchain_cached_crate "${CARGO_HOME:-$HOME/.cargo}" \
-		"$name-$version.crate" "$checksum")"
-	source="$(toolchain_prepare_patched_crate "$MOTORH/patched-crates" "$name" \
-		"$version" "$checksum" "$archive" \
-		"$ROOT_DIR/src/patches/$name-$version-motor.patch")"
+	local name="$1" test_target="$2" source
+	source="$(toolchain_rust_analyzer_crate "$ROOT_DIR" "$MOTORH" \
+		"${CARGO_HOME:-$HOME/.cargo}" "$name" false)"
 	local args=(--release --locked --offline --manifest-path "$source/Cargo.toml"
 		--test "$test_target" --target-dir "$temporary/target")
 	"$cargo" test "${args[@]}"
@@ -53,10 +50,9 @@ test_crate() {
 		"$cargo" test "${args[@]}" --target x86_64-unknown-motor --config "$runner_config"
 
 	# Locked tests must not mutate the published/patched source tree either.
-	toolchain_prepare_patched_crate "$MOTORH/patched-crates" "$name" \
-		"$version" "$checksum" "$archive" \
-		"$ROOT_DIR/src/patches/$name-$version-motor.patch" >/dev/null
+	toolchain_rust_analyzer_crate "$ROOT_DIR" "$MOTORH" \
+		"${CARGO_HOME:-$HOME/.cargo}" "$name" false >/dev/null
 }
-test_crate url "$MOTOR_URL_VERSION" "$MOTOR_URL_CHECKSUM" unit
-test_crate inventory "$MOTOR_INVENTORY_VERSION" "$MOTOR_INVENTORY_CHECKSUM" test
+test_crate url unit
+test_crate inventory test
 echo 'test-rust-analyzer-crates PASS'
