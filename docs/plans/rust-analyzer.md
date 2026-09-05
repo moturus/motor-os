@@ -25,7 +25,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | In progress; patches 1-16 complete |
+| 2. Guest | Motor OS | Motor only | Patches 1-19 complete; step 20 in progress |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -1308,11 +1308,13 @@ explicit:
     The pinned patch passes both host and Motor registration tests
     through `full-test.sh`; the full release developer-image gate passes.
     The four-line standalone lock change validates with `--locked --offline`.
-19. **Motor Rust: child pipes (implemented; review required).** Add the thread-based Motor implementation and
+19. **Motor Rust: child pipes (complete; reviewed).** Add the thread-based Motor implementation and
     its Linux unit test. Cross-check rust-analyzer offline. Stop for review of
     the complete external patch stack.
     Committed in the authoring worktree described below; host tests and both
-    host/Motor checks pass. Stopped at the planned external-stack review.
+    host/Motor checks pass. U. Lasiotus approved the external stack after its
+    conversational summary; proceed with integration, subject to the new
+    bootstrap-scoping decision below.
 20. **Toolchain/assembly identity and acquisition.** Add the standalone lock
     to toolchain identity and validation, record it in assembly manifests, add
     patched-source identity and workspace-scoped overrides for both host and
@@ -1654,11 +1656,125 @@ Evidence is in
 This is the second passing release developer-image gate after the resolver
 optimization, not a resolution of the separately tracked original hang.
 
-**Required review decision:** approve this external stack before selecting
-the fork revision, integrating patched-source and standalone-lock identity,
-and building/publishing native rust-analyzer (steps 20–22). Carry the fork's
+**Review approved:** U. Lasiotus approved this external stack and continuation
+with toolchain integration and the native build. Carry the fork's
 portable-pipe unit tests into the selected-source test integration; the current
 full developer-image gate tests the published crate patches, not this still
 unselected authoring worktree. Native LSP/resource acceptance and its separate
 threshold review remain in step 23. The original unexplained native Lorry
 hang remains tracked separately as agreed above.
+
+### 4.17 Approved integration decision: bootstrap patch scoping
+
+Step 20 inspection found an integration choice not covered by the reviewed
+external stack. In the pinned Rust bootstrap:
+
+- `src/bootstrap/src/core/builder/cargo.rs` runs tool Cargo commands from the
+  Rust source root, including commands with a rust-analyzer `--manifest-path`;
+- `src/bootstrap/src/core/build_steps/tool.rs::prepare_tool_cargo` constructs
+  those manifest arguments for both rust-analyzer and its host proc-macro
+  server; neither call currently supplies the local crate overrides; and
+- the existing per-tool bootstrap configuration supports extra features, not
+  arbitrary Cargo configuration arguments.
+
+A `.cargo/config.toml` under rust-analyzer would not be read from that working
+directory, and generating one in the source tree is prohibited by this plan
+anyway. Global Cargo patch configuration would also affect unrelated Rust-root
+builds (the root lock contains URL), violating the workspace-scoped contract.
+
+**Approved:** add a small, opt-in hook in the Motor Rust fork's
+`prepare_tool_cargo`. For rust-analyzer workspace tool paths only, it reads
+an explicitly named Motor build environment variable carrying an external
+Cargo config path and passes that path via `--config`. The Motor OS build
+script generates the config outside the source tree with only the two verified
+crate path overrides. Cover the server and proc-macro-server paths, unrelated
+tool exclusion, and safe argument handling in tests. Enforce the standalone
+lock contract and include the new helper/config-generation logic in identity.
+No global Cargo config, runtime wrapper, or std/runtime change is involved.
+
+The alternative is a build-only Cargo wrapper, selected via bootstrap's
+existing `build.cargo`, which inspects each invocation and injects the same
+arguments only for rust-analyzer. It avoids a bootstrap source patch but adds
+argument-dispatch machinery around every bootstrap Cargo invocation.
+
+U. Lasiotus approved the scoped hook, including the external Rust bootstrap
+file scope. The hook uses `MOTOR_RUST_ANALYZER_CARGO_CONFIG`; its tests cover
+the analyzer and proc-macro server, unrelated tools and parent traversal,
+an unset variable, and passing paths with spaces and shell metacharacters
+as a single unmodified argument. Toolchain integration is proceeding with
+this choice; no build-only Cargo wrapper is needed.
+
+### 4.18 Step 20 prerequisite: bootstrap path validation
+
+The scoped hook is implemented in the authoring worktree's
+`src/bootstrap/src/core/build_steps/tool.rs` and
+`tool/motor_rust_analyzer.rs`. Its four focused unit tests and an offline
+`cargo check` of the complete bootstrap crate pass. Main-repository work adds
+external config generation and checksum/tree-verified crate preparation, with
+its shell contract test wired into `full-test.sh`; the developer-image crate
+tests also use that preparation helper. The hook is committed as
+`d454849e203` in the Motor Rust fork; the preparation and identity helpers
+are committed as `83bfd301` in Motor OS. The new fork revision is not selected
+for provisioning yet.
+
+The new negative-path test exposed a **pre-existing production bug** in
+`src/toolchain-bootstrap.sh::toolchain_bootstrap_absolute_path`. Its first
+`case` calls `toolchain_die` for a relative path without returning; the second
+`case` then returns success for an otherwise ordinary string. Callers use
+`|| return`, so Bash's conditional error handling does not stop the function.
+Both the validator and `toolchain_render_bootstrap_config relative /sysroot
+/llvm test-id` print the rejection but return status 0. Thus the existing
+bootstrap renderer can accept a relative prefix. The new analyzer config
+test correctly fails with `unsafe TOML path accepted`.
+
+U. Lasiotus approved fixing this prerequisite and continuing. Commit
+`0fb58a46` adds an explicit failure return in the relative-path branch, with
+regression tests for both direct validation and the existing bootstrap
+renderer. No Rust source, runtime, or core OS expansion was needed for this
+fix. The prerequisite is resolved and release-gated.
+
+The first validation attempt (`/tmp/motor-ra-bootstrap-dev-release.log`)
+is invalid: the agent inserted the identity-test entry into `full-test.sh`
+while Bash was executing it. The live file edit disrupted execution: after
+the release terminal-size test passed, Bash ran its debug branch and then
+reported an unexpected `fi`. The on-disk script passes `bash -n`; this was an
+agent test-execution error, not an OS failure. The run exited with status 2
+and left no VM running. Validation must restart with all scripts frozen; no
+retry, timeout, or OS-code workaround was added.
+
+The subsequent frozen-script `src/tests/full-test-dev.sh --release` run
+passes completely: `/tmp/motor-ra-bootstrap-dev-release-frozen.log`. It
+includes both new shell suites, host and Motor URL/inventory tests, developer
+source builds, and the complete Lorry suite. Host preparation takes 228.175
+seconds; the native self-test takes 539.726 seconds; the full Lorry suite
+takes 927 seconds. Evidence is in
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T225508Z-657958/`.
+Bootstrap's four hook tests also pass inside its full unit-test harness;
+its offline check and selected-toolchain formatting check pass. This does
+not claim a newly selected host toolchain or a linked/executed native server.
+
+### 4.19 Next coordination: publish the reviewed Rust stack
+
+Step 20 now has tested immutable source preparation, workspace-scoped config
+generation, and an offline input digest covering pins, patches, preparation
+logic, and declared prepared-tree digests. The digest is not yet wired into
+the toolchain key. Remaining step 20 work includes that wiring, the standalone
+lock's before/after checks and manifests, source acquisition, bootstrap
+config injection, and selected-source test integration for the pipe and hook
+tests. Steps 21-24, including the native server, remain ahead.
+
+The remote `github.com/moturus/rust` branch
+`motor-os-1.99.0-beta-f47d5bb` was checked with `git ls-remote` and still points
+to `3c9729fb79778d71daabbff78319a8b9535c340b`. The reviewed authoring branch
+`motor-ra-portability` now has four commits above that baseline:
+`9ea84a28c3e`, `fc3a0529b7f`, `f040c09547a`, and `d454849e203`.
+Managed provisioning requires its selected revision to be reachable from
+the declared remote ref; it cannot yet consume these local-only commits.
+No remote push or toolchain selection has been performed.
+
+**Publication approval requested:** may the agent fast-forward the existing
+Motor Rust branch to `d454849e2030eb09bcce9e367264fa5f7984bcb1` and continue
+step 20? Recheck the remote before pushing; do not force-push. This publishes
+only the reviewed stack in the existing fork, not a new repository. Local
+implementation and commits are authorized; remote publication is the next
+external coordination boundary.
