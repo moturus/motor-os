@@ -1412,6 +1412,111 @@ fn test_positive_linger_timeout_discards_stalled_tx() {
     println!("test_positive_linger_timeout_discards_stalled_tx() PASS");
 }
 
+/// Channel EOF must not cancel accepted writes just because the TX task has
+/// not handed all their pages to the netstack yet. Fill the path while the
+/// peer does not read, then allow reads only after sys-io has reclaimed EOF.
+pub fn test_channel_teardown_drains_staged_tcp() {
+    use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
+    use moto_sys_io::api_net;
+    use std::os::fd::AsRawFd;
+
+    const SEND_RING: u64 = 32 * 1024;
+    for (explicit_close, timeout) in [(false, false), (true, false), (false, true)] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        let mut connect = api_net::tcp_stream_connect_request(&listener_addr, 0);
+        connect.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_TX] =
+            api_net::tcp_buf_size_to_code(SEND_RING);
+        connection.send(connect).unwrap();
+        let response = recv_raw_net_response(&connection);
+        response.status().unwrap();
+        let handle = response.handle;
+        let client_addr = api_net::get_socket_addr(&response.payload);
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let clients_with_writer = read_sys_io_metric("net.active_clients");
+
+        if timeout {
+            let mut linger = moto_ipc::io_channel::Msg::new();
+            linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
+            linger.handle = handle;
+            linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+            linger.payload.args_32_mut()[2] = 1;
+            linger.payload.args_32_mut()[3] = 1;
+            connection.send(linger).unwrap();
+            recv_raw_net_response(&connection).status().unwrap();
+        }
+
+        // Even a fully drained peer RX pump can only hold its TCP receive
+        // ring plus one subchannel of IPC pages. Leave a raw queue entry for
+        // the barrier, and write more than all buffers ahead of TX combined.
+        let receive_ring = moto_rt::net::recv_buffer_size(peer.as_raw_fd()).unwrap() as usize;
+        let receive_pages = CHANNEL_PAGE_COUNT / api_net::IO_SUBCHANNELS as usize;
+        let page_count = CHANNEL_PAGE_COUNT - 1;
+        assert!(
+            page_count * PAGE_SIZE > SEND_RING as usize + receive_ring + receive_pages * PAGE_SIZE
+        );
+        let mut expected = Vec::new();
+        for index in 0..page_count {
+            let page = connection.alloc_page(u64::MAX).unwrap();
+            page.bytes_mut().fill(index as u8);
+            expected.extend_from_slice(page.bytes());
+            connection
+                .send(api_net::tcp_stream_tx_msg(handle, page, PAGE_SIZE, 0))
+                .unwrap();
+        }
+
+        // TX dispatch is inline. This response proves every write reached
+        // sys-io and checks the send-ring bound used above, without draining it.
+        let mut barrier = moto_ipc::io_channel::Msg::new();
+        barrier.id = 1;
+        barrier.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        barrier.handle = handle;
+        barrier.payload.args_64_mut()[0] = api_net::TCP_OPTION_SNDBUF;
+        connection.send(barrier).unwrap();
+        let response = recv_raw_net_response(&connection);
+        assert_eq!(response.id, barrier.id);
+        response.status().unwrap();
+        assert_eq!(response.payload.args_64()[1], SEND_RING);
+
+        if explicit_close {
+            let mut close = moto_ipc::io_channel::Msg::new();
+            close.command = api_net::NetCmd::TcpStreamClose as u16;
+            close.handle = handle;
+            connection.send(close).unwrap();
+            let response = recv_raw_net_response(&connection);
+            assert_eq!(response.command, close.command);
+            response.status().unwrap();
+        }
+
+        let dropped_at = std::time::Instant::now();
+        drop(connection);
+        wait_for_sys_io_metric("net.active_clients", |value| {
+            value == clients_with_writer - 1
+        });
+        let mut received = Vec::new();
+        if timeout {
+            wait_for_sockets_released(client_addr);
+            assert!(dropped_at.elapsed() >= Duration::from_secs(1));
+            assert_eq!(
+                peer.read_to_end(&mut received).unwrap_err().kind(),
+                std::io::ErrorKind::ConnectionReset
+            );
+            assert!(received.len() < expected.len());
+        } else {
+            peer.read_to_end(&mut received).unwrap();
+            assert_eq!(received, expected);
+        }
+
+        drop(peer);
+        wait_for_sockets_released(client_addr);
+        drop(listener);
+        wait_for_sockets_released(listener_addr);
+    }
+    println!("test_channel_teardown_drains_staged_tcp() PASS");
+}
+
 fn test_failed_tcp_setup_rolls_back_socket() {
     use moto_sys_io::api_net;
 
@@ -1665,6 +1770,7 @@ pub fn test_native_net_cancellation() {
     test_delivered_then_cancelled_native_bind_releases_addr();
     test_positive_linger_timeout_discards_stalled_tx();
     test_client_death_reclaims_tcp_sockets();
+    test_channel_teardown_drains_staged_tcp();
     // Keep the raw connection last: its disconnect accounting is asynchronous
     // and must not perturb the exact client-count baselines above.
     test_positive_linger_close_rpc_completes();
