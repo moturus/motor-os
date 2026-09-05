@@ -545,7 +545,7 @@ rust-analyzer callers still own their final output buffers.
 ### 4.5 Native build and development-image layout
 
 Build after the final host compiler, Motor std, assembly sysroot, and
-`motor-rust-cc` wrapper have validated. Use the installed keyed Linux-host
+`motor-clang` wrapper have validated. Use the installed keyed Linux-host
 Cargo and rustc to cross-compile; do not try to run the Motor-host rustc on
 Linux and do not invoke `x.py` again.
 
@@ -554,7 +554,7 @@ The recipe is equivalent to:
 ```sh
 RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" \
 CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/rust-analyzer" \
-CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$ASSEMBLY_SYSROOT/bin/motor-rust-cc" \
+CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$ASSEMBLY_SYSROOT/bin/motor-clang" \
 CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS="-C link-self-contained=no -C default-linker-libraries=yes" \
 CFG_RELEASE="$RUST_ANALYZER_RELEASE" \
 CFG_RELEASE_CHANNEL="$MOTOR_RUST_CHANNEL" \
@@ -566,10 +566,16 @@ CFG_RELEASE_CHANNEL="$MOTOR_RUST_CHANNEL" \
 Derive `RUST_ANALYZER_RELEASE` from the same selected Rust version/channel
 logic used by bootstrap and require it to equal the release portion reported
 by the validated Stage 1 server. Do not obtain it from an ambient Cargo or
-rust-analyzer. The two codegen flags are required: selecting the linker alone
-does not opt a Rust binary into mlibc startup. Without them the binary uses
-the pure-Rust `motor_start`, `.init_array` is not walked, and Salsa's
-`inventory` registrations are absent at runtime.
+rust-analyzer. Use both codegen flags for this driver-managed libc link.
+mlibc's strong `motor_start` replaces Rust std's weak entry and walks
+`.init_array` before calling main. The native inventory fixture must prove
+that registration actually runs; a nonempty ELF section alone is not enough.
+
+Use the same `motor-clang`/default-library combination as native Lorry.
+The bootstrap-specific `motor-rust-cc` wrapper explicitly adds `crt1.o` and
+runtime libraries; using it with default libraries enabled duplicates the
+startup object. The inventory cross-link reproduced that recipe error and
+passed with `motor-clang`; no wrapper or runtime modification is required.
 
 The implementation must use argument arrays/environment assignments already
 available to the build shell; it must not synthesize a Cargo config in the
@@ -1285,10 +1291,16 @@ explicit:
 16. **Motor Rust: configuration and sysroot (complete).** Make `dirs` non-Motor, return
     no native implicit config directory, and skip the sysroot `cargo metadata`
     attempt on Motor.
-17. **Pinned URL patch and source preparation.** Add checksum-verified
+17. **Pinned URL patch and source preparation (complete).** Add checksum-verified
     crates.io source preparation under `../patched-crates/`, with offline
     shell contract tests. Check in the small lossless Motor file-path patch
     and conversion tests. Record the exact upstream version/checksum.
+    Preparation contract tests pass; the URL patch passes 67 host
+    and 61 Motor unit tests through the developer-image gate. The host/native
+    runner is wired into `full-test.sh`; formatting passes and Clippy reports
+    only two unchanged upstream parser warnings. The full release developer-image
+    gate passes after the approved resolver snapshot optimization (see below).
+    The earlier unreproduced native self-build stall remains tracked separately.
 18. **Pinned inventory patch.** Check in Motor `.init_array` registration and
     native fixture tests; record the exact upstream version/checksum. Prepare
     both patched sources and commit the standalone rust-analyzer path-source
@@ -1415,8 +1427,119 @@ review record.
 
 #### Open questions
 
-None at present. Record any newly discovered non-obvious decision here and
-stop for maintainer review before implementing past it.
+The local DNS/TCP TIME-WAIT prerequisite and the harness retry that masked
+it are fixed in `a3d1bae0`, validated by three debug and three release
+full-suite passes after rebasing onto the kloader staging fix `f4b5db67`.
+The earlier assembly/tap prerequisites are resolved too.
+
+**New stop: native Lorry self-build liveness (2026-09-05).** The subsequent
+`full-test-dev.sh --release` run passed the URL tests (67 host, 61 Motor),
+the repository suite, and native developer-source builds, including Lorry
+in the 4-vCPU/4-GiB VM. Lorry's final product fixture then timed out in
+`native-lorry-self-gate` at its existing 1,200-second limit, exit 124, in
+the 8-vCPU/8-GiB VM. Its host preparation passed in 202.820 seconds; native
+vendoring completed and verified `Cargo.lock`, but the first native release
+build stopped producing output after dispatching initial dependencies through
+`bisync 0.3.0`.
+
+A diagnostic SSH `ps` request also stopped responding. At a host-side sample,
+all eight vCPUs were waiting in KVM, with no console panic. The host had about
+20 GiB available and no swap in use; QEMU's resident memory was about 7.7 GiB.
+These observations establish a liveness failure, not its cause: guest memory
+pressure, a lost wake, or another OS/runtime issue remain unproven. No test
+limit, job count, or retry policy was changed. The harness stopped the VM;
+the stalled diagnostic SSH client was terminated separately.
+
+Evidence is retained under
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T165416Z-421811/`
+(`summary.txt`, `timings.tsv`, `native.log`, `qemu.log`, `lorry-cross`), with
+the complete run in `/tmp/motor-ra-url-dev-rebased.log`. The DNS fix is
+committed; URL/helper work remains uncommitted. Inventory has only been
+cross-linked in a temporary fixture, not executed natively or integrated.
+
+**Maintainer approved investigation and repair (2026-09-05).** Diagnose and
+fix the native self-build stall before continuing rust-analyzer. Do not
+bypass it by increasing the timeout or reducing the gate's concurrency.
+The failure is outside the URL/inventory portability patch. Reproduction
+uses the retained guest workspace in a disposable disk snapshot, with the
+same 8-vCPU/8-GiB configuration, and captures guest memory/process samples
+plus QEMU monitor state without repeating network vendoring.
+
+Diagnostic results, all at 8 vCPUs/8 GiB:
+
+- Resuming the retained build passed.
+- A local probe passed 32 rounds of eight synchronized `rustc --print=cfg`
+  launches (256 total).
+- A fully cold release build passed in 540.137 seconds: dependency
+  verification/preparation took about 228 seconds, dependency compilation
+  114 seconds, and the remaining root build/publication about 198 seconds.
+- Fresh Git-patch materialization, native `vendor --accept-all`, and a cold
+  release build passed together in approximately 1,115 seconds, under the
+  unchanged 1,200-second limit. Vendoring took about 581 seconds. This was
+  the vendor/build prefix, not the fixture's subsequent equivalence/tests.
+- Both preserved cold native binaries are byte-identical to the original
+  cross-build, SHA-256
+  `7a702c25fb9982ba7a09d62b96563d0779063d990128f5df2bed022f0261fa33`.
+
+None reproduced the original stall or recorded a kernel memory-admission
+refusal. These are diagnostic results, not a repair or replacement for the
+failed gate. Logs are `/tmp/motor-lorry-diag-build.log`,
+`/tmp/motor-lorry-diag-samples.log`,
+`/tmp/motor-lorry-diag-spawn-stress.log`,
+`/tmp/motor-lorry-diag-cold-build.log`, and
+`/tmp/motor-lorry-diag-vendor-build{,-timestamps}.log`. Resident counter logs
+are `/tmp/motor-lorry-diag-resident{,-v2,-interactive,-foreground}.log`.
+The gap in the interactive log was host terminal job control stopping SSH
+after input to a non-foreground `timeout`, not evidence of a guest timer
+failure; the replacement used `timeout --foreground`. A separate debugger
+sample is `/tmp/motor-lorry-diag-vendor-stacks.log`.
+
+The diagnostic VM used a disposable disk snapshot. Cache, target, and Git
+source directories were renamed within that snapshot, not deleted from the
+original disk. The VM has been shut down; host logs and the two native
+binaries remain in `/tmp`. Production code, gate limits, and concurrency
+remain unchanged. No implementation changes were committed in this
+investigation, and the original liveness failure remains open.
+
+**Approved follow-up: resolver snapshot optimization.** There is a separate measured
+verification/resolution cost, but reducing it must not be presented as proof
+that the unreproduced hang is fixed. The maintainer approved this focused
+Lorry-only change and then continuing rust-analyzer implementation:
+
+1. Share immutable `Candidate` data between resolver `State` snapshots
+   (for example, `Node::record: Arc<Candidate>`), while keeping activation,
+   edge, and selection state branch-local. Currently `State::clone` deeply
+   copies candidates, including full local manifests, during recursive
+   `solve` calls. Preserve all candidate ordering, backtracking, admission,
+   and Cargo-compatibility semantics; do not redesign the solver or change
+   the allocator as part of this patch.
+2. Test shared immutable records and independent mutable branch state;
+   run the resolver/Cargo-oracle contracts, then measure the same cold
+   native fixture and run the unchanged release developer-image gate.
+3. Keep the original liveness failure tracked separately unless evidence
+   establishes its cause. The maintainer approved resuming rust-analyzer
+   after this optimization with that failure still unresolved.
+
+Implementation complete: resolver nodes now share immutable candidates
+with `Arc`; mutable activation/edge/selection data is still cloned per branch.
+A regression test checks sharing, isolation, and final resolution both with
+and without a surviving snapshot. All 26 focused resolver tests pass, including
+the frozen Cargo-resolution oracle; Clippy passes with warnings denied.
+
+`src/tests/full-test-dev.sh --release` passes with unchanged limits and
+concurrency. Lorry's host suite reports 333 passed and 10 pre-existing ignored
+tests; the complete product suite, Cargo differential contracts, and native
+equivalence pass. The native self-build phase takes 535.133 seconds (8m55s)
+including fresh vendoring, release build, byte-for-byte cross/native comparison,
+command equivalence, proc-macro and incremental tests. Host preparation takes
+199.119 seconds; the complete Lorry product suite takes 1028 seconds. Evidence:
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T203023Z-481815/`
+and `/tmp/motor-ra-resolver-dev-release.log`.
+
+This passing fresh-workspace gate is not a controlled before/after benchmark
+against the separately cache-cleared diagnostic runs, nor proof that the
+original liveness failure is repaired. No timeout, retry, allocator, or OS
+change was made in the optimization. Continue rust-analyzer as approved.
 
 ### 4.15 Implementation map
 

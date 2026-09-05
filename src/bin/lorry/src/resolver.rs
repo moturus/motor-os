@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use semver::{Version, VersionReq};
 
@@ -1181,7 +1182,8 @@ struct Sent {
 
 #[derive(Clone)]
 struct Node {
-    record: Candidate,
+    // Candidate data is immutable; only branch-local selection state needs copying.
+    record: Arc<Candidate>,
     activations: BTreeMap<FeatureContext, Activation>,
     compile_kinds: BTreeSet<CompileKind>,
     edges: BTreeMap<(CompileKind, CompileKind, FeatureContext, usize), PackageKey>,
@@ -1280,10 +1282,11 @@ impl State {
                     },
                 )
                 .collect();
+            let record = Arc::unwrap_or_clone(node.record);
             packages.push(ResolvedPackage {
                 key,
-                source: node.record.source,
-                local_manifest: node.record.local_manifest,
+                source: record.source,
+                local_manifest: record.local_manifest,
                 feature_sets,
                 compile_kinds: node.compile_kinds,
                 target_features,
@@ -1447,7 +1450,7 @@ fn solve(
         candidate_state.nodes.insert(
             key.clone(),
             Node {
-                record,
+                record: Arc::new(record),
                 activations: BTreeMap::new(),
                 compile_kinds: BTreeSet::new(),
                 edges: BTreeMap::new(),
@@ -1984,6 +1987,99 @@ mod tests {
 
     const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
     static NEXT_LOCAL_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn snapshots_share_candidates_but_keep_selection_state_independent() {
+        let manifest = manifest("", "extra = []", "2");
+        let candidate = local_candidate(
+            manifest.clone(),
+            PathBuf::from("/fixture"),
+            PathBuf::from("/fixture"),
+            [0; 32],
+            false,
+        )
+        .unwrap();
+        let key = PackageKey {
+            name: candidate.name.clone(),
+            version: candidate.version.clone(),
+            source: candidate.source.key(),
+        };
+        let mut state = State::default();
+        state.nodes.insert(
+            key.clone(),
+            Node {
+                record: Arc::new(candidate),
+                activations: BTreeMap::from([(FeatureContext::Unified, Activation::default())]),
+                compile_kinds: BTreeSet::from([CompileKind::Target]),
+                edges: BTreeMap::new(),
+            },
+        );
+        let mut branch = state.clone();
+        let original = &state.nodes[&key];
+        let changed = branch.nodes.get_mut(&key).unwrap();
+        assert!(Arc::ptr_eq(&original.record, &changed.record));
+        assert!(original.record.local_manifest.is_some());
+        let activation = changed
+            .activations
+            .get_mut(&FeatureContext::Unified)
+            .unwrap();
+        activation.active.insert("extra".into());
+        activation.enabled_optional.insert("optional".into());
+        activation
+            .dependency_features
+            .insert("optional".into(), BTreeSet::from(["extra".into()]));
+        activation.weak_dependencies.insert(0);
+        activation.sent.insert(
+            (CompileKind::Target, 0),
+            Sent {
+                features: BTreeSet::from(["extra".into()]),
+                default_features: true,
+            },
+        );
+        changed.compile_kinds.insert(CompileKind::Host);
+        changed.edges.insert(
+            (
+                CompileKind::Target,
+                CompileKind::Host,
+                FeatureContext::Unified,
+                0,
+            ),
+            key.clone(),
+        );
+        branch.links.insert("native".into(), key.clone());
+        branch.root_edges.insert(
+            (CompileKind::Target, FeatureContext::Unified, 0),
+            key.clone(),
+        );
+        let activation = &original.activations[&FeatureContext::Unified];
+        assert!(activation.active.is_empty());
+        assert!(activation.enabled_optional.is_empty());
+        assert!(activation.dependency_features.is_empty());
+        assert!(activation.weak_dependencies.is_empty());
+        assert!(activation.sent.is_empty());
+        assert_eq!(
+            original.compile_kinds,
+            BTreeSet::from([CompileKind::Target])
+        );
+        assert!(original.edges.is_empty());
+        assert!(state.links.is_empty());
+        assert!(state.root_edges.is_empty());
+
+        // Resolution must retain local source data with or without surviving snapshots.
+        let shared = state.clone().into_resolution(&manifest);
+        drop(branch);
+        assert_eq!(Arc::strong_count(&state.nodes[&key].record), 1);
+        let owned = state.into_resolution(&manifest);
+        for resolution in [shared, owned] {
+            let package = &resolution.packages[0];
+            assert_eq!(package.key, key);
+            assert_eq!(package.source.key(), key.source);
+            assert!(package.local_manifest.is_some());
+            assert!(package.target_features.is_empty());
+            assert!(package.edges.is_empty());
+            assert!(resolution.root_edges.is_empty());
+        }
+    }
 
     struct LocalFixture(PathBuf);
 
