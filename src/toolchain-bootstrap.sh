@@ -5,7 +5,7 @@ toolchain_bootstrap_absolute_path() {
 	local name="$1" value="$2"
 	case "$value" in
 		/*) ;;
-		*) toolchain_die "$name must be an absolute path" ;;
+		*) toolchain_die "$name must be an absolute path"; return 1 ;;
 	esac
 	case "$value" in
 		*'"'*|*'\'*|*$'\n'*|*$'\r'*)

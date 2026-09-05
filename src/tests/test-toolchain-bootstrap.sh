@@ -17,6 +17,17 @@ trap 'rm -rf "$temporary"' EXIT
 rust_source="$temporary/rust"
 mkdir -p "$rust_source"
 
+# Exercise conditional callers, where errexit does not propagate a failure
+# past another successful command in the validator.
+if toolchain_bootstrap_absolute_path prefix relative 2>/dev/null; then
+	fail "relative path validation returned success"
+fi
+if toolchain_render_bootstrap_config relative /sysroot /llvm test-id \
+	> "$temporary/invalid.toml" 2>/dev/null; then
+	fail "bootstrap renderer accepted a relative prefix"
+fi
+[ ! -s "$temporary/invalid.toml" ] || fail "invalid bootstrap config was rendered"
+
 managed="$temporary/state/managed.toml"
 toolchain_generate_bootstrap_config "$managed" "$rust_source" \
 	"$temporary/toolchains/managed" "$temporary/sysroot" \
