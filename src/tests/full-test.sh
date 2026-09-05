@@ -431,6 +431,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
       -i "$WD/test.key" motor@192.168.4.2
 fi
 
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  "$WD/test-rust-analyzer-crates.sh"
+fi
+
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
   fail "mkdir returned success after a denied root-level creation"
 fi
