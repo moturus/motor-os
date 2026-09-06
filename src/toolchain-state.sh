@@ -11,9 +11,11 @@ toolchain_capture_starting_locks() {
 	local rust="$1"
 	START_RUST_ROOT_LOCK_SHA256="$(toolchain_sha256_file "$rust/Cargo.lock")" || return
 	START_RUST_LIBRARY_LOCK_SHA256="$(toolchain_sha256_file "$rust/library/Cargo.lock")" || return
+	START_RUST_ANALYZER_LOCK_SHA256="$(toolchain_sha256_file "$rust/src/tools/rust-analyzer/Cargo.lock")" || return
 }
 
 toolchain_derive_identity() {
+	RUST_ANALYZER_INPUTS_DIGEST="$(toolchain_rust_analyzer_inputs_digest)" || return
 	STANDALONE_LLVM_CONFIG_DIGEST="$(
 		toolchain_standalone_llvm_config_digest
 	)" || return
@@ -44,11 +46,14 @@ toolchain_postbuild_locks_unchanged() {
 	local rust="$1"
 	POST_RUST_ROOT_LOCK_SHA256="$(toolchain_sha256_file "$rust/Cargo.lock")" || return
 	POST_RUST_LIBRARY_LOCK_SHA256="$(toolchain_sha256_file "$rust/library/Cargo.lock")" || return
+	POST_RUST_ANALYZER_LOCK_SHA256="$(toolchain_sha256_file "$rust/src/tools/rust-analyzer/Cargo.lock")" || return
 	if [ "$START_RUST_ROOT_LOCK_SHA256" = "$POST_RUST_ROOT_LOCK_SHA256" ] &&
-		[ "$START_RUST_LIBRARY_LOCK_SHA256" = "$POST_RUST_LIBRARY_LOCK_SHA256" ]; then
+		[ "$START_RUST_LIBRARY_LOCK_SHA256" = "$POST_RUST_LIBRARY_LOCK_SHA256" ] &&
+		[ "$START_RUST_ANALYZER_LOCK_SHA256" = "$POST_RUST_ANALYZER_LOCK_SHA256" ]; then
 		return 0
 	fi
 	TOOLCHAIN_LOCK_REWRITE_REASON="Rust lockfiles changed during bootstrap; root $START_RUST_ROOT_LOCK_SHA256 -> $POST_RUST_ROOT_LOCK_SHA256; library $START_RUST_LIBRARY_LOCK_SHA256 -> $POST_RUST_LIBRARY_LOCK_SHA256"
+	TOOLCHAIN_LOCK_REWRITE_REASON+="; rust-analyzer $START_RUST_ANALYZER_LOCK_SHA256 -> $POST_RUST_ANALYZER_LOCK_SHA256"
 	toolchain_die "$TOOLCHAIN_LOCK_REWRITE_REASON"
 }
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared, offline-safe helpers for the exact Motor toolchain tuple.
 
+. "$(dirname "${BASH_SOURCE[0]}")/toolchain-rust-analyzer-identity.sh"
+
 toolchain_die() {
   echo "toolchain: $*" >&2
   return 1
@@ -42,7 +44,7 @@ toolchain_validate_versions() {
     MOTOR_CARGO_REPOSITORY MOTOR_CARGO_REV RUST_BACKTRACE_REPOSITORY \
     RUST_BOOK_REPOSITORY RUST_REFERENCE_REPOSITORY RUSTC_PERF_REPOSITORY \
     UPSTREAM_CARGO_REV \
-    MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 \
+    MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 MOTOR_RUST_ANALYZER_LOCK_SHA256 \
     MOTOR_MLIBC_REPOSITORY MOTOR_MLIBC_REF MOTOR_MLIBC_REV MOTOR_LUA_VERSION \
     HELIX_REPOSITORY HELIX_REF HELIX_REV \
     STDLIB_MOTO_RT_VERSION STDLIB_MOTO_RT_CHECKSUM LOCAL_MOTO_RT_VERSION \
@@ -59,7 +61,7 @@ toolchain_validate_versions() {
     MOTOR_MLIBC_REV HELIX_REV; do
     toolchain_require_hex "$name" "${!name}" 40 || return
   done
-  for name in MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 \
+  for name in MOTOR_RUST_ROOT_LOCK_SHA256 MOTOR_RUST_LIBRARY_LOCK_SHA256 MOTOR_RUST_ANALYZER_LOCK_SHA256 \
     STDLIB_MOTO_RT_CHECKSUM; do
     toolchain_require_hex "$name" "${!name}" 64 || return
   done
@@ -114,6 +116,7 @@ toolchain_key() {
     EFFECTIVE_MOTOR_RUST_REV EFFECTIVE_MOTOR_LLVM_REV MOTOR_RUST_TREE_STATE \
     MOTOR_LLVM_TREE_STATE AUTHORING_SOURCE_DIGEST \
     START_RUST_ROOT_LOCK_SHA256 START_RUST_LIBRARY_LOCK_SHA256 \
+    START_RUST_ANALYZER_LOCK_SHA256 RUST_ANALYZER_INPUTS_DIGEST \
     BOOTSTRAP_CONFIG_DIGEST STANDALONE_LLVM_CONFIG_DIGEST; do
     [ -n "${!name:-}" ] || toolchain_die "missing toolchain-key input $name" || return
   done
@@ -138,6 +141,8 @@ toolchain_key() {
     authoring_source_digest "$AUTHORING_SOURCE_DIGEST" \
     rust_root_lock_sha256 "$START_RUST_ROOT_LOCK_SHA256" \
     rust_library_lock_sha256 "$START_RUST_LIBRARY_LOCK_SHA256" \
+    rust_analyzer_lock_sha256 "$START_RUST_ANALYZER_LOCK_SHA256" \
+    rust_analyzer_inputs_digest "$RUST_ANALYZER_INPUTS_DIGEST" \
     bootstrap_config_digest "$BOOTSTRAP_CONFIG_DIGEST" \
     standalone_llvm_config_digest "$STANDALONE_LLVM_CONFIG_DIGEST" \
     rust_channel "$MOTOR_RUST_CHANNEL" build_host "$MOTOR_BUILD_HOST" \
@@ -167,6 +172,9 @@ toolchain_clean_key() {
   local AUTHORING_SOURCE_DIGEST=none
   local START_RUST_ROOT_LOCK_SHA256="$MOTOR_RUST_ROOT_LOCK_SHA256"
   local START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
+  local START_RUST_ANALYZER_LOCK_SHA256="$MOTOR_RUST_ANALYZER_LOCK_SHA256"
+  local RUST_ANALYZER_INPUTS_DIGEST
+  RUST_ANALYZER_INPUTS_DIGEST="$(toolchain_rust_analyzer_inputs_digest)" || return
   local BOOTSTRAP_CONFIG_DIGEST STANDALONE_LLVM_CONFIG_DIGEST
   BOOTSTRAP_CONFIG_DIGEST="$(
     toolchain_bootstrap_identity_digest "$SELECTED_TOOLCHAIN_DESCRIPTION"

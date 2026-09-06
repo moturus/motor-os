@@ -87,4 +87,22 @@ fi
 [ -z "$(find "$temporary/corrupt" -type f -print -quit)" ] ||
 	fail 'unverified download was retained'
 
+# The acquisition boundary uses only the selected Cargo/rustc and keeps the lock.
+mkdir -p "$temporary/prefix/bin" "$rust/src/tools/rust-analyzer"
+printf '%s\n' '#!/usr/bin/env bash' \
+	'[ "$RUSTC" = "${0%/cargo}/rustc" ] || exit 3' \
+	'[ "$*" = "fetch --locked --target x86_64-unknown-motor --config $EXPECTED_CONFIG" ] || exit 4' \
+	'[ "$PWD" = "$EXPECTED_WORKSPACE" ] || exit 5' \
+	'exit "${FETCH_STATUS:-0}"' > "$temporary/prefix/bin/cargo"
+chmod +x "$temporary/prefix/bin/cargo"
+RUST_ANALYZER_CARGO_CONFIG="$config"
+export EXPECTED_CONFIG="$config" EXPECTED_WORKSPACE="$rust/src/tools/rust-analyzer"
+toolchain_postbuild_locks_unchanged() { printf checked > "$temporary/locks-checked"; }
+toolchain_fetch_rust_analyzer "$rust" "$temporary/prefix"
+[ "$(cat "$temporary/locks-checked")" = checked ] || fail 'fetch skipped lock validation'
+export FETCH_STATUS=7
+if toolchain_fetch_rust_analyzer "$rust" "$temporary/prefix"; then
+	fail 'Cargo fetch failure was hidden'
+fi
+
 echo 'test-toolchain-rust-analyzer PASS'

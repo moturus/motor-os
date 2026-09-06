@@ -70,8 +70,10 @@ else
   bash "$WD/test-rmux-copy-status.sh" --self-test
 fi
 if [ "$BUILD" = "release" ]; then
+  "$WD/test-rust-analyzer-sources.sh" --release
   "$WD/test-rust-analyzer.sh" --release
 else
+  "$WD/test-rust-analyzer-sources.sh"
   "$WD/test-rust-analyzer.sh"
 fi
 # Keep a local runtime version bump from breaking only the dev-image suite.

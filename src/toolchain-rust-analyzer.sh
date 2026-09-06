@@ -92,3 +92,21 @@ toolchain_prepare_rust_analyzer() {
 	toolchain_generate_rust_analyzer_config "$RUST_ANALYZER_CARGO_CONFIG" "$rust" \
 		"$RUST_ANALYZER_URL_SOURCE" "$RUST_ANALYZER_INVENTORY_SOURCE"
 }
+
+toolchain_reverify_rust_analyzer() {
+	local rust="$1" cargo_home="$2"
+	[ "$(toolchain_rust_analyzer_inputs_digest)" = "$RUST_ANALYZER_INPUTS_DIGEST" ] || {
+		toolchain_die "analyzer input recipes changed during the build"; return 1;
+	}
+	toolchain_prepare_rust_analyzer "$MOTOR" "$rust" "$MOTORH" "$cargo_home" \
+		"$TOOLCHAIN_STATE_ROOT" false
+}
+
+toolchain_fetch_rust_analyzer() {
+	local rust="$1" prefix="$2"
+	# Provisioning may acquire sources; native check/build and regular tests are offline.
+	(cd "$rust/src/tools/rust-analyzer" && RUSTC="$prefix/bin/rustc" \
+		"$prefix/bin/cargo" fetch --locked --target x86_64-unknown-motor \
+		--config "$RUST_ANALYZER_CARGO_CONFIG") || return
+	toolchain_postbuild_locks_unchanged "$rust"
+}
