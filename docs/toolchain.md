@@ -871,8 +871,8 @@ families or select `stable`, `beta`, or `nightly` aliases.
 Normal builds run no `cargo update`, and Rust bootstrap enforces no lock
 immutability (`locked-deps` is `false`). This policy is limited to the Rust
 build; application and offline-test uses of `--locked` or `--locked --offline`
-are their owning components' policy. The committed Rust root and library
-lockfiles are the starting dependency selection, but `x.py` does not force
+are their owning components' policy. The committed Rust root, library, and
+standalone rust-analyzer lockfiles are the starting dependency selection, but `x.py` does not force
 them to be immutable. If Cargo rewrites one because a manifest changed, the
 diff stays visible. A formal source tag requires any such change to have been reviewed and
 committed before a successful build.
@@ -881,17 +881,35 @@ Dependency resolution for the Rust tree happens inside `x.py`: bootstrap's
 early `cargo metadata` pass runs with `--no-deps` and resolves nothing, so the
 first Cargo build of the run, using the Stage 0 Cargo without `--locked`, is
 what may rewrite a lockfile. There is no separate preflight; running Cargo
-before `x.py` would need a repository toolchain that does not exist yet. Both
+before `x.py` would need a repository toolchain that does not exist yet. All three
 lockfiles are hashed at the start of the run and again after the build. The
-provisional key and install path use the starting hashes. If either hash
+provisional key and install path use the starting hashes. If any hash
 differs afterwards, the run does not register or use that prefix, write a
 valid stamp, or continue into the C sysroot and OS build: the prefix is
-marked rejected, both hashes and the rewritten file are reported, the diff and
+marked rejected, the before/after hashes and rewritten file are reported, the diff and
 build outputs are preserved, and the build stops. The next run starts from the rewritten lock and derives a new key; it may
 succeed only if the locks then remain unchanged. This ensures every accepted
 prefix was actually built from the locks in its key. A formal tag requires
 committed locks, so a release never starts from a lock that the build has to
 rewrite.
+
+Rust-analyzer additionally consumes the pinned crates.io `url` and `inventory`
+releases and Motor patches in `src/patches/`. Provisioning verifies the
+archives, patches fresh source copies below `$MOTORH/patched-crates/`, and
+checks their declared content digests before reuse. It never edits the Cargo
+registry cache or managed Rust source. Archive, patch, prepared-tree, and
+preparation-recipe identity enter the host toolchain key because both host
+and native rust-analyzer consume them.
+
+A generated Cargo config outside the Rust checkout selects just those two
+path patches. The Motor bootstrap hook passes it only to rust-analyzer and
+its proc-macro server; other bootstrap workspaces retain their own sources.
+The standalone lock records the path sources in the reviewed Rust commit.
+After the host prefix validates, provisioning fetches the standalone Motor
+graph with that Cargo and `--locked`; the native build and ordinary tests
+use `--locked --offline`. Native rust-analyzer is a separate assembly output,
+not a replacement for the Stage 1 host component. Its binary and matching
+installed `rust-src` are packaged only in the developer image.
 
 Motor OS workspace lockfiles remain ordinary Cargo inputs. The `src/sys`
 workspace manifest and the lock entries in `moto-rt-cabi`'s resolved closure

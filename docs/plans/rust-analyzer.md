@@ -25,7 +25,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | Patches 1-19 complete; step 20 in progress |
+| 2. Guest | Motor OS | Motor only | Patches 1-22 complete and gated; step 23 measurement/audit scope needs review (§4.22) |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -580,7 +580,9 @@ passed with `motor-clang`; no wrapper or runtime modification is required.
 The implementation must use argument arrays/environment assignments already
 available to the build shell; it must not synthesize a Cargo config in the
 source tree. Cargo output stays under the assembly build root. Strip a copy
-with the assembly's LLVM tool and stage only the copy.
+with the assembly's LLVM tool, preserving its non-allocated `.comment`
+section for compiler identity (`--keep-section=.comment`), and stage only
+the copy.
 
 The producer atomically publishes:
 
@@ -593,7 +595,10 @@ $MOTORH/assemblies/<assembly-key>/images/rust-analyzer/
 
 Copy `rust-src` from the validated installed prefix's
 `lib/rustlib/src/rust/library`, not from an ambient rustup toolchain and not
-from a second checkout. The guest paths are consequently fixed:
+from a second checkout. Clear executable bits on the staged source files:
+they are analysis inputs, including host-only CI scripts, not guest tools.
+Preserve their contents and leave the installed prefix unchanged. The guest
+paths are consequently fixed:
 
 ```text
 server:      /devtools/rust/bin/rust-analyzer
@@ -1315,15 +1320,15 @@ explicit:
     host/Motor checks pass. U. Lasiotus approved the external stack after its
     conversational summary; proceed with integration, subject to the new
     bootstrap-scoping decision below.
-20. **Toolchain/assembly identity and acquisition.** Add the standalone lock
+20. **Toolchain/assembly identity and acquisition (complete).** Add the standalone lock
     to toolchain identity and validation, record it in assembly manifests, add
     patched-source identity and workspace-scoped overrides for both host and
     native builds, native recipe identity, locked source fetch, and shell contract tests,
     then select the reviewed Motor Rust revision. Keep the Stage 1
     host-component behavior unchanged.
-21. **Native build and validation.** Cross-build, strip, ELF-check, hash, and
+21. **Native build and validation (complete).** Cross-build, strip, ELF-check, hash, and
     atomically stage rust-analyzer and rust-src under the assembly key.
-22. **Development image.** Add only the new assembly root to the dev image and
+22. **Development image (complete).** Add only the new assembly root to the dev image and
     test required/missing/changed overlays and standard-image exclusion.
 23. **Native LSP acceptance.** Add the SSH transport, dev-image guest staging,
     flycheck and build-script assertions, multi-root case, descendant-process
@@ -1574,7 +1579,7 @@ rely on line numbers.
 | 18 inventory patch | `src/patches/`; the prepared crate's `.init_array` section target list (currently inventory 0.3.24); native test fixture and standalone rust-analyzer `Cargo.lock`. |
 | 19 fork: child pipes | `crates/stdx/src/process.rs`: the `read2` implementations under `cfg(unix)`, `cfg(windows)`, and `cfg(target_arch = "wasm32")`, and their callers `streaming_output` and `spawn_with_streaming_output`. |
 | 20 toolchain identity | `src/toolchain-versions.sh`: the `*_LOCK_SHA256` values, `MOTOR_OS_RUNTIME_INPUTS`. `src/toolchain-state.sh`: the before/after lock check. `src/toolchain-lib.sh`: `toolchain_key`. `src/toolchain-sources.sh`: provisioning. `src/toolchain-assembly.sh`: `toolchain_render_assembly_manifest`, `toolchain_validate_assembly_outputs`. Tests: `src/tests/test-toolchain-*.sh`. |
-| 21 native build | `src/toolchain-native.sh`, `src/toolchain-assembly.sh` (the `rustc` image recipe and `ASSEMBLY_IMAGE_ROOT`), `docs/toolchain.md`, `docs/libc.md` for the startup-path statement. |
+| 21 native build | `src/toolchain-native-rust-analyzer.sh`, `src/toolchain-assembly.sh` (`ASSEMBLY_IMAGE_ROOT` and artifact manifests), `docs/toolchain.md`, `docs/libc.md` for the startup-path statement. |
 | 22 development image | `src/imager/motor-os-dev.yaml`: `assembly_dirs`, `assembly_required_executables`. `src/imager/src/`. `src/tests/test-dev-sources.sh`. |
 | 23 native LSP acceptance | `src/tests/rust-analyzer-smoke/` (the SSH transport), `src/tests/full-test.sh` (the developer-image selection and `vm_ssh`), `src/tests/full-test-dev.sh`, `src/vm_scripts/run-qemu.sh` (`MOTO_MEMORY_MIB`). |
 | 24 release integration | `src/tests/full-test-dev.sh`, `docs/build-rustc.md`, `docs/toolchain.md`, this document. |
@@ -1753,28 +1758,175 @@ Bootstrap's four hook tests also pass inside its full unit-test harness;
 its offline check and selected-toolchain formatting check pass. This does
 not claim a newly selected host toolchain or a linked/executed native server.
 
-### 4.19 Next coordination: publish the reviewed Rust stack
+### 4.19 Reviewed Rust stack published; build/image integration complete
 
-Step 20 now has tested immutable source preparation, workspace-scoped config
-generation, and an offline input digest covering pins, patches, preparation
-logic, and declared prepared-tree digests. The digest is not yet wired into
-the toolchain key. Remaining step 20 work includes that wiring, the standalone
-lock's before/after checks and manifests, source acquisition, bootstrap
-config injection, and selected-source test integration for the pipe and hook
-tests. Steps 21-24, including the native server, remain ahead.
+U. Lasiotus published the four reviewed commits (`9ea84a28c3e`,
+`fc3a0529b7f`, `f040c09547a`, and `d454849e203`) in the existing Motor Rust
+fork. On 2026-09-06, `git ls-remote` verified that
+`motor-os-1.99.0-beta-f47d5bb` points to
+`d454849e2030eb09bcce9e367264fa5f7984bcb1`. Managed provisioning updated
+`../toolchain-src/rust` to that exact clean revision and verified its
+submodules. This resolves the publication boundary; no new fork is needed.
 
-The remote `github.com/moturus/rust` branch
-`motor-os-1.99.0-beta-f47d5bb` was checked with `git ls-remote` and still points
-to `3c9729fb79778d71daabbff78319a8b9535c340b`. The reviewed authoring branch
-`motor-ra-portability` now has four commits above that baseline:
-`9ea84a28c3e`, `fc3a0529b7f`, `f040c09547a`, and `d454849e203`.
-Managed provisioning requires its selected revision to be reachable from
-the declared remote ref; it cannot yet consume these local-only commits.
-No remote push or toolchain selection has been performed.
+Step 20 implementation now includes the standalone lock and patched-source
+digest in the toolchain key, all three before/after lock checks, manifests,
+locked source acquisition, and workspace-scoped bootstrap configuration.
+The replacement host toolchain passed bootstrap, source/lock checks, and
+prefix validation, and the root selector now names the registered key
+`f67a50fb6cfc5572b25be0f48172f8ad72a437e1e338fbd8f2fe33e618642f23`.
+The server reports `rust-analyzer 1.99.0-dev (d454849e203 2026-09-05)`.
+The actual portable-pipe tests (10), bootstrap-hook tests (4), native graph
+exclusion check, and selector-cutover test pass. Both external test groups
+are wired into the repository suite. Stage 1 semantic acceptance passes in
+both debug and release. The selected standalone Motor graph also passes
+`cargo check --release --locked --offline --target x86_64-unknown-motor
+-p rust-analyzer`. Evidence: `/tmp/motor-ra-host-provision.log`,
+`/tmp/motor-ra-selected-source-tests.log`,
+`/tmp/motor-ra-selected-host-lsp.log`, and
+`/tmp/motor-ra-selected-native-check.log`. Full gates subsequently pass as
+recorded in sections 4.20-4.21.
 
-**Publication approval requested:** may the agent fast-forward the existing
-Motor Rust branch to `d454849e2030eb09bcce9e367264fa5f7984bcb1` and continue
-step 20? Recheck the remote before pushing; do not force-push. This publishes
-only the reviewed stack in the existing fork, not a new repository. Local
-implementation and commits are authorized; remote publication is the next
-external coordination boundary.
+Steps 21-22 implementation adds the offline native build, ELF validation,
+atomic binary/rust-src staging, assembly provenance, and developer-only
+overlay. Focused shell contracts cover identity changes, corrupt/missing
+artifacts, ELF failures, command arguments, source-check order, and failed
+build/strip publication. Assembly publication and the full release
+developer-image gate pass; steps 23-24 remain pending.
+The first native semantic results and resource thresholds still require
+the planned step 23 review.
+
+The first native link passes ELF validation. Its strip probe found a recipe
+error: default LLVM stripping removes `.comment`, including the Motor compiler
+description. The server's own commit and release survive. The corrected
+recipe retains that non-allocated section, and the real stripped binary then
+passes every validator check. The command contract requires the keep-section
+flag. No fork, std, startup, or runtime change was needed. The active assembly
+producer was stopped before editing; its partial
+`c07d260ceeaa2d7ca456b89c6865e7ef0c384229ab7a70abc332a3f1bab5a9ae`
+tree is preserved and marked rejected. A new assembly key must consume the
+corrected recipe. Evidence: `/tmp/motor-ra-native-server-build.log`,
+`/tmp/motor-ra-native-elf-proof.log` (failed default-strip probe), and
+`/tmp/motor-ra-native-elf-preserved-proof.log` (passing corrected probe).
+
+### 4.20 Pre-existing CPU-statistics stop
+
+While checking the existing measurement interfaces, the agent confirmed the
+already-recorded `CpuStatsV1::entry` defect in `docs/plans/future-work.md`,
+item 9. The kernel writes `num_cpus` counters per process, but the userspace
+reader constructs the slice with `num_entries` (process count). The slice can
+therefore extend into subsequent records or be too short for CPU indexing.
+At that stop the code was unchanged at HEAD; no unsafe reproducer was run
+and no core source was modified.
+
+Root `AGENTS.md` requires stopping on pre-existing bugs. The two active
+compilation groups were paused intact pending guidance.
+
+U. Lasiotus approved the simple correction on 2026-09-06. It changes the
+slice length to `num_cpus` and adds three safe, synthetic snapshot tests in
+`moto-sys`, already reached by `full-test.sh`. The unequal-count tests fail
+on the original implementation and pass after the fix. Because this changes
+a runtime input, both paused producers were terminated before editing; the
+partial `0c9c868ea7e32c7e31f97ce36d585295ad29799fc611ef7e70a3a1a5a5b5b52e`
+assembly is preserved and marked rejected. A new assembly must be built.
+The correction requires three passing debug and three passing release
+`full-test.sh` runs before its separate commit, plus the previously requested
+release developer-image gate. No stdlib, `moto-rt`, package publication,
+or external source edit is included. All three debug and three release
+full-suite runs pass, as does the release developer-image gate. Logs are
+`/tmp/motor-cpustats-full-debug-{1,2,3}.log`,
+`/tmp/motor-cpustats-full-release-{1-warm,2,3}.log`, and
+`/tmp/motor-cpustats-dev-release.log`. The initial release timeout and
+approved unchanged retry are recorded below.
+
+The replacement assembly `4694483acf92fe124ea12f80c4214969250204b1ddd4cf92fa0a6f15c66759ed`
+passed publication and produced the base and standard images. Developer-image
+creation then correctly rejected a rust-src host CI script whose executable
+bit was copied unchanged, but which has no shebang. This is a new staging
+recipe defect, unrelated to CpuStats. A regression reproduces it; the recipe
+now clears executable bits only on staged source files, preserving both
+contents and installed-prefix permissions. The image permission classifier
+is unchanged. The assembly remains intact for diagnosis but must be replaced
+under the corrected recipe's new key before the remaining gates.
+
+The corrected assembly
+`c60907870e5a3ab92b2855a6e1c8d47fe23f7717c71b8c8f6e6e00d8be01f08a`
+passes publication, source/lock/ELF checks, and all three release image builds,
+including the developer image. The previously rejected CI script is `0644`
+in staging and remains `0755` in the installed prefix. Evidence:
+`/tmp/motor-cpustats-source-modes-assembly.log` and
+`/tmp/motor-cpustats-source-modes-native-ra.log`. Native semantic acceptance
+is still pending; image construction is not an LSP acceptance result.
+
+### 4.21 Release gate budget stop
+
+The first release `full-test.sh` run exits 124 at its existing 900-second
+total deadline. It includes cold host-test compilation under the newly
+selected compiler; the network-stack test target alone takes 119 seconds,
+and quiet SSH/filesystem test builds also compile fresh artifacts. The main
+VM starts around 14:48:42 local time on 2026-09-06, with approximately 160
+seconds left before the 14:51:23 deadline. Guest `systest` finishes successfully
+at 14:50:48, followed by the ripgrep regression. The remaining integration
+checks do not finish. There is no guest panic or failed assertion in the
+captured output; a final SSH routing error accompanies timeout teardown.
+All VM and test processes have exited. This is not a passing release gate
+and is not classified as an Internet DNS/ping flake.
+
+Read-only follow-up timing also finds that hashing the newly staged rust-src
+tree through the existing content serializer takes 36.214 seconds per call
+on this host (Helix's existing tree takes 10.048 seconds). Thus source
+validation adds prelude cost as well as the cold compilation. Do not hide
+either cost by extending the timeout or skipping integrity checks.
+
+Evidence: `/tmp/motor-cpustats-full-release-1.log`,
+`/tmp/motor-cpustats-release-1-console.log`, and
+`/tmp/motor-cpustats-release-1-systest.log`. The subsequent gates stopped
+automatically. No source or timeout changes were made in response.
+
+U. Lasiotus approved rerunning the unchanged release gate with the now-built
+host artifacts. That run passes at the same 900-second limit, followed by
+the third debug run, two further release runs, and the complete release
+developer-image gate. This closes the stop; the original failed log remains
+preserved, not counted as a pass. No integrity checks were skipped and the
+host serializer was not changed.
+
+The developer gate passes its repository suite, native developer-source
+builds, and complete Lorry product suite. Lorry's native self-build gate
+takes 537.337 seconds and its complete suite takes 1,152 seconds. The earlier
+unexplained self-build stall did not recur; this does not diagnose or erase
+that separately tracked issue. Evidence: `/tmp/motor-cpustats-dev-release.log`.
+Steps 20-22 and the CpuStats correction are gated; native LSP semantics and
+steps 23-24 are not yet accepted.
+
+### 4.22 Review needed: native measurement and audit scope
+
+Read-only inspection after the CpuStats fix finds a mismatch between the
+step 23 acceptance requirements and the current measurement interfaces:
+
+- `memory_usage` in `src/sys/kernel/src/xray/stats.rs` is
+  `(pages_user + pages_kernel) << 12`. `sysbox ps` explicitly documents it as
+  virtual memory, including lazily mapped stacks and shared mappings. The
+  metric catalog exposes no per-process resident-memory or memory/thread
+  high-water metric. `MemoryStats::get()` exposes system-wide physical use,
+  not per-process RSS. A sampler can report observed maxima, not exact peaks.
+- `ProcessInfoV1::list` explicitly allows completed processes without running
+  descendants to disappear; its debug names are capped at 32 bytes. Sampling
+  it cannot prove an exhaustive descendant executable/argument history.
+  Existing RA invocation logs and Lorry command logging provide additional
+  evidence, but are not an OS-wide execution audit. A clean snapshot must not
+  be described as proof that no unobserved short-lived child existed.
+
+The native binary and rust-src are built and packaged. No step 23 test or
+new kernel/runtime instrumentation has been implemented. Root `AGENTS.md`
+requires review before making this non-obvious scope choice. The requirements
+in sections 4.10-4.11 remain unchanged pending the answers below.
+
+1. **Measurements:** accept sampled virtual-memory and thread maxima for
+   rust-analyzer/Lorry, plus sampled whole-VM physical usage, with interval
+   and limitations recorded? Recommended for this work; keep exact
+   per-process RSS/high-water accounting as a separately reviewed OS task.
+2. **Process evidence:** accept checked RA invocation logs plus sampled
+   descendant identities, explicitly non-exhaustive, alongside the existing
+   exact host argv contract? Recommended for this work. If an exhaustive
+   native descendant audit remains mandatory, review an instrumentation
+   design first rather than silently adding kernel/runtime hooks or replacing
+   the supported executable paths with test wrappers.
