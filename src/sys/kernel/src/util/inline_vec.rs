@@ -56,6 +56,22 @@ impl<T: Copy, const N: usize> InlineVec<T, N> {
 }
 
 impl<T: Copy + Ord, const N: usize> InlineVec<T, N> {
+    /// Select from an already sorted vector, returning sorted, unique matches.
+    pub fn intersection(&self, values: impl Iterator<Item = T>) -> Self {
+        let mut result = Self {
+            len: 0,
+            inline: self.inline,
+            spill: Vec::new(),
+        };
+        for value in values {
+            if self.as_slice().binary_search(&value).is_ok() {
+                result.push(value);
+            }
+        }
+        result.sort_dedup();
+        result
+    }
+
     pub fn sort_dedup(&mut self) {
         if self.len <= 1 {
             return;

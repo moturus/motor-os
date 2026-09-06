@@ -45,6 +45,7 @@ mod tcp;
 mod threads;
 mod tls;
 mod udp;
+mod wait_set;
 mod wakebench;
 mod xor_server;
 
@@ -1086,6 +1087,10 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "wait-set-tests" {
+        wait_set::run_all_tests();
+        return;
+    }
     if args.len() >= 2 && args[1] == "close-race-child" {
         closerace::run_child_mode(&args);
         return;
@@ -1357,6 +1362,7 @@ fn main() {
 
     test_syscall();
     test_handle_dup();
+    wait_set::run_all_tests();
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();
