@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::socket::tcp::Socket;
+use crate::socket::tcp::{Socket, State};
 
 impl InterfaceInner {
     /// The initial sequence number a connection between these two endpoints
@@ -80,9 +80,14 @@ impl InterfaceInner {
         // under `process()` (a listener taking a SYN, an RST emptying a
         // connection), so its recorded demux key is re-derived after.
         if let Some(handle) = taker {
-            let reply = sockets
-                .get_mut::<Socket>(handle)
-                .process(self, &ip_repr, &tcp_repr);
+            let socket = sockets.get_mut::<Socket>(handle);
+            let was_listening = socket.state() == State::Listen;
+            let reply = socket.process(self, &ip_repr, &tcp_repr);
+            // Count the transition here: a poll can finish the handshake before
+            // the listener task gets to observe SynReceived.
+            if was_listening && socket.state() == State::SynReceived {
+                self.tcp_half_open_total = self.tcp_half_open_total.wrapping_add(1);
+            }
             sockets.sync_demux(handle);
             return reply.map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
         }

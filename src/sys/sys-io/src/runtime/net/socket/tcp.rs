@@ -248,9 +248,6 @@ impl HalfOpenGuard {
         listener_id: u64,
     ) -> (Self, bool) {
         stats.tcp_half_open.set(stats.tcp_half_open.get() + 1);
-        stats
-            .tcp_half_open_total
-            .set(stats.tcp_half_open_total.get() + 1);
 
         let may_replenish = budget.admit(listener_id);
         (

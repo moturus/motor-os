@@ -3253,7 +3253,7 @@ fn test_unresolved_neighbor_fails_connect() {
 /// finish the handshake, and resets connection requests no socket wants.
 ///
 /// The gauge alone cannot be sampled from here. A peer that answers completes
-/// the handshake in the poll after the one that took its SYN, so a socket is
+/// the handshake before the listener task may even run, so a socket is
 /// half-open for a fraction of a round trip, while reading a metric is a
 /// cross-thread round trip through sys-io's net runtime. `half_open_total` is
 /// what makes the accounting observable -- every connection below passes

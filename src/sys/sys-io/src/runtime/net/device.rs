@@ -1249,6 +1249,13 @@ impl<'a> NetDev<'a> {
                 .set(stats.udp_tx_unreachable_drops.get() + udp_unreachable);
         }
 
+        let half_open = iface.take_tcp_half_open_total();
+        if half_open != 0 {
+            stats
+                .tcp_half_open_total
+                .set(stats.tcp_half_open_total.get() + half_open);
+        }
+
         let syn_rst = iface.take_tcp_syn_rst_unmatched();
         if syn_rst != 0 {
             stats
