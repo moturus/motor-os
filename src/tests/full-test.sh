@@ -75,11 +75,13 @@ export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
+  bash "$WD/test-kernel-wait-set.sh" --release
   make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
+  bash "$WD/test-kernel-wait-set.sh"
   make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)

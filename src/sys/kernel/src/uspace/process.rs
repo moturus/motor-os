@@ -469,7 +469,7 @@ impl Process {
         thread.resume_debuggee()
     }
 
-    fn process_wake(&self, handle: &SysHandle) {
+    pub(super) fn process_wake(&self, handle: &SysHandle) {
         let mut objects = self.wait_objects.lock(line!());
         if let Some(obj) = objects.get_mut(handle) {
             obj.wake_count = obj.sys_object.wake_count();
@@ -1547,10 +1547,6 @@ impl Thread {
 
         wakers.sort_dedup();
 
-        for waker in wakers.as_slice() {
-            self.owner().process_wake(waker);
-        }
-
         wakers
     }
 
@@ -1621,10 +1617,6 @@ impl Thread {
         };
 
         wakers.sort_dedup();
-
-        for waker in wakers.as_slice() {
-            self.owner().process_wake(waker);
-        }
 
         (timed_out, wakers)
     }
