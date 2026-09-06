@@ -106,15 +106,12 @@ The former sys-tty/kernel-log interleaving item is complete; see
    snapshot. Gain: tools and scripts read sys-io's counters as soon as the
    VM answers, and the retry loops in the suite can go.
 
-9. **`CpuStatsV1::entry` uses the wrong slice length.**
-    `moto-sys/src/stats.rs` builds the per-CPU slice with
-    `self.num_entries` as its length instead of `num_cpus` (lines 128-131),
-    so the slice overruns into the next entry when there are more entries
-    than CPUs and would panic if a process list ever had fewer entries than
-    CPUs; harmless today only because callers index `[cpu]`. Fix: a one-line
-    length correction with a unit test; moto-sys is a runtime input, so it
-    ships with the next moto-sys bump. Gain: correct per-CPU statistics for
-    `top` and the benchmarks, and no latent panic.
+The former item 9, `CpuStatsV1::entry`'s incorrect slice length, is fixed.
+The correction and three synthetic snapshot tests pass three debug and three
+release full-system gates, plus `full-test-dev.sh --release` (2026-09-06).
+No package publication or stdlib change was needed. See the
+[rust-analyzer gate record](rust-analyzer.md#421-release-gate-budget-stop)
+for the initial cold-build timeout and approved unchanged warm-artifact run.
 
 ## Performance follow-ups from the same run (not scheduled)
 
