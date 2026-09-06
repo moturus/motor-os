@@ -15,7 +15,7 @@
 #
 # The tracked img_files directories remain source-only. The standard imager
 # consumes the libc and rg roots; the development imager additionally consumes
-# the LLVM, rustc, and Helix roots.
+# the LLVM, rustc, Helix, and rust-analyzer/rust-src roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
 # live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
@@ -45,6 +45,7 @@ Build the complete Motor OS release environment and all three images, including:
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
   - Helix as /devtools/helix/hx in the development image;
+  - native rust-analyzer and matching rust-src in the development image;
   - all standard and dev-image Motor OS binaries;
   - base, standard, and dev images under vm_images/release.
 
@@ -107,6 +108,9 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-host.sh"
 . "$SCRIPT_DIR/toolchain-assembly.sh"
 . "$SCRIPT_DIR/toolchain-native.sh"
+. "$SCRIPT_DIR/toolchain-patched-crates.sh"
+. "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
+. "$SCRIPT_DIR/patches/crates.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -899,6 +903,7 @@ main() {
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
 	fetch_workspace_sources
+	toolchain_fetch_rust_analyzer "$RUST" "$TOOLCHAIN_PREFIX"
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths
 	toolchain_claim_assembly
@@ -920,6 +925,10 @@ main() {
 		build_ripgrep
 		prepare_helix_source
 		build_helix
+		if ! toolchain_build_native_rust_analyzer "$RUST" "${CARGO_HOME:-$HOME/.cargo}" "$AUTHORING_BASE"; then
+			toolchain_reject_assembly "native rust-analyzer build or validation failed"
+			return 1
+		fi
 		toolchain_complete_assembly
 	else
 		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
@@ -940,6 +949,7 @@ main() {
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)
