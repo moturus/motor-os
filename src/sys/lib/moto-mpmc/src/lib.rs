@@ -2,6 +2,7 @@
 // Ported from crossbeam-channel.
 
 #![no_std]
+#![feature(allocator_api)]
 mod channel;
 mod context;
 mod counter;
@@ -21,7 +22,7 @@ pub mod internal {
 }
 
 pub use crate::{
-    channel::{bounded, IntoIter, Iter, Receiver, Sender, TryIter},
+    channel::{bounded, try_bounded, IntoIter, Iter, Receiver, Sender, TryIter},
     err::{
         ReadyTimeoutError, RecvError, RecvTimeoutError, SelectTimeoutError, SendError,
         SendTimeoutError, TryReadyError, TryRecvError, TrySelectError, TrySendError,
