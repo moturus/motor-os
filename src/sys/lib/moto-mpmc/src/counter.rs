@@ -21,16 +21,18 @@ struct Counter<C> {
 }
 
 /// Wraps a channel into the reference counter.
-pub(crate) fn new<C>(chan: C) -> (Sender<C>, Receiver<C>) {
-    let counter = NonNull::from(Box::leak(Box::new(Counter {
+pub(crate) fn try_new<C>(chan: C) -> moto_rt::Result<(Sender<C>, Receiver<C>)> {
+    let counter = Box::try_new(Counter {
         senders: AtomicUsize::new(1),
         receivers: AtomicUsize::new(1),
         destroy: AtomicBool::new(false),
         chan,
-    })));
+    })
+    .map_err(|_| moto_rt::Error::OutOfMemory)?;
+    let counter = NonNull::from(Box::leak(counter));
     let s = Sender { counter };
     let r = Receiver { counter };
-    (s, r)
+    Ok((s, r))
 }
 
 /// The sending side.

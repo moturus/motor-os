@@ -89,31 +89,38 @@ pub(crate) struct Channel<T> {
 
 impl<T> Channel<T> {
     /// Creates a bounded channel of capacity `cap`.
-    pub(crate) fn with_capacity(cap: usize) -> Self {
-        assert!(cap > 0, "capacity must be positive");
+    pub(crate) fn try_with_capacity(cap: usize) -> moto_rt::Result<Self> {
+        if cap == 0 {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        alloc::alloc::Layout::array::<Slot<T>>(cap).map_err(|_| moto_rt::Error::InvalidArgument)?;
 
         // Compute constants `mark_bit` and `one_lap`.
-        let mark_bit = (cap + 1).next_power_of_two();
-        let one_lap = mark_bit * 2;
+        let mark_bit = cap
+            .checked_add(1)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(moto_rt::Error::InvalidArgument)?;
+        let one_lap = mark_bit
+            .checked_mul(2)
+            .ok_or(moto_rt::Error::InvalidArgument)?;
 
         // Head is initialized to `{ lap: 0, mark: 0, index: 0 }`.
         let head = 0;
         // Tail is initialized to `{ lap: 0, mark: 0, index: 0 }`.
         let tail = 0;
 
-        // Allocate a buffer of `cap` slots initialized
-        // with stamps.
-        let buffer: Box<[Slot<T>]> = (0..cap)
-            .map(|i| {
-                // Set the stamp to `{ lap: 0, mark: 0, index: i }`.
-                Slot {
-                    stamp: AtomicUsize::new(i),
-                    msg: UnsafeCell::new(MaybeUninit::uninit()),
-                }
-            })
-            .collect();
+        let mut buffer =
+            Box::<[Slot<T>]>::try_new_uninit_slice(cap).map_err(|_| moto_rt::Error::OutOfMemory)?;
+        for (i, slot) in buffer.iter_mut().enumerate() {
+            slot.write(Slot {
+                stamp: AtomicUsize::new(i),
+                msg: UnsafeCell::new(MaybeUninit::uninit()),
+            });
+        }
+        // Every slot is initialized; messages remain uninitialized until sent.
+        let buffer = unsafe { buffer.assume_init() };
 
-        Self {
+        Ok(Self {
             buffer,
             one_lap,
             mark_bit,
@@ -121,7 +128,7 @@ impl<T> Channel<T> {
             tail: CachePadded::new(AtomicUsize::new(tail)),
             senders: SyncWaker::new(),
             receivers: SyncWaker::new(),
-        }
+        })
     }
 
     /// Returns a receiver handle to the channel.

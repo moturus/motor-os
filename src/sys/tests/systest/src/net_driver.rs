@@ -504,10 +504,7 @@ fn test_pool_cold_start_coalesces() {
     println!("net_driver::test_pool_cold_start_coalesces PASS");
 }
 
-/// The fail-all policy: with sys-io connects poisoned and the pool cold,
-/// a socket constructor fails promptly instead of hanging; unpoisoning
-/// restores service.
-fn test_sys_io_unavailable_fails_all() {
+fn wait_for_cold_pool() {
     // The pool must be cold, or an existing channel satisfies the
     // reservation without provisioning. Idle channels self-close when
     // their last reservation releases; earlier tests' have drained by now.
@@ -520,7 +517,13 @@ fn test_sys_io_unavailable_fails_all() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
 
+/// The fail-all policy: with sys-io connects poisoned and the pool cold,
+/// a socket constructor fails promptly instead of hanging; unpoisoning
+/// restores service.
+fn test_sys_io_unavailable_fails_all() {
+    wait_for_cold_pool();
     moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
     let result = std::net::UdpSocket::bind("127.0.0.1:0");
     moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
@@ -532,6 +535,26 @@ fn test_sys_io_unavailable_fails_all() {
     let recovered = std::net::UdpSocket::bind("127.0.0.1:0");
     assert!(recovered.is_ok(), "bind did not recover after unpoisoning");
     println!("net_driver::test_sys_io_unavailable_fails_all PASS");
+}
+
+fn test_channel_allocation_failure() {
+    wait_for_cold_pool();
+    moto_rt::internal_helper(0, 4, 1, 0, 0, 0);
+    // Fail after connecting IPC and allocating queue storage. Both bind
+    // veneers must receive the error; neither may publish a partial channel.
+    for _ in 0..4 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
+        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(pool_client_count(), 0);
+    }
+    moto_rt::internal_helper(0, 4, 0, 0, 0, 0);
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0); // No waiters or in-flight provisions.
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    drop((tcp, udp));
+    println!("net_driver::test_channel_allocation_failure PASS");
 }
 
 /// Accept requests riding donations from two different channels must not
@@ -1129,4 +1152,5 @@ pub fn run_all_tests() {
     test_channel_failure_wakes_every_waiter();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
+    test_channel_allocation_failure();
 }
