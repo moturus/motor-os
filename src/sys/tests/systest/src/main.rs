@@ -1087,6 +1087,10 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "ipc-listener-tests" {
+        io_channel::test_listener_cleanup();
+        return;
+    }
     if args.len() == 2 && args[1] == "wait-set-tests" {
         wait_set::run_all_tests();
         return;
