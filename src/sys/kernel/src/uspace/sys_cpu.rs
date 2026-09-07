@@ -570,8 +570,8 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     // Need to wait.
     let target_obj = killer.owner().get_object(&target).unwrap();
     target_obj.sys_object.add_waiting_thread(killer, target);
-    if target_obj.wake_count < target_obj.sys_object.wake_count() {
-        // obj has unconsumed wakes, so queue it as a waker to the current thread.
+    if target_obj.wake_count < target_obj.sys_object.wake_count() || target_obj.sys_object.done() {
+        // A prior wait may have consumed the exit wake of a completed process.
         killer.add_waker(target)
     }
 

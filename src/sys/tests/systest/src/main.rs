@@ -1199,6 +1199,10 @@ fn main() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if args.len() == 2 && args[1] == "test-kill-after-wait" {
+        spawn_wait_kill::test_kill_after_wait();
+        return;
+    }
     if spawn_wait_kill::is_shared_listener_child(&args) {
         spawn_wait_kill::run_shared_listener_child();
     }
@@ -1383,6 +1387,7 @@ fn main() {
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
+    spawn_wait_kill::test_kill_after_wait();
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
