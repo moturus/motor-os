@@ -109,6 +109,10 @@ impl NetPool {
                 }
             }
 
+            inner
+                .waiters
+                .try_reserve(1)
+                .map_err(|_| moto_rt::Error::OutOfMemory)?;
             let id = inner.next_waiter_id;
             inner.next_waiter_id += 1;
             inner.waiters.push_back(Waiter { id, tx });
@@ -197,10 +201,24 @@ extern "C" fn channel_thread_entry(ctx: u64) {
             }
         };
 
-        let client = Arc::new(client);
+        let client = match Arc::try_new(client) {
+            Ok(client) => client,
+            Err(_) => {
+                let mut inner = pool.inner.lock();
+                inner.provisions_in_flight -= 1;
+                inner.fail_waiters(moto_rt::Error::OutOfMemory);
+                return;
+            }
+        };
         let satisfied = {
             let mut inner = pool.inner.lock();
             inner.provisions_in_flight -= 1;
+
+            // Publication must not allocate after handing out reservations.
+            if inner.clients.try_reserve(1).is_err() {
+                inner.fail_waiters(moto_rt::Error::OutOfMemory);
+                return;
+            }
 
             // Satisfy up to the channel's capacity of waiters (design 6.1
             // step 5). `next` pins the channel open between sends: a

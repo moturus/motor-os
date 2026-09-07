@@ -51,6 +51,14 @@ pub fn poison_connect_for_test(poisoned: bool) {
     POISON_CONNECT.store(poisoned, Ordering::Release);
 }
 
+#[cfg(feature = "netdev")]
+static FAIL_CONSTRUCTION: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "netdev")]
+pub fn fail_construction_for_test(fail: bool) {
+    FAIL_CONSTRUCTION.store(fail, Ordering::Release);
+}
+
 /// The sys-io connect retry policy, shared by the sync and async connect
 /// paths so neither can drift from it.
 ///
@@ -126,7 +134,7 @@ pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
         }
     };
 
-    let channel = NetChannel::with_conn(conn);
+    let channel = NetChannel::with_conn(conn)?;
     Ok((
         NetClient {
             channel: channel.clone(),
@@ -646,7 +654,7 @@ pub(crate) struct NetChannel {
     // channel's word stays zero.
     client_state: AtomicU32,
 
-    subchannels_in_use: Vec<AtomicBool>,
+    subchannels_in_use: [AtomicBool; IO_SUBCHANNELS as usize],
 
     // TODO: we will only have at most IO_SUBCHANNELS streams per connection. Maybe
     //       we should get rid of spinlocks below and have simple vectors?
@@ -658,7 +666,8 @@ pub(crate) struct NetChannel {
     udp_sockets: Mutex<BTreeMap<u64, Weak<UdpSocket>>>,
 
     // This is a multi-producer, single-consumer queue.
-    send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
+    send_queue: moto_mpmc::Sender<io_channel::Msg>,
+    send_queue_rx: moto_mpmc::Receiver<io_channel::Msg>,
 
     // Lifetime push/pop counts for `send_queue`, maintained by stage_msg and
     // unstage_msg. They order a driver record against the work staged
@@ -1119,7 +1128,9 @@ impl NetChannel {
     /// Add one message to the staging queue, counting it. The count is what
     /// a driver record is ordered against, so it must cover every push.
     fn stage_msg(&self, msg: io_channel::Msg) -> Result<(), io_channel::Msg> {
-        self.send_queue.push(msg)?;
+        self.send_queue
+            .try_send(msg)
+            .map_err(|err| err.into_inner())?;
         self.staged_pushed.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -1128,7 +1139,7 @@ impl NetChannel {
     /// task and the netdev drop hooks consume the queue; both come here, so
     /// the two counts stay balanced.
     fn unstage_msg(&self) -> Option<io_channel::Msg> {
-        let msg = self.send_queue.pop()?;
+        let msg = self.send_queue_rx.try_recv().ok()?;
         self.staged_popped.fetch_add(1, Ordering::Relaxed);
         Some(msg)
     }
@@ -1592,21 +1603,25 @@ impl NetChannel {
     /// Build a channel over an established sys-io connection. No thread is
     /// spawned and no global state is touched: the caller decides who hosts
     /// the channel's [`NetDriver`].
-    fn with_conn(conn: io_channel::ClientConnection) -> Arc<Self> {
-        let mut subchannels_in_use = Vec::with_capacity(IO_SUBCHANNELS as usize);
-        for _ in 0..IO_SUBCHANNELS {
-            subchannels_in_use.push(AtomicBool::new(false));
+    fn with_conn(conn: io_channel::ClientConnection) -> moto_rt::Result<Arc<Self>> {
+        let (send_queue, send_queue_rx) = moto_mpmc::try_bounded(io_channel::CHANNEL_PAGE_COUNT)?;
+
+        // Exercise a late failure with real IPC and queue resources to release.
+        #[cfg(feature = "netdev")]
+        if FAIL_CONSTRUCTION.load(Ordering::Acquire) {
+            return Err(moto_rt::Error::OutOfMemory);
         }
 
-        Arc::new(NetChannel {
+        Arc::try_new(NetChannel {
             conn,
             client_state: AtomicU32::new(0),
-            subchannels_in_use,
+            subchannels_in_use: [const { AtomicBool::new(false) }; IO_SUBCHANNELS as usize],
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
             udp_sockets: Mutex::new(BTreeMap::new()),
             reservations: AtomicU8::new(0),
-            send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
+            send_queue,
+            send_queue_rx,
             staged_pushed: AtomicU64::new(0),
             staged_popped: AtomicU64::new(0),
             driver_queue: crossbeam_queue::SegQueue::new(),
@@ -1618,6 +1633,7 @@ impl NetChannel {
             exiting: CachePadded::new(AtomicBool::new(false)),
             failed: CachePadded::new(AtomicBool::new(false)),
         })
+        .map_err(|_| moto_rt::Error::OutOfMemory)
     }
 
     /// Returns the index of the subchannel in [0..IO_SUBCHANNELS).

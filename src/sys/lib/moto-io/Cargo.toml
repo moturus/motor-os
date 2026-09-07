@@ -13,6 +13,7 @@ async-fs         = { path = "../async-fs"         , default-features = false }
 moto-async       = { path = "../../lib/moto-async" }
 moto-io-internal = { path = "../moto-io-internal"  }
 moto-ipc         = { path = "../moto-ipc"          }
+moto-mpmc        = { path = "../moto-mpmc"         }
 moto-rt          = { path = "../moto-rt"           }
 moto-sys         = { path = "../moto-sys"          }
 moto-sys-io      = { path = "../moto-sys-io"       }

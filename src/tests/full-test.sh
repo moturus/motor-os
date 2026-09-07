@@ -61,6 +61,11 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
 if [ "$BUILD" = "release" ]; then
+  bash "$WD/test-rmux-copy-status.sh" --self-test --release
+else
+  bash "$WD/test-rmux-copy-status.sh" --self-test
+fi
+if [ "$BUILD" = "release" ]; then
   "$WD/test-rust-analyzer.sh" --release
 else
   "$WD/test-rust-analyzer.sh"
@@ -116,6 +121,13 @@ if [ "$BUILD" = "release" ]; then
 else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
+fi
+
+# Exercise both allocation-failure stages of the native bounded queue.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
+else
+  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
 fi
 
 # Platform wire helpers are no_std in the image and unit-tested on the host.
@@ -859,10 +871,9 @@ esac
 # key pressed before the shell has printed anything would open copy mode on an
 # empty buffer.
 #
-# **What is asserted is the indicator, not the picture.** The frame diff sends
-# only the cells that changed (§6.3), and copy mode's first view is often the
-# text already on screen -- so the screen saying nothing is correct, and a check
-# that grepped for a line would be reading the frame *after* copy mode ended.
+# Reconstruct the indicator on screen: the frame diff can paint `[0/28]`
+# when copy mode opens, then update only the digits for `g`. Searching the
+# raw bytes for the last complete label would incorrectly keep `[0/28]`.
 # tmux's `[above/total]` is exact: a total above zero is a pane that kept
 # history, and `above == total` is `g` having reached the oldest line of it.
 rmux_copy_mode_keys() {
@@ -876,7 +887,7 @@ rmux_copy_mode_keys() {
   printf 'exit\n'
 }
 out="$(rmux_copy_mode_keys | vm_rmux 2>&1)"
-indicator="$(printf '%s' "$out" | grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
+indicator="$(printf '%s' "$out" | bash "$WD/test-rmux-copy-status.sh")"
 [ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
 counts="${indicator##*[}"
 above="${counts%%/*}"

@@ -1270,6 +1270,7 @@ dependencies = [
  "moto-async",
  "moto-io-internal",
  "moto-ipc",
+ "moto-mpmc",
  "moto-rt",
  "moto-sys",
  "moto-sys-io",
