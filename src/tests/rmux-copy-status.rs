@@ -18,7 +18,9 @@ fn latest_indicator(bytes: &[u8]) -> Option<String> {
         let line = grid.line(23);
         let Some(counts) = line
             .strip_prefix("-- copy mode -- [")
-            .and_then(|text| text.strip_suffix(']'))
+            // Debug stderr can leave unrelated text after the status painted
+            // by rmux. Only the bracketed counts belong to the indicator.
+            .and_then(|text| text.split_once(']').map(|(counts, _)| counts))
         else {
             return;
         };
@@ -94,6 +96,19 @@ mod tests {
         assert_eq!(
             latest_indicator(&bytes).as_deref(),
             Some("copy mode -- [7/28]")
+        );
+    }
+
+    #[test]
+    fn unrelated_text_after_the_indicator_is_not_part_of_the_status() {
+        let bytes = b"\x1b[24;65H30;\x1b[24;1H-- copy mode -- [28/28]";
+        assert_eq!(
+            latest_indicator(bytes).as_deref(),
+            Some("copy mode -- [28/28]")
+        );
+        assert_eq!(
+            latest_indicator(b"\x1b[24;1H-- copy mode -- [28/28x] trailing text"),
+            None
         );
     }
 
