@@ -170,6 +170,32 @@ without). Left on the table, largest first:
 Items moved out of active plans by explicit ruling. Each entry names
 the ruling; nothing here should be picked up without a fresh call.
 
+- **Per-process resident-memory accounting and peaks** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). The current kernel
+  `memory_usage` metric counts virtual mappings, including shared mappings
+  and lazily mapped stacks; it is not resident physical memory (RSS).
+  `MemoryStats::get()` reports physical use for the whole system, not each
+  process. Design per-process resident accounting and high-water reporting,
+  with explicit shared-page attribution and allocation/reclamation semantics,
+  before implementation. This would support reliable memory-regression
+  measurements for rust-analyzer, compilers, and other applications. It is
+  not a prerequisite for native rust-analyzer: use existing counters and
+  label sampled maxima and whole-VM physical usage accurately meanwhile.
+
+- **Complete descendant-process execution audit** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). `ProcessInfoV1::list` can omit
+  exited processes with no running descendants, and its debug names are
+  limited to 32 bytes. Periodic snapshots therefore cannot establish a
+  complete history of executed programs or arguments. Design an opt-in,
+  bounded execution-event facility with process/parent identity, executable
+  identity, explicit event-loss reporting, and reviewed access/privacy rules
+  before implementation; arguments may contain secrets. It should capture
+  short-lived descendants without polling races or extra boot-time work.
+  This would support execution audits beyond rust-analyzer. Native
+  rust-analyzer acceptance may use invocation logs and sampled descendants,
+  stating that this evidence is non-exhaustive; it must not depend on this
+  new OS facility.
+
 - **`channel.rs` SeqCst fence audit** (out of scope, ruled
   2026-08-15). The io_channel wake edges now carry their own ordering;
   the SeqCst fences predate that and are likely removable. Removing
