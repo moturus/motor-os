@@ -34,8 +34,8 @@ pub struct UserAddressSpace {
     max_memory: AtomicU64,
     total_usage: AtomicU64,
 
-    // Only sys-io's address space is privileged, i.e. admitted against the
-    // lower kernel floor. Set when its process is created (CAP_IO_MANAGER).
+    // System and I/O-manager address spaces use the lower admission floor.
+    // Set from CAP_SYS | CAP_IO_MANAGER when the process is created.
     privileged: AtomicBool,
 
     // User mem stats are tracked via @inner.
@@ -147,7 +147,7 @@ impl UserAddressSpace {
     /// them, so loading an ordinary process never widens its guard band.
     pub fn mem_class(&self) -> super::admission::MemClass {
         if self.privileged.load(Ordering::Relaxed) {
-            super::admission::MemClass::SysIo
+            super::admission::MemClass::Privileged
         } else {
             super::admission::MemClass::User
         }

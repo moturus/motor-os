@@ -210,9 +210,9 @@ impl Process {
 
         log::debug!("New process {debug_name}");
 
-        // I/O-manager address spaces are admitted against the lower kernel
-        // floor because the machine may depend on their progress.
-        if capabilities & moto_sys::caps::CAP_IO_MANAGER != 0 {
+        // System services and I/O managers may use the reserve so they can
+        // keep making progress when ordinary allocations are refused.
+        if capabilities & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_IO_MANAGER) != 0 {
             address_space.mark_privileged();
         }
 

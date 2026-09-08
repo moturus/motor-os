@@ -1095,6 +1095,14 @@ fn main() {
         wait_set::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "admission-class-tests" {
+        admission::test_process_classes();
+        return;
+    }
+    if args.len() == 4 && args[1] == "admission-class-child" {
+        admission::class_child(args[2].parse().unwrap(), args[3].parse().unwrap());
+        return;
+    }
     if args.len() >= 2 && args[1] == "close-race-child" {
         closerace::run_child_mode(&args);
         return;
