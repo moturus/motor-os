@@ -18,8 +18,8 @@ fn latest_indicator(bytes: &[u8]) -> Option<String> {
         let line = grid.line(23);
         let Some(counts) = line
             .strip_prefix("-- copy mode -- [")
-            // Debug stderr can leave unrelated text after the status painted
-            // by rmux. Only the bracketed counts belong to the indicator.
+            // Debug diagnostics can leave unrelated text beyond rmux's
+            // painted status. Parse the counter field, not the entire row.
             .and_then(|text| text.split_once(']').map(|(counts, _)| counts))
         else {
             return;
@@ -119,5 +119,18 @@ mod tests {
             let bytes = paint(&mut screen::Screen::new(), status);
             assert_eq!(latest_indicator(&bytes), None);
         }
+    }
+
+    #[test]
+    fn debug_output_after_the_counter_does_not_hide_copy_mode() {
+        let mut screen = screen::Screen::new();
+        let mut bytes = paint(&mut screen, "[0] 0:rush*");
+        // An out-of-band diagnostic paints cells Screen does not know about.
+        bytes.extend_from_slice(b"\x1b[24;1H322:245: DEBUG: incoming msg TcpStreamRx");
+        bytes.extend(paint(&mut screen, "-- copy mode -- [28/28]"));
+        assert_eq!(
+            latest_indicator(&bytes).as_deref(),
+            Some("copy mode -- [28/28]")
+        );
     }
 }
