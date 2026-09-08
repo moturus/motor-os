@@ -99,6 +99,8 @@ fail() {
 
 CONSOLE_LOG=/tmp/test-terminal-size.log
 RED_STDERR_LOG=/tmp/test-terminal-size-red-stderr.log
+RMUX_STDERR_LOG=/tmp/test-terminal-size-rmux-stderr.log
+: > "$RMUX_STDERR_LOG"
 # The pty recordings live beside it, and outlive the run for the same reason:
 # a check that fails here is not reproducible on demand, and the bytes are the
 # only evidence of what the terminal actually said.
@@ -733,8 +735,11 @@ rmux_keys() {
   printf 'exit\r'   # and the one the split made
   sleep 3
 }
+# Keep the client's diagnostics separate from its screen stream: a TCP debug
+# record can split the very row this assertion measures. Retain stderr for
+# diagnosis; pane output and all geometry assertions remain unchanged.
 out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1)"
+  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
 printf '%s' "$before" |
@@ -786,7 +791,7 @@ red_rmux_keys() {
 }
 out="$(red_rmux_keys |
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1 |
+    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG" |
   tee "$red_rmux_log")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
