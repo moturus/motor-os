@@ -44,12 +44,21 @@ toolchain_selected_lock_digest() {
 
 toolchain_content_tree_digest() (
 	set -euo pipefail
-	local root="$1" temporary record list path relative kind mode content special
+	local root="$1" temporary record list path relative kind mode content special compiler
 	shift
 	temporary="$(mktemp -d)"
 	trap 'rm -rf "$temporary"' EXIT
 	record="$temporary/record"
 	list="$temporary/list"
+	# Bootstrap must still work before the checkout's selected compiler exists.
+	# Build afresh: no cached helper can outlive its source or compiler selection.
+	compiler="$(rustup which rustc 2>/dev/null)" || compiler=
+	if [ -n "$compiler" ]; then
+		"$compiler" --edition=2021 -C opt-level=1 \
+			"$(dirname "${BASH_SOURCE[0]}")/toolchain-content-tree/src/main.rs" \
+			-o "$temporary/serialize" || exit 1
+	fi
+	: > "$temporary/entries"
 	toolchain_serialize_pairs schema motor-runtime-content-v1 > "$record"
 	for path in "$@"; do
 		[ -e "$root/$path" ] || [ -L "$root/$path" ] ||
@@ -61,13 +70,13 @@ toolchain_content_tree_digest() (
 		else
 			printf '%s\0' "$root/$path"
 		fi
-	done | LC_ALL=C sort -zu > "$list"
+	done | LC_ALL=C sort -zu > "$list" || exit 1
 	while IFS= read -r -d '' path; do
 		relative="${path#"$root"/}"
 		content="$path"
 		if [ -L "$path" ]; then
 			kind=symlink; mode=120000; content="$temporary/link"
-			readlink -n "$path" > "$content"
+			if [ -z "$compiler" ]; then readlink -n "$path" > "$content" || exit 1; fi
 		elif [ -f "$path" ]; then
 			kind=file
 			if [ -x "$path" ]; then mode=100755; else mode=100644; fi
@@ -75,9 +84,16 @@ toolchain_content_tree_digest() (
 			toolchain_die "unsupported runtime file kind: $path"
 			exit 1
 		fi
-		toolchain_serialize_pairs path "$relative" kind "$kind" mode "$mode" >> "$record"
-		toolchain_emit_file_field content "$content" >> "$record"
+		if [ -n "$compiler" ]; then
+			printf '%s\0' "$path" "$relative" "$kind" "$mode" >> "$temporary/entries" || exit 1
+		else
+			toolchain_serialize_pairs path "$relative" kind "$kind" mode "$mode" >> "$record"
+			toolchain_emit_file_field content "$content" >> "$record" || exit 1
+		fi
 	done < "$list"
+	if [ -n "$compiler" ]; then
+		"$temporary/serialize" < "$temporary/entries" >> "$record" || exit 1
+	fi
 	sha256sum "$record" | awk '{print $1}'
 )
 

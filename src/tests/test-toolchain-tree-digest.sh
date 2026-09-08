@@ -82,3 +82,4 @@ if toolchain_worktree_digest "$repo" rust >/dev/null 2>&1; then
 fi
 
 echo "test-toolchain-tree-digest PASS"
+"$ROOT_DIR/src/tests/test-toolchain-content-tree.sh"
