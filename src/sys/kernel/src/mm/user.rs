@@ -3,7 +3,7 @@ use core::sync::atomic::*;
 use alloc::sync::Arc;
 
 use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
-use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID, PAGING_DIRECT_MAP_OFFSET};
+use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
 
@@ -675,33 +675,7 @@ impl UserAddressSpace {
             buf.len() as i64,
         );
 
-        let mut source_start = vaddr_start;
-        let mut remaining_bytes = buf.len() as u64;
-
-        let mut dst_ptr = buf.as_mut_ptr();
-
-        while remaining_bytes > 0 {
-            let phys_start = self.inner.page_table_ref().virt_to_phys(source_start);
-            if phys_start.is_none() {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-            let phys_start = phys_start.unwrap();
-
-            let source_end = align_up(source_start + 1, PAGE_SIZE_SMALL);
-            let size_to_copy = core::cmp::min(source_end - source_start, remaining_bytes);
-            unsafe {
-                core::intrinsics::copy_nonoverlapping(
-                    (phys_start + PAGING_DIRECT_MAP_OFFSET) as usize as *const u8,
-                    dst_ptr,
-                    (size_to_copy) as usize,
-                );
-                dst_ptr = dst_ptr.add(size_to_copy as usize);
-            }
-            source_start += size_to_copy;
-            remaining_bytes -= size_to_copy;
-        }
-
-        Ok(())
+        self.inner.page_table_ref().copy_from_user(vaddr_start, buf)
     }
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {

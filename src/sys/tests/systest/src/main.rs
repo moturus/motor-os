@@ -3,6 +3,7 @@
 #![feature(random)]
 
 mod admission;
+mod checked_copy_in;
 // mod channel_test;
 mod closerace;
 mod command_output;
@@ -1088,6 +1089,10 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "checked-copy-in-tests" {
+        checked_copy_in::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "mmio-validation-tests" {
         mmio::validation_tests();
         return;
@@ -1351,6 +1356,7 @@ fn main() {
 
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
     test_concurrent_lazy_memory_map_write();
