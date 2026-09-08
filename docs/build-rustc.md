@@ -7,14 +7,10 @@ legacy dev-toolchain handoff.
 
 ## One Rust source revision
 
-The current beta tuple in `src/toolchain-versions.sh` uses:
-
-```text
-upstream Rust beta  f47d5bb13648d5c859f5b438eb7dc834b9729961
-Motor Rust          3f0499a81a0fc6a0a7f033b666f3574176b17ca2
-Cargo gitlink       eb98b54bc9f3c74519f43d066cb3fd02ebc88df0
-Motor LLVM gitlink  2dcc671e2eb723ef61a664bde9823fbe880e4e19
-```
+`src/toolchain-versions.sh` is the source of truth for the exact upstream Rust,
+Motor Rust, Cargo, and Motor LLVM commits. Generated manifests record the
+effective revisions and keys actually built; do not infer them from a branch
+name or copy a historical revision from documentation.
 
 The fork uses Rust's `dev` channel. Its compiler description identifies the
 Motor beta tuple, and its Cargo reports `1.99.0-dev` plus the exact Cargo
@@ -64,8 +60,8 @@ rustfmt, or Clippy from an ambient channel.
 ## Using host rust-analyzer
 
 The installed rust-analyzer runs on Linux and analyzes both Linux-host and
-ordinary Motor userspace projects. It is not the native server planned for a
-later development image. From the repository, obtain the exact name and
+ordinary Motor userspace projects. It is distinct from the native server
+packaged in the development image. From the repository, obtain the exact name and
 server path with:
 
 ```sh
@@ -107,6 +103,54 @@ kernel and loader use custom JSON targets outside this integration's scope.
 Enabling build scripts and procedural macros executes project code on the
 Linux host. Keep them enabled only for this trusted checkout or another
 trusted project; disable both options when inspecting untrusted code.
+
+## Native Motor rust-analyzer
+
+The developer image packages `/devtools/rust/bin/rust-analyzer` and matching
+sources below `/devtools/rust/lib/rustlib/src/rust/library`. The standard
+image contains neither. The native server uses `/devtools/bin/lorry`, not
+Cargo; it does not replace the Linux-host component above.
+
+Launch the binary directly over stdio, with an absolute project working
+directory and this environment:
+
+```text
+CARGO=/devtools/bin/lorry
+PATH=/devtools/bin:/system/bin
+TMPDIR=/devtools/tmp
+```
+
+For an admitted, trusted Lorry package, use:
+
+```json
+{
+  "cargo": {
+    "target": "x86_64-unknown-motor",
+    "targetDir": true,
+    "sysroot": "discover",
+    "buildScripts": { "enable": true, "useRustcWrapper": false }
+  },
+  "check": { "targets": ["x86_64-unknown-motor"] },
+  "procMacro": { "enable": false },
+  "files": { "watcher": "client" }
+}
+```
+
+The client must report document saves and relevant filesystem changes.
+Multiple packages use absolute manifest paths in `linkedProjects`; they share
+the Motor target context. Native procedural-macro expansion in the analyzer
+is disabled; Lorry's existing compiler-side proc-macro support is separate.
+Build scripts and checks run with the invoking user's existing authority.
+Opening a project is not a sandbox boundary, and `lorry vendor` remains an
+explicit developer action.
+
+Native acceptance is integrated under the developer-image branch of
+`src/tests/full-test.sh`, reached by `src/tests/full-test-dev.sh --release`.
+The latter defaults to 8192 MiB for the repository-suite VM and retains
+4096 MiB for its separate developer-source phase; `MOTO_MEMORY_MIB` overrides
+both. The active [implementation plan](plans/rust-analyzer.md#433-formatter-publication-and-invocation-coverage)
+tracks the remaining keyed cutover, final gates, and queued string-hover issue;
+packaging alone is not a declaration that Stage 2 is complete.
 
 ## Native Motor rustc
 

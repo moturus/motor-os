@@ -911,6 +911,14 @@ use `--locked --offline`. Native rust-analyzer is a separate assembly output,
 not a replacement for the Stage 1 host component. Its binary and matching
 installed `rust-src` are packaged only in the developer image.
 
+The developer-image gate checks the direct packaged server through LSP,
+including Lorry build-script data, save diagnostics, multi-root navigation,
+invocation logs, and sampled process resources. Its approved limits apply to
+the four-CPU, 8 GiB acceptance fixture; per-process memory measurements are
+virtual memory, not RSS. Fresh comparison images measure the overlay's disk
+growth independently of guest writes. Native launch configuration and the
+current completion status are in [build-rustc.md](build-rustc.md#native-motor-rust-analyzer).
+
 Motor OS workspace lockfiles remain ordinary Cargo inputs. The `src/sys`
 workspace manifest and the lock entries in `moto-rt-cabi`'s resolved closure
 enter `MOTOR_OS_RUNTIME_TREE` because they affect the shim installed into the C
