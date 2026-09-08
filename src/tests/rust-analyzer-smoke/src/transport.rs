@@ -114,6 +114,11 @@ impl Default for Dispatcher {
 }
 
 impl Dispatcher {
+    pub fn clear_notifications(&mut self) {
+        self.notifications.clear();
+        self.notification_bytes = 0;
+    }
+
     pub fn send_request(
         &mut self,
         output: impl Write,
