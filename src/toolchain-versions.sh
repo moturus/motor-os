@@ -28,7 +28,7 @@ MOTOR_LLVM_REV="7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4"
 
 MOTOR_RUST_REPOSITORY="https://github.com/moturus/rust.git"
 MOTOR_RUST_REF="refs/heads/motor-os-1.99.0-beta-f47d5bb"
-MOTOR_RUST_REV="d454849e2030eb09bcce9e367264fa5f7984bcb1"
+MOTOR_RUST_REV="75940756edd423d88ba353ce720770f3061b285a"
 MOTOR_RUST_CHANNEL="dev"
 MOTOR_CARGO_VERSION="1.99.0-dev"
 MOTOR_CARGO_REPOSITORY="https://github.com/rust-lang/cargo.git"

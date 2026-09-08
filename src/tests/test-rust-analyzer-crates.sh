@@ -55,4 +55,8 @@ test_crate() {
 }
 test_crate url unit
 test_crate inventory test
+# Exercise the actual selected Motor stdlib, not a host-side formatter adapter.
+"$RUSTC" --test --edition=2024 -O --target x86_64-unknown-motor \
+  "$WD/rust-analyzer-smoke/fixtures/command-debug.rs" -o "$temporary/command-debug"
+"$WD/test-rust-analyzer-crates.sh" --run-motor "$temporary/command-debug"
 echo 'test-rust-analyzer-crates PASS'
