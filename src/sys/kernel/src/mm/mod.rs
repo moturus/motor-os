@@ -348,11 +348,13 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
     };
     let pvh_mem_map = boot_info.pvh().mem_map();
     let mut available_memory: Vec<MemorySegment> = Vec::with_capacity(pvh_mem_map.len() + 2);
+    let mut raw_ram = Vec::with_capacity(pvh_mem_map.len());
     for entry in pvh_mem_map {
         if !entry.available() {
             continue;
         }
         let pvh_seg = entry.to_segment();
+        raw_ram.push(pvh_seg);
         // Exclude the kernel + bootup heap permanently.
         let (left, right) = pvh_seg.minus(&exclusion);
         if !left.is_empty() {
@@ -378,7 +380,7 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
         assert!(initrd_seg.end() < KERNEL_PHYS_START);
     }
 
-    phys::init(&available_memory[0..], &in_use[0..]);
+    phys::init(&available_memory, &in_use, raw_ram);
     virt::init();
 
     // Do the INIT_STATUS dance so that we can initialize CPUs (allocates pages for per-cpu GS)

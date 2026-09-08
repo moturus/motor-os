@@ -18,6 +18,7 @@ mod icmp;
 mod io_channel;
 mod kernel_log;
 mod logging;
+mod mmio;
 mod moto_async;
 mod mpmc;
 mod net_driver;
@@ -1087,6 +1088,10 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "mmio-validation-tests" {
+        mmio::validation_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "ipc-listener-tests" {
         io_channel::test_listener_cleanup();
         return;

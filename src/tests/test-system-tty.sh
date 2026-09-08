@@ -24,9 +24,9 @@ IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 export MOTO_IMAGE=motor-os-system-tty.img
 
 if [ "$BUILD" = release ]; then
-  make -C "$ROOT_DIR" system-tty.img BUILD=release -j"$(nproc)"
+  make -C "$ROOT_DIR" system-tty.img systest BUILD=release -j"$(nproc)"
 else
-  make -C "$ROOT_DIR" system-tty.img -j"$(nproc)"
+  make -C "$ROOT_DIR" system-tty.img systest -j"$(nproc)"
 fi
 
 chmod 600 "$WD/test.key"
@@ -156,6 +156,25 @@ printf '%s\n' "$ps_output" | has_system_process /system/bin/rush ||
   fail "the console shell is not System: '$ps_output'"
 printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
   fail "an ordinary external command did not retain System: '$ps_output'"
+
+# Only a System parent may grant CAP_IO_MANAGER. The ordinary SSH shell
+# deliberately cannot launch this test with its required 0x4e mask.
+scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
+  motor@192.168.4.2:/user/tmp/mmio-systest
+# The child is Interactive, so its redirected output must be writable by
+# that role, not just by the System shell creating the redirection.
+vm_ssh 'echo -n > /user/tmp/mmio-validation.log'
+run_console /user/tmp/mmio-validation-done \
+  'MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
+mmio_status="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.status)"
+mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
+[ "$mmio_status" = "0" ] || fail "MMIO validation exited $mmio_status: '$mmio_output'"
+[ "$mmio_output" = "mmio::validation_tests PASS" ] ||
+  fail "MMIO validation did not finish: '$mmio_output'"
+printf '%s\n' "$mmio_output"
+
 printf '%s\n' "$listing" |
   grep -aqE -- '-r-xr-xr--[[:space:]]+[0-9]+[[:space:]]+system-tty-shim$' ||
   fail "the chmod shim did not install the exact mode"

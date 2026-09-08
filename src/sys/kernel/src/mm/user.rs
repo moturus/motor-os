@@ -553,7 +553,7 @@ impl UserAddressSpace {
     }
 
     pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
-        assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+        super::phys::validate_mmio(phys_addr, num_pages)?;
 
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 

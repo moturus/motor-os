@@ -13,6 +13,11 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
+Implementation status (2026-09-06): P-1's boot-heap alignment fix is in
+`6efc3276` (alongside the wait-set fix). P0b is in progress, split into
+range validation first, then MMIO ownership/teardown and consumer refusals.
+The block allocator and huge-page mapping changes are not implemented yet.
+
 ## Requirements and scope
 
 - Maintain a LIFO free-page list per block. Lists start empty; allocate
@@ -38,7 +43,7 @@ free-page reporting, heap-size expansion, and changes to `src/sys/lib`,
 rt.vdso, Rust stdlib, frusa, or other repositories.
 
 Code scope: `src/sys/kernel`, `src/sys/tests/systest`,
-`src/tests/full-test.sh`, and the relevant documentation. Tests run on
+`src/tests/full-test.sh` and its test helpers, and the relevant documentation. Tests run on
 Motor OS, including kernel boot self-tests; no host allocator tests.
 Benchmarks remain user-owned.
 
@@ -556,6 +561,8 @@ do not claim that the only existing sharing callers are the ELF paths.
 P0b fixes MMIO before the allocator switch. Whole-range validation uses
 checked size/end arithmetic and alignment and rejects RAM regardless of
 whether it is allocated, free, excluded, or in the fixed mid segment.
+Reject addresses outside the x86 PTE's 52-bit address field too: upper
+bits must not be interpreted as PTE flags or alias a lower RAM address.
 Use raw firmware RAM ranges initially, expanded to the same 2 MiB block
 boundaries as the final policy; P1b replaces this check with RAM flags and
 non-absent state. Check the full range before reserving/mapping pages.
@@ -711,8 +718,11 @@ evidence; metadata growth can legitimately pin blocks.
 
 ### MMIO suite
 
-Add `mmio-unmap-suite` to full-test.sh with `MOTOR_OS_CAPS=0x4e`:
-the current 0x4c plus CAP_IO_MANAGER. Run separate child cases and verify
+Add `mmio-unmap-suite` transitively to full-test.sh with `MOTOR_OS_CAPS=0x4e`:
+the current 0x4c plus CAP_IO_MANAGER. Launch privileged cases from the
+existing test-only System console fixture, not from an Interactive SSH
+shell: only a System parent can grant CAP_IO_MANAGER. Keep production
+capability policy and SSH grants unchanged. Run separate child cases and verify
 setup succeeded before interpreting a child's fault as a passing test.
 
 1. Map the page at physical 128 GiB (1 << 37) in the QEMU gate: it is
@@ -722,7 +732,7 @@ setup succeeded before interpreting a child's fault as a passing test.
    Check the expected fault termination, not merely any abnormal exit.
 2. Refuse kernel-start RAM (34 MiB), fixed-mid RAM, managed RAM, and a
    range crossing into RAM; include an address obtained from a currently
-   allocated page and the pure validator's free-RAM case.
+   allocated page.
 3. Refuse wrapped/unaligned ranges and confirm failed-map virtual/stat
    rollback. Debug checks inspect the region after removal.
 4. Refuse an MMIO page as syscall input/output and pinned-page buffer,

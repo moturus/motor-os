@@ -5,8 +5,37 @@ use core::marker::PhantomData;
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
 
-pub fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
-    PhysicalMemory::init(available, in_use);
+pub fn init(available: &[MemorySegment], in_use: &[MemorySegment], raw_ram: Vec<MemorySegment>) {
+    PhysicalMemory::init(available, in_use, raw_ram);
+}
+
+pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), ErrorCode> {
+    let invalid = moto_rt::E_INVALID_ARGUMENT;
+    if num_pages == 0 || phys_addr & (PAGE_SIZE_SMALL - 1) != 0 {
+        return Err(invalid);
+    }
+    let size = num_pages.checked_mul(PAGE_SIZE_SMALL).ok_or(invalid)?;
+    let end = phys_addr.checked_add(size).ok_or(invalid)?;
+    // Bits above the x86 PTE's 52-bit address field are not address bits.
+    if end > (1 << 52) {
+        return Err(invalid);
+    }
+    for ram in &PhysicalMemory::inst().raw_ram {
+        if ram.is_empty() {
+            continue;
+        }
+        let ram_end = ram
+            .start
+            .checked_add(ram.size)
+            .and_then(|end| end.checked_add(PAGE_SIZE_MID - 1))
+            .ok_or(invalid)?
+            & !(PAGE_SIZE_MID - 1);
+        let ram_start = align_down(ram.start, PAGE_SIZE_MID);
+        if phys_addr < ram_end && end > ram_start {
+            return Err(invalid);
+        }
+    }
+    Ok(())
 }
 
 // Physical frame.
@@ -616,6 +645,9 @@ struct PhysicalMemory {
 
     slab: MMSlab<Frame>,
 
+    // Includes kernel, boot heap, and fixed-mid RAM excluded from small_pages.
+    raw_ram: Vec<MemorySegment>,
+
     small_pages: MemoryArea<PageSizeSmall>,
     mid_pages: DesignatedSegment<PageSizeMid>,
 }
@@ -763,7 +795,7 @@ impl PhysicalMemory {
         }
     }
 
-    fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
+    fn init(available: &[MemorySegment], in_use: &[MemorySegment], raw_ram: Vec<MemorySegment>) {
         assert_eq!(0, unsafe {
             core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM))
         });
@@ -789,6 +821,7 @@ impl PhysicalMemory {
         let self_ = Box::leak(Box::new(PhysicalMemory {
             total_size,
             slab: MMSlab::<Frame>::new(true),
+            raw_ram,
             small_pages: MemoryArea::new(),
             mid_pages: DesignatedSegment::new(&Self::MID_PAGES_SEGMENT),
         }));
