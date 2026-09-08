@@ -210,3 +210,16 @@ the ruling; nothing here should be picked up without a fresh call.
   re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
   per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
+
+- **virtio queue: smarter allocation-waiter wakeups** (recorded 2026-09-08
+  from `virtio-descriptor-waiters.md`, v03). Releasing a descriptor chain
+  wakes at most two queued allocation waiters, and a waiter that does not
+  fit re-registers at the back of the line. Under the single-owner design
+  the block queue has one submitter that never waits in the driver, and
+  each net queue has one submitter, so at most one waiter exists per queue
+  and the policy is moot. It matters again only if a queue ever gets
+  several independent allocators; the v02 review showed that waking the
+  first waiter only can then starve a fitting waiter behind a non-fitting
+  one once the last in-flight request has completed. Options then: wake
+  every waiter, or select the first that fits from per-entry sizes and a
+  free-descriptor count.
