@@ -444,6 +444,7 @@ fi
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-crates.sh"
+  "$WD/test-rust-analyzer-native.sh"
 fi
 
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then

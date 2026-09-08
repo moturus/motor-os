@@ -19,6 +19,21 @@ fn main() {
     let mut args = env::args();
     let _program = args.next();
     match args.next().as_deref() {
+        Some("--native") => {
+            let (Some(evidence), Some(sampler), None) = (args.next(), args.next(), args.next())
+            else {
+                eprintln!(
+                    "usage: rust-analyzer-smoke --native NEW_EVIDENCE_DIRECTORY NATIVE_SAMPLER"
+                );
+                std::process::exit(2);
+            };
+            if let Err(error) =
+                rust_analyzer_smoke::native::run(Path::new(&evidence), Path::new(&sampler))
+            {
+                eprintln!("rust-analyzer native acceptance: {error}");
+                std::process::exit(1);
+            }
+        }
         Some("--fake-child") => fake_child(args.next().as_deref()),
         Some("--lorry") => {
             let Some(lorry) = args.next() else {

@@ -1,5 +1,6 @@
 pub mod case;
 pub mod lorry;
+pub mod native;
 pub mod process;
 pub mod resources;
 pub mod semantic;
