@@ -64,6 +64,8 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 "$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
+"$WD/test-dev-memory-contract.sh"
+"$WD/test-rust-analyzer-size-contract.sh"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release
 else
@@ -97,6 +99,10 @@ else
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
+fi
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  "$WD/test-rust-analyzer-size.sh"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
