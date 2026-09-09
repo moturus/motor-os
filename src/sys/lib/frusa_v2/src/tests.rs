@@ -928,6 +928,12 @@ fn concurrent_growth_test() {
     let stats = GROWN.stats();
     assert_eq!(stats.in_use - stats.in_use_metadata, all.len() * 64);
     assert!(stats.allocated_from_fallback >= stats.in_use);
+    // Growers that lost a race give their batch back, so slack stays
+    // within a few batches instead of one per contending thread per event.
+    let slack = stats.allocated_from_fallback
+        - stats.allocated_metadata
+        - (stats.in_use - stats.in_use_metadata);
+    assert!(slack <= 4 * 256 * 1024, "slack {slack}");
     GROWN.inner.check_invariants();
     for ptr in all {
         unsafe { GROWN.dealloc(ptr, layout) };

@@ -374,9 +374,17 @@ impl<const SLABS: usize> Frusa<SLABS> {
         block
     }
 
+    /// Links a new metadata page, or gives it back if another thread has
+    /// refilled the metadata stack meanwhile (the same rule as `grow`).
     fn link_metadata_page(&self, block: *mut Block) {
         let meta = &self.metadata_slab;
         self.write_lock(meta);
+        if !meta.partial_head.load(Ordering::Acquire).is_null() {
+            self.write_unlock(meta);
+            let layout = Layout::from_size_align(Self::PAGE_4K, Self::PAGE_4K).unwrap();
+            unsafe { self.fallback_allocator.dealloc(block as *mut u8, layout) };
+            return;
+        }
         meta.link_batch(block, block);
         meta.stack_push(block);
         meta.bytes_total.fetch_add(Self::PAGE_4K, Ordering::Relaxed);
@@ -595,6 +603,24 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 None => break (array, array_cap),
             }
         };
+        // Another grower may have refilled the stack meanwhile. Linking a
+        // second batch on top of it would let a stampede of growers multiply
+        // the slab's memory; give this one back instead, and let the caller
+        // retry against the refilled stack.
+        if !slab.partial_head.load(Ordering::Acquire).is_null() {
+            self.write_unlock(slab);
+            for taken in Slab::batch(first, num_blocks) {
+                self.dealloc_metadata(taken as *mut u8);
+            }
+            unsafe { self.fallback_allocator.dealloc(data, layout) };
+            if !retired.0.is_null() {
+                unsafe {
+                    self.fallback_allocator
+                        .dealloc(retired.0 as *mut u8, Self::index_layout(retired.1))
+                };
+            }
+            return Ok(());
+        }
         slab.index_insert_batch(first, num_blocks);
         slab.link_batch(first, last);
         {
