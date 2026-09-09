@@ -15,10 +15,13 @@ backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
 Implementation status (2026-09-08): P-1's boot-heap alignment fix is in
 `6efc3276` (alongside the wait-set fix). P0b's range validation is in
-`83f09a60`; MMIO ownership/teardown and consumer refusals are implemented,
-with acceptance in progress. The separate checked copy-in prerequisite is
-committed in `ba6da613`; it rejects device mappings under the page-table lock.
-The block allocator and huge-page mapping changes are not implemented yet.
+`83f09a60`, and MMIO ownership/teardown and consumer refusals are in
+`a94eb213`. Reservation and mapping now share the region lock, including
+contiguous mapping and failure rollback. Both P0b snapshots passed the
+common gate and launcher matrix, including Firecracker at 64 MiB; these were
+functional checks, not controlled boot-time measurements. Checked copy-in is
+in `ba6da613`. A separate direct-map consumer lifetime fix is next. The block
+allocator and huge-page mapping changes are not committed yet.
 
 ## Requirements and scope
 
@@ -74,6 +77,7 @@ Known defects relevant to this work:
 | Page-zero accounting | `DesignatedSegment::new` sets bit zero, but `add_segment` adds no corresponding used count; later `mark_used` sees the bit already set and counts no allocation. Free capacity is overstated by one when page zero belongs to a managed range. | P1b replacement |
 | MMIO teardown and failure | MMIO pages have no `Frame`, so `clear` leaves their PTEs; a failed map reverses statistics but leaves its virtual segment. | P0b |
 | MMIO into RAM | `fixed_addr_reserve` can consume free managed RAM uncharged and accepts excluded kernel RAM. | P0b |
+| Reservation/mapping race | MMIO and contiguous mapping release the region lock after reserving a segment; concurrent unmap can remove or replace it before mapping. | P0b |
 | Contiguous allocation | Outer assertion caps at 64; the inner scan omits the last page; descriptor-failure rollback misses one frame. | P1b replacement |
 
 Page zero must be charged exactly once and never released. Test that in
@@ -578,6 +582,13 @@ then unmaps exactly the successful prefix, including rollback, with its
 existing flush-before-drop ordering. On failure remove the virtual segment
 and reverse its accounting exactly once.
 
+Hold the existing region lock continuously from reservation through mapping
+or rollback, for both MMIO and contiguous allocation. Otherwise concurrent
+unmap can remove the reservation, or replace it with another segment, before
+the mapper reacquires the lock. A missing-segment error alone would not fix
+the replacement case or double reversal of process accounting. Reuse a
+locked reservation helper; no new lock or boot-time work is needed.
+
 Return a distinct `VaddrMapStatus::Mmio`. `copy_to_user`,
 `get_user_page_as_kernel`, `read_from_user_into`, and sharing refuse it;
 retain the existing handling of other statuses and special fixed mappings.
@@ -799,7 +810,10 @@ gate's public dependency downloads for all patches in this work. Retry a
 confirmed external-network flake once, including approved DNS/ping cases;
 never retry hermetic failures or enlarge timeouts/ignore failures to disguise
 a defect. Diagnose failures; pause implementation for
-new non-test pre-existing bugs or a newly required policy decision.
+new non-test pre-existing bugs or a newly required policy decision, except
+that the user explicitly authorized fixing discovered races and continuing
+without creating race tests or reproducers. Existing acceptance gates remain
+required.
 
 P1b launcher matrix: cloud-hypervisor; Firecracker at 64 MiB and 1 GiB;
 QEMU -kernel; QEMU BIOS; release developer image at 8 GiB with a PhysStats

@@ -10,8 +10,7 @@ pub struct MmioMapping {
 pub fn mmio_map(phys_addr: u64, num_pages: u64) -> Result<MmioMapping, ErrorCode> {
     phys::validate_mmio(phys_addr, num_pages)?;
 
-    let vmem = virt::vmem_allocate_pages(virt::VmemKind::KernelMMIO, num_pages)?;
-    super::virt::KERNEL_ADDRESS_SPACE.mmio_map(phys_addr, vmem.start)?;
+    let vmem = virt::KERNEL_ADDRESS_SPACE.mmio_map(phys_addr, num_pages)?;
 
     Ok(MmioMapping {
         phys_addr,

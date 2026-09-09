@@ -558,21 +558,11 @@ impl UserAddressSpace {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         self.inner
-            .vmem_allocate_pages(VmemKind::UserMMIO, num_pages, None)
-            .map_or_else(
-                |err| {
-                    self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    Err(err)
-                },
-                |segment| {
-                    self.inner
-                        .mmio_map(phys_addr, segment.start)
-                        .map(|_| segment.start)
-                        .inspect_err(|_| {
-                            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        })
-                },
-            )
+            .mmio_map(phys_addr, num_pages)
+            .map(|segment| segment.start)
+            .inspect_err(|_| {
+                self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            })
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
