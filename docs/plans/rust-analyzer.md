@@ -25,7 +25,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | Steps 1–24 complete and gated; queued string-hover investigation is at an allocator review stop (§4.37) |
+| 2. Guest | Motor OS | Motor only | Steps 1–25 complete and gated; the string-hover timeout was the runtime allocator, resolved by frusa_v2 (§4.37) |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -2708,8 +2708,8 @@ one intentionally larger atomic change so its SSH transport, semantic
 assertions, CLI, and full-gate entry point compile and run together. All other
 code patches are small; the sampler's 309-line diff includes 167 generated
 lockfile lines. No tracing patch or external source changes were added.
-Step 24 is complete. Step 25, the string-hover diagnosis, is now the only
-remaining implementation item; retain this plan until that is resolved.
+Step 24 is complete. Step 25, the string-hover diagnosis, was the last
+implementation item; §4.37 records its resolution.
 
 ### 4.37 String-hover investigation: allocator scalability review stop
 
