@@ -335,9 +335,10 @@ fn rotation_and_space_cleanup(slot: &str) {
     let trigger = derived_tag(slot, "cleanup-trigger");
     let trigger_path = log_path(&trigger);
     let (mut trigger_conn, trigger_id) = connected_tag(&trigger);
-    prepare_log(&mut trigger_conn, trigger_id, b"cleanup complete");
+    let cleanup_marker = format!("cleanup complete {:016x}", std::random::random::<u64>(..));
+    prepare_log(&mut trigger_conn, trigger_id, cleanup_marker.as_bytes());
     assert_eq!(moto_rt::E_OK, rpc_result(&mut trigger_conn));
-    wait_for_records(&trigger_path, &["cleanup complete".to_string()]);
+    wait_for_records(&trigger_path, &[cleanup_marker]);
     assert!(!std::fs::exists(&previous_path).unwrap(), "{previous_path}");
 
     drop((trigger_conn, fill));
