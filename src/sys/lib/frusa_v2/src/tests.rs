@@ -1124,3 +1124,232 @@ fn reclaim_2m() {
     let stats = frusa.stats();
     assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
 }
+
+// ---- per-thread private blocks ----
+
+use crate::Cache4K;
+
+#[test]
+fn cached_allocation_owns_one_block_per_class() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptrs: Vec<*mut u8> = (0..10)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    assert_disjoint(&ptrs, 64);
+    let slab = frusa.inner.slab_for_sz(64);
+    let block = slab.lookup(ptrs[0]);
+    for ptr in &ptrs {
+        assert_eq!(slab.lookup(*ptr), block);
+    }
+    assert_eq!(
+        unsafe { (*block).owner.load(Ordering::Relaxed) },
+        cache.id()
+    );
+    assert!(!unsafe { (*block).on_stack() });
+    assert_eq!(cache.current[slab.table_idx as usize].get(), block);
+    frusa.inner.check_invariants();
+
+    // Freed but still owned: reclaim must leave the block's batch alone.
+    for ptr in &ptrs {
+        unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+    }
+    let before = frusa.stats();
+    frusa.reclaim();
+    assert_eq!(
+        frusa.stats().allocated_from_fallback,
+        before.allocated_from_fallback
+    );
+
+    // Released: the block rejoins the stack and reclaim can free it.
+    frusa.release_cache(&cache);
+    assert!(unsafe { (*block).owner.load(Ordering::Relaxed) }.is_null());
+    assert!(unsafe { (*block).on_stack() });
+    assert!(cache.current[slab.table_idx as usize].get().is_null());
+    frusa.inner.check_invariants();
+    frusa.reclaim();
+    let stats = frusa.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+}
+
+#[test]
+fn classes_above_the_threshold_use_the_shared_path() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    for size in [512usize, 1024, 4096] {
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+        let slab = frusa.inner.slab_for_sz(size);
+        let block = slab.lookup(ptr);
+        assert!(unsafe { (*block).owner.load(Ordering::Relaxed) }.is_null());
+        assert!(cache.current[slab.table_idx as usize].get().is_null());
+        unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+    }
+    // The largest cached class is 256 bytes.
+    let layout = Layout::from_size_align(256, 8).unwrap();
+    let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+    let slab = frusa.inner.slab_for_sz(256);
+    assert_eq!(
+        unsafe { (*slab.lookup(ptr)).owner.load(Ordering::Relaxed) },
+        cache.id()
+    );
+    unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+    frusa.release_cache(&cache);
+    frusa.inner.check_invariants();
+}
+
+#[test]
+fn a_full_private_block_is_dropped_and_comes_back_through_a_free() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let slab = frusa.inner.slab_for_sz(64);
+    let class = slab.table_idx as usize;
+    let ptrs: Vec<*mut u8> = (0..Block::ENTRIES)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    let block = slab.lookup(ptrs[0]);
+    assert!(unsafe { (*block).is_full() });
+    // The claim that filled the block dropped it: no owner, off the stack.
+    assert!(cache.current[class].get().is_null());
+    assert!(unsafe { (*block).owner.load(Ordering::Relaxed) }.is_null());
+    assert!(!unsafe { (*block).on_stack() });
+
+    // An uncached free from "another thread" pushes it, and the cache takes
+    // it back on its next allocation and gets that very slot.
+    unsafe { frusa.dealloc(ptrs[7], layout) };
+    assert!(unsafe { (*block).on_stack() });
+    let again = unsafe { frusa.alloc_cached(&cache, layout) };
+    assert_eq!(again, ptrs[7]);
+    assert_eq!(cache.current[class].get(), core::ptr::null_mut());
+    frusa.inner.check_invariants();
+    for ptr in ptrs {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    frusa.release_cache(&cache);
+    frusa.inner.check_invariants();
+}
+
+#[test]
+fn remote_frees_into_a_private_block_are_reused_by_its_owner() {
+    static SHARED: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let slab = SHARED.inner.slab_for_sz(64);
+    let ptrs: Vec<*mut u8> = (0..40)
+        .map(|_| unsafe { SHARED.alloc_cached(&cache, layout) })
+        .collect();
+    let block = slab.lookup(ptrs[0]);
+    let remote: Vec<usize> = ptrs[..10].iter().map(|p| *p as usize).collect();
+    std::thread::spawn(move || {
+        for ptr in remote {
+            unsafe { SHARED.dealloc(ptr as *mut u8, layout) };
+        }
+    })
+    .join()
+    .unwrap();
+    // Not pushed (owned), and the owner keeps allocating from it: the 24
+    // untouched slots plus the 10 freed ones all come from this block.
+    assert!(!unsafe { (*block).on_stack() });
+    let mut reused = 0;
+    for _ in 0..34 {
+        let ptr = unsafe { SHARED.alloc_cached(&cache, layout) };
+        assert_eq!(slab.lookup(ptr), block);
+        if ptrs[..10].contains(&ptr) {
+            reused += 1;
+        }
+    }
+    assert_eq!(reused, 10);
+    assert!(unsafe { (*block).is_full() });
+    SHARED.release_cache(&cache);
+    SHARED.inner.check_invariants();
+}
+
+/// Eight caching threads exchange objects through a shared pool and free
+/// each other's, while a coordinator reclaims; caches are released and
+/// reused along the way. Every invariant must hold at the end and all
+/// memory must come back.
+#[test]
+fn private_blocks_survive_cross_thread_churn() {
+    static SHARED: Frusa4K = Frusa4K::new(&BACK_END);
+    static POOL: std::sync::Mutex<Vec<(usize, Layout)>> = std::sync::Mutex::new(Vec::new());
+    #[cfg(debug_assertions)]
+    const STEPS: usize = 20_000;
+    #[cfg(not(debug_assertions))]
+    const STEPS: usize = 200_000;
+
+    let workers: Vec<_> = (0..8)
+        .map(|t| {
+            std::thread::spawn(move || {
+                let mut rng = Xorshift(0x1357_9bdf_2468_ace0 ^ (t as u64 + 1));
+                let mut cache = Cache4K::new();
+                for step in 0..STEPS {
+                    let size = 256 >> (rng.next() % 5);
+                    let layout = Layout::from_size_align(size, 8).unwrap();
+                    let ptr = unsafe { SHARED.alloc_cached(&cache, layout) };
+                    assert!(!ptr.is_null());
+                    unsafe { ptr.write(t as u8) };
+                    let victim = {
+                        let mut pool = POOL.lock().unwrap();
+                        pool.push((ptr as usize, layout));
+                        if pool.len() > 64 {
+                            let k = (rng.next() % pool.len() as u64) as usize;
+                            Some(pool.swap_remove(k))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((victim, layout)) = victim {
+                        unsafe { SHARED.dealloc_cached(&cache, victim as *mut u8, layout) };
+                    }
+                    if step % 5_000 == 4_999 {
+                        SHARED.release_cache(&cache);
+                        cache = Cache4K::new();
+                    }
+                }
+                SHARED.release_cache(&cache);
+            })
+        })
+        .collect();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(5));
+        SHARED.reclaim();
+    }
+    for w in workers {
+        w.join().unwrap();
+    }
+    for (ptr, layout) in POOL.lock().unwrap().drain(..) {
+        unsafe { SHARED.dealloc(ptr as *mut u8, layout) };
+    }
+    SHARED.inner.check_invariants();
+    let stats = SHARED.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+    SHARED.reclaim();
+    let stats = SHARED.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+}
+
+#[test]
+fn cached_realloc_keeps_the_slot_within_a_class() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(40, 8).unwrap();
+    let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+    fill_and_check(ptr, 40);
+    assert_eq!(
+        unsafe { frusa.realloc_cached(&cache, ptr, layout, 64) },
+        ptr
+    );
+    let moved =
+        unsafe { frusa.realloc_cached(&cache, ptr, Layout::from_size_align(64, 8).unwrap(), 200) };
+    assert_ne!(moved, ptr);
+    let buf = unsafe { core::slice::from_raw_parts(moved, 40) };
+    for (idx, byte) in buf.iter().enumerate() {
+        assert_eq!((idx % 251) as u8, *byte);
+    }
+    unsafe { frusa.dealloc_cached(&cache, moved, Layout::from_size_align(200, 8).unwrap()) };
+    frusa.release_cache(&cache);
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}

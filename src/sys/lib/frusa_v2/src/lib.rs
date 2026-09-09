@@ -9,6 +9,7 @@
 #![no_std]
 
 mod block;
+mod cache;
 mod slab;
 mod sync;
 
@@ -23,7 +24,13 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use block::Block;
+pub use cache::ThreadCache;
 use slab::Slab;
+
+/// The per-thread cache type for [`Frusa4K`].
+pub type Cache4K = ThreadCache<9>;
+/// The per-thread cache type for [`Frusa2M`].
+pub type Cache2M = ThreadCache<17>;
 
 /// Basic usage statistics. In-use figures are computed from the block
 /// bitmaps when asked, so the hot paths keep no counters.
@@ -74,6 +81,43 @@ impl Frusa4K {
     pub fn stats(&self) -> FrusaStats {
         self.inner.stats()
     }
+
+    /// Allocation served from the calling thread's private block when the
+    /// class is cached; otherwise the shared path.
+    ///
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::alloc`. `cache` must be used by one thread at a
+    /// time and only with this allocator.
+    pub unsafe fn alloc_cached(&self, cache: &Cache4K, layout: Layout) -> *mut u8 {
+        self.inner.alloc_cached(cache, layout)
+    }
+
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::dealloc`, with the `cache` rule of `alloc_cached`.
+    pub unsafe fn dealloc_cached(&self, cache: &Cache4K, ptr: *mut u8, layout: Layout) {
+        unsafe { self.inner.dealloc_cached(cache, ptr, layout) }
+    }
+
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::realloc`, with the `cache` rule of `alloc_cached`.
+    pub unsafe fn realloc_cached(
+        &self,
+        cache: &Cache4K,
+        ptr: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        unsafe { self.inner.realloc_cached(cache, ptr, layout, new_size) }
+    }
+
+    /// Gives the cache's private blocks back to their slabs. Call before a
+    /// thread exits; the cache may be used again afterwards.
+    pub fn release_cache(&self, cache: &Cache4K) {
+        self.inner.release_cache(cache)
+    }
 }
 
 /// An allocator that manages allocations up to 1M and uses the fallback
@@ -114,6 +158,40 @@ impl Frusa2M {
 
     pub fn stats(&self) -> FrusaStats {
         self.inner.stats()
+    }
+
+    /// See [`Frusa4K::alloc_cached`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Frusa4K::alloc_cached`].
+    pub unsafe fn alloc_cached(&self, cache: &Cache2M, layout: Layout) -> *mut u8 {
+        self.inner.alloc_cached(cache, layout)
+    }
+
+    /// # Safety
+    ///
+    /// As for [`Frusa4K::dealloc_cached`].
+    pub unsafe fn dealloc_cached(&self, cache: &Cache2M, ptr: *mut u8, layout: Layout) {
+        unsafe { self.inner.dealloc_cached(cache, ptr, layout) }
+    }
+
+    /// # Safety
+    ///
+    /// As for [`Frusa4K::realloc_cached`].
+    pub unsafe fn realloc_cached(
+        &self,
+        cache: &Cache2M,
+        ptr: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        unsafe { self.inner.realloc_cached(cache, ptr, layout, new_size) }
+    }
+
+    /// See [`Frusa4K::release_cache`].
+    pub fn release_cache(&self, cache: &Cache2M) {
+        self.inner.release_cache(cache)
     }
 }
 
@@ -344,12 +422,20 @@ impl<const SLABS: usize> Frusa<SLABS> {
             panic!("FRUSA: bad ptr for dealloc");
         }
         if unsafe { (*block).dealloc(ptr) } {
-            let _lock = slab.partial_lock.lock();
-            slab.stack_push(block);
+            self.push_unowned(slab, block);
         }
         slab.guard.read_unlock();
     }
 
+    /// A block that just went from full to non-full rejoins the stack unless
+    /// a cache owns it: the owner sees the free slot itself, and if it is
+    /// giving the block up, its own re-check pushes it (§5.2 of the plan).
+    fn push_unowned(&self, slab: &Slab, block: *mut Block) {
+        let _lock = slab.partial_lock.lock();
+        if unsafe { (*block).owner.load(Ordering::SeqCst) }.is_null() {
+            slab.stack_push(block);
+        }
+    }
     /// Bytes to request for the next batch of `slab`: small classes start
     /// with single pages and move to larger batches as they grow, so a big
     /// heap needs few backend calls while a small one returns memory in
@@ -478,6 +564,115 @@ impl<const SLABS: usize> Frusa<SLABS> {
             };
         }
         Ok(())
+    }
+
+    // ---- per-thread private blocks ----
+
+    /// Entries up to this size are served from private blocks; an idle
+    /// thread holds at most one block per cached class, 31 KiB in all.
+    const CACHED_MAX_LOG2: u32 = 8;
+
+    fn alloc_cached(&self, cache: &ThreadCache<SLABS>, layout: Layout) -> *mut u8 {
+        let Some(sz) = Self::sz_from_layout(&layout) else {
+            return unsafe { self.fallback_allocator.alloc(layout) };
+        };
+        let slab = self.slab_for_sz(sz);
+        if slab.entry_sz_log2 > Self::CACHED_MAX_LOG2 {
+            return self.alloc_from_slab(slab);
+        }
+        let class = slab.table_idx as usize;
+        loop {
+            slab.guard.read_lock();
+            let block = cache.current[class].get();
+            if !block.is_null() {
+                match unsafe { (*block).alloc() } {
+                    Some((ptr, became_full)) => {
+                        if became_full {
+                            self.release_private(slab, cache, class);
+                        }
+                        slab.guard.read_unlock();
+                        return ptr;
+                    }
+                    None => self.release_private(slab, cache, class),
+                }
+            }
+            let taken = {
+                let _lock = slab.partial_lock.lock();
+                let taken = slab.stack_pop();
+                if !taken.is_null() {
+                    unsafe { (*taken).owner.store(cache.id(), Ordering::SeqCst) };
+                }
+                taken
+            };
+            if !taken.is_null() {
+                cache.current[class].set(taken);
+                slab.guard.read_unlock();
+                continue;
+            }
+            slab.guard.read_unlock();
+            if self.grow(slab).is_err() {
+                return core::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Gives up the private block of `class`. Ownership is cleared first;
+    /// then, if a remote free landed while the block looked full to its
+    /// owner, that free saw an owner and did not push, so the re-check here
+    /// does. Both sides use sequentially consistent operations, so one of
+    /// them always observes the other. Read guard held by the caller.
+    fn release_private(&self, slab: &Slab, cache: &ThreadCache<SLABS>, class: usize) {
+        let block = cache.current[class].replace(core::ptr::null_mut());
+        if block.is_null() {
+            return;
+        }
+        let b = unsafe { &*block };
+        let previous = b.owner.swap(core::ptr::null_mut(), Ordering::SeqCst);
+        debug_assert_eq!(previous, cache.id());
+        if !b.is_full() {
+            let _lock = slab.partial_lock.lock();
+            slab.stack_push(block);
+        }
+    }
+
+    unsafe fn dealloc_cached(&self, cache: &ThreadCache<SLABS>, ptr: *mut u8, layout: Layout) {
+        // The cache selects the guard shard once the guard is sharded.
+        let _ = cache;
+        unsafe { self.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc_cached(
+        &self,
+        cache: &ThreadCache<SLABS>,
+        ptr: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> *mut u8 {
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        if let (Some(old), Some(new)) = (
+            Self::sz_from_layout(&layout),
+            Self::sz_from_layout(&new_layout),
+        ) && old == new
+        {
+            return ptr;
+        }
+        let new_ptr = self.alloc_cached(cache, new_layout);
+        if !new_ptr.is_null() {
+            unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size)) };
+            unsafe { self.dealloc_cached(cache, ptr, layout) };
+        }
+        new_ptr
+    }
+
+    fn release_cache(&self, cache: &ThreadCache<SLABS>) {
+        for (class, slab) in self.slabs().iter().enumerate() {
+            if cache.current[class].get().is_null() {
+                continue;
+            }
+            slab.guard.read_lock();
+            self.release_private(slab, cache, class);
+            slab.guard.read_unlock();
+        }
     }
 
     // ---- reclaim ----
