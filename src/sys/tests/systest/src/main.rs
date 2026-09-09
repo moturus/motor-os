@@ -13,6 +13,7 @@ mod execute_permissions;
 mod file_locking;
 mod fs;
 mod fs_permissions;
+mod alloc_bench;
 mod fsbench;
 mod icmp;
 mod io_channel;
@@ -1109,6 +1110,10 @@ fn main() {
     }
     if args.len() >= 2 && args[1] == "fs-bench" {
         fsbench::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "alloc-bench" {
+        alloc_bench::run();
         return;
     }
     if args.len() == 2 && args[1] == "--under-load" {
