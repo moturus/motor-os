@@ -1,18 +1,31 @@
-//! Locks. A slab has one read/write guard and one spinlock for its partial
-//! stack. Readers are ordinary allocation and free; the writer is growth's
-//! link step or reclaim, which then has the slab to itself. Neither lock is
-//! ever held across a backend call.
+//! Locks. A slab has one readers/writer guard and one spinlock for its
+//! partial stack. Readers are ordinary allocation and free; the writer is
+//! growth's link step or reclaim, which then has the slab to itself. Neither
+//! lock is ever held across a backend call.
+//!
+//! Reader counts are sharded: each shard is a cache line of its own, and a
+//! thread counts itself in the shard of the CPU it runs on, so readers on
+//! different CPUs never write the same line. The writer bit lives in the
+//! slab and the writer waits for every shard to drain.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 const WRITER: u32 = 1;
-const READER: u32 = 2;
-// A reader that observes a count above this backs off: the writer bit or an
-// absurd reader count means the word is not in a state to join.
-const MAX_LOCK_VALUE: u32 = u32::MAX / 2;
 
-/// Readers/writer guard. Readers spin while a writer holds it; a writer
-/// waits for readers to drain.
+/// Reader shards per slab. Two threads sharing one only share a line.
+pub(crate) const SHARDS: usize = 16;
+
+/// One reader count on its own cache line.
+#[repr(align(64))]
+pub(crate) struct ReaderShard(AtomicU32);
+
+impl ReaderShard {
+    pub const fn new() -> Self {
+        Self(AtomicU32::new(0))
+    }
+}
+
+/// The writer side of a slab guard; readers are counted in `ReaderShard`s.
 pub(crate) struct RwLock(AtomicU32);
 
 impl RwLock {
@@ -20,51 +33,55 @@ impl RwLock {
         Self(AtomicU32::new(0))
     }
 
-    pub fn try_read_lock(&self) -> bool {
-        // While a writer is draining readers, back off without touching
-        // the count, or the writer may never observe it at zero.
-        if self.0.load(Ordering::SeqCst) & WRITER != 0 {
+    fn writer_pending(&self) -> bool {
+        self.0.load(Ordering::SeqCst) & WRITER != 0
+    }
+
+    /// Joins as a reader in `shard` unless a writer holds or is taking the
+    /// guard. The count is touched only when no writer is pending, so a
+    /// draining writer sees it reach zero.
+    pub fn try_read_lock(&self, shard: &ReaderShard) -> bool {
+        if self.writer_pending() {
             return false;
         }
-        let val = self.0.fetch_add(READER, Ordering::SeqCst);
-        if val > MAX_LOCK_VALUE || val & WRITER != 0 {
-            self.0.fetch_sub(READER, Ordering::SeqCst);
-            false
-        } else {
-            true
-        }
-    }
-
-    pub fn read_lock(&self) {
-        while !self.try_read_lock() {
-            core::hint::spin_loop();
-        }
-    }
-
-    pub fn read_unlock(&self) {
-        self.0.fetch_sub(READER, Ordering::SeqCst);
-    }
-
-    /// Takes the writer role if nobody else holds it, then waits for the
-    /// readers to drain. Returns false at once if another writer holds it.
-    pub fn try_write_lock(&self) -> bool {
-        let mut val = self.0.fetch_or(WRITER, Ordering::SeqCst);
-        if val & WRITER != 0 {
+        shard.0.fetch_add(1, Ordering::SeqCst);
+        if self.writer_pending() {
+            shard.0.fetch_sub(1, Ordering::SeqCst);
             return false;
-        }
-        while val != WRITER {
-            core::hint::spin_loop();
-            val = self.0.load(Ordering::SeqCst);
         }
         true
     }
 
-    pub fn write_lock(&self) {
-        loop {
-            while self.0.load(Ordering::SeqCst) & WRITER != 0 {
+    pub fn read_lock(&self, shard: &ReaderShard) {
+        while !self.try_read_lock(shard) {
+            core::hint::spin_loop();
+        }
+    }
+
+    pub fn read_unlock(&self, shard: &ReaderShard) {
+        shard.0.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Takes the writer role if nobody else holds it, then waits for every
+    /// shard to drain. Returns false at once if another writer holds it.
+    pub fn try_write_lock(&self, shards: &[ReaderShard]) -> bool {
+        if self.0.fetch_or(WRITER, Ordering::SeqCst) & WRITER != 0 {
+            return false;
+        }
+        for shard in shards {
+            while shard.0.load(Ordering::SeqCst) != 0 {
                 core::hint::spin_loop();
             }
-            if self.try_write_lock() {
+        }
+        true
+    }
+
+    pub fn write_lock(&self, shards: &[ReaderShard]) {
+        loop {
+            while self.writer_pending() {
+                core::hint::spin_loop();
+            }
+            if self.try_write_lock(shards) {
                 return;
             }
         }
@@ -77,7 +94,7 @@ impl RwLock {
 
     #[cfg(test)]
     pub fn is_write_locked(&self) -> bool {
-        self.0.load(Ordering::SeqCst) & WRITER != 0
+        self.writer_pending()
     }
 }
 

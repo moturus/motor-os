@@ -5,53 +5,59 @@ use std::time::Duration;
 use std::vec::Vec;
 
 use crate::block::Block;
-use crate::sync::{RwLock, SpinLock};
+use crate::sync::{ReaderShard, RwLock, SHARDS, SpinLock};
+
+fn shards() -> [ReaderShard; SHARDS] {
+    [const { ReaderShard::new() }; SHARDS]
+}
 
 #[test]
 fn rwlock_readers_share_and_exclude_writers() {
     let lock = RwLock::new();
-    lock.read_lock();
-    assert!(lock.try_read_lock());
+    let shards = shards();
+    lock.read_lock(&shards[0]);
+    assert!(lock.try_read_lock(&shards[3]));
     assert!(!lock.is_write_locked());
-    lock.read_unlock();
-    lock.read_unlock();
+    lock.read_unlock(&shards[0]);
+    lock.read_unlock(&shards[3]);
 
-    assert!(lock.try_write_lock());
-    assert!(!lock.try_read_lock());
-    assert!(!lock.try_write_lock());
+    assert!(lock.try_write_lock(&shards));
+    assert!(!lock.try_read_lock(&shards[5]));
+    assert!(!lock.try_write_lock(&shards));
     lock.write_unlock();
-    assert!(lock.try_read_lock());
-    lock.read_unlock();
+    assert!(lock.try_read_lock(&shards[5]));
+    lock.read_unlock(&shards[5]);
 }
 
 #[test]
 fn rwlock_writer_waits_for_readers_to_drain() {
-    let lock = Arc::new(RwLock::new());
-    lock.read_lock();
+    // The reader sits in the last shard; the writer must drain them all.
+    let lock = Arc::new((RwLock::new(), shards()));
+    lock.0.read_lock(&lock.1[SHARDS - 1]);
     let writer = {
         let lock = lock.clone();
         std::thread::spawn(move || {
-            lock.write_lock();
-            let held = lock.is_write_locked();
-            lock.write_unlock();
+            lock.0.write_lock(&lock.1);
+            let held = lock.0.is_write_locked();
+            lock.0.write_unlock();
             held
         })
     };
     // Once the writer has taken its bit it cannot proceed, and new readers
     // back off. Wait for the bit rather than for a fixed time.
     let start = std::time::Instant::now();
-    while !lock.is_write_locked() {
+    while !lock.0.is_write_locked() {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "writer never took its bit"
         );
         std::thread::yield_now();
     }
-    assert!(!lock.try_read_lock());
-    lock.read_unlock();
+    assert!(!lock.0.try_read_lock(&lock.1[0]));
+    lock.0.read_unlock(&lock.1[SHARDS - 1]);
     assert!(writer.join().unwrap());
-    lock.read_lock();
-    lock.read_unlock();
+    lock.0.read_lock(&lock.1[0]);
+    lock.0.read_unlock(&lock.1[0]);
 }
 
 #[test]
@@ -408,9 +414,11 @@ fn test_init() {
     let slabs = num_slabs(&frusa.inner);
     // stats() forces the lazy init: one metadata page holding its own
     // descriptor and the slab table.
+    // Reader shards for every slab take three more pages.
+    let shard_pages = ((slabs + 1) * SHARDS * 64).next_multiple_of(PAGE);
     let stats = frusa.stats();
-    assert_eq!(PAGE, stats.allocated_from_fallback);
-    assert_eq!(PAGE, stats.allocated_metadata);
+    assert_eq!(PAGE + shard_pages, stats.allocated_from_fallback);
+    assert_eq!(PAGE + shard_pages, stats.allocated_metadata);
     assert_eq!((slabs + 1) * 64, stats.in_use_metadata);
     assert_eq!(stats.in_use, stats.in_use_metadata);
 
@@ -422,15 +430,15 @@ fn test_init() {
     // hence four descriptors) and one page for its index.
     let blocks = PAGE / (16 * Block::ENTRIES);
     let stats = frusa.stats();
-    assert_eq!(PAGE * 3, stats.allocated_from_fallback);
-    assert_eq!(PAGE * 2, stats.allocated_metadata);
+    assert_eq!(PAGE * 3 + shard_pages, stats.allocated_from_fallback);
+    assert_eq!(PAGE * 2 + shard_pages, stats.allocated_metadata);
     assert_eq!((slabs + 1 + blocks) * 64, stats.in_use_metadata);
     assert_eq!(stats.in_use, stats.in_use_metadata + 16);
 
     unsafe { frusa.dealloc(ptr, layout) };
     let stats = frusa.stats();
     assert_eq!(stats.in_use, stats.in_use_metadata);
-    assert_eq!(PAGE * 3, stats.allocated_from_fallback);
+    assert_eq!(PAGE * 3 + shard_pages, stats.allocated_from_fallback);
 }
 
 fn fill_and_check(ptr: *mut u8, size: usize) {
@@ -1030,8 +1038,9 @@ fn every_backend_failure_rolls_back_cleanly() {
         BACKEND_CALLS.with(|c| c.set(0));
         FAIL_AT.with(|f| f.set(fail_at));
         let frusa: Frusa4K = Frusa4K::new(&FAILING);
-        if fail_at == 1 {
-            // Initialization cannot fail softly: it panics, as before.
+        if fail_at <= 2 {
+            // Initialization makes two backend calls, for the reader shards
+            // and the first metadata page; it cannot fail softly and panics.
             continue;
         }
         let (mut live, refused) = injection_scenario(&frusa);

@@ -26,6 +26,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use block::Block;
 pub use cache::ThreadCache;
 use slab::Slab;
+use sync::{ReaderShard, SHARDS};
 
 /// The per-thread cache type for [`Frusa4K`].
 pub type Cache4K = ThreadCache<9>;
@@ -208,6 +209,9 @@ struct Frusa<const SLABS: usize> {
     /// The data slabs, in the first metadata page; null until first use,
     /// `LOCKED_MARKER` while one thread builds them.
     data_slabs: AtomicPtr<[Slab; SLABS]>,
+    /// `SHARDS` reader counts per slab, the metadata slab's last, allocated
+    /// at initialization.
+    shards: AtomicPtr<ReaderShard>,
 }
 
 unsafe impl<const SLABS: usize> Send for Frusa<SLABS> {}
@@ -234,6 +238,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             fallback_allocator,
             metadata_slab: Slab::new(Self::METADATA_SZ.ilog2(), SLABS as u32),
             data_slabs: AtomicPtr::new(core::ptr::null_mut()),
+            shards: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -241,23 +246,59 @@ impl<const SLABS: usize> Frusa<SLABS> {
         let mut result = FrusaStats::default();
         let slabs = self.slabs(); // Forces initialization before reading metadata.
         let meta = &self.metadata_slab;
-        meta.guard.read_lock();
+        self.read_lock(meta, 0);
         result.allocated_metadata = meta.bytes_total.load(Ordering::Relaxed);
         result.in_use_metadata = meta.in_use_bytes();
-        meta.guard.read_unlock();
+        self.read_unlock(meta, 0);
 
         let mut index_bytes = 0;
         for slab in slabs {
-            slab.guard.read_lock();
+            self.read_lock(slab, 0);
             result.allocated_from_fallback += slab.bytes_total.load(Ordering::Relaxed);
             result.in_use += slab.in_use_bytes();
             index_bytes += slab.index_cap.load(Ordering::Relaxed) as usize * 8;
-            slab.guard.read_unlock();
+            self.read_unlock(slab, 0);
         }
-        result.allocated_metadata += index_bytes;
+        result.allocated_metadata += index_bytes + Self::shards_layout().size();
         result.allocated_from_fallback += result.allocated_metadata;
         result.in_use += result.in_use_metadata;
         result
+    }
+
+    // ---- guards ----
+
+    fn shards_layout() -> Layout {
+        let bytes = ((SLABS + 1) * SHARDS * core::mem::size_of::<ReaderShard>())
+            .next_multiple_of(Self::PAGE_4K);
+        Layout::from_size_align(bytes, Self::PAGE_4K).unwrap()
+    }
+
+    fn shards_of(&self, slab: &Slab) -> &[ReaderShard] {
+        let base = self.shards.load(Ordering::Relaxed);
+        debug_assert!(!base.is_null());
+        unsafe { core::slice::from_raw_parts(base.add(slab.table_idx as usize * SHARDS), SHARDS) }
+    }
+
+    fn read_lock(&self, slab: &Slab, shard: u32) {
+        slab.guard
+            .read_lock(&self.shards_of(slab)[shard as usize % SHARDS]);
+    }
+
+    fn read_unlock(&self, slab: &Slab, shard: u32) {
+        slab.guard
+            .read_unlock(&self.shards_of(slab)[shard as usize % SHARDS]);
+    }
+
+    fn try_write_lock(&self, slab: &Slab) -> bool {
+        slab.guard.try_write_lock(self.shards_of(slab))
+    }
+
+    fn write_lock(&self, slab: &Slab) {
+        slab.guard.write_lock(self.shards_of(slab));
+    }
+
+    fn write_unlock(&self, slab: &Slab) {
+        slab.guard.write_unlock();
     }
 
     // ---- initialization ----
@@ -284,6 +325,16 @@ impl<const SLABS: usize> Frusa<SLABS> {
     }
 
     fn do_init(&self) {
+        // Reader shards first: linking the first metadata page takes a guard.
+        let shards =
+            unsafe { self.fallback_allocator.alloc(Self::shards_layout()) } as *mut ReaderShard;
+        if shards.is_null() {
+            panic!("Cannot initialize FRUSA: OOM");
+        }
+        for idx in 0..(SLABS + 1) * SHARDS {
+            unsafe { shards.add(idx).write(ReaderShard::new()) };
+        }
+        self.shards.store(shards, Ordering::Release);
         let block = self.alloc_metadata_page();
         if block.is_null() {
             panic!("Cannot initialize FRUSA: OOM");
@@ -325,19 +376,19 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     fn link_metadata_page(&self, block: *mut Block) {
         let meta = &self.metadata_slab;
-        meta.guard.write_lock();
+        self.write_lock(meta);
         meta.link_batch(block, block);
         meta.stack_push(block);
         meta.bytes_total.fetch_add(Self::PAGE_4K, Ordering::Relaxed);
-        meta.guard.write_unlock();
+        self.write_unlock(meta);
     }
 
     fn alloc_metadata(&self) -> *mut u8 {
         let meta = &self.metadata_slab;
         loop {
-            meta.guard.read_lock();
+            self.read_lock(meta, 0);
             let ptr = meta.alloc();
-            meta.guard.read_unlock();
+            self.read_unlock(meta, 0);
             if !ptr.is_null() {
                 return ptr;
             }
@@ -353,7 +404,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
     fn dealloc_metadata(&self, ptr: *mut u8) {
         let meta = &self.metadata_slab;
         let block = ((ptr as usize) & !(Self::PAGE_4K - 1)) as *mut Block;
-        meta.guard.read_lock();
+        self.read_lock(meta, 0);
         unsafe {
             assert!((*block).data == block as *mut u8, "FRUSA: bad metadata ptr");
             if (*block).dealloc(ptr) {
@@ -361,7 +412,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 meta.stack_push(block);
             }
         }
-        meta.guard.read_unlock();
+        self.read_unlock(meta, 0);
     }
 
     // ---- data slabs ----
@@ -403,9 +454,9 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     fn alloc_from_slab(&self, slab: &Slab) -> *mut u8 {
         loop {
-            slab.guard.read_lock();
+            self.read_lock(slab, 0);
             let ptr = slab.alloc();
-            slab.guard.read_unlock();
+            self.read_unlock(slab, 0);
             if !ptr.is_null() {
                 return ptr;
             }
@@ -415,8 +466,8 @@ impl<const SLABS: usize> Frusa<SLABS> {
         }
     }
 
-    fn dealloc_to_slab(&self, slab: &Slab, ptr: *mut u8) {
-        slab.guard.read_lock();
+    fn dealloc_to_slab(&self, slab: &Slab, ptr: *mut u8, shard: u32) {
+        self.read_lock(slab, shard);
         let block = slab.lookup(ptr);
         if block.is_null() {
             panic!("FRUSA: bad ptr for dealloc");
@@ -424,7 +475,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
         if unsafe { (*block).dealloc(ptr) } {
             self.push_unowned(slab, block);
         }
-        slab.guard.read_unlock();
+        self.read_unlock(slab, shard);
     }
 
     /// A block that just went from full to non-full rejoins the stack unless
@@ -537,9 +588,9 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 }
                 array_cap = cap;
             }
-            slab.guard.write_lock();
+            self.write_lock(slab);
             match slab.index_growth(num_blocks) {
-                Some(cap) if cap > array_cap => slab.guard.write_unlock(),
+                Some(cap) if cap > array_cap => self.write_unlock(slab),
                 Some(_) => break slab.index_install(array, array_cap),
                 None => break (array, array_cap),
             }
@@ -555,7 +606,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             }
         }
         slab.bytes_total.fetch_add(batch_bytes, Ordering::Relaxed);
-        slab.guard.write_unlock();
+        self.write_unlock(slab);
 
         if !retired.0.is_null() {
             unsafe {
@@ -582,7 +633,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
         }
         let class = slab.table_idx as usize;
         loop {
-            slab.guard.read_lock();
+            self.read_lock(slab, cache.shard.get());
             let block = cache.current[class].get();
             if !block.is_null() {
                 match unsafe { (*block).alloc() } {
@@ -590,7 +641,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
                         if became_full {
                             self.release_private(slab, cache, class);
                         }
-                        slab.guard.read_unlock();
+                        self.read_unlock(slab, cache.shard.get());
                         return ptr;
                     }
                     None => self.release_private(slab, cache, class),
@@ -606,10 +657,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
             };
             if !taken.is_null() {
                 cache.current[class].set(taken);
-                slab.guard.read_unlock();
+                self.read_unlock(slab, cache.shard.get());
                 continue;
             }
-            slab.guard.read_unlock();
+            self.read_unlock(slab, cache.shard.get());
             if self.grow(slab).is_err() {
                 return core::ptr::null_mut();
             }
@@ -636,9 +687,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
     }
 
     unsafe fn dealloc_cached(&self, cache: &ThreadCache<SLABS>, ptr: *mut u8, layout: Layout) {
-        // The cache selects the guard shard once the guard is sharded.
-        let _ = cache;
-        unsafe { self.dealloc(ptr, layout) }
+        match Self::sz_from_layout(&layout) {
+            Some(sz) => self.dealloc_to_slab(self.slab_for_sz(sz), ptr, cache.shard.get()),
+            None => unsafe { self.fallback_allocator.dealloc(ptr, layout) },
+        }
     }
 
     unsafe fn realloc_cached(
@@ -669,9 +721,9 @@ impl<const SLABS: usize> Frusa<SLABS> {
             if cache.current[class].get().is_null() {
                 continue;
             }
-            slab.guard.read_lock();
+            self.read_lock(slab, cache.shard.get());
             self.release_private(slab, cache, class);
-            slab.guard.read_unlock();
+            self.read_unlock(slab, cache.shard.get());
         }
     }
 
@@ -690,13 +742,13 @@ impl<const SLABS: usize> Frusa<SLABS> {
     /// call, and a concurrent reclaim or growth link step makes this one
     /// skip the slab.
     fn reclaim_slab(&self, slab: &Slab) {
-        slab.guard.read_lock();
+        self.read_lock(slab, 0);
         let slack = slab.bytes_total.load(Ordering::Relaxed) - slab.in_use_bytes();
-        slab.guard.read_unlock();
+        self.read_unlock(slab, 0);
         if slack < Self::PAGE_4K {
             return;
         }
-        if !slab.guard.try_write_lock() {
+        if !self.try_write_lock(slab) {
             return;
         }
 
@@ -734,7 +786,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             slab.index_rebuild();
             slab.stack_rebuild();
         }
-        slab.guard.write_unlock();
+        self.write_unlock(slab);
 
         while !detached.is_null() {
             let batch_sz = unsafe { (*detached).batch_sz } as usize;
@@ -758,14 +810,14 @@ impl<const SLABS: usize> Frusa<SLABS> {
     #[cfg(test)]
     pub(crate) fn check_invariants(&self) {
         for slab in self.slabs() {
-            slab.guard.write_lock();
+            self.write_lock(slab);
             slab.check_index();
             slab.check_stack();
-            slab.guard.write_unlock();
+            self.write_unlock(slab);
         }
-        self.metadata_slab.guard.write_lock();
+        self.write_lock(&self.metadata_slab);
         self.metadata_slab.check_stack();
-        self.metadata_slab.guard.write_unlock();
+        self.write_unlock(&self.metadata_slab);
     }
 }
 
@@ -779,7 +831,7 @@ unsafe impl<const SLABS: usize> GlobalAlloc for Frusa<SLABS> {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         match Self::sz_from_layout(&layout) {
-            Some(sz) => self.dealloc_to_slab(self.slab_for_sz(sz), ptr),
+            Some(sz) => self.dealloc_to_slab(self.slab_for_sz(sz), ptr, 0),
             None => unsafe { self.fallback_allocator.dealloc(ptr, layout) },
         }
     }
