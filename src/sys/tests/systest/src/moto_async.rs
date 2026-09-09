@@ -1157,8 +1157,8 @@ fn test_sleep_reused_across_selects() {
 
 /// A SpinSource registered by a Pending task is polled by the executor
 /// instead of parking, and `begin`/`end` run exactly once per registration
-/// whether the task is woken, the registration is replaced, or the executor
-/// parks on it.
+/// whether readiness is observed, the registration is replaced, or the
+/// executor stops polling it.
 fn test_spin_source() {
     use std::cell::Cell;
     use std::future::Future;
@@ -1171,21 +1171,13 @@ fn test_spin_source() {
     }
 
     struct Source {
-        // ready() calls before the source is ready; u32::MAX: never.
-        ready_after: Cell<u32>,
+        ready: bool,
         counts: Rc<Counts>,
     }
 
     impl moto_async::SpinSource for Source {
         fn ready(&self) -> bool {
-            match self.ready_after.get() {
-                0 => true,
-                u32::MAX => false,
-                n => {
-                    self.ready_after.set(n - 1);
-                    false
-                }
-            }
+            self.ready
         }
         fn begin(&self) {
             self.counts.begins.set(self.counts.begins.get() + 1);
@@ -1196,19 +1188,18 @@ fn test_spin_source() {
         }
     }
 
-    fn register(cx: &mut std::task::Context<'_>, ready_after: u32, counts: &Rc<Counts>) {
-        const ACTIVE_NS: u64 = 100_000_000; // Longer than any spin here.
+    fn register(cx: &mut std::task::Context<'_>, ready: bool, counts: &Rc<Counts>) {
+        const ACTIVE_NS: u64 = 100_000_000;
         let source = Source {
-            ready_after: Cell::new(ready_after),
+            ready,
             counts: counts.clone(),
         };
         moto_async::register_spin_source(Box::new(source), cx, ACTIVE_NS);
     }
 
-    // Ready after a few polls of the source: the executor's spin wakes the
-    // task long before the fallback timer.
+    // Readiness must end the registration before the task resumes. Counting
+    // callbacks avoids assuming a number of polls fits a wall-clock window.
     let counts = Rc::new(Counts::default());
-    let start = Instant::now();
     let polls = {
         let counts = counts.clone();
         moto_async::LocalRuntime::new().block_on(async move {
@@ -1217,54 +1208,53 @@ fn test_spin_source() {
             std::future::poll_fn(|cx| {
                 polls += 1;
                 if polls == 1 {
-                    assert!(sleep.as_mut().poll(cx).is_pending());
-                    register(cx, 20, &counts);
+                    let _ = sleep.as_mut().poll(cx);
+                    register(cx, true, &counts);
                     return Poll::Pending;
                 }
+                assert_eq!((counts.begins.get(), counts.ends.get()), (1, 1));
                 Poll::Ready(polls)
             })
             .await
         })
     };
     assert_eq!(polls, 2);
-    if start.elapsed() < Duration::from_millis(50) {
-        assert_eq!((counts.begins.get(), counts.ends.get()), (1, 1));
-    } else {
-        // The timer won: the registration is still live, so its end() is
-        // owed by the dropped runtime, not observable here.
-        assert!(crate::under_load(), "woken by the timer, not the poll");
-    }
+    assert_eq!((counts.begins.get(), counts.ends.get()), (1, 1));
 
     // Never ready: the executor parks with the registration ended, and a
     // timer completes the task. A second registration by the same task
     // replaces (and ends) the first.
     let first = Rc::new(Counts::default());
     let second = Rc::new(Counts::default());
+    let mut runtime = moto_async::LocalRuntime::new();
     {
         let (first, second) = (first.clone(), second.clone());
-        moto_async::LocalRuntime::new().block_on(async move {
+        runtime.block_on(async move {
             let mut sleep = Box::pin(moto_async::sleep(Duration::from_millis(5)));
-            let mut polls = 0_u32;
+            let mut registered = false;
             std::future::poll_fn(|cx| {
-                if sleep.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(());
+                if !registered {
+                    // Replace within one poll, independently of timer expiry.
+                    register(cx, false, &first);
+                    register(cx, false, &second);
+                    registered = true;
                 }
-                polls += 1;
-                match polls {
-                    1 => {
-                        register(cx, u32::MAX, &first);
-                        cx.waker().wake_by_ref();
-                    }
-                    2 => register(cx, u32::MAX, &second),
-                    _ => {}
+                if sleep.as_mut().poll(cx).is_ready() {
+                    // Leave a live registration when the root returns Ready.
+                    register(cx, false, &first);
+                    return Poll::Ready(());
                 }
                 Poll::Pending
             })
             .await;
         });
     }
-    assert_eq!((first.begins.get(), first.ends.get()), (1, 1));
+    // Cleanup is owed on block_on exit, not deferred until runtime drop.
+    assert_eq!((first.begins.get(), first.ends.get()), (2, 2));
     assert_eq!((second.begins.get(), second.ends.get()), (1, 1));
+    drop(runtime);
+    assert_eq!(first.ends.get(), 2);
+    assert_eq!(second.ends.get(), 1);
 
     println!("----- moto_async::test_spin_source PASS");
 }
