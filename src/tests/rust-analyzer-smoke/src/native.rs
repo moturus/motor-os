@@ -155,6 +155,22 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         let generated =
             case.text_request("textDocument/definition", &source, SOURCE, "GENERATED }")?;
         require_generated_definition(&generated, &root)?;
+        // The env!-derived string hover: strings render through MIR
+        // evaluation and were the case that timed out under the old
+        // allocator (docs/plans/frusa.md §1.2).
+        let environment_started = Instant::now();
+        let hover = case.text_request("textDocument/hover", &source, SOURCE, "ENVIRONMENT }")?;
+        timings["environment_hover_ms"] =
+            json!(environment_started.elapsed().as_secs_f64() * 1000.0);
+        if !hover.to_string().contains("from-build-script") {
+            return Err(io::Error::other(format!(
+                "missing environment string hover: {hover}"
+            )));
+        }
+        println!(
+            "native environment-hover={:?}",
+            environment_started.elapsed()
+        );
         let completion_started = Instant::now();
         let completion =
             case.text_request("textDocument/completion", &source, SOURCE, "GENERATED }")?;
