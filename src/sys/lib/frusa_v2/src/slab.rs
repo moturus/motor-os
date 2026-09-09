@@ -71,10 +71,6 @@ impl Slab {
         }
     }
 
-    pub fn entry_size(&self) -> usize {
-        1 << self.entry_sz_log2
-    }
-
     pub fn block_size(&self) -> usize {
         Block::ENTRIES << self.entry_sz_log2
     }
@@ -141,6 +137,8 @@ impl Slab {
         top
     }
 
+    // Used by reclaim, which the next patch adds.
+    #[allow(dead_code)]
     /// Rebuilds the stack from the batch list: every non-full block without
     /// an owner. Write guard only.
     pub fn stack_rebuild(&self) {
@@ -266,6 +264,8 @@ impl Slab {
         self.index_len.store((len + num) as u32, Ordering::Release);
     }
 
+    // Used by reclaim, which the next patch adds.
+    #[allow(dead_code)]
     /// Rebuilds the index from the batch list. Write guard only.
     pub fn index_rebuild(&self) {
         let base = self.index.load(Ordering::Acquire);

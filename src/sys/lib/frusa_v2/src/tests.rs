@@ -357,3 +357,317 @@ fn slab_rebuild_matches_incremental_state() {
     s.descriptors.remove(1);
     s.buffers.remove(1);
 }
+
+// ---- allocator ----
+
+use core::alloc::{GlobalAlloc, Layout};
+use std::time::Instant;
+
+use crate::{Frusa, Frusa2M, Frusa4K};
+
+/// How many data slabs `frusa` has.
+fn num_slabs<const SLABS: usize>(_frusa: &Frusa<SLABS>) -> usize {
+    SLABS
+}
+
+/// The largest allocation served inside rather than by the back end.
+fn max_inside_size<const SLABS: usize>(_frusa: &Frusa<SLABS>) -> usize {
+    Frusa::<SLABS>::MAX_SIZE
+}
+
+struct BackEndAllocator {}
+
+unsafe impl Send for BackEndAllocator {}
+unsafe impl Sync for BackEndAllocator {}
+
+unsafe impl GlobalAlloc for BackEndAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+static BACK_END: BackEndAllocator = BackEndAllocator {};
+
+const PAGE: usize = 4096;
+
+#[test]
+fn test_init() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let slabs = num_slabs(&frusa.inner);
+    // stats() forces the lazy init: one metadata page holding its own
+    // descriptor and the slab table.
+    let stats = frusa.stats();
+    assert_eq!(PAGE, stats.allocated_from_fallback);
+    assert_eq!(PAGE, stats.allocated_metadata);
+    assert_eq!((slabs + 1) * 64, stats.in_use_metadata);
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+
+    let layout = Layout::from_size_align(1, 1).unwrap();
+    let ptr = unsafe { frusa.alloc(layout) };
+    assert!(!ptr.is_null());
+
+    // Plus one page for the smallest slab's first batch (four 1 KiB blocks,
+    // hence four descriptors) and one page for its index.
+    let blocks = PAGE / (16 * Block::ENTRIES);
+    let stats = frusa.stats();
+    assert_eq!(PAGE * 3, stats.allocated_from_fallback);
+    assert_eq!(PAGE * 2, stats.allocated_metadata);
+    assert_eq!((slabs + 1 + blocks) * 64, stats.in_use_metadata);
+    assert_eq!(stats.in_use, stats.in_use_metadata + 16);
+
+    unsafe { frusa.dealloc(ptr, layout) };
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+    assert_eq!(PAGE * 3, stats.allocated_from_fallback);
+}
+
+fn fill_and_check(ptr: *mut u8, size: usize) {
+    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
+    for (idx, byte) in buf.iter_mut().enumerate() {
+        *byte = (idx % 251) as u8;
+    }
+    for (idx, byte) in buf.iter().enumerate() {
+        assert_eq!((idx % 251) as u8, *byte);
+    }
+}
+
+fn basic_test_impl(frusa: &dyn GlobalAlloc, max_size: usize) {
+    let mut live: Vec<(*mut u8, Layout)> = Vec::new();
+    for size in (1..max_size).step_by(7) {
+        for align_step in 0..8 {
+            let align: usize = 1 << align_step;
+            let layout = Layout::from_size_align(size, align).unwrap();
+            let ptr = unsafe { frusa.alloc(layout) };
+            assert!(!ptr.is_null());
+            assert_eq!(0, (ptr as usize) & (align - 1));
+            fill_and_check(ptr, size);
+            live.push((ptr, layout));
+        }
+    }
+    for (ptr, layout) in live {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+}
+
+#[test]
+fn basic_test() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    basic_test_impl(&frusa, 5000);
+    assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
+}
+
+#[test]
+fn basic_test_2m() {
+    let frusa: Frusa2M = Frusa2M::new(&BACK_END);
+    assert_eq!(max_inside_size(&frusa.inner), 1 << 20);
+    basic_test_impl(&frusa, 3000);
+    let big = Layout::from_size_align(1 << 20, 8).unwrap();
+    let ptr = unsafe { frusa.alloc(big) };
+    assert!(!ptr.is_null());
+    fill_and_check(ptr, 1 << 20);
+    unsafe { frusa.dealloc(ptr, big) };
+}
+
+#[test]
+fn realloc_keeps_the_slot_within_a_class() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let layout = Layout::from_size_align(40, 8).unwrap();
+    let ptr = unsafe { frusa.alloc(layout) };
+    fill_and_check(ptr, 40);
+    let same = unsafe { frusa.realloc(ptr, layout, 64) };
+    assert_eq!(same, ptr);
+    let moved = unsafe { frusa.realloc(same, Layout::from_size_align(64, 8).unwrap(), 65) };
+    assert_ne!(moved, ptr);
+    let buf = unsafe { core::slice::from_raw_parts(moved, 40) };
+    for (idx, byte) in buf.iter().enumerate() {
+        assert_eq!((idx % 251) as u8, *byte);
+    }
+    unsafe { frusa.dealloc(moved, Layout::from_size_align(65, 8).unwrap()) };
+    assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
+}
+
+/// Sorts the pointers and checks that no two live objects overlap.
+fn assert_disjoint(ptrs: &[*mut u8], size: usize) {
+    let mut sorted: Vec<usize> = ptrs.iter().map(|p| *p as usize).collect();
+    sorted.sort_unstable();
+    for pair in sorted.windows(2) {
+        assert!(pair[1] - pair[0] >= size, "overlapping allocations");
+    }
+}
+
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+}
+
+fn shuffle<T>(items: &mut [T], seed: u64) {
+    let mut rng = Xorshift(seed);
+    for i in (1..items.len()).rev() {
+        let j = (rng.next() % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+}
+
+#[cfg(debug_assertions)]
+const RETAINED: usize = 16 * 1024;
+#[cfg(not(debug_assertions))]
+const RETAINED: usize = 64 * 1024;
+
+/// The §1.1 reproduction: a retained population, churn on its oldest slot,
+/// then whole-population frees in several orders. Correctness is asserted;
+/// timings are printed for the baseline record, never asserted.
+#[test]
+fn retained_population_test() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    for order in ["insertion", "reverse", "random"] {
+        let start = Instant::now();
+        let mut ptrs = Vec::with_capacity(RETAINED);
+        for i in 0..RETAINED {
+            let ptr = unsafe { frusa.alloc(layout) };
+            assert!(!ptr.is_null());
+            unsafe { ptr.write(i as u8) };
+            ptrs.push(ptr);
+        }
+        let populate = start.elapsed();
+        assert_disjoint(&ptrs, 64);
+        assert_eq!(
+            frusa.stats().in_use - frusa.stats().in_use_metadata,
+            RETAINED * 64
+        );
+
+        let start = Instant::now();
+        for _ in 0..10_000 {
+            unsafe { frusa.dealloc(ptrs[0], layout) };
+            ptrs[0] = unsafe { frusa.alloc(layout) };
+            assert!(!ptrs[0].is_null());
+        }
+        let churn = start.elapsed();
+        assert_disjoint(&ptrs, 64);
+        for (i, ptr) in ptrs.iter().enumerate().skip(1) {
+            assert_eq!(unsafe { ptr.read() }, i as u8);
+        }
+
+        match order {
+            "reverse" => ptrs.reverse(),
+            "random" => shuffle(&mut ptrs, 0x9E3779B97F4A7C15),
+            _ => {}
+        }
+        let start = Instant::now();
+        for ptr in ptrs {
+            unsafe { frusa.dealloc(ptr, layout) };
+        }
+        let free_all = start.elapsed();
+        assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
+        println!(
+            "retained {RETAINED} x 64 B, {order} order: populate {populate:?}, churn {churn:?}, free-all {free_all:?}"
+        );
+    }
+}
+
+/// One slot freed in every block, then reallocated: allocation must find
+/// the holes through the partial stack, not by scanning.
+#[test]
+fn sparse_holes_test() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let mut ptrs: Vec<*mut u8> = (0..RETAINED)
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    let holes: Vec<*mut u8> = ptrs.iter().copied().step_by(Block::ENTRIES).collect();
+    for hole in &holes {
+        unsafe { frusa.dealloc(*hole, layout) };
+    }
+    let total_before = frusa.stats().allocated_from_fallback;
+    let refilled: Vec<*mut u8> = holes
+        .iter()
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    assert_eq!(
+        total_before,
+        frusa.stats().allocated_from_fallback,
+        "holes not reused"
+    );
+    let mut hole_set = holes.clone();
+    hole_set.sort_unstable();
+    for ptr in &refilled {
+        assert!(hole_set.binary_search(ptr).is_ok());
+    }
+    for (slot, hole) in holes.iter().enumerate() {
+        let idx = ptrs.iter().position(|p| p == hole).unwrap();
+        ptrs[idx] = refilled[slot];
+    }
+    assert_disjoint(&ptrs, 64);
+    for ptr in ptrs {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+}
+
+/// A backend that allocates from the allocator it backs, once per request,
+/// as a logging or instrumented backend would. This deadlocks in `frusa`,
+/// whose slab lock is held across the backend call.
+struct NestingBackEnd;
+
+static NESTED: Frusa4K = Frusa4K::new(&NestingBackEnd);
+
+thread_local! {
+    static NESTING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+unsafe impl GlobalAlloc for NestingBackEnd {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !NESTING.with(|n| n.replace(true)) {
+            let inner = Layout::from_size_align(layout.size().min(4096), 8).unwrap();
+            let ptr = unsafe { NESTED.alloc(inner) };
+            assert!(!ptr.is_null());
+            unsafe { NESTED.dealloc(ptr, inner) };
+            NESTING.with(|n| n.set(false));
+        }
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if !NESTING.with(|n| n.replace(true)) {
+            let inner = Layout::from_size_align(64, 8).unwrap();
+            let p = unsafe { NESTED.alloc(inner) };
+            unsafe { NESTED.dealloc(p, inner) };
+            NESTING.with(|n| n.set(false));
+        }
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+#[test]
+fn backend_may_allocate_from_the_allocator_it_backs() {
+    // Initialization itself must not re-enter: it holds the slab table
+    // marker, so a nested request would spin on it. Run it with nesting
+    // suppressed, as a real backend would be quiet until the runtime is up.
+    NESTING.with(|n| n.set(true));
+    NESTED.stats();
+    NESTING.with(|n| n.set(false));
+    let mut live = Vec::new();
+    for size in [16usize, 64, 4096, 512, 32] {
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        for _ in 0..200 {
+            let ptr = unsafe { NESTED.alloc(layout) };
+            assert!(!ptr.is_null());
+            live.push((ptr, layout));
+        }
+    }
+    for (ptr, layout) in live {
+        unsafe { NESTED.dealloc(ptr, layout) };
+    }
+    assert_eq!(NESTED.stats().in_use, NESTED.stats().in_use_metadata);
+}
