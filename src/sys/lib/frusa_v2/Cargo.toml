@@ -15,7 +15,6 @@ rand = "0.8"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }
 
-# Not a member of the src/sys workspace on purpose: that manifest is a
-# toolchain runtime input, and adding a member there invalidates the pinned
-# assembly. rt.vdso reaches this crate as a path dependency.
-[workspace]
+# Deliberately absent from the src/sys workspace member list: that manifest
+# is a toolchain runtime input, and editing it invalidates the pinned
+# assembly. The crate joins the workspace as rt.vdso's path dependency.

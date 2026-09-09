@@ -610,6 +610,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "frusa_v2"
+version = "0.2.0"
+dependencies = [
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1442,7 +1449,7 @@ dependencies = [
  "crossbeam",
  "crossbeam-queue",
  "elfloader",
- "frusa",
+ "frusa_v2",
  "futures",
  "log",
  "moto-async",
