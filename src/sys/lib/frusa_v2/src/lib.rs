@@ -8,10 +8,11 @@
 
 #![no_std]
 // Temporary: the primitives below have no user until the patch that adds
-// `Frusa` and its slabs, which removes this allowance.
+// `Frusa`, which removes this allowance.
 #![allow(dead_code)]
 
 mod block;
+mod slab;
 mod sync;
 
 #[cfg(test)]
@@ -20,3 +21,14 @@ extern crate std;
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only work counter: one index probe. Compiles to nothing otherwise.
+#[cfg(test)]
+pub(crate) static INDEX_PROBES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+#[inline(always)]
+pub(crate) fn probe_counted() {
+    #[cfg(test)]
+    INDEX_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
