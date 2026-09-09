@@ -1,11 +1,9 @@
 # Virtio block descriptors: one owner for the block queue
 
-2026-09-08, v04. Code baseline `927f1125`; v01 to v03 changed documentation
-only. v03 replaced the worker-side headroom design with a single I/O task
-that owns all block-queue traffic; v04 folds in the review of v03 (channel
-handling, flush support, migration order, the unsafe boundary, idle and
-shutdown handling). Implementation proceeds one patch at a time, each
-reviewed before the next, and nothing is committed before the Step 4 gate.
+2026-09-09, v05: implemented; results at the end. v03 replaced the
+worker-side headroom design with a single I/O task that owns all block-queue
+traffic; v04 folded in the review of v03 (channel handling, flush support,
+migration order, the unsafe boundary, idle and shutdown handling).
 
 ## Terms used below
 
@@ -559,12 +557,76 @@ suites exercise the queue.
   smarter wakeups. All moot while every queue has a single submitter, which
   Step 2b makes true for storage and the net tasks already are. Review
   separately if ever wanted.
-- Focused tests of the task itself (inbox message and completion ready in
-  the same step, idle inbox with work in flight, unsupported flush, split
-  chunks completing out of order). They need a fake driver behind the task;
-  the v03 review asked for them, the earlier decision was a single
-  reproduction. Not adopted here; reopen if wanted.
+- Focused tests of the task itself were added after all: the v03 review
+  asked for them, and `src/sys/tests/virtio-task-tests` compiles the real
+  `block_io.rs` against a fake device to cover split chunks, out-of-order
+  errors, buffer ownership, a closed inbox, and the fatal early drop.
 
 ## Open questions
 
 None for this revision.
+
+## Results (2026-09-09)
+
+Implemented as planned, Steps 0 to 3, plus the two test pieces the v03
+review asked for: a memory-backed fixture that drives the real queue code
+(`virtio-async` feature `test-support`, module `virtio_queue/tests.rs`) and
+a model of the actual `block_io.rs` against a fake device
+(`src/sys/tests/virtio-task-tests`), both run by `systest`. The driver's
+allocation-waiter code is unchanged. One pre-existing bug was fixed on the
+way: `alloc_descriptor_chain` asserted that a free-list link never points
+at its own descriptor, but a freed chain whose tail was the exhausted free
+head legitimately does, and the ownership marks already handle it; the
+fixture's `test_exhausted_self_link` is the regression case.
+
+### Correctness
+
+- CHV, release, 128-entry queue: the reproduction hangs at its final flush
+  on the baseline (62 overwrites in 0.8 ms) and completes after the change:
+  62 main-area runs, 68 requests, 126 blocks, 1.2 ms of overwrites, 10 ms
+  through the flush. QEMU reports the same counts; the release suite asserts
+  them.
+- `lorry test` from `/devtools/src/motor-os/bin/red` in the release
+  developer image under CHV: three runs, all 72 tests, 11.5 to 11.9 s.
+- Firecracker (request cap 1): request counts equal block counts, so the
+  split path is exercised; scattered writes and checked 128 MiB passes
+  complete.
+- Gates on the committed tree: see the commit messages.
+
+### Performance
+
+Same host, guest vCPUs pinned, fresh disk seed per boot, seven boots per
+variant, medians of per-boot medians, MiB/s. Reads verify every byte.
+
+| Workload | Original driver | This change |
+| --- | ---: | ---: |
+| Sequential read, 4 KiB calls | 506.3 | 493.2 |
+| Sequential read, 1 MiB calls | 880.2 | 834.6 |
+| Sequential write, 4 KiB calls | 258.1 | 244.9 |
+| Sequential write, 1 MiB calls | 347.8 | 332.6 |
+| Random 4 KiB reads, 1 thread | 111.2 | 104.6 |
+| Random 4 KiB reads, 4 threads | 204.2 | 201.9 |
+| Random 4 KiB reads, 16 threads | 205.3 | 243.4 |
+| Random 4 KiB reads, 64 threads | 131.3 | 249.2 |
+
+Services-up time is 36 ms for both (31 to 41 versus 31 to 49 ms); a cold
+single-block read is 51.8 versus 48.4 us; LLVM cold startup is 361 versus
+365 ms with overlapping ranges. Sequential throughput costs 3 to 5 percent.
+The original driver collapses under many concurrent readers because every
+reader contends in the allocation-waiter queue; the single owner removes
+that, which is where the 64-thread gain comes from.
+
+### Optimizations measured, not adopted
+
+Three changes to the task recover and exceed the original's sequential
+throughput: draining the used ring at the start of the task's poll, keeping
+a single-chunk response inline instead of in shared state, and a receiver
+variant that does not spin on an empty inbox, with the inbox at 16 entries.
+Five-boot medians: 593, 875, 271 and 350 MiB/s for the four sequential
+cases. The cost: 64-thread p99 latency 10.7 versus 5.9 ms, and in one boot
+with 16 saturated disk readers TCP throughput roughly halved. Deferred until
+measured at matched load; recorded in `future-work.md`. A driver-side
+result-record variant matched the original sequentially but fell to 85
+versus 235 MiB/s at 64 threads and was archived. The experiment journal,
+raw data, and archived variants are under `build/virtio-waiters-results/`,
+outside the repository.

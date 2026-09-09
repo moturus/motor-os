@@ -49,19 +49,13 @@ The former sys-tty/kernel-log interleaving item is complete; see
    baseline after bursts instead of holding the peak, which matters on small
    VMs and for the memory-pressure model's accounting.
 
-4. **`MAX_BLOCKS_IN_TXN_LOG` 256 stops sys-io on the first large write.**
-   Raising the transaction-log batch from 64 to 256 blocks compiles (the
-   superblock still fits) but the first 20 MB write stops sys-io without a
-   panic. The likely mechanism: `write_blocks_with_completion` posts every
-   16-block chunk of a run before awaiting any, a 256-block batch is 16
-   requests of 18 descriptors = 288 entries against a 256-entry virtqueue,
-   and descriptors are reclaimed only when a completion is awaited -- the
-   shape the July TSO work hit on the net side; 64-block batches post at
-   most 72. Fix: bound the in-flight descriptors per run (await a completion
-   when the queue is full) or derive the batch size from the virtqueue
-   depth. Gain: unblocks the write-path work below (a larger batch is one of
-   its three levers) and removes a latent stall for any device with a
-   smaller queue.
+4. **Resolved 2026-09-09: `MAX_BLOCKS_IN_TXN_LOG` 256 stopped sys-io on the
+   first large write.** The mechanism was descriptor retention: a completion
+   held its descriptors until dropped, and the worker held completions until
+   `Commit`. `docs/plans/virtio-descriptor-waiters.md` moved all block-queue
+   traffic behind one I/O task that drops completions as the device finishes
+   them, so batch size no longer interacts with queue depth. Raising the
+   batch is still one of the write-path levers below and still unmeasured.
 
 5. **sys-io allocates a Vec of every wait handle on each park.**
    `LocalRuntime::wait` builds the array of registered wait handles anew per
@@ -223,3 +217,15 @@ the ruling; nothing here should be picked up without a fresh call.
   one once the last in-flight request has completed. Options then: wake
   every waiter, or select the first that fits from per-entry sizes and a
   free-descriptor count.
+
+- **Block I/O task: recover the sequential cost** (recorded 2026-09-09 from
+  `virtio-descriptor-waiters.md`). The single-owner task costs 3 to 5
+  percent of sequential throughput against the old driver. Three measured
+  changes recover it and more (593 versus 506 MiB/s for 4 KiB sequential
+  reads): drain the used ring at the start of the task's poll, keep a
+  single-chunk response inline instead of in shared state, and a channel
+  receiver that does not spin on an empty inbox, with the inbox at 16
+  entries. Not adopted because the 64-thread p99 latency rose from 5.9 to
+  10.7 ms and one boot showed TCP throughput halving under 16 saturated disk
+  readers. Pick up only with a matched-load network measurement and the
+  threaded latency probe; patch and data under `build/virtio-waiters-results/`.

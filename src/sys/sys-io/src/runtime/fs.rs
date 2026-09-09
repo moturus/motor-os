@@ -19,6 +19,7 @@ use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
+mod block_io;
 mod lock_manager;
 mod mbr;
 pub mod stats;
@@ -328,6 +329,9 @@ pub(super) async fn init(
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
 
+    // The boot-time MBR read has completed; all later I/O shares this owner.
+    let (block_io, inbox) = moto_async::channel::channel(64);
+    moto_async::LocalRuntime::spawn(block_io::run(block_device.clone(), inbox, fs_stats.clone()));
     let mut fs: Option<Rc<LocalRwLock<FS>>> = None;
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
@@ -346,10 +350,10 @@ pub(super) async fn init(
 
                 let partition = Box::new(
                     virtio_partition::VirtioPartition::from_virtio_bd(
-                        block_device.clone(),
+                        block_io.clone(),
+                        block_device.flush_supported(),
                         pte.lba as u64,
                         pte.sectors as u64,
-                        fs_stats.clone(),
                     )
                     .await
                     .map_err(|err| {

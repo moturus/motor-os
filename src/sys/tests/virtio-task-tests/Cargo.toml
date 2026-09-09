@@ -1,0 +1,8 @@
+[package]
+name = "virtio-task-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moto-async = { path = "../../lib/moto-async" }
+futures = "0.3"

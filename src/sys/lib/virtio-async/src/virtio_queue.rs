@@ -1,4 +1,6 @@
 //! VirtIO Queue.
+#[cfg(feature = "test-support")]
+pub(crate) mod tests;
 use super::virtio_device::VirtioDevice;
 use super::{le16, le32, le64};
 use crate::pci::PciBar;
@@ -812,6 +814,27 @@ impl<T> VqCompletion<T> {
 impl<T> Drop for VqCompletion<T> {
     fn drop(&mut self) {
         let mut virtqueue = self.virtqueue.borrow_mut();
+        let device_owned = |queue: &Virtqueue| {
+            let mut curr = self.chain_head;
+            loop {
+                if queue.header_buffers[curr as usize].in_use_by_device {
+                    return true;
+                }
+                let descriptor = queue.get_descriptor(curr);
+                if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
+                    return false;
+                }
+                curr = descriptor.next;
+            }
+        };
+        if device_owned(&virtqueue) {
+            // An unpolled completion may already be on the used ring.
+            while virtqueue.reclaim_used().is_some() {}
+            assert!(
+                !device_owned(&virtqueue),
+                "virtio completion dropped while the device still owns its DMA buffers"
+            );
+        }
         let mut curr = self.chain_head;
         let mut chain_in_use = true;
         virtqueue.completion_waiters[self.chain_head as usize] = None;
@@ -857,37 +880,6 @@ impl<T: Unpin> Future for WriteCompletion<T> {
             .vq_completion
             .do_poll(cx)
             .map(|(val, res)| (val, res.map(|_| ())))
-    }
-}
-
-/// Completion of a scatter-gather read: one request filling several 4K
-/// buffers (see `BlockDevice::post_read_many`).
-pub struct ReadManyCompletion<T: AsMut<IoBuf> + Unpin> {
-    pub(crate) vq_completion: VqCompletion<Vec<T>>,
-}
-
-impl<T: AsMut<IoBuf> + Unpin> Future for ReadManyCompletion<T> {
-    type Output = (Vec<T>, Result<()>);
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.as_mut()
-            .vq_completion
-            .do_poll(cx)
-            .map(|(mut bufs, res)| {
-                if res.is_ok() {
-                    // As in ReadCompletion, the device-reported size is
-                    // unreliable (it may include the status byte); each
-                    // buffer is a full block.
-                    for buf in &mut bufs {
-                        buf.as_mut().set_len(4096);
-                    }
-                }
-
-                (bufs, res.map(|_| ()))
-            })
     }
 }
 

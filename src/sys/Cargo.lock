@@ -1756,6 +1756,8 @@ dependencies = [
  "moto-stats",
  "moto-sys",
  "moto-sys-io",
+ "virtio-async",
+ "virtio-task-tests",
 ]
 
 [[package]]
@@ -1962,6 +1964,14 @@ dependencies = [
  "moto-rt",
  "moto-sys",
  "moto-tooling",
+]
+
+[[package]]
+name = "virtio-task-tests"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "moto-async",
 ]
 
 [[package]]
