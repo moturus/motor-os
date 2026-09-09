@@ -316,9 +316,12 @@ clean:
 	rm -rf vm_images
 	rm -rf src/sys/target
 	rm -rf src/boot/*/target
+	rm -rf src/tests/*/target
 	rm -rf src/third_party/*/target
 	rm -rf src/third_party/*/Cargo.lock
 	cd src/imager && cargo clean && rm -rf target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
 	rm -f lib/rt.vdso/rt.vdso
+	rm -rf src/bin/lorry/tests/metadata-schema/target
+	rm -rf src/tests/rust-analyzer-smoke/fixtures/motor/target
