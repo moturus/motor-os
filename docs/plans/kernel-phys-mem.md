@@ -13,9 +13,11 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
-Implementation status (2026-09-06): P-1's boot-heap alignment fix is in
-`6efc3276` (alongside the wait-set fix). P0b is in progress, split into
-range validation first, then MMIO ownership/teardown and consumer refusals.
+Implementation status (2026-09-08): P-1's boot-heap alignment fix is in
+`6efc3276` (alongside the wait-set fix). P0b's range validation is in
+`83f09a60`; MMIO ownership/teardown and consumer refusals are implemented,
+with acceptance in progress. The separate checked copy-in prerequisite is
+committed in `ba6da613`; it rejects device mappings under the page-table lock.
 The block allocator and huge-page mapping changes are not implemented yet.
 
 ## Requirements and scope
@@ -730,6 +732,9 @@ setup succeeded before interpreting a child's fault as a passing test.
    translation query, free it, verify translation is gone, then attempt a
    volatile read in the child.
    Check the expected fault termination, not merely any abnormal exit.
+   Finish output before unmapping: its allocations can reuse the address.
+   Between free, translation check, and the deliberate read, do not allocate;
+   distinguish setup failures and unexpected survival with separate exit codes.
 2. Refuse kernel-start RAM (34 MiB), fixed-mid RAM, managed RAM, and a
    range crossing into RAM; include an address obtained from a currently
    allocated page.
@@ -789,9 +794,11 @@ For each kernel patch, before commit:
   work and does not add a debug developer-image run.
 - All new tests reached directly or transitively by full-test.sh.
 
-No Internet access in new tests. Existing approved DNS/ping flakes may be
-retried once under AGENTS.md; no retries, enlarged timeouts, or ignored
-failures to disguise a defect. Diagnose failures; pause implementation for
+No Internet access in new tests. The user approved the existing developer
+gate's public dependency downloads for all patches in this work. Retry a
+confirmed external-network flake once, including approved DNS/ping cases;
+never retry hermetic failures or enlarge timeouts/ignore failures to disguise
+a defect. Diagnose failures; pause implementation for
 new non-test pre-existing bugs or a newly required policy decision.
 
 P1b launcher matrix: cloud-hypervisor; Firecracker at 64 MiB and 1 GiB;

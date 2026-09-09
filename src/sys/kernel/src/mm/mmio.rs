@@ -21,8 +21,8 @@ pub fn mmio_map(phys_addr: u64, num_pages: u64) -> Result<MmioMapping, ErrorCode
 }
 
 #[allow(dead_code)]
-pub fn mmio_unmap(_mmio_mapping: &MmioMapping) {
-    todo!("VmemSegment is leaked in mmio_map");
+pub fn mmio_unmap(mmio_mapping: &MmioMapping) {
+    virt::vmem_free(mmio_mapping.virt_addr, virt::VmemKind::KernelMMIO);
 }
 
 pub fn mmio_map_region(phys_addr: u64, size: u64) -> Result<MmioMapping, ErrorCode> {

@@ -1097,6 +1097,13 @@ fn main() {
         mmio::validation_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "mmio-unmap-suite" {
+        mmio::ownership_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-fault" {
+        mmio::unmap_fault();
+    }
     if args.len() == 2 && args[1] == "ipc-listener-tests" {
         io_channel::test_listener_cleanup();
         return;

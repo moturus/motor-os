@@ -279,6 +279,9 @@ impl VmemSegment {
         let page = self.find_page(vmem_addr).unwrap();
 
         if let Some(frame) = page.frame.get() {
+            if frame.is_mmio() {
+                return VaddrMapStatus::Mmio;
+            }
             let offset = vmem_addr - page.start;
             let phys_addr = frame.start() + offset;
             let refs = page.frame.refs();
@@ -431,8 +434,7 @@ impl VmemSegment {
         Ok(())
     }
 
-    pub fn mmio_map(&self, phys_addr: u64, user: bool) -> Result<(), ErrorCode> {
-        let pt = &self.address_space().page_table;
+    pub fn mmio_map(&mut self, phys_addr: u64, user: bool) -> Result<(), ErrorCode> {
         let start = self.segment.start;
 
         assert!(!self.pages.is_empty());
@@ -449,13 +451,17 @@ impl VmemSegment {
 
         let mut offset = 0;
         for _idx in 0..num_pages {
-            super::phys::fixed_addr_reserve(phys_addr + offset, PageType::SmallPage)?;
-            pt.map_page(
+            let frame = super::phys::mmio_frame(phys_addr + offset)?;
+            self.address_space().page_table.map_page(
                 phys_addr + offset,
                 start + offset,
                 PageType::SmallPage,
                 options,
             )?;
+            let page = self.find_page_mut(start + offset).unwrap();
+            debug_assert!(page.frame.is_null());
+            page.frame = frame;
+            page.mapping_options = options;
             offset += PAGE_SIZE_SMALL;
         }
 
@@ -580,6 +586,18 @@ impl VmemSegment {
         }
         debug_assert!(!self.pages.is_empty());
         debug_assert!(!other.pages.is_empty());
+
+        // Validate both complete ranges before replacing any destination PTE.
+        let mut source = self.pages.find(&start);
+        for dest in other.pages.iter() {
+            let page = source.get().ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            if page.frame.get().is_some_and(Frame::is_mmio)
+                || dest.frame.get().is_some_and(Frame::is_mmio)
+            {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            source.move_next();
+        }
 
         let mut self_cursor = self.pages.find(&start);
         let mut other_cursor = other.pages.front();

@@ -149,6 +149,7 @@ pub enum VaddrMapStatus {
     Unallocated,
     Unmapped,
     ZeroPageMapped,
+    Mmio,
     Private(u64),
     Shared(u64),
 }
@@ -250,7 +251,10 @@ impl VmemRegion {
         }
 
         let mut segments = self.used_segments.lock(line!());
+        self.free_locked(&mut segments, addr)
+    }
 
+    fn free_locked(&self, segments: &mut SegmentMap, addr: u64) -> Result<u64, ErrorCode> {
         if let Some(deleted) = segments.remove(addr) {
             let sz = VmemSegment::unmap(deleted); // Consumes deleted.
 
@@ -450,9 +454,23 @@ impl VmemRegion {
         virt_addr: u64,
         user: bool,
     ) -> Result<(), ErrorCode> {
-        let segments = self.used_segments.lock(line!());
-        let segment = segments.get(&virt_addr).unwrap();
-        segment.mmio_map(phys_addr, user)
+        let mut segments = self.used_segments.lock(line!());
+        let segment = segments.get_mut(&virt_addr).unwrap();
+        let size = segment.segment().size;
+        let result = segment.mmio_map(phys_addr, user);
+        if result.is_err() {
+            // Tear down the mapped prefix before releasing the reservation lock.
+            assert_eq!(self.free_locked(&mut segments, virt_addr).unwrap(), size);
+            #[cfg(debug_assertions)]
+            {
+                assert!(segments.find(virt_addr).is_none());
+                let pt = &unsafe { self.address_space.get() }.page_table;
+                for offset in (0..size).step_by(PAGE_SIZE_SMALL as usize) {
+                    assert!(pt.virt_to_phys(virt_addr + offset).is_none());
+                }
+            }
+        }
+        result
     }
 
     fn allocate_user_fixed(
@@ -673,6 +691,7 @@ impl KernelAddressSpace {
         match kind {
             VmemKind::KernelHeap => self.kernel_heap.free(addr).unwrap(),
             VmemKind::KernelStack => self.kernel_stacks.free(addr).unwrap(),
+            VmemKind::KernelMMIO => self.kernel_mmio.free(addr).unwrap(),
             _ => panic!(),
         }
     }

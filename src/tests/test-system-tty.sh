@@ -175,6 +175,22 @@ mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
   fail "MMIO validation did not finish: '$mmio_output'"
 printf '%s\n' "$mmio_output"
 
+for mmio_case in mmio-unmap-suite mmio-unmap-fault; do
+  vm_ssh "echo -n > /user/tmp/$mmio_case.log"
+  run_console "/user/tmp/$mmio_case-done" \
+    "MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
+  mmio_status="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.status)"
+  mmio_output="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.log)"
+  if [ "$mmio_case" = mmio-unmap-suite ]; then
+    [ "$mmio_status" = 0 ] && [ "$mmio_output" = 'mmio::ownership_tests PASS' ] ||
+      fail "MMIO ownership: status=$mmio_status output='$mmio_output'"
+  else
+    [ "$mmio_status" = -1 ] && [ "$mmio_output" = 'mmio::unmap_fault READY' ] ||
+      fail "MMIO fault: status=$mmio_status output='$mmio_output'"
+  fi
+  printf '%s: status=%s %s\n' "$mmio_case" "$mmio_status" "$mmio_output"
+done
+
 printf '%s\n' "$listing" |
   grep -aqE -- '-r-xr-xr--[[:space:]]+[0-9]+[[:space:]]+system-tty-shim$' ||
   fail "the chmod shim did not install the exact mode"

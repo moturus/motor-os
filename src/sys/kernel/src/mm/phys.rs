@@ -42,7 +42,10 @@ pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), ErrorC
 pub struct Frame {
     start: u64,
     kind: PageType,
+    mmio: bool,
 }
+
+const _FRAME_SZ: () = assert!(core::mem::size_of::<Frame>() == 16);
 
 impl Frame {
     pub fn start(&self) -> u64 {
@@ -50,6 +53,9 @@ impl Frame {
     }
     pub fn kind(&self) -> PageType {
         self.kind
+    }
+    pub fn is_mmio(&self) -> bool {
+        self.mmio
     }
 }
 
@@ -63,10 +69,13 @@ impl Slabbable for Frame {
     fn inplace_init(&mut self) {
         self.start = 0;
         self.kind = PageType::Unknown;
+        self.mmio = false;
     }
 
     fn drop_slabbable(&mut self) {
-        PhysicalMemory::inst().deallocate_frame(self)
+        if !self.mmio {
+            PhysicalMemory::inst().deallocate_frame(self)
+        }
     }
 }
 
@@ -129,9 +138,14 @@ pub fn phys_deallocate_frameless(phys_addr: u64, kind: PageType) {
     PhysicalMemory::inst().deallocate_frameless(phys_addr, kind);
 }
 
-// Reserve a page at a fixed physical address, e.g. for MMIO.
-pub fn fixed_addr_reserve(phys_addr: u64, kind: PageType) -> Result<(), ErrorCode> {
-    PhysicalMemory::inst().fixed_addr_reserve(phys_addr, kind)
+// The caller has validated the whole MMIO range. Only the descriptor is owned.
+pub(super) fn mmio_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
+    let frame = PhysicalMemory::inst().slab.alloc_arc()?;
+    let inner = frame.get_mut().unwrap();
+    inner.start = phys_addr;
+    inner.kind = PageType::SmallPage;
+    inner.mmio = true;
+    Ok(frame)
 }
 
 pub fn phys_allocate_contiguous_frames(
@@ -475,41 +489,6 @@ impl<S: PageSize> MemoryArea<S> {
         false
     }
 
-    fn fixed_addr_reserve(&self, phys_addr: u64) -> Result<(), ErrorCode> {
-        if self
-            .free_frame
-            .compare_exchange(phys_addr, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.count_alloc(1);
-            return Ok(());
-        }
-
-        for seg in &self.segments {
-            if !seg.segment.contains(phys_addr) {
-                continue;
-            }
-            let result = seg.fixed_addr_reserve(phys_addr);
-            if result.is_ok() {
-                self.count_alloc(1);
-            }
-            return result;
-        }
-
-        crate::xray::tracing::trace(
-            "phys: fixed_addr_reserve: 0x{:x}: not found",
-            phys_addr,
-            0,
-            0,
-        );
-
-        // VirtIO/MMIO sometimes tries to map pages that are not in our memory map.
-        // TODO: figure out how to confirm that the requested address is indeed
-        //       available for MMIO.
-        Ok(())
-        // Err(moto_rt::E_OUT_OF_MEMORY)
-    }
-
     fn do_allocate_frame(&self) -> Result<u64, ErrorCode> {
         let start = self.free_frame.swap(0u64, Ordering::Relaxed);
         if start != 0 {
@@ -693,20 +672,6 @@ impl PhysicalMemory {
         match kind {
             PageType::SmallPage => self.small_pages.allocate_frame(),
             PageType::MidPage => self.mid_pages.allocate_frame(),
-            _ => panic!(),
-        }
-    }
-
-    fn fixed_addr_reserve(&'static self, phys_addr: u64, kind: PageType) -> Result<(), ErrorCode> {
-        const LAPIC_BASE: u64 = 0xfee0_0000_u64; // The default Local APIC address.
-        const IOAPIC_BASE: u64 = 0xfec0_0000_u64; // The default IO APIC address.
-
-        if phys_addr == LAPIC_BASE || phys_addr == IOAPIC_BASE {
-            return Ok(());
-        }
-        match kind {
-            PageType::SmallPage => self.small_pages.fixed_addr_reserve(phys_addr),
-            // PageType::MidPage => self.mid_pages.fixed_addr_reserve(phys_addr),
             _ => panic!(),
         }
     }
