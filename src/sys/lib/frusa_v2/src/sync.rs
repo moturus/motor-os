@@ -21,6 +21,11 @@ impl RwLock {
     }
 
     pub fn try_read_lock(&self) -> bool {
+        // While a writer is draining readers, back off without touching
+        // the count, or the writer may never observe it at zero.
+        if self.0.load(Ordering::SeqCst) & WRITER != 0 {
+            return false;
+        }
         let val = self.0.fetch_add(READER, Ordering::SeqCst);
         if val > MAX_LOCK_VALUE || val & WRITER != 0 {
             self.0.fetch_sub(READER, Ordering::SeqCst);
@@ -55,8 +60,13 @@ impl RwLock {
     }
 
     pub fn write_lock(&self) {
-        while !self.try_write_lock() {
-            core::hint::spin_loop();
+        loop {
+            while self.0.load(Ordering::SeqCst) & WRITER != 0 {
+                core::hint::spin_loop();
+            }
+            if self.try_write_lock() {
+                return;
+            }
         }
     }
 

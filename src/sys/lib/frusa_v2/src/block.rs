@@ -53,13 +53,10 @@ impl Block {
         Self::ENTRIES << self.entry_sz_log2
     }
 
-    // Used by reclaim and the stack rebuild, which the next patch adds.
-    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.used_bitmap.load(Ordering::SeqCst) == u64::MAX
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.used_bitmap.load(Ordering::SeqCst) == 0
     }

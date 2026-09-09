@@ -65,6 +65,12 @@ impl Frusa4K {
         }
     }
 
+    /// Returns every batch whose blocks are all free to the fallback
+    /// allocator.
+    pub fn reclaim(&self) {
+        self.inner.reclaim();
+    }
+
     pub fn stats(&self) -> FrusaStats {
         self.inner.stats()
     }
@@ -98,6 +104,12 @@ impl Frusa2M {
         Self {
             inner: Frusa::<17>::new(fallback),
         }
+    }
+
+    /// Returns every batch whose blocks are all free to the fallback
+    /// allocator.
+    pub fn reclaim(&self) {
+        self.inner.reclaim();
     }
 
     pub fn stats(&self) -> FrusaStats {
@@ -413,28 +425,39 @@ impl<const SLABS: usize> Frusa<SLABS> {
             last = block;
         }
 
+        // The index may need a larger array. It is allocated with no lock
+        // held, so by the time the guard is taken another grower may have
+        // installed one (ours goes unused) or inserted a batch (ours may
+        // be too small: release, get a larger one, and try again).
         let mut array: *mut *mut Block = core::ptr::null_mut();
         let mut array_cap = 0;
-        if let Some(cap) = slab.index_growth(num_blocks) {
-            array = unsafe { self.fallback_allocator.alloc(Self::index_layout(cap)) } as *mut _;
-            if array.is_null() {
-                for taken in Slab::batch(first, num_blocks) {
-                    self.dealloc_metadata(taken as *mut u8);
+        let retired = loop {
+            if let Some(cap) = slab.index_growth(num_blocks)
+                && cap > array_cap
+            {
+                if !array.is_null() {
+                    unsafe {
+                        self.fallback_allocator
+                            .dealloc(array as *mut u8, Self::index_layout(array_cap))
+                    };
                 }
-                unsafe { self.fallback_allocator.dealloc(data, layout) };
-                return Err(());
+                array = unsafe { self.fallback_allocator.alloc(Self::index_layout(cap)) } as *mut _;
+                if array.is_null() {
+                    for taken in Slab::batch(first, num_blocks) {
+                        self.dealloc_metadata(taken as *mut u8);
+                    }
+                    unsafe { self.fallback_allocator.dealloc(data, layout) };
+                    return Err(());
+                }
+                array_cap = cap;
             }
-            array_cap = cap;
-        }
-
-        slab.guard.write_lock();
-        let mut retired = (array, array_cap);
-        if !array.is_null() {
-            // Another grower may have installed enough capacity meanwhile.
-            if slab.index_growth(num_blocks).is_some() {
-                retired = slab.index_install(array, array_cap);
+            slab.guard.write_lock();
+            match slab.index_growth(num_blocks) {
+                Some(cap) if cap > array_cap => slab.guard.write_unlock(),
+                Some(_) => break slab.index_install(array, array_cap),
+                None => break (array, array_cap),
             }
-        }
+        };
         slab.index_insert_batch(first, num_blocks);
         slab.link_batch(first, last);
         {
@@ -455,6 +478,99 @@ impl<const SLABS: usize> Frusa<SLABS> {
             };
         }
         Ok(())
+    }
+
+    // ---- reclaim ----
+
+    fn reclaim(&self) {
+        for slab in self.slabs() {
+            self.reclaim_slab(slab);
+        }
+        // Metadata pages are never returned.
+    }
+
+    /// Two phases: under the write guard, detach every batch whose blocks
+    /// are all free and rebuild the index and the stack; after releasing
+    /// it, return the detached memory. No lock is held across a backend
+    /// call, and a concurrent reclaim or growth link step makes this one
+    /// skip the slab.
+    fn reclaim_slab(&self, slab: &Slab) {
+        slab.guard.read_lock();
+        let slack = slab.bytes_total.load(Ordering::Relaxed) - slab.in_use_bytes();
+        slab.guard.read_unlock();
+        if slack < Self::PAGE_4K {
+            return;
+        }
+        if !slab.guard.try_write_lock() {
+            return;
+        }
+
+        let mut detached: *mut Block = core::ptr::null_mut();
+        let mut freed = 0usize;
+        let mut prev: *mut Block = core::ptr::null_mut();
+        let mut batch_start = slab.head.load(Ordering::Acquire);
+        while !batch_start.is_null() {
+            let batch_sz = unsafe { (*batch_start).batch_sz } as usize;
+            debug_assert_eq!(unsafe { (*batch_start).batch_pos }, 0);
+            let mut batch_last = batch_start;
+            let mut in_use = false;
+            for block in Slab::batch(batch_start, batch_sz) {
+                let b = unsafe { &*block };
+                in_use |= !b.is_empty() || !b.owner.load(Ordering::Relaxed).is_null();
+                batch_last = block;
+            }
+            let next_batch = unsafe { (*batch_last).next.load(Ordering::Acquire) };
+            if in_use {
+                prev = batch_last;
+            } else {
+                if prev.is_null() {
+                    slab.head.store(next_batch, Ordering::Release);
+                } else {
+                    unsafe { (*prev).next.store(next_batch, Ordering::Release) };
+                }
+                unsafe { (*batch_last).next.store(detached, Ordering::Release) };
+                detached = batch_start;
+                freed += batch_sz * slab.block_size();
+            }
+            batch_start = next_batch;
+        }
+        if freed > 0 {
+            slab.bytes_total.fetch_sub(freed, Ordering::Relaxed);
+            slab.index_rebuild();
+            slab.stack_rebuild();
+        }
+        slab.guard.write_unlock();
+
+        while !detached.is_null() {
+            let batch_sz = unsafe { (*detached).batch_sz } as usize;
+            let bytes = batch_sz * slab.block_size();
+            let data = unsafe { (*detached).data };
+            let mut next_batch = core::ptr::null_mut();
+            for block in Slab::batch(detached, batch_sz) {
+                next_batch = unsafe { (*block).next.load(Ordering::Acquire) };
+                self.dealloc_metadata(block as *mut u8);
+            }
+            unsafe {
+                self.fallback_allocator
+                    .dealloc(data, Self::batch_layout(bytes))
+            };
+            detached = next_batch;
+        }
+    }
+
+    /// Every slab's index and stack invariants, checked with the slab to
+    /// itself. Test builds only.
+    #[cfg(test)]
+    pub(crate) fn check_invariants(&self) {
+        for slab in self.slabs() {
+            slab.guard.write_lock();
+            slab.check_index();
+            slab.check_stack();
+            slab.guard.write_unlock();
+        }
+        self.metadata_slab.guard.write_lock();
+        self.metadata_slab.check_stack();
+        self.metadata_slab.guard.write_unlock();
     }
 }
 
@@ -496,11 +612,18 @@ unsafe impl<const SLABS: usize> GlobalAlloc for Frusa<SLABS> {
 
 /// Test-only work counter: one index probe. Compiles to nothing otherwise.
 #[cfg(test)]
-pub(crate) static INDEX_PROBES: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+pub(crate) fn index_probes() -> usize {
+    INDEX_PROBES.with(|p| p.get())
+}
+
+// Per thread, so tests running in parallel do not count each other's work.
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_PROBES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 
 #[inline(always)]
 pub(crate) fn probe_counted() {
     #[cfg(test)]
-    INDEX_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    INDEX_PROBES.with(|p| p.set(p.get() + 1));
 }

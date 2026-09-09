@@ -277,11 +277,11 @@ fn slab_index_finds_every_block_boundary() {
 fn slab_index_probes_are_logarithmic() {
     let s = SyntheticSlab::new(16, 8);
     let blocks: Vec<*mut Block> = s.slab.blocks().collect();
-    let before = crate::INDEX_PROBES.load(Ordering::Relaxed);
+    let before = crate::index_probes();
     for block in &blocks {
         assert_eq!(s.slab.lookup(unsafe { (**block).data }), *block);
     }
-    let probes = crate::INDEX_PROBES.load(Ordering::Relaxed) - before;
+    let probes = crate::index_probes() - before;
     let bound = (128usize.ilog2() as usize + 1) * blocks.len();
     assert!(
         probes <= bound,
@@ -670,4 +670,253 @@ fn backend_may_allocate_from_the_allocator_it_backs() {
         unsafe { NESTED.dealloc(ptr, layout) };
     }
     assert_eq!(NESTED.stats().in_use, NESTED.stats().in_use_metadata);
+
+    // Reclaim frees through the same backend, which nests on that path too.
+    let layout = Layout::from_size_align(128, 8).unwrap();
+    let ptrs: Vec<*mut u8> = (0..4096).map(|_| unsafe { NESTED.alloc(layout) }).collect();
+    for ptr in ptrs {
+        unsafe { NESTED.dealloc(ptr, layout) };
+    }
+    NESTED.reclaim();
+    NESTED.inner.check_invariants();
+    // The backend's nested request during reclaim's second phase can grow
+    // the class that was just emptied by one batch; nothing else remains.
+    let stats = NESTED.stats();
+    assert!(stats.allocated_from_fallback - stats.allocated_metadata <= PAGE);
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+// ---- reclaim ----
+
+#[test]
+fn reclaim_returns_empty_batches_and_keeps_used_ones() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptrs: Vec<*mut u8> = (0..RETAINED)
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    let stats = frusa.stats();
+    let data_bytes = stats.allocated_from_fallback - stats.allocated_metadata;
+    assert!(data_bytes >= RETAINED * 64);
+
+    // Reclaim with everything live frees nothing.
+    frusa.reclaim();
+    assert_eq!(
+        frusa.stats().allocated_from_fallback,
+        stats.allocated_from_fallback
+    );
+
+    // Keep one object in every 64th block; only batches without one go.
+    let keep: Vec<*mut u8> = ptrs.iter().copied().step_by(Block::ENTRIES * 64).collect();
+    for ptr in &ptrs {
+        if !keep.contains(ptr) {
+            unsafe { frusa.dealloc(*ptr, layout) };
+        }
+    }
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    let kept_bytes = stats.allocated_from_fallback - stats.allocated_metadata;
+    assert!(kept_bytes < data_bytes, "nothing reclaimed");
+    assert!(kept_bytes > 0);
+    for ptr in &keep {
+        assert_eq!(unsafe { ptr.read_volatile() }, unsafe {
+            ptr.read_volatile()
+        });
+        unsafe { frusa.dealloc(*ptr, layout) };
+    }
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+
+    // Growth works again afterwards and addresses are reusable.
+    let again = unsafe { frusa.alloc(layout) };
+    assert!(!again.is_null());
+    unsafe { again.write(7) };
+    unsafe { frusa.dealloc(again, layout) };
+}
+
+#[test]
+fn reclaim_test() {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+
+    #[cfg(not(debug_assertions))]
+    const ALLOCS: usize = 1_000_000;
+    #[cfg(debug_assertions)]
+    const ALLOCS: usize = 10_000;
+
+    let mut ptrs: Vec<(*mut u8, Layout)> = Vec::with_capacity(ALLOCS);
+    for _ in 0..ALLOCS {
+        let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 8) as usize;
+        let sz = 1 << alloc_bucket;
+        let layout = Layout::from_size_align(sz, 8).unwrap();
+        let ptr = unsafe { frusa.alloc(layout) };
+        assert!(!ptr.is_null());
+        ptrs.push((ptr, layout));
+    }
+    let peak = frusa.stats();
+    println!(
+        "alloc: allocated from system: {} used bytes: {}",
+        peak.allocated_from_fallback, peak.in_use
+    );
+    for (ptr, layout) in &ptrs {
+        unsafe { frusa.dealloc(*ptr, *layout) };
+    }
+    frusa.reclaim();
+    let after = frusa.stats();
+    println!(
+        "reclaim: allocated from system: {} used bytes: {} of these metadata: {} - {}",
+        after.allocated_from_fallback,
+        after.in_use,
+        after.allocated_metadata,
+        after.in_use_metadata
+    );
+    assert_eq!(after.allocated_from_fallback, after.allocated_metadata);
+    assert_eq!(after.in_use, after.in_use_metadata);
+    frusa.inner.check_invariants();
+}
+
+struct FlakyBackEndAllocator {}
+
+unsafe impl Send for FlakyBackEndAllocator {}
+unsafe impl Sync for FlakyBackEndAllocator {}
+
+unsafe impl GlobalAlloc for FlakyBackEndAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if FLAKY.load(Ordering::Relaxed) {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            if rng.r#gen::<u8>() < 50 {
+                return core::ptr::null_mut();
+            }
+        }
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+static FLAKY_BACK_END: FlakyBackEndAllocator = FlakyBackEndAllocator {};
+static FLAKY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[test]
+fn stress_test() {
+    FLAKY.store(false, Ordering::Relaxed);
+    static STRESSED_FRUSA: Frusa4K = Frusa4K::new(&FLAKY_BACK_END);
+
+    #[cfg(debug_assertions)]
+    const STEPS: usize = 1_000;
+    #[cfg(not(debug_assertions))]
+    const STEPS: usize = 1_000_000;
+
+    let thread_fn = || {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        for step in 0..STEPS {
+            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 20) as usize;
+            let sz = 1 << alloc_bucket;
+
+            if step == 50 {
+                // Don't fail during the init phase, but fail later.
+                FLAKY.store(true, Ordering::Relaxed);
+            }
+
+            let layout = Layout::from_size_align(sz, 8).unwrap();
+            let ptr = loop {
+                let ptr = unsafe { STRESSED_FRUSA.alloc(layout) };
+                if !ptr.is_null() {
+                    break ptr;
+                }
+            };
+            if sz < 1024 {
+                fill_and_check(ptr, sz);
+            }
+            unsafe { STRESSED_FRUSA.dealloc(ptr, layout) };
+        }
+    };
+
+    let mut threads = vec![];
+    for _ in 0..8 {
+        threads.push(std::thread::spawn(thread_fn));
+    }
+
+    // Concurrently with threads above, do alloc + reclaim.
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    for _ in 0..100 {
+        const ALLOCS: usize = STEPS / 100;
+        let mut ptrs: Vec<(*mut u8, Layout)> = Vec::with_capacity(ALLOCS);
+        for _ in 0..ALLOCS {
+            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 10) as usize;
+            let sz = 1 << alloc_bucket;
+            let layout = Layout::from_size_align(sz, 8).unwrap();
+            let ptr = loop {
+                let ptr = unsafe { STRESSED_FRUSA.alloc(layout) };
+                if !ptr.is_null() {
+                    break ptr;
+                }
+            };
+            ptrs.push((ptr, layout));
+        }
+        for (ptr, layout) in &ptrs {
+            unsafe { STRESSED_FRUSA.dealloc(*ptr, *layout) };
+        }
+        STRESSED_FRUSA.reclaim();
+    }
+
+    for handle in threads {
+        handle.join().unwrap();
+    }
+    FLAKY.store(false, Ordering::Relaxed);
+    STRESSED_FRUSA.inner.check_invariants();
+    let stats = STRESSED_FRUSA.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+/// Many threads growing one empty class at once: every request succeeds,
+/// accounting stays exact, and the structures stay consistent even when
+/// concurrent growers add duplicate batches.
+#[test]
+fn concurrent_growth_test() {
+    static GROWN: Frusa4K = Frusa4K::new(&BACK_END);
+    const PER_THREAD: usize = 20_000;
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let ptrs: Vec<usize> = (0..PER_THREAD)
+                    .map(|_| {
+                        let p = unsafe { GROWN.alloc(layout) };
+                        assert!(!p.is_null());
+                        unsafe { p.write(1) };
+                        p as usize
+                    })
+                    .collect();
+                ptrs
+            })
+        })
+        .collect();
+    let mut all: Vec<*mut u8> = Vec::new();
+    for t in threads {
+        all.extend(t.join().unwrap().into_iter().map(|p| p as *mut u8));
+    }
+    assert_disjoint(&all, 64);
+    let stats = GROWN.stats();
+    assert_eq!(stats.in_use - stats.in_use_metadata, all.len() * 64);
+    assert!(stats.allocated_from_fallback >= stats.in_use);
+    GROWN.inner.check_invariants();
+    for ptr in all {
+        unsafe { GROWN.dealloc(ptr, layout) };
+    }
+    GROWN.reclaim();
+    let stats = GROWN.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
 }
