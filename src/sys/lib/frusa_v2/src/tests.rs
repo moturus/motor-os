@@ -37,8 +37,16 @@ fn rwlock_writer_waits_for_readers_to_drain() {
             held
         })
     };
-    // The writer has taken its bit but cannot proceed; new readers back off.
-    std::thread::sleep(Duration::from_millis(20));
+    // Once the writer has taken its bit it cannot proceed, and new readers
+    // back off. Wait for the bit rather than for a fixed time.
+    let start = std::time::Instant::now();
+    while !lock.is_write_locked() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "writer never took its bit"
+        );
+        std::thread::yield_now();
+    }
     assert!(!lock.try_read_lock());
     lock.read_unlock();
     assert!(writer.join().unwrap());
@@ -918,5 +926,201 @@ fn concurrent_growth_test() {
     }
     GROWN.reclaim();
     let stats = GROWN.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+}
+
+// ---- coverage: work bounds, fault injection, cross-thread frees, Frusa2M ----
+
+/// Every allocation examines exactly one stack entry, and every free of a
+/// retained population probes the index at most log2(len) + 1 times.
+#[test]
+fn work_bounds_end_to_end() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let examined_before = crate::stack_examined();
+    let mut ptrs: Vec<*mut u8> = (0..RETAINED)
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    // One entry per allocation, plus one per block for its descriptor.
+    let examined = crate::stack_examined() - examined_before;
+    assert!(
+        (RETAINED..=RETAINED + RETAINED / Block::ENTRIES).contains(&examined),
+        "{examined}"
+    );
+
+    shuffle(&mut ptrs, 0x1234_5678_9ABC_DEF1);
+    let len = frusa
+        .inner
+        .slab_for_sz(64)
+        .index_len
+        .load(Ordering::Relaxed) as usize;
+    let probes_before = crate::index_probes();
+    for ptr in &ptrs {
+        unsafe { frusa.dealloc(*ptr, layout) };
+    }
+    let probes = crate::index_probes() - probes_before;
+    assert!(
+        probes <= RETAINED * (len.ilog2() as usize + 1),
+        "{probes} probes over {len} blocks"
+    );
+}
+
+thread_local! {
+    static BACKEND_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static FAIL_AT: core::cell::Cell<usize> = const { core::cell::Cell::new(usize::MAX) };
+}
+
+/// Fails exactly one backend allocation, chosen by call number, so a test
+/// can fail every stage of growth in turn.
+struct FailingBackEnd;
+
+unsafe impl GlobalAlloc for FailingBackEnd {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let call = BACKEND_CALLS.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        });
+        if FAIL_AT.with(|f| f.get()) == call {
+            return core::ptr::null_mut();
+        }
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+static FAILING: FailingBackEnd = FailingBackEnd;
+
+/// Allocates across three classes; enough 64-byte objects to outgrow the
+/// first metadata page, so metadata growth is on the path too.
+fn injection_scenario(frusa: &Frusa4K) -> (Vec<(*mut u8, Layout)>, usize) {
+    let mut live = Vec::new();
+    let mut refused = 0;
+    for (size, count) in [(16usize, 300usize), (4096, 100), (64, 4000)] {
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        for _ in 0..count {
+            let ptr = unsafe { frusa.alloc(layout) };
+            if ptr.is_null() {
+                refused += 1;
+            } else {
+                unsafe { ptr.write(1) };
+                live.push((ptr, layout));
+            }
+        }
+    }
+    (live, refused)
+}
+
+#[test]
+fn every_backend_failure_rolls_back_cleanly() {
+    BACKEND_CALLS.with(|c| c.set(0));
+    FAIL_AT.with(|f| f.set(usize::MAX));
+    let frusa: Frusa4K = Frusa4K::new(&FAILING);
+    let (live, refused) = injection_scenario(&frusa);
+    assert_eq!(refused, 0);
+    let calls = BACKEND_CALLS.with(|c| c.get());
+    assert!(calls > 20, "scenario makes only {calls} backend calls");
+    for (ptr, layout) in live {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+
+    for fail_at in 1..=calls {
+        BACKEND_CALLS.with(|c| c.set(0));
+        FAIL_AT.with(|f| f.set(fail_at));
+        let frusa: Frusa4K = Frusa4K::new(&FAILING);
+        if fail_at == 1 {
+            // Initialization cannot fail softly: it panics, as before.
+            continue;
+        }
+        let (mut live, refused) = injection_scenario(&frusa);
+        assert!(refused <= 1, "one failed call refused {refused} requests");
+        FAIL_AT.with(|f| f.set(usize::MAX));
+        frusa.inner.check_invariants();
+        let ptrs: Vec<*mut u8> = live.iter().map(|(p, _)| *p).collect();
+        assert_disjoint(&ptrs, 16);
+        let stats = frusa.stats();
+        let live_bytes: usize = live.iter().map(|(_, l)| l.size().next_power_of_two()).sum();
+        assert_eq!(stats.in_use - stats.in_use_metadata, live_bytes);
+        // The allocator keeps working once the backend recovers.
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let ptr = unsafe { frusa.alloc(layout) };
+        assert!(!ptr.is_null(), "fail_at {fail_at}");
+        live.push((ptr, layout));
+        for (ptr, layout) in live {
+            unsafe { frusa.dealloc(ptr, layout) };
+        }
+        frusa.reclaim();
+        frusa.inner.check_invariants();
+        let stats = frusa.stats();
+        assert_eq!(
+            stats.allocated_from_fallback, stats.allocated_metadata,
+            "fail_at {fail_at}"
+        );
+        assert_eq!(stats.in_use, stats.in_use_metadata);
+    }
+    FAIL_AT.with(|f| f.set(usize::MAX));
+}
+
+#[test]
+fn cross_thread_frees() {
+    static SHARED: Frusa4K = Frusa4K::new(&BACK_END);
+    const OBJECTS: usize = 100_000;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<(usize, Layout)>>(16);
+    let producer = std::thread::spawn(move || {
+        let mut rng = Xorshift(0x0bad_5eed_0bad_5eed);
+        let mut batch = Vec::with_capacity(1024);
+        for i in 0..OBJECTS {
+            let layout = Layout::from_size_align(4096 >> (rng.next() % 9), 8).unwrap();
+            let ptr = unsafe { SHARED.alloc(layout) };
+            assert!(!ptr.is_null());
+            unsafe { ptr.write(1) };
+            batch.push((ptr as usize, layout));
+            if batch.len() == 1024 || i + 1 == OBJECTS {
+                tx.send(core::mem::replace(&mut batch, Vec::with_capacity(1024)))
+                    .unwrap();
+            }
+        }
+    });
+    let consumer = std::thread::spawn(move || {
+        let mut freed = 0;
+        for batch in rx {
+            for (ptr, layout) in batch {
+                unsafe { SHARED.dealloc(ptr as *mut u8, layout) };
+                freed += 1;
+            }
+        }
+        freed
+    });
+    producer.join().unwrap();
+    assert_eq!(consumer.join().unwrap(), OBJECTS);
+    SHARED.inner.check_invariants();
+    let stats = SHARED.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+    SHARED.reclaim();
+    let stats = SHARED.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+}
+
+#[test]
+fn reclaim_2m() {
+    let frusa: Frusa2M = Frusa2M::new(&BACK_END);
+    let layout = Layout::from_size_align(256 * 1024, 8).unwrap();
+    let ptrs: Vec<*mut u8> = (0..100)
+        .map(|_| {
+            let p = unsafe { frusa.alloc(layout) };
+            assert!(!p.is_null());
+            unsafe { p.write(1) };
+            p
+        })
+        .collect();
+    assert_disjoint(&ptrs, 256 * 1024);
+    for ptr in ptrs {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
     assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
 }

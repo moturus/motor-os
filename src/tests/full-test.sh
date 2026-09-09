@@ -149,6 +149,16 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
 fi
 
+# Both allocators are host-tested: frusa serves the kernel, frusa_v2 the
+# runtime. Release covers the full stress and concurrency step counts.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
+fi
+
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.

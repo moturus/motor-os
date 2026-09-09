@@ -159,6 +159,7 @@ impl Slab {
         }
         let _lock = self.partial_lock.lock();
         loop {
+            crate::stack_counted();
             let top = self.partial_head.load(Ordering::Relaxed);
             if top.is_null() {
                 return core::ptr::null_mut();

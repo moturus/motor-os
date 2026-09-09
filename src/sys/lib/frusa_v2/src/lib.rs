@@ -616,14 +616,27 @@ pub(crate) fn index_probes() -> usize {
     INDEX_PROBES.with(|p| p.get())
 }
 
+#[cfg(test)]
+pub(crate) fn stack_examined() -> usize {
+    STACK_EXAMINED.with(|p| p.get())
+}
+
 // Per thread, so tests running in parallel do not count each other's work.
 #[cfg(test)]
 std::thread_local! {
     static INDEX_PROBES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static STACK_EXAMINED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 #[inline(always)]
 pub(crate) fn probe_counted() {
     #[cfg(test)]
     INDEX_PROBES.with(|p| p.set(p.get() + 1));
+}
+
+/// Test-only work counter: one partial-stack entry examined by an allocation.
+#[inline(always)]
+pub(crate) fn stack_counted() {
+    #[cfg(test)]
+    STACK_EXAMINED.with(|p| p.set(p.get() + 1));
 }
