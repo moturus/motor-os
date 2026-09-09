@@ -1,12 +1,11 @@
 # Frusa allocator scalability
 
-Status: revised on 2026-09-08 after design review and an allocator survey.
-The augmented AVL index from the first draft is set aside (§3.1) in favor of a
-sorted block index plus a partial stack (§4). Replacing Frusa with another
-allocator was evaluated and rejected (§3.2). Three further phases, ending in
-per-thread private blocks and a sharded read guard, are proposed in §5.
-Awaiting the maintainer's answers to the open questions in §9. No allocator
-code has been changed.
+Status: implemented on 2026-09-08 and 2026-09-09 as `frusa_v2`, which the
+runtime now uses; the kernel keeps `frusa`. §10 records what landed, the
+decisions that changed on the way, and the measurements. The augmented AVL
+index from the first draft was set aside (§3.1); replacing Frusa with
+another allocator was evaluated and rejected (§3.2). Phase E (§5.4) and the
+Linux attribution build (§6 step 0) remain open.
 This plan follows the root `AGENTS.md`. The issue was isolated on 2026-09-08
 while investigating native rust-analyzer's remaining string-hover timeout.
 
@@ -957,3 +956,111 @@ ok
 
 the kernel keep using old frusa; this is new frusa, create frusa_v2 crate
 (motor-os only; publishing to crates.io is not in scope)
+
+## 10. Implementation record (2026-09-08)
+
+What landed, as `frusa_v2` beside the unchanged `frusa` that the kernel
+keeps:
+
+| Patch | Content |
+|---|---|
+| 1 | Crate skeleton, readers/writer guard, partial-stack spinlock, block descriptor |
+| 2 | Slab: batch list, partial stack, address-sorted index |
+| 3 | Allocator core: growth with no lock held, computed statistics, same-class realloc, batch tiers |
+| 4 | Two-phase reclaim; readers back off while a writer drains; index capacity re-checked under the guard |
+| 5 | Fault-injection sweep, work-bound counters, cross-thread frees, Frusa2M reclaim; both allocators wired into the gate |
+| 7 | Per-thread private blocks (phase C) |
+| 8 | CPU-sharded reader counts (phase D) |
+| 8a | Growth gives back a batch when another grower refilled the stack |
+| 9 | `rt.vdso` switches to `frusa_v2`; a per-thread block holds the TLS map and the allocator cache |
+| 10 | `systest alloc-bench`, the host harness's workloads on Motor |
+
+Phase B's computed statistics, same-class realloc, and batch tiers went into
+patch 3 rather than a separate phase, since the crate was new. Step 0 of §6
+(the Linux attribution build) was not run: the allocator's share was
+established directly by the before/after measurement on Motor below.
+
+Decisions that changed during implementation:
+
+- **Workspace membership.** `src/sys/Cargo.toml` is a toolchain runtime
+  input; adding a member there invalidates the pinned assembly and forces a
+  toolchain assembly rebuild. `frusa_v2` is therefore not listed as a member
+  and joins the workspace as `rt.vdso`'s path dependency; before that
+  dependency existed it built as its own root.
+- **Duplicate batches.** Ungated growth stayed (§4.4), but a grower that
+  finds the partial stack refilled when it takes the write guard returns its
+  batch to the backend instead of linking a second one.
+- **Thread block creation.** The runtime creates a thread's block on its
+  first allocation or TLS write rather than at thread start, so the vDSO's
+  own threads and C threads are covered without touching every spawn path.
+  Frees never create one, so a thread whose block was released at exit does
+  not get a new one for a late free.
+- **Test isolation.** Test-only work counters are thread-local and tests
+  that share a static allocator were merged, since the suite runs in
+  parallel.
+
+### 10.1 Host measurements
+
+Linux host, 16 cores, release builds, common 4 KiB page backend with byte
+counting; `v2 cached` uses one `ThreadCache` per thread with its own guard
+shard. Retained figures are for 64-byte objects.
+
+| Workload | frusa | frusa_v2, shared path | frusa_v2, cached |
+|---|---:|---:|---:|
+| Churn on the oldest slot, 262K live, 10K rounds | 357 ms | 0.76 ms | 0.99 ms |
+| Free all, 262K, insertion order | 1,995 ms | 10.0 ms | 9.5 ms |
+| Free all, 262K, random order | 2,018 ms | 26.3 ms | 27.2 ms |
+| Backend bytes at 262K live / after reclaim | 16.3 MB / 0.3 MB | 16.3 MB / 0.3 MB | 16.3 MB / 0.3 MB |
+| Immediate alloc+free, 1 thread | 54 ns | 57 ns | 56 ns |
+| Immediate, 8 threads, per thread | 507 ns | 465 ns | 332 ns |
+| Ring of 4,096 live objects, 1 thread | 70 ns | 86 ns | 97 ns |
+| Ring, 8 threads, per thread | 1,025 ns | 688 ns | 674 ns |
+| Producer/consumer cross-thread pair | 110 ns | 112 ns | 79 ns |
+
+The retained-heap pathology is gone: churn and free-all are 200 to 470
+times faster and now scale with the population. Single-thread immediate
+cost is unchanged; the single-thread ring is 20 to 40 percent slower because
+each free pays a binary search over the index. Eight-thread throughput
+improves 1.5 times, not the order of magnitude glibc's thread cache shows,
+because the immediate workload draws half its sizes above the 256-byte
+cache threshold and so takes the shared path under the partial lock. Peak
+process RSS in this harness is set by the cross-thread queue depth, not by
+the allocator, so backend bytes are the memory comparison.
+
+### 10.2 Motor measurements
+
+`systest alloc-bench` on the release image, QEMU with 4 vCPUs, two runs
+each; first run shown, the second within 5 percent except where noted.
+
+| Workload | frusa (old vDSO) | frusa_v2 (new vDSO) |
+|---|---:|---:|
+| Free all, 65K retained, insertion order | 107 ms | 2.3 ms |
+| Free all, 65K retained, random order | 106 ms | 5.5 ms |
+| Populate 65K after a random free-all | 109 ms | 1.9 ms |
+| Immediate, 1 thread | 57 ns | 61 ns |
+| Immediate, 2 threads, per thread | 186 ns | 119 ns |
+| Immediate, 4 threads, per thread | 372 ns | 216 ns |
+| Ring of 4,096 live, 1 thread | 88 ns | 107 ns |
+| Ring, 4 threads, per thread | 584 ns | 429 ns |
+| Producer/consumer cross-thread pair | 121 ns | 87 ns |
+
+The second frusa_v2 run's single-thread retained figures were two to three
+times the first (still 20 to 50 times faster than frusa); the threaded
+figures were stable.
+
+### 10.3 Gates
+
+Patch 5: three debug and three release `full-test.sh` runs. Patches 9 and
+10: three debug and three release `full-test.sh` runs and one
+`full-test-dev.sh --release`. Every crate patch: three debug and three
+release runs of the crate's own suite, Clippy clean, no build warnings.
+
+### 10.4 Native rust-analyzer
+
+With the new runtime allocator, the maintained native LSP case passes with
+the `env!`-derived string-hover assertion restored. The hover that
+exhausted the unchanged 90-second whole-case deadline under `frusa` (§1.2)
+answers in 920 ms on Motor, against 870 ms for the first plain-string hover
+on Linux. First completion after it takes 1.2 ms. The release
+developer-image gate passed twice with the new allocator, once before and
+once after the assertion was restored.

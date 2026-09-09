@@ -2715,3 +2715,7 @@ remaining implementation item; retain this plan until that is resolved.
 
 See [the Frusa scalability plan](frusa.md) for the investigation evidence,
 optimization proposal, validation requirements, and decisions awaiting review.
+
+Resolved on 2026-09-09: the runtime now uses `frusa_v2`, and the queued
+`env!`-derived string-hover assertion is restored in the native case, where
+the hover completes in 920 ms; see frusa.md §10.
