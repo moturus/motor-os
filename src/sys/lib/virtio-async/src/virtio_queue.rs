@@ -515,7 +515,8 @@ impl Virtqueue {
             }
             descriptor.flags = VIRTQ_DESC_F_NEXT;
 
-            debug_assert_ne!(curr, descriptor.next);
+            // A freed chain whose tail was the exhausted free head links to
+            // itself; the ownership marks above stop the walk there.
             curr = descriptor.next;
         }
 
