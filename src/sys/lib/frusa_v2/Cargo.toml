@@ -1,0 +1,21 @@
+[package]
+name = "frusa_v2"
+version = "0.2.0"
+edition = "2024"
+description = "A system allocator with reclaim, bounded lookups, and per-thread private blocks."
+repository = "https://github.com/moturus/motor-os"
+keywords = ["allocator", "no_std", "global_allocator"]
+categories = ["no-std", "memory-management"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dev-dependencies]
+rand = "0.8"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }
+
+# Not a member of the src/sys workspace on purpose: that manifest is a
+# toolchain runtime input, and adding a member there invalidates the pinned
+# assembly. rt.vdso reaches this crate as a path dependency.
+[workspace]
