@@ -4,6 +4,7 @@
 
 mod admission;
 // mod channel_test;
+mod alloc_bench;
 mod closerace;
 mod command_output;
 mod ctrl_c;
@@ -13,7 +14,6 @@ mod execute_permissions;
 mod file_locking;
 mod fs;
 mod fs_permissions;
-mod alloc_bench;
 mod fsbench;
 mod icmp;
 mod io_channel;
@@ -46,6 +46,7 @@ mod tcp;
 mod threads;
 mod tls;
 mod udp;
+mod virtio;
 mod wait_set;
 mod wakebench;
 mod xor_server;
@@ -1088,6 +1089,22 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {
+        virtio_task_tests::test_premature_reply_drop();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-task") {
+        virtio_task_tests::run_tests();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-descriptors") {
+        virtio::run_tests();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
+        virtio_async::test_premature_completion_drop(args[2] == "block");
+        return;
+    }
     if args.len() == 2 && args[1] == "wait-set-tests" {
         wait_set::run_all_tests();
         return;
@@ -1145,6 +1162,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
         fs::concurrent_flush_stress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-scattered-writes" {
+        fs::scattered_writes_test();
         return;
     }
     // The FS pressure regression; the suite runs the same body at spam size
@@ -1349,6 +1370,8 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    virtio::run_tests();
+    virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();

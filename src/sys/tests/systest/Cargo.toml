@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+virtio-task-tests = { path = "../virtio-task-tests" }
+virtio-async = { path = "../../lib/virtio-async", features = ["test-support"] }
 moto-async   = { path = "../../lib/moto-async"  }
 moto-rt      = { path = "../../lib/moto-rt"     }
 moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}

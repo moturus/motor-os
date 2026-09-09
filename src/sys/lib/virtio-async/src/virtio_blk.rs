@@ -22,6 +22,9 @@ compile_error!("Little Endian is often assumed here.");
 // Although virtio uses blocks of 512 bytes, we expose blocks of 4k.
 pub const BLOCK_SIZE: usize = 4096;
 
+/// A block request whose DMA buffers are kept alive by its caller.
+pub type RawCompletion = WriteCompletion<()>;
+
 /*
  *  VIRTIO_BLK_F_SIZE_MAX (1) Maximum size of any single segment is in size_max.
  *  VIRTIO_BLK_F_SEG_MAX (2) Maximum number of segments in a request is in seg_max.
@@ -83,6 +86,83 @@ impl BlockDevice {
         self.seg_max
     }
 
+    pub fn flush_supported(&self) -> bool {
+        self.flush_enabled
+    }
+
+    /// Submit a read without waiting for descriptors or registering a waiter.
+    ///
+    /// # Safety
+    /// Each address must identify a writable, physically contiguous 4096-byte
+    /// page. The caller must keep every page allocated and otherwise untouched
+    /// until the returned completion resolves.
+    pub unsafe fn try_read(&self, sector: u64, pages: &[u64]) -> Option<RawCompletion> {
+        assert!(!pages.is_empty());
+        self.try_request(0, sector, pages) // VIRTIO_BLK_T_IN
+    }
+
+    /// Submit a write without waiting for descriptors or registering a waiter.
+    ///
+    /// # Safety
+    /// Each address must identify a readable, physically contiguous 4096-byte
+    /// page. The caller must keep every page allocated and otherwise untouched
+    /// until the returned completion resolves.
+    pub unsafe fn try_write(&self, sector: u64, pages: &[u64]) -> Option<RawCompletion> {
+        assert!(!pages.is_empty());
+        self.try_request(1, sector, pages) // VIRTIO_BLK_T_OUT
+    }
+
+    /// Call only when [`Self::flush_supported`] is true.
+    pub fn try_flush(&self) -> Option<RawCompletion> {
+        assert!(self.flush_supported());
+        self.try_request(4, 0, &[]) // VIRTIO_BLK_T_FLUSH
+    }
+
+    fn try_request(&self, type_: u32, sector: u64, pages: &[u64]) -> Option<RawCompletion> {
+        use super::virtio_queue::UserData;
+
+        assert!(pages.len() <= self.seg_max);
+        let chain_len = (pages.len() + 2) as u16;
+        let mut virtqueue = self.virtqueue.borrow_mut();
+        assert!(chain_len <= virtqueue.queue_size() / 2);
+        let chain_head = virtqueue.alloc_descriptor_chain(chain_len)?;
+        let (header, phys_addr, mut next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+        *header = BlkHeader {
+            type_,
+            _reserved: 0,
+            sector,
+        };
+        let mut buffs = Vec::with_capacity(pages.len() + 2);
+        buffs.push(UserData {
+            phys_addr,
+            len: core::mem::size_of::<BlkHeader>() as u32,
+        });
+        for &phys_addr in pages {
+            buffs.push(UserData {
+                phys_addr,
+                len: BLOCK_SIZE as u32,
+            });
+            next_idx = virtqueue.next_idx(next_idx);
+        }
+        // Reserve a whole u64: CHV can write more than the status byte.
+        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = 2; // VIRTIO_BLK_S_UNSUPP; little endian.
+        buffs.push(UserData { phys_addr, len: 1 });
+        let writable = if type_ == 0 { chain_len - 1 } else { 1 };
+        drop(virtqueue);
+        Some(WriteCompletion {
+            vq_completion: Virtqueue::add_buffs(
+                self.virtqueue.clone(),
+                &buffs,
+                chain_len - writable,
+                writable,
+                chain_head,
+                (),
+            )
+            .expect_blk_status(),
+        })
+    }
+
     pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
         let dev = Rc::new(RefCell::new(dev));
         let dev_clone = dev.clone();
@@ -111,8 +191,8 @@ impl BlockDevice {
 
         let virtqueue = dev_mut.virtqueues[0].clone();
 
-        // Requests also need a header and a status descriptor, and
-        // post_read_many/post_write_many keep chains within half the queue.
+        // Requests also need a header and a status descriptor; keep each
+        // chain within half the queue.
         let queue_size = virtqueue.borrow().queue_size() as usize;
         let seg_max = seg_max.clamp(1, queue_size / 2 - 2);
 
@@ -266,235 +346,5 @@ impl BlockDevice {
             vq_completion,
             size_adjustor: READ_SIZE_ADJUSTOR,
         }
-    }
-
-    /// Read `buffers.len()` consecutive 4K blocks starting at `sector` with
-    /// ONE device request: a single descriptor chain scatter-gathers the
-    /// contiguous disk range into the (arbitrarily located) buffers, so the
-    /// whole read costs one queue notification (a VM exit) and one
-    /// completion interrupt instead of one per block.
-    #[inline(never)]
-    pub async fn post_read_many<T: AsMut<IoBuf> + Unpin>(
-        self: Rc<Self>,
-        sector: u64,
-        mut buffers: Vec<T>,
-    ) -> crate::virtio_queue::ReadManyCompletion<T> {
-        use super::virtio_queue::UserData;
-
-        let num_buffers = buffers.len();
-        assert!(num_buffers > 0);
-        assert!(num_buffers <= self.seg_max);
-        // Header + data descriptors + status must fit the queue (and leave
-        // room for concurrent requests; callers keep chains short).
-        let chain_len = (num_buffers + 2) as u16;
-        assert!(chain_len <= self.virtqueue.borrow().queue_size() / 2);
-
-        let chain_head = VqAlloc::new(self.virtqueue.clone(), chain_len).await;
-        let mut virtqueue = self.virtqueue.borrow_mut();
-
-        let (header, phys_addr, mut next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-        *header = BlkHeader {
-            type_: 0, /* VIRTIO_BLK_T_IN */
-            _reserved: 0,
-            sector,
-        };
-
-        let mut buffs: Vec<UserData> = Vec::with_capacity(num_buffers + 2);
-        buffs.push(UserData {
-            phys_addr,
-            len: core::mem::size_of::<BlkHeader>() as u32,
-        });
-
-        for buf in &mut buffers {
-            assert_eq!(buf.as_mut().len(), 4096);
-            buffs.push(UserData {
-                phys_addr: buf.as_mut().phys_addr() as u64,
-                len: 4096,
-            });
-            // The data descriptors' header buffers are unused; walk past them
-            // to the last descriptor, whose header buffer holds the status.
-            next_idx = virtqueue.next_idx(next_idx);
-        }
-
-        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
-        // If we use a single byte for status, CHV corrupts the stack (writes
-        // more than one byte).
-        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
-        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-        buffs.push(UserData { phys_addr, len: 1 });
-
-        drop(virtqueue);
-        let vq_completion = Virtqueue::add_buffs(
-            self.virtqueue.clone(),
-            &buffs,
-            1,
-            (num_buffers + 1) as u16,
-            chain_head,
-            buffers,
-        )
-        .expect_blk_status();
-
-        crate::virtio_queue::ReadManyCompletion { vq_completion }
-    }
-
-    #[inline(never)]
-    pub async fn post_write<T: AsRef<IoBuf> + Unpin>(
-        self: Rc<Self>,
-        sector: u64,
-        bytes: T,
-    ) -> WriteCompletion<T> {
-        use super::virtio_queue::UserData;
-
-        assert_eq!(bytes.as_ref().len(), 4096);
-
-        let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
-        let mut virtqueue = self.virtqueue.borrow_mut();
-
-        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-        *header = BlkHeader {
-            type_: 1, /* VIRTIO_BLK_T_OUT */
-            _reserved: 0,
-            sector,
-        };
-
-        let header_data = UserData {
-            phys_addr,
-            len: core::mem::size_of::<BlkHeader>() as u32,
-        };
-
-        const VIRTIO_BLK_S_OK: u8 = 0;
-        const VIRTIO_BLK_S_IOERR: u8 = 1;
-        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
-        let (_, _, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
-        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
-        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-
-        let buffs: [UserData; 3] = [
-            header_data,
-            UserData {
-                phys_addr: bytes.as_ref().phys_addr() as u64,
-                len: 4096,
-            },
-            UserData { phys_addr, len: 1 },
-        ];
-
-        drop(virtqueue);
-        let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head, bytes)
-                .expect_blk_status();
-
-        WriteCompletion { vq_completion }
-    }
-
-    /// Write `buffers.len()` consecutive 4K blocks starting at `sector` with
-    /// ONE device request; the write-side mirror of [`Self::post_read_many`].
-    #[inline(never)]
-    pub async fn post_write_many<T: AsRef<IoBuf> + Unpin>(
-        self: Rc<Self>,
-        sector: u64,
-        buffers: Vec<T>,
-    ) -> WriteCompletion<Vec<T>> {
-        use super::virtio_queue::UserData;
-
-        let num_buffers = buffers.len();
-        assert!(num_buffers > 0);
-        assert!(num_buffers <= self.seg_max);
-        // Header + data descriptors + status must fit the queue (and leave
-        // room for concurrent requests; callers keep chains short).
-        let chain_len = (num_buffers + 2) as u16;
-        assert!(chain_len <= self.virtqueue.borrow().queue_size() / 2);
-
-        let chain_head = VqAlloc::new(self.virtqueue.clone(), chain_len).await;
-        let mut virtqueue = self.virtqueue.borrow_mut();
-
-        let (header, phys_addr, mut next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-        *header = BlkHeader {
-            type_: 1, /* VIRTIO_BLK_T_OUT */
-            _reserved: 0,
-            sector,
-        };
-
-        let mut buffs: Vec<UserData> = Vec::with_capacity(num_buffers + 2);
-        buffs.push(UserData {
-            phys_addr,
-            len: core::mem::size_of::<BlkHeader>() as u32,
-        });
-
-        for buf in &buffers {
-            assert_eq!(buf.as_ref().len(), 4096);
-            buffs.push(UserData {
-                phys_addr: buf.as_ref().phys_addr() as u64,
-                len: 4096,
-            });
-            // The data descriptors' header buffers are unused; walk past them
-            // to the last descriptor, whose header buffer holds the status.
-            next_idx = virtqueue.next_idx(next_idx);
-        }
-
-        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
-        // If we use a single byte for status, CHV corrupts the stack (writes
-        // more than one byte).
-        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
-        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-        buffs.push(UserData { phys_addr, len: 1 });
-
-        drop(virtqueue);
-        let vq_completion = Virtqueue::add_buffs(
-            self.virtqueue.clone(),
-            &buffs,
-            (num_buffers + 1) as u16,
-            1,
-            chain_head,
-            buffers,
-        )
-        .expect_blk_status();
-
-        WriteCompletion { vq_completion }
-    }
-
-    /// Returns the ID of the submitted request.
-    #[inline(never)]
-    pub async fn post_flush(self: Rc<Self>) -> Result<()> {
-        use super::virtio_queue::UserData;
-
-        if !self.flush_enabled {
-            return Err(ErrorKind::Unsupported.into());
-        }
-
-        let chain_head = VqAlloc::new(self.virtqueue.clone(), 2).await;
-        let mut virtqueue = self.virtqueue.borrow_mut();
-
-        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-        *header = BlkHeader {
-            type_: 4, /* VIRTIO_BLK_T_FLUSH */
-            _reserved: 0,
-            sector: 0,
-        };
-
-        let header_data = UserData {
-            phys_addr,
-            len: core::mem::size_of::<BlkHeader>() as u32,
-        };
-
-        const VIRTIO_BLK_S_OK: u8 = 0;
-        const VIRTIO_BLK_S_IOERR: u8 = 1;
-        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
-        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
-        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-
-        let buffs: [UserData; 2] = [header_data, UserData { phys_addr, len: 1 }];
-
-        core::mem::drop(virtqueue);
-
-        let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ())
-                .expect_blk_status();
-
-        WriteCompletion { vq_completion }.await.1.map(|_| ())
     }
 }
