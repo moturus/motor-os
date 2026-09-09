@@ -37,6 +37,9 @@ ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
 
+# Host russhd tests also use this key, before the VM tests below.
+chmod 600 "$WD/test.key"
+
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
@@ -191,9 +194,6 @@ if [ "$BUILD" = "release" ]; then
 else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
-
-# A fresh checkout leaves the key group-readable; ssh then silently ignores it.
-chmod 600 "$WD/test.key"
 
 SSH_OPTIONS=(
   -F /dev/null
