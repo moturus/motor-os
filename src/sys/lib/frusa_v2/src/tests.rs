@@ -1192,7 +1192,8 @@ fn cached_allocation_owns_one_block_per_class() {
 fn classes_above_the_threshold_use_the_shared_path() {
     let frusa: Frusa4K = Frusa4K::new(&BACK_END);
     let cache = Cache4K::new();
-    for size in [512usize, 1024, 4096] {
+    // 4096 is the only 4K class above the 2 KiB threshold.
+    for size in [4096usize] {
         let layout = Layout::from_size_align(size, 8).unwrap();
         let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
         let slab = frusa.inner.slab_for_sz(size);
@@ -1201,10 +1202,10 @@ fn classes_above_the_threshold_use_the_shared_path() {
         assert!(cache.current[slab.table_idx as usize].get().is_null());
         unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
     }
-    // The largest cached class is 256 bytes.
-    let layout = Layout::from_size_align(256, 8).unwrap();
+    // The largest cached class is 2048 bytes.
+    let layout = Layout::from_size_align(2048, 8).unwrap();
     let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
-    let slab = frusa.inner.slab_for_sz(256);
+    let slab = frusa.inner.slab_for_sz(2048);
     assert_eq!(
         unsafe { (*slab.lookup(ptr)).owner.load(Ordering::Relaxed) },
         cache.id()

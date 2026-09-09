@@ -645,9 +645,11 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     // ---- per-thread private blocks ----
 
-    /// Entries up to this size are served from private blocks; an idle
-    /// thread holds at most one block per cached class, 31 KiB in all.
-    const CACHED_MAX_LOG2: u32 = 8;
+    /// Entries up to this size are served from private blocks. An idle
+    /// thread holds at most one block per cached class; at 2 KiB that is
+    /// classes 16 B..2 KiB, up to 255 KiB in all. Larger classes stay on
+    /// the shared path, where their few, large blocks cost little to reach.
+    const CACHED_MAX_LOG2: u32 = 11;
 
     fn alloc_cached(&self, cache: &ThreadCache<SLABS>, layout: Layout) -> *mut u8 {
         let Some(sz) = Self::sz_from_layout(&layout) else {
@@ -713,10 +715,25 @@ impl<const SLABS: usize> Frusa<SLABS> {
     }
 
     unsafe fn dealloc_cached(&self, cache: &ThreadCache<SLABS>, ptr: *mut u8, layout: Layout) {
-        match Self::sz_from_layout(&layout) {
-            Some(sz) => self.dealloc_to_slab(self.slab_for_sz(sz), ptr, cache.shard.get()),
-            None => unsafe { self.fallback_allocator.dealloc(ptr, layout) },
+        let Some(sz) = Self::sz_from_layout(&layout) else {
+            return unsafe { self.fallback_allocator.dealloc(ptr, layout) };
+        };
+        let slab = self.slab_for_sz(sz);
+        // The common case: freeing something this thread allocated from the
+        // block it still holds. The block is ours (`owner` names this cache),
+        // so reclaim never touches it, and its descriptor is stable; `slot_of`
+        // is a pure range check, so no read guard is needed. It is always
+        // non-full here (a fill nulls the slot in `alloc_cached`), so the free
+        // never fills a gap that would rejoin the partial stack.
+        if slab.entry_sz_log2 <= Self::CACHED_MAX_LOG2 {
+            let block = cache.current[slab.table_idx as usize].get();
+            if !block.is_null() && unsafe { (*block).slot_of(ptr).is_some() } {
+                let was_full = unsafe { (*block).dealloc(ptr) };
+                debug_assert!(!was_full, "cached current block was full");
+                return;
+            }
         }
+        self.dealloc_to_slab(slab, ptr, cache.shard.get());
     }
 
     unsafe fn realloc_cached(
