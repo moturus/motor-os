@@ -13,15 +13,32 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
-Implementation status (2026-09-08): P-1's boot-heap alignment fix is in
+Implementation status (2026-09-09): P-1's boot-heap alignment fix is in
 `6efc3276` (alongside the wait-set fix). P0b's range validation is in
 `83f09a60`, and MMIO ownership/teardown and consumer refusals are in
 `a94eb213`. Reservation and mapping now share the region lock, including
 contiguous mapping and failure rollback. Both P0b snapshots passed the
 common gate and launcher matrix, including Firecracker at 64 MiB; these were
 functional checks, not controlled boot-time measurements. Checked copy-in is
-in `ba6da613`. A separate direct-map consumer lifetime fix is next. The block
-allocator and huge-page mapping changes are not committed yet.
+in `ba6da613`. P0c's direct-map consumer lifetime fix is implemented and passed
+the common gate: three debug, three release and one release developer-image
+run, without test retries or temporary probes. That exact source snapshot also
+included the native-driver test cleanup (`d2aef7fd`) and the separately reviewed
+spin-source lifecycle fix (`ec28676d`). Production still uses the old allocator;
+P1a1's core has only been exercised as a draft in an isolated native boot.
+Block allocator and huge-page changes are not committed.
+
+Residual diagnostic history: P0c's original third debug gate exited during
+pressure without a recorded cause; the failed image had 193 MiB free. A later
+TCP test lost two exchanges, followed by expected harness shutdown. Traces
+proved that earlier native-driver tests left two FIN-WAIT-2 peers occupying
+orphan slots; the cleanup drains these owners, but quota cancellation was not
+recorded as the original reset cause. Another gate exposed a timing-dependent
+spin-source test and missing cleanup when block_on ends; both are now fixed.
+The passing common gate does not establish the original pressure exit's cause
+or relation to P0c. Original failures and before/after evidence are preserved
+under `/tmp/kernel-user-page-pin.DtyP1d`, `/tmp/kernel-failure-cause.C67ZxC`,
+and `/tmp/spin-source-lifecycle.vcaNn7` on the development host.
 
 ## Requirements and scope
 
@@ -78,6 +95,7 @@ Known defects relevant to this work:
 | MMIO teardown and failure | MMIO pages have no `Frame`, so `clear` leaves their PTEs; a failed map reverses statistics but leaves its virtual segment. | P0b |
 | MMIO into RAM | `fixed_addr_reserve` can consume free managed RAM uncharged and accepts excluded kernel RAM. | P0b |
 | Reservation/mapping race | MMIO and contiguous mapping release the region lock after reserving a segment; concurrent unmap can remove or replace it before mapping. | P0b |
+| Direct-map consumer lifetime | Copy-out, stats-page writes and the console retain physical addresses without owning their frames; concurrent unmap can free them. Concurrent console registrations can also replace the published control pointer. | P0c |
 | Contiguous allocation | Outer assertion caps at 64; the inner scan omits the last page; descriptor-failure rollback misses one frame. | P1b replacement |
 
 Page zero must be charged exactly once and never released. Test that in
@@ -596,6 +614,15 @@ Do not turn the input path into a blanket refusal of everything outside
 the normal segment tree. `virt_to_phys` still reports device addresses.
 Kernel LAPIC/IOAPIC mappings and sys-io BAR mappings must continue booting.
 
+P0c gives copy-out and pinned-page consumers an owning Frame reference,
+acquired under the region lock and retained until use finishes. Keep the
+existing refusals of frame-less zero/CoW pages and MMIO. The console retains
+its control-page pin beside its permanent address-space reference; an
+address-space reference alone does not prevent explicit unmap. Serialize
+registration with the existing state-then-driver lock order, rechecking
+ownership before publishing the control pointer so its pin cannot be replaced.
+No new locks, allocations, race tests or reproducers are needed.
+
 ## Validation
 
 ### Deterministic kernel self-tests
@@ -772,6 +799,7 @@ workflow.
 |---|---|---|
 | P-1 | In mm/kheap.rs, checked aligned bump-offset helper, CAS reservation of padding + size, pointer-alignment assertion, startup_remaining. Frusa untouched. | Debug boot arithmetic test: awkward base/offset, alignments 1–4096, exhaustion and overflow; launcher boots. |
 | P0b | MMIO validation, owning descriptor with no physical free, Mmio status, consumer refusals, teardown and rollback. Keep this independent of blocks. | MMIO suite and all launchers; current suite unchanged otherwise. |
+| P0c | Retain Frame ownership for direct-map consumers; serialize console registration and retain its control-page pin. | Existing copy, stats, console, MMIO and pressure coverage; source-inspected race fixes, without new race tests/reproducers. |
 | P1a1 | Descriptor/bounds, link check word, ownership and uniform re-combination, F/W publication, ordinary counters, core scratch tests. | Debug self-tests; production still uses old allocator. Temporary module dead-code allowance names P1b. |
 | P1a2 | Pure shaping/table-carve helper, F/W search, advisory claims/no-GS path, contiguous search; input-range and source-order fixtures. | Hole/initrd/lazy-initialization cases; no real shadow allocator or table allocation. |
 | P1b | Switch phys.rs to blocks including low/dual re-combination; carve/install table, route small/run/free/adopt/MMIO and runtime cursors; remove old vector/cache/search. | Page-zero regression; independent boot recounts, no-GS/AP and rollback tests, fresh-boot placement/churn, pressure/admission; launcher matrix and boot measurements. |
@@ -782,7 +810,7 @@ workflow.
 | P5 | Enable the full sizing rule and mixed huge/small segments; rounded fallback sizes everywhere. | Table boundaries, overflow, mixed lookup/copy/pinning, exact controlled accounting; re-read admission boundary expectations. |
 | P6 | Widen churn to mixed sizes; document final accounting and metrics in docs/oom-handling.md and measured results here/boot-time.md. | Full integration gate and recorded residual risks/measurements. |
 
-Order: P-1 -> P0b -> P1a1 -> P1a2 -> P1b.
+Order: P-1 -> P0b -> P0c -> P1a1 -> P1a2 -> P1b.
 P2 and P3 each depend on P1b; P4a depends on P2; P4b depends on P4a and
 P3; P5 depends on P4b; P6 depends on P5. P4b's intermediate eligibility
 rule is deliberate: non-multiple requests already get deterministic sharing

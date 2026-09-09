@@ -711,7 +711,7 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
         return ResultBuilder::invalid_argument();
     };
 
-    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr as usize);
+    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr.kernel_addr() as usize);
     ResultBuilder::ok_1(num_entries as u64)
 }
 

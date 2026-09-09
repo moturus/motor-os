@@ -295,6 +295,17 @@ impl VmemSegment {
         }
     }
 
+    pub(super) fn pin_user_page(&self, vmem_addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        let page = self.find_page(vmem_addr)?;
+        let frame = page.frame.get()?;
+        if frame.is_mmio() {
+            return None;
+        }
+        // The caller holds the region lock, so unmap cannot release the
+        // mapping's last reference while this owning reference is acquired.
+        Some((page.frame.clone(), vmem_addr - page.start))
+    }
+
     pub(super) fn unmap(mut self) -> u64 {
         // Note: it is important to unmap pages before freeing the segment
         // in the VMemRegion, otherwise a concurrent allocation may try

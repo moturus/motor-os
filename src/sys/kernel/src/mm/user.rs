@@ -2,10 +2,24 @@ use core::sync::atomic::*;
 
 use alloc::sync::Arc;
 
-use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
+
+// A direct-map address is usable only while its backing frame is owned.
+pub struct PinnedUserPage {
+    frame: super::slab::SlabArc<super::phys::Frame>,
+    offset: u64,
+}
+
+impl PinnedUserPage {
+    pub fn kernel_addr(&self) -> u64 {
+        self.frame.get().unwrap().start()
+            + self.offset
+            + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET
+    }
+}
 
 #[derive(Debug)]
 pub struct UserStack {
@@ -582,69 +596,48 @@ impl UserAddressSpace {
             bytes.len() as i64,
         );
 
-        let mut source_start = 0_u64;
+        user_vaddr_start
+            .checked_add(bytes.len() as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut source = bytes;
         let mut dst_start = user_vaddr_start;
-        let mut bytes_left = bytes.len() as u64;
-
-        while bytes_left > 0 {
-            let bytes_to_copy = {
-                let page_end = align_up(dst_start + 1, PAGE_SIZE_SMALL);
-                if page_end - dst_start >= bytes_left {
-                    bytes_left
-                } else {
-                    page_end - dst_start
-                }
-            };
-
-            // vaddr_map_status (not a raw page-table walk) is the authority
-            // here: it rejects zero-page/CoW mappings, which must never be
-            // written through the direct map.
-            let mapping = self.inner.vaddr_map_status(dst_start);
-            let phys_start = match mapping {
-                VaddrMapStatus::Private(addr) => addr,
-                VaddrMapStatus::Shared(addr) => addr,
-                _ => {
-                    log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                }
-            };
-
+        while !source.is_empty() {
+            // Pin under the region lock and retain ownership through the copy.
+            // Frame-less zero/CoW pages and device mappings remain refused.
+            let page = self.pin_user_page(dst_start)?;
+            let bytes_to_copy = source
+                .len()
+                .min((PAGE_SIZE_SMALL - (dst_start & (PAGE_SIZE_SMALL - 1))) as usize);
             unsafe {
                 core::intrinsics::copy_nonoverlapping(
-                    bytes.get_unchecked(source_start as usize) as *const u8,
-                    (phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET) as usize
-                        as *mut u8,
-                    bytes_to_copy as usize,
+                    source.as_ptr(),
+                    page.kernel_addr() as *mut u8,
+                    bytes_to_copy,
                 );
             }
-
-            source_start += bytes_to_copy;
-            dst_start += bytes_to_copy;
-            bytes_left -= bytes_to_copy;
+            dst_start += bytes_to_copy as u64;
+            source = &source[bytes_to_copy..];
         }
 
         Ok(())
     }
 
-    pub fn get_user_page_as_kernel(&self, user_page_addr: u64) -> Result<u64, ErrorCode> {
+    fn pin_user_page(&self, addr: u64) -> Result<PinnedUserPage, ErrorCode> {
+        let (frame, offset) = self
+            .inner
+            .pin_user_page(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        Ok(PinnedUserPage { frame, offset })
+    }
+
+    pub fn get_user_page_as_kernel(
+        &self,
+        user_page_addr: u64,
+    ) -> Result<PinnedUserPage, ErrorCode> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let mapping = self.inner.vaddr_map_status(user_page_addr);
-        let phys_start = match mapping {
-            VaddrMapStatus::Private(addr) => addr,
-            VaddrMapStatus::Shared(addr) => addr,
-            _ => {
-                log::error!(
-                    "{}:{} - get_user_page_as_kernel: bad mapping.",
-                    file!(),
-                    line!()
-                );
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-        };
-
-        Ok(phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET)
+        self.pin_user_page(user_page_addr)
     }
 
     pub fn read_from_user(

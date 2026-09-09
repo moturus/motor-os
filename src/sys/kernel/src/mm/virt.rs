@@ -243,6 +243,11 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
+    fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        let segments = self.used_segments.lock(line!());
+        segments.find(addr)?.pin_user_page(addr)
+    }
+
     #[allow(unused)]
     pub(super) fn free(&self, addr: u64) -> Result<u64, ErrorCode> {
         if !self.segment.contains(addr) {
@@ -933,13 +938,13 @@ impl UserAddressSpaceBase {
         }
     }
 
-    pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
-        match vmem_addr {
-            0..=VMEM_USER_END => self.normal_memory.vaddr_map_status(vmem_addr),
+    pub(super) fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        match addr {
+            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory.vaddr_map_status(vmem_addr)
+                self.custom_memory.pin_user_page(addr)
             }
-            _ => VaddrMapStatus::Unallocated,
+            _ => None,
         }
     }
 
