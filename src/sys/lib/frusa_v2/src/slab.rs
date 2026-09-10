@@ -1,6 +1,10 @@
 //! A size class: its batch list, the partial stack of blocks that have a
 //! free slot, and the address-sorted index that maps a pointer to its block.
 //!
+//! The index array holds `index_cap` sorted data addresses followed by
+//! `index_cap` block pointers in the same order, so a lookup probes the
+//! dense address half and touches one descriptor, after the search.
+//!
 //! The index and the batch list change only under the slab's write guard
 //! (growth's link step, reclaim). The partial stack changes under the
 //! partial lock, or under the write guard, which excludes every holder of
@@ -11,8 +15,11 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use crate::block::Block;
 use crate::sync::{RwLock, SpinLock};
 
-/// Smallest index capacity, one 4 KiB page of pointers.
-pub(crate) const INDEX_MIN_CAP: usize = 512;
+/// Smallest index capacity: one 4 KiB page of addresses and pointers.
+pub(crate) const INDEX_MIN_CAP: usize = 256;
+
+/// Bytes per index entry: one address and one block pointer.
+pub(crate) const INDEX_ENTRY_BYTES: usize = 16;
 
 #[repr(C)]
 pub(crate) struct Slab {
@@ -25,7 +32,8 @@ pub(crate) struct Slab {
     pub head: AtomicPtr<Block>,
     pub bytes_total: AtomicUsize,
     pub partial_head: AtomicPtr<Block>,
-    /// Address-sorted block pointers; null until the first growth.
+    /// Sorted data addresses, then block pointers; null until the first
+    /// growth.
     pub index: AtomicPtr<*mut Block>,
     pub index_len: AtomicU32,
     pub index_cap: AtomicU32,
@@ -182,8 +190,14 @@ impl Slab {
 
     // ---- sorted index (read under the read guard, written under the write guard) ----
 
-    fn index_slice(&self) -> &[*mut Block] {
-        let base = self.index.load(Ordering::Acquire);
+    /// The block-pointer half of the array.
+    fn index_blocks(&self) -> *mut *mut Block {
+        let cap = self.index_cap.load(Ordering::Acquire) as usize;
+        unsafe { self.index.load(Ordering::Acquire).add(cap) }
+    }
+
+    fn index_addrs(&self) -> &[usize] {
+        let base = self.index.load(Ordering::Acquire) as *const usize;
         let len = self.index_len.load(Ordering::Acquire) as usize;
         if base.is_null() {
             &[]
@@ -192,16 +206,26 @@ impl Slab {
         }
     }
 
+    #[cfg(test)]
+    fn index_slice(&self) -> &[*mut Block] {
+        let len = self.index_addrs().len();
+        if len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(self.index_blocks(), len) }
+        }
+    }
+
     /// The block whose data starts at the greatest address not above `ptr`,
     /// or null. The caller validates the range with `Block::slot_of`.
     pub fn lookup(&self, ptr: *mut u8) -> *mut Block {
-        let index = self.index_slice();
+        let addrs = self.index_addrs();
         let mut lo = 0usize;
-        let mut hi = index.len();
+        let mut hi = addrs.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             crate::probe_counted();
-            if unsafe { (*index[mid]).data } as usize <= ptr as usize {
+            if addrs[mid] <= ptr as usize {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -210,7 +234,7 @@ impl Slab {
         if lo == 0 {
             core::ptr::null_mut()
         } else {
-            index[lo - 1]
+            unsafe { *self.index_blocks().add(lo - 1) }
         }
     }
 
@@ -229,15 +253,19 @@ impl Slab {
         Some(new_cap)
     }
 
-    /// Installs a larger array, copying the entries. Returns the old array
-    /// and its capacity for the caller to free after releasing the guard.
+    /// Installs a larger array of `cap` entries (`cap * INDEX_ENTRY_BYTES`
+    /// bytes), copying both halves. Returns the old array and its capacity
+    /// for the caller to free after releasing the guard.
     pub fn index_install(&self, array: *mut *mut Block, cap: usize) -> (*mut *mut Block, usize) {
         let old = self.index.load(Ordering::Acquire);
         let old_cap = self.index_cap.load(Ordering::Acquire) as usize;
         let len = self.index_len.load(Ordering::Acquire) as usize;
         assert!(cap >= len);
         if !old.is_null() {
-            unsafe { core::ptr::copy_nonoverlapping(old, array, len) };
+            unsafe {
+                core::ptr::copy_nonoverlapping(old as *const usize, array as *mut usize, len);
+                core::ptr::copy_nonoverlapping(old.add(old_cap), array.add(cap), len);
+            }
         }
         self.index.store(array, Ordering::Release);
         self.index_cap.store(cap as u32, Ordering::Release);
@@ -249,16 +277,16 @@ impl Slab {
     pub fn index_insert_batch(&self, first: *mut Block, num: usize) {
         let len = self.index_len.load(Ordering::Acquire) as usize;
         assert!(len + num <= self.index_cap.load(Ordering::Acquire) as usize);
-        let base = self.index.load(Ordering::Acquire);
-        let index = unsafe { core::slice::from_raw_parts_mut(base, len + num) };
+        let base = self.index.load(Ordering::Acquire) as *mut usize;
+        let addrs = unsafe { core::slice::from_raw_parts_mut(base, len + num) };
+        let blocks = unsafe { core::slice::from_raw_parts_mut(self.index_blocks(), len + num) };
         let start = unsafe { (*first).data } as usize;
-        let pos = index[..len].partition_point(|b| (unsafe { (**b).data } as usize) < start);
-        index.copy_within(pos..len, pos + num);
-        for (slot, block) in index[pos..pos + num]
-            .iter_mut()
-            .zip(Self::batch(first, num))
-        {
-            *slot = block;
+        let pos = addrs[..len].partition_point(|&addr| addr < start);
+        addrs.copy_within(pos..len, pos + num);
+        blocks.copy_within(pos..len, pos + num);
+        for (offset, block) in Self::batch(first, num).enumerate() {
+            addrs[pos + offset] = unsafe { (*block).data } as usize;
+            blocks[pos + offset] = block;
         }
         self.index_len.store((len + num) as u32, Ordering::Release);
     }
@@ -271,14 +299,19 @@ impl Slab {
             return;
         }
         let cap = self.index_cap.load(Ordering::Acquire) as usize;
+        let blocks_base = unsafe { base.add(cap) };
         let mut len = 0usize;
         for block in self.blocks() {
             assert!(len < cap);
-            unsafe { base.add(len).write(block) };
+            unsafe { blocks_base.add(len).write(block) };
             len += 1;
         }
-        let index = unsafe { core::slice::from_raw_parts_mut(base, len) };
-        index.sort_unstable_by_key(|b| unsafe { (**b).data } as usize);
+        let blocks = unsafe { core::slice::from_raw_parts_mut(blocks_base, len) };
+        blocks.sort_unstable_by_key(|b| unsafe { (**b).data } as usize);
+        let addrs = unsafe { core::slice::from_raw_parts_mut(base as *mut usize, len) };
+        for (addr, block) in addrs.iter_mut().zip(blocks.iter()) {
+            *addr = unsafe { (**block).data } as usize;
+        }
         self.index_len.store(len as u32, Ordering::Release);
     }
 
@@ -287,6 +320,9 @@ impl Slab {
         let index = self.index_slice();
         for pair in index.windows(2) {
             assert!(unsafe { (*pair[0]).data } < unsafe { (*pair[1]).data });
+        }
+        for (addr, block) in self.index_addrs().iter().zip(index) {
+            assert_eq!(*addr, unsafe { (**block).data } as usize);
         }
         let listed = self.blocks().count();
         assert_eq!(listed, index.len());

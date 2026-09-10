@@ -172,8 +172,10 @@ struct SyntheticSlab {
 impl SyntheticSlab {
     fn new(batches: usize, per_batch: usize) -> Self {
         let slab = Box::new(Slab::new(4, 0));
-        let mut index = Vec::with_capacity(INDEX_MIN_CAP);
-        index.resize(INDEX_MIN_CAP, core::ptr::null_mut());
+        // Addresses in the first half of the array, block pointers in the
+        // second: two words per entry.
+        let mut index = Vec::with_capacity(2 * INDEX_MIN_CAP);
+        index.resize(2 * INDEX_MIN_CAP, core::ptr::null_mut());
         slab.index_install(index.as_mut_ptr(), INDEX_MIN_CAP);
         let mut this = Self {
             slab,
@@ -312,7 +314,7 @@ fn slab_index_growth_and_replacement_keep_entries() {
         s.slab.index_growth(INDEX_MIN_CAP - 3),
         Some(2 * INDEX_MIN_CAP)
     );
-    let mut bigger = vec![core::ptr::null_mut(); 2 * INDEX_MIN_CAP];
+    let mut bigger = vec![core::ptr::null_mut(); 2 * 2 * INDEX_MIN_CAP];
     let (old, old_cap) = s.slab.index_install(bigger.as_mut_ptr(), 2 * INDEX_MIN_CAP);
     assert_eq!(old, s.index.as_mut_ptr());
     assert_eq!(old_cap, INDEX_MIN_CAP);

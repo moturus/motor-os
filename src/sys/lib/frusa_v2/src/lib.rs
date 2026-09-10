@@ -256,7 +256,8 @@ impl<const SLABS: usize> Frusa<SLABS> {
             self.read_lock(slab, 0);
             result.allocated_from_fallback += slab.bytes_total.load(Ordering::Relaxed);
             result.in_use += slab.in_use_bytes();
-            index_bytes += slab.index_cap.load(Ordering::Relaxed) as usize * 8;
+            index_bytes +=
+                slab.index_cap.load(Ordering::Relaxed) as usize * slab::INDEX_ENTRY_BYTES;
             self.read_unlock(slab, 0);
         }
         result.allocated_metadata += index_bytes + Self::shards_layout().size();
@@ -532,7 +533,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
     }
 
     fn index_layout(cap: usize) -> Layout {
-        Layout::from_size_align(cap * 8, Self::PAGE_4K).unwrap()
+        Layout::from_size_align(cap * slab::INDEX_ENTRY_BYTES, Self::PAGE_4K).unwrap()
     }
 
     /// Adds a batch to `slab`. Everything is allocated with no lock held;
