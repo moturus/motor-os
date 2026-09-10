@@ -60,6 +60,7 @@ GUEST_KEY="$TEST_TMP/test-tui.key"
 GUEST_KNOWN="$TEST_TMP/test-tui-known-hosts"
 GUEST_STREAM_HELPER="$TEST_TMP/test-tui-stream-child.sh"
 GUEST_HELIX_ROOT=""
+HELIX_LSP_EVIDENCE=""
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -136,6 +137,10 @@ remove_helix_fixtures() {
 
 cleanup() {
   set +e
+  if [ -n "$HELIX_LSP_EVIDENCE" ]; then
+    vm_ssh "cat $helix_lsp_log" > "$HELIX_LSP_EVIDENCE/helix.log"
+    printf '%s' "$PTY_OUTPUT" > "$HELIX_LSP_EVIDENCE/last-terminal-output"
+  fi
   if [ -n "$PTY_IN_FD" ]; then
     exec {PTY_IN_FD}>&-
   fi
@@ -655,6 +660,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   vm_ssh "[ \"\$(cat $helix_rmux)\" = HELIX_RMUX_OK ] && [ \"\$(wc -c < $helix_rmux)\" = 14 ]" ||
     fail "Helix rmux save did not preserve the exact bytes"
 
+  . "$WD/test-helix-lsp.sh"
   remove_helix_fixtures
 fi
 
