@@ -10,6 +10,7 @@ echo "-- Helix native rust-analyzer; evidence=$HELIX_LSP_EVIDENCE --"
 
 helix_log_wait() {
   local pattern="$1" label="$2" count="${3:-1}"
+  local require_ready="${4:-false}"
   local deadline=$((SECONDS + 60))
   local chunk
   while [ "$SECONDS" -lt "$deadline" ]; do
@@ -17,7 +18,13 @@ helix_log_wait() {
       fail "cannot read Helix LSP log"
     tail -n +"$helix_log_start" "$HELIX_LSP_EVIDENCE/helix.log" > "$HELIX_LSP_EVIDENCE/latest.log"
     if [ "$(grep -Ec "$pattern" "$HELIX_LSP_EVIDENCE/latest.log")" -ge "$count" ]; then
-      return
+      if [ "$require_ready" = false ]; then
+        return
+      elif python3 "$WD/test-helix-lsp-ready.py" "$HELIX_LSP_EVIDENCE/helix.log"; then
+        return
+      elif [ "$?" -ne 1 ]; then
+        fail "cannot observe analyzer readiness"
+      fi
     fi
     if grep -Eq 'request [0-9]+ timed out|failed to initialize language server|StreamClosed' \
       "$HELIX_LSP_EVIDENCE/helix.log"; then
@@ -63,7 +70,7 @@ PTY_OUTPUT=""
 printf '\033' >&"$PTY_IN_FD"
 wait_pty_output "NOR" "initial edit normal mode"
 printf 'u' >&"$PTY_IN_FD"
-helix_log_wait "$helix_check_end" "initial analysis after edit"
+helix_log_wait "$helix_check_end" "initial analysis after edit" 1 true
 helix_log_wait '"method":"textDocument/didChange"' "initial analysis changes" 2
 helix_save_screen open_and_edit
 printf '6G32lgd' >&"$PTY_IN_FD"
@@ -80,7 +87,7 @@ vm_ssh "/system/bin/sysbox cp -r /devtools/src/helix-rust-demo '$helix_project'"
 start_pty "cd '$helix_project' && XDG_CACHE_HOME=$helix_cache hx -v --log $helix_lsp_log '$helix_project/src/main.rs:6:33'"
 wait_pty_output "main.rs" "Helix Rust project startup"
 helix_save_screen startup
-helix_log_wait "$helix_check_end" "initial Lorry check"
+helix_log_wait "$helix_check_end" "initial analysis and Lorry check" 1 true
 
 # Hover must render server-supplied documentation in the editor. The selected
 # identifier itself is in the source, so it would not prove a hover response.

@@ -260,6 +260,9 @@ stream. The existing local-file URI layer handles navigation.
 The integration also exposed a runtime child-pipe partial-write readiness bug;
 the bounded regression, repair, core gates, editor acceptance, and overnight
 authorization are documented in [helix-rust-analyzer.md](helix-rust-analyzer.md).
-No Helix fork or assembly revision changes are needed. Native use is documented
+The subsequent user report exposed an abort on ordinary Salsa cancellation;
+[rust-unwinding.md](rust-unwinding.md) records the diagnosis, private analyzer
+library build, new assembly identity, and strengthened editor regression.
+No further Helix fork revision is needed. Native use is documented
 in [build-rustc.md](../build-rustc.md#helix-on-the-developer-image) and the
 developer image's editor guide.

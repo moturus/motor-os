@@ -69,6 +69,7 @@ chmod 600 "$WD/test.key"
 "$WD/test-vm-image-format.sh"
 "$WD/test-dev-memory-contract.sh"
 "$WD/test-rust-analyzer-size-contract.sh"
+python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release
 else

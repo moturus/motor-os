@@ -125,6 +125,12 @@ An editor that owns a session terminal must additionally pass
 editor retains keyboard and Ctrl+C ownership. This launch instruction is
 consumed by Motor before rust-analyzer starts.
 
+Analysis cancellation requires Rust unwinding. The native analyzer recipe
+rebuilds a private copy of the pinned Rust library with a pure Rust unwinder;
+the installed compiler's default abort strategy is unchanged. Older images
+with recipe `motor-native-rust-analyzer-v1` abort on ordinary cancellation and
+must be rebuilt. See [the diagnosis and build scope](plans/rust-unwinding.md).
+
 For an admitted, trusted Lorry package, use:
 
 ```json
@@ -169,7 +175,9 @@ cd /devtools/src/helix-rust-demo
 hx src/main.rs
 ```
 
-After the initial project check, place the cursor on `ANSWER`: `Space k`
+Starting `hx` without arguments and opening `src/main.rs` with `:o` also works.
+
+After initial source loading and indexing, place the cursor on `ANSWER`: `Space k`
 shows documentation, `g d` opens its definition, and `Ctrl-o` returns.
 `Ctrl-x` requests completion in insert mode. Change the `answer` binding's
 type from `u32` to `bool` and save with `:w` to see a compiler diagnostic;

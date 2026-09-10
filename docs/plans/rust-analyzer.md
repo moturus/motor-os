@@ -2739,10 +2739,11 @@ the hover completes in 920 ms; see frusa.md §10.
 
 ### 4.38 Native Helix integration
 
-Completed on 2026-09-10. The developer image configures Helix to run the native
-server through Lorry and includes `/devtools/src/helix-rust-demo`. Actual editor
-acceptance proves hover, local and Motor std navigation, completion, compiler
-diagnostics on save, clearing, and shutdown. The complete release developer
+Initial acceptance was recorded on 2026-09-10. The developer image configures
+Helix to run the native server through Lorry and includes
+`/devtools/src/helix-rust-demo`. That serial editor sequence covered hover,
+local and Motor std navigation, completion, compiler diagnostics on save,
+clearing, and shutdown, but missed analysis cancellation. The release developer
 gate passes, including native analyzer acceptance, developer-source builds,
 and the full Lorry product suite. The necessary runtime child-pipe fix passed
 three debug and three release main-image gates before commit.
@@ -2750,3 +2751,12 @@ three debug and three release main-image gates before commit.
 See the [integration record](helix-rust-analyzer.md) for patches, evidence,
 continued stop conditions, and the earlier unresolved sys-io abort. Native
 rustfmt remains uninstalled, and Rust automatic formatting is disabled.
+
+### 4.39 Analysis cancellation aborted the native server
+
+The user's subsequent `hx` -> open `src/main.rs` -> `gd` report invalidated the
+usability conclusion above. Salsa implements routine cancellation through
+`resume_unwind`; the abort-only native build exited with status -1, leaving
+Helix requests to time out. See [rust-unwinding.md](rust-unwinding.md) for the
+captured native stack, private library repair, unchanged dependency locks,
+deterministic cancellation test, editor regression, and final image gates.
