@@ -15,11 +15,13 @@ exit-stack reporting under `src/sys/kernel` in a separate diagnostic image to
 identify the caller; retain the user's disk and remove that instrumentation
 before production changes or commits. No external sources are being edited.
 
-Complete and gated on 2026-09-10. Helix and rust-analyzer run natively on the
-release developer image, using Lorry for project metadata and compiler checks.
-The packaged example exercises completion, hover, navigation, and diagnostics
-without downloads. See [the usage guide](../build-rustc.md#helix-on-the-developer-image).
-The final validation below preserves the initial unresolved sys-io abort.
+The initial acceptance was recorded as complete on 2026-09-10, but the user's
+report invalidated that conclusion. The recorded serial editor sequence did
+not cover Salsa cancellation. The diagnosed abort and private Rust library
+repair are tracked in [rust-unwinding.md](rust-unwinding.md). The original
+validation below remains as historical evidence, including the unrelated
+unresolved sys-io abort; it does not establish that the original server was
+usable. See [the usage guide](../build-rustc.md#helix-on-the-developer-image).
 
 ## Authorization and baseline
 

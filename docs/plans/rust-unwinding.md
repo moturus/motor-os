@@ -68,3 +68,32 @@ This adds no boot work, kernel/runtime change, or native compiler capability.
 General opt-in unwinding for other native Rust applications remains a separate
 toolchain change. The private library is a build input, not shipped rust-src:
 analysis still uses sources matching the installed native compiler.
+
+## Regression evidence during integration
+
+The maintained native test (`src/tests/rust-analyzer-unwind`) passes against
+the patched private library: four threads perform 128 cancellations with
+nested catch/rethrow, preserve every payload, run 256 destructors while
+panicking, and leave each thread's panic state clear. Cancellation invokes no
+panic hook; an ordinary caught panic invokes it once. A child explicitly
+calling abort exits with Motor status -1. The native log is
+`/tmp/motor-ra-unwind-gate-native.log`. The developer branch of `full-test.sh`
+compiles and runs this test with the same library preparer and linker flags
+as the analyzer. Source and host analyzer gates also pass; the first source
+gate needed sandbox access to its existing sibling generated-crate cache.
+
+The expanded Helix helper passes against the prototype in a disposable image
+overlay: empty `hx`, `:o src/main.rs` in the shipped project, unsaved edits
+and undo during loading, and `gd` on `ANSWER` after the initial check. It also
+passes the existing copied-project hover/completion, saved-error clearing,
+Motor std navigation, and shutdown sequence. Evidence is
+`/tmp/motor-helix-lsp.hhltHo/`, including `shipped-project.log`. This validates
+the regression sequence; final acceptance must still use the packaged server
+in the rebuilt image with its unmodified default configuration.
+
+The first stripped prototype is 37,280,224 bytes, above the previously
+approved 32 MiB limit. Compared with the old 29,245,528-byte server, it adds
+about 4.6 MiB of exception tables and 3.4 MiB of cleanup-capable machine code.
+Investigate ThinLTO before accepting the final build. The size, memory, image
+growth, and timing limits remain unchanged. Incomplete assemblies from recipe
+development are not selected or reused as validated artifacts.

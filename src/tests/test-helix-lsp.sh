@@ -19,7 +19,7 @@ helix_log_wait() {
     if [ "$(grep -Ec "$pattern" "$HELIX_LSP_EVIDENCE/latest.log")" -ge "$count" ]; then
       return
     fi
-    if grep -Eq 'request [0-9]+ timed out|failed to initialize language server' \
+    if grep -Eq 'request [0-9]+ timed out|failed to initialize language server|StreamClosed' \
       "$HELIX_LSP_EVIDENCE/helix.log"; then
       fail "Helix LSP failed during $label; evidence=$HELIX_LSP_EVIDENCE"
     fi
@@ -47,11 +47,39 @@ helix_save_screen() {
   PTY_OUTPUT=""
 }
 
+helix_check_end='"token":"rust-analyzer/flycheck/0","value":\{"kind":"end"'
+# Reproduce the reported workflow on the shipped project. Opening and editing
+# during workspace loading previously cancelled Salsa work and killed the server.
+helix_lsp_log="$GUEST_HELIX_ROOT/open.log"
+start_pty "cd /devtools/src/helix-rust-demo && hx -v --log $helix_lsp_log"
+wait_pty_output "[scratch]" "empty Helix startup"
+PTY_OUTPUT=""
+printf ':o src/main.rs\r' >&"$PTY_IN_FD"
+wait_pty_output "main.rs" "opening Rust after Helix startup"
+PTY_OUTPUT=""
+printf 'i// analysis edit' >&"$PTY_IN_FD"
+wait_pty_output "INS" "edit during initial analysis"
+PTY_OUTPUT=""
+printf '\033' >&"$PTY_IN_FD"
+wait_pty_output "NOR" "initial edit normal mode"
+printf 'u' >&"$PTY_IN_FD"
+helix_log_wait "$helix_check_end" "initial analysis after edit"
+helix_log_wait '"method":"textDocument/didChange"' "initial analysis changes" 2
+helix_save_screen open_and_edit
+printf '6G32lgd' >&"$PTY_IN_FD"
+wait_pty_output "greeting.rs" "shipped ANSWER definition"
+helix_save_screen shipped_definition
+printf ':q!\r' >&"$PTY_IN_FD"
+finish_pty 0 "shipped project navigation"
+helix_log_wait '"method":"shutdown"' "shipped server shutdown"
+cp "$HELIX_LSP_EVIDENCE/helix.log" "$HELIX_LSP_EVIDENCE/shipped-project.log"
+
+helix_lsp_log="$GUEST_HELIX_ROOT/lsp.log"
+helix_log_start=1
 vm_ssh "/system/bin/sysbox cp -r /devtools/src/helix-rust-demo '$helix_project'"
 start_pty "cd '$helix_project' && XDG_CACHE_HOME=$helix_cache hx -v --log $helix_lsp_log '$helix_project/src/main.rs:6:33'"
 wait_pty_output "main.rs" "Helix Rust project startup"
 helix_save_screen startup
-helix_check_end='"token":"rust-analyzer/flycheck/0","value":\{"kind":"end"'
 helix_log_wait "$helix_check_end" "initial Lorry check"
 
 # Hover must render server-supplied documentation in the editor. The selected
