@@ -550,6 +550,11 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   [ -n "${HELIX_REV:-}" ] || fail "HELIX_REV is not configured"
 
   helix_bin=/devtools/helix/hx
+  # Exercise the shipped configuration before the isolated editor-only cases.
+  out="$(vm_ssh 'NO_COLOR=1 hx --health rust')"
+  printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /devtools/rust/bin/rust-analyzer' ||
+    fail "default Rust health did not find the native server: '$out'"
+
   helix_short_rev="${HELIX_REV:0:8}"
   GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
   helix_config="$GUEST_HELIX_ROOT/config"

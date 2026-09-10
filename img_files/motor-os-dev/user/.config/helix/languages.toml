@@ -1,0 +1,15 @@
+# Native Cargo compatibility is provided by Lorry. Select it in the server's
+# own environment: cargo.extraEnv only affects the server's children.
+[language-server.rust-analyzer]
+command = "/devtools/rust/bin/rust-analyzer"
+environment = { CARGO = "/devtools/bin/lorry", PATH = "/devtools/bin:/system/bin:/user/bin", TMPDIR = "/devtools/tmp" }
+
+[language-server.rust-analyzer.config]
+cargo.target = "x86_64-unknown-motor"
+cargo.targetDir = true
+cargo.sysroot = "discover"
+cargo.buildScripts.enable = true
+cargo.buildScripts.useRustcWrapper = false
+check.targets = ["x86_64-unknown-motor"]
+procMacro.enable = false
+files.watcher = "client"
