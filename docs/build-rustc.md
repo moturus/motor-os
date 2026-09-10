@@ -177,7 +177,8 @@ hx src/main.rs
 
 Starting `hx` without arguments and opening `src/main.rs` with `:o` also works.
 
-After initial source loading and indexing, place the cursor on `ANSWER`: `Space k`
+After initial source loading and indexing (the LSP spinner stops), place the
+cursor on `ANSWER`: `Space k`
 shows documentation, `g d` opens its definition, and `Ctrl-o` returns.
 `Ctrl-x` requests completion in insert mode. Change the `answer` binding's
 type from `u32` to `bool` and save with `:w` to see a compiler diagnostic;

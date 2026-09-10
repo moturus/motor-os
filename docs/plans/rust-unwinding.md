@@ -1,5 +1,11 @@
 # Native Rust unwinding required by rust-analyzer
 
+Complete and gated on 2026-09-10. The release developer image now uses the
+unwinding-enabled analyzer; the packaged SSH workflow, a fresh console run,
+and the full release developer-image suite pass. Initial loading/indexing
+must finish before semantic navigation; the first compiler check alone does
+not establish readiness.
+
 ## Evidence and authorization
 
 The 2026-09-10 Helix failure is an ordinary Salsa cancellation compiled for
@@ -122,3 +128,66 @@ as well as a completed check, before semantic assertions. A host regression
 tests initial project-only scans, reloads, active indexing, and partial logs.
 The original 60-second observation and 20-second response bounds are unchanged;
 the semantic request is issued once, after readiness, rather than retried.
+
+## Final packaged validation
+
+The clean assembly is
+`f64cef43ac5451f87829bf0c45595b2d44ae1ae83eb25671161ce1707019abcc`,
+with recipe `motor-native-rust-analyzer-v2-unwind`, produced at `a4d3f412`.
+The installed host toolchain remains
+`50df587e90f781a28d420f9b5e47135ea78508dd83bdac9f487a410fcd330500`.
+The complete build log is `/tmp/motor-helix-unwind-packaged-build.log`.
+
+`src/tests/full-test-dev.sh --release` passes completely:
+`/tmp/motor-helix-unwind-full-dev-release.log`. This includes the repository
+suite, native dependency and cancellation regressions, the actual Helix
+workflow, native developer-source builds, and the complete Lorry product
+suite (513 seconds; native self-build gate 259.928 seconds). No test retries,
+deadline extensions, or resource-limit increases were used to obtain this
+pass. The repair changes no production `src/sys` code; the earlier child-pipe
+patch's six core gates remain recorded in the integration plan.
+
+Packaged Helix evidence is `/tmp/motor-helix-lsp.viKpQf/`. Its
+`shipped-project.log` records opening the file after empty startup, editing
+during loading, then one definition response pointing to
+`file:///devtools/src/helix-rust-demo/src/greeting.rs`, line 2, column 11.
+Hover, completion, saved diagnostics and clearing, Motor std navigation, and
+shutdown all pass using the default packaged configuration.
+
+The native analyzer's two-project case uses four CPUs and 8 GiB RAM. Evidence
+is `/tmp/motor-ra-native.4aUvWY/case/`; sizes are in
+`build/ra-image-growth.eGJJLs/sizes`.
+
+| Measurement | Observed | Existing bound |
+|---|---:|---:|
+| Complete native case | 26.552 s | 90 s |
+| Stripped server | 29,767,376 bytes | 32 MiB |
+| Rust sources | 71,952,945 bytes | 80 MiB |
+| Fresh image growth | 121,896,960 bytes | 128 MiB |
+| Sampled server virtual memory | 914,612,224 bytes | 2 GiB |
+| Server threads | 26 | 32 |
+| Sampled whole-VM physical memory | 1,369,657,344 bytes | 3 GiB |
+
+String hover took 916.5 ms; completion 1.37 ms; saved-error checking 1.752 s;
+clearing 1.728 s; shutdown 192.5 ms. These remain measurements, not extra
+thresholds. The new runtime test also passes host Clippy with warnings denied.
+
+After the gate, a refreshed image was copied and booted on the serial console
+with eight CPUs and 8 GiB RAM. Empty `hx`, `:o src/main.rs`, and a single `gd`
+on `ANSWER` after loading opened `greeting.rs:2:11`. The actual response is
+in `/tmp/motor-helix-unwind-final-console-lsp.log`; the terminal recording is
+`/tmp/motor-helix-unwind-final-console.log`. Shutdown/exit completed and no
+analyzer process remained. The final image refresh also corrects the shipped
+guide to wait for source loading/indexing (the LSP spinner), not merely the
+first compiler check. Refresh evidence is `/tmp/motor-helix-unwind-final-image.log`.
+
+The original reported disk is preserved as
+`vm_images/release/motor-os-dev-user-reported-20260910.qcow2`; the reproduction
+overlay points to that backup. The final delivered image is
+`vm_images/release/motor-os-dev.qcow2`, booted with `vm_images/release/run-dev.sh`.
+
+Repair commits: `63b92a79` (diagnosis/plan), `fd5176dc` (private unwinding build
+and native regression), `559830f9` (reported editor workflow), `468814d2`
+(bounded binary size and dependency provisioning), and `a4d3f412` (readiness
+regression and corrected integration records), followed by this validation
+and shipped-guide update.

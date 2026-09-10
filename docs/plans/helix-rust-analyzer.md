@@ -1,19 +1,18 @@
 # Native Helix and rust-analyzer integration
 
-Reopened after the user's 2026-09-10 report: starting `hx` without a filename,
-opening the packaged `src/main.rs`, and using `gd` on `ANSWER` eventually
-reports "No definition found." The previous acceptance opened a copied file
-on the command line and waited for flycheck before hover/navigation. Reproduce
-the reported startup path on a preserved image, inspect the actual LSP exchange,
-repair the diagnosed defect, and add coverage without widening timeouts. The
-original authorization to record stop conditions and continue remains in force.
+Resolved after the user's 2026-09-10 report: starting `hx` without a filename,
+opening the packaged `src/main.rs`, and using `gd` on `ANSWER` previously
+reported "No definition found." Salsa cancellation was aborting the server.
+The repaired developer image passes this workflow on both SSH and the console,
+including edits during loading, and passes the full release developer gate.
+The original authorization to record stop conditions and continue covered the
+investigation and private analyzer-library repair.
 
-The preserved user image reproduces the server exit both on the console and
-through SSH with 8 GiB RAM, including a copied project. A temporary launcher
-captures exit status `-1` without a panic message. Add temporary, fault-only
-exit-stack reporting under `src/sys/kernel` in a separate diagnostic image to
-identify the caller; retain the user's disk and remove that instrumentation
-before production changes or commits. No external sources are being edited.
+The preserved user image reproduced the exit on the console and SSH with
+8 GiB RAM. Temporary exit-stack reporting in a separate diagnostic kernel
+identified `resume_unwind` reaching the abort-only Rust runtime. That kernel
+instrumentation was removed before production changes or commits. The user's
+disk is preserved; the managed Rust and Helix checkouts remain unchanged.
 
 The initial acceptance was recorded as complete on 2026-09-10, but the user's
 report invalidated that conclusion. The recorded serial editor sequence did
