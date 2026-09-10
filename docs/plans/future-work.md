@@ -1,5 +1,62 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Deferred filesystem flush race (2026-09-09)
+
+Fix after merging the pending filesystem branch, per maintainer direction.
+Recheck the proposed change against that branch before implementing it.
+
+`motor-fs` can acknowledge an explicit flush before committing all preceding
+writes. This is a preexisting production race, shared by the host Tokio and
+Motor OS runtime paths, not an allocator-test defect. During kernel allocator
+validation, the existing host test `tests::resize_truncate_crash_regrow`
+failed with `InvalidData`: main transaction 12 versus logged transaction 11.
+The failure preceded the main VM boot; guest allocator code was not running.
+
+Cause in `src/sys/lib/motor-fs/src/txn_log.rs`: the timeout task takes the
+pending batch out of its shared holder before sending it to the committer.
+An explicit `Flush` can already be queued ahead of that batch. The committer
+then sees an empty holder, flushes earlier device writes, and acknowledges
+the caller; the timeout-owned batch commits afterward. A caller that drops
+and reopens the filesystem after the acknowledgment can overlap that commit.
+`BlockCache::new` reads the pinned log blocks before the main superblock, so
+the reopened cache can combine the previous log with the new superblock.
+
+Temporary ordering logs on the existing concurrent filesystem suite captured
+this sequence for the failing crash/regrow case (capacity 1):
+
+1. Explicit flush requested with transaction 12, four blocks pending.
+2. Timeout takes transaction 12 and queues its batch behind `Flush`.
+3. Committer handles `Flush` with an empty transaction-13 holder and
+   acknowledges completion.
+4. Committer only now consumes transaction 12; the test concurrently reopens
+   and rejects main transaction 12 versus logged transaction 11.
+
+Both preserved disk images had matching transaction-12 headers by the time
+they were copied: the later commit completed, but the reopening cache had
+already observed inconsistent generations. A later consistent image does
+not disprove the race.
+
+Proposed fix: timeout tasks enqueue a transaction-ID-tagged request without
+taking the batch. Only the committer handles that request by checking and
+taking the matching pending batch. This keeps timeout ownership changes
+ordered with explicit flushes. Preserve stale-ID checks, error propagation,
+and the rule that no holder borrow spans an await. Do not mask the defect
+with a longer timer or a reopen retry.
+
+Validation: from `src/sys/lib/motor-fs`, run
+`cargo test --features image-admin` in debug and release; the crate-local
+Cargo configuration supplies `tokio_unstable`. These existing tests are
+already part of `src/tests/full-test.sh`; the eventual production fix also
+needs the normal core-OS gate. No new reproducer or test workaround was added.
+All temporary source logging has been removed. Original failures, ordering
+traces, diagnostic patch, and disk images are retained on the development
+host under `/tmp/kernel-phys-host-shutdown.9ox3kE/` (`DIAGNOSIS.md` indexes them).
+
+This establishes the filesystem test failure's cause, not the earlier quiet
+VM exit during pressure. That separate unresolved finding and its evidence
+remain in [the allocator plan](kernel-phys-mem.md). Kernel validation resumes
+with this filesystem fix explicitly deferred; no test is skipped or weakened.
+
 ## Open bugs from the 2026-08-28/29 performance run (address soon)
 
 Found while reviewing file I/O and the async runtime; the run's report
