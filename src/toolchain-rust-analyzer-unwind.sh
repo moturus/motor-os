@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Salsa cancels analyses with resume_unwind, even without a user-code panic.
 
+toolchain_fetch_rust_analyzer_library() {
+	local rust="$1" prefix="$2"
+	# Provision all locked platforms: Xous already locks the pure Rust unwinder.
+	# This acquisition step is separate from offline builds and regular tests.
+	RUSTC="$prefix/bin/rustc" "$prefix/bin/cargo" fetch --locked \
+		--manifest-path "$rust/library/Cargo.toml"
+}
+
 toolchain_prepare_rust_analyzer_library() (
 	set -euo pipefail
 	local source="$1" destination="$2" helpers

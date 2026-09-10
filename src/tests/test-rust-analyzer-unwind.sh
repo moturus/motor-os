@@ -16,6 +16,7 @@ if toolchain_prepare_rust_analyzer_library "$source" "$temporary/library" 2>/dev
 fi
 assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
 __CARGO_TESTS_ONLY_SRC_ROOT="$temporary/library" \
+CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
 CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="${assembly_images%/images}/sysroot/bin/motor-clang" \
 CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS="$(toolchain_rust_analyzer_unwind_flags)" \
 	"$cargo" build --release --locked --offline --target x86_64-unknown-motor \

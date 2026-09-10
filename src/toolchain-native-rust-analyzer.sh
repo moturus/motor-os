@@ -86,6 +86,7 @@ toolchain_build_native_rust_analyzer() (
 	toolchain_prepare_rust_analyzer_library "$rust/library" "$unwind_root/library" || exit 1
 	(cd "$rust/src/tools/rust-analyzer" && \
 		RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" \
+		CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
 		__CARGO_TESTS_ONLY_SRC_ROOT="$unwind_root/library" \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$ASSEMBLY_SYSROOT/bin/motor-clang" \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS="$(toolchain_rust_analyzer_unwind_flags)" \

@@ -97,3 +97,28 @@ about 4.6 MiB of exception tables and 3.4 MiB of cleanup-capable machine code.
 Investigate ThinLTO before accepting the final build. The size, memory, image
 growth, and timing limits remain unchanged. Incomplete assemblies from recipe
 development are not selected or reused as validated artifacts.
+
+ThinLTO increased the stripped prototype to 40,221,936 bytes and was rejected.
+Release `opt-level=s`, without ThinLTO, produces 29,772,208 bytes: below the
+unchanged 32 MiB bound and only 526,680 bytes larger than the abort-only server.
+Apply that profile only to the native analyzer and its runtime regression.
+The full native semantic/resource gate must still establish that this code
+generation choice meets the existing latency and memory limits. Evidence:
+`/tmp/motor-helix-unwind-ra-{thin,size}-build.log` and the corresponding
+stripped binaries under `build/helix-unwind/`.
+
+Provisioning explicitly fetches the selected library lock's dependencies for
+all platforms, including the existing Xous unwinder dependency. This avoids
+depending on a warm Cargo cache. The native build and its tests remain offline;
+acquisition failure is fatal and the original library lock stays unchanged.
+
+The size-optimized runtime regression passes. Its first editor run exposed a
+preexisting test readiness error: the first flycheck can finish before source
+loading/indexing. The server stayed alive and returned null to hover in 3 ms;
+it completed loading about four seconds later. Evidence is
+`/tmp/motor-helix-unwind-size-hover-failure.log`. The editor helper now observes
+completion of the project and std source scan and all active progress work,
+as well as a completed check, before semantic assertions. A host regression
+tests initial project-only scans, reloads, active indexing, and partial logs.
+The original 60-second observation and 20-second response bounds are unchanged;
+the semantic request is issued once, after readiness, rather than retried.

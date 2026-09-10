@@ -106,6 +106,7 @@ printf 'set -ex\n' > "$library/backtrace/ci/host-only.sh"
 chmod 755 "$library/backtrace/ci/host-only.sh"
 printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
 	'[ "$RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ]' \
+	'[ "$CARGO_PROFILE_RELEASE_OPT_LEVEL" = s ]' \
 	'[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER" = "$ASSEMBLY_SYSROOT/bin/motor-clang" ]' \
 	'[[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS" == "-C panic=unwind "* ]]' \
 	'[[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS" == *"--defsym=__GNU_EH_FRAME_HDR=ADDR(.eh_frame_hdr)" ]]' \
@@ -163,4 +164,14 @@ for failure in BUILD_FAIL STRIP_FAIL LIBRARY_LOCK_FAIL; do
 		[ -z "$(ls -A "$ASSEMBLY_IMAGE_ROOT")" ] || fail 'left temporary overlay'
 	fi
 done
+export NATIVE_LIBRARY_MANIFEST="$rust/library/Cargo.toml"
+printf '%s\n' '#!/usr/bin/env bash' 'set -e' '[ "${FETCH_FAIL:-0}" = 0 ] || exit 7' \
+	'[ "$RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ]' \
+	'[ "$*" = "fetch --locked --manifest-path $NATIVE_LIBRARY_MANIFEST" ]' \
+	> "$TOOLCHAIN_PREFIX/bin/cargo"
+toolchain_fetch_rust_analyzer_library "$rust" "$TOOLCHAIN_PREFIX"
+export FETCH_FAIL=1
+if toolchain_fetch_rust_analyzer_library "$rust" "$TOOLCHAIN_PREFIX"; then
+	fail 'library source acquisition failure was ignored'
+fi
 echo 'test-toolchain-native-rust-analyzer PASS'
