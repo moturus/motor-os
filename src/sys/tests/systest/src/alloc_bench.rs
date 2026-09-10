@@ -177,6 +177,56 @@ fn cross_thread(steps: usize) {
     );
 }
 
+/// Immediate alloc+free of one fixed size on `threads` threads: the pure
+/// fast path, and for 4 KiB the class above the private-block threshold.
+fn immediate_fixed(threads: usize, size: usize, steps: usize) {
+    let t = Instant::now();
+    let hs: Vec<_> = (0..threads)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let l = Layout::from_size_align(size, 8).unwrap();
+                for _ in 0..steps {
+                    let p = unsafe { System.alloc(l) };
+                    assert!(!p.is_null());
+                    unsafe { p.write(1) };
+                    black_box(p);
+                    unsafe { System.dealloc(p, l) };
+                }
+            })
+        })
+        .collect();
+    for h in hs {
+        h.join().unwrap();
+    }
+    let ns = t.elapsed().as_nanos() as f64;
+    println!(
+        "immediate fixed {size:>4}B threads={threads} {:>8.1} ns/op per thread",
+        ns / steps as f64
+    );
+}
+
+/// A FIFO queue of `depth` live 64-byte objects: allocate at the head, free
+/// the oldest. Every free lands in a block filled `depth` allocations ago.
+fn fifo(depth: usize, steps: usize) {
+    let l = Layout::from_size_align(64, 8).unwrap();
+    let mut q: std::collections::VecDeque<*mut u8> =
+        (0..depth).map(|_| unsafe { System.alloc(l) }).collect();
+    let t = Instant::now();
+    for _ in 0..steps {
+        let old = q.pop_front().unwrap();
+        unsafe { System.dealloc(old, l) };
+        let p = unsafe { System.alloc(l) };
+        assert!(!p.is_null());
+        unsafe { p.write(1) };
+        q.push_back(p);
+    }
+    let ns = t.elapsed().as_nanos() as f64;
+    for p in q {
+        unsafe { System.dealloc(p, l) };
+    }
+    println!("fifo depth={depth:<6} 64B {:>8.1} ns/op", ns / steps as f64);
+}
+
 pub fn run() {
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     println!("alloc-bench: {cpus} cpus");
@@ -184,9 +234,13 @@ pub fn run() {
         retained(live, false);
     }
     retained(65_536, true);
+    immediate_fixed(1, 64, 2_000_000);
+    immediate_fixed(cpus, 64, 2_000_000);
+    immediate_fixed(cpus, 4096, 500_000);
     for t in [1usize, 2, cpus] {
         immediate(t, 500_000);
     }
+    fifo(64, 2_000_000);
     for t in [1usize, cpus] {
         ring(t, 4096, 300_000);
     }
