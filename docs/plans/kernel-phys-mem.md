@@ -20,13 +20,21 @@ Implementation status (2026-09-09): P-1's boot-heap alignment fix is in
 contiguous mapping and failure rollback. Both P0b snapshots passed the
 common gate and launcher matrix, including Firecracker at 64 MiB; these were
 functional checks, not controlled boot-time measurements. Checked copy-in is
-in `ba6da613`. P0c's direct-map consumer lifetime fix is implemented and passed
+in `ba6da613`. P0c's direct-map consumer lifetime fix is in `56e66622` and passed
 the common gate: three debug, three release and one release developer-image
 run, without test retries or temporary probes. That exact source snapshot also
 included the native-driver test cleanup (`d2aef7fd`) and the separately reviewed
-spin-source lifecycle fix (`ec28676d`). Production still uses the old allocator;
-P1a1's core has only been exercised as a draft in an isolated native boot.
-Block allocator and huge-page changes are not committed.
+spin-source lifecycle fix (`ec28676d`). P1a1's ownership core and deterministic
+scratch tests are now implemented locally, with the approved debug-only hook
+in ordinary boots. Strict kernel Clippy passes in both profiles. With the
+separate timestamp self-test correction described below, the unchanged kernel
+candidate passed the common gate: three consecutive debug runs, three release
+runs and one release developer-image run, including native source builds and
+the bundled Lorry suite. No retries or temporary source probes were used in
+that sequence. P1a1 is implemented and reviewed; production
+still uses the old allocator. P1a2 and huge-page changes are not installed.
+The earlier unexplained pressure exit remains recorded below, not resolved by
+these later passes. Review precedes further implementation.
 
 Residual diagnostic history: P0c's original third debug gate exited during
 pressure without a recorded cause; the failed image had 193 MiB free. A later
@@ -39,6 +47,46 @@ The passing common gate does not establish the original pressure exit's cause
 or relation to P0c. Original failures and before/after evidence are preserved
 under `/tmp/kernel-user-page-pin.DtyP1d`, `/tmp/kernel-failure-cause.C67ZxC`,
 and `/tmp/spin-source-lifecycle.vcaNn7` on the development host.
+
+P1a1's new failure stopped timestamped guest output at 66.84 s, during the first
+pressure episode, with 193.6 MiB disk space free and before the harness deadline.
+The final shutdown line has no timestamp. QEMU exited
+while systest's SSH session was still waiting; its later termination was
+cleanup, not the initiating cause. Temporary service-exit/admission probes,
+a shutdown-only fixed journal, and debugger observations of the uninstrumented
+candidate have not caught another unexpected exit. Later debug and release
+diagnostic passes do not resolve this failure or count toward acceptance.
+The initiating caller/status remains unknown; a console/service-exit cascade
+or privileged shutdown is not yet established. All source probes are removed.
+Evidence and run-by-run notes are under `/tmp/kernel-phys-p1a1-gate.FtzLmO`.
+A separate preexisting SSH test-capture defect (stderr could split its expected
+stdout line) is fixed in `4265358e`, with debug/release component checks passing.
+
+A later diagnostic also exposed a preexisting transaction-logger race in the
+host `motor-fs` suite: explicit flush can acknowledge before a timeout-owned
+batch commits. The existing crash/regrow test reproduced it with ordering
+traces; the diagnosis and proposed correction are recorded in
+[future-work.md](future-work.md#deferred-filesystem-flush-race-2026-09-09).
+Temporary logs are removed. The maintainer has deferred its separate production
+fix until after merging the pending filesystem branch and requested continued
+kernel validation without skipping or weakening tests. It is not established
+as the cause of the earlier quiet VM exit.
+
+Renewed uninstrumented validation passed one full debug run, then failed in
+sys-io's existing timestamp self-test, after both pressure checks passed. Its
+unsigned comparison of two offset estimates rejects a valid millisecond
+boundary; it also assumes the separate clock reads cannot be preempted for
+longer. A separate, local test-only correction brackets the timestamp read
+with uptime readings and checks the actual interval and offset stability.
+Production clock behavior is unchanged. The original failure and diagnosis
+are retained under `/tmp/kernel-phys-resumed-gate.jzP5OI`; the fresh common gate
+with that correction passed under `/tmp/kernel-phys-clock-test-gate.yS7I2b`.
+All three debug runs passed the block-core scratch suite and all 63 sys-io
+self-tests. The correction is in `584e873c`. Strict sys-io
+Clippy additionally reported existing lints in untouched code, none in the
+corrected test; strict kernel Clippy passed with warnings denied in both
+profiles. Tested source hashes and complete gate results are retained with
+the logs. The findings-only commit `91eadfe2` did not change the tested code.
 
 ## Requirements and scope
 

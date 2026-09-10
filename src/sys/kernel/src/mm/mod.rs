@@ -7,6 +7,8 @@ mod cache;
 pub mod kheap;
 pub mod mmio;
 pub mod phys;
+#[allow(dead_code)] // P1b wires the block allocator into production.
+pub(crate) mod phys_blocks;
 mod slab;
 pub mod user;
 pub mod virt;
