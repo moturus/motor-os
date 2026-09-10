@@ -66,6 +66,16 @@ once at initialization for all slabs and reached through one pointer in
 `Frusa`. A thread counts itself in the shard the caller names, normally its
 CPU, so readers on different CPUs never write the same line.
 
+Free lists: `SHARDS` lists per data slab (`ShardList`, one cache line each:
+a spinlock, a head pointer, and a count), allocated at initialization
+beside the reader shards. A list holds slots of its class that were freed
+by a thread on that shard and are marked in use in their blocks. The list
+runs through the slots themselves: word 0 is the next slot's address XOR
+the slot's own address shifted right by 12, so a stale or overwritten link
+rarely decodes to a usable pointer and a misaligned one panics; word 1 is
+the list's key, which flags a double free. A list holds at most
+`min(64, 16 KiB / slot size)` slots; classes above 16 KiB keep none.
+
 Invariants:
 
 - Index: entries `[0, index_len)` are live descriptors of this slab in
@@ -80,19 +90,26 @@ Invariants:
   therefore every holder of `partial_lock`.
 - Ownership: a block with a non-null `owner` is off the stack, is allocated
   from only by its owner, and is never reclaimed.
+- Free lists: a listed slot's bit is set in its block, so the block is
+  neither reclaimed nor handed out twice; a list is read and written only
+  under its own lock, except the head, which is read without it as a hint.
 
 The stack head is never updated by CAS, so there is no ABA hazard, and
-descriptors cannot be freed while any thread holds the read guard.
+descriptors cannot be freed while any thread holds the read guard. The
+lists have no ABA hazard either: they are mutated only under their lock.
 
 ## 3. Locks and ordering
 
 | Path | Locks, in order |
 |---|---|
 | Shared allocation | read guard, then `partial_lock` |
-| Free | read guard, then `partial_lock` only on a full-to-non-full transition |
-| Cached allocation from a private block | read guard |
+| Free through the slab | read guard, then `partial_lock` only on a full-to-non-full transition |
+| Cached allocation from a private block | none |
+| Cached allocation or free through a list | the list's lock alone, tried once |
 | Cached allocation that takes a block from the stack | read guard, then `partial_lock` |
+| Cached allocation that takes from another shard's list | the list's lock alone, tried once, no guard held |
 | Growth, link step | write guard alone |
+| Reclaim, drain step | each list's lock in turn, then the slab free path |
 | Reclaim, detach step | write guard alone, try-only, skip if busy |
 | Metadata slab | the same table with its own guard and lock |
 
@@ -100,7 +117,10 @@ The read guard means "descriptors and the index are stable"; the write
 guard means "nobody else is in this slab". A reader that finds a writer
 pending backs off instead of joining, so a draining writer sees the counts
 reach zero. A write guard is never requested while holding a read guard or
-`partial_lock` of the same slab. Hot paths never spin on a growth lock.
+`partial_lock` of the same slab. A list lock is only ever tried, never spun
+on, and is never held while any other allocator lock is taken, so a busy
+list costs its caller one tier, never a wait. Hot paths never spin on a
+growth lock.
 
 ## 4. Paths
 
@@ -110,8 +130,9 @@ reach zero. A write guard is never requested while holding a read guard or
 has no free slot, and the caller grows. Otherwise take `partial_lock`, claim
 the lowest free slot of the top block with a bitmap compare-and-swap loop
 (a CAS that loses to a concurrent free retries), pop the block if it became
-full, release. `alloc_from_slab` wraps this in the read guard, using shard
-zero, and grows on null.
+full, release. `alloc_from_slab` wraps this in the read guard, using the
+caller's shard, then tries the other shards' free lists, and grows only
+when those are empty too.
 
 ### 4.2 Free
 
@@ -140,9 +161,10 @@ may both grow, and the loser gives its batch back.
 
 ### 4.4 Reclaim
 
-`reclaim()` walks every data slab; metadata pages are never returned. A
-slab with less than a page of slack, or with another writer active, is
-skipped. Under the write guard, every batch whose blocks are all empty and
+`reclaim()` walks every data slab; metadata pages are never returned. For
+each slab it first drains the class's free lists, so that listed slots
+return to their blocks and count as free. A slab with less than a page of
+slack, or with another writer active, is skipped. Under the write guard, every batch whose blocks are all empty and
 unowned is detached from the batch list and the index and stack are rebuilt
 from the survivors (the index by `sort_unstable_by_key`). After the guard,
 the detached data goes back to the backend and the descriptors to the
@@ -174,24 +196,38 @@ the guard shard index. The caller owns it and passes it to `alloc_cached`,
 `dealloc_cached`, `realloc_cached`, and `release_cache`; the `GlobalAlloc`
 implementation is the shared path.
 
-Allocation: under the read guard, claim a slot of `current[class]` with the
-bitmap CAS. On a full or missing block, give up ownership (clear `owner`
-with a swap, push the block if it has a free slot), pop a block from the
-stack under `partial_lock` with `owner` set to this cache, and retry; grow
-when the stack is empty. Only classes up to `CACHED_MAX_LOG2` (2 KiB) are
-cached, so an idle thread holds at most 255 KiB; larger classes use the
-shared path.
+Allocation, in tiers: claim a slot of `current[class]` with the bitmap CAS
+and no guard (an owned block is never reclaimed and descriptors never
+leave the metadata slab); a full block is given up under the guard. Then
+pop the free list of the caller's shard. Then, under the guard, pop a block
+from the stack under `partial_lock` with `owner` set to this cache, and
+retry. Then, with no lock held, take from the other shards' lists in turn.
+Only then grow. Classes above `CACHED_MAX_LOG2` (2 KiB) have no private
+block: their tiers are the shard's list, the shared path, the other lists,
+growth. A listed slot is served as is; every slot of class `k` is
+`2^k`-aligned, so any layout that maps to the class fits.
 
-Free: if the pointer lies in the thread's current block of that class, flip
-the bit and return; the block is owned, so its descriptor is stable and no
-guard is needed, and it is never full here. Otherwise `dealloc_to_slab`
-with the cache's shard. A free into a block another thread owns just flips
-the bit; the owner sees the slot on its next allocation. The release re-check
-and the free's owner check both use sequentially consistent operations, so a
+Free, in tiers: if the pointer lies in the thread's current block of that
+class, flip the bit and return, one locked instruction and the slot is the
+thread's next allocation; the block is owned, so its descriptor is stable
+and no guard is needed, and it is never full here. Otherwise push the slot
+on the shard's list if the list is below its limit and not busy; the slot
+stays marked in use, so nothing shared changes, whichever block and thread
+it came from. Otherwise `dealloc_to_slab` with the cache's shard. A free
+into a block another thread owns that reaches the slab just flips the bit;
+the owner sees the slot on its next allocation. The release re-check and
+the free's owner check both use sequentially consistent operations, so a
 remote free that lands while a block is being released is never lost.
 
+Memory on a list is reachable from every thread: the tier before growth
+scans the other shards, and reclaim drains every list of a class before it
+looks for empty batches. So the lists pin nothing the way a per-thread
+cache would, and a process at its admission floor finds what another
+thread freed before it asks the backend.
+
 `release_cache` gives every private block back; the cache may be used again
-afterwards.
+afterwards. Listed slots need no release: they belong to the shard, not
+the thread.
 
 vDSO wiring (`rt.vdso`): the runtime's per-thread block, reached through
 the `tls` word of the thread control block with one `rdfsbase`, holds the
@@ -218,7 +254,8 @@ per free, stack entries examined per allocation), never with wall-clock
 time.
 
 `systest alloc-bench` prints per-workload timings on Motor for retained
-populations, immediate alloc/free, rings of live objects, and a
+populations, immediate alloc/free of one fixed size and of random sizes,
+the 4 KiB class on every CPU, a FIFO queue, rings of live objects, and a
 producer/consumer pair. A host harness with the same workloads compares the
 crate's shared and cached paths against glibc over a common page backend;
 it lives outside the repository.
@@ -275,11 +312,20 @@ The costs, each confirmed with a variant build or the instruction stream:
    Searching an array of addresses instead of descriptor pointers brings it
    to 139 ns; at 262K it is worth 13 percent.
 
-A prototype of the per-thread free lists below, in front of the cached
-path with 32 entries per class, measured 3 to 5 ns on the immediate
-workloads, 4 ns on FIFO, 21 ns on the ring at 1 thread and 23 ns at 8, and
-3 ns for 4 KiB at 8 threads: at or below glibc on every row. A limit of 7
-per class leaves the 8-thread ring at 72 ns; 256 gives 21 ns.
+A prototype of per-thread free lists in the style of glibc's tcache, in
+front of the cached path with 32 entries per class, measured 3 to 5 ns on
+the immediate workloads, 4 ns on FIFO, 21 ns on the ring at 1 thread and
+23 ns at 8, and 3 ns for 4 KiB at 8 threads: at or below glibc on every
+row. It was implemented, passed the crate suite and five gate runs, and
+then failed `test_aggregate_listener_exhaustion`: a flood child at the
+admission floor died on a 2 KiB-class allocation inside the vDSO. Objects
+the main thread allocates and the IO runtime thread frees sat on the IO
+thread's list instead of returning to the main thread's block, so the main
+thread had to grow at the floor. The test's contract, that a process at the
+floor cannot grow its heap, is a real requirement for admission-limited
+processes, and any cache that keeps another thread's frees breaks the
+margin; glibc avoids this case only by not caching sizes above 1 KiB.
+That is why C below shards the lists by CPU instead.
 
 ### 7.2 Changes
 
@@ -301,33 +347,33 @@ only; the descriptor is loaded once, after the search. Growth, rebuild,
 and replacement maintain both halves. The synthetic slab fixture in the
 tests allocates both halves.
 
-**C. Per-thread free lists.** The idea of glibc's tcache, in front of the
-private blocks: `ThreadCache` gains a singly linked list of free slots per
-class with a count. The link lives in the freed slot itself, which is at
-least 16 bytes, encoded as `next ^ (slot >> 12)` so a stale or corrupted
-link is unlikely to decode to a usable pointer; a decoded link that is not
-aligned to the class's slot size panics.
+**C. Free lists sharded by CPU.** Per class, `SHARDS` lists on their own
+cache lines, indexed by the shard the cache already carries (the thread
+control block's `current_cpu`), each guarded by a spinlock that is only
+ever tried: a busy list is skipped and the caller uses its next tier. The
+structure is described in §2 and the tiers in §5.
 
-- Allocation pops the list first; on an empty list, the private block; then
-  the shared path. A popped slot is served as is; every slot of class `k`
-  is `2^k`-aligned, so any layout that maps to the class fits.
-- Free pushes when the list is below its limit, whatever block the slot
-  belongs to and whichever thread allocated it; otherwise the existing
-  path (current block, then the slab). A slot on a list stays marked in use
-  in its block, so no block state changes and reclaim leaves its batch
-  alone until the slot returns.
-- The limit per class is `min(64, 16 KiB / slot size)`: 64 entries for
-  classes up to 256 B, then 32, 16, 8, and 4 for 4 KiB; 2 and 1 for the 8
-  and 16 KiB classes of Frusa2M and none above. An idle `Frusa4K` thread
-  holds at most 95 KiB on its lists.
-- `release_cache` returns every listed slot through the slab path before
-  it releases the private blocks. Same-class `realloc_cached` is unchanged.
-- Tests: LIFO reuse with no stack entry examined and no probe; the limit
-  per class, with the overflow reaching the block; class isolation and
-  alignment of served slots; a cross-thread free landing on the freeing
-  thread's list; reclaim leaving a batch alone while its slots are listed
-  and freeing it after release; a corrupted link panicking; Frusa2M's
-  large classes keeping no list.
+- A list push and pop each cost one locked instruction plus a few loads and
+  stores, more than the bitmap's single locked bit flip, so the private
+  block stays first on both paths and the lists serve what it cannot: frees
+  of older objects, of other threads' objects, and of the 4 KiB class,
+  which has no private block. The temporaries path is unchanged.
+- A slot on a list stays reachable: an allocation that finds its own list
+  empty, its private block gone, and the stack empty takes from the other
+  shards' lists before it grows, and reclaim drains every list of a class
+  before it looks for empty batches. A per-thread list cannot offer either.
+- The limit per list is `min(64, 16 KiB / slot size)`: 64 for classes up to
+  256 B, then 32, 16, 8, and 4 for 4 KiB; 2 and 1 for the 8 and 16 KiB
+  classes of Frusa2M and none above. Listed slots count as in use in
+  `stats()` until reclaim drains them.
+- Tests: LIFO reuse from a list with no guard, stack entry, or probe; the
+  limit per class, with the overflow reaching the block; class isolation
+  and alignment of served slots; a slot freed on one shard taken on
+  another when the backend refuses growth, and only then a null; reclaim
+  draining the lists and returning the batch; a busy list skipped by both
+  paths; a double free and a corrupted link panicking; Frusa2M's large
+  classes keeping no list; the guard-count test of A with frees into the
+  current block still guard-free and list-free.
 
 Not in this plan, recorded for later: requests above 4 KiB are a
 `SysMem::alloc` and `SysMem::free` pair each on Motor, where glibc serves
@@ -342,21 +388,25 @@ free list.
 
 ### 7.3 Patches and gates
 
-Three patches in the order A, B, C, each 100 to 300 lines including tests.
-Each passes the crate's suite in both profiles, is Clippy clean and
-formatted with the repository toolchain, and passes `src/tests/full-test.sh`
-three times in debug and three times in release before it is committed. No
-runtime change is needed: the vDSO already calls `release_cache` at thread
-exit and the cache type grows in place. The plan ends with the §7.1 table
-rerun on the host with the new crate as an added column.
+Three patches in the order A, B, C. A and B are within 100 to 300 lines
+including tests; C is about 400 because the list module is dead code
+without its wiring and half of it is tests. Each passes the crate's suite
+in both profiles, is Clippy clean and formatted with the repository
+toolchain, and passes `src/tests/full-test.sh` three times in debug and
+three times in release before it is committed. No runtime change is
+needed: the caches are unchanged and the lists live in the allocator.
+`systest alloc-bench` gains the host harness's fixed-size, per-CPU, and
+FIFO rows in a patch of its own, so the Motor and host tables line up. The
+plan ends with the §7.1 table rerun on the host with the new crate as an
+added column, and the same rows measured on Motor (§7.5).
 
 ### 7.4 Risks
 
-- **Memory pinned by idle threads** rises from the private blocks' 255 KiB
-  worst case by up to 95 KiB of listed slots per thread, and those slots
-  block reclaim of their batches. Bounded by the limits above; the vDSO's
-  reclaim resident cannot flush another thread's list, which is the
-  documented limitation.
+- **Memory held on lists** is at most 16 KiB per list per class, 9 KiB of
+  list headers per `Frusa4K` instance, and is never pinned: every thread
+  can take it before growing, and reclaim drains it. Between reclaims,
+  `stats()` reports listed slots as in use, so the reclaim resident sees
+  less slack than there is; it drains on its next pass.
 - **Free-list corruption** by a use-after-free write is the classic attack
   on this structure. The link encoding and the alignment check make it
   detectable rather than silent; the bitmap remains the ground truth.
@@ -365,3 +415,55 @@ rerun on the host with the new crate as an added column.
   release path still takes the guard.
 - **Index memory** doubles per block (16 bytes per 64 slots). The first
   page per slab is unchanged.
+
+### 7.5 Results
+
+Host, the harness of §6, nanoseconds per alloc+free pair, one thread
+unless noted. "Before" is the crate as it was on 2026-09-09, then the tree
+after A and B, then after C.
+
+| Workload | glibc | before | A + B | A + B + C |
+|---|---:|---:|---:|---:|
+| fixed 64 B | 6 | 34 | 20 | 21 |
+| fixed 64 B, 8 threads | 10 | 51 | 19 | 19 |
+| fixed 4 KiB, 8 threads | 37 | 2,105 | 2,009 | 22 |
+| random 16 B to 4 KiB, 8 threads | 18 to 26 | 230 | 219 | 86 |
+| FIFO queue of 64 × 64 B | 7.5 | 92 | 89 | 25 |
+| ring of 4,096 live, random sizes, 1 thread | 49 | 96 | 94 | 43 |
+| ring, 8 threads, per thread | 55 | 680 | 532 | 123 |
+| free 262K × 64 B in random order, per free | 82 | 98 | 83 | 85 |
+| free 4M × 64 B in random order, per free | 216 | 216 | 139 | not rerun |
+
+Motor, `systest alloc-bench` on the release image, QEMU with 4 vCPUs on
+the same host, two runs each within 5 percent except where noted. The
+"before" column is the crate as it was before A, measured on 2026-09-08
+with the rows that existed then.
+
+| Workload | before | A + B | A + B + C |
+|---|---:|---:|---:|
+| free all, 65K retained, insertion order | 2.3 ms | 2.4 ms | 2.4 ms |
+| free all, 65K retained, random order | 5.5 ms | 4.9 ms | 4.7 ms |
+| fixed 64 B, 1 thread | – | 29 | 30 |
+| fixed 64 B, 4 threads, per thread | – | 29 | 30 |
+| fixed 4 KiB, 4 threads, per thread | – | 945 | 30 |
+| random 16 B to 4 KiB, 1 thread | 61 | 34 | 32 |
+| random, 2 threads, per thread | 119 | 59 | 33 to 41 |
+| random, 4 threads, per thread | 216 | 102 | 53 to 56 |
+| FIFO queue of 64 × 64 B | – | 97 | 31 |
+| ring of 4,096 live, 1 thread | 107 | 105 | 60 |
+| ring, 4 threads, per thread | 429 | 370 | 135 |
+| producer/consumer cross-thread pair | 87 | 82 | 80 to 100 |
+
+What the numbers say. A took the temporaries path from 34 to 20 ns on the
+host by removing the guard; on Motor that row is 29 ns, and the 9 ns above
+the host is the vDSO entry path (vtable call, layout re-validation, shard
+store), which is now the largest fixed cost per operation. C changed
+nothing on that row by design and took every other row down: the 4 KiB
+class by 30 to 90 times because it no longer serializes on one block, FIFO
+and ring by 3 to 4 times because a free of an older object is a list push
+instead of a guarded search, and the mixed-size multi-thread rows by 2 to
+3 times. glibc still leads on the temporaries row by three times, which
+is the two locked instructions of the bitmap path against none, and the
+lists cannot close that gap without the per-thread state that §7.1 shows
+breaking the admission contract. The remaining Motor-specific cost is the
+entry path; §7.2 lists it with the other follow-ups.
