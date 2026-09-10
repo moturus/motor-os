@@ -1369,3 +1369,51 @@ fn cached_realloc_keeps_the_slot_within_a_class() {
     let stats = frusa.stats();
     assert_eq!(stats.in_use, stats.in_use_metadata);
 }
+
+#[test]
+fn private_block_fast_paths_take_no_guard() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    // The first allocation takes a block from the stack under the guard.
+    let first = unsafe { frusa.alloc_cached(&cache, layout) };
+    let slab = frusa.inner.slab_for_sz(64);
+    let class = slab.table_idx as usize;
+    let block = cache.current[class].get();
+    assert!(!block.is_null());
+
+    // Every further allocation from the block, and every free back into
+    // it, touches nothing shared.
+    let before = crate::guards_taken();
+    let ptrs: Vec<*mut u8> = (0..Block::ENTRIES - 2)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    for ptr in &ptrs {
+        unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+    }
+    assert_eq!(
+        crate::guards_taken(),
+        before,
+        "guard taken on the fast path"
+    );
+    assert_eq!(cache.current[class].get(), block);
+
+    // Filling the block gives it up under the guard.
+    let fill: Vec<*mut u8> = (0..Block::ENTRIES - 1)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    assert!(cache.current[class].get().is_null());
+    assert!(crate::guards_taken() > before);
+    // A free into a block that is not current goes through the slab.
+    let before = crate::guards_taken();
+    unsafe { frusa.dealloc_cached(&cache, first, layout) };
+    assert_eq!(crate::guards_taken(), before + 1);
+
+    for ptr in fill {
+        unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+    }
+    frusa.release_cache(&cache);
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}

@@ -280,6 +280,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
     }
 
     fn read_lock(&self, slab: &Slab, shard: u32) {
+        guard_counted();
         slab.guard
             .read_lock(&self.shards_of(slab)[shard as usize % SHARDS]);
     }
@@ -425,15 +426,21 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     // ---- data slabs ----
 
+    /// One relaxed load on every allocation and free; initialization is
+    /// kept out of line so this inlines into the hot paths.
+    #[inline(always)]
     fn slabs(&self) -> &[Slab; SLABS] {
-        // First/fast path, do a relaxed load.
         let data_slabs = self.data_slabs.load(Ordering::Relaxed);
         let addr = data_slabs as usize;
         if addr != 0 && addr != LOCKED_MARKER {
             return unsafe { &*data_slabs };
         }
+        self.slabs_slow()
+    }
 
-        // If failed, do it properly.
+    #[cold]
+    #[inline(never)]
+    fn slabs_slow(&self) -> &[Slab; SLABS] {
         loop {
             let data_slabs = self.data_slabs.load(Ordering::Acquire);
             let addr = data_slabs as usize;
@@ -460,11 +467,11 @@ impl<const SLABS: usize> Frusa<SLABS> {
         if sz <= Self::MAX_SIZE { Some(sz) } else { None }
     }
 
-    fn alloc_from_slab(&self, slab: &Slab) -> *mut u8 {
+    fn alloc_from_slab(&self, slab: &Slab, shard: u32) -> *mut u8 {
         loop {
-            self.read_lock(slab, 0);
+            self.read_lock(slab, shard);
             let ptr = slab.alloc();
-            self.read_unlock(slab, 0);
+            self.read_unlock(slab, shard);
             if !ptr.is_null() {
                 return ptr;
             }
@@ -657,9 +664,22 @@ impl<const SLABS: usize> Frusa<SLABS> {
         };
         let slab = self.slab_for_sz(sz);
         if slab.entry_sz_log2 > Self::CACHED_MAX_LOG2 {
-            return self.alloc_from_slab(slab);
+            return self.alloc_from_slab(slab, cache.shard.get());
         }
         let class = slab.table_idx as usize;
+        // The fast path: the block is ours, so reclaim never touches it,
+        // and its descriptor never leaves the metadata slab. No guard.
+        let block = cache.current[class].get();
+        if !block.is_null()
+            && let Some((ptr, became_full)) = unsafe { (*block).alloc() }
+        {
+            if became_full {
+                self.read_lock(slab, cache.shard.get());
+                self.release_private(slab, cache, class);
+                self.read_unlock(slab, cache.shard.get());
+            }
+            return ptr;
+        }
         loop {
             self.read_lock(slab, cache.shard.get());
             let block = cache.current[class].get();
@@ -867,7 +887,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
 unsafe impl<const SLABS: usize> GlobalAlloc for Frusa<SLABS> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match Self::sz_from_layout(&layout) {
-            Some(sz) => self.alloc_from_slab(self.slab_for_sz(sz)),
+            Some(sz) => self.alloc_from_slab(self.slab_for_sz(sz), 0),
             None => unsafe { self.fallback_allocator.alloc(layout) },
         }
     }
@@ -911,11 +931,24 @@ pub(crate) fn stack_examined() -> usize {
     STACK_EXAMINED.with(|p| p.get())
 }
 
+#[cfg(test)]
+pub(crate) fn guards_taken() -> usize {
+    GUARDS_TAKEN.with(|p| p.get())
+}
+
 // Per thread, so tests running in parallel do not count each other's work.
 #[cfg(test)]
 std::thread_local! {
     static INDEX_PROBES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     static STACK_EXAMINED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    static GUARDS_TAKEN: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Test-only work counter: one read guard taken.
+#[inline(always)]
+fn guard_counted() {
+    #[cfg(test)]
+    GUARDS_TAKEN.with(|p| p.set(p.get() + 1));
 }
 
 #[inline(always)]
