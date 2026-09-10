@@ -120,6 +120,11 @@ PATH=/devtools/bin:/system/bin
 TMPDIR=/devtools/tmp
 ```
 
+An editor that owns a session terminal must additionally pass
+`MOTURUS_STDIO_NO_TERMINAL=true` when spawning its background server so the
+editor retains keyboard and Ctrl+C ownership. This launch instruction is
+consumed by Motor before rust-analyzer starts.
+
 For an admitted, trusted Lorry package, use:
 
 ```json
@@ -148,9 +153,39 @@ Native acceptance is integrated under the developer-image branch of
 `src/tests/full-test.sh`, reached by `src/tests/full-test-dev.sh --release`.
 The latter defaults to 8192 MiB for the repository-suite VM and retains
 4096 MiB for its separate developer-source phase; `MOTO_MEMORY_MIB` overrides
-both. The active [implementation plan](plans/rust-analyzer.md#433-formatter-publication-and-invocation-coverage)
-tracks the remaining keyed cutover, final gates, and queued string-hover issue;
-packaging alone is not a declaration that Stage 2 is complete.
+both. Native server acceptance is complete, including the string-hover case
+resolved by the allocator work recorded in the
+[implementation plan](plans/rust-analyzer.md#437-string-hover-investigation-allocator-scalability-review-stop).
+
+### Helix on the developer image
+
+Boot the release developer image with `vm_images/release/run-dev.sh`; this
+launcher provides 8 GiB of guest RAM by default. In Motor OS, `hx` uses the
+packaged native server configuration automatically. Try the dependency-free
+example, which requires no downloads:
+
+```sh
+cd /devtools/src/helix-rust-demo
+hx src/main.rs
+```
+
+After the initial project check, place the cursor on `ANSWER`: `Space k`
+shows documentation, `g d` opens its definition, and `Ctrl-o` returns.
+`Ctrl-x` requests completion in insert mode. Change the `answer` binding's
+type from `u32` to `bool` and save with `:w` to see a compiler diagnostic;
+restore `u32` and save to clear it. `Space d` opens document diagnostics.
+The `rt_version` call navigates into the installed Motor standard library.
+Native rustfmt is not packaged, so Rust automatic formatting is disabled;
+saving still runs the compiler check.
+
+For other projects, select an admitted Lorry package and prepare its dependencies
+with `lorry vendor` explicitly. A virtual workspace root is not a Lorry package.
+Server options are in `/user/.config/helix/languages.toml`, with normal Helix
+project overrides in `.helix/languages.toml`. A custom `XDG_CONFIG_HOME` needs
+the native settings copied into its own `helix/languages.toml`.
+Use `hx --health rust` for discovery, `:log-open` for logs, and `:lsp-restart`
+after changing server settings or project metadata. The
+[Helix integration record](plans/helix-rust-analyzer.md) tracks editor acceptance.
 
 ## Native Motor rustc
 

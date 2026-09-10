@@ -7,8 +7,9 @@ reviewed against the selected Motor Rust tree, the Lorry sources, and the
 imager configuration on 2026-09-02, and its design questions were answered
 the same day in section 4.14. On 2026-09-02 U. Lasiotus expanded the scope to
 include Cargo-compatible `lorry metadata`, `lorry tree`, and
-`lorry check --message-format=json`; section 4 reflects that scope. It is
-being implemented. Lorry prerequisite
+`lorry check --message-format=json`; section 4 reflects that scope. The native
+server is complete; section 4 retains its implementation and validation record.
+Lorry prerequisite
 patches 1-16 in section 4.12 are complete and gated. `lorry metadata`,
 `lorry check`, including Cargo-compatible JSON messages, and `lorry tree` are
 implemented, and the pinned host rust-analyzer passes the exact Lorry
@@ -25,7 +26,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | Steps 1–25 complete and gated; the string-hover timeout was the runtime allocator, resolved by frusa_v2 (§4.37) |
+| 2. Guest | Motor OS | Motor only | Complete and gated, including native Helix integration (§4.38); frusa_v2 resolved string hover (§4.37) |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -643,6 +644,14 @@ select the executable. A client that omits the variable gets upstream
 behavior: rust-analyzer looks for `cargo` on `PATH`, finds none, and reports
 the failed metadata query visibly.
 
+A terminal editor spawning the server as a background helper must also set
+`MOTURUS_STDIO_NO_TERMINAL=true` in that spawn's environment. Motor consumes
+this launch instruction before server startup; it prevents the synthesized
+terminal-input relay from taking the editor's keyboard stream. The non-PTY
+SSH acceptance transport has no session terminal to inherit. See
+`docs/tui.md` (Foreground forwarding) and the
+[native Helix integration record](helix-rust-analyzer.md).
+
 Every supported client, including the acceptance harness, sends this
 configuration explicitly. It is the Stage 1 Motor configuration with two
 differences:
@@ -666,9 +675,12 @@ differences:
 cache already shortens. `procMacro.enable` is off for the reason in section
 4.9. `cargo.targetDir = true` keeps editor checks in `target/rust-analyzer`,
 away from `target/lorry`; Lorry's global unit cache makes that second
-artifact tree cheap. `check.workspace` keeps its default of true; the
-single-package `-p` form that rust-analyzer emits when it is false is not
-accepted by Lorry. The Motor fork changes no defaults. The acceptance client
+artifact tree cheap. `check.workspace` keeps its default of true. Saving a
+binary or integration test still emits `-p <package-id>` with a named target;
+the Helix integration extends Lorry to accept the exact selected manifest's
+metadata ID and `--bin NAME`/`--test NAME` (see
+[Lorry's integration record](../../src/bin/lorry/helix-integration.md)).
+The Motor fork changes no defaults. The acceptance client
 advertises the experimental `colorDiagnosticOutput` capability, which selects
 the ANSI flycheck form; clients without it use the supported plain-JSON form.
 
@@ -805,7 +817,7 @@ revision changes. Bracketed items are conditional on configuration.
 | Target-data query | `$CARGO rustc -Z unstable-options --print target-spec-json --target <triple> -- -Z unstable-options`, cwd the selected package, env sets `RUSTC_BOOTSTRAP=1` | Supports only this read-only form. Lorry invokes the configured rustc with the equivalent rustc arguments and effective Cargo-compatible target rustflags, sets `RUSTC_BOOTSTRAP=1` for that invocation only, and copies stdout and status without resolving or compiling the package. |
 | Metadata | `$CARGO metadata --format-version 1 [--no-deps] --manifest-path <abs> [--filter-platform <triple>] [--locked]`, cwd the manifest directory, env may carry `RUSTUP_TOOLCHAIN` | Supported. Rejects `--features`, `--all-features`, `--no-default-features`, `--config`, `-Z`, and `--lockfile-path` with the ordinary error. A virtual workspace manifest, including the sysroot's `library/Cargo.toml` that an unpatched Linux server asks about, is rejected immediately with the ordinary error. |
 | Build-script pass | `$CARGO check --quiet --workspace --message-format=json --manifest-path <abs> [--target-dir <abs>] --target <triple> --keep-going [--all-targets]`, cwd the workspace root | Supported. |
-| Flycheck | `$CARGO check --workspace --message-format=json-diagnostic-rendered-ansi --manifest-path <abs> --keep-going --target <triple> [--all-targets \| --lib --bins --examples] [--target-dir <abs>]`, cwd the workspace root, env carries `CARGO_LOG` | Supported. Rejects `-p <package-id>`, `--example`, `--bench`, feature flags, `--lockfile-path`, and `-Z`. |
+| Flycheck | `$CARGO check [--workspace \| -p <package-id>] --message-format=json-diagnostic-rendered-ansi --manifest-path <abs> --keep-going --target <triple> [--all-targets \| --lib --bins --examples] [--bin NAME \| --test NAME] [--target-dir <abs>]`, cwd the workspace root, env carries `CARGO_LOG` | Supported. Package IDs must exactly match metadata for the explicit manifest. Rejects `--example`, `--bench`, feature flags, `--lockfile-path`, and `-Z`. |
 | `tree` | Not issued by rust-analyzer | `lorry tree [-p NAME] [--target TRIPLE] [--manifest-path <abs>]`. |
 
 The accepted product-command options are deliberately finite. `metadata`,
@@ -918,6 +930,11 @@ and binaries again in test mode, as Cargo's `--all-targets` does. Without a
 message format, diagnostics are rendered as `lorry build` renders them.
 Exit status is nonzero when any unit fails, after `--keep-going` has been
 honored.
+
+Named `--bin NAME` and `--test NAME` selectors check that target plus its
+library dependencies. Combining them with `--all-targets` still checks all
+supported targets. Unknown names and mismatched Cargo package IDs fail before
+compiler discovery; a package ID requires an explicit `--manifest-path`.
 
 With `--message-format=json` or `--message-format=json-diagnostic-rendered-ansi`,
 stdout carries one JSON object per line in `cargo_metadata::Message` form and
@@ -2719,3 +2736,17 @@ optimization proposal, validation requirements, and decisions awaiting review.
 Resolved on 2026-09-09: the runtime now uses `frusa_v2`, and the queued
 `env!`-derived string-hover assertion is restored in the native case, where
 the hover completes in 920 ms; see frusa.md §10.
+
+### 4.38 Native Helix integration
+
+Completed on 2026-09-10. The developer image configures Helix to run the native
+server through Lorry and includes `/devtools/src/helix-rust-demo`. Actual editor
+acceptance proves hover, local and Motor std navigation, completion, compiler
+diagnostics on save, clearing, and shutdown. The complete release developer
+gate passes, including native analyzer acceptance, developer-source builds,
+and the full Lorry product suite. The necessary runtime child-pipe fix passed
+three debug and three release main-image gates before commit.
+
+See the [integration record](helix-rust-analyzer.md) for patches, evidence,
+continued stop conditions, and the earlier unresolved sys-io abort. Native
+rustfmt remains uninstalled, and Rust automatic formatting is disabled.

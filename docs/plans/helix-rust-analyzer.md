@@ -1,5 +1,11 @@
 # Native Helix and rust-analyzer integration
 
+Complete and gated on 2026-09-10. Helix and rust-analyzer run natively on the
+release developer image, using Lorry for project metadata and compiler checks.
+The packaged example exercises completion, hover, navigation, and diagnostics
+without downloads. See [the usage guide](../build-rustc.md#helix-on-the-developer-image).
+The final validation below preserves the initial unresolved sys-io abort.
+
 ## Authorization and baseline
 
 On 2026-09-09 the user requested review of `helix.md` and `rust-analyzer.md`,
@@ -194,3 +200,62 @@ offline fetch for both Motor and Linux. All resolve without lockfile changes;
 the sampler's offline Motor build passes in 5.19 seconds
 (`/tmp/motor-helix-ra-native-sampler-build.log`). The complete, unchanged gate
 is running again at `/tmp/motor-helix-ra-full-dev-release-final.log`.
+
+## Final validation and delivery
+
+The final `src/tests/full-test-dev.sh --release` run passed completely on
+2026-09-10, with all original deadlines and no new retries or ignored failures.
+The full log is `/tmp/motor-helix-ra-full-dev-release-final.log`. It contains:
+
+- Native Helix hover, local definition, accepted completion, rustc E0308 on
+  save, clearing on the corrected save, exact saved-source comparison, Motor
+  std navigation, and clean shutdown. The project path contains a space.
+  Evidence: `/tmp/motor-helix-lsp.ATaC8B/`.
+- Direct native rust-analyzer semantic and resource acceptance, including
+  string hover. Evidence: `/tmp/motor-ra-native.UXeDCk/case/`.
+- The complete developer-image system suite and `TEST-DEV-SOURCES PASS`,
+  including native C/C++/Rust fixtures and red, gears, and Lorry source builds.
+- The complete Lorry product suite in 623 seconds: 333 Rust tests passed
+  (10 existing ignored), all contracts and Cargo artifact-identity checks,
+  and the native Lorry self-build in 258.183 seconds.
+
+The main-image core gates passed three times per build mode before the runtime
+commit. Each includes the new `process::framed_stdio_test` regression:
+
+| Build | Successful logs under `/tmp/` | Completion times, 2026-09-10 UTC |
+|---|---|---|
+| Debug | `motor-helix-ra-main-debug-{1,2,3}.log` | 06:24:46, 06:36:12, 06:47:33 |
+| Release | `motor-helix-ra-main-release-{2,3,4}.log` | 16:26:31, 16:34:46, 16:43:01 |
+
+The initial release-1 abort remains unresolved and is retained above; the
+subsequent passes do not establish its cause. No diagnostic kernel or systest
+edits remain. No external source, assembly revision, boot service, or Rust
+standard-library change was needed. Formatting, shell syntax, diff checks,
+and component Clippy checks pass without new compiler or Clippy warnings.
+
+Implementation commits:
+
+- `2bab93c5`: native server configuration, quoted launcher, offline example,
+  and health check.
+- `69cc04f2`: child-pipe readiness repair and bounded Tokio regression.
+- `ebd7246d`: investigation evidence and gate history.
+- `5957a0ed`: exact Lorry package IDs and named check-target compatibility.
+- `fa37488d`: background-server terminal ownership and native editor acceptance.
+
+Native rustfmt is not packaged, so Rust auto-formatting and the server's
+format feature are disabled. Analyzer procedural-macro expansion remains off;
+Lorry's existing compiler/build-script policies are unchanged. These limits
+are documented in the developer image's editor guide.
+
+After the gate VMs stopped, `make -j$(nproc) BUILD=release dev.img` rebuilt a
+fresh packaged image successfully. Build evidence is
+`/tmp/motor-helix-ra-final-image-build.log`; delivery is
+`vm_images/release/motor-os-dev.qcow2` (4 GiB virtual, 540 MiB on disk).
+The image contains the final launcher, server configuration, example, and editor
+guide, without the temporary acceptance projects. Boot it on the host with
+`vm_images/release/run-dev.sh` (8 GiB RAM by default), then in Motor OS:
+
+```sh
+cd /devtools/src/helix-rust-demo
+hx src/main.rs
+```
