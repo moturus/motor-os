@@ -140,7 +140,7 @@ fn print_help(topic: Option<&str>) {
             "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE] [--target-dir DIRECTORY]"
         ),
         Some("check") => println!(
-            "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--examples] [--message-format FORMAT]"
+            "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples] [--message-format FORMAT]"
         ),
         Some("metadata") => println!(
             "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] --format-version 1 [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked]"

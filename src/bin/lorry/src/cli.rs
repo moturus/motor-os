@@ -98,6 +98,8 @@ pub struct CheckOptions {
     pub all_targets: bool,
     pub lib: bool,
     pub bins: bool,
+    pub bin: Option<String>,
+    pub test: Option<String>,
     pub examples: bool,
     pub message_format: MessageFormat,
 }
@@ -443,6 +445,18 @@ fn check_command() -> ClapCommand {
         .arg(Arg::new("lib").long("lib").action(ArgAction::SetTrue))
         .arg(Arg::new("bins").long("bins").action(ArgAction::SetTrue))
         .arg(
+            Arg::new("bin")
+                .long("bin")
+                .value_name("NAME")
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+        .arg(
+            Arg::new("test")
+                .long("test")
+                .value_name("NAME")
+                .value_parser(NonEmptyStringValueParser::new()),
+        )
+        .arg(
             Arg::new("examples")
                 .long("examples")
                 .action(ArgAction::SetTrue),
@@ -664,6 +678,8 @@ fn parse_command(matches: &ArgMatches) -> Result<Command> {
                 all_targets: options.get_flag("all-targets"),
                 lib: options.get_flag("lib"),
                 bins: options.get_flag("bins"),
+                bin: options.get_one::<String>("bin").cloned(),
+                test: options.get_one::<String>("test").cloned(),
                 examples: options.get_flag("examples"),
                 message_format,
             }))
@@ -1049,6 +1065,8 @@ mod tests {
                 all_targets: true,
                 lib: false,
                 bins: false,
+                bin: None,
+                test: None,
                 examples: false,
                 message_format: MessageFormat::Json,
             })

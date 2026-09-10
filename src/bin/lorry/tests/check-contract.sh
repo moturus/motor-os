@@ -87,7 +87,7 @@ printf 'fn main() { assert_eq!(check_fixture::old_value(), 42); }\n' \
     >"$PROJECT/src/bin/first.rs"
 printf 'fn main() { assert_eq!(check_fixture::value(), 42); }\n' \
     >"$PROJECT/src/bin/second.rs"
-printf '#[test]\nfn integration() { assert_eq!(check_fixture::value(), 42); }\n' \
+printf 'const _: &str = env!("CARGO_BIN_EXE_first");\n#[test]\nfn integration() { assert_eq!(check_fixture::value(), 42); }\n' \
     >"$PROJECT/tests/integration.rs"
 
 cat >"$WORK/rustc-log" <<'EOF'
@@ -164,6 +164,60 @@ SCHEMA_MANIFEST="$SCRIPT_DIR/metadata-schema/Cargo.toml"
 JSON_TARGET="$WORK/json-target"
 "$LORRY" metadata --format-version 1 --manifest-path "$PROJECT/Cargo.toml" \
     >"$WORK/metadata.json"
+# Use the metadata identity, including its path/name/version encoding, just as
+# rust-analyzer does when saving a binary or integration-test target.
+PACKAGE_ID="$(sed -n 's/.*"root":[[:space:]]*"\([^"]*\)".*/\1/p' "$WORK/metadata.json")"
+[[ "$PACKAGE_ID" == path+file://* ]] || { echo "missing metadata root ID" >&2; exit 1; }
+for selector in first second; do
+    : >"$LOG"
+    "$LORRY" check -p "$PACKAGE_ID" --bin "$selector" --quiet \
+        --manifest-path "$PROJECT/Cargo.toml" --target-dir "$WORK/named-$selector"
+    [ "$(grep -Fc '<src/lib.rs>' "$LOG")" -eq 1 ]
+    [ "$(grep -Fc '<src/bin/' "$LOG")" -eq 1 ]
+    grep -F "<src/bin/$selector.rs>" "$LOG" >/dev/null
+    if grep -F '<tests/integration.rs>' "$LOG" >/dev/null; then
+        echo "check-contract: --bin selected an integration test" >&2
+        exit 1
+    fi
+done
+: >"$LOG"
+"$LORRY" check -p "$PACKAGE_ID" --test integration --quiet \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$WORK/named-test"
+[ "$(grep -Fc '<src/lib.rs>' "$LOG")" -eq 1 ]
+[ "$(grep -Fc '<tests/integration.rs>' "$LOG")" -eq 1 ]
+if grep -F '<src/bin/' "$LOG" >/dev/null; then
+    echo "check-contract: --test selected an unrelated binary" >&2
+    exit 1
+fi
+: >"$LOG"
+"$LORRY" check -p "$PACKAGE_ID" --bin first --test integration --all-targets --quiet \
+    --manifest-path "$PROJECT/Cargo.toml" --target-dir "$WORK/named-all"
+[ "$(grep -Fc '<src/lib.rs>' "$LOG")" -eq 2 ]
+[ "$(grep -Fc '<src/bin/first.rs>' "$LOG")" -eq 2 ]
+[ "$(grep -Fc '<src/bin/second.rs>' "$LOG")" -eq 2 ]
+[ "$(grep -Fc '<tests/integration.rs>' "$LOG")" -eq 1 ]
+
+reject_check_selector() {
+    : >"$LOG"
+    if "$LORRY" check "$@" --quiet --target-dir "$WORK/rejected-selector" \
+        >"$WORK/rejected.out" 2>"$WORK/rejected.err"; then
+        echo "check-contract: accepted invalid check selector: $*" >&2
+        exit 1
+    fi
+    [ ! -s "$LOG" ] # Reject before querying or invoking the compiler.
+    [ ! -e "$WORK/rejected-selector" ]
+}
+for wrong in "${PACKAGE_ID%0.1.0}9.9.9" "${PACKAGE_ID/check-fixture/other-name}" \
+    "${PACKAGE_ID/\/project/\/another-project}"; do
+    reject_check_selector -p "$wrong" --manifest-path "$PROJECT/Cargo.toml"
+    grep -F 'does not match selected package' "$WORK/rejected.err" >/dev/null
+done
+reject_check_selector -p "$PACKAGE_ID"
+grep -F 'requires --manifest-path' "$WORK/rejected.err" >/dev/null
+for selector in bin test; do
+    reject_check_selector --"$selector" missing --all-targets --manifest-path "$PROJECT/Cargo.toml"
+done
+
 "$LORRY" check --all-targets --keep-going --quiet --message-format=json \
     --manifest-path "$PROJECT/Cargo.toml" --target-dir "$JSON_TARGET" \
     >"$WORK/messages.json" 2>"$WORK/messages.err"

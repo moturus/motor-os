@@ -189,9 +189,11 @@ succeeds when the cache is already absent.
 lorry metadata --format-version 1 [--manifest-path PATH] [--no-deps]
                [--filter-platform TRIPLE] [--locked]
 lorry tree [--manifest-path PATH] [--target TRIPLE]
-lorry check [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE]
+lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
+            [--target-dir DIRECTORY] [--target TRIPLE]
             [--workspace] [-q|--quiet] [--keep-going]
             [--all-targets|--lib|--bins|--examples]
+            [--bin NAME] [--test NAME]
             [--message-format json|json-diagnostic-rendered-ansi]
 ```
 
@@ -213,6 +215,13 @@ library, binaries, integration tests, and test-mode library and binaries;
 target directory owns a separate `DIRECTORY/lorry/check` profile. The two JSON
 message formats produce newline-delimited Cargo-compatible messages on stdout
 and keep progress on stderr; the ANSI form changes only rendered diagnostics.
+
+`--bin NAME` or `--test NAME` selects a named binary or integration test plus
+its library dependencies. Combining a named selector with `--all-targets`
+still checks all supported targets. For rust-analyzer's save checks, `-p`
+also accepts the exact Cargo package ID emitted by `metadata`, with an explicit
+`--manifest-path` selecting that same package. Mismatched IDs and unknown target
+names are rejected before compiler discovery.
 
 ## Vendor dependencies
 
