@@ -10,6 +10,7 @@
 
 mod block;
 mod cache;
+mod lists;
 mod slab;
 mod sync;
 
@@ -25,6 +26,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use block::Block;
 pub use cache::ThreadCache;
+use lists::ShardList;
 use slab::Slab;
 use sync::{ReaderShard, SHARDS};
 
@@ -83,8 +85,9 @@ impl Frusa4K {
         self.inner.stats()
     }
 
-    /// Allocation served from the calling thread's private block when the
-    /// class is cached; otherwise the shared path.
+    /// Allocation served from the free list of the caller's shard, then the
+    /// thread's private block when the class is cached, then the shared
+    /// path; other shards' lists are used before the slab grows.
     ///
     /// # Safety
     ///
@@ -212,6 +215,8 @@ struct Frusa<const SLABS: usize> {
     /// `SHARDS` reader counts per slab, the metadata slab's last, allocated
     /// at initialization.
     shards: AtomicPtr<ReaderShard>,
+    /// `SHARDS` free lists per data slab, allocated at initialization.
+    lists: AtomicPtr<ShardList>,
 }
 
 unsafe impl<const SLABS: usize> Send for Frusa<SLABS> {}
@@ -239,6 +244,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             metadata_slab: Slab::new(Self::METADATA_SZ.ilog2(), SLABS as u32),
             data_slabs: AtomicPtr::new(core::ptr::null_mut()),
             shards: AtomicPtr::new(core::ptr::null_mut()),
+            lists: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 
@@ -260,7 +266,8 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 slab.index_cap.load(Ordering::Relaxed) as usize * slab::INDEX_ENTRY_BYTES;
             self.read_unlock(slab, 0);
         }
-        result.allocated_metadata += index_bytes + Self::shards_layout().size();
+        result.allocated_metadata +=
+            index_bytes + Self::shards_layout().size() + Self::lists_layout().size();
         result.allocated_from_fallback += result.allocated_metadata;
         result.in_use += result.in_use_metadata;
         result
@@ -278,6 +285,58 @@ impl<const SLABS: usize> Frusa<SLABS> {
         let base = self.shards.load(Ordering::Relaxed);
         debug_assert!(!base.is_null());
         unsafe { core::slice::from_raw_parts(base.add(slab.table_idx as usize * SHARDS), SHARDS) }
+    }
+
+    // ---- free lists ----
+
+    fn lists_layout() -> Layout {
+        let bytes =
+            (SLABS * SHARDS * core::mem::size_of::<ShardList>()).next_multiple_of(Self::PAGE_4K);
+        Layout::from_size_align(bytes, Self::PAGE_4K).unwrap()
+    }
+
+    /// The free list of `slab`'s class for `shard`. Data slabs only.
+    fn list(&self, slab: &Slab, shard: u32) -> &ShardList {
+        let base = self.lists.load(Ordering::Relaxed);
+        debug_assert!(!base.is_null());
+        debug_assert!((slab.table_idx as usize) < SLABS);
+        unsafe { &*base.add(slab.table_idx as usize * SHARDS + shard as usize % SHARDS) }
+    }
+
+    /// Bytes one list of one class may hold; a list is also capped at 64
+    /// slots, and classes above 16 KiB keep none.
+    const FREE_LIST_BYTES: usize = 16 * 1024;
+
+    fn free_list_limit(entry_sz_log2: u32) -> u32 {
+        ((Self::FREE_LIST_BYTES >> entry_sz_log2) as u32).min(64)
+    }
+
+    /// A slot from any other shard's list, or null. The tier before
+    /// growth: what another CPU freed is used before the backend is asked.
+    fn steal(&self, slab: &Slab, shard: u32) -> *mut u8 {
+        for offset in 1..SHARDS as u32 {
+            let slot = self
+                .list(slab, shard.wrapping_add(offset))
+                .pop(slab.entry_sz_log2);
+            if !slot.is_null() {
+                return slot;
+            }
+        }
+        core::ptr::null_mut()
+    }
+
+    /// Returns every listed slot of `slab`'s class to its block.
+    fn drain_lists(&self, slab: &Slab) {
+        for shard in 0..SHARDS as u32 {
+            let list = self.list(slab, shard);
+            loop {
+                let slot = list.pop(slab.entry_sz_log2);
+                if slot.is_null() {
+                    break;
+                }
+                self.dealloc_to_slab(slab, slot, shard);
+            }
+        }
     }
 
     fn read_lock(&self, slab: &Slab, shard: u32) {
@@ -337,6 +396,15 @@ impl<const SLABS: usize> Frusa<SLABS> {
             unsafe { shards.add(idx).write(ReaderShard::new()) };
         }
         self.shards.store(shards, Ordering::Release);
+        let lists =
+            unsafe { self.fallback_allocator.alloc(Self::lists_layout()) } as *mut ShardList;
+        if lists.is_null() {
+            panic!("Cannot initialize FRUSA: OOM");
+        }
+        for idx in 0..SLABS * SHARDS {
+            unsafe { lists.add(idx).write(ShardList::new()) };
+        }
+        self.lists.store(lists, Ordering::Release);
         let block = self.alloc_metadata_page();
         if block.is_null() {
             panic!("Cannot initialize FRUSA: OOM");
@@ -475,6 +543,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
             self.read_unlock(slab, shard);
             if !ptr.is_null() {
                 return ptr;
+            }
+            let stolen = self.steal(slab, shard);
+            if !stolen.is_null() {
+                return stolen;
             }
             if self.grow(slab).is_err() {
                 return core::ptr::null_mut();
@@ -664,22 +736,31 @@ impl<const SLABS: usize> Frusa<SLABS> {
             return unsafe { self.fallback_allocator.alloc(layout) };
         };
         let slab = self.slab_for_sz(sz);
-        if slab.entry_sz_log2 > Self::CACHED_MAX_LOG2 {
-            return self.alloc_from_slab(slab, cache.shard.get());
-        }
+        let shard = cache.shard.get();
         let class = slab.table_idx as usize;
-        // The fast path: the block is ours, so reclaim never touches it,
+        // The private block first: it is ours, so reclaim never touches it,
         // and its descriptor never leaves the metadata slab. No guard.
-        let block = cache.current[class].get();
-        if !block.is_null()
-            && let Some((ptr, became_full)) = unsafe { (*block).alloc() }
-        {
-            if became_full {
-                self.read_lock(slab, cache.shard.get());
-                self.release_private(slab, cache, class);
-                self.read_unlock(slab, cache.shard.get());
+        if slab.entry_sz_log2 <= Self::CACHED_MAX_LOG2 {
+            let block = cache.current[class].get();
+            if !block.is_null()
+                && let Some((ptr, became_full)) = unsafe { (*block).alloc() }
+            {
+                if became_full {
+                    self.read_lock(slab, shard);
+                    self.release_private(slab, cache, class);
+                    self.read_unlock(slab, shard);
+                }
+                return ptr;
             }
-            return ptr;
+        }
+        // Then this CPU's list. Every slot of the class is aligned to its
+        // size, so a listed slot fits any layout that maps to the class.
+        let slot = self.list(slab, shard).pop(slab.entry_sz_log2);
+        if !slot.is_null() {
+            return slot;
+        }
+        if slab.entry_sz_log2 > Self::CACHED_MAX_LOG2 {
+            return self.alloc_from_slab(slab, shard);
         }
         loop {
             self.read_lock(slab, cache.shard.get());
@@ -710,6 +791,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 continue;
             }
             self.read_unlock(slab, cache.shard.get());
+            let stolen = self.steal(slab, shard);
+            if !stolen.is_null() {
+                return stolen;
+            }
             if self.grow(slab).is_err() {
                 return core::ptr::null_mut();
             }
@@ -740,12 +825,13 @@ impl<const SLABS: usize> Frusa<SLABS> {
             return unsafe { self.fallback_allocator.dealloc(ptr, layout) };
         };
         let slab = self.slab_for_sz(sz);
-        // The common case: freeing something this thread allocated from the
-        // block it still holds. The block is ours (`owner` names this cache),
-        // so reclaim never touches it, and its descriptor is stable; `slot_of`
-        // is a pure range check, so no read guard is needed. It is always
-        // non-full here (a fill nulls the slot in `alloc_cached`), so the free
-        // never fills a gap that would rejoin the partial stack.
+        // The block this thread still holds first: one locked bit flip, and
+        // the slot is reused by this thread's next allocation. The block is
+        // ours (`owner` names this cache), so reclaim never touches it, and
+        // its descriptor is stable; `slot_of` is a pure range check, so no
+        // read guard is needed. It is always non-full here (a fill nulls
+        // the slot in `alloc_cached`), so the free never fills a gap that
+        // would rejoin the partial stack.
         if slab.entry_sz_log2 <= Self::CACHED_MAX_LOG2 {
             let block = cache.current[slab.table_idx as usize].get();
             if !block.is_null() && unsafe { (*block).slot_of(ptr).is_some() } {
@@ -753,6 +839,12 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 debug_assert!(!was_full, "cached current block was full");
                 return;
             }
+        }
+        // Then this CPU's list, whichever block and thread the slot came
+        // from: the slot stays marked in use, so nothing shared changes.
+        let limit = Self::free_list_limit(slab.entry_sz_log2);
+        if limit != 0 && self.list(slab, cache.shard.get()).push(ptr, limit) {
+            return;
         }
         self.dealloc_to_slab(slab, ptr, cache.shard.get());
     }
@@ -806,6 +898,9 @@ impl<const SLABS: usize> Frusa<SLABS> {
     /// call, and a concurrent reclaim or growth link step makes this one
     /// skip the slab.
     fn reclaim_slab(&self, slab: &Slab) {
+        // Listed slots count as in use; give them back first so that the
+        // batches they sit in can be returned.
+        self.drain_lists(slab);
         self.read_lock(slab, 0);
         let slack = slab.bytes_total.load(Ordering::Relaxed) - slab.in_use_bytes();
         self.read_unlock(slab, 0);

@@ -379,7 +379,7 @@ fn slab_rebuild_matches_incremental_state() {
 use core::alloc::{GlobalAlloc, Layout};
 use std::time::Instant;
 
-use crate::{Frusa, Frusa2M, Frusa4K};
+use crate::{Cache2M, Frusa, Frusa2M, Frusa4K};
 
 /// How many data slabs `frusa` has.
 fn num_slabs<const SLABS: usize>(_frusa: &Frusa<SLABS>) -> usize {
@@ -416,8 +416,10 @@ fn test_init() {
     let slabs = num_slabs(&frusa.inner);
     // stats() forces the lazy init: one metadata page holding its own
     // descriptor and the slab table.
-    // Reader shards for every slab take three more pages.
-    let shard_pages = ((slabs + 1) * SHARDS * 64).next_multiple_of(PAGE);
+    // Reader shards for every slab take three more pages, and the free
+    // lists of the data slabs another three.
+    let shard_pages = ((slabs + 1) * SHARDS * 64).next_multiple_of(PAGE)
+        + (slabs * SHARDS * 64).next_multiple_of(PAGE);
     let stats = frusa.stats();
     assert_eq!(PAGE + shard_pages, stats.allocated_from_fallback);
     assert_eq!(PAGE + shard_pages, stats.allocated_metadata);
@@ -1046,9 +1048,10 @@ fn every_backend_failure_rolls_back_cleanly() {
         BACKEND_CALLS.with(|c| c.set(0));
         FAIL_AT.with(|f| f.set(fail_at));
         let frusa: Frusa4K = Frusa4K::new(&FAILING);
-        if fail_at <= 2 {
-            // Initialization makes two backend calls, for the reader shards
-            // and the first metadata page; it cannot fail softly and panics.
+        if fail_at <= 3 {
+            // Initialization makes three backend calls, for the reader
+            // shards, the free lists, and the first metadata page; it cannot
+            // fail softly and panics.
             continue;
         }
         let (mut live, refused) = injection_scenario(&frusa);
@@ -1113,10 +1116,10 @@ fn cross_thread_frees() {
     producer.join().unwrap();
     assert_eq!(consumer.join().unwrap(), OBJECTS);
     SHARED.inner.check_invariants();
-    let stats = SHARED.stats();
-    assert_eq!(stats.in_use, stats.in_use_metadata);
+    // Listed slots count as in use until reclaim drains the lists.
     SHARED.reclaim();
     let stats = SHARED.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
     assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
 }
 
@@ -1341,10 +1344,10 @@ fn private_blocks_survive_cross_thread_churn() {
         unsafe { SHARED.dealloc(ptr as *mut u8, layout) };
     }
     SHARED.inner.check_invariants();
-    let stats = SHARED.stats();
-    assert_eq!(stats.in_use, stats.in_use_metadata);
+    // Listed slots count as in use until reclaim drains the lists.
     SHARED.reclaim();
     let stats = SHARED.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
     assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
 }
 
@@ -1368,6 +1371,8 @@ fn cached_realloc_keeps_the_slot_within_a_class() {
     }
     unsafe { frusa.dealloc_cached(&cache, moved, Layout::from_size_align(200, 8).unwrap()) };
     frusa.release_cache(&cache);
+    // Listed slots count as in use until reclaim drains the lists.
+    frusa.reclaim();
     let stats = frusa.stats();
     assert_eq!(stats.in_use, stats.in_use_metadata);
 }
@@ -1376,16 +1381,17 @@ fn cached_realloc_keeps_the_slot_within_a_class() {
 fn private_block_fast_paths_take_no_guard() {
     let frusa: Frusa4K = Frusa4K::new(&BACK_END);
     let cache = Cache4K::new();
-    let layout = Layout::from_size_align(64, 8).unwrap();
-    // The first allocation takes a block from the stack under the guard.
+    // 512-byte slots: one block of 64, and a list limit of 32.
+    let layout = Layout::from_size_align(512, 8).unwrap();
     let first = unsafe { frusa.alloc_cached(&cache, layout) };
-    let slab = frusa.inner.slab_for_sz(64);
+    let slab = frusa.inner.slab_for_sz(512);
     let class = slab.table_idx as usize;
     let block = cache.current[class].get();
     assert!(!block.is_null());
+    let list = frusa.inner.list(slab, 0);
 
-    // Every further allocation from the block, and every free back into
-    // it, touches nothing shared.
+    // Allocations from the block and frees back into it touch nothing
+    // shared: no guard, and no list either.
     let before = crate::guards_taken();
     let ptrs: Vec<*mut u8> = (0..Block::ENTRIES - 2)
         .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
@@ -1393,28 +1399,310 @@ fn private_block_fast_paths_take_no_guard() {
     for ptr in &ptrs {
         unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
     }
-    assert_eq!(
-        crate::guards_taken(),
-        before,
-        "guard taken on the fast path"
-    );
+    assert_eq!(crate::guards_taken(), before, "guard on the fast path");
+    assert_eq!(list.len(), 0);
     assert_eq!(cache.current[class].get(), block);
 
     // Filling the block gives it up under the guard.
-    let fill: Vec<*mut u8> = (0..Block::ENTRIES - 1)
+    let again: Vec<*mut u8> = (0..Block::ENTRIES - 1)
         .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
         .collect();
-    assert!(cache.current[class].get().is_null());
-    assert!(crate::guards_taken() > before);
-    // A free into a block that is not current goes through the slab.
-    let before = crate::guards_taken();
-    unsafe { frusa.dealloc_cached(&cache, first, layout) };
     assert_eq!(crate::guards_taken(), before + 1);
+    assert!(cache.current[class].get().is_null());
+    assert!(unsafe { (*block).is_full() });
 
-    for ptr in fill {
+    // Frees into the old block go to the list without a guard, up to its
+    // limit; the next one goes through the slab and puts the block back
+    // on the stack.
+    let extra = unsafe { frusa.alloc_cached(&cache, layout) };
+    let before = crate::guards_taken();
+    let limit = Frusa::<9>::free_list_limit(9) as usize;
+    for ptr in &again[..limit] {
+        unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+    }
+    assert_eq!(list.len() as usize, limit);
+    assert_eq!(crate::guards_taken(), before);
+    unsafe { frusa.dealloc_cached(&cache, again[limit], layout) };
+    assert_eq!(crate::guards_taken(), before + 1);
+    assert!(unsafe { (*block).on_stack() });
+
+    for ptr in again[limit + 1..].iter().chain([first, extra].iter()) {
+        unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+    }
+    frusa.release_cache(&cache);
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+fn shard_lists_reuse_slots_last_in_first_out() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    cache.set_shard(3);
+    let layout = Layout::from_size_align(48, 8).unwrap();
+    let slab = frusa.inner.slab_for_sz(64);
+    let a = unsafe { frusa.alloc_cached(&cache, layout) };
+    let b = unsafe { frusa.alloc_cached(&cache, layout) };
+    let c = unsafe { frusa.alloc_cached(&cache, layout) };
+    // Once the block is no longer the cache's own, frees go to the list.
+    frusa.release_cache(&cache);
+    unsafe { frusa.dealloc_cached(&cache, a, layout) };
+    unsafe { frusa.dealloc_cached(&cache, b, layout) };
+    let list = frusa.inner.list(slab, 3);
+    assert_eq!(list.len(), 2);
+
+    // Served from the list: no guard, no stack entry, no index probe.
+    let counters = (
+        crate::guards_taken(),
+        crate::stack_examined(),
+        crate::index_probes(),
+    );
+    assert_eq!(unsafe { frusa.alloc_cached(&cache, layout) }, b);
+    assert_eq!(unsafe { frusa.alloc_cached(&cache, layout) }, a);
+    assert_eq!(
+        counters,
+        (
+            crate::guards_taken(),
+            crate::stack_examined(),
+            crate::index_probes()
+        )
+    );
+    assert_eq!(list.len(), 0);
+
+    for ptr in [a, b, c] {
         unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
     }
     frusa.release_cache(&cache);
+    frusa.reclaim();
+    assert_eq!(list.len(), 0);
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+fn shard_lists_are_bounded_per_class() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    for (size, limit) in [(16usize, 64u32), (256, 64), (512, 32), (2048, 8), (4096, 4)] {
+        assert_eq!(Frusa::<9>::free_list_limit(size.ilog2()), limit);
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        let ptrs: Vec<*mut u8> = (0..limit as usize + 3)
+            .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+            .collect();
+        // With no private block, every free is a candidate for the list.
+        frusa.release_cache(&cache);
+        let before = frusa.stats().in_use;
+        for ptr in &ptrs {
+            unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+        }
+        let slab = frusa.inner.slab_for_sz(size);
+        assert_eq!(frusa.inner.list(slab, 0).len(), limit);
+        // Listed slots stay in use; the three beyond the limit reached
+        // their blocks.
+        assert_eq!(frusa.stats().in_use, before - 3 * size);
+    }
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+fn shard_lists_serve_their_class_at_its_alignment() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let small = Layout::from_size_align(40, 8).unwrap();
+    let ptr = unsafe { frusa.alloc_cached(&cache, small) };
+    frusa.release_cache(&cache);
+    unsafe { frusa.dealloc_cached(&cache, ptr, small) };
+    assert_eq!(frusa.inner.list(frusa.inner.slab_for_sz(64), 0).len(), 1);
+    // Another class does not see the slot.
+    let other = unsafe { frusa.alloc_cached(&cache, Layout::from_size_align(100, 8).unwrap()) };
+    assert_ne!(other, ptr);
+    // The same class does, at any alignment the class satisfies.
+    let aligned = Layout::from_size_align(16, 64).unwrap();
+    let again = unsafe { frusa.alloc_cached(&cache, aligned) };
+    assert_eq!(again, ptr);
+    assert_eq!(again as usize % 64, 0);
+    unsafe { frusa.dealloc_cached(&cache, again, aligned) };
+    unsafe { frusa.dealloc_cached(&cache, other, Layout::from_size_align(100, 8).unwrap()) };
+    frusa.release_cache(&cache);
+    frusa.reclaim();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+/// A backend that refuses every request while `REFUSE` is set.
+struct RefusingBackEnd;
+
+static REFUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe impl GlobalAlloc for RefusingBackEnd {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if REFUSE.load(Ordering::Relaxed) {
+            return core::ptr::null_mut();
+        }
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+}
+
+static REFUSING: RefusingBackEnd = RefusingBackEnd;
+
+#[test]
+fn a_slot_freed_on_one_shard_is_taken_on_another_before_growth() {
+    static FRUSA: Frusa4K = Frusa4K::new(&REFUSING);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let slab = FRUSA.inner.slab_for_sz(64);
+    let class = slab.table_idx as usize;
+    let a = Cache4K::new();
+    a.set_shard(1);
+    let b = Cache4K::new();
+    b.set_shard(2);
+
+    // Shard 1 takes eight slots of the first block, gives the block up
+    // (56 free slots: back on the stack), then lists the eight.
+    let freed: Vec<*mut u8> = (0..8)
+        .map(|_| unsafe { FRUSA.alloc_cached(&a, layout) })
+        .collect();
+    FRUSA.release_cache(&a);
+    for ptr in &freed {
+        unsafe { FRUSA.dealloc_cached(&a, *ptr, layout) };
+    }
+    assert_eq!(FRUSA.inner.list(slab, 1).len(), 8);
+
+    // Shard 2 takes the block and fills it, which gives it up.
+    let fill: Vec<*mut u8> = (0..Block::ENTRIES - 8)
+        .map(|_| unsafe { FRUSA.alloc_cached(&b, layout) })
+        .collect();
+    assert!(b.current[class].get().is_null());
+
+    // With the backend refusing, the slab cannot grow: shard 2's next
+    // allocations are the slots shard 1 listed, and only then nothing.
+    REFUSE.store(true, Ordering::Relaxed);
+    let taken: Vec<*mut u8> = (0..8)
+        .map(|_| unsafe { FRUSA.alloc_cached(&b, layout) })
+        .collect();
+    for ptr in &taken {
+        assert!(freed.contains(ptr));
+    }
+    assert_eq!(FRUSA.inner.list(slab, 1).len(), 0);
+    assert!(unsafe { FRUSA.alloc_cached(&b, layout) }.is_null());
+    REFUSE.store(false, Ordering::Relaxed);
+
+    for ptr in fill.iter().chain(taken.iter()) {
+        unsafe { FRUSA.dealloc_cached(&b, *ptr, layout) };
+    }
+    FRUSA.release_cache(&b);
+    FRUSA.reclaim();
+    FRUSA.inner.check_invariants();
+    let stats = FRUSA.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+fn reclaim_drains_the_lists_first() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptrs: Vec<*mut u8> = (0..10)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    frusa.release_cache(&cache);
+    for ptr in &ptrs {
+        unsafe { frusa.dealloc_cached(&cache, *ptr, layout) };
+    }
+    let slab = frusa.inner.slab_for_sz(64);
+    assert_eq!(frusa.inner.list(slab, 0).len(), 10);
+    let stats = frusa.stats();
+    assert!(stats.allocated_from_fallback > stats.allocated_metadata);
+    assert_eq!(stats.in_use, stats.in_use_metadata + 10 * 64);
+    // The listed slots go back to their block, and the block's batch goes
+    // back to the backend.
+    frusa.reclaim();
+    assert_eq!(frusa.inner.list(slab, 0).len(), 0);
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.allocated_from_fallback, stats.allocated_metadata);
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+fn a_busy_list_is_skipped() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let slab = frusa.inner.slab_for_sz(64);
+    let a = unsafe { frusa.alloc_cached(&cache, layout) };
+    let b = unsafe { frusa.alloc_cached(&cache, layout) };
+    frusa.release_cache(&cache);
+    unsafe { frusa.dealloc_cached(&cache, a, layout) };
+    let list = frusa.inner.list(slab, 0);
+    assert_eq!(list.len(), 1);
+    {
+        // Another thread holds the list: allocation and free go around it.
+        let _held = list.hold_for_test();
+        let c = unsafe { frusa.alloc_cached(&cache, layout) };
+        assert_ne!(c, a);
+        frusa.release_cache(&cache);
+        unsafe { frusa.dealloc_cached(&cache, c, layout) };
+        assert_eq!(list.len(), 1);
+    }
+    assert_eq!(unsafe { frusa.alloc_cached(&cache, layout) }, a);
+    unsafe { frusa.dealloc_cached(&cache, a, layout) };
+    unsafe { frusa.dealloc_cached(&cache, b, layout) };
+    frusa.release_cache(&cache);
+    frusa.reclaim();
+    frusa.inner.check_invariants();
+    let stats = frusa.stats();
+    assert_eq!(stats.in_use, stats.in_use_metadata);
+}
+
+#[test]
+#[should_panic(expected = "double free")]
+fn a_double_free_through_a_list_panics() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+    frusa.release_cache(&cache);
+    unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+    unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+}
+
+#[test]
+#[should_panic(expected = "corrupted free list")]
+fn a_corrupted_list_link_panics() {
+    let frusa: Frusa4K = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+    frusa.release_cache(&cache);
+    unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+    // Decodes to 1, which is no slot boundary of the class.
+    unsafe { *(ptr as *mut usize) = 1 ^ (ptr as usize >> 12) };
+    let _ = unsafe { frusa.alloc_cached(&cache, layout) };
+}
+
+#[test]
+fn frusa_2m_keeps_no_list_above_16_kib() {
+    let frusa: Frusa2M = Frusa2M::new(&BACK_END);
+    let cache = Cache2M::new();
+    for (size, listed) in [(8192usize, 1u32), (16384, 1), (32768, 0)] {
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        let ptr = unsafe { frusa.alloc_cached(&cache, layout) };
+        unsafe { frusa.dealloc_cached(&cache, ptr, layout) };
+        let slab = frusa.inner.slab_for_sz(size);
+        assert_eq!(frusa.inner.list(slab, 0).len(), listed);
+    }
+    frusa.release_cache(&cache);
+    frusa.reclaim();
     frusa.inner.check_invariants();
     let stats = frusa.stats();
     assert_eq!(stats.in_use, stats.in_use_metadata);

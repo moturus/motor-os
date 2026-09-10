@@ -124,6 +124,14 @@ impl SpinLock {
         }
     }
 
+    /// Takes the lock if it is free, without spinning.
+    pub fn try_lock(&self) -> Option<SpinGuard<'_>> {
+        self.0
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| SpinGuard(self))
+    }
+
     #[cfg(test)]
     pub fn is_locked(&self) -> bool {
         self.0.load(Ordering::SeqCst) != 0
