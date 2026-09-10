@@ -2,7 +2,7 @@
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::util::SpinLock;
 
@@ -17,6 +17,14 @@ const ABSENT: u8 = 0;
 const WHOLE: u8 = 1;
 const SPLIT: u8 = 2;
 const TAKEN: u8 = 3;
+const NO_CURSOR: usize = usize::MAX;
+
+#[derive(Clone, Copy)]
+enum SmallSource {
+    Split,
+    Unclaimed,
+    Whole,
+}
 
 #[derive(Clone, Copy)]
 struct Inner {
@@ -316,25 +324,31 @@ impl<L: PageLinks> Pool<'_, L> {
     }
 
     fn pop(&self, block: usize) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, 1, false)
+        self.take_small(block, 1, SmallSource::Split, false)
     }
 
     fn run(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, count, false)
+        self.take_small(block, count, SmallSource::Split, false)
     }
 
     fn split(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, count, true)
+        self.take_small(block, count, SmallSource::Whole, false)
     }
 
-    fn take_small(&self, index: usize, count: u16, split: bool) -> Result<Option<u64>, Corruption> {
+    fn take_small(
+        &self,
+        index: usize,
+        count: u16,
+        source: SmallSource,
+        claim: bool,
+    ) -> Result<Option<u64>, Corruption> {
         if count == 0 || count > PAGES {
             return Ok(None);
         }
         let block = self.block(index)?;
         let mut inner = block.inner.lock(line!());
-        match (block.state.load(Ordering::Relaxed), split) {
-            (WHOLE, true) => {
+        match (block.state.load(Ordering::Relaxed), source) {
+            (WHOLE, SmallSource::Whole) => {
                 inner.check_whole(0)?;
                 // The block lock excludes all access to this entry. Initialize
                 // all words before switching to the only state that reads them.
@@ -348,7 +362,13 @@ impl<L: PageLinks> Pool<'_, L> {
                 self.publish(index, Publication::FreeSet);
                 self.publish(index, Publication::WholeClear);
             }
-            (SPLIT, false) => {}
+            (SPLIT, SmallSource::Split | SmallSource::Unclaimed) => {
+                if matches!(source, SmallSource::Unclaimed)
+                    && block.flags.load(Ordering::Relaxed) & CLAIMED != 0
+                {
+                    return Ok(None);
+                }
+            }
             (ABSENT | WHOLE | SPLIT | TAKEN, _) => return Ok(None),
             _ => return Err(Corruption::State),
         }
@@ -377,6 +397,9 @@ impl<L: PageLinks> Pool<'_, L> {
             page
         };
         inner.used += count;
+        if claim {
+            block.flags.fetch_or(CLAIMED, Ordering::Relaxed);
+        }
         self.charge(count);
         if inner.used == PAGES {
             self.publish(index, Publication::FreeClear);
@@ -458,6 +481,8 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(())
     }
 }
+
+mod search;
 
 #[cfg(debug_assertions)]
 mod tests;

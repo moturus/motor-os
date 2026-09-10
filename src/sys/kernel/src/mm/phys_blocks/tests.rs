@@ -498,6 +498,9 @@ fn malformed_bounds_and_state() {
     assert_eq!(used, 1);
 }
 
+#[path = "search_tests.rs"]
+mod search;
+
 pub(super) fn run() {
     links();
     ownership_and_runs();
@@ -506,5 +509,6 @@ pub(super) fn run() {
     partial_and_recombination();
     huge_and_lazy_words();
     malformed_bounds_and_state();
+    search::run();
     crate::raw_log!("phys_blocks core tests PASS");
 }

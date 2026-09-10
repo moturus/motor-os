@@ -13,7 +13,7 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
-Implementation status (2026-09-09): P-1's boot-heap alignment fix is in
+Implementation status (2026-09-10): P-1's boot-heap alignment fix is in
 `6efc3276` (alongside the wait-set fix). P0b's range validation is in
 `83f09a60`, and MMIO ownership/teardown and consumer refusals are in
 `a94eb213`. Reservation and mapping now share the region lock, including
@@ -25,7 +25,7 @@ the common gate: three debug, three release and one release developer-image
 run, without test retries or temporary probes. That exact source snapshot also
 included the native-driver test cleanup (`d2aef7fd`) and the separately reviewed
 spin-source lifecycle fix (`ec28676d`). P1a1's ownership core and deterministic
-scratch tests are now implemented locally, with the approved debug-only hook
+scratch tests are committed in `ad1e42dc`, with the approved debug-only hook
 in ordinary boots. Strict kernel Clippy passes in both profiles. With the
 separate timestamp self-test correction described below, the unchanged kernel
 candidate passed the common gate: three consecutive debug runs, three release
@@ -87,6 +87,24 @@ Clippy additionally reported existing lints in untouched code, none in the
 corrected test; strict kernel Clippy passed with warnings denied in both
 profiles. Tested source hashes and complete gate results are retained with
 the logs. The findings-only commit `91eadfe2` did not change the tested code.
+
+P1a2 is proceeding in small increments. The first local increment adds F/W
+search, advisory cursor adoption/clearing, a cursor-free bootstrap path,
+contiguous-run selection, and downward huge-block selection around P1a1's
+locked ownership helpers. Debug scratch tests cover exact four-block packing
+for 2048 pages, split-before-whole selection, claimed capacity before splitting
+or OOM, sticky/shared/stale cursors, preserved short tails, and LIFO reuse.
+They run through the existing ordinary-boot hook; production is unchanged.
+Strict kernel Clippy passes with warnings denied in both profiles. The
+unchanged source passed three consecutive debug runs, three release runs, and
+one release developer-image run, including native source builds and the
+complete Lorry suite. Both scratch suites passed in all three debug boot logs.
+No test retries or temporary probes were used. Source hashes and complete
+results are under `/tmp/kernel-phys-p1a2-search-gate.XGoygD`. This approximately
+250-line code/test increment remains uncommitted for review.
+Pure range shaping, table-size/preflight/carving, and their input fixtures
+remain the next P1a2 increments; P1b still owns production installation and
+runtime CPU-publication wiring.
 
 ## Requirements and scope
 
