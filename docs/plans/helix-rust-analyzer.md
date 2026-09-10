@@ -1,5 +1,20 @@
 # Native Helix and rust-analyzer integration
 
+Reopened after the user's 2026-09-10 report: starting `hx` without a filename,
+opening the packaged `src/main.rs`, and using `gd` on `ANSWER` eventually
+reports "No definition found." The previous acceptance opened a copied file
+on the command line and waited for flycheck before hover/navigation. Reproduce
+the reported startup path on a preserved image, inspect the actual LSP exchange,
+repair the diagnosed defect, and add coverage without widening timeouts. The
+original authorization to record stop conditions and continue remains in force.
+
+The preserved user image reproduces the server exit both on the console and
+through SSH with 8 GiB RAM, including a copied project. A temporary launcher
+captures exit status `-1` without a panic message. Add temporary, fault-only
+exit-stack reporting under `src/sys/kernel` in a separate diagnostic image to
+identify the caller; retain the user's disk and remove that instrumentation
+before production changes or commits. No external sources are being edited.
+
 Complete and gated on 2026-09-10. Helix and rust-analyzer run natively on the
 release developer image, using Lorry for project metadata and compiler checks.
 The packaged example exercises completion, hover, navigation, and diagnostics
