@@ -46,6 +46,11 @@ ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
 toolchain_capture_starting_locks "$rust"
 toolchain_reverify_selected_sources() { :; }
+toolchain_validate_native_elf() {
+	[ "$1" = "$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main" ]
+	[ "$2" = "$STANDALONE_LLVM_BIN/llvm-readelf" ]
+	[ "$3" = "$1" ]
+}
 
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash

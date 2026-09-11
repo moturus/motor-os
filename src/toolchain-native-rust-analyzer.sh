@@ -2,42 +2,9 @@
 # Build the standalone Motor server, using the assembly's driver-managed libc link.
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain-rust-analyzer-unwind.sh"
 
-toolchain_validate_rust_analyzer_elf() {
-	local binary="$1" readelf="$2" headers sections dynamic symbols
+toolchain_validate_native_rust_analyzer() {
+	local binary="$1"
 	[ -x "$binary" ] || { toolchain_die "analyzer is not executable: $binary"; return 1; }
-	headers="$("$readelf" -W -h -l "$binary")" || return
-	sections="$("$readelf" -W -S "$binary")" || return
-	dynamic="$("$readelf" -W -d "$binary")" || return
-	symbols="$("$readelf" -W --dyn-syms "$binary")" || return
-	if ! awk '
-		/Class:.*ELF64/ { class++ }
-		/Data:.*little endian/ { endian++ }
-		/Type:.*DYN/ { pie++ }
-		/Machine:.*Advanced Micro Devices X86-64/ { machine++ }
-		$1 == "INTERP" || $1 == "TLS" { bad = 1 }
-		$1 == "GNU_STACK" { stack++; if ($0 ~ /E/) bad = 1 }
-		$1 == "LOAD" && /W/ && /E/ { bad = 1 }
-		END { exit !(class == 1 && endian == 1 && pie == 1 && machine == 1 && stack == 1 && !bad) }
-	' <<< "$headers"; then
-		toolchain_die "analyzer ELF is not a compatible non-executable-stack x86-64 static PIE"; return 1
-	fi
-	if ! awk '
-		{ sub(/^.*\] +/, "") }
-		$1 == ".init_array" && $2 == "INIT_ARRAY" && $5 !~ /^0+$/ { found++ }
-		$1 == ".eh_frame_hdr" && $5 !~ /^0+$/ { header++ }
-		$1 == ".eh_frame" && $5 !~ /^0+$/ { frames++ }
-		$1 == ".gcc_except_table" && $5 !~ /^0+$/ { exceptions++ }
-		END { exit found != 1 || header != 1 || frames != 1 || exceptions != 1 }
-	' <<< "$sections" || ! awk '
-		/NEEDED|TEXTREL/ { bad = 1 }
-		/\(INIT_ARRAYSZ\)/ && $3 > 0 { array++ }
-		END { exit bad || array != 1 }
-	' <<< "$dynamic" || ! awk '
-		$7 == "UND" && $1 != "0:" { bad = 1 }
-		END { exit bad }
-	' <<< "$symbols"; then
-		toolchain_die "analyzer ELF has invalid constructors, unwind tables, dependencies, relocations, or symbols"; return 1
-	fi
 	grep -aFq "$EFFECTIVE_MOTOR_RUST_REV" "$binary" &&
 		grep -aFq "$RUST_ANALYZER_RELEASE" "$binary" &&
 		grep -aFq "$SELECTED_TOOLCHAIN_DESCRIPTION" "$binary" || {
@@ -96,7 +63,8 @@ toolchain_build_native_rust_analyzer() (
 	toolchain_reverify_rust_analyzer "$rust" "$cargo_home" || exit 1
 	binary="$ASSEMBLY_BUILD_ROOT/rust-analyzer/x86_64-unknown-motor/release/rust-analyzer"
 	toolchain_reverify_selected_sources "$rust" "$authoring_base" "$expected_digest" || exit 1
-	toolchain_validate_rust_analyzer_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" || exit 1
+	toolchain_validate_native_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" "$binary" || exit 1
+	toolchain_validate_native_rust_analyzer "$binary" || exit 1
 	library="$TOOLCHAIN_PREFIX/lib/rustlib/src/rust/library"
 	[ -f "$library/core/src/lib.rs" ] && [ -f "$library/std/src/lib.rs" ] || {
 		toolchain_die 'selected rust-src is incomplete'; exit 1;
@@ -113,8 +81,9 @@ toolchain_build_native_rust_analyzer() (
 	"$STANDALONE_LLVM_BIN/llvm-strip" --keep-section=.comment \
 		-o "$temporary/devtools/rust/bin/rust-analyzer" "$binary" || exit 1
 	chmod 755 "$temporary/devtools/rust/bin/rust-analyzer" || exit 1
-	toolchain_validate_rust_analyzer_elf "$temporary/devtools/rust/bin/rust-analyzer" \
-		"$STANDALONE_LLVM_BIN/llvm-readelf" || exit 1
+	toolchain_validate_native_elf "$temporary/devtools/rust/bin/rust-analyzer" \
+		"$STANDALONE_LLVM_BIN/llvm-readelf" "$binary" || exit 1
+	toolchain_validate_native_rust_analyzer "$temporary/devtools/rust/bin/rust-analyzer" || exit 1
 	cp -a "$library" "$temporary/devtools/rust/lib/rustlib/src/rust/" || exit 1
 	# These are analysis inputs, including host-only CI scripts, not guest tools.
 	find "$temporary/devtools/rust/lib/rustlib/src/rust/library" -type f \

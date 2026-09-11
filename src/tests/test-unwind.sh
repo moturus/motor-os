@@ -3,6 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+for helper in versions lib native llvm; do
+  . "$ROOT_DIR/src/toolchain-$helper.sh"
+done
 manifest="$ROOT_DIR/src/tests/unwind/Cargo.toml"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
@@ -20,6 +23,19 @@ grep -F -- '-C panic=abort' "$temporary/abort-build.log" >/dev/null || {
   echo 'test-unwind: abort profile did not pass -C panic=abort' >&2
   exit 1
 }
+
+development_root="$(readlink -f "${MOTORH:-$ROOT_DIR/..}")"
+EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
+MOTOR_LLVM_TREE_STATE=clean
+standalone_key="$(toolchain_standalone_llvm_key)"
+elf_tools="$development_root/build/toolchain/standalone-llvm/$standalone_key/bin"
+for profile in release release-lto release-abort; do
+  binary="$target/x86_64-unknown-motor/$profile/motor-unwind-test"
+  toolchain_validate_native_elf "$binary" "$elf_tools/llvm-readelf" "$binary" || {
+    echo "test-unwind: $profile ELF validation failed" >&2
+    exit 1
+  }
+done
 
 runner="$ROOT_DIR/src/tests/test-rust-analyzer-crates.sh"
 failures=0

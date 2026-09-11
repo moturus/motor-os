@@ -708,6 +708,8 @@ rustc_stage_image() {
 
 	# The compiler, stripped (~154 MB -> ~98 MB).
 	"$B/llvm-strip" -o "$rust_img/bin/rustc" "$RUSTC_MAIN"
+	toolchain_validate_native_elf "$rust_img/bin/rustc" "$B/llvm-readelf" "$RUSTC_MAIN" ||
+		die "staged rustc ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustc" << 'EOF'
 #!/system/bin/rush
 export TMPDIR=/devtools/tmp
