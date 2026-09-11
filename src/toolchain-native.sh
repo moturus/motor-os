@@ -204,7 +204,8 @@ toolchain_generate_native_llvm_config() {
 }
 
 toolchain_build_native_rustc() {
-	local rust="$1" authoring_base="$2" expected_digest="$AUTHORING_SOURCE_DIGEST"
+	local rust="$1" authoring_base="$2" bootstrap_cache="$3"
+	local expected_digest="$AUTHORING_SOURCE_DIGEST"
 	local prefix_before prefix_after native_llvm_bin target_llvm_root
 	toolchain_generate_cross_wrappers "$ASSEMBLY_SYSROOT" "$STANDALONE_LLVM_BIN" || return
 	native_llvm_bin="$ASSEMBLY_ROOT/native-llvm-config/bin"
@@ -214,7 +215,7 @@ toolchain_build_native_rustc() {
 	NATIVE_BOOTSTRAP_CONFIG="$ASSEMBLY_ROOT/native-bootstrap.toml"
 	toolchain_generate_bootstrap_config "$NATIVE_BOOTSTRAP_CONFIG" "$rust" \
 		"$TOOLCHAIN_PREFIX" "$ASSEMBLY_SYSROOT" "$native_llvm_bin" \
-		"$SELECTED_TOOLCHAIN_DESCRIPTION" || return
+		"$bootstrap_cache" "$SELECTED_TOOLCHAIN_DESCRIPTION" || return
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || return
 	prefix_before="$(toolchain_content_tree_digest "$TOOLCHAIN_PREFIX" .)" || return

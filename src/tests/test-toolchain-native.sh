@@ -44,6 +44,7 @@ TOOLCHAIN_STATE_ROOT="$temporary/state"
 STANDALONE_LLVM_BIN="$temporary/llvm/bin"
 ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
+BOOTSTRAP_CACHE="$temporary/bootstrap-cache"
 toolchain_capture_starting_locks "$rust"
 toolchain_reverify_selected_sources() { :; }
 toolchain_validate_native_elf() {
@@ -64,7 +65,7 @@ chmod +x "\$binary"
 EOF
 chmod +x "$rust/x.py"
 
-toolchain_build_native_rustc "$rust" ''
+toolchain_build_native_rustc "$rust" '' "$BOOTSTRAP_CACHE"
 toolchain_validate_native_rustc "$RUSTC_MAIN" || fail "native identity was rejected"
 adapter="$ASSEMBLY_ROOT/native-llvm-config/bin/llvm-config"
 target_llvm="$rust/build/x86_64-unknown-motor/llvm"
@@ -99,7 +100,7 @@ ASSEMBLY_ROOT="$temporary/changed-assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
 mkdir -p "$ASSEMBLY_SYSROOT"
 export MUTATE_PREFIX=1
-if toolchain_build_native_rustc "$rust" '' 2>/dev/null; then
+if toolchain_build_native_rustc "$rust" '' "$BOOTSTRAP_CACHE" 2>/dev/null; then
 	fail "native bootstrap prefix mutation was accepted"
 fi
 [ -f "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-REJECTED" ] ||

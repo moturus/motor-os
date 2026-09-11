@@ -22,18 +22,19 @@ mkdir -p "$rust_source"
 if toolchain_bootstrap_absolute_path prefix relative 2>/dev/null; then
 	fail "relative path validation returned success"
 fi
-if toolchain_render_bootstrap_config relative /sysroot /llvm test-id \
+if toolchain_render_bootstrap_config relative /sysroot /llvm /cache test-id \
 	> "$temporary/invalid.toml" 2>/dev/null; then
 	fail "bootstrap renderer accepted a relative prefix"
 fi
 [ ! -s "$temporary/invalid.toml" ] || fail "invalid bootstrap config was rendered"
 
 managed="$temporary/state/managed.toml"
+cache="$temporary/managed-rust/build/cache"
 toolchain_generate_bootstrap_config "$managed" "$rust_source" \
 	"$temporary/toolchains/managed" "$temporary/sysroot" \
-	"$temporary/llvm/bin" "$MOTOR_TOOLCHAIN_ID"
+	"$temporary/llvm/bin" "$cache" "$MOTOR_TOOLCHAIN_ID"
 
-expected_keys='change-id profile host target description submodules extended tools docs optimized-compiler-builtins locked-deps prefix sysconfdir channel omit-git-hash deny-warnings incremental download-ci-llvm targets experimental-targets static-libstdcpp llvm-config cc cxx ar ranlib linker'
+expected_keys='change-id profile host target description bootstrap-cache-path submodules extended tools docs optimized-compiler-builtins locked-deps prefix sysconfdir channel omit-git-hash deny-warnings incremental download-ci-llvm targets experimental-targets static-libstdcpp llvm-config cc cxx ar ranlib linker'
 actual_keys="$(sed -n 's/^[[:space:]]*\([A-Za-z][A-Za-z0-9_-]*\)[[:space:]]*=.*/\1/p' "$managed" | tr '\n' ' ' | sed 's/ $//')"
 [ "$actual_keys" = "$expected_keys" ] ||
 	fail "bootstrap schema differs: $actual_keys"
@@ -49,6 +50,8 @@ grep -Fqx 'description = "'"$MOTOR_TOOLCHAIN_ID"'"' "$managed" ||
 	fail "managed description is missing"
 grep -Fqx 'incremental = false' "$managed" ||
 	fail "incremental compiler build was enabled"
+grep -Fqx 'bootstrap-cache-path = "'"$cache"'"' "$managed" ||
+	fail "managed bootstrap cache is missing"
 grep -Fqx 'llvm-config = "'"$temporary/llvm/bin/llvm-config"'"' "$managed" ||
 	fail "host rustc does not use the standalone LLVM"
 
@@ -56,20 +59,20 @@ grep -Fqx 'llvm-config = "'"$temporary/llvm/bin/llvm-config"'"' "$managed" ||
 before="$(sha256sum "$managed")"
 toolchain_generate_bootstrap_config "$managed" "$rust_source" \
 	"$temporary/toolchains/managed" "$temporary/sysroot" \
-	"$temporary/llvm/bin" "$MOTOR_TOOLCHAIN_ID"
+	"$temporary/llvm/bin" "$cache" "$MOTOR_TOOLCHAIN_ID"
 [ "$(sha256sum "$managed")" = "$before" ] || fail "exact config changed"
 printf '\n# stale\n' >> "$managed"
 stale="$(sha256sum "$managed")"
 if toolchain_generate_bootstrap_config "$managed" "$rust_source" \
 	"$temporary/toolchains/managed" "$temporary/sysroot" \
-	"$temporary/llvm/bin" "$MOTOR_TOOLCHAIN_ID" 2>/dev/null; then
+	"$temporary/llvm/bin" "$cache" "$MOTOR_TOOLCHAIN_ID" 2>/dev/null; then
 	fail "mismatched existing config was accepted"
 fi
 [ "$(sha256sum "$managed")" = "$stale" ] || fail "mismatched config was overwritten"
 
 if toolchain_generate_bootstrap_config "$rust_source/generated.toml" \
 	"$rust_source" "$temporary/prefix" "$temporary/sysroot" \
-	"$temporary/llvm/bin" "$MOTOR_TOOLCHAIN_ID" 2>/dev/null; then
+	"$temporary/llvm/bin" "$cache" "$MOTOR_TOOLCHAIN_ID" 2>/dev/null; then
 	fail "configuration inside an authoring checkout was accepted"
 fi
 
@@ -77,7 +80,7 @@ authoring_description="$MOTOR_TOOLCHAIN_ID+authoring.$(printf authoring | sha256
 authoring="$temporary/state/authoring.toml"
 toolchain_generate_bootstrap_config "$authoring" "$rust_source" \
 	"$temporary/toolchains/authoring" "$temporary/sysroot" \
-	"$temporary/llvm/bin" "$authoring_description"
+	"$temporary/llvm/bin" "$cache" "$authoring_description"
 grep -Fqx 'description = "'"$authoring_description"'"' "$authoring" ||
 	fail "authoring description is missing"
 [ "$(toolchain_bootstrap_identity_digest "$MOTOR_TOOLCHAIN_ID")" != \

@@ -898,7 +898,7 @@ main() {
 	log "effective LLVM: $EFFECTIVE_MOTOR_LLVM_REV ($MOTOR_LLVM_TREE_STATE)"
 	toolchain_build_selected_host "$RUST" "$AUTHORING_BASE" "$MOTORH/build/toolchain" \
 		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
-		"$MOTOR/src/sys/lib/moto-rt"
+		"$MOTOR/src/sys/lib/moto-rt" "$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
 	export PYTHONDONTWRITEBYTECODE=1
@@ -921,7 +921,8 @@ main() {
 		build_native_llvm
 		build_lua
 		llvm_stage_image
-		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE"
+		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE" \
+			"$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 		rustc_stage_image
 		update_ripgrep_source
 		build_ripgrep

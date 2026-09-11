@@ -152,7 +152,8 @@ chmod +x "$fake_rustup"
 export RUSTUP_STATE="$temporary/rustup-state"
 
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
-	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"
+	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \
+	"$temporary/bootstrap-cache"
 [ "$(cat "$temporary/xpy-runs")" = x ] || fail "bootstrap did not run exactly once"
 [ "$(cat "$temporary/analyzer-verifications")" = v ] || fail "analyzer sources were not reverified"
 [ -f "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ] || fail "prefix was not finalized"
@@ -168,12 +169,14 @@ cmp -s "$STANDALONE_LLVM_BIN/lld" \
 	fail "prefix rust-lld differs from standalone lld"
 [ ! -e "$TOOLCHAIN_PREFIX.building" ] || fail "successful producer lock remains"
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
-	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"
+	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \
+	"$temporary/bootstrap-cache"
 [ "$(cat "$temporary/xpy-runs")" = x ] || fail "valid prefix was rebuilt"
 
 FAIL_PRECHECK=1
 if toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
-	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" 2>/dev/null; then
+	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \
+	"$temporary/bootstrap-cache" 2>/dev/null; then
 	fail "failed package precheck was accepted"
 fi
 FAIL_PRECHECK=0
@@ -184,7 +187,8 @@ FAIL_PRECHECK=0
 printf 'new starting lock\n' > "$rust/Cargo.lock"
 export FAIL_XPY=1
 if toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
-	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" 2>/dev/null; then
+	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \
+	"$temporary/bootstrap-cache" 2>/dev/null; then
 	fail "failed bootstrap was accepted"
 fi
 [ -f "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-REJECTED" ] ||

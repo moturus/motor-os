@@ -15,10 +15,11 @@ toolchain_bootstrap_absolute_path() {
 }
 
 toolchain_render_bootstrap_config() {
-	local prefix="$1" sysroot="$2" llvm_bin="$3" description="$4"
+	local prefix="$1" sysroot="$2" llvm_bin="$3" cache="$4" description="$5"
 	toolchain_bootstrap_absolute_path prefix "$prefix" || return
 	toolchain_bootstrap_absolute_path sysroot "$sysroot" || return
 	toolchain_bootstrap_absolute_path llvm_bin "$llvm_bin" || return
+	toolchain_bootstrap_absolute_path bootstrap_cache "$cache" || return
 	[[ "$description" =~ ^[A-Za-z0-9._+-]+$ ]] ||
 		toolchain_die "invalid bootstrap description: $description" || return
 
@@ -30,6 +31,7 @@ profile = "library"
 host = ["x86_64-unknown-linux-gnu"]
 target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
 description = "$description"
+bootstrap-cache-path = "$cache"
 submodules = false
 extended = true
 tools = ["cargo", "clippy", "rust-analyzer", "rustdoc", "rustfmt", "src"]
@@ -127,7 +129,8 @@ toolchain_generate_cross_wrappers() {
 toolchain_bootstrap_identity_digest() {
 	local description="$1" config_digest wrappers_digest wrapper
 	config_digest="$(toolchain_render_bootstrap_config \
-		/MOTOR_TOOLCHAIN_PREFIX /MOTOR_SYSROOT /MOTOR_LLVM_BIN "$description" |
+		/MOTOR_TOOLCHAIN_PREFIX /MOTOR_SYSROOT /MOTOR_LLVM_BIN \
+		/MOTOR_BOOTSTRAP_CACHE "$description" |
 		sha256sum | awk '{print $1}')" || return
 	wrappers_digest="$({
 		for wrapper in motor-clang motor-clang++ motor-rust-cc; do
@@ -142,7 +145,8 @@ toolchain_bootstrap_identity_digest() {
 
 toolchain_generate_bootstrap_config() {
 	local output="$1" rust_source="$2" prefix="$3" sysroot="$4"
-	local llvm_bin="$5" description="$6" output_path rust_path temporary
+	local llvm_bin="$5" cache="$6" description="$7"
+	local output_path rust_path temporary
 	toolchain_bootstrap_absolute_path output "$output" || return
 	toolchain_bootstrap_absolute_path rust_source "$rust_source" || return
 	output_path="$(readlink -m "$output")"
@@ -157,7 +161,7 @@ toolchain_generate_bootstrap_config() {
 	mkdir -p "$(dirname "$output_path")"
 	temporary="$(mktemp "${output_path}.tmp.XXXXXX")"
 	if ! toolchain_render_bootstrap_config \
-		"$prefix" "$sysroot" "$llvm_bin" "$description" > "$temporary"; then
+		"$prefix" "$sysroot" "$llvm_bin" "$cache" "$description" > "$temporary"; then
 		rm -f "$temporary"
 		return 1
 	fi

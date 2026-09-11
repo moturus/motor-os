@@ -68,7 +68,7 @@ toolchain_accept_new_prefix() {
 
 toolchain_build_selected_host() {
 	local rust="$1" authoring_base="$2" build_root="$3" rustup="$4"
-	local cargo_home="$5" local_moto_rt="$6" expected_digest
+	local cargo_home="$5" local_moto_rt="$6" bootstrap_cache="$7" expected_digest
 	toolchain_capture_starting_locks "$rust" || return
 	toolchain_derive_identity || return
 	expected_digest="$AUTHORING_SOURCE_DIGEST"
@@ -87,7 +87,7 @@ toolchain_build_selected_host() {
 	BOOTSTRAP_CONFIG="$TOOLCHAIN_STATE_ROOT/bootstrap.toml"
 	toolchain_generate_bootstrap_config "$BOOTSTRAP_CONFIG" "$rust" \
 		"$TOOLCHAIN_PREFIX" "$BOOTSTRAP_SYSROOT" "$STANDALONE_LLVM_BIN" \
-		"$SELECTED_TOOLCHAIN_DESCRIPTION" || return
+		"$bootstrap_cache" "$SELECTED_TOOLCHAIN_DESCRIPTION" || return
 
 	toolchain_claim_prefix "$TOOLCHAIN_PREFIX" || return
 	if [ "$TOOLCHAIN_PREFIX_REUSED" = true ]; then
