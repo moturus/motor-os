@@ -41,7 +41,7 @@ start_test_vm() {
 EOF
 printf '%s\n' 'filter_vm_console() { cat; }' > "$temporary/src/tests/vm-console-filter.sh"
 printf '%s\n' 'stop_vm() { :; }' > "$temporary/src/tests/vm-cleanup.sh"
-for script in test-rust-analyzer-native.sh test-rust-analyzer-crates.sh; do
+for script in test-rust-analyzer-native.sh test-rust-analyzer-crates.sh test-unwind.sh; do
   printf '%s\n' '#!/bin/bash' \
     'printf "%s\n" "${0##*/}" >> "$MEMORY_TEST_LOG"' \
     > "$temporary/src/tests/$script"
@@ -51,14 +51,14 @@ done
 : > "$MEMORY_TEST_LOG"
 env -u MOTO_MEMORY_MIB bash "$temporary/src/tests/test-candidate-vm.sh" --release \
   >> "$temporary/wrapper.log"
-expected=$'candidate-vm 8192 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh'
+expected=$'candidate-vm 8192 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'candidate VM default changed' >&2; exit 1;
 }
 : > "$MEMORY_TEST_LOG"
 MOTO_MEMORY_MIB=6144 bash "$temporary/src/tests/test-candidate-vm.sh" --release \
   >> "$temporary/wrapper.log"
-expected=$'candidate-vm 6144 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh'
+expected=$'candidate-vm 6144 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'candidate VM caller override was not preserved' >&2; exit 1;
 }

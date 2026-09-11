@@ -608,6 +608,13 @@ before image construction because its sandbox made the shared patched-crates
 cache read-only; the unchanged command passed with access to the established
 build paths.
 
+Patch 2 baseline also matches the current abort-default sysroot. The explicit
+abort build passed `cancel` and `abort`, and its fresh verbose build contained
+`-C panic=abort`. The normal and fat-LTO suites both failed `cancel`, `hook`,
+`join`, and the double-panic cleanup marker; their explicit abort and
+`extern "C"` termination cases passed. The candidate wrapper's analyzer tests
+passed before it reported these expected unwind-suite failures.
+
 Before any change: host prefix size, native sysroot size, rustc (99 MB) and
 analyzer sizes, main and developer qcow2 sizes, boot time from the existing
 boot observation, and representative build and runtime timings. After each

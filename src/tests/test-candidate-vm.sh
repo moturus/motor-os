@@ -36,4 +36,5 @@ echo "Starting candidate developer VM; console log: /tmp/test-candidate-vm.log"
 start_test_vm "$IMG_DIR" /tmp/test-candidate-vm.log
 "$WD/test-rust-analyzer-native.sh"
 "$WD/test-rust-analyzer-crates.sh"
+"$WD/test-unwind.sh"
 echo "test-candidate-vm PASS"
