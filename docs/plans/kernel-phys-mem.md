@@ -351,6 +351,40 @@ notification counted by a debug-only oracle; guests without a dual-purpose
 block see the refusal instead. The descriptor-failure rollback has no fault
 injection; the scratch tests cover the pool's take and return paths.
 
+### P4b: eligible heaps map huge pages (2026-09-11)
+
+Ordinary eager private heap requests above 1 MiB carry HUGE_ELIGIBLE. The
+mapping loop maps each whole 2 MiB unit of an eligible segment through a
+local huge-frame source, small pages first-failure onward, with the
+`mem.huge_pages_mapped` and `mem.huge_fallbacks` events produced there;
+the rest of the segment maps small. For now only exact multiples map huge
+(the rounding rule is P5). `share_range_with` refuses when either segment
+is eligible, whatever its backing, before any destructive work, which
+covers F_SHARE_SELF and IPC's `map_shared` at both endpoints, subranges
+included. The debug huge-frame source is a seam (`HUGE_SEAM`: production,
+refuse, or held frames). A controlled boot test on private address spaces
+whose CR3 is never installed maps a held, dirtied huge frame and checks
+the 2 MiB leaf, translation of an interior address, zeroing, pinning, the
+refusals at either end with the destination's bytes intact, teardown
+returning the block, and the refusal path (512 small leaves, one fallback,
+the policy retained). It also exposed a latent placement defect: a region
+whose segments were all freed still holds node slabs, so the old empty-map
+test failed and the append and gap searches found nothing; placement now
+keys on the last segment. systest mem_blocks adds the sizing table through
+map2 (sizes, alignment, every page touched and queried, huge runs reported,
+event counters moving by at least the candidate count), zeroed reuse of a
+dirtied 2 MiB mapping, F_SHARE_SELF refusals for eligible sources and
+subranges with 1 MiB sharing still working, and a `mem-huge-sizes`
+subcommand that asserts no huge success and positive fallback coverage on
+guests of 128 MiB or less.
+
+Launcher matrix, release: every 1 GiB or larger guest (cloud-hypervisor,
+Firecracker, QEMU direct kernel and BIOS, the 8 GiB developer image)
+mapped 5 huge pages for the sizing table plus the reuse test with no
+fallback and 3 contiguous huge runs; Firecracker at 64 MiB mapped none
+with 5 fallbacks and reused 438 of 512 pages zeroed. Placement stayed at
+7 to 10 blocks.
+
 ### P2 is not blocked
 
 An earlier note here claimed the metric catalog lives in `moto-sys`; that

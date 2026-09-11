@@ -1098,6 +1098,10 @@ fn main() {
         mem_blocks::placement_subcommand();
         return;
     }
+    if args.len() == 2 && args[1] == "mem-huge-sizes" {
+        mem_blocks::huge_sizes_subcommand();
+        return;
+    }
     if args.len() == 2 && args[1] == "mmio-validation-tests" {
         mmio::validation_tests();
         return;

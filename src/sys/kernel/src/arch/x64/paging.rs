@@ -223,6 +223,30 @@ impl PageTableImpl {
         None
     }
 
+    #[cfg(debug_assertions)]
+    fn leaf_kind(&self, virt_addr: u64) -> Option<PageType> {
+        let pte_l4 = self.table_l4.get(PageTableImpl::idx_l4(virt_addr));
+        if !pte_l4.is_present() {
+            return None;
+        }
+        let pte_l3 = HwPageTable::from_pte(pte_l4).get(PageTableImpl::idx_l3(virt_addr));
+        if !pte_l3.is_present() {
+            return None;
+        }
+        if pte_l3.is_huge_page() {
+            return Some(PageType::LargePage);
+        }
+        let pte_l2 = HwPageTable::from_pte(pte_l3).get(PageTableImpl::idx_l2(virt_addr));
+        if !pte_l2.is_present() {
+            return None;
+        }
+        if pte_l2.is_huge_page() {
+            return Some(PageType::MidPage);
+        }
+        let pte_l1 = HwPageTable::from_pte(pte_l2).get(PageTableImpl::idx_l1(virt_addr));
+        pte_l1.is_present().then_some(PageType::SmallPage)
+    }
+
     fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         let idx_l4 = PageTableImpl::idx_l4(virt_addr);
         let pte_l4 = self.table_l4.get(idx_l4);
@@ -897,6 +921,12 @@ impl PageTable {
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         unsafe { self.inst.get().lock(line!()).virt_to_phys(virt_addr) }
+    }
+
+    // The kind of the present leaf mapping `virt_addr`, for mapping tests.
+    #[cfg(debug_assertions)]
+    pub fn leaf_kind(&self, virt_addr: u64) -> Option<PageType> {
+        unsafe { self.inst.get().lock(line!()).leaf_kind(virt_addr) }
     }
 
     pub fn copy_from_user(&self, mut virt_addr: u64, mut buf: &mut [u8]) -> Result<(), ErrorCode> {

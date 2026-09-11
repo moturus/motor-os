@@ -203,7 +203,17 @@ impl BlockMetrics {
         );
         assert!(self.free_low <= 64 * 512, "{self:?}");
         assert!(self.reserved > 0, "{self:?}");
-        assert_eq!((self.huge_mapped, self.huge_fallbacks), (0, 0), "{self:?}");
+    }
+
+    // Event counters only grow; other processes may add to them at any time.
+    fn check_monotonic(&self, later: &Self) {
+        assert!(self.splits <= later.splits, "{self:?} {later:?}");
+        assert!(self.recombined <= later.recombined, "{self:?} {later:?}");
+        assert!(self.huge_mapped <= later.huge_mapped, "{self:?} {later:?}");
+        assert!(
+            self.huge_fallbacks <= later.huge_fallbacks,
+            "{self:?} {later:?}"
+        );
     }
 }
 
@@ -225,15 +235,165 @@ fn metrics() {
     after.check_bounds();
     for (a, b) in [(&before, &held), (&held, &after)] {
         assert_eq!((a.total, a.reserved), (b.total, b.reserved), "{a:?} {b:?}");
-        assert!(
-            a.splits <= b.splits && a.recombined <= b.recombined,
-            "{a:?} {b:?}"
-        );
+        a.check_monotonic(b);
     }
     println!(
         "mem_blocks: {} blocks, {} whole, {} split, {} reserved pages, {} splits, {} recombined",
         after.total, after.whole, after.split, after.reserved, after.splits, after.recombined
     );
+}
+
+const MID: u64 = 1 << 21;
+
+struct Handle(moto_sys::SysHandle);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        moto_sys::SysObj::put(self.0).unwrap();
+    }
+}
+
+// Physical pages of a mapping, and how many of them sit in whole 2 MiB
+// runs that are physically contiguous and aligned: those can be huge.
+fn physical_runs(mapping: &Mapping) -> (Vec<u64>, u64) {
+    let mut phys = Vec::with_capacity(mapping.pages as usize);
+    mapping.blocks(&mut phys);
+    phys.clear();
+    for page in 0..mapping.pages {
+        phys.push(SysMem::virt_to_phys(mapping.addr + page * PAGE_SIZE_SMALL).unwrap());
+    }
+    let mut runs = 0;
+    for chunk in phys.chunks_exact(512) {
+        if chunk[0] % MID == 0
+            && chunk
+                .iter()
+                .enumerate()
+                .all(|(i, p)| *p == chunk[0] + i as u64 * PAGE_SIZE_SMALL)
+        {
+            runs += 1;
+        }
+    }
+    (phys, runs)
+}
+
+// Eager heap sizes through map2: exact returned sizes, 2 MiB alignment for
+// requests above 1 MiB, every page mapped and touched, and the huge event
+// counters moving by at least the candidate count (other processes may add
+// to them). Huge success is reported, never required: it is best effort.
+fn sizes() -> u64 {
+    let mut huge_runs = 0;
+    for (pages, candidates) in [(16, 0), (256, 0), (512, 1), (768, 0), (1024, 2)] {
+        let before = BlockMetrics::read();
+        let (addr, size) = SysMem::map2(
+            moto_sys::SysHandle::SELF,
+            SysMem::F_READABLE | SysMem::F_WRITABLE,
+            u64::MAX,
+            u64::MAX,
+            PAGE_SIZE_SMALL,
+            pages,
+        )
+        .unwrap();
+        let mapping = Mapping { addr, pages };
+        assert_eq!(size, pages * PAGE_SIZE_SMALL);
+        if pages > 256 {
+            assert_eq!(addr % MID, 0, "eligible segment not 2 MiB aligned");
+        }
+        mapping.fill(0xc0de + pages);
+        mapping.verify(0xc0de + pages);
+        let (phys, runs) = physical_runs(&mapping);
+        assert_eq!(phys.len() as u64, pages);
+        huge_runs += runs;
+        let after = BlockMetrics::read();
+        let events = (after.huge_mapped - before.huge_mapped)
+            + (after.huge_fallbacks - before.huge_fallbacks);
+        assert!(
+            events >= candidates,
+            "{pages} pages: {events} huge events, {candidates} candidates"
+        );
+        assert!(
+            runs <= candidates,
+            "{pages} pages: {runs} huge runs without candidates"
+        );
+    }
+    huge_runs
+}
+
+// Frames come back zeroed: a dirtied 2 MiB mapping freed and reallocated
+// must read zero even when it lands on the same physical pages.
+fn reuse_is_zeroed() {
+    let first = Mapping::alloc(512);
+    first.fill(0xdead_beef);
+    let (phys_first, _) = physical_runs(&first);
+    drop(first);
+    let second = Mapping::alloc(512);
+    let (phys_second, _) = physical_runs(&second);
+    for page in 0..512 {
+        let base = (second.addr + page * PAGE_SIZE_SMALL) as *const u64;
+        let (lo, hi) = unsafe { (base.read_volatile(), base.add(511).read_volatile()) };
+        assert_eq!((lo, hi), (0, 0), "reused page {page} not zeroed");
+    }
+    let reused = phys_first
+        .iter()
+        .filter(|p| phys_second.contains(p))
+        .count();
+    println!("mem_blocks: reallocation reused {reused} of 512 physical pages, all zero");
+}
+
+// Sharing is refused for an eligible source whatever its backing, subranges
+// included, while sharing of a 1 MiB segment still works.
+fn sharing() {
+    let target = Handle(
+        moto_sys::SysObj::create(
+            moto_sys::SysHandle::NONE,
+            0,
+            "address_space:debug_name=mem-blocks",
+        )
+        .unwrap(),
+    );
+    let dest = moto_sys::CUSTOM_USERSPACE_REGION_START;
+    let share = |source: u64, pages: u64| {
+        SysMem::map(
+            target.0,
+            SysMem::F_SHARE_SELF | SysMem::F_READABLE,
+            source,
+            dest,
+            PAGE_SIZE_SMALL,
+            pages,
+        )
+    };
+    let small = Mapping::alloc(256);
+    let huge = Mapping::alloc(512);
+    let odd = Mapping::alloc(768);
+    let invalid = Err(moto_rt::E_INVALID_ARGUMENT);
+    assert_eq!(share(huge.addr, 512), invalid);
+    assert_eq!(share(huge.addr + PAGE_SIZE_SMALL, 2), invalid);
+    assert_eq!(share(odd.addr, 768), invalid);
+    assert_eq!(share(odd.addr + MID, 1), invalid);
+    assert_eq!(share(small.addr, 256), Ok(dest));
+    SysMem::unmap(target.0, 0, u64::MAX, dest).unwrap();
+    println!("mem_blocks: sharing refusals PASS");
+}
+
+// The 64 MiB launcher leg: no dual-purpose block exists, so every candidate
+// falls back. Larger guests only report.
+pub fn huge_sizes_subcommand() {
+    let before = BlockMetrics::read();
+    let runs = sizes();
+    reuse_is_zeroed();
+    let after = BlockMetrics::read();
+    let small_guest = moto_sys::stats::MemoryStats::get().unwrap().available <= 128 << 20;
+    println!(
+        "mem_blocks: {} huge runs, {} huge pages mapped, {} fallbacks, small guest: {small_guest}",
+        runs,
+        after.huge_mapped - before.huge_mapped,
+        after.huge_fallbacks - before.huge_fallbacks
+    );
+    if small_guest {
+        assert_eq!(after.huge_mapped, before.huge_mapped);
+        assert!(after.huge_fallbacks >= before.huge_fallbacks + 3);
+        assert_eq!(runs, 0);
+    }
+    println!("mem_blocks: huge sizes PASS");
 }
 
 pub fn placement_subcommand() {
@@ -244,6 +404,10 @@ pub fn placement_subcommand() {
 pub fn run_all_tests() {
     placement(false);
     metrics();
+    let runs = sizes();
+    println!("mem_blocks: {runs} huge runs in the sizing table");
+    reuse_is_zeroed();
+    sharing();
     churn();
     BlockMetrics::read().check_bounds();
 }

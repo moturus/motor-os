@@ -378,13 +378,13 @@ impl VmemRegion {
         let region_start = self.segment.start.max(PAGE_SIZE_SMALL);
         let region_end = self.segment.end();
 
-        let mut start = None;
-        if segments.is_empty() {
-            start = aligned_start(region_start, region_end, size, align);
-        } else if let Some(last_seg) = segments.last_segment() {
-            // Appending is the fastest.
-            start = aligned_start(last_seg.segment().end(), region_end, size, align);
-        }
+        // Appending is the fastest. A map whose segments were all freed still
+        // holds its node slabs, so the last segment, not the map, says
+        // whether the region is empty.
+        let mut start = match segments.last_segment() {
+            None => aligned_start(region_start, region_end, size, align),
+            Some(last_seg) => aligned_start(last_seg.segment().end(), region_end, size, align),
+        };
         if start.is_none() {
             // The worst case: find a gap in the middle. This is a linear
             // search, but regions should be large enough to make this rare.

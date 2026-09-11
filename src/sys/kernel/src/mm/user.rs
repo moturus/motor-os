@@ -415,8 +415,16 @@ impl UserAddressSpace {
     pub fn alloc_user_heap(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
+        // Ordinary eager private heap above 1 MiB may map huge pages; the
+        // policy is the segment's, not inferred from anything else.
+        let options = (num_pages > (PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2) / 2).then_some(
+            MappingOptions::READABLE
+                | MappingOptions::WRITABLE
+                | MappingOptions::USER_ACCESSIBLE
+                | MappingOptions::HUGE_ELIGIBLE,
+        );
         self.inner
-            .vmem_allocate_pages(VmemKind::User, num_pages, None)
+            .vmem_allocate_pages(VmemKind::User, num_pages, options)
             .inspect_err(|_| {
                 log::error!("failed to allocate {num_pages} pages");
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
@@ -690,4 +698,110 @@ impl UserAddressSpace {
 
         backtrace
     }
+}
+
+// Controlled huge mapping tests on private address spaces whose CR3 is never
+// installed: a held frame maps as a 2 MiB leaf and comes back zeroed,
+// a refusal falls back to small pages with the policy retained, sharing is
+// refused at either eligible endpoint, and teardown returns the block.
+#[cfg(debug_assertions)]
+pub fn huge_mapping_self_test() {
+    use super::phys::{allocate_huge_frame, block_metrics};
+    use super::virt::{HUGE_FALLBACKS, HUGE_PAGES_MAPPED};
+    use super::virt_intrusive::{HugeSeam, HUGE_SEAM};
+    use super::PageType;
+    use super::PAGING_DIRECT_MAP_OFFSET;
+
+    const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let taken_before = block_metrics().taken;
+    let (mapped_before, fallbacks_before) = (
+        HUGE_PAGES_MAPPED.load(Ordering::Relaxed),
+        HUGE_FALLBACKS.load(Ordering::Relaxed),
+    );
+
+    // A held frame, dirtied through the direct map, then handed to the loop.
+    let Ok(frame) = allocate_huge_frame() else {
+        crate::raw_log!("huge mapping tests SKIPPED: no dual-purpose block");
+        return;
+    };
+    let phys = frame.get().unwrap().start();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (phys + PAGING_DIRECT_MAP_OFFSET) as *mut u8,
+            PAGE_SIZE_MID as usize,
+        )
+    };
+    bytes.fill(0xa5);
+    *HUGE_SEAM.lock(line!()) = HugeSeam::Held(alloc::vec![frame]);
+    let huge = space.alloc_user_heap(HUGE_PAGES).unwrap();
+    assert!(matches!(*HUGE_SEAM.lock(line!()), HugeSeam::Held(ref held) if held.is_empty()));
+    assert_eq!(huge.size, PAGE_SIZE_MID);
+    assert_eq!(huge.start & (PAGE_SIZE_MID - 1), 0);
+    let table = space.inner.page_table_ref();
+    assert_eq!(table.leaf_kind(huge.start), Some(PageType::MidPage));
+    assert_eq!(table.virt_to_phys(huge.start + 12345), Some(phys + 12345));
+    assert!(
+        bytes.iter().all(|byte| *byte == 0),
+        "a reused huge page was not zeroed"
+    );
+    let (pinned, offset) = space
+        .inner
+        .pin_user_page(huge.start + PAGE_SIZE_MID - 1)
+        .unwrap();
+    assert_eq!(pinned.get().unwrap().kind(), PageType::MidPage);
+    assert_eq!(
+        pinned.get().unwrap().start() + offset,
+        phys + PAGE_SIZE_MID - 1
+    );
+    drop(pinned);
+    assert_eq!(HUGE_PAGES_MAPPED.load(Ordering::Relaxed), mapped_before + 1);
+
+    // Sharing is refused with the eligible segment at either end, and the
+    // existing destination keeps its bytes.
+    let small = peer.alloc_user_heap(HUGE_PAGES / 2).unwrap();
+    peer.copy_to_user(b"intact", small.start).unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    assert_eq!(
+        UserAddressSpace::map_shared(&peer, small.start, &space, huge.start, options),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, huge.start, &peer, small.start, options),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(peer.read_from_user(small.start, 6).unwrap(), b"intact");
+
+    // Teardown returns the block; the frame count observes it.
+    space.unmap(huge.start).unwrap();
+    assert_eq!(block_metrics().taken, taken_before);
+    assert_eq!(table.leaf_kind(huge.start), None);
+
+    // A refused candidate is served small: 512 small leaves, one fallback,
+    // the policy retained for the segment; sharing stays refused.
+    *HUGE_SEAM.lock(line!()) = HugeSeam::Refuse;
+    let fallback = space.alloc_user_heap(HUGE_PAGES).unwrap();
+    assert_eq!(fallback.start & (PAGE_SIZE_MID - 1), 0);
+    for page in [0, 1, HUGE_PAGES - 1] {
+        assert_eq!(
+            table.leaf_kind(fallback.start + page * PAGE_SIZE_SMALL),
+            Some(PageType::SmallPage)
+        );
+    }
+    assert_eq!(HUGE_FALLBACKS.load(Ordering::Relaxed), fallbacks_before + 1);
+    assert_eq!(block_metrics().taken, taken_before);
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, fallback.start, &peer, small.start, options),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    space.unmap(fallback.start).unwrap();
+    *HUGE_SEAM.lock(line!()) = HugeSeam::Production;
+
+    // Ordinary small sharing still works between the peers.
+    let dest = space.alloc_user_unmapped(HUGE_PAGES / 2).unwrap();
+    UserAddressSpace::map_shared(&space, dest.start, &peer, small.start, options).unwrap();
+    assert_eq!(space.read_from_user(dest.start, 6).unwrap(), b"intact");
+    crate::raw_log!("huge mapping tests PASS");
 }
