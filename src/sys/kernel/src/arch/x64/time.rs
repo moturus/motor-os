@@ -192,7 +192,10 @@ fn update_globals() {
         sec = PVCLOCK.wall_clock.sec.load(Ordering::Relaxed);
         nsec = PVCLOCK.wall_clock.nsec.load(Ordering::Relaxed);
 
-        if PVCLOCK.wall_clock.version.load(Ordering::Acquire) == ver {
+        // Seqlock re-check: the fence keeps the field loads above from being
+        // reordered past the second version load (Linux: virt_rmb()).
+        fence(Ordering::Acquire);
+        if PVCLOCK.wall_clock.version.load(Ordering::Relaxed) == ver {
             break;
         }
     }
@@ -232,7 +235,10 @@ fn read_vcpu_time_info(ti: &PvClockVcpuTimeInfo) -> (u32, i8, u64, u64) {
         let tsc_ts = ti.tsc_timestamp.load(Ordering::Relaxed);
         let system_time = ti.system_time.load(Ordering::Relaxed);
 
-        if ti.version.load(Ordering::Acquire) == ver {
+        // Seqlock re-check: the fence keeps the field loads above from being
+        // reordered past the second version load (Linux: virt_rmb()).
+        fence(Ordering::Acquire);
+        if ti.version.load(Ordering::Relaxed) == ver {
             assert_ne!(tsc_mul, 0, "PvClockVcpuTimeInfo (KVM clock) not working");
             return (tsc_mul, tsc_shift, tsc_ts, system_time);
         }
