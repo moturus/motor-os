@@ -13,6 +13,101 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
+## Resume checkpoint after 5e401fc9
+
+This checkpoint is the current state and supersedes intermediate status in the
+history below. The five patches listed here are committed; no code or validation
+is pending for that series. Production still uses `mm/phys.rs`. The new
+`mm/phys_blocks` implementation is inactive except for debug scratch tests.
+P1b and all production huge-page work remain unstarted.
+
+P-1, P0b, P0c and P1a1 are complete. P1a1's ownership core is `ad1e42dc`.
+Commit `6ead6302`, titled "patch P1a2", completed the search increment only.
+The original P1a2 deliverable is still partial: search and block-local shaping
+are implemented; byte-range/span integration and table preparation remain.
+Do not repeat the search or shaping work or treat that commit title as
+completion of the entire P1a2 row in the patch sequence.
+
+| Commit | Completed change |
+|---|---|
+| `2276eda8` | Isolate console rmux stderr from terminal-size measurements, preserving diagnostics and assertions. |
+| `a3c9785e` | Accept an initrd starting exactly at the boot heap's end (`>=`). |
+| `09cda9fd` | Retain five process/thread reader guards, clone the main-thread Arc under its lock, and safely handle empty thread-list buffers; add the existing lifecycle test's empty-buffer assertion. |
+| `0153db5b` | Serialize fresh pressure sampling/publication and refresh on every small-page free, preserving 512/768-page hysteresis. |
+| `5e401fc9` | Add pure block-local shaping and deterministic fixtures without production allocator wiring. |
+
+Resume with a small P1a2 increment for physical byte-range normalization and
+validation, following [boot shaping and initialization](#boot-shaping-and-initialization).
+Round available RAM inward to pages and initrd reservations outward; check
+arithmetic/order/overlap and coalesce adjacent available ranges. Keep helpers
+pure and use deterministic fixtures through the existing boot hook. Then add
+raw-RAM/SMALL_ONLY flags and span-wide shaping integration, including more than
+255 mixed blocks, followed by checked table sizing, boot-heap preflight, pure
+table carving and lazy-storage fixtures. Split these into reviewable increments.
+Production table allocation, installation and CPU-publication wiring belong to
+P1b, after P1a2 is complete.
+
+Start in `src/sys/kernel/src/mm/phys_blocks/`: `mod.rs` owns descriptors, list
+integrity and accounting; `search.rs` owns selection/cursor helpers;
+`shaping.rs::Shape::new` takes ordered block-local page intervals in 0..512.
+It already validates/coalesces them, subtracts reservations, retains the largest
+free interval adjacent to an initrd (lowest-address tie), and returns bounds
+plus managed/reserved/discarded counts. It does not normalize physical byte
+ranges, derive flags, iterate the span or carve a table. The core, search and
+shaping fixtures run through `init.rs`'s existing debug-only
+`phys_blocks::test()` hook in ordinary boots, hence transitively through
+`src/tests/full-test.sh`. Release does not run these scratch tests. The
+empty-buffer regression runs in ordinary systest in both profiles.
+
+The combined source committed through `5e401fc9` passed ten debug and ten
+release `src/tests/full-test.sh` runs, plus
+`src/tests/full-test-dev.sh --release` (native source builds and complete Lorry
+suite). Strict kernel Clippy passed in both profiles. No retries, enlarged
+timeouts, weakened assertions or temporary probes were used; no probes remain.
+Source hashes matched after committing. Intermediate commits were not
+independently gated; the user explicitly authorized this split using combined
+results. Future code changes still require the [common gate](#common-gate).
+Keep developer-image validation release-only.
+
+Neither the quiet VM exit nor the five-second filesystem client-refusal timeout
+recurred in those 10+10 runs. That meets the user's continuation threshold;
+neither failure is claimed causally resolved. One diagnostic caught normal
+sys-io exit (`Exited(0)`) triggering shutdown; the initiating service exit is
+unproven. Do not restart investigations merely because this history exists.
+Diagnose a recurrence and fix kernel-memory defects within the authorized
+scope. Pause only for a diagnosed non-obvious fix or a specific outside-scope
+issue; an undiagnosed failure is not a reason to stop. No new race tests or
+reproducers are authorized. Temporary targeted instrumentation and diagnostic
+runs of existing tests are authorized; remove probes before acceptance.
+
+The host motor-fs explicit-flush race is separately diagnosed and deferred by
+the maintainer until the filesystem branch merges; see
+[future-work.md](future-work.md#deferred-filesystem-flush-race-2026-09-09).
+The old allocator's page-zero and contiguous-allocation defects below belong
+to P1b's replacement, not prerequisite repairs for these pure helpers.
+
+Evidence on the development host is under
+`/tmp/kernel-initrd-adjacent-gate.cRf0oY/publication-lifetime-gate-2/`:
+`results.log`, `source-hashes.txt`, `main-validation-summary.json` and `FINAL.md`.
+Earlier failures are in sibling directories described below. These temporary
+paths may be absent on another host; durable findings are in
+[kernel-pressure-publication.md](kernel-pressure-publication.md) and
+[kernel-process-readers.md](kernel-process-readers.md). Page-fault medians were
+11.631 microseconds debug and 6.449 release, with some slower samples. These
+are uncontrolled observations, not a free-path contention benchmark. The
+pressure fix adds shared synchronization to small-page frees. All release
+boot milestone checks passed; P1b's controlled boot/placement measurements
+remain required before activation.
+
+Continue in small local patches for review. The request to commit the five
+patches above is fulfilled, not blanket authorization for future commits.
+No new design decision or approval is pending at this checkpoint.
+
+## Implementation and diagnostic history
+
+These records describe earlier checkpoints and diagnostic sequences. Use the
+resume checkpoint above for current completion and validation status.
+
 Implementation status (2026-09-10): P-1's boot-heap alignment fix is in
 `6efc3276` (alongside the wait-set fix). P0b's range validation is in
 `83f09a60`, and MMIO ownership/teardown and consumer refusals are in
@@ -34,7 +129,7 @@ the bundled Lorry suite. No retries or temporary source probes were used in
 that sequence. P1a1 is implemented and reviewed; production
 still uses the old allocator. P1a2 and huge-page changes are not installed.
 The earlier unexplained pressure exit remains recorded below, not resolved by
-these later passes. Review precedes further implementation.
+these later passes. That checkpoint preceded the later increments below.
 
 Residual diagnostic history: P0c's original third debug gate exited during
 pressure without a recorded cause; the failed image had 193 MiB free. A later
@@ -103,7 +198,7 @@ complete Lorry suite. Both scratch suites passed in all three debug boot logs.
 No test retries or temporary probes were used. Source hashes and complete
 results are under `/tmp/kernel-phys-p1a2-search-gate.XGoygD`. This approximately
 250-line code/test increment is committed and reviewed.
-The next increment supplies pure block-local shaping: validate ordered
+Commit `5e401fc9` supplies pure block-local shaping: validate ordered
 page intervals, coalesce adjacent managed runs, subtract reservations, select
 the largest free run adjacent to any initrd (lowest-address tie), and compute
 managed/reserved/discarded counts and descriptor bounds. It allocates no
@@ -127,17 +222,18 @@ sys_kill_impl from PID 8; the optional process-name read failed, but the stack
 and PID were retained. This does not establish the original exit's cause and
 receives no acceptance credit. Logs, image and source hashes are under
 `/tmp/kernel-initrd-adjacent-gate.cRf0oY`. Under the user's session-specific
-continuation policy, a fresh uninstrumented sequence now checks 10 debug and
+continuation policy, a fresh uninstrumented sequence then checked 10 debug and
 10 release full-suite runs for recurrence, followed by the release developer
 gate. The sequence stops on failure for diagnosis; no source probes or
-weakened assertions are used. This increment and the boundary fix were still local during diagnosis.
+weakened assertions were used. This increment and the boundary fix were still
+local during diagnosis.
 The fresh sequence passed debug-1 and release-1, then debug-2 failed in
 `probe_fresh_client("sys-io-fs")`: the server handle remained live through its
 five-second deadline in the second filesystem pressure episode. Both network
 pressure episodes passed; this VM shut down after the harness reported the
 assertion. It is distinct from the quiet exit. The failed log/image are in
 `characterization/` under the same evidence directory. Temporary snapshots
-in the existing test now investigate whether waiter cleanup cleared pressure
+in the existing test investigated whether waiter cleanup cleared pressure
 before client acceptance, versus an incorrect retained server connection.
 The diagnostic full run retains the shutdown breakpoint, changes no assertion
 or timeout, and receives no acceptance credit. That diagnostic passed; the
@@ -150,12 +246,13 @@ for the outer console rmux client and retains its diagnostics separately.
 Its Rush wrapper explicitly preserves the original console rmux capability
 mask (0x6c); no production permission policy changes. The existing terminal
 suite passes in debug and release, with the TCP diagnostics present in the
-retained stderr. This small test-only fix was kept separate from the kernel changes. Pressure diagnosis continues using the existing complete systest
+retained stderr. This small test-only fix was kept separate from the kernel
+changes. Pressure diagnosis continued using the existing complete systest
 with snapshots and the shutdown breakpoint; no new workload or reproducer.
 That direct systest diagnostic passed too: FS pressure stayed raised at 448
 and 472 free pages, covering both kernel refusal and service-side drop.
 Temporary snapshots are removed; neither pressure failure has been explained.
-A fresh uninstrumented 10-debug/10-release sequence now includes the validated
+A fresh uninstrumented 10-debug/10-release sequence then included the validated
 terminal-test correction, followed by the release developer gate. Its logs
 are in `characterization-2/` under the evidence directory; any failure stops
 that sequence for diagnosis. No diagnostic pass receives acceptance credit.
@@ -165,9 +262,9 @@ The original quiet exit did not recur. A lighter temporary observer adds no
 extra diagnostic syscall until the original final failed wake poll; earlier
 snapshots may affect scheduling. Complete systest with this observer passed,
 as did 20 existing standalone `test-fs-pressure 128` runs without GDB. Full
-harness diagnosis without GDB now preserves the original workload order and
-seeks the pressure/admission/connection state at the timeout. The 10+10
-threshold has not been met. The original and recurring failures remain saved.
+harness diagnosis without GDB then preserved the original workload order and
+sought the pressure/admission/connection state at the timeout. At that point
+the 10+10 threshold had not been met. The original and recurring failures remain saved.
 The full-harness failure-only diagnostic passed once; its second scheduled
 run was intentionally canceled before VM/pressure testing, with status 143
 recorded separately from test regressions. All temporary test probes are
@@ -178,9 +275,9 @@ ordering can miss recovery too. This is not yet established as the cause of
 either recorded failure. The synchronization decision and ordering example
 are in [kernel-pressure-publication.md](kernel-pressure-publication.md).
 The user confirmed that fixing this race is within the authorized work. The
-local fix serializes fresh sampling and publication, including every small-page
-free; validation and performance comparison are pending. The shaping, boundary
-and terminal-test changes remain local.
+fix serialized fresh sampling and publication, including every small-page
+free; validation and performance comparison were pending at that point. The
+shaping, boundary and terminal-test changes were then still local.
 The fix passed strict kernel Clippy and one full debug/release pair; the
 page-fault benchmark remained within the saved baseline ranges. Debug-2
 then exited quietly during the first network-pressure episode, at guest
@@ -204,8 +301,7 @@ no extra lock is held while querying thread stats. Details are in
 Three subsequent full debug diagnostics with both fixes and service-exit
 probes passed. All temporary probes are removed; exact backup comparisons
 confirmed that both fixes remain. A further bounds fix makes `list_tids` safe
-for a zero-length caller buffer;
-the existing shared-listener test checks that request against its live child.
+for a zero-length caller buffer; the existing shared-listener test checks that request against its live child.
 The first clean gate was canceled during prelude before this fix/test and
 receives no acceptance credit. Clean validation restarted in
 `publication-lifetime-gate-2/` under the evidence directory: 10 debug plus
@@ -250,7 +346,7 @@ valid initrd at 38 MiB in sufficient RAM reaches the incorrect branch. The
 strict comparison predates this work (present in `5e42173e`). This is a
 source-level diagnosis, not a launcher failure reproduced during validation.
 The user approved the one-line `>` to `>=` correction for upper-initrd
-classification; it is implemented as a separate fix. No new boot self-test is added
+classification; it is implemented in `a3c9785e`. No new boot self-test is added
 for the comparison alone. The existing common gate validates compilation and
 ordinary boots, but does not force the adjacent-initrd layout; that boundary
 is validated by source inspection. Common-gate failure details are recorded
@@ -1096,7 +1192,7 @@ Cross-CPU frees and descriptor false sharing may affect
 performance. Do not add claim-spacing heuristics, migration, larger heaps,
 or new tuning knobs without evidence and a separate review.
 
-Implementation may start at P-1 under the requested local-change/commit
-workflow. Keep this document as the active specification, update patch
+Resume at the remaining P1a2 work identified in the current checkpoint,
+under the requested local-change/commit workflow. Keep this document as the active specification, update patch
 status and measured outcomes as they land, and use Git history for the
 superseded alternatives and review discussion.
