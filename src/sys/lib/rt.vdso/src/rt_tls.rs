@@ -61,11 +61,15 @@ pub(crate) fn thread_cache() -> Option<&'static frusa::Cache4K> {
         // First allocation on this thread: the block is created on the
         // shared path and serves from the next call on.
         let block = ThreadBlock::ensure();
-        block.cache.set_shard(tcb.current_cpu.load(Ordering::Relaxed));
+        block
+            .cache
+            .set_shard(tcb.current_cpu.load(Ordering::Relaxed));
         return Some(&block.cache);
     }
     let block = unsafe { &*(tcb.tls as usize as *const ThreadBlock) };
-    block.cache.set_shard(tcb.current_cpu.load(Ordering::Relaxed));
+    block
+        .cache
+        .set_shard(tcb.current_cpu.load(Ordering::Relaxed));
     Some(&block.cache)
 }
 
@@ -78,7 +82,9 @@ pub(crate) fn existing_thread_cache() -> Option<&'static frusa::Cache4K> {
         return None;
     }
     let block = unsafe { &*(tcb.tls as usize as *const ThreadBlock) };
-    block.cache.set_shard(tcb.current_cpu.load(Ordering::Relaxed));
+    block
+        .cache
+        .set_shard(tcb.current_cpu.load(Ordering::Relaxed));
     Some(&block.cache)
 }
 
