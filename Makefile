@@ -3,12 +3,15 @@
 BUILD ?= debug
 
 ROOT_DIR := $(CURDIR)
+# Cleaning does not require a Rust toolchain.
+ifneq ($(sort $(MAKECMDGOALS)),clean)
 TOOLCHAIN_SYSROOT := $(shell rustc --print sysroot 2>/dev/null)
 MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
 	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \
 	test -f "$$stamp" && grep -Ex '[0-9a-f]{64}' "$$stamp"))
 ifeq ($(MOTOR_TOOLCHAIN_KEY),)
 $(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
+endif
 endif
 OBJ_ROOT := $(ROOT_DIR)/build/obj/$(MOTOR_TOOLCHAIN_KEY)
 
@@ -319,7 +322,7 @@ clean:
 	rm -rf src/tests/*/target
 	rm -rf src/third_party/*/target
 	rm -rf src/third_party/*/Cargo.lock
-	cd src/imager && cargo clean && rm -rf target
+	rm -rf src/imager/target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
 	rm -f lib/rt.vdso/rt.vdso
