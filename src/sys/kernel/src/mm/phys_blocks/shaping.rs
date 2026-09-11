@@ -133,6 +133,26 @@ impl Shape {
     }
 }
 
+impl Shape {
+    // Take the first `pages` of the retained free run as permanent, allocated
+    // table storage. The backing block starts split with its bounds intact.
+    pub(super) fn carve(&mut self, pages: u16) -> Result<(), ShapeError> {
+        let run = match self.state {
+            WHOLE => 0..PAGES,
+            SPLIT => self.inner.unused_lo..self.inner.unused_hi,
+            _ => return Err(ShapeError::Bounds),
+        };
+        if pages == 0 || pages > run.end - run.start {
+            return Err(ShapeError::Bounds);
+        }
+        self.inner.unused_lo = run.start + pages;
+        self.inner.unused_hi = run.end;
+        self.inner.used += pages;
+        self.state = SPLIT;
+        Ok(())
+    }
+}
+
 #[cfg(debug_assertions)]
 #[path = "shaping_tests.rs"]
 mod tests;

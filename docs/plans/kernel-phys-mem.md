@@ -152,7 +152,23 @@ host-side preparation took the same 196 seconds in both. That is a guest
 stall, not a slow run, in code this increment does not touch (the retained
 evidence is under `gate-layout-2/dev-1-native-hang/` in the scratchpad and
 the Lorry `native-self-tests` directory named in `dev-1-hang.log`). The
-developer leg was rerun once with the failure preserved.
+developer leg was rerun once with the failure preserved; it passed with the
+native phase at 844 seconds. The increment is committed as `c3cbd5cc`,
+after the console exit line `3f25f1ed`.
+
+The second increment completes the P1a2 helpers: `Layout::block` clips the
+page intervals to one block, shapes it, and derives its RAM and SMALL_ONLY
+flags (blocks below 128 MiB); `Budget::preflight` sizes descriptor lines,
+the two bitmaps and the list-state table (64 blocks per page) with checked
+arithmetic against the boot heap remainder and refuses over-limit spans;
+`Layout::carve_table` finds the lowest block whose retained free run holds
+the table; and `Shape::carve` records the table pages as allocated in a
+whole or partial backing block without changing its bounds. Fixtures cover
+a 351-block span with 289 mixed blocks, whole blocks on both sides of the
+dual-purpose line, absent blocks with and without raw RAM, an initrd across
+three blocks, table rounding at 1/63/64/65/32768 blocks, exact heap-budget
+boundaries, and carving from whole, partial and exhausted runs. Production
+still uses `mm/phys.rs`; P1b is next.
 
 ## Implementation and diagnostic history
 

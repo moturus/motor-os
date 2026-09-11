@@ -1,4 +1,5 @@
 use super::*;
+use crate::mm::phys_blocks::{ABSENT, PAGES, SPLIT, WHOLE};
 use core::slice::from_ref;
 
 const K: u64 = 1 << 10;
@@ -174,5 +175,258 @@ pub(super) fn run() {
         Some(LayoutError::Initrd)
     );
     assert!(Layout::new(&available, &reserved, seg(41 * M, 42 * M), &raw).is_ok());
+    span();
+    storage();
     crate::raw_log!("phys_blocks layout tests PASS");
+}
+
+fn expect(
+    shaped: &Shaped,
+    state: u8,
+    flags: u8,
+    alloc: Range<u16>,
+    unused: Range<u16>,
+    counts: (u16, u16, u16, u16),
+) {
+    let shape = &shaped.shape;
+    assert_eq!((shape.state, shaped.flags), (state, flags));
+    assert_eq!(shape.inner.alloc_lo..shape.inner.alloc_hi, alloc);
+    assert_eq!(shape.inner.unused_lo..shape.inner.unused_hi, unused);
+    assert_eq!(
+        (
+            shape.managed,
+            shape.reserved,
+            shape.discarded,
+            shape.inner.used
+        ),
+        counts
+    );
+}
+
+fn span() {
+    // 300 RAM blocks plus a distant one: the low reservation, the kernel gap,
+    // a three-block initrd, and one reserved page per block above it, so
+    // more than 255 blocks are mixed. Blocks 30 and 299 stay whole.
+    let raw = [seg(0, 600 * M), seg(700 * M, 702 * M)];
+    let available = [seg(0, 34 * M), seg(38 * M, 600 * M)];
+    let mut reserved = alloc::vec![seg(0, 34 * M)];
+    for block in (22..299u64).filter(|block| *block != 30) {
+        let start = block * 2 * M + block * 4 * K;
+        reserved.push(seg(start, start + 4 * K));
+    }
+    let initrd = seg(39 * M + 4 * K, 43 * M + 8 * K);
+    let mut layout = Layout::new(&available, &reserved, initrd, &raw).unwrap();
+    assert_eq!(layout.blocks, 351);
+
+    let mut managed = 0;
+    let mut reserved = 0;
+    let mut discarded = 0;
+    let mut states = [0; 3];
+    let mut mixed = 0;
+    for index in 0..layout.blocks {
+        let shaped = layout.block(index).unwrap();
+        let shape = &shaped.shape;
+        assert_eq!(shaped.flags & RAM != 0, index < 300 || index == 350);
+        assert_eq!(shaped.flags & SMALL_ONLY != 0, index < 64);
+        managed += u64::from(shape.managed);
+        reserved += u64::from(shape.reserved);
+        discarded += u64::from(shape.discarded);
+        states[usize::from(shape.state)] += 1;
+        if shape.state == SPLIT && (shape.inner.alloc_lo != 0 || shape.inner.alloc_hi != PAGES) {
+            mixed += 1;
+        }
+    }
+    // Independent expectations: the smaller run beside each reserved page is
+    // discarded, and low RAM is entirely reserved.
+    let low_reserved = 13 * 512;
+    let (mut per_block_reserved, mut per_block_discarded) = (0, 0);
+    for block in (22..299u64).filter(|block| *block != 30) {
+        let smaller = block.min(511 - block);
+        per_block_reserved += 1 + smaller;
+        per_block_discarded += smaller;
+    }
+    assert_eq!(managed, 294 * 512);
+    assert_eq!(reserved, low_reserved + per_block_reserved);
+    assert_eq!(discarded, per_block_discarded);
+    assert_eq!(states, [57, 2, 292]);
+    // 276 blocks with a reserved page, plus the 13 fully reserved low blocks.
+    assert_eq!(mixed, 289);
+
+    let low = RAM | SMALL_ONLY;
+    expect(
+        &layout.block(0).unwrap(),
+        SPLIT,
+        low,
+        0..0,
+        0..0,
+        (512, 512, 0, 512),
+    );
+    expect(
+        &layout.block(3).unwrap(),
+        ABSENT,
+        low,
+        0..0,
+        0..0,
+        (0, 0, 0, 512),
+    );
+    expect(
+        &layout.block(17).unwrap(),
+        ABSENT,
+        low,
+        0..0,
+        0..0,
+        (0, 0, 0, 512),
+    );
+    expect(
+        &layout.block(19).unwrap(),
+        SPLIT,
+        low,
+        0..512,
+        0..257,
+        (512, 0, 0, 255),
+    );
+    expect(
+        &layout.block(20).unwrap(),
+        SPLIT,
+        low,
+        0..512,
+        0..0,
+        (512, 0, 0, 512),
+    );
+    expect(
+        &layout.block(21).unwrap(),
+        SPLIT,
+        low,
+        0..512,
+        258..512,
+        (512, 0, 0, 258),
+    );
+    expect(
+        &layout.block(22).unwrap(),
+        SPLIT,
+        low,
+        23..512,
+        23..512,
+        (512, 23, 22, 23),
+    );
+    expect(
+        &layout.block(30).unwrap(),
+        WHOLE,
+        low,
+        0..512,
+        0..0,
+        (512, 0, 0, 0),
+    );
+    expect(
+        &layout.block(64).unwrap(),
+        SPLIT,
+        RAM,
+        65..512,
+        65..512,
+        (512, 65, 64, 65),
+    );
+    expect(
+        &layout.block(256).unwrap(),
+        SPLIT,
+        RAM,
+        0..256,
+        0..256,
+        (512, 256, 255, 256),
+    );
+    expect(
+        &layout.block(299).unwrap(),
+        WHOLE,
+        RAM,
+        0..512,
+        0..0,
+        (512, 0, 0, 0),
+    );
+    expect(
+        &layout.block(320).unwrap(),
+        ABSENT,
+        0,
+        0..0,
+        0..0,
+        (0, 0, 0, 512),
+    );
+    expect(
+        &layout.block(350).unwrap(),
+        ABSENT,
+        RAM,
+        0..0,
+        0..0,
+        (0, 0, 0, 512),
+    );
+}
+
+fn storage() {
+    // Table rounding: 64 bytes per block, 64 blocks per page.
+    for (blocks, lines, words, heap_bytes) in [
+        (1, 1, 1, 168),
+        (63, 16, 1, 1128),
+        (64, 16, 1, 1128),
+        (65, 17, 2, 1208),
+        (MAX_BLOCKS, 8192, 512, 524352 + 8216),
+    ] {
+        let budget = Budget::preflight(blocks, u64::MAX).unwrap();
+        assert_eq!(
+            budget,
+            Budget {
+                lines,
+                words,
+                table_pages: words as u16,
+                heap_bytes,
+            }
+        );
+        assert!(Budget::preflight(blocks, heap_bytes).is_ok());
+        assert_eq!(
+            Budget::preflight(blocks, heap_bytes - 1),
+            Err(LayoutError::Heap {
+                needed: heap_bytes,
+                remaining: heap_bytes - 1
+            })
+        );
+    }
+    assert_eq!(
+        Budget::preflight(MAX_BLOCKS + 1, u64::MAX),
+        Err(LayoutError::Span)
+    );
+
+    // The table backs onto the lowest run that fits: a whole block, a partial
+    // retained run beside the initrd, or nothing at all.
+    let raw = [seg(0, 64 * M)];
+    let available = [seg(0, 34 * M), seg(38 * M, 64 * M)];
+    let mut layout = standard(&available, NONE, &raw).unwrap();
+    assert_eq!(layout.carve_table(0), Ok(None));
+    assert_eq!(layout.carve_table(1), Ok(Some((19, 0))));
+    assert_eq!(layout.carve_table(512), Ok(Some((19, 0))));
+    let mut shape = layout.block(19).unwrap().shape;
+    assert_eq!(shape.carve(513), Err(ShapeError::Bounds));
+    shape.carve(3).unwrap();
+    assert_eq!(shape.state, SPLIT);
+    assert_eq!(shape.inner.alloc_lo..shape.inner.alloc_hi, 0..512);
+    assert_eq!(shape.inner.unused_lo..shape.inner.unused_hi, 3..512);
+    assert_eq!(shape.inner.used, 3);
+    shape.inner.check_bounds().unwrap();
+
+    let mut layout = standard(&available, seg(38 * M, 39 * M), &raw).unwrap();
+    assert_eq!(layout.carve_table(256), Ok(Some((19, 256))));
+    assert_eq!(layout.carve_table(257), Ok(Some((20, 0))));
+    let mut shape = layout.block(19).unwrap().shape;
+    assert_eq!(shape.carve(257), Err(ShapeError::Bounds));
+    shape.carve(256).unwrap();
+    assert_eq!(shape.state, SPLIT);
+    assert_eq!(shape.inner.alloc_lo..shape.inner.alloc_hi, 0..512);
+    assert_eq!(shape.inner.unused_lo..shape.inner.unused_hi, 512..512);
+    assert_eq!(shape.inner.used, 512);
+    assert_eq!(shape.carve(1), Err(ShapeError::Bounds));
+
+    let reserved = [seg(0, 34 * M), seg(38 * M + 8 * K, 64 * M)];
+    let mut layout = Layout::new(&available, &reserved, NONE, &raw).unwrap();
+    assert_eq!(layout.carve_table(2), Ok(Some((19, 0))));
+    assert_eq!(layout.carve_table(3), Ok(None));
+    let mut shape = layout.block(0).unwrap().shape;
+    assert_eq!(shape.carve(1), Err(ShapeError::Bounds));
+    let mut shape = layout.block(3).unwrap().shape;
+    assert_eq!(shape.carve(1), Err(ShapeError::Bounds));
 }
