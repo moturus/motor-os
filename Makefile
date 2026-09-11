@@ -8,7 +8,7 @@ MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
 	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \
 	test -f "$$stamp" && grep -Ex '[0-9a-f]{64}' "$$stamp"))
 ifeq ($(MOTOR_TOOLCHAIN_KEY),)
-	$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
+$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
 endif
 OBJ_ROOT := $(ROOT_DIR)/build/obj/$(MOTOR_TOOLCHAIN_KEY)
 
