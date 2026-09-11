@@ -98,8 +98,9 @@ toolchain_content_tree_digest() (
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v3 target x86_64-unknown-motor \
-		rust_analyzer_recipe motor-native-rust-analyzer-v2-unwind \
+	toolchain_hash_pairs schema motor-native-config-v4 target x86_64-unknown-motor \
+		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
+		rustfmt_recipe motor-native-rustfmt-v1 \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
 		lua_version "$MOTOR_LUA_VERSION" \
@@ -251,7 +252,7 @@ helix_ref=$HELIX_REF
 helix_rev=$HELIX_REV
 helix_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" devtools/helix)
 native_configuration_digest=$NATIVE_CONFIGURATION_DIGEST
-native_rust_analyzer_recipe=motor-native-rust-analyzer-v2-unwind
+native_rust_analyzer_recipe=motor-native-rust-analyzer-v3-std
 native_rust_analyzer_expected_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_VERSION" | base64 -w0)
 native_rust_analyzer_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" | awk '{print $1}')
 rust_src_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" devtools/rust/lib/rustlib/src/rust/library)
@@ -329,7 +330,7 @@ toolchain_validate_consumed_assembly() (
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
 		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
 		"$LOCAL_MOTO_SYS_VERSION" "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV"
-		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v2-unwind)
+		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v3-std)
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {

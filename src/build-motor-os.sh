@@ -904,7 +904,6 @@ main() {
 
 	fetch_workspace_sources
 	toolchain_fetch_rust_analyzer "$RUST" "$TOOLCHAIN_PREFIX"
-	toolchain_fetch_rust_analyzer_library "$RUST" "$TOOLCHAIN_PREFIX"
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths
 	toolchain_claim_assembly

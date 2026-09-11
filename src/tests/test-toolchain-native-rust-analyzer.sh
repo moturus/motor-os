@@ -108,15 +108,13 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
 	'[ "$RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ]' \
 	'[ "$CARGO_PROFILE_RELEASE_OPT_LEVEL" = s ]' \
 	'[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER" = "$ASSEMBLY_SYSROOT/bin/motor-clang" ]' \
-	'[[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS" == "-C panic=unwind "* ]]' \
-	'[[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS" == *"--defsym=__GNU_EH_FRAME_HDR=ADDR(.eh_frame_hdr)" ]]' \
-	'[ "$(cat "$__CARGO_TESTS_ONLY_SRC_ROOT/Cargo.lock")" = library-lock ]' \
+	'[ "$CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS" = "-C link-self-contained=no -C default-linker-libraries=yes" ]' \
+	'[ -z "${__CARGO_TESTS_ONLY_SRC_ROOT:-}" ]' \
 	'[ "$CFG_RELEASE" = 1.99.0-dev ] && [ "$CFG_RELEASE_CHANNEL" = dev ]' \
 	'[[ "$PWD" == */rust/src/tools/rust-analyzer ]]' \
-	'[ "$*" = "build --release --locked --offline --target x86_64-unknown-motor -p rust-analyzer --config $RUST_ANALYZER_CARGO_CONFIG --target-dir $ASSEMBLY_BUILD_ROOT/rust-analyzer -Z build-std=std,panic_unwind" ]' \
+	'[ "$*" = "build --release --locked --offline --target x86_64-unknown-motor -p rust-analyzer --config $RUST_ANALYZER_CARGO_CONFIG --target-dir $ASSEMBLY_BUILD_ROOT/rust-analyzer" ]' \
 	'printf "cargo\n" >> "$NATIVE_BUILD_CALLS"' \
 	'[ "${BUILD_FAIL:-0}" = 0 ] || exit 7' \
-	'if [ "${LIBRARY_LOCK_FAIL:-0}" = 1 ]; then printf changed > "$__CARGO_TESTS_ONLY_SRC_ROOT/Cargo.lock"; fi' \
 	'output="$ASSEMBLY_BUILD_ROOT/rust-analyzer/x86_64-unknown-motor/release/rust-analyzer"' \
 	'mkdir -p "$(dirname "$output")"; cp "$NATIVE_FIXTURE_BINARY" "$output"' \
 	> "$TOOLCHAIN_PREFIX/bin/cargo"
@@ -128,15 +126,8 @@ ln -s "$reader" "$STANDALONE_LLVM_BIN/llvm-readelf"
 toolchain_reverify_selected_sources() { printf 'source\n' >> "$NATIVE_BUILD_CALLS"; }
 toolchain_reverify_rust_analyzer() { printf 'patch\n' >> "$NATIVE_BUILD_CALLS"; }
 toolchain_postbuild_locks_unchanged() { printf 'locks\n' >> "$NATIVE_BUILD_CALLS"; }
-mkdir -p "$rust/library"
-printf library-lock > "$rust/library/Cargo.lock"
-toolchain_prepare_rust_analyzer_library() {
-	[ "$1" = "$rust/library" ] || return 1
-	cp -a "$1" "$2"
-	printf 'library\n' >> "$NATIVE_BUILD_CALLS"
-}
 toolchain_build_native_rust_analyzer "$rust" "$temporary/cargo" ''
-[ "$(paste -sd, "$NATIVE_BUILD_CALLS")" = source,patch,library,cargo,locks,patch,source ] ||
+[ "$(paste -sd, "$NATIVE_BUILD_CALLS")" = source,patch,cargo,locks,patch,source ] ||
 	fail 'source/lock verification order differs'
 staged="$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust"
 cmp "$binary" "$staged/bin/rust-analyzer" || fail 'staged wrong binary'
@@ -150,7 +141,7 @@ cmp "$library/backtrace/ci/host-only.sh" "$staged/lib/rustlib/src/rust/library/b
 if toolchain_build_native_rust_analyzer "$rust" "$temporary/cargo" '' 2>/dev/null; then
 	fail 'existing overlay was overwritten'
 fi
-for failure in BUILD_FAIL STRIP_FAIL LIBRARY_LOCK_FAIL; do
+for failure in BUILD_FAIL STRIP_FAIL; do
 	ASSEMBLY_IMAGE_ROOT="$temporary/$failure"
 	export "$failure=1"
 	if toolchain_build_native_rust_analyzer "$rust" "$temporary/cargo" '' 2>/dev/null; then
@@ -158,8 +149,6 @@ for failure in BUILD_FAIL STRIP_FAIL LIBRARY_LOCK_FAIL; do
 	fi
 	unset "$failure"
 	[ ! -e "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" ] || fail 'published failed build'
-	[ -z "$(find "$ASSEMBLY_BUILD_ROOT" -maxdepth 1 -name '.analyzer-library.*' -print)" ] ||
-		fail 'left private library after build'
 	if [ -d "$ASSEMBLY_IMAGE_ROOT" ]; then
 		[ -z "$(ls -A "$ASSEMBLY_IMAGE_ROOT")" ] || fail 'left temporary overlay'
 	fi

@@ -73,7 +73,7 @@ write_assembly() {
 			"$root/images/helix" devtools/helix)"
 		printf 'native_configuration_digest=%s\n' "$native_config"
 		printf 'rust_analyzer_inputs_digest=%s\n' "$(toolchain_rust_analyzer_inputs_digest)"
-		printf 'native_rust_analyzer_recipe=motor-native-rust-analyzer-v2-unwind\n'
+		printf 'native_rust_analyzer_recipe=motor-native-rust-analyzer-v3-std\n'
 		toolchain_rust_analyzer_manifest_fields
 		printf 'native_rust_analyzer_sha256=%s\n' "$(sha256sum "$root/images/rust-analyzer/devtools/rust/bin/rust-analyzer" | awk '{print $1}')"
 		printf 'rust_src_tree_sha256=%s\n' "$(toolchain_content_tree_digest "$root/images/rust-analyzer" devtools/rust/lib/rustlib/src/rust/library)"

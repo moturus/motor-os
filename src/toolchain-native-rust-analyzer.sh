@@ -75,28 +75,23 @@ toolchain_rust_analyzer_manifest_fields() (
 
 toolchain_build_native_rust_analyzer() (
 	set -euo pipefail
-	local rust="$1" cargo_home="$2" authoring_base="$3" binary destination temporary='' library unwind_root
+	local rust="$1" cargo_home="$2" authoring_base="$3" binary destination temporary='' library
 	local expected_digest="$AUTHORING_SOURCE_DIGEST"
 	toolchain_rust_analyzer_release || exit 1
 	toolchain_reverify_selected_sources "$rust" "$authoring_base" "$expected_digest" || exit 1
 	toolchain_reverify_rust_analyzer "$rust" "$cargo_home" || exit 1
 	mkdir -p "$ASSEMBLY_BUILD_ROOT" || exit 1
-	unwind_root="$(mktemp -d "$ASSEMBLY_BUILD_ROOT/.analyzer-library.XXXXXX")" || exit 1
-	trap 'rm -rf "$unwind_root" "$temporary"' EXIT
-	toolchain_prepare_rust_analyzer_library "$rust/library" "$unwind_root/library" || exit 1
+	trap 'rm -rf "$temporary"' EXIT
 	(cd "$rust/src/tools/rust-analyzer" && \
 		RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" \
 		CARGO_PROFILE_RELEASE_OPT_LEVEL=s \
-		__CARGO_TESTS_ONLY_SRC_ROOT="$unwind_root/library" \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$ASSEMBLY_SYSROOT/bin/motor-clang" \
-		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS="$(toolchain_rust_analyzer_unwind_flags)" \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS="-C link-self-contained=no -C default-linker-libraries=yes" \
 		CFG_RELEASE="$RUST_ANALYZER_RELEASE" CFG_RELEASE_CHANNEL="$MOTOR_RUST_CHANNEL" \
 		"$TOOLCHAIN_PREFIX/bin/cargo" build --release --locked --offline \
 		--target x86_64-unknown-motor -p rust-analyzer \
 		--config "$RUST_ANALYZER_CARGO_CONFIG" \
-		--target-dir "$ASSEMBLY_BUILD_ROOT/rust-analyzer" \
-		-Z build-std=std,panic_unwind) || exit 1
-	cmp "$rust/library/Cargo.lock" "$unwind_root/library/Cargo.lock" || exit 1
+		--target-dir "$ASSEMBLY_BUILD_ROOT/rust-analyzer") || exit 1
 	toolchain_postbuild_locks_unchanged "$rust" || exit 1
 	toolchain_reverify_rust_analyzer "$rust" "$cargo_home" || exit 1
 	binary="$ASSEMBLY_BUILD_ROOT/rust-analyzer/x86_64-unknown-motor/release/rust-analyzer"
