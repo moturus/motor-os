@@ -1106,6 +1106,7 @@ fn main() {
     if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
         virtio_async::test_premature_completion_drop(args[2] == "block");
         return;
+    }
     if args.len() == 2 && args[1] == "checked-copy-in-tests" {
         checked_copy_in::run_all_tests();
         return;
