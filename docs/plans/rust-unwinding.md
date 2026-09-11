@@ -1,5 +1,11 @@
 # Native Rust unwinding required by rust-analyzer
 
+The decision to retain a private analyzer-only Rust library is **superseded**
+by the [unified toolchain and rustfmt plan](rustfmt.md). That plan is the current
+design direction; the migration is not implemented yet. The deployed analyzer
+still uses the private build described below. This document preserves the
+earlier repair's evidence and authorization, which do not authorize new work.
+
 Complete and gated on 2026-09-10. The release developer image now uses the
 unwinding-enabled analyzer; the packaged SSH workflow, a fresh console run,
 and the full release developer-image suite pass. Initial loading/indexing
@@ -52,13 +58,14 @@ assembly. Temporary kernel exit-stack instrumentation must be removed.
    Preserve the reported image and investigation logs. Do not count the old
    passing editor sequence as proof that this defect is resolved.
 
-## Selected scope after the native prototype
+## Historical scope after the native prototype (superseded)
 
 The pure-Rust implementation passed 128 cancellations on four native threads,
 including nested cleanup and payload recovery. A server built with it survived
 the previously fatal initial workspace analysis and resolved `ANSWER` in Helix.
 
-Keep this opt-in implementation private to the native rust-analyzer build.
+The repair kept this implementation private to the native rust-analyzer build.
+That production-isolation choice is superseded by the unified toolchain plan.
 `src/patches/rust-analyzer-unwind.patch` changes four files in a temporary copy
 of the selected Rust library, never the managed checkout or installed sysroot.
 The patch and recipe are assembly identity inputs; the native recipe advances
@@ -70,9 +77,10 @@ The pure-Rust unwinder is already locked at 0.2.10; its selected features use
 static ELF unwind tables and require no OS API or libc call. LLD supplies
 aliases for the unwind table finder. The default Motor target remains abort.
 
-This adds no boot work, kernel/runtime change, or native compiler capability.
-General opt-in unwinding for other native Rust applications remains a separate
-toolchain change. The private library is a build input, not shipped rust-src:
+That repair added no boot work, kernel/runtime change, or native compiler
+capability. General unwinding for other native Rust applications was deferred
+and is now included in the unified toolchain plan. The deployed private library
+is a build input, not shipped rust-src:
 analysis still uses sources matching the installed native compiler.
 
 ## Regression evidence during integration
