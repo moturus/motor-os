@@ -481,22 +481,17 @@ impl Process {
     }
 
     pub(super) fn list_tids(&self, start_tid: &ThreadId, buf: &mut [u64]) -> usize {
-        let _ = self.status.lock(line!());
-        let tids = self.threads.range(start_tid..);
-        let mut idx = 0;
-        for (tid, _) in tids {
-            buf[idx] = tid.as_u64();
-            idx += 1;
-            if idx >= buf.len() {
-                break;
-            }
+        let _status = self.status.lock(line!());
+        let mut copied = 0;
+        for (slot, (tid, _)) in buf.iter_mut().zip(self.threads.range(start_tid..)) {
+            *slot = tid.as_u64();
+            copied += 1;
         }
-
-        idx
+        copied
     }
     pub(super) fn get_thread_data(&self, tid: u64) -> Option<moto_sys::stats::ThreadDataV1> {
         let thread: Arc<Thread> = {
-            let _ = self.status.lock(line!());
+            let _status = self.status.lock(line!());
             self.threads.get(&ThreadId::from_u64(tid))?.clone()
         };
 
@@ -504,16 +499,12 @@ impl Process {
     }
 
     pub(super) fn self_object(&self) -> Option<Arc<SysObject>> {
-        self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
-        compiler_fence(Ordering::AcqRel);
-        core::sync::atomic::fence(Ordering::AcqRel);
+        let _status = self.status.lock(line!());
         self.self_object.as_ref().map(|o| o.clone())
     }
 
     pub(super) fn self_pinned(&self) -> Option<Arc<Process>> {
-        self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
-        compiler_fence(Ordering::AcqRel);
-        core::sync::atomic::fence(Ordering::AcqRel);
+        let _status = self.status.lock(line!());
         self.self_object
             .as_ref()
             .and_then(super::sysobject::object_from_sysobject::<Process>)
@@ -525,8 +516,9 @@ impl Process {
     pub fn address_space(&self) -> &Arc<UserAddressSpace> {
         &self.address_space
     }
-    pub fn main_thread(&self) -> &Option<Arc<Thread>> {
-        &self.main_thread
+    pub fn main_thread(&self) -> Option<Arc<Thread>> {
+        let _status = self.status.lock(line!());
+        self.main_thread.clone()
     }
 
     pub fn start(&self) {
@@ -1102,9 +1094,7 @@ impl Thread {
     }
 
     pub(super) fn self_object(&self) -> Option<Arc<SysObject>> {
-        self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
-        compiler_fence(Ordering::AcqRel);
-        core::sync::atomic::fence(Ordering::AcqRel);
+        let _status = self.status.lock(line!());
         self.self_object.as_ref().cloned()
     }
 
