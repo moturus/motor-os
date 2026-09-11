@@ -85,9 +85,20 @@ fn update_pressure() {
     });
 }
 
+#[cfg(debug_assertions)]
+static FREE_NOTIFICATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// How many times the free path has notified admission; a debug test oracle.
+#[cfg(debug_assertions)]
+pub fn free_notifications() -> u64 {
+    FREE_NOTIFICATIONS.load(Ordering::Relaxed)
+}
+
 /// Frees outside admission windows must publish too. Skipping a clear flag
 /// would let a concurrent publisher raise pressure after recovery unnoticed.
 pub fn note_pages_freed() {
+    #[cfg(debug_assertions)]
+    FREE_NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
     update_pressure();
 }
 

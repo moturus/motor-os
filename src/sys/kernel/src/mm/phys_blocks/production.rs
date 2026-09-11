@@ -258,6 +258,17 @@ impl BlockPool {
             .unwrap_or_else(|err| panic!("phys: corrupt free of 0x{addr:x}: {err:?}"));
     }
 
+    // A whole dual-purpose block, or None: a recoverable fallback signal.
+    pub(crate) fn alloc_huge(&self) -> Option<u64> {
+        self.allocate_huge()
+            .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} (huge)"))
+    }
+
+    pub(crate) fn free_huge(&self, addr: u64) {
+        self.return_huge(addr)
+            .unwrap_or_else(|err| panic!("phys: corrupt huge free of 0x{addr:x}: {err:?}"));
+    }
+
     pub(crate) fn total_pages(&self) -> u64 {
         self.counters.total
     }

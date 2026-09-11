@@ -87,7 +87,6 @@ impl<L: PageLinks> Pool<'_, L> {
         }
     }
 
-    #[allow(dead_code)] // P4a maps huge pages.
     pub(super) fn allocate_huge(&self) -> Result<Option<u64>, Corruption> {
         self.scan(self.whole, true, |index| self.take_huge(index))
     }

@@ -470,7 +470,6 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(())
     }
 
-    #[allow(dead_code)] // P4a maps huge pages.
     fn take_huge(&self, index: usize) -> Result<Option<u64>, Corruption> {
         let block = self.block(index)?;
         let mut inner = block.inner.lock(line!());
@@ -491,7 +490,6 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(Some((index as u64) << BLOCK_SHIFT))
     }
 
-    #[allow(dead_code)] // P4a maps huge pages.
     fn return_huge(&self, addr: u64) -> Result<(), Corruption> {
         let (index, page) = self.page_location(addr)?;
         if page != 0 {

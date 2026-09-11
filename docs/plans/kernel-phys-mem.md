@@ -337,6 +337,20 @@ failed 50 of 5028 listings against 34 of 6818 on this kernel, so it is
 preexisting motor-fs behavior, outside this plan; fs-write now churns its
 own subdirectory.
 
+### P4a: owning huge frames (2026-09-11)
+
+`phys::allocate_huge_frame` takes one whole dual-purpose block through the
+pool's downward search and wraps it in a `Frame` of kind MidPage; failure
+is `E_OUT_OF_MEMORY`, the recoverable fallback signal, and a failed frame
+descriptor returns the block. Dropping such a frame returns the block and
+then notifies admission, after the block lock. The fixed sys-io mid segment
+keeps its frameless path. A debug boot test on the live pool takes and
+returns one huge frame while the BSP is alone: kind, 2 MiB alignment, the
+128 MiB line, taken and whole counts, the free-page delta, and an admission
+notification counted by a debug-only oracle; guests without a dual-purpose
+block see the refusal instead. The descriptor-failure rollback has no fault
+injection; the scratch tests cover the pool's take and return paths.
+
 ### P2 is not blocked
 
 An earlier note here claimed the metric catalog lives in `moto-sys`; that

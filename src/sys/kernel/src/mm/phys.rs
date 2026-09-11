@@ -98,6 +98,24 @@ pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
     res
 }
 
+/// A huge frame owning one whole dual-purpose block. Failure is the
+/// recoverable fallback signal for huge candidates, not exhaustion.
+pub fn allocate_huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
+    let inst = PhysicalMemory::inst();
+    let start = inst.blocks.alloc_huge().ok_or(moto_rt::E_OUT_OF_MEMORY)?;
+    match inst.slab.alloc_arc() {
+        Ok(frame) => {
+            frame.get_mut().unwrap().start = start;
+            frame.get_mut().unwrap().kind = PageType::MidPage;
+            Ok(frame)
+        }
+        Err(err) => {
+            inst.free_huge(start);
+            Err(err)
+        }
+    }
+}
+
 /// A frame for a page the allocator already holds as used: boot-time
 /// reservations such as the initrd. Dropping it frees the page, so the
 /// owner must be something that lives as long as the reservation.
@@ -320,9 +338,17 @@ impl PhysicalMemory {
         crate::mm::admission::note_pages_freed();
     }
 
+    // Huge frames come only from the dual-purpose pool; the fixed mid
+    // segment has no frames and is never returned.
+    fn free_huge(&self, phys_addr: u64) {
+        self.blocks.free_huge(phys_addr);
+        crate::mm::admission::note_pages_freed();
+    }
+
     fn deallocate_frame(&self, frame: &Frame) {
         match frame.kind {
             PageType::SmallPage => self.free_small(frame.start),
+            PageType::MidPage => self.free_huge(frame.start),
             _ => panic!(),
         };
 
@@ -415,6 +441,7 @@ pub struct PhysStats {
     pub blocks_total: u64,
     pub blocks_whole: u64,
     pub blocks_split: u64,
+    pub blocks_taken: u64,
     pub block_splits: u64,
     pub block_recombined: u64,
 }
@@ -440,6 +467,7 @@ impl PhysStats {
             blocks_total: inst.blocks.block_count() as u64,
             blocks_whole: inst.blocks.whole_count(),
             blocks_split: inst.blocks.split_count(),
+            blocks_taken: inst.blocks.taken_count(),
             block_splits: inst.blocks.split_events(),
             block_recombined: inst.blocks.recombine_events(),
         }
@@ -459,4 +487,43 @@ impl PhysStats {
 #[cfg(debug_assertions)]
 pub fn dump_stats() {
     log::debug!("phys mem stats:\n{:#?}", PhysStats::get());
+}
+
+// Take and return one huge frame from the live pool while the BSP is alone:
+// block accounting, alignment, and the admission notification on return.
+#[cfg(debug_assertions)]
+pub fn huge_frame_self_test() {
+    use crate::mm::admission;
+    let inst = PhysicalMemory::inst();
+    let before = block_metrics();
+    let free_before = inst.blocks.free_pages();
+    let notified = admission::free_notifications();
+    let frame = match allocate_huge_frame() {
+        Ok(frame) => frame,
+        Err(err) => {
+            // Guests of 128 MiB or less have no dual-purpose block.
+            assert_eq!(err, moto_rt::E_OUT_OF_MEMORY);
+            assert!(
+                before.total <= 64,
+                "huge frame refused with {} blocks",
+                before.total
+            );
+            crate::raw_log!("phys huge frame tests SKIPPED: no dual-purpose block");
+            return;
+        }
+    };
+    let (start, kind) = (frame.get().unwrap().start(), frame.get().unwrap().kind());
+    assert_eq!(kind, PageType::MidPage);
+    assert_eq!(start & (PAGE_SIZE_MID - 1), 0);
+    assert!(start >= 128 * super::ONE_MB);
+    let held = block_metrics();
+    assert_eq!(held.taken, before.taken + 1);
+    assert_eq!(held.whole, before.whole - 1);
+    assert_eq!(inst.blocks.free_pages(), free_before - 512);
+    drop(frame);
+    let after = block_metrics();
+    assert_eq!((after.taken, after.whole), (before.taken, before.whole));
+    assert_eq!(inst.blocks.free_pages(), free_before);
+    assert!(admission::free_notifications() > notified);
+    crate::raw_log!("phys huge frame tests PASS");
 }
