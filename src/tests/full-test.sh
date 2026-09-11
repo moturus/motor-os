@@ -36,9 +36,10 @@ fi
 ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
+. "$WD/vm-test-boot.sh"
 
 # Host russhd tests also use this key, before the VM tests below.
-chmod 600 "$WD/test.key"
+test_vm_configure_ssh
 
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
@@ -218,16 +219,6 @@ else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
 
-SSH_OPTIONS=(
-  -F /dev/null
-  -p 2222
-  -o IdentitiesOnly=yes
-  -o BatchMode=yes
-  -o StrictHostKeyChecking=yes
-  -o UserKnownHostsFile="$WD/test-known-hosts"
-  -i "$WD/test.key"
-)
-SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   MOTOR_TEST_ROOT=/devtools
 else
@@ -237,10 +228,6 @@ export MOTOR_TEST_ROOT
 TEST_BIN="$MOTOR_TEST_ROOT/tests"
 TEST_TMP="$MOTOR_TEST_ROOT/tmp"
 RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
-
-vm_ssh() {
-  "${SSH[@]}" "$@"
-}
 
 vm_ssh_stdout() {
   vm_ssh "$@"
@@ -392,35 +379,7 @@ echo ""
 echo ""
 
 
-# FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
-# for hang forensics); run-qemu.sh passes "$@" through to qemu.
-# Do not forward the guest's terminal-size controls: a host terminal may answer
-# or retain them, leaving reports queued for the shell after this run.
-"$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
-  > >(filter_vm_console | tee /tmp/full-test.log) 2>&1 &
-VMM_PID="$!"
-
-# A refused connection returns immediately, so OpenSSH's ConnectionAttempts
-# does not reliably cover a slow debug boot. Retry explicitly; the overall
-# harness timeout bounds this loop.
-until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
-    vmm_status=0
-    wait "$VMM_PID" || vmm_status="$?"
-    VMM_PID=""
-    cat /tmp/full-test.log >&2
-    fail "QEMU exited before SSH became ready (status $vmm_status)"
-  fi
-  sleep 1
-done
-if ! kill -0 "$VMM_PID" 2>/dev/null; then
-  vmm_status=0
-  wait "$VMM_PID" || vmm_status="$?"
-  VMM_PID=""
-  cat /tmp/full-test.log >&2
-  fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
-fi
+start_test_vm "$IMG_DIR" /tmp/full-test.log
 
 ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
 ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"

@@ -1,9 +1,9 @@
 # Standard Motor Rust unwinding and native rustfmt
 
-Status: implementation plan, revised 2026-09-11 after a fourth review
-(section 10). No implementation,
-toolchain builds, external source changes, commits, or publication have been
-made. Default policy: leave changes local; commit only when asked.
+Status: implementation in progress, revised 2026-09-11 after a fourth review
+(section 10). The current-toolchain baseline and candidate VM harness are the
+first implementation patch. No external source changes or publication have
+been made.
 
 Decisions recorded:
 
@@ -575,6 +575,38 @@ archives instead of downloading them. If added, include it in the normalized
 identity digest as `/MOTOR_BOOTSTRAP_CACHE` like the other paths.
 
 ## 5. Measurements and limits
+
+Baseline recorded on 2026-09-11 before the first implementation edit, using
+toolchain key `50df587e90f781a28d420f9b5e47135ea78508dd83bdac9f487a410fcd330500`
+and assembly `f64cef43ac5451f87829bf0c45595b2d44ae1ae83eb25671161ce1707019abcc`:
+
+| Artifact | Baseline |
+|---|---:|
+| Host toolchain prefix | 952,047,569 bytes |
+| Native Rust sysroot overlay | 218,720,517 bytes |
+| Stripped native rustc | 99,841,112 bytes |
+| Stripped native rust-analyzer | 29,767,376 bytes |
+| Main qcow2 file / allocated | 226,754,560 / 226,709,504 bytes |
+| Developer qcow2 file / allocated | 4,252,041,216 / 4,252,209,152 bytes |
+
+The current native analyzer acceptance took 25.658 seconds total, including
+20.322 seconds to healthy quiescence; sampled maxima were 913,338,368 virtual
+bytes and 26 analyzer threads, and 1,307,824,128 bytes of guest physical
+memory. The existing QEMU boot observation is 203 ms to `kernel up` and
+1.19-1.21 seconds to SSH readiness. The selected toolchain's recorded cold
+host build took 20 minutes 25 seconds and the complete toolchain, assembly,
+and image build took 3,785.08 seconds. Candidate measurements use the same
+definitions.
+
+Patch 1 validation passed: the memory contract covers the candidate wrapper's
+8192 MiB default and caller override, the wrapper booted the release developer
+image and passed both analyzer scripts, and the release `full-test.sh` passed
+with the shared launcher. Immediately before this patch the same tuple passed
+three consecutive debug and three consecutive release main-image suites plus
+the release developer-image suite. An initial post-edit invocation stopped
+before image construction because its sandbox made the shared patched-crates
+cache read-only; the unchanged command passed with access to the established
+build paths.
 
 Before any change: host prefix size, native sysroot size, rustc (99 MB) and
 analyzer sizes, main and developer qcow2 sizes, boot time from the existing
