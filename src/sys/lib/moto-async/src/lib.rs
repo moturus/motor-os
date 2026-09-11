@@ -21,6 +21,7 @@
 //! will be enough).
 
 #![no_std]
+#![feature(allocator_api)]
 #![feature(likely_unlikely)]
 #![feature(local_waker)]
 

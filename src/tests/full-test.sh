@@ -139,11 +139,13 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
 fi
 
-# Exercise both allocation-failure stages of the native bounded queue.
+# Exercise fallible queue and local-runtime construction.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
+  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-async/Cargo.toml" --features host-construction-test --test fallible
 else
   cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
+  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-async/Cargo.toml" --features host-construction-test --test fallible
 fi
 
 # Platform wire helpers are no_std in the image and unit-tested on the host.

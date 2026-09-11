@@ -557,6 +557,24 @@ fn test_channel_allocation_failure() {
     println!("net_driver::test_channel_allocation_failure PASS");
 }
 
+fn test_pool_runtime_allocation_failure() {
+    wait_for_cold_pool();
+    moto_rt::internal_helper(0, 5, 1, 0, 0, 0);
+    for _ in 0..4 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
+        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(pool_client_count(), 0);
+    }
+    moto_rt::internal_helper(0, 5, 0, 0, 0, 0);
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    drop((tcp, udp));
+    println!("net_driver::test_pool_runtime_allocation_failure PASS");
+}
+
 /// Accept requests riding donations from two different channels must not
 /// collide in the listener's in-flight map. Request ids were per-channel
 /// counters, each starting at 1, and the map is keyed by bare id: with one
@@ -1175,4 +1193,5 @@ pub fn run_all_tests() {
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
     test_channel_allocation_failure();
+    test_pool_runtime_allocation_failure();
 }

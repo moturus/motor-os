@@ -340,21 +340,26 @@ struct LocalRuntimeInner {
 }
 
 impl LocalRuntimeInner {
-    fn new() -> Self {
-        Self {
+    fn try_new() -> Result<Self> {
+        let timeq = crate::timeq::TimeQ::try_new()?;
+        let nonlocal_wakes = Arc::try_new(crossbeam::queue::SegQueue::new())
+            .map_err(|_| moto_rt::Error::OutOfMemory)?;
+        let run_state = Arc::try_new(AtomicU32::new(RUN_STATE_POLLING))
+            .map_err(|_| moto_rt::Error::OutOfMemory)?;
+        Ok(Self {
             runqueue: Default::default(),
             sys_handle_futures: Default::default(),
-            timeq: Default::default(),
+            timeq: RefCell::new(timeq),
             incoming: Default::default(),
             tasks: Default::default(),
             next_task_id: RefCell::new(1),
-            nonlocal_wakes: Default::default(),
-            run_state: Arc::new(AtomicU32::new(RUN_STATE_POLLING)),
+            nonlocal_wakes,
+            run_state,
             wake_on_sleep: core::cell::Cell::new(None),
             currently_running_task: Default::default(),
             io_turn_requested: Default::default(),
             spin_sources: Default::default(),
-        }
+        })
     }
 
     // About to park: nobody will watch the sources, so end every
@@ -688,9 +693,15 @@ impl Default for LocalRuntime {
 
 impl LocalRuntime {
     pub fn new() -> Self {
-        Self {
-            inner: Box::new(LocalRuntimeInner::new()),
-        }
+        Self::try_new().expect("failed to allocate local runtime")
+    }
+
+    /// Construct a runtime without invoking the allocation-error handler.
+    pub fn try_new() -> Result<Self> {
+        let inner = LocalRuntimeInner::try_new()?;
+        Ok(Self {
+            inner: Box::try_new(inner).map_err(|_| moto_rt::Error::OutOfMemory)?,
+        })
     }
 
     fn enter(&mut self) -> LocalRuntimeContextGuard {

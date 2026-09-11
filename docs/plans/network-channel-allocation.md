@@ -127,3 +127,31 @@ patch; that patch is not included in the network fix's commit. Debug runs
 1 and 3 exhibited the previously diagnosed network-RX monitor intervention;
 this allocation fix does not claim to resolve that separate issue.
 No additional performance tests or comparisons were run.
+
+## Follow-up: pool runtime construction
+
+On 2026-09-11, the first unchanged debug gate after a branch merge found the
+next allocation gap. A listener-flood child was admitted to spawn a pool
+channel thread, then aborted while `LocalRuntime::new` allocated that thread's
+executor. The runtime constructor owned four infallible allocations: the timer
+queue cancellation counter, two shared scheduler values, and the outer box.
+
+The user reviewed and authorized the follow-up. `LocalRuntime::try_new` now
+reports `OutOfMemory` from every construction allocation and drops partial
+state. The network pool uses it before connecting to sys-io, fails all parked
+waiters through the existing policy, clears the in-flight provision, and exits
+the unused thread normally. The infallible constructor remains for callers
+whose APIs cannot report allocation failure.
+
+A host allocator regression refuses each of the four allocations and verifies
+that no owned bytes remain. A guest injection verifies TCP and UDP error
+delivery, empty pool accounting, and recovery after the failure is disabled.
+
+The host regression passed in debug and release, and host and Motor-target
+Clippy passed with warnings denied. Three consecutive debug and three
+consecutive release main-image suites passed without retries, including the
+new guest regression. The release developer-image suite also passed, including
+its source-tree and complete Lorry product gates. A test-helper race exposed by
+the first debug run was fixed separately in commit `1157c53b`; subsequent
+pressure tests reported every attempted write, stat, and lock acquisition as
+refused while pressure was active.
