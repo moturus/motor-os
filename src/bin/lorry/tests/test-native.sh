@@ -367,9 +367,12 @@ start_vm() {
         if timeout 2 "${SSH[@]}" /system/bin/rush -c true >/dev/null 2>&1; then
             fail "a VM is already answering on the tap; stop it before running"
         fi
+        # LORRY_NATIVE_QEMU_ARGS: optional extra qemu arguments (a monitor
+        # socket for hang forensics); run-qemu.sh passes them through.
+        # shellcheck disable=SC2086
         MOTO_IMAGE="$IMAGE_NAME" MOTO_SMP="$VM_SMP" \
             MOTO_MEMORY_MIB="$VM_MEMORY_MIB" \
-            "$ROOT_DIR/vm_images/release/run-qemu.sh" >"$QEMU_LOG" 2>&1 &
+            "$ROOT_DIR/vm_images/release/run-qemu.sh" ${LORRY_NATIVE_QEMU_ARGS:-} >"$QEMU_LOG" 2>&1 &
         VM_PID="$!"
         VM_STARTED=1
     fi
