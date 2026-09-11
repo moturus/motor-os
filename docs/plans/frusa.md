@@ -2,8 +2,9 @@
 
 `frusa_v2` (`src/sys/lib/frusa_v2`) is the allocator behind every process's
 `GlobalAlloc`, wired in by `rt.vdso`. The kernel keeps the original `frusa`
-crate. §1 to §6 describe the allocator as it is; §7 is the plan to close the
-fast-path gap to glibc. This document follows the root `AGENTS.md`.
+crate; §8 assesses moving it. §1 to §6 describe the allocator as it is; §7
+is the plan to close the fast-path gap to glibc. This document follows the
+root `AGENTS.md`.
 
 ## 1. Overview and constraints
 
@@ -467,3 +468,153 @@ is the two locked instructions of the bitmap path against none, and the
 lists cannot close that gap without the per-thread state that §7.1 shows
 breaking the admission contract. The remaining Motor-specific cost is the
 entry path; §7.2 lists it with the other follow-ups.
+
+## 8. The kernel heap
+
+The kernel's `GlobalAlloc` (`src/sys/kernel/src/mm/kheap.rs`) is the
+original `frusa` crate behind `RawAllocator`, a page-granular backend that
+bumps from a 2 MiB boot area until memory is initialized and then hands
+out `VmemKind::KernelHeap` pages. This section is the assessment of
+replacing it with `frusa_v2`, measured on 2026-09-10.
+
+### 8.1 What a switch needs
+
+Nothing the kernel does not already have.
+
+- **Backend contract.** `Frusa4K` asks the backend for at most 256 KiB at
+  4 KiB alignment (a batch of the 4 KiB class; the 2 MiB alignment tier in
+  `batch_layout` is reachable only by classes above 4 KiB), inside the raw
+  allocator's "align at most 4 KiB" assertion. Initialization takes the
+  reader shards, the free lists, and one metadata page, about 28 KiB, plus
+  a 4 KiB index per class on its first growth, all from the boot bump area
+  when the first allocation precedes memory init. Frees inside the boot
+  area are no-ops for both crates. Every backend free is the whole
+  allocation at its start, which `vmem_free` requires.
+- **Execution model.** An allocation on a CPU runs to completion before
+  any other allocation can begin on that CPU: kernel code is never
+  preempted, and interrupt handlers do not allocate (every IDT entry is an
+  interrupt gate, the handlers touch atomics only, and object destruction
+  runs in the scheduler loop). Three things follow. A holder of an
+  allocator lock is never descheduled, so a lock wait is bounded by the
+  critical section and the killed-while-holding hazard of §1 cannot arise.
+  A per-CPU cache satisfies the one-user rule of §5 with nothing masked or
+  disabled, and its shard, `arch::current_cpu()` (one gs-relative load),
+  is exact for the whole operation, where a thread's `current_cpu` in the
+  vDSO can go stale under migration. And the per-CPU stage can be a
+  magazine of plain loads and stores with no atomic at all, the design of
+  §7.1 that the vDSO had to reject; §8.4 takes this up.
+- **Lock discipline.** Both crates spin without disabling interrupts,
+  which the execution model makes safe. v2 is stricter on one point:
+  `frusa` holds its slab lock across `vmem_allocate_pages`, v2 holds no
+  lock across a backend call (§1).
+- **Per-CPU state.** `StaticPerCpu` is the natural home; `MAX_CPUS = 16`
+  equals `SHARDS`, so the shard is the CPU. Allocations before the per-CPU
+  structures exist take the uncached path, as the vDSO does before a thread
+  has its block. The wrapper needs an `unsafe impl Sync` justified by the
+  execution model.
+- **No flush hook.** The vDSO needed one for the per-thread lists of §7.1
+  and rejected it: a thread can park forever holding another thread's
+  frees, a process at its admission floor cannot reach them, and returning
+  them would have meant a flush at every park, at the five `SysCpu::wait`
+  call sites in `rt.vdso` and two more in `moto-async`, so C shards the
+  lists by CPU instead. None of that applies to per-CPU state. A CPU never
+  exits, and an idle CPU's magazine is used by its next allocation; what
+  all CPUs hold together is bounded by 16 times the per-CPU caps, not by
+  the thread count; the kernel heap has no admission floor; and its
+  reclaim is an explicit, rare operation (see Consumers below) that simply
+  leaves the cached slots where they are, since listed slots are marked in
+  use and owned blocks are skipped (§4.4, §5). A drain would make that
+  reclaim more exhaustive by a few hundred KiB at most; if ever wanted, it
+  is one scheduler job posted to each CPU from `kheap::reclaim()`, and it
+  can wait.
+- **Consumers.** `kheap::reclaim()` has one caller, the reclaim syscall
+  behind `sysbox free`; there is no periodic reclaim and no pressure hook.
+  `heap_stats()` reads the raw allocator's page counter, not the crate.
+  Neither changes.
+
+A bare swap is one dependency and one type; the per-CPU cache and the
+magazine in front of it are 60 to 100 lines each, gated as in §7.3.
+
+### 8.2 Measurements
+
+The host harness of §6 with a `frusa` column, nanoseconds per alloc+free
+pair, 16 cores. "v1" is the kernel today, "v2 uncached" a bare swap, "v2
+cached" the swap with a per-CPU cache (one cache per thread here).
+
+| Workload | glibc | v1 | v2 uncached | v2 cached |
+|---|---:|---:|---:|---:|
+| fixed 64 B, 1 thread | 6 | 51 | 50 | 21 |
+| fixed 64 B, 8 threads | 6 | 1,264 | 2,140 | 19 |
+| fixed 4 KiB, 8 threads | 38 | 1,233 | 2,195 | 20 |
+| random 16 B to 4 KiB, 8 threads | 20 | 546 | 574 | 97 |
+| FIFO queue of 64 × 64 B | 8 | 57 | 58 | 26 |
+| FIFO queue of 65,536 × 64 B | 8 | 2,965 | 64 | 25 |
+| ring of 4,096 live, random sizes, 8 threads | 58 | 950 | 700 | 120 |
+
+`frusa` frees by walking the slab's block list, so its cost grows with the
+number of live objects of the class; per free, random order:
+
+| Live 64 B objects | v1 | v2 uncached |
+|---:|---:|---:|
+| 4,096 | 98 | 43 |
+| 16,384 | 208 | 31 |
+| 65,536 | 2,190 | 30 |
+| 262,144 | 7,760 | 30 |
+
+### 8.3 Where the kernel allocates
+
+The hot paths were made allocation-free on purpose. Syscall dispatch
+passes arguments by value; wait and wake stage handles in stack arrays up
+to 16 and wakers in an inline vector up to 4, a thread's wait-object
+vector is cleared and reused, a single waiter registers without a map,
+the wake queue is an intrusive list, the scheduler's queues are pre-sized
+deques, and the `mm` layer has its own slabs. Page faults, IPC switches,
+and mappings never touch the heap.
+
+The one per-call heap user on a hot path is the timed wait:
+`Timers::add_timer` builds a BTreeMap node and a BTreeSet per timer under
+the timers spinlock, and the wake frees them. Everything else allocates at
+object creation: process and thread setup, kernel objects and their
+handles, shared-memory endpoints, URL parsing on object creation, and
+diagnostics. Frees run under spinlocks in `put_object` and the timers, so
+a free's cost is lock hold time that other CPUs spin on.
+
+No systest row exercises the kernel heap directly; `wake-bench` (timed
+waits) and an object-creation flood are the measurements that would move.
+
+### 8.4 Assessment
+
+- A bare swap is not worth a gate. It changes nothing on the temporaries
+  path and is slower under contention, because the uncached path
+  serializes every CPU on one partial block. Its only wins are `frusa`'s
+  pathological cases, deep queues and large live populations.
+- The switch pays in two places, both bounded. With a per-CPU cache the
+  timed-wait pair gets a few hundred nanoseconds back on a busy machine.
+  Independent of the cache, frees stop scaling with heap size: a listener
+  flood or a process with tens of thousands of live kernel objects turns
+  every free under `put_object` or the timers into microseconds of lock
+  hold time with `frusa`, and stays at tens of nanoseconds with v2.
+- The execution model lets the kernel take what the vDSO could not. The
+  per-thread lists of §7.1 measured 3 to 5 ns on the immediate workloads
+  and 4 ns on FIFO on the host, at or below glibc, against 21 to 26 for
+  the private block; they were rejected because another thread's frees sat
+  where the allocating thread could not reach them at the admission floor,
+  and the only fix, a flush at every park, was judged not worth its reach
+  into the runtime (§8.1). Per CPU, a free
+  pushes onto the CPU's own magazine and an allocation pops from it with
+  plain stores, since nothing else on that CPU can run in between, and
+  what is held is bounded by 16 CPUs, not by the thread count, so no flush
+  is needed (§8.1).
+- The cost is pinned memory. A per-CPU cache holds up to one block per
+  cached class (§5), at most about 255 KiB per CPU, and a magazine at most
+  its limit per class, 16 KiB per class with the rule of §2; the lists add
+  at most 16 KiB per class per shard. This memory stays with its CPU, since
+  no CPU exits and nothing flushes it (§8.1): a bound of a few MiB on a
+  16-CPU machine, comparable to the slab slack `frusa` keeps today until
+  someone runs `sysbox free`.
+
+Recommendation: switch, as the cached version only, in three patches: the
+swap with the uncached path; the per-CPU `Cache4K`; the magazine in front
+of it. Measure before and after with `systest
+wake-bench` and a flood of object creation. Expect a modest system-level
+effect and a robustness gain at scale.
