@@ -66,6 +66,85 @@ fn join_case() {
     assert!(!std::thread::panicking());
 }
 
+#[cfg(feature = "cxx")]
+unsafe extern "C-unwind" {
+    fn motor_cxx_catch_own() -> i32;
+    fn motor_cxx_static_result() -> i32;
+    fn motor_cxx_throw();
+    fn motor_cxx_catch_through_rust(callback: extern "C-unwind" fn()) -> i32;
+    fn motor_cxx_call_rust(callback: extern "C-unwind" fn(), drops: *mut u64);
+}
+
+#[cfg(feature = "cxx")]
+fn cxx_case() {
+    assert_eq!(unsafe { motor_cxx_catch_own() }, 29);
+    let panic = std::panic::catch_unwind(|| panic!("Rust panic after C++ catch"));
+    assert_eq!(
+        panic.unwrap_err().downcast_ref::<&str>(),
+        Some(&"Rust panic after C++ catch")
+    );
+}
+
+#[cfg(feature = "cxx")]
+fn cxx_static_case() {
+    assert_eq!(unsafe { motor_cxx_static_result() }, 31);
+}
+
+#[cfg(feature = "cxx")]
+static CXX_THROUGH_RUST_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "cxx")]
+struct CxxThroughRustCleanup;
+
+#[cfg(feature = "cxx")]
+impl Drop for CxxThroughRustCleanup {
+    fn drop(&mut self) {
+        CXX_THROUGH_RUST_DROPS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(feature = "cxx")]
+extern "C-unwind" fn cxx_through_rust_bridge() {
+    let _cleanup = CxxThroughRustCleanup;
+    unsafe { motor_cxx_throw() };
+}
+
+#[cfg(feature = "cxx")]
+fn cxx_through_rust_case() {
+    CXX_THROUGH_RUST_DROPS.store(0, Ordering::SeqCst);
+    assert_eq!(
+        unsafe { motor_cxx_catch_through_rust(cxx_through_rust_bridge) },
+        37
+    );
+    assert_eq!(CXX_THROUGH_RUST_DROPS.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(feature = "cxx")]
+extern "C-unwind" fn rust_through_cxx_bridge() {
+    panic!("Rust panic through C++");
+}
+
+#[cfg(feature = "cxx")]
+fn rust_through_cxx_case() {
+    let mut drops = 0_u64;
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        motor_cxx_call_rust(rust_through_cxx_bridge, &mut drops);
+    }));
+    assert_eq!(
+        panic.unwrap_err().downcast_ref::<&str>(),
+        Some(&"Rust panic through C++")
+    );
+    assert_eq!(drops, 1);
+}
+
+#[cfg(feature = "cxx")]
+fn cxx_suite() {
+    cxx_case();
+    cxx_static_case();
+    cxx_through_rust_case();
+    rust_through_cxx_case();
+}
+
 struct PanicOnDrop;
 
 impl Drop for PanicOnDrop {
@@ -148,6 +227,16 @@ fn main() -> ExitCode {
         }
         Some("double-child") => return run(double_child),
         Some("extern-c-child") => return run(|| extern_c_child()),
+        #[cfg(feature = "cxx")]
+        Some("cxx") => return run(cxx_case),
+        #[cfg(feature = "cxx")]
+        Some("cxx-static") => return run(cxx_static_case),
+        #[cfg(feature = "cxx")]
+        Some("cxx-through-rust") => return run(cxx_through_rust_case),
+        #[cfg(feature = "cxx")]
+        Some("rust-through-cxx") => return run(rust_through_cxx_case),
+        #[cfg(feature = "cxx")]
+        Some("cxx-suite") => return run(cxx_suite),
         Some("suite") => unwind_suite(),
         Some("abort-suite") => abort_suite(),
         _ => {
