@@ -421,9 +421,9 @@ echo "$out"
 [ "${out##*$'\n'}" = "mem_blocks: placement PASS" ] ||
   fail "systest mem-placement did not pass: $out"
 
+"$WD/test-unwind.sh"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-crates.sh"
-  "$WD/test-rust-analyzer-unwind.sh"
   "$WD/test-rust-analyzer-native.sh"
 fi
 

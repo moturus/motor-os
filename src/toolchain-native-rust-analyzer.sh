@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Build the standalone Motor server, using the assembly's driver-managed libc link.
-. "$(dirname "${BASH_SOURCE[0]}")/toolchain-rust-analyzer-unwind.sh"
+
+toolchain_fetch_rust_analyzer_library() {
+	local rust="$1" prefix="$2"
+	RUSTC="$prefix/bin/rustc" "$prefix/bin/cargo" fetch --locked \
+		--manifest-path "$rust/library/Cargo.toml"
+}
 
 toolchain_validate_native_rust_analyzer() {
 	local binary="$1"

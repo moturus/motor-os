@@ -96,8 +96,6 @@ MOTOR_OS_RUNTIME_INPUTS=(
   "src/toolchain-rust-analyzer-identity.sh"
   "src/toolchain-patched-crates.sh"
   "src/toolchain-native-rust-analyzer.sh"
-  "src/toolchain-rust-analyzer-unwind.sh"
-  "src/patches/rust-analyzer-unwind.patch"
 )
 
 MOTOR_TOOLCHAIN_KEY_FIELDS=(

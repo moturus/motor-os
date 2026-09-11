@@ -73,11 +73,18 @@ for mode_target in "pure:$pure_target" "c-runtime:$c_target"; do
   done
 done
 
-runner="$ROOT_DIR/src/tests/test-rust-analyzer-crates.sh"
+ssh_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ROOT_DIR/src/tests/test-known-hosts"
+  -i "$ROOT_DIR/src/tests/test.key")
+guest_dir="${MOTOR_TEST_ROOT:-/devtools}/tmp"
 failures=0
 run_guest() {
   local label="$1" binary="$2" command="$3" status=0
-  "$runner" --run-motor "$binary" "$command" || status="$?"
+  local guest="$guest_dir/motor-unwind-$label-$$"
+  printf 'put "%s" "%s"\nchmod 755 "%s"\n' "$binary" "$guest" "$guest" |
+    sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
+  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 "$guest" "$command" || status="$?"
+  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest"
   if [ "$status" -eq 0 ]; then
     echo "test-unwind: $label PASS"
   else
@@ -102,9 +109,6 @@ for profile in release release-lto; do
 done
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
-  ssh_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ROOT_DIR/src/tests/test-known-hosts"
-    -i "$ROOT_DIR/src/tests/test.key")
   guest_source="/devtools/tmp/motor-unwind-test-$$.rs"
   guest_binary="/devtools/tmp/motor-unwind-native-$$"
   downloaded="$temporary/motor-unwind-native"
