@@ -18,9 +18,8 @@ backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 Current state, superseding the checkpoint below and the history after it:
 P-1, P0b, P0c, P1a1, P1a2 and P1b are committed and production allocates
 small pages from the block pool (`3738d69d`). P3 is implemented and gated
-(see its section under the progress notes). P2 is blocked on a scope
-decision: its metrics need `moto-sys` changes, which this plan excludes;
-P4a and everything after it depend on P2. Two preexisting intermittent
+(see its section under the progress notes) and committed as `48a2a701`.
+P2 is next; its metric catalog is kernel-only. Two preexisting intermittent
 failures recurred during this session's gates and are recorded with
 evidence: the quiet VM exit during pressure tests (now self-reporting on
 the console) and one stall of the developer image's native Lorry phase.
@@ -282,15 +281,12 @@ fits, one-byte-short gaps, rounding past a narrow gap and overflow, and the
 option stripping; the 2 MiB alignment branch runs end to end only once P4b
 sets the bit. `Page` and `SegmentNode` keep their 72-byte assertions.
 
-### P2 needs a scope decision
+### P2 is not blocked
 
-Kernel metric names are declared in `moto-sys` (`MetricType` and its
-`name` table in `src/sys/lib/moto-sys/src/stats.rs`), so the eleven P2
-metrics require a `src/sys/lib` change, which this plan lists as out of
-scope and which forces the pinned toolchain assembly to be rebuilt. P4a
-depends on P2. Options: extend `MetricType` in `moto-sys` (crate bump and
-assembly rebuild), or expose the block counts through `PhysStats` and
-`MemoryStats` only. This is the user's call; P3 does not depend on it.
+An earlier note here claimed the metric catalog lives in `moto-sys`; that
+was a misread of a grep. `MetricType` and its `name` table are in
+`kernel/src/xray/stats.rs`, and userspace discovers metrics by name through
+the kernel's stats provider. The eleven P2 metrics are a kernel-only change.
 
 ## Implementation and diagnostic history
 
