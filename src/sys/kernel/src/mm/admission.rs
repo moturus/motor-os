@@ -10,6 +10,7 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use super::phys;
+use crate::util::SpinLock;
 use moto_sys::ErrorCode;
 
 /// Which floor an operation must stay above. CAP_SYS and CAP_IO_MANAGER
@@ -37,6 +38,8 @@ pub const PRESSURE_HIGH_PAGES: u64 = 3 * USER_FLOOR_PAGES; // 3M.
 
 /// Pages reserved by admitted operations that have not completed yet.
 static RESERVED_PAGES: AtomicU64 = AtomicU64::new(0);
+// Serializes sampling and publication, including frees while pressure is down.
+static PRESSURE_UPDATE: SpinLock<()> = SpinLock::new(());
 /// The lowest number of free small pages ever observed at an admission check.
 static LOW_WATER_PAGES: AtomicU64 = AtomicU64::new(u64::MAX);
 
@@ -57,32 +60,35 @@ fn pressure_flag() -> Option<&'static AtomicU32> {
     Some(&super::virt::get_kernel_static_page_mut().memory_pressure)
 }
 
-/// Maintain the shared-page pressure flag from the quantity admission
-/// compares against floors. The CAS picks a single transition winner, so the
-/// flag is written once per transition, not once per caller.
-fn update_pressure(free_for_admission: u64) {
+/// Sample inside the publication lock: an old observation must not overwrite
+/// a newer completed update. Counter changes racing with this sample have
+/// their own update, which cannot complete until this publisher releases.
+fn update_pressure() {
     let Some(flag) = pressure_flag() else {
         return;
     };
-    if flag.load(Ordering::Relaxed) != 0 {
-        if free_for_admission >= PRESSURE_HIGH_PAGES {
-            let _ = flag.compare_exchange(1, 0, Ordering::Release, Ordering::Relaxed);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let _guard = PRESSURE_UPDATE.lock(line!());
+        let reserved = RESERVED_PAGES.load(Ordering::Acquire);
+        let free = phys::available_small_pages().saturating_sub(reserved);
+        let pressure = flag.load(Ordering::Relaxed);
+        let next = if free <= PRESSURE_LOW_PAGES {
+            1
+        } else if free >= PRESSURE_HIGH_PAGES {
+            0
+        } else {
+            pressure
+        };
+        if next != pressure {
+            flag.store(next, Ordering::Release);
         }
-    } else if free_for_admission <= PRESSURE_LOW_PAGES {
-        let _ = flag.compare_exchange(0, 1, Ordering::Release, Ordering::Relaxed);
-    }
+    });
 }
 
-/// Called from the small-page free path, so the flag clears when memory is
-/// freed outside any admission window -- a dying process's teardown, an
-/// unmap. Gated: one load per free while the flag is down.
+/// Frees outside admission windows must publish too. Skipping a clear flag
+/// would let a concurrent publisher raise pressure after recovery unnoticed.
 pub fn note_pages_freed() {
-    let Some(flag) = pressure_flag() else {
-        return;
-    };
-    if flag.load(Ordering::Relaxed) != 0 {
-        update_pressure(phys::available_small_pages().saturating_sub(reserved_pages()));
-    }
+    update_pressure();
 }
 
 /// `u64::MAX` until the first admission check.
@@ -99,8 +105,8 @@ pub struct Admission {
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        let reserved = RESERVED_PAGES.fetch_sub(self.pages, Ordering::AcqRel) - self.pages;
-        update_pressure(phys::available_small_pages().saturating_sub(reserved));
+        RESERVED_PAGES.fetch_sub(self.pages, Ordering::AcqRel);
+        update_pressure();
     }
 }
 
@@ -122,7 +128,7 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
         record_low_water(available);
 
         let free = available.saturating_sub(reserved);
-        update_pressure(free);
+        update_pressure();
         if free < charge_pages || (free - charge_pages) < floor {
             return Err(refuse(class));
         }
@@ -156,7 +162,7 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
     record_low_water(available);
     // `reserved` includes this operation's own charge.
     let free = available.saturating_sub(reserved);
-    update_pressure(free);
+    update_pressure();
     if free < floor {
         core::mem::drop(admission);
         return Err(refuse(class));
