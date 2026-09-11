@@ -139,6 +139,8 @@ impl WaitObject {
 // Note: Process is never moved, but we don't use Pin<> because
 //       we use Arc and Weak, and Pin interaction with Arc and Weak
 //       is underdeveloped: see e.g. PinWeak.
+const EARLY_PROCESS_PIDS: u64 = 8;
+
 pub struct Process {
     this: Weak<Self>,
     main_thread: Option<Arc<Thread>>,
@@ -784,6 +786,17 @@ impl Process {
                     self.debug_name(), // Process debug name, not locking.
                     *status_lock
                 );
+                // The first processes are the boot services and the console
+                // shell. Their exit is rare and usually ends the VM, so record
+                // it on the serial console, which outlives the log forwarder.
+                if self.pid().as_u64() <= EARLY_PROCESS_PIDS {
+                    crate::raw_log!(
+                        "process {} '{}' exited: {:?}",
+                        self.pid().as_u64(),
+                        self.debug_name(),
+                        *status_lock
+                    );
+                }
 
                 self_mut.main_thread = None;
                 self_mut.self_object.take().unwrap()
