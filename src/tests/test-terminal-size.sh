@@ -100,6 +100,9 @@ fail() {
 CONSOLE_LOG=/tmp/test-terminal-size.log
 RED_STDERR_LOG=/tmp/test-terminal-size-red-stderr.log
 RMUX_STDERR_LOG=/tmp/test-terminal-size-rmux-stderr.log
+RMUX_CONSOLE_STDERR_LOG=/tmp/test-terminal-size-rmux-console-stderr.log
+RMUX_CONSOLE_STARTED=0
+: > "$RMUX_CONSOLE_STDERR_LOG"
 : > "$RMUX_STDERR_LOG"
 # The pty recordings live beside it, and outlive the run for the same reason:
 # a check that fails here is not reproducible on demand, and the bytes are the
@@ -112,6 +115,10 @@ save_red_stderr() {
   if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
       motor@192.168.4.2 "/system/bin/cat $TEST_TMP/red-*.stderr" > "$RED_STDERR_LOG"
+    if [ "$RMUX_CONSOLE_STARTED" = "1" ]; then
+      ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+        motor@192.168.4.2 "/system/bin/cat $TEST_TMP/rmux-console.stderr" > "$RMUX_CONSOLE_STDERR_LOG"
+    fi
   fi
 }
 
@@ -493,7 +500,11 @@ printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
 sleep 2
 
 rmux_at="$(wc -c < "$CONSOLE_LOG")"
-printf 'TMPDIR=%s rmux\r' "$RMUX_TMPDIR" >&3
+# Keep the outer client's runtime diagnostics out of the screen measurement,
+# using the same inherited stderr pipe as start_red above. Preserve the
+# console rmux grant (spawn, log, detached spawn, Interactive) in the wrapper.
+RMUX_CONSOLE_STARTED=1
+printf 'TMPDIR=%s MOTOR_OS_CAPS=0x6c /system/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
 wait_console_since "$rmux_at" $'\033\\[?2048h'
 answered_rmux_at="$(wc -c < "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3

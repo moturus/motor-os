@@ -106,6 +106,15 @@ Pure range shaping, table-size/preflight/carving, and their input fixtures
 remain the next P1a2 increments; P1b still owns production installation and
 runtime CPU-publication wiring.
 
+A terminal-test diagnostic stopped before systest: a TCP runtime stderr fragment
+interrupted a 100-column rmux repaint, making the terminal test count 180.
+The test already isolates Red's stderr; the local correction does the same
+for the outer console rmux client and retains its diagnostics separately.
+Its Rush wrapper explicitly preserves the original console rmux capability
+mask (0x6c); no production permission policy changes. The existing terminal
+suite passes in debug and release, with the TCP diagnostics present in the
+retained stderr. This small test-only fix was kept separate from the kernel changes.
+
 ## Requirements and scope
 
 - Maintain a LIFO free-page list per block. Lists start empty; allocate
