@@ -280,6 +280,9 @@ bitflags! {
         const GUARD           = 64;
         const PRIVATE         = 128;  // Used by vmem_pages.
         const EXECUTABLE      = 256;  // W^X: only ELF text is mapped with this.
+        // A segment's creation policy, never a per-page hardware option:
+        // 2 MiB-aligned placement and huge candidates for its mapping.
+        const HUGE_ELIGIBLE   = 512;
     }
 }
 

@@ -3,7 +3,8 @@
 // they involve heap allocations, and we don't want to do heap allocations
 // while allocating virtual memory, as it results in nasty recursion.
 use core::mem::MaybeUninit;
-use intrusive_collections::{intrusive_adapter, UnsafeRef};
+
+use intrusive_collections::{intrusive_adapter, Bound, UnsafeRef};
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeLink};
 use intrusive_collections::{SinglyLinkedList, SinglyLinkedListLink};
 use moto_sys::ErrorCode;
@@ -69,8 +70,36 @@ impl Page {
             && !self.tree_link.is_linked()
     }
 
+    // A page's kind is its frame's; an unbacked page (lazy, guard, reserved)
+    // is small. The frame is the only record of it, so nothing can disagree.
+    fn kind(&self) -> PageType {
+        self.frame.get().map_or(PageType::SmallPage, Frame::kind)
+    }
+
+    fn size(&self) -> u64 {
+        self.kind().page_size()
+    }
+
     fn contains(&self, vmem_addr: u64) -> bool {
-        (self.start <= vmem_addr) && (vmem_addr < (self.start + PAGE_SIZE_SMALL))
+        (self.start <= vmem_addr) && (vmem_addr < (self.start + self.size()))
+    }
+}
+
+// Per-page options for page `idx` of `num_pages`: guard ends are unmapped
+// and the interior loses GUARD and LAZY; the segment's creation policy is
+// never a hardware mapping option.
+pub(super) fn page_mapping_options(
+    segment_options: MappingOptions,
+    idx: u64,
+    num_pages: u64,
+) -> MappingOptions {
+    let options = segment_options.difference(MappingOptions::HUGE_ELIGIBLE);
+    if !options.contains(MappingOptions::GUARD) {
+        options
+    } else if idx == 0 || idx == num_pages - 1 {
+        MappingOptions::empty()
+    } else {
+        options.difference(MappingOptions::GUARD | MappingOptions::LAZY)
     }
 }
 
@@ -260,17 +289,21 @@ impl VmemSegment {
         self.segment
     }
 
+    // The greatest page start not above the address, if its kind-sized
+    // extent covers the address: interior addresses of a huge page resolve
+    // to it, and gaps resolve to nothing.
     fn find_page(&self, vmem_addr: u64) -> Option<&Page> {
-        let page_addr = vmem_addr & !(PAGE_SIZE_SMALL - 1);
-        self.pages.find(&page_addr).get()
+        let page = self.pages.upper_bound(Bound::Included(&vmem_addr)).get()?;
+        page.contains(vmem_addr).then_some(page)
     }
 
     fn find_page_mut(&mut self, vmem_addr: u64) -> Option<&mut Page> {
-        let page_addr = vmem_addr & !(PAGE_SIZE_SMALL - 1);
-        self.pages
-            .find(&page_addr)
+        let page = self
+            .pages
+            .upper_bound(Bound::Included(&vmem_addr))
             .clone_pointer()
-            .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
+            .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })?;
+        page.contains(vmem_addr).then_some(page)
     }
 
     pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
@@ -326,7 +359,7 @@ impl VmemSegment {
                 self.address_space().page_table.unmap_page_no_flush(
                     frame.start(),
                     page.start,
-                    PageType::SmallPage,
+                    frame.kind(),
                 );
                 mapped_pages += 1;
             }
@@ -345,12 +378,13 @@ impl VmemSegment {
         while let Some(page) = cursor.remove() {
             let page_ptr = UnsafeRef::into_raw(page);
             let page_mut = unsafe { page_ptr.as_mut().unwrap() };
-            // The frame is freed here, after the TLB flush above: no CPU can
+            // The size is the frame's, so take it before the frame goes. The
+            // frame is freed here, after the TLB flush above: no CPU can
             // reach a reused frame through a stale translation.
+            sz += page_mut.size();
             page_mut.frame.take();
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
-            sz += PAGE_SIZE_SMALL;
         }
 
         self.segment = MemorySegment::empty_segment();
@@ -389,19 +423,7 @@ impl VmemSegment {
             debug_assert!(page_mut.is_empty());
             page_mut.start = start;
 
-            // Determine mapping options for the page.
-            let page_options = {
-                if self.mapping_options.contains(MappingOptions::GUARD) {
-                    if idx == 0 || idx == (num_pages - 1) {
-                        MappingOptions::empty()
-                    } else {
-                        self.mapping_options
-                            .difference(MappingOptions::GUARD | MappingOptions::LAZY)
-                    }
-                } else {
-                    self.mapping_options
-                }
-            };
+            let page_options = page_mapping_options(self.mapping_options, idx, num_pages);
             page_mut.mapping_options = page_options;
 
             // Map, if needed.

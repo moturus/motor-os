@@ -13,13 +13,26 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
-## Resume checkpoint after 5e401fc9
+## Resume checkpoint (2026-09-11)
 
-This checkpoint is the current state and supersedes intermediate status in the
-history below. The five patches listed here are committed; no code or validation
-is pending for that series. Production still uses `mm/phys.rs`. The new
-`mm/phys_blocks` implementation is inactive except for debug scratch tests.
-P1b and all production huge-page work remain unstarted.
+Current state, superseding the checkpoint below and the history after it:
+P-1, P0b, P0c, P1a1, P1a2 and P1b are committed and production allocates
+small pages from the block pool (`3738d69d`). P3 is implemented and gated
+(see its section under the progress notes). P2 is blocked on a scope
+decision: its metrics need `moto-sys` changes, which this plan excludes;
+P4a and everything after it depend on P2. Two preexisting intermittent
+failures recurred during this session's gates and are recorded with
+evidence: the quiet VM exit during pressure tests (now self-reporting on
+the console) and one stall of the developer image's native Lorry phase.
+The `phys::init` boot cost is measured but first-touch dominated on this
+host; the 0.1 ms target is unverified.
+
+## Checkpoint after 5e401fc9
+
+This checkpoint preceded the P1a2 completion and P1b. The five patches
+listed here are committed; no code or validation is pending for that series.
+Production then still used `mm/phys.rs`, with the `mm/phys_blocks`
+implementation inactive except for debug scratch tests.
 
 P-1, P0b, P0c and P1a1 are complete. P1a1's ownership core is `ad1e42dc`.
 Commit `6ead6302`, titled "patch P1a2", completed the search increment only.
@@ -248,7 +261,36 @@ remain unverified. Against the recorded 0.5 ms at 1 GiB and 3.0 ms at
 Not covered by a test: the descriptor-failure rollback in
 `allocate_contiguous_frames` (no fault injection into the frame slab); the
 no-GS bootstrap path is exercised by every boot's kernel stack and GS
-allocations before the all-CPU publication.
+allocations before the all-CPU publication. P1b is committed as `3738d69d`
+after its common gate (3 debug, 3 release, developer run with the native
+phase at 812 seconds).
+
+### P3: page kind, policy bit, placement (2026-09-11)
+
+`MappingOptions::HUGE_ELIGIBLE` (512) is the internal creation policy;
+nothing sets it yet. `Page::kind` is its frame's kind, small without a
+frame, and `contains` uses that size. `find_page` takes the greatest page
+start not above the address and checks the kind-sized extent, so interior
+addresses of a huge page resolve and gaps do not. `VmemSegment::clear`
+unmaps each page with its frame's kind and sums each page's size before
+taking its frame. `page_mapping_options` derives per-page options, dropping
+the policy bit before any page or `map_page` sees it, with guard handling
+unchanged. `aligned_start` places segments with checked arithmetic and an
+exact end bound for the empty-region, append and gap cases; eligible
+segments align to 2 MiB. Debug boot self-tests cover the placement helper's
+fits, one-byte-short gaps, rounding past a narrow gap and overflow, and the
+option stripping; the 2 MiB alignment branch runs end to end only once P4b
+sets the bit. `Page` and `SegmentNode` keep their 72-byte assertions.
+
+### P2 needs a scope decision
+
+Kernel metric names are declared in `moto-sys` (`MetricType` and its
+`name` table in `src/sys/lib/moto-sys/src/stats.rs`), so the eleven P2
+metrics require a `src/sys/lib` change, which this plan lists as out of
+scope and which forces the pinned toolchain assembly to be rebuilt. P4a
+depends on P2. Options: extend `MetricType` in `moto-sys` (crate bump and
+assembly rebuild), or expose the block counts through `PhysStats` and
+`MemoryStats` only. This is the user's call; P3 does not depend on it.
 
 ## Implementation and diagnostic history
 

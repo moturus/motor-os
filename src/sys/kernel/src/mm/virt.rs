@@ -188,6 +188,56 @@ pub fn vaddr_map_status(vmem_addr: u64) -> VaddrMapStatus {
     KERNEL_ADDRESS_SPACE.vaddr_map_status(vmem_addr)
 }
 
+// The first `align`-aligned start of `size` bytes inside [gap_start,
+// gap_end), with checked arithmetic and an exact end bound.
+fn aligned_start(gap_start: u64, gap_end: u64, size: u64, align: u64) -> Option<u64> {
+    debug_assert!(align.is_power_of_two());
+    let start = gap_start.checked_add(align - 1)? & !(align - 1);
+    let end = start.checked_add(size)?;
+    (end <= gap_end).then_some(start)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn self_test() {
+    let (small, mid) = (PAGE_SIZE_SMALL, PAGE_SIZE_MID);
+    // Empty region, append and gap placement all reduce to this: an exact
+    // fit, an aligned fit, a gap one byte short, and an aligned gap that is
+    // too narrow once its start is rounded up.
+    assert_eq!(aligned_start(0, 2 * small, small, small), Some(0));
+    assert_eq!(aligned_start(small, 2 * small, small, small), Some(small));
+    assert_eq!(aligned_start(small, 2 * small, 2 * small, small), None);
+    assert_eq!(aligned_start(small, 2 * small - 1, small, small), None);
+    assert_eq!(aligned_start(small, 4 * mid, small, mid), Some(mid));
+    assert_eq!(aligned_start(mid + 1, 6 * mid, 2 * mid, mid), Some(2 * mid));
+    assert_eq!(aligned_start(mid + 1, 4 * mid - 1, 2 * mid, mid), None);
+    assert_eq!(aligned_start(mid, 3 * mid, 2 * mid, mid), Some(mid));
+    assert_eq!(aligned_start(u64::MAX - 100, u64::MAX, small, small), None);
+    assert_eq!(
+        aligned_start(u64::MAX - small + 1, u64::MAX, 1, small),
+        Some(u64::MAX - small + 1)
+    );
+    assert_eq!(
+        aligned_start(u64::MAX - small + 1, u64::MAX, small, small),
+        None
+    );
+
+    // The creation policy never reaches a page; guard handling is unchanged.
+    use super::virt_intrusive::page_mapping_options;
+    let rw = MappingOptions::READABLE | MappingOptions::WRITABLE;
+    let eligible = rw | MappingOptions::HUGE_ELIGIBLE;
+    assert_eq!(page_mapping_options(eligible, 0, 4), rw);
+    assert_eq!(page_mapping_options(eligible, 3, 4), rw);
+    let guarded = eligible | MappingOptions::GUARD | MappingOptions::LAZY;
+    assert_eq!(page_mapping_options(guarded, 0, 4), MappingOptions::empty());
+    assert_eq!(page_mapping_options(guarded, 3, 4), MappingOptions::empty());
+    assert_eq!(page_mapping_options(guarded, 1, 4), rw);
+    assert_eq!(
+        page_mapping_options(rw | MappingOptions::LAZY, 2, 4),
+        rw | MappingOptions::LAZY
+    );
+    crate::raw_log!("virt placement tests PASS");
+}
+
 pub(super) struct VmemRegion {
     segment: MemorySegment, // never changes, once set
     bytes_used: AtomicU64,
@@ -312,48 +362,38 @@ impl VmemRegion {
         debug_assert!(!self.address_space.is_null());
         debug_assert_ne!(num_pages, 0);
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
-        let mut start = self.segment.start;
+        // Huge-eligible segments start on a 2 MiB boundary, whether or not
+        // any candidate ends up huge.
+        let align = if mapping_options.contains(MappingOptions::HUGE_ELIGIBLE) {
+            PAGE_SIZE_MID
+        } else {
+            PAGE_SIZE_SMALL
+        };
+        let region_start = self.segment.start.max(PAGE_SIZE_SMALL);
+        let region_end = self.segment.end();
 
-        if start == 0 {
-            start = PAGE_SIZE_SMALL
-        }
-
-        let mut found_gap = false;
-
+        let mut start = None;
         if segments.is_empty() {
-            // If nothing has been allocated, we are good.
-            if size > self.segment.size {
-                log::warn!(
-                    "VmemRegion::allocate_pages: bad size: 0x{:x} vs 0x{:x} available.",
-                    size,
-                    self.segment.size
-                );
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
-            found_gap = true;
+            start = aligned_start(region_start, region_end, size, align);
         } else if let Some(last_seg) = segments.last_segment() {
-            // Otherwise, try to add to the end, as this is the fastest.
-            let end = last_seg.segment().end();
-            if (end + size) <= self.segment.end() {
-                start = end;
-                found_gap = true;
-            }
+            // Appending is the fastest.
+            start = aligned_start(last_seg.segment().end(), region_end, size, align);
         }
-
-        if !found_gap {
-            // The worst case: find a gap in the middle.
-            // This is a linear search, but regions should be large
-            // enough to make this a rare/exceptional case.
+        if start.is_none() {
+            // The worst case: find a gap in the middle. This is a linear
+            // search, but regions should be large enough to make this rare.
+            let mut gap_start = region_start;
             for seg in segments.iter() {
-                if seg.vmem_segment().segment().start >= (start + size) {
-                    found_gap = true;
+                let next = seg.vmem_segment().segment();
+                start = aligned_start(gap_start, next.start, size, align);
+                if start.is_some() {
                     break;
                 }
-                start = seg.vmem_segment().segment().end();
+                gap_start = next.end();
             }
         }
 
-        if !found_gap {
+        let Some(start) = start else {
             log::error!(
                 "vmem_allocate: have 0x{:x}, in use 0x{:x}, need 0x{:x}: no gap: OOM",
                 self.segment.size,
@@ -361,7 +401,7 @@ impl VmemRegion {
                 size
             );
             return Err(moto_rt::E_OUT_OF_MEMORY);
-        }
+        };
 
         let mut seg = VmemSegment::new(MemorySegment { start, size }, self, mapping_options);
         seg.allocate_pages()?;
