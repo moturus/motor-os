@@ -1984,60 +1984,26 @@ pub fn listen(url: &str) -> impl Future<Output = Result<(Sender, Receiver)>> {
     // in `async fn`), it would not happen until the first poll — a race for
     // the common "signal the server is ready right after calling listen"
     // pattern, because `connect` fails with NotFound instead of waiting.
-    let setup = || -> Result<(u64, SysHandle)> {
-        let addr = SysMem::map(
-            SysHandle::SELF,
-            0, // not mapped
-            u64::MAX,
-            u64::MAX,
-            4096,
-            (core::mem::size_of::<RawChannel>() >> 12) as u64,
-        )?;
-        let full_url = alloc::format!(
-            "shared:url={};address={};page_type=small;page_num={}",
-            moto_sys::url_encode(url),
-            addr,
-            64
-        );
-
-        let remote_handle = SysObj::create(SysHandle::SELF, 0, &full_url)
-            .inspect_err(|_| SysMem::free(addr).unwrap())?;
-        Ok((addr, remote_handle))
-    };
-    let registered = setup();
+    let registered = ServerConnection::create(url);
 
     async move {
-        let (addr, remote_handle) = registered?;
+        let mut connection = registered?;
+        connection.wait_handle().as_future().await?;
+        connection.accept()?;
 
-        remote_handle.as_future().await?;
-
-        if !moto_sys::SysObj::is_connected(remote_handle)? {
-            return Err(moto_rt::Error::NotConnected);
-        };
-
-        compiler_fence(Ordering::Acquire);
-        fence(Ordering::Acquire);
-
-        // Safety: safe because we checked is_connected above.
-        unsafe {
-            let raw_channel = addr as usize as *mut RawChannel;
-            if (*raw_channel).server_queue_head.load(Ordering::Relaxed) != 0
-                || (*raw_channel).server_queue_tail.load(Ordering::Relaxed) != 0
-            {
-                return Err(moto_rt::Error::BadHandle);
-            }
-        }
-
-        let raw_channel = AtomicPtr::new(addr as usize as *mut RawChannel);
         let sender = Sender {
             inner: Arc::new(IoChannelImpl {
-                raw_channel,
-                remote_handle,
+                raw_channel: AtomicPtr::new(connection.raw_channel),
+                remote_handle: connection.wait_handle(),
                 endpoint_type: EndpointType::Server,
                 page_waiters: Arc::new(PageWaiters::new()),
                 remote_page_waiters: Mutex::new([0; CHANNEL_PAGE_COUNT]),
             }),
         };
+        // Keep the connection's cleanup armed until the channel owns both resources.
+        connection.raw_channel = core::ptr::null_mut();
+        connection.wait_handle = SysHandle::NONE;
+
         let receiver = Receiver {
             inner: sender.inner.clone(),
             recv_future: None,

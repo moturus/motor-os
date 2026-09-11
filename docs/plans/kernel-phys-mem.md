@@ -13,6 +13,99 @@ All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. “Huge” below means an ordinary allocation
 backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 
+Implementation status (2026-09-10): P-1's boot-heap alignment fix is in
+`6efc3276` (alongside the wait-set fix). P0b's range validation is in
+`83f09a60`, and MMIO ownership/teardown and consumer refusals are in
+`a94eb213`. Reservation and mapping now share the region lock, including
+contiguous mapping and failure rollback. Both P0b snapshots passed the
+common gate and launcher matrix, including Firecracker at 64 MiB; these were
+functional checks, not controlled boot-time measurements. Checked copy-in is
+in `ba6da613`. P0c's direct-map consumer lifetime fix is in `56e66622` and passed
+the common gate: three debug, three release and one release developer-image
+run, without test retries or temporary probes. That exact source snapshot also
+included the native-driver test cleanup (`d2aef7fd`) and the separately reviewed
+spin-source lifecycle fix (`ec28676d`). P1a1's ownership core and deterministic
+scratch tests are committed in `ad1e42dc`, with the approved debug-only hook
+in ordinary boots. Strict kernel Clippy passes in both profiles. With the
+separate timestamp self-test correction described below, the unchanged kernel
+candidate passed the common gate: three consecutive debug runs, three release
+runs and one release developer-image run, including native source builds and
+the bundled Lorry suite. No retries or temporary source probes were used in
+that sequence. P1a1 is implemented and reviewed; production
+still uses the old allocator. P1a2 and huge-page changes are not installed.
+The earlier unexplained pressure exit remains recorded below, not resolved by
+these later passes. Review precedes further implementation.
+
+Residual diagnostic history: P0c's original third debug gate exited during
+pressure without a recorded cause; the failed image had 193 MiB free. A later
+TCP test lost two exchanges, followed by expected harness shutdown. Traces
+proved that earlier native-driver tests left two FIN-WAIT-2 peers occupying
+orphan slots; the cleanup drains these owners, but quota cancellation was not
+recorded as the original reset cause. Another gate exposed a timing-dependent
+spin-source test and missing cleanup when block_on ends; both are now fixed.
+The passing common gate does not establish the original pressure exit's cause
+or relation to P0c. Original failures and before/after evidence are preserved
+under `/tmp/kernel-user-page-pin.DtyP1d`, `/tmp/kernel-failure-cause.C67ZxC`,
+and `/tmp/spin-source-lifecycle.vcaNn7` on the development host.
+
+P1a1's new failure stopped timestamped guest output at 66.84 s, during the first
+pressure episode, with 193.6 MiB disk space free and before the harness deadline.
+The final shutdown line has no timestamp. QEMU exited
+while systest's SSH session was still waiting; its later termination was
+cleanup, not the initiating cause. Temporary service-exit/admission probes,
+a shutdown-only fixed journal, and debugger observations of the uninstrumented
+candidate have not caught another unexpected exit. Later debug and release
+diagnostic passes do not resolve this failure or count toward acceptance.
+The initiating caller/status remains unknown; a console/service-exit cascade
+or privileged shutdown is not yet established. All source probes are removed.
+Evidence and run-by-run notes are under `/tmp/kernel-phys-p1a1-gate.FtzLmO`.
+A separate preexisting SSH test-capture defect (stderr could split its expected
+stdout line) is fixed in `4265358e`, with debug/release component checks passing.
+
+A later diagnostic also exposed a preexisting transaction-logger race in the
+host `motor-fs` suite: explicit flush can acknowledge before a timeout-owned
+batch commits. The existing crash/regrow test reproduced it with ordering
+traces; the diagnosis and proposed correction are recorded in
+[future-work.md](future-work.md#deferred-filesystem-flush-race-2026-09-09).
+Temporary logs are removed. The maintainer has deferred its separate production
+fix until after merging the pending filesystem branch and requested continued
+kernel validation without skipping or weakening tests. It is not established
+as the cause of the earlier quiet VM exit.
+
+Renewed uninstrumented validation passed one full debug run, then failed in
+sys-io's existing timestamp self-test, after both pressure checks passed. Its
+unsigned comparison of two offset estimates rejects a valid millisecond
+boundary; it also assumes the separate clock reads cannot be preempted for
+longer. A separate, local test-only correction brackets the timestamp read
+with uptime readings and checks the actual interval and offset stability.
+Production clock behavior is unchanged. The original failure and diagnosis
+are retained under `/tmp/kernel-phys-resumed-gate.jzP5OI`; the fresh common gate
+with that correction passed under `/tmp/kernel-phys-clock-test-gate.yS7I2b`.
+All three debug runs passed the block-core scratch suite and all 63 sys-io
+self-tests. The correction is in `584e873c`. Strict sys-io
+Clippy additionally reported existing lints in untouched code, none in the
+corrected test; strict kernel Clippy passed with warnings denied in both
+profiles. Tested source hashes and complete gate results are retained with
+the logs. The findings-only commit `91eadfe2` did not change the tested code.
+
+P1a2 is proceeding in small increments. The first local increment adds F/W
+search, advisory cursor adoption/clearing, a cursor-free bootstrap path,
+contiguous-run selection, and downward huge-block selection around P1a1's
+locked ownership helpers. Debug scratch tests cover exact four-block packing
+for 2048 pages, split-before-whole selection, claimed capacity before splitting
+or OOM, sticky/shared/stale cursors, preserved short tails, and LIFO reuse.
+They run through the existing ordinary-boot hook; production is unchanged.
+Strict kernel Clippy passes with warnings denied in both profiles. The
+unchanged source passed three consecutive debug runs, three release runs, and
+one release developer-image run, including native source builds and the
+complete Lorry suite. Both scratch suites passed in all three debug boot logs.
+No test retries or temporary probes were used. Source hashes and complete
+results are under `/tmp/kernel-phys-p1a2-search-gate.XGoygD`. This approximately
+250-line code/test increment remains uncommitted for review.
+Pure range shaping, table-size/preflight/carving, and their input fixtures
+remain the next P1a2 increments; P1b still owns production installation and
+runtime CPU-publication wiring.
+
 ## Requirements and scope
 
 - Maintain a LIFO free-page list per block. Lists start empty; allocate
@@ -38,7 +131,7 @@ free-page reporting, heap-size expansion, and changes to `src/sys/lib`,
 rt.vdso, Rust stdlib, frusa, or other repositories.
 
 Code scope: `src/sys/kernel`, `src/sys/tests/systest`,
-`src/tests/full-test.sh`, and the relevant documentation. Tests run on
+`src/tests/full-test.sh` and its test helpers, and the relevant documentation. Tests run on
 Motor OS, including kernel boot self-tests; no host allocator tests.
 Benchmarks remain user-owned.
 
@@ -67,6 +160,8 @@ Known defects relevant to this work:
 | Page-zero accounting | `DesignatedSegment::new` sets bit zero, but `add_segment` adds no corresponding used count; later `mark_used` sees the bit already set and counts no allocation. Free capacity is overstated by one when page zero belongs to a managed range. | P1b replacement |
 | MMIO teardown and failure | MMIO pages have no `Frame`, so `clear` leaves their PTEs; a failed map reverses statistics but leaves its virtual segment. | P0b |
 | MMIO into RAM | `fixed_addr_reserve` can consume free managed RAM uncharged and accepts excluded kernel RAM. | P0b |
+| Reservation/mapping race | MMIO and contiguous mapping release the region lock after reserving a segment; concurrent unmap can remove or replace it before mapping. | P0b |
+| Direct-map consumer lifetime | Copy-out, stats-page writes and the console retain physical addresses without owning their frames; concurrent unmap can free them. Concurrent console registrations can also replace the published control pointer. | P0c |
 | Contiguous allocation | Outer assertion caps at 64; the inner scan omits the last page; descriptor-failure rollback misses one frame. | P1b replacement |
 
 Page zero must be charged exactly once and never released. Test that in
@@ -556,6 +651,8 @@ do not claim that the only existing sharing callers are the ELF paths.
 P0b fixes MMIO before the allocator switch. Whole-range validation uses
 checked size/end arithmetic and alignment and rejects RAM regardless of
 whether it is allocated, free, excluded, or in the fixed mid segment.
+Reject addresses outside the x86 PTE's 52-bit address field too: upper
+bits must not be interpreted as PTE flags or alias a lower RAM address.
 Use raw firmware RAM ranges initially, expanded to the same 2 MiB block
 boundaries as the final policy; P1b replaces this check with RAM flags and
 non-absent state. Check the full range before reserving/mapping pages.
@@ -569,12 +666,28 @@ then unmaps exactly the successful prefix, including rollback, with its
 existing flush-before-drop ordering. On failure remove the virtual segment
 and reverse its accounting exactly once.
 
+Hold the existing region lock continuously from reservation through mapping
+or rollback, for both MMIO and contiguous allocation. Otherwise concurrent
+unmap can remove the reservation, or replace it with another segment, before
+the mapper reacquires the lock. A missing-segment error alone would not fix
+the replacement case or double reversal of process accounting. Reuse a
+locked reservation helper; no new lock or boot-time work is needed.
+
 Return a distinct `VaddrMapStatus::Mmio`. `copy_to_user`,
 `get_user_page_as_kernel`, `read_from_user_into`, and sharing refuse it;
 retain the existing handling of other statuses and special fixed mappings.
 Do not turn the input path into a blanket refusal of everything outside
 the normal segment tree. `virt_to_phys` still reports device addresses.
 Kernel LAPIC/IOAPIC mappings and sys-io BAR mappings must continue booting.
+
+P0c gives copy-out and pinned-page consumers an owning Frame reference,
+acquired under the region lock and retained until use finishes. Keep the
+existing refusals of frame-less zero/CoW pages and MMIO. The console retains
+its control-page pin beside its permanent address-space reference; an
+address-space reference alone does not prevent explicit unmap. Serialize
+registration with the existing state-then-driver lock order, rechecking
+ownership before publishing the control pointer so its pin cannot be replaced.
+No new locks, allocations, race tests or reproducers are needed.
 
 ## Validation
 
@@ -711,8 +824,11 @@ evidence; metadata growth can legitimately pin blocks.
 
 ### MMIO suite
 
-Add `mmio-unmap-suite` to full-test.sh with `MOTOR_OS_CAPS=0x4e`:
-the current 0x4c plus CAP_IO_MANAGER. Run separate child cases and verify
+Add `mmio-unmap-suite` transitively to full-test.sh with `MOTOR_OS_CAPS=0x4e`:
+the current 0x4c plus CAP_IO_MANAGER. Launch privileged cases from the
+existing test-only System console fixture, not from an Interactive SSH
+shell: only a System parent can grant CAP_IO_MANAGER. Keep production
+capability policy and SSH grants unchanged. Run separate child cases and verify
 setup succeeded before interpreting a child's fault as a passing test.
 
 1. Map the page at physical 128 GiB (1 << 37) in the QEMU gate: it is
@@ -720,9 +836,12 @@ setup succeeded before interpreting a child's fault as a passing test.
    translation query, free it, verify translation is gone, then attempt a
    volatile read in the child.
    Check the expected fault termination, not merely any abnormal exit.
+   Finish output before unmapping: its allocations can reuse the address.
+   Between free, translation check, and the deliberate read, do not allocate;
+   distinguish setup failures and unexpected survival with separate exit codes.
 2. Refuse kernel-start RAM (34 MiB), fixed-mid RAM, managed RAM, and a
    range crossing into RAM; include an address obtained from a currently
-   allocated page and the pure validator's free-RAM case.
+   allocated page.
 3. Refuse wrapped/unaligned ranges and confirm failed-map virtual/stat
    rollback. Debug checks inspect the region after removal.
 4. Refuse an MMIO page as syscall input/output and pinned-page buffer,
@@ -746,6 +865,7 @@ workflow.
 |---|---|---|
 | P-1 | In mm/kheap.rs, checked aligned bump-offset helper, CAS reservation of padding + size, pointer-alignment assertion, startup_remaining. Frusa untouched. | Debug boot arithmetic test: awkward base/offset, alignments 1–4096, exhaustion and overflow; launcher boots. |
 | P0b | MMIO validation, owning descriptor with no physical free, Mmio status, consumer refusals, teardown and rollback. Keep this independent of blocks. | MMIO suite and all launchers; current suite unchanged otherwise. |
+| P0c | Retain Frame ownership for direct-map consumers; serialize console registration and retain its control-page pin. | Existing copy, stats, console, MMIO and pressure coverage; source-inspected race fixes, without new race tests/reproducers. |
 | P1a1 | Descriptor/bounds, link check word, ownership and uniform re-combination, F/W publication, ordinary counters, core scratch tests. | Debug self-tests; production still uses old allocator. Temporary module dead-code allowance names P1b. |
 | P1a2 | Pure shaping/table-carve helper, F/W search, advisory claims/no-GS path, contiguous search; input-range and source-order fixtures. | Hole/initrd/lazy-initialization cases; no real shadow allocator or table allocation. |
 | P1b | Switch phys.rs to blocks including low/dual re-combination; carve/install table, route small/run/free/adopt/MMIO and runtime cursors; remove old vector/cache/search. | Page-zero regression; independent boot recounts, no-GS/AP and rollback tests, fresh-boot placement/churn, pressure/admission; launcher matrix and boot measurements. |
@@ -756,7 +876,7 @@ workflow.
 | P5 | Enable the full sizing rule and mixed huge/small segments; rounded fallback sizes everywhere. | Table boundaries, overflow, mixed lookup/copy/pinning, exact controlled accounting; re-read admission boundary expectations. |
 | P6 | Widen churn to mixed sizes; document final accounting and metrics in docs/oom-handling.md and measured results here/boot-time.md. | Full integration gate and recorded residual risks/measurements. |
 
-Order: P-1 -> P0b -> P1a1 -> P1a2 -> P1b.
+Order: P-1 -> P0b -> P0c -> P1a1 -> P1a2 -> P1b.
 P2 and P3 each depend on P1b; P4a depends on P2; P4b depends on P4a and
 P3; P5 depends on P4b; P6 depends on P5. P4b's intermediate eligibility
 rule is deliberate: non-multiple requests already get deterministic sharing
@@ -779,10 +899,15 @@ For each kernel patch, before commit:
   work and does not add a debug developer-image run.
 - All new tests reached directly or transitively by full-test.sh.
 
-No Internet access in new tests. Existing approved DNS/ping flakes may be
-retried once under AGENTS.md; no retries, enlarged timeouts, or ignored
-failures to disguise a defect. Diagnose failures; pause implementation for
-new non-test pre-existing bugs or a newly required policy decision.
+No Internet access in new tests. The user approved the existing developer
+gate's public dependency downloads for all patches in this work. Retry a
+confirmed external-network flake once, including approved DNS/ping cases;
+never retry hermetic failures or enlarge timeouts/ignore failures to disguise
+a defect. Diagnose failures; pause implementation for
+new non-test pre-existing bugs or a newly required policy decision, except
+that the user explicitly authorized fixing discovered races and continuing
+without creating race tests or reproducers. Existing acceptance gates remain
+required.
 
 P1b launcher matrix: cloud-hypervisor; Firecracker at 64 MiB and 1 GiB;
 QEMU -kernel; QEMU BIOS; release developer image at 8 GiB with a PhysStats

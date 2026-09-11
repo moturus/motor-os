@@ -139,7 +139,6 @@ pub enum VmemKind {
     KernelStack,
     KernelStatic, // For things like entry pages, GS, etc.
     User,
-    UserMMIO,
     UserStack,
     Unmapped,
 }
@@ -149,6 +148,7 @@ pub enum VaddrMapStatus {
     Unallocated,
     Unmapped,
     ZeroPageMapped,
+    Mmio,
     Private(u64),
     Shared(u64),
 }
@@ -243,6 +243,11 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
+    fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        let segments = self.used_segments.lock(line!());
+        segments.find(addr)?.pin_user_page(addr)
+    }
+
     #[allow(unused)]
     pub(super) fn free(&self, addr: u64) -> Result<u64, ErrorCode> {
         if !self.segment.contains(addr) {
@@ -250,7 +255,10 @@ impl VmemRegion {
         }
 
         let mut segments = self.used_segments.lock(line!());
+        self.free_locked(&mut segments, addr)
+    }
 
+    fn free_locked(&self, segments: &mut SegmentMap, addr: u64) -> Result<u64, ErrorCode> {
         if let Some(deleted) = segments.remove(addr) {
             let sz = VmemSegment::unmap(deleted); // Consumes deleted.
 
@@ -289,6 +297,16 @@ impl VmemRegion {
         num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
+        let mut segments = self.used_segments.lock(line!());
+        self.allocate_pages_locked(&mut segments, num_pages, mapping_options)
+    }
+
+    fn allocate_pages_locked(
+        &self,
+        segments: &mut SegmentMap,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<MemorySegment, ErrorCode> {
         debug_assert!(!self.address_space.is_null());
         debug_assert_ne!(num_pages, 0);
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
@@ -299,7 +317,6 @@ impl VmemRegion {
         }
 
         let mut found_gap = false;
-        let mut segments = self.used_segments.lock(line!());
 
         if segments.is_empty() {
             // If nothing has been allocated, we are good.
@@ -365,9 +382,9 @@ impl VmemRegion {
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
         debug_assert_eq!(0, phys_start & (PAGE_SIZE_SMALL - 1));
-        let memory_segment = self.allocate_pages(num_pages, MappingOptions::empty())?;
-
         let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = memory_segment.start;
         let mut phys_addr = phys_start;
@@ -420,21 +437,28 @@ impl VmemRegion {
             }
         }
 
-        let memory_segment = self.allocate_pages(frames.len() as u64, MappingOptions::empty())?;
-
+        // Do not expose a reservation that unmap can remove before mapping completes.
         let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = vmem_segment.segment().start;
         for idx in 0..num_pages {
             let frame = frames[idx as usize].take();
 
-            unsafe {
+            let result = unsafe {
                 self.address_space.get().page_table.map_page(
                     frame.get().unwrap().start(),
                     virt_addr,
                     PageType::SmallPage,
                     mapping_options,
-                )?;
+                )
+            };
+            if let Err(err) = result {
+                // Unmap the successful prefix before its frames can be freed.
+                self.free_locked(&mut segments, memory_segment.start)
+                    .unwrap();
+                return Err(err);
             }
 
             vmem_segment.set_frame(virt_addr, frame);
@@ -447,12 +471,30 @@ impl VmemRegion {
     pub(super) fn mmio_map(
         &self,
         phys_addr: u64,
-        virt_addr: u64,
+        num_pages: u64,
         user: bool,
-    ) -> Result<(), ErrorCode> {
-        let segments = self.used_segments.lock(line!());
-        let segment = segments.get(&virt_addr).unwrap();
-        segment.mmio_map(phys_addr, user)
+    ) -> Result<MemorySegment, ErrorCode> {
+        // Reservation, mapping and rollback share the same lock as unmap.
+        let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
+        let virt_addr = memory_segment.start;
+        let segment = segments.get_mut(&virt_addr).unwrap();
+        let size = segment.segment().size;
+        let result = segment.mmio_map(phys_addr, user);
+        if result.is_err() {
+            // Tear down the mapped prefix before releasing the reservation lock.
+            assert_eq!(self.free_locked(&mut segments, virt_addr).unwrap(), size);
+            #[cfg(debug_assertions)]
+            {
+                assert!(segments.find(virt_addr).is_none());
+                let pt = &unsafe { self.address_space.get() }.page_table;
+                for offset in (0..size).step_by(PAGE_SIZE_SMALL as usize) {
+                    assert!(pt.virt_to_phys(virt_addr + offset).is_none());
+                }
+            }
+        }
+        result.map(|()| memory_segment)
     }
 
     fn allocate_user_fixed(
@@ -673,6 +715,7 @@ impl KernelAddressSpace {
         match kind {
             VmemKind::KernelHeap => self.kernel_heap.free(addr).unwrap(),
             VmemKind::KernelStack => self.kernel_stacks.free(addr).unwrap(),
+            VmemKind::KernelMMIO => self.kernel_mmio.free(addr).unwrap(),
             _ => panic!(),
         }
     }
@@ -693,8 +736,12 @@ impl KernelAddressSpace {
         status
     }
 
-    pub(super) fn mmio_map(&self, phys_addr: u64, virt_addr: u64) -> Result<(), ErrorCode> {
-        self.kernel_mmio.mmio_map(phys_addr, virt_addr, false)
+    pub(super) fn mmio_map(
+        &self,
+        phys_addr: u64,
+        num_pages: u64,
+    ) -> Result<MemorySegment, ErrorCode> {
+        self.kernel_mmio.mmio_map(phys_addr, num_pages, false)
     }
 }
 
@@ -853,7 +900,7 @@ impl UserAddressSpaceBase {
                     | MappingOptions::LAZY
                     | MappingOptions::GUARD,
             ),
-            VmemKind::UserMMIO | VmemKind::Unmapped => self
+            VmemKind::Unmapped => self
                 .normal_memory
                 .allocate_pages(num_pages, MappingOptions::empty()),
             _ => panic!("Unexpected VmemKind for userspace memory."),
@@ -891,18 +938,22 @@ impl UserAddressSpaceBase {
         }
     }
 
-    pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
-        match vmem_addr {
-            0..=VMEM_USER_END => self.normal_memory.vaddr_map_status(vmem_addr),
+    pub(super) fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        match addr {
+            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory.vaddr_map_status(vmem_addr)
+                self.custom_memory.pin_user_page(addr)
             }
-            _ => VaddrMapStatus::Unallocated,
+            _ => None,
         }
     }
 
-    pub(super) fn mmio_map(&self, phys_addr: u64, virt_addr: u64) -> Result<(), ErrorCode> {
-        self.normal_memory.mmio_map(phys_addr, virt_addr, true)
+    pub(super) fn mmio_map(
+        &self,
+        phys_addr: u64,
+        num_pages: u64,
+    ) -> Result<MemorySegment, ErrorCode> {
+        self.normal_memory.mmio_map(phys_addr, num_pages, true)
     }
 
     pub(super) fn share_with(

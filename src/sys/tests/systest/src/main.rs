@@ -3,6 +3,7 @@
 #![feature(random)]
 
 mod admission;
+mod checked_copy_in;
 // mod channel_test;
 mod alloc_bench;
 mod closerace;
@@ -19,6 +20,7 @@ mod icmp;
 mod io_channel;
 mod kernel_log;
 mod logging;
+mod mmio;
 mod moto_async;
 mod mpmc;
 mod net_driver;
@@ -1104,9 +1106,35 @@ fn main() {
     if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
         virtio_async::test_premature_completion_drop(args[2] == "block");
         return;
+    if args.len() == 2 && args[1] == "checked-copy-in-tests" {
+        checked_copy_in::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-validation-tests" {
+        mmio::validation_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-suite" {
+        mmio::ownership_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-fault" {
+        mmio::unmap_fault();
+    }
+    if args.len() == 2 && args[1] == "ipc-listener-tests" {
+        io_channel::test_listener_cleanup();
+        return;
     }
     if args.len() == 2 && args[1] == "wait-set-tests" {
         wait_set::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "admission-class-tests" {
+        admission::test_process_classes();
+        return;
+    }
+    if args.len() == 4 && args[1] == "admission-class-child" {
+        admission::class_child(args[2].parse().unwrap(), args[3].parse().unwrap());
         return;
     }
     if args.len() >= 2 && args[1] == "close-race-child" {
@@ -1364,6 +1392,7 @@ fn main() {
 
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
     test_concurrent_lazy_memory_map_write();

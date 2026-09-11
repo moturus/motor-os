@@ -224,15 +224,13 @@ pub(super) struct NetStats {
     /// corruption on the wire or a device that vouched for less than it should
     /// have.
     pub rx_csum_failed: Cell<u64>,
-    /// Listening sockets that have accepted a peer's SYN and are waiting for
-    /// the handshake to complete. Each one holds its full receive and transmit
-    /// rings, so this is the memory a SYN flood commands; nothing bounds it
-    /// today except the 15-second listening-socket timeout.
+    /// Listener tasks waiting for a peer to finish the handshake, charged to
+    /// the half-open admission budget. Each socket holds its receive and
+    /// transmit rings until the wait ends.
     pub tcp_half_open: Cell<u64>,
-    /// How many sockets have entered that state. A handshake with a peer that
-    /// answers lasts a fraction of a round trip, far less than a stats query,
-    /// so the gauge above is unobservable for ordinary traffic and this is what
-    /// says the accounting works. Also the arrival rate the cap is chosen from.
+    /// Passive Listen -> SynReceived transitions, including handshakes that
+    /// finish before a listener task observes them. SYN retransmissions and
+    /// stateless cookie handshakes do not create another half-open socket.
     pub tcp_half_open_total: Cell<u64>,
     /// Connection requests the netstack reset because nothing was listening for
     /// them. Only bare SYNs count.

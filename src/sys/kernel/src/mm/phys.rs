@@ -5,15 +5,47 @@ use core::marker::PhantomData;
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
 
-pub fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
-    PhysicalMemory::init(available, in_use);
+pub fn init(available: &[MemorySegment], in_use: &[MemorySegment], raw_ram: Vec<MemorySegment>) {
+    PhysicalMemory::init(available, in_use, raw_ram);
+}
+
+pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), ErrorCode> {
+    let invalid = moto_rt::E_INVALID_ARGUMENT;
+    if num_pages == 0 || phys_addr & (PAGE_SIZE_SMALL - 1) != 0 {
+        return Err(invalid);
+    }
+    let size = num_pages.checked_mul(PAGE_SIZE_SMALL).ok_or(invalid)?;
+    let end = phys_addr.checked_add(size).ok_or(invalid)?;
+    // Bits above the x86 PTE's 52-bit address field are not address bits.
+    if end > (1 << 52) {
+        return Err(invalid);
+    }
+    for ram in &PhysicalMemory::inst().raw_ram {
+        if ram.is_empty() {
+            continue;
+        }
+        let ram_end = ram
+            .start
+            .checked_add(ram.size)
+            .and_then(|end| end.checked_add(PAGE_SIZE_MID - 1))
+            .ok_or(invalid)?
+            & !(PAGE_SIZE_MID - 1);
+        let ram_start = align_down(ram.start, PAGE_SIZE_MID);
+        if phys_addr < ram_end && end > ram_start {
+            return Err(invalid);
+        }
+    }
+    Ok(())
 }
 
 // Physical frame.
 pub struct Frame {
     start: u64,
     kind: PageType,
+    mmio: bool,
 }
+
+const _FRAME_SZ: () = assert!(core::mem::size_of::<Frame>() == 16);
 
 impl Frame {
     pub fn start(&self) -> u64 {
@@ -21,6 +53,9 @@ impl Frame {
     }
     pub fn kind(&self) -> PageType {
         self.kind
+    }
+    pub fn is_mmio(&self) -> bool {
+        self.mmio
     }
 }
 
@@ -34,10 +69,13 @@ impl Slabbable for Frame {
     fn inplace_init(&mut self) {
         self.start = 0;
         self.kind = PageType::Unknown;
+        self.mmio = false;
     }
 
     fn drop_slabbable(&mut self) {
-        PhysicalMemory::inst().deallocate_frame(self)
+        if !self.mmio {
+            PhysicalMemory::inst().deallocate_frame(self)
+        }
     }
 }
 
@@ -100,9 +138,14 @@ pub fn phys_deallocate_frameless(phys_addr: u64, kind: PageType) {
     PhysicalMemory::inst().deallocate_frameless(phys_addr, kind);
 }
 
-// Reserve a page at a fixed physical address, e.g. for MMIO.
-pub fn fixed_addr_reserve(phys_addr: u64, kind: PageType) -> Result<(), ErrorCode> {
-    PhysicalMemory::inst().fixed_addr_reserve(phys_addr, kind)
+// The caller has validated the whole MMIO range. Only the descriptor is owned.
+pub(super) fn mmio_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
+    let frame = PhysicalMemory::inst().slab.alloc_arc()?;
+    let inner = frame.get_mut().unwrap();
+    inner.start = phys_addr;
+    inner.kind = PageType::SmallPage;
+    inner.mmio = true;
+    Ok(frame)
 }
 
 pub fn phys_allocate_contiguous_frames(
@@ -446,41 +489,6 @@ impl<S: PageSize> MemoryArea<S> {
         false
     }
 
-    fn fixed_addr_reserve(&self, phys_addr: u64) -> Result<(), ErrorCode> {
-        if self
-            .free_frame
-            .compare_exchange(phys_addr, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.count_alloc(1);
-            return Ok(());
-        }
-
-        for seg in &self.segments {
-            if !seg.segment.contains(phys_addr) {
-                continue;
-            }
-            let result = seg.fixed_addr_reserve(phys_addr);
-            if result.is_ok() {
-                self.count_alloc(1);
-            }
-            return result;
-        }
-
-        crate::xray::tracing::trace(
-            "phys: fixed_addr_reserve: 0x{:x}: not found",
-            phys_addr,
-            0,
-            0,
-        );
-
-        // VirtIO/MMIO sometimes tries to map pages that are not in our memory map.
-        // TODO: figure out how to confirm that the requested address is indeed
-        //       available for MMIO.
-        Ok(())
-        // Err(moto_rt::E_OUT_OF_MEMORY)
-    }
-
     fn do_allocate_frame(&self) -> Result<u64, ErrorCode> {
         let start = self.free_frame.swap(0u64, Ordering::Relaxed);
         if start != 0 {
@@ -616,6 +624,9 @@ struct PhysicalMemory {
 
     slab: MMSlab<Frame>,
 
+    // Includes kernel, boot heap, and fixed-mid RAM excluded from small_pages.
+    raw_ram: Vec<MemorySegment>,
+
     small_pages: MemoryArea<PageSizeSmall>,
     mid_pages: DesignatedSegment<PageSizeMid>,
 }
@@ -661,20 +672,6 @@ impl PhysicalMemory {
         match kind {
             PageType::SmallPage => self.small_pages.allocate_frame(),
             PageType::MidPage => self.mid_pages.allocate_frame(),
-            _ => panic!(),
-        }
-    }
-
-    fn fixed_addr_reserve(&'static self, phys_addr: u64, kind: PageType) -> Result<(), ErrorCode> {
-        const LAPIC_BASE: u64 = 0xfee0_0000_u64; // The default Local APIC address.
-        const IOAPIC_BASE: u64 = 0xfec0_0000_u64; // The default IO APIC address.
-
-        if phys_addr == LAPIC_BASE || phys_addr == IOAPIC_BASE {
-            return Ok(());
-        }
-        match kind {
-            PageType::SmallPage => self.small_pages.fixed_addr_reserve(phys_addr),
-            // PageType::MidPage => self.mid_pages.fixed_addr_reserve(phys_addr),
             _ => panic!(),
         }
     }
@@ -763,7 +760,7 @@ impl PhysicalMemory {
         }
     }
 
-    fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
+    fn init(available: &[MemorySegment], in_use: &[MemorySegment], raw_ram: Vec<MemorySegment>) {
         assert_eq!(0, unsafe {
             core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM))
         });
@@ -789,6 +786,7 @@ impl PhysicalMemory {
         let self_ = Box::leak(Box::new(PhysicalMemory {
             total_size,
             slab: MMSlab::<Frame>::new(true),
+            raw_ram,
             small_pages: MemoryArea::new(),
             mid_pages: DesignatedSegment::new(&Self::MID_PAGES_SEGMENT),
         }));

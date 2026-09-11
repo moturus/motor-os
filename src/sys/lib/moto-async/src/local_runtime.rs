@@ -133,8 +133,8 @@ pub fn timer_queue_len() -> usize {
 /// time when it has nothing else to run, and wakes the task without a
 /// syscall or an IPI when it becomes ready. Between `begin` and `end` the
 /// peer need not send wakes, so `end` runs exactly once per registration:
-/// when the task is woken, when the registration expires, or before the
-/// executor parks.
+/// when readiness is observed, when the registration is replaced or expires,
+/// or before the executor parks or leaves `block_on`.
 pub trait SpinSource {
     fn ready(&self) -> bool;
     /// The executor now watches the source (e.g. clear the channel's
@@ -660,6 +660,9 @@ pub struct LocalRuntimeContextGuard {
 impl Drop for LocalRuntimeContextGuard {
     fn drop(&mut self) {
         assert_eq!(self.context, get_local_runtime_context() as usize);
+        // No source is watched outside block_on, even if the runtime is kept.
+        // End it while callback wakers still have their runtime context.
+        LocalRuntimeInner::current().park_spin_sources();
         clear_local_runtime_context();
     }
 }

@@ -100,6 +100,19 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_text_after_the_indicator_is_not_part_of_the_status() {
+        let bytes = b"\x1b[24;65H30;\x1b[24;1H-- copy mode -- [28/28]";
+        assert_eq!(
+            latest_indicator(bytes).as_deref(),
+            Some("copy mode -- [28/28]")
+        );
+        assert_eq!(
+            latest_indicator(b"\x1b[24;1H-- copy mode -- [28/28x] trailing text"),
+            None
+        );
+    }
+
+    #[test]
     fn absent_or_malformed_status_is_not_an_indicator() {
         assert_eq!(latest_indicator(b""), None);
         for status in ["-- copy mode -- [/28]", "-- copy mode -- [a/28]"] {

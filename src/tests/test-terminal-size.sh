@@ -98,12 +98,22 @@ fail() {
 }
 
 CONSOLE_LOG=/tmp/test-terminal-size.log
+RED_STDERR_LOG=/tmp/test-terminal-size-red-stderr.log
+RMUX_STDERR_LOG=/tmp/test-terminal-size-rmux-stderr.log
+: > "$RMUX_STDERR_LOG"
 # The pty recordings live beside it, and outlive the run for the same reason:
 # a check that fails here is not reproducible on demand, and the bytes are the
 # only evidence of what the terminal actually said.
 SCRATCH="$(mktemp -d)"
 VMM_PID=""
 TEST_ROOT_CREATED=0
+
+save_red_stderr() {
+  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
+    ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+      motor@192.168.4.2 "/system/bin/cat $TEST_TMP/red-*.stderr" > "$RED_STDERR_LOG"
+  fi
+}
 
 remove_test_root() {
   if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
@@ -116,6 +126,7 @@ remove_test_root() {
 
 cleanup() {
   set +e
+  save_red_stderr
   remove_test_root
   stop_vm "$VMM_PID"
   VMM_PID=""
@@ -123,6 +134,13 @@ cleanup() {
   rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
+
+# Geometry probes need only red's screen stream; stderr may interleave in the
+# middle of its bar. The wrapper gives red inherited, pipe-relayed stderr so
+# runtime diagnostics are retained too. Stdin/stdout remain terminal streams.
+start_red() {
+  printf '/system/bin/rush -c red 2>%s/red-%s.stderr\r' "$TEST_TMP" "$1"
+}
 
 # The serial console's stdin: the fifo stays open on fd 3 so the console can be
 # answered at any point, and qemu never sees EOF until cleanup.
@@ -426,7 +444,7 @@ probes="$(console_since "$answered_at" |
 # asymmetry; the point of the checks below is everything that comes after it.
 echo "-- red on the serial console --"
 red_at="$(wc -c < "$CONSOLE_LOG")"
-printf 'red\r' >&3
+start_red console >&3
 wait_console_since "$red_at" $'\033\\[?2048h'
 [ "$(console_since "$red_at" | red_bars "$RED_GROUND")" = "23:80 " ] ||
   fail "red's first console frame was not the 80x24 fallback (log: $CONSOLE_LOG)"
@@ -491,7 +509,7 @@ sleep 2
 # `$COLUMNS` right for the editor it launches, one hop further in.
 exec 4>&3
 RMUX_REFRESH='\001\001r'    # doubled past qemu's console, see `settled_bar`
-printf 'red\r' >&3
+start_red console-rmux >&3
 first="$(settled_bar "$CONSOLE_LOG" "")"
 
 # The resize, sent only once the editor has painted once, so that what follows
@@ -585,7 +603,7 @@ red_ssh_log=/tmp/test-terminal-size-red-ssh.log
 count="$(bar_count_cmd "$red_ssh_log")"
 red_ssh_keys() {
   sleep 7
-  printf 'red\r'
+  start_red ssh
   # The mark below is written once the resize has been repainted, and no key
   # goes in before it: the frames this check reads have to be the resize's and
   # nothing else's, which a guessed interval cannot promise on a slow VM.
@@ -648,7 +666,7 @@ rmux_ssh_keys() {
   exec 4>&1
   RMUX_REFRESH='\001r'    # no qemu in this path: ssh carries the prefix as it is
   sleep 8
-  printf 'red\r'
+  start_red ssh-rmux
   wait_bar "$rmux_ssh_log"
   first="$(settled_bar "$rmux_ssh_log" "")"
   # The `stty` under the running client, which is what raises the `SIGWINCH`
@@ -717,8 +735,11 @@ rmux_keys() {
   printf 'exit\r'   # and the one the split made
   sleep 3
 }
+# Keep the client's diagnostics separate from its screen stream: a TCP debug
+# record can split the very row this assertion measures. Retain stderr for
+# diagnosis; pane output and all geometry assertions remain unchanged.
 out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1)"
+  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
 printf '%s' "$before" |
@@ -747,7 +768,7 @@ red_rmux_keys() {
   exec 4>&1
   RMUX_REFRESH='\001r'
   sleep 4
-  printf 'red\r'
+  start_red pane
   wait_bar "$red_rmux_log"
   first="$(settled_bar "$red_rmux_log" "")"
 
@@ -770,7 +791,7 @@ red_rmux_keys() {
 }
 out="$(red_rmux_keys |
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>&1 |
+    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG" |
   tee "$red_rmux_log")"
 before="${out%%1:sh*}"
 [ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
@@ -788,6 +809,7 @@ bars="$(cat "$SCRATCH/rmux-pane-bars")"
 [ "$bars" = "22:80 10:80" ] ||
   fail "rmux pane red frames were '$bars', want '22:80 10:80'"
 
+save_red_stderr
 remove_test_root
 stop_vm "$VMM_PID"
 VMM_PID=""

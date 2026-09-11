@@ -67,14 +67,25 @@ Notes:
     only when the operation is explicitly designed to tolerate a documented
     transient external failure, and only with prior user approval.
 
-(2) Rust stdlib's Motor OS port only depends on moto-rt. It should have very little Motor OS-specific
+(2) Failure diagnosis is pre-authorized: inspect logs and state, add temporary
+    targeted instrumentation, and rerun existing tests—including hermetic
+    tests—to investigate a specific hypothesis without requesting permission.
+    Each diagnostic rerun must seek new evidence, not merely a passing
+    result. Preserve and report the original failure; a later pass alone does not resolve it.
+    Do not add automatic retries, extend timeouts, weaken
+    assertions, or ignore failures. Remove temporary diagnostics before final validation and
+    commits. Diagnose preexisting bugs before stopping to
+    discuss fixes outside the authorized scope.
+    Explicit restrictions on new tests or reproducers still apply.
+
+(3) Rust stdlib's Motor OS port only depends on moto-rt. It should have very little Motor OS-specific
     logic, and mostly should just call moto-rt functions. Any changes to Rust stdlib should be discussed
     and vetted.
 
-(3) moto-rt has a bit of no-std functionality, but mostly calls into rt.vdso. Any changes to moto-rt
+(4) moto-rt has a bit of no-std functionality, but mostly calls into rt.vdso. Any changes to moto-rt
     should be discussed and vetted.
 
-(4) Although Motor OS is not unix, it has a posixy shell in src/bin/rush; also it has
+(5) Although Motor OS is not unix, it has a posixy shell in src/bin/rush; also it has
     functional libc port, llvm/clang, and rustc. If in doubt about what capabilities Motor OS has or what
     capabilities are expected to happen in the near future, stop and ask, don't assume a feature
     is not available.

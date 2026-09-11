@@ -2,10 +2,24 @@ use core::sync::atomic::*;
 
 use alloc::sync::Arc;
 
-use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
-use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID, PAGING_DIRECT_MAP_OFFSET};
+use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
+
+// A direct-map address is usable only while its backing frame is owned.
+pub struct PinnedUserPage {
+    frame: super::slab::SlabArc<super::phys::Frame>,
+    offset: u64,
+}
+
+impl PinnedUserPage {
+    pub fn kernel_addr(&self) -> u64 {
+        self.frame.get().unwrap().start()
+            + self.offset
+            + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET
+    }
+}
 
 #[derive(Debug)]
 pub struct UserStack {
@@ -34,8 +48,8 @@ pub struct UserAddressSpace {
     max_memory: AtomicU64,
     total_usage: AtomicU64,
 
-    // Only sys-io's address space is privileged, i.e. admitted against the
-    // lower kernel floor. Set when its process is created (CAP_IO_MANAGER).
+    // System and I/O-manager address spaces use the lower admission floor.
+    // Set from CAP_SYS | CAP_IO_MANAGER when the process is created.
     privileged: AtomicBool,
 
     // User mem stats are tracked via @inner.
@@ -147,7 +161,7 @@ impl UserAddressSpace {
     /// them, so loading an ordinary process never widens its guard band.
     pub fn mem_class(&self) -> super::admission::MemClass {
         if self.privileged.load(Ordering::Relaxed) {
-            super::admission::MemClass::SysIo
+            super::admission::MemClass::Privileged
         } else {
             super::admission::MemClass::User
         }
@@ -553,26 +567,16 @@ impl UserAddressSpace {
     }
 
     pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
-        assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+        super::phys::validate_mmio(phys_addr, num_pages)?;
 
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         self.inner
-            .vmem_allocate_pages(VmemKind::UserMMIO, num_pages, None)
-            .map_or_else(
-                |err| {
-                    self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    Err(err)
-                },
-                |segment| {
-                    self.inner
-                        .mmio_map(phys_addr, segment.start)
-                        .map(|_| segment.start)
-                        .inspect_err(|_| {
-                            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        })
-                },
-            )
+            .mmio_map(phys_addr, num_pages)
+            .map(|segment| segment.start)
+            .inspect_err(|_| {
+                self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            })
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
@@ -592,69 +596,48 @@ impl UserAddressSpace {
             bytes.len() as i64,
         );
 
-        let mut source_start = 0_u64;
+        user_vaddr_start
+            .checked_add(bytes.len() as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut source = bytes;
         let mut dst_start = user_vaddr_start;
-        let mut bytes_left = bytes.len() as u64;
-
-        while bytes_left > 0 {
-            let bytes_to_copy = {
-                let page_end = align_up(dst_start + 1, PAGE_SIZE_SMALL);
-                if page_end - dst_start >= bytes_left {
-                    bytes_left
-                } else {
-                    page_end - dst_start
-                }
-            };
-
-            // vaddr_map_status (not a raw page-table walk) is the authority
-            // here: it rejects zero-page/CoW mappings, which must never be
-            // written through the direct map.
-            let mapping = self.inner.vaddr_map_status(dst_start);
-            let phys_start = match mapping {
-                VaddrMapStatus::Private(addr) => addr,
-                VaddrMapStatus::Shared(addr) => addr,
-                _ => {
-                    log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                }
-            };
-
+        while !source.is_empty() {
+            // Pin under the region lock and retain ownership through the copy.
+            // Frame-less zero/CoW pages and device mappings remain refused.
+            let page = self.pin_user_page(dst_start)?;
+            let bytes_to_copy = source
+                .len()
+                .min((PAGE_SIZE_SMALL - (dst_start & (PAGE_SIZE_SMALL - 1))) as usize);
             unsafe {
                 core::intrinsics::copy_nonoverlapping(
-                    bytes.get_unchecked(source_start as usize) as *const u8,
-                    (phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET) as usize
-                        as *mut u8,
-                    bytes_to_copy as usize,
+                    source.as_ptr(),
+                    page.kernel_addr() as *mut u8,
+                    bytes_to_copy,
                 );
             }
-
-            source_start += bytes_to_copy;
-            dst_start += bytes_to_copy;
-            bytes_left -= bytes_to_copy;
+            dst_start += bytes_to_copy as u64;
+            source = &source[bytes_to_copy..];
         }
 
         Ok(())
     }
 
-    pub fn get_user_page_as_kernel(&self, user_page_addr: u64) -> Result<u64, ErrorCode> {
+    fn pin_user_page(&self, addr: u64) -> Result<PinnedUserPage, ErrorCode> {
+        let (frame, offset) = self
+            .inner
+            .pin_user_page(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        Ok(PinnedUserPage { frame, offset })
+    }
+
+    pub fn get_user_page_as_kernel(
+        &self,
+        user_page_addr: u64,
+    ) -> Result<PinnedUserPage, ErrorCode> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let mapping = self.inner.vaddr_map_status(user_page_addr);
-        let phys_start = match mapping {
-            VaddrMapStatus::Private(addr) => addr,
-            VaddrMapStatus::Shared(addr) => addr,
-            _ => {
-                log::error!(
-                    "{}:{} - get_user_page_as_kernel: bad mapping.",
-                    file!(),
-                    line!()
-                );
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-        };
-
-        Ok(phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET)
+        self.pin_user_page(user_page_addr)
     }
 
     pub fn read_from_user(
@@ -675,33 +658,7 @@ impl UserAddressSpace {
             buf.len() as i64,
         );
 
-        let mut source_start = vaddr_start;
-        let mut remaining_bytes = buf.len() as u64;
-
-        let mut dst_ptr = buf.as_mut_ptr();
-
-        while remaining_bytes > 0 {
-            let phys_start = self.inner.page_table_ref().virt_to_phys(source_start);
-            if phys_start.is_none() {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-            let phys_start = phys_start.unwrap();
-
-            let source_end = align_up(source_start + 1, PAGE_SIZE_SMALL);
-            let size_to_copy = core::cmp::min(source_end - source_start, remaining_bytes);
-            unsafe {
-                core::intrinsics::copy_nonoverlapping(
-                    (phys_start + PAGING_DIRECT_MAP_OFFSET) as usize as *const u8,
-                    dst_ptr,
-                    (size_to_copy) as usize,
-                );
-                dst_ptr = dst_ptr.add(size_to_copy as usize);
-            }
-            source_start += size_to_copy;
-            remaining_bytes -= size_to_copy;
-        }
-
-        Ok(())
+        self.inner.page_table_ref().copy_from_user(vaddr_start, buf)
     }
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {

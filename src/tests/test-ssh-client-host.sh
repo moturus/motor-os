@@ -202,8 +202,15 @@ test_ssh_client_host() {
     fail "recursive re-upload changed the mode of an existing directory"
 
   local password_command="/user/bin/ssh -F /dev/null -p $port -i $guest_wrong -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo password-ok"
-  output="$(printf 'vroomvroom\n' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$password_command" 2>&1)" ||
-    fail "Motor client password fallback failed"
+  local password_stderr="$TEST_TMP/ssh-client-host-password.stderr"
+  local password_status=0
+  # Keep the PTY on stdin/stdout, but retain client diagnostics separately:
+  # a stderr debug record can split the password-ok line being asserted.
+  # The wrapper also gives the client's runtime inherited, pipe-relayed stderr.
+  output="$(printf 'vroomvroom\n' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+    "/system/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
+  vm_ssh "/system/bin/cat $password_stderr" >&2 || fail "could not read password-auth diagnostics"
+  [ "$password_status" -eq 0 ] || fail "Motor client password fallback failed: $password_status"
   printf '%s\n' "$output" | tr -d '\r' | grep -qx password-ok ||
     fail "password-auth command returned '$output'"
 

@@ -42,6 +42,64 @@ fn free_pages_upper_bound() -> u64 {
     (stats.available >> PAGE_SIZE_SMALL_LOG2) - stats.used_pages
 }
 
+/// Run from the System console: ordinary parents cannot grant either reserve
+/// capability. Include strobe's exact mask and children that drop all privilege.
+pub fn test_process_classes() {
+    use moto_sys::caps::*;
+
+    assert_ne!(moto_sys::ProcessStaticPage::get().capabilities & CAP_SYS, 0);
+    for (caps, privileged) in [
+        (CAP_SYS | CAP_LOG, true),
+        (CAP_IO_MANAGER | CAP_INTERACTIVE, true),
+        (CAP_SYS | CAP_IO_MANAGER, true),
+        (CAP_INTERACTIVE, false),
+        (CAP_LOG, false),
+        (0, false),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "admission-class-child",
+                &caps.to_string(),
+                &privileged.to_string(),
+            ])
+            .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "admission class for caps {caps:#x}: {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    println!("admission::test_process_classes PASS");
+}
+
+pub fn class_child(caps: u64, privileged: bool) {
+    assert_eq!(moto_sys::ProcessStaticPage::get().capabilities, caps);
+    let user_before = kernel_metric("mem.admission_refused_user");
+    let privileged_before = kernel_metric("mem.admission_refused_sys_io");
+    let pages = free_pages_upper_bound();
+
+    // Oversized but well-formed: admission must refuse before allocating. This
+    // identifies the real target address-space class without exhausting RAM.
+    const REFUSALS: u64 = 3;
+    for _ in 0..REFUSALS {
+        assert_eq!(
+            SysMem::alloc(PAGE_SIZE_SMALL, pages).err(),
+            Some(moto_rt::E_OUT_OF_MEMORY)
+        );
+    }
+    assert_eq!(
+        kernel_metric("mem.admission_refused_user") - user_before,
+        if privileged { 0 } else { REFUSALS }
+    );
+    assert_eq!(
+        kernel_metric("mem.admission_refused_sys_io") - privileged_before,
+        if privileged { REFUSALS } else { 0 }
+    );
+}
+
 /// Every admitted operation releases its reservation when it completes, so an
 /// idle system settles at zero. A leaked guard never does.
 fn assert_reservations_drain() {

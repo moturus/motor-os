@@ -61,6 +61,8 @@ impl PTE {
     const PRESENT: u64 = 0b_0000_0001; // bit 0.
     const WRITABLE: u64 = 0b_0000_0010; // bit 1.
     const USER: u64 = 0b_0000_0100; // bit 2.
+    const WRITE_THROUGH: u64 = 1 << 3;
+    const CACHE_DISABLE: u64 = 1 << 4;
     const ACCESSED: u64 = 0b_0010_0000; // bit 5.
     const HUGE: u64 = 0b_1000_0000; // bit 7.
                                     // Leaf-only: the translation survives `mov cr3` (needs CR4.PGE). Set on
@@ -197,6 +199,30 @@ struct PageTableImpl {
 }
 
 impl PageTableImpl {
+    fn user_phys_addr(&self, virt_addr: u64) -> Option<u64> {
+        let mut table = &*self.table_l4;
+        for shift in [39, 30, 21, 12] {
+            let pte = table.get((virt_addr >> shift) & 511);
+            let required = PTE::PRESENT | PTE::USER;
+            if pte.entry & required != required {
+                return None;
+            }
+            if shift == 12 || (shift != 39 && pte.is_huge_page()) {
+                // Device mappings are not buffers for kernel copies.
+                if pte.entry & (PTE::WRITE_THROUGH | PTE::CACHE_DISABLE) != 0 {
+                    return None;
+                }
+                let mask = (1 << shift) - 1;
+                return Some((pte.get_addr() & !mask) + (virt_addr & mask));
+            }
+            if pte.is_huge_page() {
+                return None; // No level-4 leaf in four-level paging.
+            }
+            table = HwPageTable::from_pte(pte);
+        }
+        None
+    }
+
     fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         let idx_l4 = PageTableImpl::idx_l4(virt_addr);
         let pte_l4 = self.table_l4.get(idx_l4);
@@ -871,5 +897,39 @@ impl PageTable {
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         unsafe { self.inst.get().lock(line!()).virt_to_phys(virt_addr) }
+    }
+
+    pub fn copy_from_user(&self, mut virt_addr: u64, mut buf: &mut [u8]) -> Result<(), ErrorCode> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        // Motor OS user mappings are in the lower canonical half (four levels).
+        if virt_addr
+            .checked_add(buf.len() as u64)
+            .is_none_or(|end| end > (1 << 47))
+        {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        while !buf.is_empty() {
+            let page_table = unsafe { self.inst.get() }.lock(line!());
+            let phys_addr = page_table
+                .user_phys_addr(virt_addr)
+                .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            let size = buf
+                .len()
+                .min((PAGE_SIZE_SMALL - (virt_addr & (PAGE_SIZE_SMALL - 1))) as usize);
+            // Keep validation and copying under the same lock: unmap cannot
+            // replace the PTE or release its backing frame during this copy.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (phys_addr + PAGING_DIRECT_MAP_OFFSET) as *const u8,
+                    buf.as_mut_ptr(),
+                    size,
+                );
+            }
+            virt_addr += size as u64;
+            buf = &mut buf[size..];
+        }
+        Ok(())
     }
 }

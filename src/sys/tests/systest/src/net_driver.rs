@@ -587,7 +587,7 @@ fn test_accept_ids_unique_across_channels() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let result = runtime.block_on(async {
-        let (client_a, _driver_a) = host_channel().await;
+        let (client_a, driver_a) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client_a.try_reserve().unwrap(),
@@ -628,14 +628,19 @@ fn test_accept_ids_unique_across_channels() {
                 None => all_accepted = false,
             }
         }
-        (all_accepted, accepted, peer_threads)
+        (all_accepted, accepted, peer_threads, driver_a)
     });
-    let (all_accepted, accepted, peer_threads) = result;
+    let (all_accepted, accepted, peer_threads, driver_a) = result;
     assert!(all_accepted, "cross-channel accept did not complete");
     for peer in peer_threads {
         peer.join().unwrap();
     }
     drop(accepted);
+    // Socket drops queue their closes; keep A running until it sends them.
+    assert!(
+        runtime.block_on(async { bounded(driver_a, 5).await }),
+        "cross-channel accept driver A did not exit"
+    );
     drop(client_b);
     driver_b_thread.join().unwrap();
     println!("net_driver::test_accept_ids_unique_across_channels PASS");
@@ -701,7 +706,7 @@ fn test_partial_write_raises_writable() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let saw_edge = runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
 
         let stream = moto_io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -758,13 +763,20 @@ fn test_partial_write_raises_writable() {
         // though the last write was partial, not E_NOT_READY.
         let edges_before = observer.writable.load(Ordering::SeqCst);
         drain_tx.send(()).unwrap();
+        let mut saw_edge = false;
         for _ in 0..2000 {
             if observer.writable.load(Ordering::SeqCst) > edges_before {
-                return true;
+                saw_edge = true;
+                break;
             }
             moto_async::sleep(Duration::from_millis(5)).await;
         }
-        false
+        drop(stream);
+        assert!(
+            bounded(driver_task, 5).await,
+            "partial-write test driver did not exit"
+        );
+        saw_edge
     });
     assert!(saw_edge, "no WRITABLE edge after a partial write");
 
@@ -801,7 +813,7 @@ fn test_connected_udp_ignores_foreign_datagrams() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let rx = moto_io::net::udp::UdpSocket::bind_reserved(
@@ -871,6 +883,11 @@ fn test_connected_udp_ignores_foreign_datagrams() {
             .expect("the peer's datagram was not readable");
         assert_eq!(&buf[..len], b"from-peer");
         assert_eq!(&from, peer.local_addr());
+        drop((rx, peer, outside));
+        assert!(
+            bounded(driver_task, 5).await,
+            "connected-UDP test driver did not exit"
+        );
     });
     println!("net_driver::test_connected_udp_ignores_foreign_datagrams PASS");
 }
@@ -912,7 +929,7 @@ fn test_dropped_futures_leave_no_waiters() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
 
         let stream = moto_io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -1022,6 +1039,11 @@ fn test_dropped_futures_leave_no_waiters() {
             }
         }
         assert_eq!(&acked, b"ack!");
+        drop((stream, udp));
+        assert!(
+            bounded(driver_task, 5).await,
+            "dropped-future test driver did not exit"
+        );
     });
 
     drop(drain_tx);

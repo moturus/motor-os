@@ -37,19 +37,19 @@ backing, or attribute shared kernel-heap objects to individual processes.
 
 ## Memory zones
 
-Two non-configurable low-water marks over free small pages:
+Two non-configurable floors apply after subtracting outstanding reservations
+and the operation's charge:
 
-```text
-available above USER_FLOOR:
-    ordinary processes and sys-io may start memory-growing operations
+- Ordinary address spaces must leave `USER_FLOOR` pages free.
+- Processes with `CAP_SYS` or `CAP_IO_MANAGER` may use the reserve between
+  the floors, but must still leave `SYS_IO_FLOOR` pages for bounded kernel
+  work. This includes strobe and sys-init as well as sys-io and sys-tty.
 
-SYS_IO_FLOOR < available <= USER_FLOOR:
-    only sys-io may start memory-growing operations
-
-available <= SYS_IO_FLOOR:
-    no userspace process, including sys-io, may start one
-    the remaining pages are for bounded kernel work already in flight
-```
+The lower floor and its exported statistics retain their historical `sys_io`
+names. Reserve eligibility does not grant IO-manager permissions or guarantee
+that every allocation succeeds. New address spaces start ordinary and acquire
+their process's eligibility at process creation; a privileged loader does not
+lend its reserve to ordinary children.
 
 The floors are compile-time constants: `USER_FLOOR_PAGES = 256` (1 MiB),
 `SYS_IO_FLOOR_PAGES = 128` (512 KiB), validated by measurement (below). They

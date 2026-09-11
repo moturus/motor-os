@@ -12,15 +12,16 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use super::phys;
 use moto_sys::ErrorCode;
 
-/// Which floor an operation must stay above. Only sys-io's address space is
-/// privileged; everything else, including sys-init, is ordinary.
+/// Which floor an operation must stay above. CAP_SYS and CAP_IO_MANAGER
+/// address spaces may use the reserve; ordinary processes may not.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MemClass {
     User,
-    SysIo,
+    Privileged,
 }
 
-// The floors are compile-time safety constants.
+// The floors are compile-time safety constants. The lower floor and its
+// exported stats retain their historical sys-io names.
 pub const USER_FLOOR_PAGES: u64 = 256; // 1M.
 pub const SYS_IO_FLOOR_PAGES: u64 = 128; // 512K.
 
@@ -112,7 +113,7 @@ impl Drop for Admission {
 pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode> {
     let floor = match class {
         MemClass::User => USER_FLOOR_PAGES,
-        MemClass::SysIo => SYS_IO_FLOOR_PAGES,
+        MemClass::Privileged => SYS_IO_FLOOR_PAGES,
     };
 
     let mut reserved = RESERVED_PAGES.load(Ordering::Relaxed);
@@ -167,7 +168,7 @@ pub fn admit(class: MemClass, charge_pages: u64) -> Result<Admission, ErrorCode>
 fn refuse(class: MemClass) -> ErrorCode {
     match class {
         MemClass::User => REFUSED_USER.fetch_add(1, Ordering::Relaxed),
-        MemClass::SysIo => REFUSED_SYS_IO.fetch_add(1, Ordering::Relaxed),
+        MemClass::Privileged => REFUSED_SYS_IO.fetch_add(1, Ordering::Relaxed),
     };
     moto_rt::E_OUT_OF_MEMORY
 }
