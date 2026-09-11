@@ -88,9 +88,10 @@ corrected test; strict kernel Clippy passed with warnings denied in both
 profiles. Tested source hashes and complete gate results are retained with
 the logs. The findings-only commit `91eadfe2` did not change the tested code.
 
-P1a2 is proceeding in small increments. The first local increment adds F/W
-search, advisory cursor adoption/clearing, a cursor-free bootstrap path,
-contiguous-run selection, and downward huge-block selection around P1a1's
+P1a2 is only partially implemented. Commit `6ead6302`, titled "patch P1a2",
+contains the search increment: F/W search, advisory cursor adoption/clearing,
+a cursor-free bootstrap path, contiguous-run selection, and downward
+huge-block selection around P1a1's
 locked ownership helpers. Debug scratch tests cover exact four-block packing
 for 2048 pages, split-before-whole selection, claimed capacity before splitting
 or OOM, sticky/shared/stale cursors, preserved short tails, and LIFO reuse.
@@ -101,11 +102,47 @@ one release developer-image run, including native source builds and the
 complete Lorry suite. Both scratch suites passed in all three debug boot logs.
 No test retries or temporary probes were used. Source hashes and complete
 results are under `/tmp/kernel-phys-p1a2-search-gate.XGoygD`. This approximately
-250-line code/test increment remains uncommitted for review.
-Pure range shaping, table-size/preflight/carving, and their input fixtures
-remain the next P1a2 increments; P1b still owns production installation and
-runtime CPU-publication wiring.
-
+250-line code/test increment is committed and reviewed.
+The next increment supplies pure block-local shaping: validate ordered
+page intervals, coalesce adjacent managed runs, subtract reservations, select
+the largest free run adjacent to any initrd (lowest-address tie), and compute
+managed/reserved/discarded counts and descriptor bounds. It allocates no
+storage and touches no page data. Debug boot fixtures cover holes, initrd
+containment/adjacency, malformed ranges, full/partial/absent shapes, and low
+RAM before/after release with page zero and two synthetic loader-table pages.
+The approved initrd boundary correction below is included in this snapshot.
+Strict kernel Clippy passes in both profiles. The common gate passed its first
+debug run, then the second guest exited during the later pressure episode
+at about 193.488 seconds, before systest completion and before the harness
+timeout. All three block scratch suites passed in both boot logs. The failed
+boot used the low initrd path, so it did not exercise the changed comparison.
+The stopped image has about 193 MiB free; persisted logs identify no shutdown
+caller. This resembles the previously recorded quiet exit but does not prove
+a common cause. The stranded SSH session was cleaned up only after evidence
+capture; no release/developer-image acceptance run or test retry followed.
+One diagnostic run of the existing debug suite, with a hardware kernel_exit
+breakpoint installed before the main VM booted, passed both pressure episodes
+and the full suite. It captured only the normal final shutdown through
+sys_kill_impl from PID 8; the optional process-name read failed, but the stack
+and PID were retained. This does not establish the original exit's cause and
+receives no acceptance credit. Logs, image and source hashes are under
+`/tmp/kernel-initrd-adjacent-gate.cRf0oY`. Under the user's session-specific
+continuation policy, a fresh uninstrumented sequence now checks 10 debug and
+10 release full-suite runs for recurrence, followed by the release developer
+gate. The sequence stops on failure for diagnosis; no source probes or
+weakened assertions are used. This increment and the boundary fix were still local during diagnosis.
+The fresh sequence passed debug-1 and release-1, then debug-2 failed in
+`probe_fresh_client("sys-io-fs")`: the server handle remained live through its
+five-second deadline in the second filesystem pressure episode. Both network
+pressure episodes passed; this VM shut down after the harness reported the
+assertion. It is distinct from the quiet exit. The failed log/image are in
+`characterization/` under the same evidence directory. Temporary snapshots
+in the existing test now investigate whether waiter cleanup cleared pressure
+before client acceptance, versus an incorrect retained server connection.
+The diagnostic full run retains the shutdown breakpoint, changes no assertion
+or timeout, and receives no acceptance credit. That diagnostic passed; the
+second FS episode rose from 433 to 536 free pages with pressure still raised,
+and sys-io correctly dropped the newly admitted client.
 A terminal-test diagnostic stopped before systest: a TCP runtime stderr fragment
 interrupted a 100-column rmux repaint, making the terminal test count 180.
 The test already isolates Red's stderr; the local correction does the same
@@ -113,7 +150,91 @@ for the outer console rmux client and retains its diagnostics separately.
 Its Rush wrapper explicitly preserves the original console rmux capability
 mask (0x6c); no production permission policy changes. The existing terminal
 suite passes in debug and release, with the TCP diagnostics present in the
-retained stderr. This small test-only fix was kept separate from the kernel changes.
+retained stderr. This small test-only fix was kept separate from the kernel changes. Pressure diagnosis continues using the existing complete systest
+with snapshots and the shutdown breakpoint; no new workload or reproducer.
+That direct systest diagnostic passed too: FS pressure stayed raised at 448
+and 472 free pages, covering both kernel refusal and service-side drop.
+Temporary snapshots are removed; neither pressure failure has been explained.
+A fresh uninstrumented 10-debug/10-release sequence now includes the validated
+terminal-test correction, followed by the release developer gate. Its logs
+are in `characterization-2/` under the evidence directory; any failure stops
+that sequence for diagnosis. No diagnostic pass receives acceptance credit.
+That sequence passed three debug/release pairs, then debug-4 repeated the
+five-second FS client-refusal failure, now in the first filesystem episode.
+The original quiet exit did not recur. A lighter temporary observer adds no
+extra diagnostic syscall until the original final failed wake poll; earlier
+snapshots may affect scheduling. Complete systest with this observer passed,
+as did 20 existing standalone `test-fs-pressure 128` runs without GDB. Full
+harness diagnosis without GDB now preserves the original workload order and
+seeks the pressure/admission/connection state at the timeout. The 10+10
+threshold has not been met. The original and recurring failures remain saved.
+The full-harness failure-only diagnostic passed once; its second scheduled
+run was intentionally canceled before VM/pressure testing, with status 143
+recorded separately from test regressions. All temporary test probes are
+removed. Source inspection established a stale-snapshot pressure-publication
+race in `mm/admission.rs`: a delayed high-free observation can clear the flag
+after another CPU completes allocations below the low watermark; the reverse
+ordering can miss recovery too. This is not yet established as the cause of
+either recorded failure. The synchronization decision and ordering example
+are in [kernel-pressure-publication.md](kernel-pressure-publication.md).
+The user confirmed that fixing this race is within the authorized work. The
+local fix serializes fresh sampling and publication, including every small-page
+free; validation and performance comparison are pending. The shaping, boundary
+and terminal-test changes remain local.
+The fix passed strict kernel Clippy and one full debug/release pair; the
+page-fault benchmark remained within the saved baseline ranges. Debug-2
+then exited quietly during the first network-pressure episode, at guest
+66.415 seconds after expected TCP/UDP refusals. This is preserved under
+`pressure-fix-gate/` in the same evidence directory. It does not establish a
+common cause with earlier failures, but the publication fix has not eliminated
+quiet exits. Subsequent temporary shutdown-only probes recorded the kernel
+exit stack, privileged shutdown caller, and sys-io exit status in
+`exit-only-diagnostic/`. No pressure-loop instrumentation or new test/reproducer
+was added. Those diagnostic runs receive no acceptance credit.
+
+Diagnostic update (2026-09-10): `exit-only-diagnostic/debug-2` captured the
+quiet shutdown as `init_exited: Exited(0)`, with the stack through sys-io
+process/thread teardown. It was not a privileged shutdown request. The
+initiating event before sys-init/sys-io returned is still unproven. Inspection
+also found five discarded process/thread lock guards and an unlocked
+main-thread getter racing with teardown. The local correction retains guards
+through reads/Arc clones and returns a main-thread Arc cloned under its lock;
+no extra lock is held while querying thread stats. Details are in
+[kernel-process-readers.md](kernel-process-readers.md).
+Three subsequent full debug diagnostics with both fixes and service-exit
+probes passed. All temporary probes are removed; exact backup comparisons
+confirmed that both fixes remain. A further bounds fix makes `list_tids` safe
+for a zero-length caller buffer;
+the existing shared-listener test checks that request against its live child.
+The first clean gate was canceled during prelude before this fix/test and
+receives no acceptance credit. Clean validation restarted in
+`publication-lifetime-gate-2/` under the evidence directory: 10 debug plus
+10 release runs, then release developer-image validation. No diagnostic
+pass receives acceptance credit, and neither quiet-exit causality nor the
+filesystem-refusal timeout is claimed resolved.
+
+Clean main-image validation in `publication-lifetime-gate-2/` has now passed
+ten debug and ten release full suites on unchanged source, with no retries
+or temporary probes. Both pressure episodes and the empty-buffer lifecycle
+regression passed in all twenty runs; shaping fixtures passed in every debug
+boot. Neither intermittent failure recurred, satisfying the user's 10+10
+threshold for moving on without asserting a root cause. Strict kernel Clippy
+passes in both profiles. The release developer-image gate also passed,
+including native source builds and the complete Lorry suite. Recorded source
+hashes still match. The user authorized committing the five patches using
+this combined validation; intermediate revisions were not independently gated.
+Page-fault timing ranges and their limits are recorded in
+[kernel-pressure-publication.md](kernel-pressure-publication.md).
+
+The remaining deliverables in the original P1a2 row are not implemented:
+
+- Physical byte-range normalization/validation, raw-RAM flags and span-wide
+  shaping integration, including more than 255 mixed blocks.
+- Table sizing, boot-heap preflight and pure table carving, with storage and
+  lazy-initialization fixtures.
+
+P1b still owns production installation and runtime CPU-publication wiring;
+the search commit does not complete the original P1a2 deliverable.
 
 Continuation checkpoint (2026-09-10): input inspection for the next shaping
 increment found a preexisting initrd adjacency rejection in
@@ -935,8 +1056,12 @@ never retry hermetic failures or enlarge timeouts/ignore failures to disguise
 a defect. Diagnose failures; pause implementation for
 new non-test pre-existing bugs or a newly required policy decision, except
 that the user explicitly authorized fixing discovered races and continuing
-without creating race tests or reproducers. Existing acceptance gates remain
-required.
+without creating race tests or reproducers. For this session, the user further authorized continued diagnosis of
+undetermined failures and kernel-memory regressions: pause only for a diagnosed
+non-obvious fix in the current work or a specific issue outside it. An issue
+that does not recur across 10 debug and 10 release full-test.sh passes may be
+treated as an extremely rare flake and work may continue. Preserve the original
+failure and report it. Existing acceptance gates remain required.
 
 P1b launcher matrix: cloud-hypervisor; Firecracker at 64 MiB and 1 GiB;
 QEMU -kernel; QEMU BIOS; release developer image at 8 GiB with a PhysStats

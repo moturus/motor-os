@@ -510,5 +510,6 @@ pub(super) fn run() {
     huge_and_lazy_words();
     malformed_bounds_and_state();
     search::run();
+    super::shaping::test();
     crate::raw_log!("phys_blocks core tests PASS");
 }

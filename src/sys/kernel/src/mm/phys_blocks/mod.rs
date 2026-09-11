@@ -483,6 +483,7 @@ impl<L: PageLinks> Pool<'_, L> {
 }
 
 mod search;
+mod shaping;
 
 #[cfg(debug_assertions)]
 mod tests;
