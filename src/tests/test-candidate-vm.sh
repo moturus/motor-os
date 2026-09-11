@@ -14,6 +14,7 @@ fi
 IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os-dev.qcow2}"
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-8192}"
+export FULL_TEST_VERIFY_DEV_SOURCES=1
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
 . "$WD/vm-cleanup.sh"
