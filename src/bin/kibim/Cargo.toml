@@ -16,6 +16,9 @@ edition = "2018"
 [dependencies]
 unicode-width = "0.1.11"
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"
