@@ -303,9 +303,17 @@ build_shim() {
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
 		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
-		run_motor_cargo build --target x86_64-unknown-motor --release )
+		run_motor_cargo build --target x86_64-unknown-motor --release \
+			-Zbuild-std=core,alloc )
 	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
+	if "$B/llvm-nm" "$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
+			awk '$NF == "rust_eh_personality" ||
+				$NF == "DW.ref.rust_eh_personality" ||
+				$NF ~ /^_Unwind_/ || $NF ~ /^__unw_/ { found = 1 }
+				END { exit !found }'; then
+		die "moto-rt-cabi contains unwind runtime references"
+	fi
 	for symbol in motor_start memcpy memmove memset memcmp; do
 		if "$B/llvm-nm" --defined-only \
 				"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |

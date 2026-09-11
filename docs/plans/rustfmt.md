@@ -343,8 +343,22 @@ panic = "abort"
 ```
 
 Add both `[profile.dev]` and `[profile.release]` with `panic = "abort"` to
-`src/bin/russhd/Cargo.toml`. `src/sys`, the kernel, boot, and the shim need
-nothing. ripgrep (confirmed 2026-09-11) stays on its `release` profile and becomes unwind, which is
+`src/bin/russhd/Cargo.toml`. `src/sys` crates, the kernel, and boot need no
+profile change. Two freestanding artifacts link the sysroot's `core` and
+`alloc`, which D1 makes unwind-compiled, and provide no unwinder: the moto-rt
+C ABI shim and `rt.vdso`. Both build those two crates under their own abort
+profile with `-Zbuild-std=core,alloc` (`src/build-motor-os.sh` and
+`src/sys/lib/rt.vdso/build.sh`); without it the link fails on the
+`_Unwind_Resume` and `rust_eh_personality` references in the prebuilt
+`liballoc`. On the current abort tuple the flag still rebuilds `core` and
+`alloc` with the vdso's fat-LTO profile, so the vdso binary changes (about
+4 KB larger). In debug builds the dev profile would compile those crates at
+opt-level 0 with assertions, unlike the prebuilt sysroot crates, so
+`src/sys/lib/rt.vdso/.cargo/config.toml` overrides `core`, `alloc`, and
+`compiler_builtins` back to opt-level 3 without assertions; without that,
+the first debug gate on the managed `.dev.2` tuple ran every systest child
+case three to five times slower and failed a 500 ms stdio lifetime bound.
+ripgrep (confirmed 2026-09-11) stays on its `release` profile and becomes unwind, which is
 its upstream default; record its size delta. Lorry needs no change:
 `CargoPanicStrategy::Abort` already emits `panic=abort` and unwind relies on
 the target default. Confirm with `cargo build -v` that every OS binary's
@@ -910,8 +924,10 @@ Other external writes: `/home/posk/motor-dev/toolchain-state`,
 checkout's `build/`, `/home/posk/motor-dev/assemblies`, Cargo caches during
 provisioning, and the candidate worktree `/home/posk/motor-dev/motor-os-candidate`.
 `/home/posk/motor-dev/toolchain-src/rust` is not edited. No changes in
-moto-rt, `src/sys` sources, Lorry source, Helix, LLVM, or mlibc; the only
-Lorry-path edit is the profile line in `src/bin/lorry/Cargo.toml` (4.5). A
+moto-rt, `src/sys` Rust sources, Lorry source, Helix, LLVM, or mlibc; the
+`src/sys` edit is the build-std flag in `src/sys/lib/rt.vdso/build.sh` (4.5),
+and the only Lorry-path edit is the profile line in `src/bin/lorry/Cargo.toml`
+(4.5). A
 change that proves necessary elsewhere is a stop-and-review event with exact
 paths. The
 only new startup work is the D2 registration. Follow AGENTS.md for

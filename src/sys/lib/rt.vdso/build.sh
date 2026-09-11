@@ -14,9 +14,10 @@ if [ -f "${TARGET_FNAME}" ]; then
     PREV_HASH=$(sha256sum "${TARGET_FNAME}" | awk '{print $1}')
 fi
 
-cargo build --target x86_64-unknown-motor --features "netdev" $@
+# Keep the freestanding VDSO and its standard-library dependencies abort-only.
+cargo build -Zbuild-std=core,alloc --target x86_64-unknown-motor --features "netdev" $@
 
-cargo clippy --target x86_64-unknown-motor --features "netdev" $@
+cargo clippy -Zbuild-std=core,alloc --target x86_64-unknown-motor --features "netdev" $@
 
 # Don't update the output file if nothings has changed,
 # otherwise sys-io is always relinked, which takes time.
@@ -40,4 +41,3 @@ else
     rm "${TEMP_FNAME}"
     echo "nothing done"
 fi
-

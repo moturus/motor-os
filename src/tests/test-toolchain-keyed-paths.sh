@@ -47,6 +47,10 @@ case "$(declare -f build_shim)" in
 	*'cargo +dev-x86_64-unknown-motor'*|*'src/sys/target'*)
 		fail "shim still uses a legacy toolchain or target directory" ;;
 esac
+case "$(declare -f build_shim)" in
+	*'-Zbuild-std=core,alloc'*'rust_eh_personality'*'_Unwind_'*'__unw_'*) ;;
+	*) fail "shim does not enforce its abort-only runtime closure" ;;
+esac
 for producer in build_mlibc build_cxx_runtimes build_native_llvm; do
 	case "$(declare -f "$producer")" in
 		*'--wipe'*|*'rm -rf'*|*'$LLVM/build-'*)
