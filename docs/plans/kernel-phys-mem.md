@@ -103,6 +103,57 @@ Continue in small local patches for review. The request to commit the five
 patches above is fulfilled, not blanket authorization for future commits.
 No new design decision or approval is pending at this checkpoint.
 
+### Progress after the checkpoint (2026-09-11)
+
+The first remaining P1a2 increment is the byte-range normalization in
+`mm/phys_blocks/layout.rs`: `Layout::new` converts available, reserved,
+initrd and raw firmware segments to sorted page intervals with checked
+arithmetic, rounds available RAM inward and reservations outward, coalesces
+adjacent runs, excludes the fixed mid segment (now the module constant
+`phys::FIXED_MID_SEGMENT`), requires available RAM inside raw RAM and the
+page-rounded initrd inside one managed run clear of reservations, records
+block indexes touching raw RAM, and refuses spans beyond 32768 blocks. Its
+debug fixtures run from the same boot hook. The increment also carries the
+`cargo fmt` of one untouched `virt.rs` function that was left unformatted.
+
+The increment's first common gate passed two debug runs, then the third
+guest exited quietly during the pressure tests (no panic, no fatal line).
+Its evidence is on the host under the session scratchpad
+`gate-layout-attempt1/` (`debug-3.log`, captured console and systest logs,
+`debug-3-failed.qcow2`). Compared with the earlier saved failure
+(`debug-2-console-at-exit.log` in the initrd-adjacent evidence directory),
+both consoles end with one terminal-size probe (`ESC 7`, `ESC [9999;9999H`,
+`ESC 8`) immediately before `vm_exit: bye.`; passing runs print that probe
+only in pairs during the rmux tests. A virtio block-queue stall report from
+sys-io's debug monitor appeared 13 seconds earlier in this run only, while
+kernel builds ran on the host, and is absent from the earlier failures.
+
+Source inspection gives the exit chain: sys-io returns when sys-init returns,
+sys-init returns when sys-tty exits, and sys-tty returns when its console
+shell exits, printing nothing when that exit status is zero. Rush treats an
+error from its terminal event read as end of input and exits normally. Every
+diagnostic channel (kernel-log forwarding, strobe files) dies with sys-tty,
+which is why these exits are silent. Below the user floor, user-class
+processes are refused lazy faults, object creation and mappings; the pressure
+squeeze deliberately parks free memory a few hundred pages above that floor,
+so concurrent kernel work can briefly cross it. This mechanism is inferred,
+not observed: no probe has yet caught the first exiting process. The kernel
+now prints `process <pid> '<name>' exited: <status>` on the serial console for
+the first eight processes (the boot services and the console shell), a
+permanent line that costs nothing until one of them exits, so a recurrence
+names its initiator. The gate was restarted on that snapshot.
+
+On that snapshot three debug and three release main-image runs passed. The
+release developer-image run then failed its native Lorry self-gate: the
+8 GiB guest's compile output stopped nine minutes into the phase and stayed
+silent until the phase's 1200-second budget expired, with no panic on its
+console; the earlier passing run finished that phase in 831 seconds, and
+host-side preparation took the same 196 seconds in both. That is a guest
+stall, not a slow run, in code this increment does not touch (the retained
+evidence is under `gate-layout-2/dev-1-native-hang/` in the scratchpad and
+the Lorry `native-self-tests` directory named in `dev-1-hang.log`). The
+developer leg was rerun once with the failure preserved.
+
 ## Implementation and diagnostic history
 
 These records describe earlier checkpoints and diagnostic sequences. Use the

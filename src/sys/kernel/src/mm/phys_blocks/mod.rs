@@ -482,6 +482,7 @@ impl<L: PageLinks> Pool<'_, L> {
     }
 }
 
+mod layout;
 mod search;
 mod shaping;
 

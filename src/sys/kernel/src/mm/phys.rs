@@ -618,6 +618,12 @@ impl<S: PageSize> MemoryArea<S> {
     }
 }
 
+// sys-io's fixed mid-page segment: [2 MiB, 10 MiB), outside small-page management.
+pub(super) const FIXED_MID_SEGMENT: MemorySegment = MemorySegment {
+    start: super::ONE_MB * 2,
+    size: (PhysicalMemory::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
+};
+
 // Contains everything. Has a single instantiation.
 struct PhysicalMemory {
     total_size: u64, // does not change once initialized
@@ -638,10 +644,7 @@ impl PhysicalMemory {
     // The number of MID pages we reserve. At the moment only the kernel
     // and, maybe, sys-io are allowed to use MID pages, so the number is small.
     const MID_PAGES: usize = 4;
-    const MID_PAGES_SEGMENT: MemorySegment = MemorySegment {
-        start: super::ONE_MB * 2,
-        size: (Self::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
-    };
+    const MID_PAGES_SEGMENT: MemorySegment = FIXED_MID_SEGMENT;
 
     fn inst() -> &'static Self {
         let addr = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM)) };

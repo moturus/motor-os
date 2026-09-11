@@ -173,9 +173,11 @@ pub fn vmem_map_reserved_pages(
     phys_start: u64,
     num_pages: u64,
 ) -> Result<MemorySegment, ErrorCode> {
-    KERNEL_ADDRESS_SPACE
-        .kernel_static
-        .map_reserved_pages(phys_start, num_pages, MappingOptions::READABLE)
+    KERNEL_ADDRESS_SPACE.kernel_static.map_reserved_pages(
+        phys_start,
+        num_pages,
+        MappingOptions::READABLE,
+    )
 }
 
 pub fn vmem_free(addr: u64, kind: VmemKind) -> u64 {

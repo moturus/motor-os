@@ -511,5 +511,6 @@ pub(super) fn run() {
     malformed_bounds_and_state();
     search::run();
     super::shaping::test();
+    super::layout::test();
     crate::raw_log!("phys_blocks core tests PASS");
 }
