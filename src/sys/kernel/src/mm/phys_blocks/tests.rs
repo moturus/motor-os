@@ -74,20 +74,7 @@ impl Fixture {
     fn new() -> Self {
         Self {
             lines: (0..BLOCKS.div_ceil(4))
-                .map(|_| {
-                    BlockLine(core::array::from_fn(|_| Block {
-                        inner: SpinLock::new(Inner {
-                            head: 0,
-                            used: PAGES,
-                            unused_lo: 0,
-                            unused_hi: 0,
-                            alloc_lo: 0,
-                            alloc_hi: 0,
-                        }),
-                        state: AtomicU8::new(ABSENT),
-                        flags: AtomicU8::new(0),
-                    }))
-                })
+                .map(|_| BlockLine(core::array::from_fn(|_| Block::absent())))
                 .collect(),
             lists: (0..BLOCKS).map(|_| ListWords::uninit()).collect(),
             free: [const { AtomicU64::new(0) }; 2],
@@ -152,6 +139,7 @@ impl Fixture {
                 used: AtomicU64::new(0),
                 high_water: AtomicU64::new(0),
                 reserved: AtomicU64::new(0),
+                discarded: AtomicU64::new(0),
                 split: AtomicU64::new(split),
                 taken: AtomicU64::new(0),
             },

@@ -1,4 +1,4 @@
-//! Block ownership core. P1a2 adds shaping/search; P1b replaces phys.rs callers.
+//! Block ownership core: one free-page list and lock per 2 MiB block.
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -42,6 +42,23 @@ struct Block {
     flags: AtomicU8,
 }
 
+impl Block {
+    const fn absent() -> Self {
+        Self {
+            inner: SpinLock::new(Inner {
+                head: 0,
+                used: PAGES,
+                unused_lo: 0,
+                unused_hi: 0,
+                alloc_lo: 0,
+                alloc_hi: 0,
+            }),
+            state: AtomicU8::new(ABSENT),
+            flags: AtomicU8::new(0),
+        }
+    }
+}
+
 #[repr(C, align(64))]
 struct BlockLine([Block; 4]);
 
@@ -53,6 +70,7 @@ struct ListWords(UnsafeCell<MaybeUninit<[u64; 8]>>);
 unsafe impl Sync for ListWords {}
 
 impl ListWords {
+    #[cfg(debug_assertions)]
     const fn uninit() -> Self {
         Self(UnsafeCell::new(MaybeUninit::uninit()))
     }
@@ -64,7 +82,7 @@ const _: () = assert!(core::mem::align_of::<BlockLine>() == 64);
 const _: () = assert!(core::mem::size_of::<ListWords>() == 64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Corruption {
+pub(crate) enum Corruption {
     Address,
     State,
     Bounds,
@@ -213,12 +231,12 @@ impl Inner {
 
 // Only free, validated pages reach this interface. The scratch implementation
 // stores one word per page and never dereferences its synthetic addresses.
-trait PageLinks {
+pub(crate) trait PageLinks {
     fn read(&self, addr: u64) -> u64;
     fn write(&self, addr: u64, word: u64);
 }
 
-struct DirectLinks;
+pub(crate) struct DirectLinks;
 
 impl PageLinks for DirectLinks {
     fn read(&self, addr: u64) -> u64 {
@@ -236,7 +254,9 @@ enum Publication {
     FreeClear,
     WholeSet,
     WholeClear,
+    #[cfg(debug_assertions)]
     Charge(u16),
+    #[cfg(debug_assertions)]
     Release(u16),
 }
 
@@ -245,13 +265,14 @@ struct Counters {
     used: AtomicU64,
     high_water: AtomicU64,
     reserved: AtomicU64,
+    discarded: AtomicU64,
     split: AtomicU64,
     taken: AtomicU64,
 }
 
 // Storage is permanent in production and private to one pool. Construction
 // must initialize every SPLIT entry's list words before publishing its state.
-struct Pool<'a, L> {
+pub(crate) struct Pool<'a, L> {
     lines: &'a [BlockLine],
     block_count: usize,
     lists: &'a [ListWords],
@@ -286,6 +307,7 @@ impl<L: PageLinks> Pool<'_, L> {
             Publication::FreeClear => (self.free, false),
             Publication::WholeSet => (self.whole, true),
             Publication::WholeClear => (self.whole, false),
+            #[cfg(debug_assertions)]
             _ => unreachable!(),
         };
         let mask = 1 << (block % 64);
@@ -323,14 +345,17 @@ impl<L: PageLinks> Pool<'_, L> {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn pop(&self, block: usize) -> Result<Option<u64>, Corruption> {
         self.take_small(block, 1, SmallSource::Split, false)
     }
 
+    #[cfg(debug_assertions)]
     fn run(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
         self.take_small(block, count, SmallSource::Split, false)
     }
 
+    #[cfg(debug_assertions)]
     fn split(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
         self.take_small(block, count, SmallSource::Whole, false)
     }
@@ -440,6 +465,7 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(())
     }
 
+    #[allow(dead_code)] // P4a maps huge pages.
     fn take_huge(&self, index: usize) -> Result<Option<u64>, Corruption> {
         let block = self.block(index)?;
         let mut inner = block.inner.lock(line!());
@@ -460,6 +486,7 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(Some((index as u64) << BLOCK_SHIFT))
     }
 
+    #[allow(dead_code)] // P4a maps huge pages.
     fn return_huge(&self, addr: u64) -> Result<(), Corruption> {
         let (index, page) = self.page_location(addr)?;
         if page != 0 {
@@ -483,8 +510,11 @@ impl<L: PageLinks> Pool<'_, L> {
 }
 
 mod layout;
+mod production;
 mod search;
 mod shaping;
+
+pub(crate) use production::{BlockPool, BootInputs};
 
 #[cfg(debug_assertions)]
 mod tests;

@@ -430,6 +430,15 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
       -i "$WD/test.key" motor@192.168.4.2
 fi
 
+# Fresh-boot physical placement, before allocation-heavy tests fragment the
+# block pool: eight 1 MiB pieces must land in at most 10 + 2 * CPUs blocks
+# (four ideal, up to six partially free boot blocks, two per CPU cursor).
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest mem-placement")" ||
+  fail "systest mem-placement failed: $out"
+echo "$out"
+[ "${out##*$'\n'}" = "mem_blocks: placement PASS" ] ||
+  fail "systest mem-placement did not pass: $out"
+
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
   fail "mkdir returned success after a denied root-level creation"
 fi

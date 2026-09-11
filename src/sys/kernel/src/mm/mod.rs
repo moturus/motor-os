@@ -7,7 +7,6 @@ mod cache;
 pub mod kheap;
 pub mod mmio;
 pub mod phys;
-#[allow(dead_code)] // P1b wires the block allocator into production.
 pub(crate) mod phys_blocks;
 mod slab;
 pub mod user;
@@ -307,9 +306,10 @@ fn inc_cpu_initialized() {
     INIT_STATUS.fetch_add(1, Ordering::Relaxed);
 }
 
-#[allow(unused)]
-fn cpu_initialized() -> bool {
-    INIT_STATUS.load(Ordering::Relaxed) == INIT_STATUS_CPU
+// Acquire pairs with the all-CPU publication in stage 2: GS CPU identity is
+// valid on every CPU once this holds.
+pub(super) fn cpu_initialized() -> bool {
+    INIT_STATUS.load(Ordering::Acquire) == INIT_STATUS_CPU
 }
 
 // Returns the new stack.
@@ -367,22 +367,18 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
         }
     }
 
-    let mut in_use: Vec<MemorySegment> = Vec::with_capacity(2);
-
-    in_use.push(MemorySegment {
-        start: 0,
-        size: KERNEL_PHYS_START,
-    });
-
+    // The bootloader's RAM below the kernel is reserved until stage 2; an
+    // initrd above the boot heap stays allocated for good.
     let initrd_seg = boot_info.initrd_bytes_phys();
-    if initrd_seg.start >= bootup_heap_phys.end() {
-        in_use.push(initrd_seg);
+    let initrd = if initrd_seg.start >= bootup_heap_phys.end() {
         INITRD_RESERVED.store(true, Ordering::Relaxed);
+        initrd_seg
     } else {
         assert!(initrd_seg.end() < KERNEL_PHYS_START);
-    }
+        MemorySegment::empty_segment()
+    };
 
-    phys::init(&available_memory, &in_use, raw_ram);
+    phys::init(&available_memory, initrd, raw_ram);
     virt::init();
 
     // Do the INIT_STATUS dance so that we can initialize CPUs (allocates pages for per-cpu GS)
@@ -399,10 +395,7 @@ pub fn init_mm_bsp_stage2() {
     log::warn!("TODO: there is some stranded (wasted) memory in the bootup KHEAP.");
 
     crate::arch::paging::init_paging_bsp(); // Unmaps the lower 1G.
-    phys::mark_unused(&MemorySegment {
-        start: 0,
-        size: KERNEL_PHYS_START,
-    });
+    phys::release_low_memory();
 
     inc_cpu_initialized();
 

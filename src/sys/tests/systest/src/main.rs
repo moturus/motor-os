@@ -19,6 +19,7 @@ mod icmp;
 mod io_channel;
 mod kernel_log;
 mod logging;
+mod mem_blocks;
 mod mmio;
 mod moto_async;
 mod mpmc;
@@ -1093,6 +1094,10 @@ fn main() {
         checked_copy_in::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "mem-placement" {
+        mem_blocks::placement_subcommand();
+        return;
+    }
     if args.len() == 2 && args[1] == "mmio-validation-tests" {
         mmio::validation_tests();
         return;
@@ -1361,6 +1366,7 @@ fn main() {
     // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();
 
+    mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
     checked_copy_in::run_all_tests();

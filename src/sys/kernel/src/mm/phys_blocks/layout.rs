@@ -210,13 +210,11 @@ impl Layout {
         })
     }
 
-    // Shape one block of the span from the normalized page intervals.
+    // Shape one block of the span from the normalized page intervals. A block
+    // inside one managed run that no reservation or initrd touches is whole
+    // without further work; that is nearly every block of a large span.
     pub(super) fn block(&mut self, index: usize) -> Result<Shaped, ShapeError> {
         assert!(index < self.blocks);
-        clip(&self.managed, index, &mut self.managed_local);
-        clip(&self.reserved, index, &mut self.reserved_local);
-        let initrd = clip_one(&self.initrd, index).unwrap_or(0..0);
-        let shape = Shape::new(&self.managed_local, &self.reserved_local, initrd)?;
         let mut flags = 0;
         if self.ram.iter().any(|range| range.contains(&index)) {
             flags |= RAM;
@@ -224,6 +222,25 @@ impl Layout {
         if index < DUAL_PURPOSE_BLOCK {
             flags |= SMALL_ONLY;
         }
+        let base = index as u64 * BLOCK_PAGES;
+        let end = base + BLOCK_PAGES;
+        let touches = |range: &Range<u64>| range.start < end && base < range.end;
+        if self
+            .managed
+            .iter()
+            .any(|range| range.start <= base && end <= range.end)
+            && !self.reserved.iter().any(touches)
+            && !touches(&self.initrd)
+        {
+            return Ok(Shaped {
+                shape: Shape::whole(),
+                flags,
+            });
+        }
+        clip(&self.managed, index, &mut self.managed_local);
+        clip(&self.reserved, index, &mut self.reserved_local);
+        let initrd = clip_one(&self.initrd, index).unwrap_or(0..0);
+        let shape = Shape::new(&self.managed_local, &self.reserved_local, initrd)?;
         Ok(Shaped { shape, flags })
     }
 

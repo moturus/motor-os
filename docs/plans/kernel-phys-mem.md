@@ -168,7 +168,87 @@ a 351-block span with 289 mixed blocks, whole blocks on both sides of the
 dual-purpose line, absent blocks with and without raw RAM, an initrd across
 three blocks, table rounding at 1/63/64/65/32768 blocks, exact heap-budget
 boundaries, and carving from whole, partial and exhausted runs. Production
-still uses `mm/phys.rs`; P1b is next.
+still uses `mm/phys.rs`; P1b is next. That increment is committed as
+`fe4f8607` after a full common gate (3 debug, 3 release, developer run with
+the native phase at 832 seconds).
+
+### P1b: the production switch (2026-09-11)
+
+`mm/phys.rs` now allocates small pages from the block pool. The pool is
+built in `phys_blocks/production.rs` from the boot inputs (available RAM,
+the above-heap initrd, raw firmware RAM): `Layout::new`, `Budget::preflight`
+against the boot heap remainder, `carve_table`, then every descriptor
+constructed in place with counters and index words accumulated locally
+before the pool is published; split blocks get their list words zeroed.
+Stage 2 re-shapes only the blocks below the kernel with page zero and the
+two kloader page tables as the remaining reservations, publishing each
+block's final index bit and releasing its free pages; managed totals never
+change. Debug builds recount managed, reserved and retained pages by walking
+the pages of every block a reservation or initrd touches, check every
+descriptor, list and index invariant at both checkpoints, and compare the
+stage-2 free delta with the independent low-memory release; block 0's
+allocatable bounds must exclude page zero. Runtime cursors are a static
+per-CPU array used only after the all-CPU publication (an Acquire load);
+before it, allocation scans the indexes without CPU identity. Contiguous
+runs come from `allocate` with the syscall's 64-page cap; a failed frame
+descriptor frees the suffix once while the prefix handles free themselves.
+MMIO validation rejects blocks with raw RAM or managed pages. Frees notify
+admission after the block lock is released. `PhysStats` gains reserved,
+discarded and whole/split/total block counts; the old segment vector,
+random tries, one-frame cache and linear search are gone. `take_huge`,
+`return_huge` and `allocate_huge` keep a dead-code allowance naming P4a.
+
+`systest mem_blocks` adds fresh-boot placement (eight 1 MiB pieces, every
+page queried through `virt_to_phys`, distinct blocks counted) and churn
+(four threads in a ring, 512 iterations of 1 to 256 pages, verified
+patterns, every other release handed to the next thread). The placement
+budget asserted by the focused `mem-placement` subcommand, which
+`full-test.sh` runs right after uploading the test binaries, is
+10 + 2 * CPUs: four blocks of ideal packing, up to six blocks that boot
+leaves partially free and that the split-before-whole rule drains first
+(the page-zero block, the kloader page-table block, up to two initrd
+boundary blocks, the list-state table block), and two per CPU cursor. The
+original 4 + 2 * CPUs budget failed on Firecracker at 1 GiB with two CPUs
+(9 blocks against 8) for exactly that reason; the allocator behaved as
+specified. Observed fresh-boot placement, release builds:
+
+| launcher | blocks | budget |
+|---|---|---|
+| cloud-hypervisor 1 GiB, 4 CPUs | 8 | 18 |
+| Firecracker 64 MiB, 2 CPUs | 8 and 10 | 14 |
+| Firecracker 1 GiB, 2 CPUs | 9 | 14 |
+| QEMU direct kernel 1 GiB, 4 CPUs | 7 | 18 |
+| QEMU BIOS 1 GiB, 4 CPUs | 6 | 18 |
+| QEMU developer image 8 GiB, 8 CPUs | 9 | 26 |
+
+All six launchers boot and pass the placement run; "kernel up" times were
+52 ms (cloud-hypervisor), 10 to 20 ms (Firecracker), 100 ms (QEMU direct
+kernel), 321 ms (QEMU BIOS) and 438 ms (developer image), in line with
+boot-time.md. A temporary probe around `phys::init` and the stage-2
+release, since removed, measured release builds with three boots each:
+
+| launcher | phys::init | stage 2 |
+|---|---|---|
+| cloud-hypervisor 1 GiB | 0.3 to 1.6 ms | 1 to 6 us |
+| QEMU direct kernel 1 GiB | 0.19 to 0.38 ms | 1 to 2 us |
+| Firecracker 1 GiB | 0.50 to 0.58 ms | 3 to 35 us |
+| cloud-hypervisor 8 GiB | 0.40 to 1.45 ms | 1 to 2 us |
+| QEMU developer image 8 GiB | 0.91 to 1.88 ms | 2 us |
+
+The spread between boots of one launcher is larger than the difference
+between 1 and 8 GiB, and rewriting the construction loop without locks or
+atomics did not move it, so the time is dominated by first-touch faults
+on fresh guest memory (the descriptor lines, the table page, the boot heap)
+rather than by the per-block work. This host has no hugetlbfs pool and
+passwordless configuration is unavailable, so the prefaulted method of
+boot-time.md could not be applied; the compute cost and the 0.1 ms target
+remain unverified. Against the recorded 0.5 ms at 1 GiB and 3.0 ms at
+8 GiB of the old allocator this is not a regression at either size.
+
+Not covered by a test: the descriptor-failure rollback in
+`allocate_contiguous_frames` (no fault injection into the frame slab); the
+no-GS bootstrap path is exercised by every boot's kernel stack and GS
+allocations before the all-CPU publication.
 
 ## Implementation and diagnostic history
 

@@ -134,6 +134,24 @@ impl Shape {
 }
 
 impl Shape {
+    // Entirely free managed RAM: the common case, shaped without any input.
+    pub(super) fn whole() -> Self {
+        Self {
+            inner: Inner {
+                head: 0,
+                used: 0,
+                unused_lo: 0,
+                unused_hi: 0,
+                alloc_lo: 0,
+                alloc_hi: PAGES,
+            },
+            state: WHOLE,
+            managed: PAGES,
+            reserved: 0,
+            discarded: 0,
+        }
+    }
+
     // Take the first `pages` of the retained free run as permanent, allocated
     // table storage. The backing block starts split with its bounds intact.
     pub(super) fn carve(&mut self, pages: u16) -> Result<(), ShapeError> {
