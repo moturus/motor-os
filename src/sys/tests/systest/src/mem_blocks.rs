@@ -155,6 +155,87 @@ fn churn() {
     println!("mem_blocks: churn PASS");
 }
 
+// The block allocator's metrics, read in one query.
+#[derive(Debug)]
+struct BlockMetrics {
+    total: u64,
+    whole: u64,
+    split: u64,
+    taken: u64,
+    whole_low: u64,
+    reserved: u64,
+    free_low: u64,
+    splits: u64,
+    recombined: u64,
+    huge_mapped: u64,
+    huge_fallbacks: u64,
+}
+
+impl BlockMetrics {
+    fn read() -> Self {
+        let m = crate::admission::kernel_metric;
+        Self {
+            total: m("mem.blocks_total"),
+            whole: m("mem.blocks_whole"),
+            split: m("mem.blocks_split"),
+            taken: m("mem.blocks_taken"),
+            whole_low: m("mem.blocks_whole_low"),
+            reserved: m("mem.pages_reserved"),
+            free_low: m("mem.pages_free_low"),
+            splits: m("mem.block_splits"),
+            recombined: m("mem.block_recombined"),
+            huge_mapped: m("mem.huge_pages_mapped"),
+            huge_fallbacks: m("mem.huge_fallbacks"),
+        }
+    }
+
+    // Bounds that hold at any moment, not only at quiescent points: the
+    // gauges are collected without a common lock.
+    fn check_bounds(&self) {
+        assert!(self.total > 0, "{self:?}");
+        assert!(
+            self.whole + self.split + self.taken <= self.total,
+            "{self:?}"
+        );
+        assert!(
+            self.whole_low <= 64 && self.whole_low <= self.whole,
+            "{self:?}"
+        );
+        assert!(self.free_low <= 64 * 512, "{self:?}");
+        assert!(self.reserved > 0, "{self:?}");
+        assert_eq!((self.huge_mapped, self.huge_fallbacks), (0, 0), "{self:?}");
+    }
+}
+
+// Every metric reports; the event counters only grow; reserved pages and the
+// block count never move. A controlled cycle cannot promise a split or a
+// re-combination: boot-split capacity may absorb it, and metadata pages can
+// pin a block.
+fn metrics() {
+    let before = BlockMetrics::read();
+    before.check_bounds();
+    let pieces: [Mapping; 8] = core::array::from_fn(|_| Mapping::alloc(256));
+    for (idx, piece) in pieces.iter().enumerate() {
+        piece.fill(idx as u64);
+    }
+    let held = BlockMetrics::read();
+    held.check_bounds();
+    drop(pieces);
+    let after = BlockMetrics::read();
+    after.check_bounds();
+    for (a, b) in [(&before, &held), (&held, &after)] {
+        assert_eq!((a.total, a.reserved), (b.total, b.reserved), "{a:?} {b:?}");
+        assert!(
+            a.splits <= b.splits && a.recombined <= b.recombined,
+            "{a:?} {b:?}"
+        );
+    }
+    println!(
+        "mem_blocks: {} blocks, {} whole, {} split, {} reserved pages, {} splits, {} recombined",
+        after.total, after.whole, after.split, after.reserved, after.splits, after.recombined
+    );
+}
+
 pub fn placement_subcommand() {
     placement(true);
     println!("mem_blocks: placement PASS");
@@ -162,5 +243,7 @@ pub fn placement_subcommand() {
 
 pub fn run_all_tests() {
     placement(false);
+    metrics();
     churn();
+    BlockMetrics::read().check_bounds();
 }

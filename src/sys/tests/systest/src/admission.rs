@@ -13,7 +13,7 @@ const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
 
 /// Reads a system-wide kernel metric by name. Metric ids are provider-private,
 /// so nothing here is hardcoded to a number.
-fn kernel_metric(name: &str) -> u64 {
+pub(crate) fn kernel_metric(name: &str) -> u64 {
     use moto_stats::Collector;
 
     let kernel = Collector::kernel();

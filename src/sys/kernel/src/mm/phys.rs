@@ -164,6 +164,36 @@ pub fn dump_serial() {
     PhysicalMemory::inst().dump_serial();
 }
 
+// Block allocator gauges and events for the kernel metrics; collected under
+// no common lock, so they need not agree with each other instantaneously.
+pub struct BlockMetrics {
+    pub total: u64,
+    pub whole: u64,
+    pub split: u64,
+    pub taken: u64,
+    pub whole_low: u64,
+    pub pages_reserved: u64,
+    pub pages_free_low: u64,
+    pub splits: u64,
+    pub recombined: u64,
+}
+
+pub fn block_metrics() -> BlockMetrics {
+    let blocks = &PhysicalMemory::inst().blocks;
+    let (whole_low, pages_free_low) = blocks.low_memory();
+    BlockMetrics {
+        total: blocks.block_count() as u64,
+        whole: blocks.whole_count(),
+        split: blocks.split_count(),
+        taken: blocks.taken_count(),
+        whole_low,
+        pages_reserved: blocks.reserved_pages(),
+        pages_free_low,
+        splits: blocks.split_events(),
+        recombined: blocks.recombine_events(),
+    }
+}
+
 // sys-io's fixed mid-page segment: [2 MiB, 10 MiB), outside small-page management.
 pub(super) const FIXED_MID_SEGMENT: MemorySegment = MemorySegment {
     start: super::ONE_MB * 2,
@@ -385,6 +415,8 @@ pub struct PhysStats {
     pub blocks_total: u64,
     pub blocks_whole: u64,
     pub blocks_split: u64,
+    pub block_splits: u64,
+    pub block_recombined: u64,
 }
 
 impl PhysStats {
@@ -408,6 +440,8 @@ impl PhysStats {
             blocks_total: inst.blocks.block_count() as u64,
             blocks_whole: inst.blocks.whole_count(),
             blocks_split: inst.blocks.split_count(),
+            block_splits: inst.blocks.split_events(),
+            block_recombined: inst.blocks.recombine_events(),
         }
     }
 

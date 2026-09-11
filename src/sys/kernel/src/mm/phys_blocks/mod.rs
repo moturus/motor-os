@@ -268,6 +268,9 @@ struct Counters {
     discarded: AtomicU64,
     split: AtomicU64,
     taken: AtomicU64,
+    // Cumulative events since the pool was built.
+    splits: AtomicU64,
+    recombined: AtomicU64,
 }
 
 // Storage is permanent in production and private to one pool. Construction
@@ -384,6 +387,7 @@ impl<L: PageLinks> Pool<'_, L> {
                 inner.unused_hi = PAGES;
                 block.state.store(SPLIT, Ordering::Relaxed);
                 self.counters.split.fetch_add(1, Ordering::Relaxed);
+                self.counters.splits.fetch_add(1, Ordering::Relaxed);
                 self.publish(index, Publication::FreeSet);
                 self.publish(index, Publication::WholeClear);
             }
@@ -456,6 +460,7 @@ impl<L: PageLinks> Pool<'_, L> {
             block.flags.fetch_and(!CLAIMED, Ordering::Relaxed);
             block.state.store(WHOLE, Ordering::Relaxed);
             self.counters.split.fetch_sub(1, Ordering::Relaxed);
+            self.counters.recombined.fetch_add(1, Ordering::Relaxed);
             self.publish(index, Publication::WholeSet);
             self.publish(index, Publication::FreeClear);
         } else {

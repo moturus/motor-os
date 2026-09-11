@@ -32,6 +32,8 @@ impl BootInputs {
     }
 }
 
+const LOW_BLOCKS: usize = (128 << 20) >> BLOCK_SHIFT;
+
 const LOW_RESERVED: MemorySegment = MemorySegment {
     start: 0,
     size: KERNEL_PHYS_START,
@@ -125,6 +127,8 @@ impl BlockPool {
                 discarded: AtomicU64::new(discarded),
                 split: AtomicU64::new(split),
                 taken: AtomicU64::new(0),
+                splits: AtomicU64::new(0),
+                recombined: AtomicU64::new(0),
             },
             links: DirectLinks,
             #[cfg(debug_assertions)]
@@ -291,6 +295,37 @@ impl BlockPool {
 
     pub(crate) fn block_count(&self) -> usize {
         self.block_count
+    }
+
+    pub(crate) fn taken_count(&self) -> u64 {
+        self.counters.taken.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn split_events(&self) -> u64 {
+        self.counters.splits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn recombine_events(&self) -> u64 {
+        self.counters.recombined.load(Ordering::Relaxed)
+    }
+
+    // Whole blocks and free pages among the first 64 blocks (the 128 MiB
+    // small-only region), each read under its lock; not a snapshot.
+    pub(crate) fn low_memory(&self) -> (u64, u64) {
+        let (mut whole, mut free) = (0, 0);
+        for index in 0..self.block_count.min(LOW_BLOCKS) {
+            let block = &self.lines[index / 4].0[index % 4];
+            let inner = block.inner.lock(line!());
+            match block.state.load(Ordering::Relaxed) {
+                WHOLE => {
+                    whole += 1;
+                    free += u64::from(PAGES);
+                }
+                SPLIT => free += u64::from(PAGES - inner.used),
+                _ => {}
+            }
+        }
+        (whole, free)
     }
 
     // Any raw RAM or managed page in the block, for MMIO validation.

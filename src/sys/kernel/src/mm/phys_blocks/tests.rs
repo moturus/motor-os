@@ -142,6 +142,8 @@ impl Fixture {
                 discarded: AtomicU64::new(0),
                 split: AtomicU64::new(split),
                 taken: AtomicU64::new(0),
+                splits: AtomicU64::new(0),
+                recombined: AtomicU64::new(0),
             },
             trace: None,
         }
@@ -385,6 +387,13 @@ fn partial_and_recombination() {
     assert_eq!(pool.block(1).unwrap().state.load(Ordering::Relaxed), SPLIT);
     check(&pool, 0);
     assert_eq!(pool.take_huge(0), Ok(None));
+    let events = |pool: &Pool<'_, &ScratchLinks>| {
+        (
+            pool.counters.splits.load(Ordering::Relaxed),
+            pool.counters.recombined.load(Ordering::Relaxed),
+        )
+    };
+    assert_eq!(events(&pool), (0, 0));
     for index in [0, HIGH] {
         let base = (index as u64) << BLOCK_SHIFT;
         assert_eq!(pool.split(index, 2), Ok(Some(base)));
@@ -398,12 +407,15 @@ fn partial_and_recombination() {
         assert_eq!(block.flags.load(Ordering::Relaxed) & CLAIMED, 0);
         assert_eq!(pool.pop(index), Ok(None));
         check(&pool, 0);
+        // The recovered block supplies a contiguous run; the low one never
+        // supplies a huge page. Each split and re-combination is counted.
         assert_eq!(pool.split(index, 65), Ok(Some(base)));
         for page in 0..65 {
             pool.push(base + page * 4096).unwrap();
         }
         check(&pool, 0);
     }
+    assert_eq!(events(&pool), (4, 4));
     assert_eq!(pool.take_huge(0), Ok(None));
 
     // Corrupt metadata must not promote a partial block to whole.

@@ -188,6 +188,12 @@ pub fn vaddr_map_status(vmem_addr: u64) -> VaddrMapStatus {
     KERNEL_ADDRESS_SPACE.vaddr_map_status(vmem_addr)
 }
 
+// Huge-mapping events, cumulative and including later undone maps: a
+// successful huge PTE installation, and a candidate served small (also the
+// candidates skipped after the first refusal). Produced once huge pages map.
+pub(crate) static HUGE_PAGES_MAPPED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HUGE_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
 // The first `align`-aligned start of `size` bytes inside [gap_start,
 // gap_end), with checked arithmetic and an exact end bound.
 fn aligned_start(gap_start: u64, gap_end: u64, size: u64, align: u64) -> Option<u64> {

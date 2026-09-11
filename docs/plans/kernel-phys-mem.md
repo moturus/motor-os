@@ -281,6 +281,62 @@ fits, one-byte-short gaps, rounding past a narrow gap and overflow, and the
 option stripping; the 2 MiB alignment branch runs end to end only once P4b
 sets the bit. `Page` and `SegmentNode` keep their 72-byte assertions.
 
+### P2: metrics and diagnostics (2026-09-11)
+
+The eleven metrics are declared together in the kernel catalog
+(`MetricType` in `kernel/src/xray/stats.rs`, names `mem.blocks_total`,
+`mem.blocks_whole`, `mem.blocks_split`, `mem.blocks_taken`,
+`mem.blocks_whole_low`, `mem.pages_reserved`, `mem.pages_free_low`,
+`mem.block_splits`, `mem.block_recombined`, `mem.huge_pages_mapped`,
+`mem.huge_fallbacks`) and reported at the PID_SYSTEM scope. The pool
+counts split and re-combination events cumulatively; the whole count is the
+W bitmap's popcount; the low-memory pair scans at most 64 blocks under
+their locks; the two huge-mapping counters are statics in `mm/virt.rs`
+that report zero until P4b's mapping path produces them. `PhysStats` (and
+the debug dump) carry the event counters beside the block counts. The
+scratch re-combination test asserts the event counts and that a recovered
+low block supplies a contiguous run but never a huge page. `systest
+mem_blocks` reads all eleven metrics in one query around a controlled
+allocate/free cycle and after churn, checking the bounds that hold at any
+moment (state sum within the total, low-memory gauges within 64 blocks,
+huge counters zero), that the event counters only grow, and that the block
+count and reserved pages never move; it does not require a split or a
+re-combination from the cycle, since boot-split capacity can absorb one and
+metadata pages can pin a block. `stress-soak.sh` now appends the block
+gauges and admission refusals to `blocks.log` at every progress interval.
+
+The one-hour release `stress-soak.sh` run (all ten workloads, no failures:
+fs-sftp 1725, fs-write 9053, http 18060, suites 709, tui 15094 iterations)
+sampled the gauges twelve times. From the first sample on, the pool held 3
+whole and 503 split blocks of 512 with 35235 to 47675 pages in use (137 to
+186 MiB, growing slowly through the hour), reserved pages constant at 167,
+the phys low-water mark at 321 pages, and no admission refusals after the
+gate. The state was set by the mandatory gate's systest pressure squeeze
+before the workloads started: the squeeze fills nearly every block, and
+pages that other processes and the kernel allocate meanwhile stay behind in
+them, so re-combination (2043 events against 2543 splits) recovers only
+the blocks with nothing else in them. The soak's own workloads never run
+the squeeze, so the count neither recovered nor worsened. Consequence for
+P4: after any pressure episode, huge availability is close to nil until the
+pinning pages die; the plan lists best-effort huge availability as an
+accepted cost, and the slow growth in used pages is an observation, not a
+diagnosis.
+
+Two soak-harness fixes were needed to run it at all, both test-only and
+preexisting. Its HTTP fetch target, `/devtools/www/motor-os-256.png`, was
+removed with the website rewrite (`6a2b7166`), so the soak has been unable
+to pass its server validation since; it now uploads its own 108776-byte
+asset under `/devtools/tmp/www` (the packaged `/devtools/www` is not
+writable over sftp, and httpd serves only extensions it knows). Its
+fs-write workload copied that same missing file, so it had never actually
+churned; churning `/devtools/tmp` while the fs-sftp workload lists that
+directory failed one listing in about 200 with "error reading directory"
+(motor-fs rejects a directory read that races a create or remove there).
+The same listing-under-churn loop against the pre-P1b kernel `fe4f8607`
+failed 50 of 5028 listings against 34 of 6818 on this kernel, so it is
+preexisting motor-fs behavior, outside this plan; fs-write now churns its
+own subdirectory.
+
 ### P2 is not blocked
 
 An earlier note here claimed the metric catalog lives in `moto-sys`; that
