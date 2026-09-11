@@ -375,7 +375,7 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
     });
 
     let initrd_seg = boot_info.initrd_bytes_phys();
-    if initrd_seg.start > bootup_heap_phys.end() {
+    if initrd_seg.start >= bootup_heap_phys.end() {
         in_use.push(initrd_seg);
         INITRD_RESERVED.store(true, Ordering::Relaxed);
     } else {

@@ -115,6 +115,26 @@ mask (0x6c); no production permission policy changes. The existing terminal
 suite passes in debug and release, with the TCP diagnostics present in the
 retained stderr. This small test-only fix was kept separate from the kernel changes.
 
+Continuation checkpoint (2026-09-10): input inspection for the next shaping
+increment found a preexisting initrd adjacency rejection in
+[`init_mm_bsp_stage1`](../../src/sys/kernel/src/mm/mod.rs): the upper-initrd
+branch requires `initrd_seg.start > bootup_heap_phys.end()`. An initrd starting
+exactly at that end is non-overlapping and passes
+[`KernelBootupInfo::is_available`](../../src/sys/kernel/src/init.rs)'s heap
+check, but falls into the below-kernel branch and panics. The existing
+half-open `MemorySegment::intersect` contract permits this adjacency; kloader's
+separate 32 MiB heap check does not exclude an initrd above the kernel heap.
+For example, the recorded debug boot heap ends at 38 MiB; placing an otherwise
+valid initrd at 38 MiB in sufficient RAM reaches the incorrect branch. The
+strict comparison predates this work (present in `5e42173e`). This is a
+source-level diagnosis, not a launcher failure reproduced during validation.
+The user approved the one-line `>` to `>=` correction for upper-initrd
+classification; it is implemented as a separate fix. No new boot self-test is added
+for the comparison alone. The existing common gate validates compilation and
+ordinary boots, but does not force the adjacent-initrd layout; that boundary
+is validated by source inspection. Common-gate failure details are recorded
+above; the corrected boundary itself was checked by source inspection.
+
 ## Requirements and scope
 
 - Maintain a LIFO free-page list per block. Lists start empty; allocate
