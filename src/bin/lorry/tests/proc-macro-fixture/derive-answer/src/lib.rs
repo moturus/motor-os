@@ -24,3 +24,8 @@ pub fn answer_value(_: TokenStream, item: TokenStream) -> TokenStream {
 pub fn intentional_failure(_: TokenStream) -> TokenStream {
     panic!("intentional proc-macro failure")
 }
+
+#[proc_macro]
+pub fn intentional_abort(_: TokenStream) -> TokenStream {
+    std::process::abort()
+}

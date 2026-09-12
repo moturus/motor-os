@@ -461,9 +461,14 @@ run_native() {
     remote_command "cd $proc_macro_fixture && $REMOTE_ROOT/lorry-native run --release"
     grep -F "84" "$NATIVE_LOG" >/dev/null ||
         fail "native proc-macro fixture did not produce 84"
+    # A panicking macro unwinds inside its executable and rustc reports the
+    # macro's own message; a crashing macro must still name its executable.
     remote_command_expect_failure "cd $proc_macro_fixture && $REMOTE_ROOT/lorry-native test --release --test panic"
+    grep -F "message: intentional proc-macro failure" "$NATIVE_LOG" >/dev/null ||
+        fail "native proc-macro panic did not report its message"
+    remote_command_expect_failure "cd $proc_macro_fixture && $REMOTE_ROOT/lorry-native test --release --test abort"
     grep -F "procedural macro executable" "$NATIVE_LOG" >/dev/null ||
-        fail "native proc-macro failure did not identify its executable"
+        fail "native proc-macro crash did not identify its executable"
     if grep -F "internal compiler error" "$NATIVE_LOG" >/dev/null; then
         fail "native proc-macro failure became an internal compiler error"
     fi
