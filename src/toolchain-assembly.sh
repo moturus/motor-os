@@ -195,6 +195,7 @@ toolchain_validate_assembly_outputs() {
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a" \
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" \
 		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" \
 		"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx" \
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" \
@@ -260,6 +261,8 @@ $(toolchain_rust_analyzer_manifest_fields)
 host_rustc_verbose_base64=$(printf '%s' "$VALIDATED_RUSTC_VERBOSE" | base64 -w0)
 host_cargo_verbose_base64=$(printf '%s' "$VALIDATED_CARGO_VERBOSE" | base64 -w0)
 native_rustc_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" | awk '{print $1}')
+native_rustfmt_expected_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
+native_rustfmt_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')
 native_llvm_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')
 ripgrep_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" | awk '{print $1}')
 libc_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" | awk '{print $1}')
@@ -363,11 +366,13 @@ toolchain_validate_consumed_assembly() (
 		toolchain_die "assembly Helix tree digest does not match"
 		exit 1
 	}
-	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_llvm_sha256 ripgrep_sha256
+	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_rustfmt_sha256
+		native_llvm_sha256 ripgrep_sha256
 		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
 	hash_paths=(
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"

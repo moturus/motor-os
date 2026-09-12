@@ -129,6 +129,7 @@ LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
 MOTO_RT_PACKAGE_COMPARISON=exact
 VALIDATED_RUSTC_VERBOSE='rustc test verbose'
 VALIDATED_CARGO_VERBOSE='cargo test verbose'
+VALIDATED_RUSTFMT_VERSION='rustfmt test version'
 VALIDATED_RUST_ANALYZER_VERSION='rust-analyzer test version'
 mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
 	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
@@ -145,6 +146,7 @@ printf cxx > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
 printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
 printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
 chmod 755 "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
@@ -175,6 +177,9 @@ printf analyzer > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-ana
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
 if toolchain_claim_assembly 2>/dev/null; then fail "changed rust-src was accepted"; fi
 printf rust-src > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
+if toolchain_claim_assembly 2>/dev/null; then fail "changed rustfmt was accepted"; fi
+printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed Helix binary was accepted"

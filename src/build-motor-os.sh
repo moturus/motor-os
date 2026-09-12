@@ -724,6 +724,15 @@ export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustc "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustc"
+	"$B/llvm-strip" -o "$rust_img/bin/rustfmt" "$RUSTFMT_MAIN"
+	toolchain_validate_native_elf "$rust_img/bin/rustfmt" "$B/llvm-readelf" "$RUSTFMT_MAIN" ||
+		die "staged rustfmt ELF validation failed"
+	cat > "$RUSTC_IMG/devtools/bin/rustfmt" << 'EOF'
+#!/system/bin/rush
+export TMPDIR=/devtools/tmp
+exec /devtools/rust/bin/rustfmt "$@"
+EOF
+	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
 	# A binary that still carries mlibc's operator-delete panic stub would
 	# abort at runtime; the stub guard must have taken effect.
 	if grep -aq 'operator delete called! delete expressions' "$rust_img/bin/rustc"; then
@@ -958,6 +967,7 @@ main() {
 	local required_outputs=(
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
+		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
