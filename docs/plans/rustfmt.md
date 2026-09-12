@@ -629,6 +629,11 @@ guesses of 128 MiB and 160 MiB are upper expectations, not the limits. Report
 total image and sysroot growth too. Once set, a violated bound is
 investigated, never raised.
 
+The first packaged candidate measured a 19,662,152-byte stripped rustfmt, an
+84-byte launcher, and 19,726,336 bytes of fresh-qcow2 growth. Both enforced
+ceilings are 21 MiB (22,020,096 bytes), about twelve percent above the measured
+values.
+
 ## 6. Tests
 
 All new tests run from `src/tests/full-test.sh` directly or transitively and
@@ -780,6 +785,7 @@ src/tests/test-toolchain-native-rust-analyzer.sh
 src/tests/test-toolchain-assembly.sh
 src/tests/test-toolchain-assembly-selection.sh
 src/tests/test-rust-analyzer-size.sh
+src/tests/test-rustfmt-size.sh
 src/tests/test-candidate-vm.sh --release          # new, see below
 MOTO_MEMORY_MIB=8192 \
 FULL_TEST_IMAGE=motor-os-dev.qcow2 \
@@ -788,10 +794,10 @@ FULL_TEST_VERIFY_DEV_SOURCES=1 \
 src/tests/test-tui.sh --release
 ```
 
-`test-rust-analyzer-size.sh` is a host-side gate run after the release image
-build and before VM acceptance. It enforces the existing 32 MiB analyzer,
-80 MiB rust-src, and 128 MiB fresh-image growth ceilings on the candidate
-assembly; mock contract tests do not replace these measurements.
+The analyzer and rustfmt size scripts are host-side gates run after the release
+image build and before VM acceptance. They enforce the artifact and fresh-image
+growth ceilings on the candidate assembly; mock contract tests do not replace
+these measurements.
 
 `test-rust-analyzer-native.sh`, `test-rust-analyzer-crates.sh`, and the new
 `test-unwind.sh` and `test-rustfmt-native.sh` assume a VM already running at

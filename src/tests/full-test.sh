@@ -70,6 +70,7 @@ test_vm_configure_ssh
 "$WD/test-vm-image-format.sh"
 "$WD/test-dev-memory-contract.sh"
 "$WD/test-rust-analyzer-size-contract.sh"
+"$WD/test-rustfmt-size-contract.sh"
 python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release
@@ -109,6 +110,7 @@ fi
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-size.sh"
+  "$WD/test-rustfmt-size.sh"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
