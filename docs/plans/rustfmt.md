@@ -712,12 +712,16 @@ toolchain's rustfmt at the same revision and checked in:
 - in-place file formatting in a directory whose name contains a space, then a
   second run produces no change;
 - a project `rustfmt.toml` (`max_width = 60`) is honored from the file's
-  directory; `XDG_CONFIG_HOME/rustfmt/rustfmt.toml` is honored when set;
+  directory; `/user/cfg/rustfmt/rustfmt.toml` and then `/user/rustfmt.toml`
+  are each honored while installed and are removed again, also on failure;
+  `HOME` and `XDG_CONFIG_HOME` pointing at directories that hold the same
+  file change nothing;
 - `--edition 2024` accepts syntax that `--edition 2015` rejects;
 - a macro invocation that needs speculative parsing formats correctly;
-- a fatal lexer input (unterminated raw string) and a fatal parser input:
-  exit 1, an `error` diagnostic on stderr, the file byte-identical
-  afterwards, and a following valid run succeeds.
+- a fatal lexer input (unterminated raw string) exits 101 because lexing starts
+  before rustfmt's parser unwind boundary, while a fatal parser input exits 1;
+  both emit an `error` diagnostic on stderr, leave the file byte-identical,
+  and allow a following valid run to succeed.
 
 Wire it into the developer branch of `full-test.sh` next to
 `test-rust-analyzer-native.sh`.
