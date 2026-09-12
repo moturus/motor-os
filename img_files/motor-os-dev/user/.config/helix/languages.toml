@@ -5,6 +5,7 @@ command = "/devtools/rust/bin/rust-analyzer"
 
 [language-server.rust-analyzer.environment]
 CARGO = "/devtools/bin/lorry"
+RUSTFMT = "/devtools/rust/bin/rustfmt"
 PATH = "/devtools/bin:/system/bin:/user/bin"
 TMPDIR = "/devtools/tmp"
 # The background server must not take the editor's session terminal stream.
@@ -20,8 +21,8 @@ check.targets = ["x86_64-unknown-motor"]
 procMacro.enable = false
 files.watcher = "client"
 
-# The developer image currently packages rustc and rust-analyzer, not rustfmt.
+# Formatting is provided by rust-analyzer through the native rustfmt above.
 [[language]]
 name = "rust"
-auto-format = false
-language-servers = [{ name = "rust-analyzer", except-features = ["format"] }]
+auto-format = true
+language-servers = ["rust-analyzer"]

@@ -562,12 +562,11 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
 
   helix_short_rev="${HELIX_REV:0:8}"
   GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
-  helix_config="$GUEST_HELIX_ROOT/config"
   helix_cache="$GUEST_HELIX_ROOT/cache"
   helix_tmp="$GUEST_HELIX_ROOT/tmp"
-  helix_env="XDG_CONFIG_HOME=$helix_config XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
+  helix_env="XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
   helix_health_env="$helix_env NO_COLOR=1"
-  for path in "$GUEST_HELIX_ROOT" "$helix_config" "$helix_cache" "$helix_tmp"; do
+  for path in "$GUEST_HELIX_ROOT" "$helix_cache" "$helix_tmp"; do
     vm_ssh "/system/bin/mkdir $path" || fail "cannot create Helix fixture directory $path"
   done
 
