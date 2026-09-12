@@ -809,8 +809,9 @@ and 3. Preserve LSP logs and terminal evidence as today.
 `docs/build-rustc.md`: replace the "Native rustfmt is not packaged" sentence
 with the formatting workflow; add a section on panic strategies (default
 unwind, opt-out via profile, native and shell examples, the `rt::init`
-boundary). `docs/toolchain.md` sections 3.2 and 5.2: the unwind default, and
-that rustfmt adds no patched dependency. `docs/plans/rust-unwinding.md`
+boundary); the same file records that rustfmt adds no patched dependency.
+`docs/toolchain.md` was rewritten on 2026-09-12 as a short selection guide
+and no longer carries per-candidate notes. `docs/plans/rust-unwinding.md`
 and `docs/plans/helix-rust-analyzer.md`: status paragraphs pointing here.
 The packaged editor guide under `img_files/motor-os-dev`: formatting keys.
 

@@ -241,4 +241,4 @@ Stage 0 compiler is used only internally by `x.py`.
 
 The final stable-release rebase and immutable source tags are intentionally
 deferred until upstream Rust 1.99.0 is published. See
-[toolchain.md](toolchain.md), section 6.1, for that release procedure.
+[toolchain.md](toolchain.md), section 5, for the update and release procedure.
