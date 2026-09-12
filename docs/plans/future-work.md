@@ -54,7 +54,7 @@ host under `/tmp/kernel-phys-host-shutdown.9ox3kE/` (`DIAGNOSIS.md` indexes them
 
 This establishes the filesystem test failure's cause, not the earlier quiet
 VM exit during pressure. That separate unresolved finding and its evidence
-remain in [the allocator plan](kernel-phys-mem.md). Kernel validation resumes
+remain in Git history (the retired kernel-phys-mem.md plan). Kernel validation resumes
 with this filesystem fix explicitly deferred; no test is skipped or weakened.
 
 ## Open bugs from the 2026-08-28/29 performance run (address soon)

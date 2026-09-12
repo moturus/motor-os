@@ -277,7 +277,7 @@ They are collected without a common lock, so only their bounds hold at any
 moment; `mem.pages_reserved` is constant after boot. A pressure episode that
 drains the pool leaves most blocks split (pages allocated by other processes
 during the squeeze pin them), so huge-page availability afterwards is best
-effort until those pages die; see docs/plans/kernel-phys-mem.md.
+effort until those pages die; see docs/kernel-mm.md.
 
 Observability: kernel metrics `mem.admission_refused_user`,
 `mem.admission_refused_sys_io`, `mem.admission_reserved_pages`,
