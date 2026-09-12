@@ -276,13 +276,22 @@ fn physical_runs(mapping: &Mapping) -> (Vec<u64>, u64) {
     (phys, runs)
 }
 
-// Eager heap sizes through map2: exact returned sizes, 2 MiB alignment for
-// requests above 1 MiB, every page mapped and touched, and the huge event
-// counters moving by at least the candidate count (other processes may add
-// to them). Huge success is reported, never required: it is best effort.
+// Eager heap sizes through map2: the sizing table's returned sizes, 2 MiB
+// alignment for requests above 1 MiB, every page mapped and touched, and the
+// huge event counters moving by at least the candidate count (other
+// processes may add to them). Huge success is reported, never required.
 fn sizes() -> u64 {
     let mut huge_runs = 0;
-    for (pages, candidates) in [(16, 0), (256, 0), (512, 1), (768, 0), (1024, 2)] {
+    for (pages, mapped, candidates) in [
+        (16, 16, 0),
+        (256, 256, 0),
+        (257, 512, 1),
+        (384, 512, 1),
+        (512, 512, 1),
+        (768, 768, 1),
+        (769, 1024, 2),
+        (1408, 1536, 3),
+    ] {
         let before = BlockMetrics::read();
         let (addr, size) = SysMem::map2(
             moto_sys::SysHandle::SELF,
@@ -293,8 +302,9 @@ fn sizes() -> u64 {
             pages,
         )
         .unwrap();
+        let pages = mapped;
         let mapping = Mapping { addr, pages };
-        assert_eq!(size, pages * PAGE_SIZE_SMALL);
+        assert_eq!(size, mapped * PAGE_SIZE_SMALL);
         if pages > 256 {
             assert_eq!(addr % MID, 0, "eligible segment not 2 MiB aligned");
         }
@@ -390,7 +400,7 @@ pub fn huge_sizes_subcommand() {
     );
     if small_guest {
         assert_eq!(after.huge_mapped, before.huge_mapped);
-        assert!(after.huge_fallbacks >= before.huge_fallbacks + 3);
+        assert!(after.huge_fallbacks >= before.huge_fallbacks + 9);
         assert_eq!(runs, 0);
     }
     println!("mem_blocks: huge sizes PASS");

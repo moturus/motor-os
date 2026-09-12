@@ -385,6 +385,34 @@ fallback and 3 contiguous huge runs; Firecracker at 64 MiB mapped none
 with 5 fallbacks and reused 438 of 512 pages zeroed. Placement stayed at
 7 to 10 blocks.
 
+### P5: the full sizing rule and mixed segments (2026-09-11)
+
+`HeapSizing::new` is the one checked helper for eligible requests: whole
+2 MiB units are huge candidates, a tail above 1 MiB rounds up to one more,
+a smaller tail stays small, and requests of 1 MiB or less map exactly what
+they ask for. `alloc_user_heap` allocates, charges and reports the rounded
+size; `map_charge` charges `mapping_charge(M, M)` for the ordinary heap
+with M the mapped pages, aggregated before the flat metadata charge; the
+mapping loop maps every whole unit of an eligible segment and the tail
+small. The controlled boot test checks the rule's table (including the
+saturating `u64::MAX` case), a 3 MiB mixed segment (huge leaf then small
+leaves at the boundary, copies and pinning across it, statistics charging
+exactly the mapped size, teardown returning the block) and a request one
+page over 1 MiB mapping 2 MiB. systest's sizing table expects the rounded
+returned sizes (1 MiB + 4 KiB, 1.5 MiB and 2 MiB return 2 MiB; 3 MiB
+returns 3 MiB; 3 MiB + 4 KiB returns 4 MiB; 5.5 MiB returns 6 MiB), and
+the small-guest subcommand expects at least nine fallbacks. Launcher
+matrix, release: every guest of 1 GiB or more mapped 11 huge pages (the
+nine candidates of the sizing table plus the reuse test) with no fallback
+and 9 contiguous huge runs; Firecracker at 64 MiB mapped none with 11
+fallbacks, including the 1 MiB + 4 KiB request served as 2 MiB of small
+mappings. P5's common gate passed two debug runs, then the third failed in
+the known pressure probe (`pressure.rs:67`, the dropped client's server
+handle alive through its five-second deadline), the failure recorded before
+this allocator existed; the squeeze allocates 64-page pieces, which the
+sizing rule leaves alone. The failed leg's logs are kept under
+`gate-p5/debug-3.*` in the scratchpad and the remaining legs were rerun.
+
 ### P2 is not blocked
 
 An earlier note here claimed the metric catalog lives in `moto-sys`; that

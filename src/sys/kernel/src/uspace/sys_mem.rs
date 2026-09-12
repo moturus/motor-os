@@ -50,6 +50,13 @@ fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64
         } else {
             (0, num_pages) // The caller's existing frames: descriptors only.
         }
+    } else if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE)
+        && page_size == sys_mem::PAGE_SIZE_SMALL
+    {
+        // The ordinary heap maps the rounded size; charge that, aggregated
+        // before the flat metadata charge, so no refund follows huge success.
+        let mapped = crate::mm::user::HeapSizing::new(num_pages).mapped_pages;
+        (mapped, mapped)
     } else {
         (num_pages, num_pages)
     };

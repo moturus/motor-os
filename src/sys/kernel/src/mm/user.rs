@@ -413,21 +413,24 @@ impl UserAddressSpace {
     }
 
     pub fn alloc_user_heap(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-
         // Ordinary eager private heap above 1 MiB may map huge pages; the
-        // policy is the segment's, not inferred from anything else.
-        let options = (num_pages > (PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2) / 2).then_some(
+        // policy is the segment's, not inferred from anything else. Its
+        // mapping never covers less than requested; the rounded size is
+        // what the caller, the statistics and admission all see.
+        let sizing = HeapSizing::new(num_pages);
+        let mapped = sizing.mapped_pages;
+        self.stats_user_add(mapped << PAGE_SIZE_SMALL_LOG2)?;
+        let options = sizing.eligible.then_some(
             MappingOptions::READABLE
                 | MappingOptions::WRITABLE
                 | MappingOptions::USER_ACCESSIBLE
                 | MappingOptions::HUGE_ELIGIBLE,
         );
         self.inner
-            .vmem_allocate_pages(VmemKind::User, num_pages, options)
+            .vmem_allocate_pages(VmemKind::User, mapped, options)
             .inspect_err(|_| {
-                log::error!("failed to allocate {num_pages} pages");
-                self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+                log::error!("failed to allocate {mapped} pages");
+                self.stats_user_sub(mapped << PAGE_SIZE_SMALL_LOG2);
             })
     }
 
@@ -700,6 +703,42 @@ impl UserAddressSpace {
     }
 }
 
+/// The huge-eligible sizing rule for an ordinary heap request of `pages`
+/// small pages: whole 2 MiB units are huge candidates, a tail above 1 MiB
+/// rounds up to one more, and a smaller tail stays small. Small-only
+/// requests (1 MiB and below) map exactly what they ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapSizing {
+    pub eligible: bool,
+    pub huge: u64,
+    pub small: u64,
+    pub mapped_pages: u64,
+}
+
+impl HeapSizing {
+    pub fn new(pages: u64) -> Self {
+        const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
+        if pages <= HUGE_PAGES / 2 {
+            return Self {
+                eligible: false,
+                huge: 0,
+                small: pages,
+                mapped_pages: pages,
+            };
+        }
+        let tail = pages % HUGE_PAGES;
+        let round_up = tail > HUGE_PAGES / 2;
+        let huge = pages / HUGE_PAGES + u64::from(round_up);
+        let small = if round_up { 0 } else { tail };
+        Self {
+            eligible: true,
+            huge,
+            small,
+            mapped_pages: huge.saturating_mul(HUGE_PAGES).saturating_add(small),
+        }
+    }
+}
+
 // Controlled huge mapping tests on private address spaces whose CR3 is never
 // installed: a held frame maps as a 2 MiB leaf and comes back zeroed,
 // a refusal falls back to small pages with the policy retained, sharing is
@@ -803,5 +842,58 @@ pub fn huge_mapping_self_test() {
     let dest = space.alloc_user_unmapped(HUGE_PAGES / 2).unwrap();
     UserAddressSpace::map_shared(&space, dest.start, &peer, small.start, options).unwrap();
     assert_eq!(space.read_from_user(dest.start, 6).unwrap(), b"intact");
+
+    // The sizing rule and a mixed segment: a request one page over 1 MiB
+    // maps a whole huge page, and 3 MiB maps one huge page followed by 256
+    // small ones. Copies and lookups cross the huge/small boundary, and the
+    // statistics charge exactly the mapped size.
+    for (pages, expected) in [
+        (16, (false, 0, 16, 16)),
+        (256, (false, 0, 256, 256)),
+        (257, (true, 1, 0, 512)),
+        (384, (true, 1, 0, 512)),
+        (512, (true, 1, 0, 512)),
+        (768, (true, 1, 256, 768)),
+        (769, (true, 2, 0, 1024)),
+        (1408, (true, 3, 0, 1536)),
+    ] {
+        let sizing = HeapSizing::new(pages);
+        assert_eq!(
+            (
+                sizing.eligible,
+                sizing.huge,
+                sizing.small,
+                sizing.mapped_pages
+            ),
+            expected,
+            "{pages} pages"
+        );
+    }
+    assert_eq!(HeapSizing::new(u64::MAX).mapped_pages, u64::MAX);
+    let usage_before = space.user_mem_stats().total();
+    let mixed = space.alloc_user_heap(HUGE_PAGES + 256).unwrap();
+    assert_eq!(mixed.size, PAGE_SIZE_MID + 256 * PAGE_SIZE_SMALL);
+    assert_eq!(space.user_mem_stats().total() - usage_before, mixed.size);
+    let boundary = mixed.start + PAGE_SIZE_MID;
+    if table.leaf_kind(mixed.start) == Some(PageType::MidPage) {
+        assert_eq!(table.leaf_kind(boundary), Some(PageType::SmallPage));
+        assert_eq!(
+            table.leaf_kind(boundary - PAGE_SIZE_SMALL),
+            Some(PageType::MidPage)
+        );
+    }
+    space.copy_to_user(b"across", boundary - 3).unwrap();
+    assert_eq!(space.read_from_user(boundary - 3, 6).unwrap(), b"across");
+    let (pinned, offset) = space.inner.pin_user_page(boundary + 5).unwrap();
+    assert_eq!(pinned.get().unwrap().kind(), PageType::SmallPage);
+    assert_eq!(offset, 5);
+    drop(pinned);
+    let rounded = space.alloc_user_heap(HUGE_PAGES / 2 + 1).unwrap();
+    assert_eq!(rounded.size, PAGE_SIZE_MID);
+    assert_eq!(rounded.start & (PAGE_SIZE_MID - 1), 0);
+    space.unmap(rounded.start).unwrap();
+    space.unmap(mixed.start).unwrap();
+    assert_eq!(space.user_mem_stats().total(), usage_before);
+    assert_eq!(block_metrics().taken, taken_before);
     crate::raw_log!("huge mapping tests PASS");
 }

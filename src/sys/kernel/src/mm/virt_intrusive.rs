@@ -404,12 +404,11 @@ impl VmemSegment {
         page.frame = frame;
     }
 
-    // Huge candidates of an eligible segment: whole 2 MiB units of its size.
-    // Only exact multiples map huge for now; the rounding rule comes later.
+    // Huge candidates of an eligible segment: its whole 2 MiB units. The
+    // sizing rule already rounded the segment, so a tail is at most 1 MiB
+    // and stays small.
     fn huge_candidates(&self) -> u64 {
-        if self.mapping_options.contains(MappingOptions::HUGE_ELIGIBLE)
-            && self.segment.size.is_multiple_of(PAGE_SIZE_MID)
-        {
+        if self.mapping_options.contains(MappingOptions::HUGE_ELIGIBLE) {
             self.segment.size / PAGE_SIZE_MID
         } else {
             0
