@@ -1,10 +1,10 @@
 # Standard Motor Rust unwinding and native rustfmt
 
-Status: local implementation and candidate validation complete through patch
-17, revised 2026-09-12 for D4. Publication, the managed `.dev.2` cutover, its
-six main-image gates, and the release developer-image gate remain pending.
-The external Rust changes are committed only in the local authoring
-checkout; no remote refs have been created or moved.
+Status: implemented and cut over. The managed `.dev.2` tuple built from the
+published fork revision passed three debug and three release main-image
+suites and the release developer-image suite on 2026-09-12, and the root
+selector names it (section 5). The fork branch is published; the motor-os
+branch has not been pushed yet.
 
 Decisions recorded:
 
@@ -670,17 +670,37 @@ Both size gates counted YAML lines with a host `rg`, which is not a documented
 host prerequisite and was only present in the earlier sessions' harness; they
 use `grep -cxF` now.
 
+Cutover record (2026-09-12). The managed producer built the `.dev.2` tuple
+from the published fork revision in 41 minutes 8 seconds with 2,945,628 KiB
+peak resident memory and installed
+`motor-1.99.0-beta-f47d5bb-dev.2-774c61a5c9c4bf117f92f1a82512570dcc43b6cb03ea152829d42981cdb8bad2`,
+the declaration's clean name. With the selector pointing at it, the cutover
+and versions tests passed, `make -j BUILD=release dev.img` produced the
+developer image, and `full-test.sh` passed three consecutive debug runs of
+about twelve minutes and three consecutive release runs of about ten
+minutes, followed by `full-test-dev.sh --release` in 25 minutes. Two
+findings came out of these gates, both fixed before the passing runs: the
+first debug run failed the 500 ms stdio lifetime bound because the debug
+vdso's build-std crates were unoptimized (4.5), and the developer suite's
+Lorry native gate expected a panicking proc macro to kill its executable,
+which the unwinding std no longer does, so that test now checks the panic
+message for a panicking macro and the executable name for an aborting one.
+
 Motor-os implementation commits through patch 17 are `24517f53` (candidate
 harness), `70045e78` (unwind fixture), `32007447` (abort profiles), `4b11fda9`
 (installed-std analyzer), `c3e33a49` (ELF validation), `e279fe90` (bootstrap
-cache), `ed4bb6b7` (abort-only C ABI shim and rt.vdso), `ebdf5e3e`
-(cross-language cases), `55b0058b` (candidate unwind modes), `0606f5bc`
-(private-build cleanup), `ed9457df` (D4 plan revision and rustfmt sources
-test), `bcbbf312` (rustfmt build), `cfa9f049` (rustfmt packaging), `35b9789d`
-(native fixtures), `891940e5` (size contract), `1cec7c98` (analyzer size gate
-without host ripgrep), and `6d9cabe3` (Helix formatting). The local Rust fork
-ends at
-`9f2e10270e097f607d00bffd8dae2980ff7c26ef` and its worktree is clean.
+cache), `c3b8a790` (abort-only C ABI shim and rt.vdso), `f62279f0`
+(cross-language cases), `f5b7de6b` (candidate unwind modes), `2cf6f5fe`
+(private-build cleanup), `f9798067` (D4 plan revision and rustfmt sources
+test), `82194f5f` (rustfmt build), `44cff55a` (rustfmt packaging), `0e4d926c`
+(native fixtures), `065a8c03` (size contract), `95cf3b95` (analyzer size gate
+without host ripgrep), and `3135809e` (Helix formatting); after the series,
+`8e6fbd16` (loud make failures), `726aa6f7` (the declaration), `afe3af65`
+(the toolchain guide rewrite), `3de3b762` (the Lorry proc-macro test), and
+the cutover commit carrying this record. The fork branch is published at
+`d9b95d4a8f17021fc769a0685c5d943fa0ce797b`, the same tree as the validated
+`9f2e10270e097f607d00bffd8dae2980ff7c26ef` with its top two commits
+rewritten before the push; `src/toolchain-versions.sh` declares it.
 
 ## 6. Tests
 

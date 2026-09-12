@@ -126,12 +126,11 @@ An editor that owns a session terminal must additionally pass
 editor retains keyboard and Ctrl+C ownership. This launch instruction is
 consumed by Motor before rust-analyzer starts.
 
-Analysis cancellation requires Rust unwinding. The selected `.dev.1` image
-rebuilds a private copy of the pinned Rust library for the analyzer. The
-validated standard-unwind candidate replaces that recipe: the standard Motor
-sysroot supplies the pure Rust unwinder, and the analyzer builds directly
-against the installed std. The managed `.dev.2` cutover remains pending. Older
-images with recipe `motor-native-rust-analyzer-v1` abort on ordinary
+Analysis cancellation requires Rust unwinding. The selected `.dev.2` toolchain
+supplies the pure Rust unwinder in the standard Motor sysroot, and the
+analyzer builds directly against the installed std. Older `.dev.1` images
+rebuilt a private copy of the pinned Rust library for the analyzer; images
+with recipe `motor-native-rust-analyzer-v1` abort on ordinary
 cancellation and must be rebuilt. See
 [the diagnosis and migration record](plans/rust-unwinding.md).
 
@@ -193,9 +192,8 @@ format-on-save. Use `:format` to format without saving. A parser error leaves
 the buffer unchanged; fix the source and format again. Project `rustfmt.toml`
 settings are honored; without one, rustfmt reads `/user/rustfmt.toml` and
 then `/user/cfg/rustfmt/rustfmt.toml`, never `HOME` or `XDG_CONFIG_HOME`.
-The selected `.dev.1` image predates native rustfmt, so these formatting
-features become available with the managed `.dev.2` cutover.
-Saving also runs the compiler check.
+The selected `.dev.2` toolchain packages native rustfmt, so these features
+are available on the developer image. Saving also runs the compiler check.
 
 For other projects, select an admitted Lorry package and prepare its dependencies
 with `lorry vendor` explicitly. A virtual workspace root is not a Lorry package.

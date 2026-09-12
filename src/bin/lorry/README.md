@@ -361,8 +361,8 @@ prompt.
 A leading rustup-style selector chooses an installed compiler on Linux:
 
 ```sh
-lorry +motor-1.99.0-beta-f47d5bb-dev.1-<full-toolchain-key> build
-lorry +motor-1.99.0-beta-f47d5bb-dev.1-<full-toolchain-key> \
+lorry +motor-1.99.0-beta-f47d5bb-dev.2-<full-toolchain-key> build
+lorry +motor-1.99.0-beta-f47d5bb-dev.2-<full-toolchain-key> \
   build --target x86_64-unknown-motor
 ```
 

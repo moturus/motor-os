@@ -5,10 +5,10 @@ by the [unified toolchain and rustfmt plan](rustfmt.md). That plan is the curren
 implementation. Its local standard-unwind candidate builds std, rustc, rust-analyzer,
 and rustfmt with standard Motor unwinding and passes the generic Rust/C++
 unwind and analyzer gates. The private build and regression were removed from
-the candidate producer. Publication and the managed `.dev.2` cutover remain pending; the
-selected `.dev.1` image still uses the private build described below. This
-document preserves the earlier repair's evidence and authorization, which do
-not authorize new work.
+the candidate producer, and the managed `.dev.2` cutover selected the
+published fork revision on 2026-09-12, so the private build described below
+is history. This document preserves the earlier repair's evidence and
+authorization, which do not authorize new work.
 
 Complete and gated on 2026-09-10. The release developer image now uses the
 unwinding-enabled analyzer; the packaged SSH workflow, a fresh console run,
