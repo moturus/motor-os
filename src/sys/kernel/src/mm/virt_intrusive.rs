@@ -431,7 +431,9 @@ impl VmemSegment {
             let frame = if refused {
                 None
             } else {
-                huge_frame().inspect_err(|_| refused = true).ok()
+                super::phys::allocate_huge_frame()
+                    .inspect_err(|_| refused = true)
+                    .ok()
             };
             match frame {
                 Some(frame) => {
@@ -727,31 +729,6 @@ impl VmemSegment {
 
         Ok(())
     }
-}
-
-// The mapping loop's huge-frame source. Production asks the physical
-// allocator; debug tests hand it held frames or a deliberate refusal.
-#[cfg(debug_assertions)]
-pub(super) static HUGE_SEAM: SpinLock<HugeSeam> = SpinLock::new(HugeSeam::Production);
-
-#[cfg(debug_assertions)]
-pub(super) enum HugeSeam {
-    Production,
-    Refuse,
-    Held(alloc::vec::Vec<SlabArc<Frame>>),
-}
-
-fn huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
-    #[cfg(debug_assertions)]
-    {
-        let mut seam = HUGE_SEAM.lock(line!());
-        match &mut *seam {
-            HugeSeam::Production => {}
-            HugeSeam::Refuse => return Err(moto_rt::E_OUT_OF_MEMORY),
-            HugeSeam::Held(frames) => return frames.pop().ok_or(moto_rt::E_OUT_OF_MEMORY),
-        }
-    }
-    super::phys::allocate_huge_frame()
 }
 
 // ----------------------- Segment Map ----------------------------- //

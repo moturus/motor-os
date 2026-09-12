@@ -3,9 +3,7 @@
 
 use super::layout::{Budget, Layout, Shaped};
 use super::*;
-use crate::mm::{
-    kheap, MemorySegment, KERNEL_PHYS_START, PAGE_SIZE_SMALL, PAGING_DIRECT_MAP_OFFSET,
-};
+use crate::mm::{MemorySegment, KERNEL_PHYS_START, PAGE_SIZE_SMALL, PAGING_DIRECT_MAP_OFFSET};
 use alloc::vec::Vec;
 
 pub(crate) type BlockPool = Pool<'static, DirectLinks>;
@@ -42,7 +40,7 @@ const LOW_RESERVED: MemorySegment = MemorySegment {
 impl BlockPool {
     pub(crate) fn build(inputs: &BootInputs) -> Self {
         let mut layout = inputs.layout(core::slice::from_ref(&LOW_RESERVED));
-        let budget = Budget::preflight(layout.blocks, kheap::startup_remaining())
+        let budget = Budget::preflight(layout.blocks)
             .unwrap_or_else(|err| panic!("phys: {} blocks: {err:?}", layout.blocks));
         let (table_block, table_page) = layout
             .carve_table(budget.table_pages)
@@ -190,19 +188,16 @@ impl BlockPool {
     pub(crate) fn release_low(&self, inputs: &BootInputs, keep: [u64; 2]) {
         let mut pages = [0, keep[0], keep[1]];
         pages.sort_unstable();
-        let reserved: Vec<MemorySegment> = pages
-            .iter()
-            .map(|&start| {
-                assert!(
-                    start < KERNEL_PHYS_START,
-                    "phys: kloader table at 0x{start:x}"
-                );
-                MemorySegment {
-                    start,
-                    size: PAGE_SIZE_SMALL,
-                }
-            })
-            .collect();
+        let reserved = pages.map(|start| {
+            assert!(
+                start < KERNEL_PHYS_START,
+                "phys: kloader table at 0x{start:x}"
+            );
+            MemorySegment {
+                start,
+                size: PAGE_SIZE_SMALL,
+            }
+        });
         #[cfg(debug_assertions)]
         let before = (
             self.free_pages(),

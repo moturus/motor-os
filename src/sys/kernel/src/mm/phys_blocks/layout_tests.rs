@@ -361,36 +361,23 @@ fn span() {
 
 fn storage() {
     // Table rounding: 64 bytes per block, 64 blocks per page.
-    for (blocks, lines, words, heap_bytes) in [
-        (1, 1, 1, 168),
-        (63, 16, 1, 1128),
-        (64, 16, 1, 1128),
-        (65, 17, 2, 1208),
-        (MAX_BLOCKS, 8192, 512, 524352 + 8216),
+    for (blocks, lines, words) in [
+        (1, 1, 1),
+        (63, 16, 1),
+        (64, 16, 1),
+        (65, 17, 2),
+        (MAX_BLOCKS, 8192, 512),
     ] {
-        let budget = Budget::preflight(blocks, u64::MAX).unwrap();
         assert_eq!(
-            budget,
+            Budget::preflight(blocks).unwrap(),
             Budget {
                 lines,
                 words,
                 table_pages: words as u16,
-                heap_bytes,
             }
         );
-        assert!(Budget::preflight(blocks, heap_bytes).is_ok());
-        assert_eq!(
-            Budget::preflight(blocks, heap_bytes - 1),
-            Err(LayoutError::Heap {
-                needed: heap_bytes,
-                remaining: heap_bytes - 1
-            })
-        );
     }
-    assert_eq!(
-        Budget::preflight(MAX_BLOCKS + 1, u64::MAX),
-        Err(LayoutError::Span)
-    );
+    assert_eq!(Budget::preflight(MAX_BLOCKS + 1), Err(LayoutError::Span));
 
     // The table backs onto the lowest run that fits: a whole block, a partial
     // retained run beside the initrd, or nothing at all.

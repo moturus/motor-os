@@ -1,12 +1,11 @@
 //! Boot input normalization: byte ranges become validated page spans.
 
 use super::shaping::{Shape, ShapeError};
-use super::{BlockLine, BLOCK_SHIFT, MAX_BLOCKS, PAGES, PAGE_SHIFT, RAM, SMALL_ONLY, SPLIT, WHOLE};
+use super::{BLOCK_SHIFT, MAX_BLOCKS, PAGES, PAGE_SHIFT, RAM, SMALL_ONLY, SPLIT, WHOLE};
 use crate::mm::phys::FIXED_MID_SEGMENT;
 use crate::mm::MemorySegment;
 use alloc::vec::Vec;
 use core::ops::Range;
-use core::sync::atomic::AtomicU64;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LayoutError {
@@ -16,41 +15,28 @@ pub(super) enum LayoutError {
     FixedMid,
     Raw,
     Initrd,
-    Heap { needed: u64, remaining: u64 },
 }
 
-// Permanent boot-heap storage for one span: descriptor lines, the F and W
-// bitmaps with their alignment padding, and the list-state table's base
-// pointer. The table itself is carved from managed RAM.
+// Storage sizes for one span: descriptor lines and bitmap words on the boot
+// heap (the startup allocator panics if it cannot hold them), and the
+// list-state table carved from managed RAM.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Budget {
     pub lines: usize,
     pub words: usize,
     pub table_pages: u16,
-    pub heap_bytes: u64,
 }
 
 impl Budget {
-    pub(super) fn preflight(blocks: usize, heap_remaining: u64) -> Result<Self, LayoutError> {
+    pub(super) fn preflight(blocks: usize) -> Result<Self, LayoutError> {
         if blocks > MAX_BLOCKS {
             return Err(LayoutError::Span);
         }
-        let lines = blocks.div_ceil(4);
         let words = blocks.div_ceil(64);
-        let line = size_of::<BlockLine>() as u64;
-        let word = size_of::<AtomicU64>() as u64;
-        let heap_bytes = (lines as u64 + 1) * line + 2 * (words as u64 + 1) * word + 8;
-        if heap_bytes > heap_remaining {
-            return Err(LayoutError::Heap {
-                needed: heap_bytes,
-                remaining: heap_remaining,
-            });
-        }
         Ok(Self {
-            lines,
+            lines: blocks.div_ceil(4),
             words,
             table_pages: words as u16,
-            heap_bytes,
         })
     }
 }
