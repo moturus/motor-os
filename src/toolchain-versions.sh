@@ -5,7 +5,7 @@
 # worktree state belong in generated manifests.
 
 MOTOR_GENERATED_MANIFEST_SCHEMA="motor-toolchain-manifest-v1"
-MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v2"
+MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v3"
 MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v3"
 
 MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.1"
@@ -28,7 +28,7 @@ MOTOR_LLVM_REV="7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4"
 
 MOTOR_RUST_REPOSITORY="https://github.com/moturus/rust.git"
 MOTOR_RUST_REF="refs/heads/motor-os-1.99.0-beta-f47d5bb"
-MOTOR_RUST_REV="3c9729fb79778d71daabbff78319a8b9535c340b"
+MOTOR_RUST_REV="75940756edd423d88ba353ce720770f3061b285a"
 MOTOR_RUST_CHANNEL="dev"
 MOTOR_CARGO_VERSION="1.99.0-dev"
 MOTOR_CARGO_REPOSITORY="https://github.com/rust-lang/cargo.git"
@@ -39,6 +39,7 @@ RUST_REFERENCE_REPOSITORY="https://github.com/rust-lang/reference.git"
 RUSTC_PERF_REPOSITORY="https://github.com/rust-lang/rustc-perf.git"
 MOTOR_RUST_ROOT_LOCK_SHA256="b38dc5b991122b4f630a818cae6669a7d2065597632a1b3055a683fe35951939"
 MOTOR_RUST_LIBRARY_LOCK_SHA256="a975b500e40752e08f2f664666ed078325f7eb37d27d5fca7eeb73199dcf7665"
+MOTOR_RUST_ANALYZER_LOCK_SHA256="be2b1876e92a88208cc6e1b59d6ee12e128c3ee4cab31b6323a32134348c4706"
 UPSTREAM_CARGO_REV="eb98b54bc9f3c74519f43d066cb3fd02ebc88df0"
 
 MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
@@ -91,6 +92,12 @@ MOTOR_OS_RUNTIME_INPUTS=(
   "src/sys/lib/moto-sys"
   "src/sys/lib/moto-rt-cabi"
   "src/build-motor-os.sh"
+  "src/toolchain-rust-analyzer.sh"
+  "src/toolchain-rust-analyzer-identity.sh"
+  "src/toolchain-patched-crates.sh"
+  "src/toolchain-native-rust-analyzer.sh"
+  "src/toolchain-rust-analyzer-unwind.sh"
+  "src/patches/rust-analyzer-unwind.patch"
 )
 
 MOTOR_TOOLCHAIN_KEY_FIELDS=(
@@ -98,7 +105,8 @@ MOTOR_TOOLCHAIN_KEY_FIELDS=(
   upstream_rust_version upstream_rust_rev stage0_rev rust_llvm_base_rev
   upstream_cargo_rev cargo_version cargo_rev effective_rust_rev effective_llvm_rev
   rust_tree_state llvm_tree_state authoring_source_digest
-  rust_root_lock_sha256 rust_library_lock_sha256 bootstrap_config_digest
+  rust_root_lock_sha256 rust_library_lock_sha256 rust_analyzer_lock_sha256
+  rust_analyzer_inputs_digest bootstrap_config_digest
   standalone_llvm_config_digest rust_channel build_host
   build_targets build_tools build_extended build_docs build_submodules
   build_locked_deps optimized_compiler_builtins download_ci_llvm llvm_targets

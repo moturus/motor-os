@@ -13,6 +13,8 @@ mkdir -p "$rust/library" "$temporary/prefix/bin" "$temporary/llvm/bin" \
 	"$temporary/assembly/sysroot"
 printf root > "$rust/Cargo.lock"
 printf library > "$rust/library/Cargo.lock"
+mkdir -p "$rust/src/tools/rust-analyzer"
+printf analyzer > "$rust/src/tools/rust-analyzer/Cargo.lock"
 printf installed > "$temporary/prefix/bin/rustc"
 chmod +x "$temporary/prefix/bin/rustc"
 cat > "$temporary/llvm/bin/llvm-config" <<EOF

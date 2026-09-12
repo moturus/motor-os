@@ -125,8 +125,12 @@ impl SemanticCase {
     }
 
     pub fn open(&mut self, path: &Path) -> io::Result<String> {
-        let uri = file_uri(path);
         let text = fs::read_to_string(path)?;
+        self.open_text(path, &text)
+    }
+
+    pub fn open_text(&mut self, path: &Path, text: &str) -> io::Result<String> {
+        let uri = file_uri(path);
         self.session.notify(
             "textDocument/didOpen",
             Some(json!({
@@ -134,6 +138,57 @@ impl SemanticCase {
             })),
         )?;
         Ok(uri)
+    }
+
+    pub fn text_request(
+        &mut self,
+        method: &str,
+        path: &Path,
+        text: &str,
+        needle: &str,
+    ) -> io::Result<Value> {
+        let result = self.session.request(
+            method,
+            json!({"textDocument": {"uri": file_uri(path)}, "position": position(text, needle)?}),
+            self.deadline,
+        ).and_then(rpc_result);
+        result.map_err(|error| {
+            io::Error::new(error.kind(), format!("{method} at {needle:?}: {error}"))
+        })
+    }
+
+    // Call only after the previous check completed and the guest file was
+    // written. Discard consumed events so a reused flycheck token is new work.
+    pub fn save_text(&mut self, path: &Path, version: u32, text: &str) -> io::Result<()> {
+        self.session.clear_notifications();
+        let uri = file_uri(path);
+        self.session.notify(
+            "textDocument/didChange",
+            Some(json!({
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": text}]
+            })),
+        )?;
+        self.session.notify(
+            "textDocument/didSave",
+            Some(json!({
+                "textDocument": {"uri": uri}
+            })),
+        )
+    }
+
+    pub fn wait_for_rustc_error(&mut self, uri: &str, present: bool) -> io::Result<()> {
+        loop {
+            if let Some(diagnostics) = self.latest_diagnostics(uri).and_then(Value::as_array) {
+                let has_error = diagnostics.iter().any(|diagnostic| {
+                    diagnostic["source"] == "rustc" && diagnostic["severity"] == 1
+                });
+                if has_error == present {
+                    return Ok(());
+                }
+            }
+            self.session.pump(self.deadline)?;
+        }
     }
 
     pub fn definition(&mut self, path: &Path, needle: &str) -> io::Result<String> {

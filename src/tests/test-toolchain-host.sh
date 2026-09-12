@@ -9,10 +9,13 @@ fail() { echo "test-toolchain-host: $*" >&2; exit 1; }
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 export MOTORH="$temporary/motorh"
+MOTOR="$ROOT_DIR"
 rust="$temporary/rust"
 mkdir -p "$rust/library" "$rust/src/llvm-project/llvm" "$temporary/local-moto"
+mkdir -p "$rust/src/tools/rust-analyzer"
 printf 'root lock\n' > "$rust/Cargo.lock"
 printf 'library lock\n' > "$rust/library/Cargo.lock"
+printf 'analyzer lock\n' > "$rust/src/tools/rust-analyzer/Cargo.lock"
 git -C "$rust/src/llvm-project" init -q
 git -C "$rust/src/llvm-project" config user.email test@example.com
 git -C "$rust/src/llvm-project" config user.name Test
@@ -39,6 +42,13 @@ MOTOR_ASSEMBLY_STATE=clean
 # Source and package equivalence have focused tests; this checks transaction
 # ordering without manufacturing the complete Rust superproject and crate.
 toolchain_reverify_selected_sources() { :; }
+toolchain_prepare_rust_analyzer() {
+	[ "$6" = true ] || fail "host preparation did not permit provisioning"
+	RUST_ANALYZER_CARGO_CONFIG="$5/rust-analyzer-cargo.toml"
+	mkdir -p "$5"
+	printf '[patch.crates-io]\n' > "$RUST_ANALYZER_CARGO_CONFIG"
+}
+toolchain_reverify_rust_analyzer() { printf v >> "$temporary/analyzer-verifications"; }
 toolchain_verify_moto_rt_package() {
 	LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
 	LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
@@ -87,6 +97,8 @@ export MOTOR_CMAKE_COMMAND="$fake_cmake" MOTOR_NINJA_COMMAND="$fake_ninja"
 cat > "$rust/x.py" <<EOF
 #!/usr/bin/env bash
 [ "\${PYTHONDONTWRITEBYTECODE:-}" = 1 ] || exit 8
+[ "\${MOTOR_RUST_ANALYZER_CARGO_CONFIG:-}" = "\${PYTHONPYCACHEPREFIX%/*}/rust-analyzer-cargo.toml" ] || exit 10
+[ -f "\$MOTOR_RUST_ANALYZER_CARGO_CONFIG" ] || exit 11
 case "\${PYTHONPYCACHEPREFIX:-}" in
   '$MOTORH/toolchain-state/'*/python-cache) ;;
   *) exit 9 ;;
@@ -142,6 +154,7 @@ export RUSTUP_STATE="$temporary/rustup-state"
 toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto"
 [ "$(cat "$temporary/xpy-runs")" = x ] || fail "bootstrap did not run exactly once"
+[ "$(cat "$temporary/analyzer-verifications")" = v ] || fail "analyzer sources were not reverified"
 [ -f "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ] || fail "prefix was not finalized"
 grep -q '^rust_analyzer_version_base64=' "$TOOLCHAIN_PREFIX/MOTOR-TOOLCHAIN-MANIFEST" ||
 	fail "prefix manifest lacks the rust-analyzer version"

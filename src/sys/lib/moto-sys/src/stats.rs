@@ -127,7 +127,7 @@ impl CpuStatsV1 {
             let pid = *(addr as *const u64);
             let percpu_entries = core::slice::from_raw_parts(
                 (addr + 8) as *const CpuStatsPerCpuEntryV1,
-                self.num_entries as usize,
+                self.num_cpus as usize,
             );
 
             CpuStatsEntryV1 {
@@ -135,6 +135,56 @@ impl CpuStatsV1 {
                 percpu_entries,
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "userspace"))]
+mod cpu_stats_tests {
+    use super::*;
+    use core::mem::ManuallyDrop;
+
+    fn check_snapshot(num_entries: u32, num_cpus: u32) {
+        // Match the kernel's packed rows in aligned, initialized storage.
+        // Keep the backing page alive; this snapshot must not call SysMem::free.
+        let mut page = [0u64; sys_mem::PAGE_SIZE_SMALL as usize / 8];
+        let row_words = 1 + 2 * num_cpus as usize;
+        for process in 0..num_entries as usize {
+            let row = process * row_words;
+            page[row] = 100 + process as u64;
+            for cpu in 0..num_cpus as usize {
+                page[row + 1 + 2 * cpu] = 1000 * process as u64 + cpu as u64;
+                page[row + 2 + 2 * cpu] = 1000 * process as u64 + cpu as u64 + 100;
+            }
+        }
+        let stats = ManuallyDrop::new(CpuStatsV1 {
+            num_entries,
+            num_cpus,
+            page_addr: page.as_ptr() as u64,
+        });
+        for process in 0..num_entries as usize {
+            let entry = stats.entry(process);
+            assert_eq!(entry.pid, 100 + process as u64);
+            assert_eq!(entry.percpu_entries.len(), num_cpus as usize);
+            for (cpu, counters) in entry.percpu_entries.iter().enumerate() {
+                assert_eq!(counters.kernel, 1000 * process as u64 + cpu as u64);
+                assert_eq!(counters.uspace, 1000 * process as u64 + cpu as u64 + 100);
+            }
+        }
+    }
+
+    #[test]
+    fn fewer_processes_than_cpus() {
+        check_snapshot(1, 4);
+    }
+
+    #[test]
+    fn more_processes_than_cpus() {
+        check_snapshot(5, 2);
+    }
+
+    #[test]
+    fn equal_process_and_cpu_counts() {
+        check_snapshot(3, 3);
     }
 }
 

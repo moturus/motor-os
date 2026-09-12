@@ -106,19 +106,13 @@ The former sys-tty/kernel-log interleaving item is complete; see
    baseline after bursts instead of holding the peak, which matters on small
    VMs and for the memory-pressure model's accounting.
 
-4. **`MAX_BLOCKS_IN_TXN_LOG` 256 stops sys-io on the first large write.**
-   Raising the transaction-log batch from 64 to 256 blocks compiles (the
-   superblock still fits) but the first 20 MB write stops sys-io without a
-   panic. The likely mechanism: `write_blocks_with_completion` posts every
-   16-block chunk of a run before awaiting any, a 256-block batch is 16
-   requests of 18 descriptors = 288 entries against a 256-entry virtqueue,
-   and descriptors are reclaimed only when a completion is awaited -- the
-   shape the July TSO work hit on the net side; 64-block batches post at
-   most 72. Fix: bound the in-flight descriptors per run (await a completion
-   when the queue is full) or derive the batch size from the virtqueue
-   depth. Gain: unblocks the write-path work below (a larger batch is one of
-   its three levers) and removes a latent stall for any device with a
-   smaller queue.
+4. **Resolved 2026-09-09: `MAX_BLOCKS_IN_TXN_LOG` 256 stopped sys-io on the
+   first large write.** The mechanism was descriptor retention: a completion
+   held its descriptors until dropped, and the worker held completions until
+   `Commit`. `docs/plans/virtio-descriptor-waiters.md` moved all block-queue
+   traffic behind one I/O task that drops completions as the device finishes
+   them, so batch size no longer interacts with queue depth. Raising the
+   batch is still one of the write-path levers below and still unmeasured.
 
 5. **sys-io allocates a Vec of every wait handle on each park.**
    `LocalRuntime::wait` builds the array of registered wait handles anew per
@@ -163,15 +157,12 @@ The former sys-tty/kernel-log interleaving item is complete; see
    snapshot. Gain: tools and scripts read sys-io's counters as soon as the
    VM answers, and the retry loops in the suite can go.
 
-9. **`CpuStatsV1::entry` uses the wrong slice length.**
-    `moto-sys/src/stats.rs` builds the per-CPU slice with
-    `self.num_entries` as its length instead of `num_cpus` (lines 128-131),
-    so the slice overruns into the next entry when there are more entries
-    than CPUs and would panic if a process list ever had fewer entries than
-    CPUs; harmless today only because callers index `[cpu]`. Fix: a one-line
-    length correction with a unit test; moto-sys is a runtime input, so it
-    ships with the next moto-sys bump. Gain: correct per-CPU statistics for
-    `top` and the benchmarks, and no latent panic.
+The former item 9, `CpuStatsV1::entry`'s incorrect slice length, is fixed.
+The correction and three synthetic snapshot tests pass three debug and three
+release full-system gates, plus `full-test-dev.sh --release` (2026-09-06).
+No package publication or stdlib change was needed. See the
+[rust-analyzer gate record](rust-analyzer.md#421-release-gate-budget-stop)
+for the initial cold-build timeout and approved unchanged warm-artifact run.
 
 ## Performance follow-ups from the same run (not scheduled)
 
@@ -230,6 +221,32 @@ without). Left on the table, largest first:
 Items moved out of active plans by explicit ruling. Each entry names
 the ruling; nothing here should be picked up without a fresh call.
 
+- **Per-process resident-memory accounting and peaks** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). The current kernel
+  `memory_usage` metric counts virtual mappings, including shared mappings
+  and lazily mapped stacks; it is not resident physical memory (RSS).
+  `MemoryStats::get()` reports physical use for the whole system, not each
+  process. Design per-process resident accounting and high-water reporting,
+  with explicit shared-page attribution and allocation/reclamation semantics,
+  before implementation. This would support reliable memory-regression
+  measurements for rust-analyzer, compilers, and other applications. It is
+  not a prerequisite for native rust-analyzer: use existing counters and
+  label sampled maxima and whole-VM physical usage accurately meanwhile.
+
+- **Complete descendant-process execution audit** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). `ProcessInfoV1::list` can omit
+  exited processes with no running descendants, and its debug names are
+  limited to 32 bytes. Periodic snapshots therefore cannot establish a
+  complete history of executed programs or arguments. Design an opt-in,
+  bounded execution-event facility with process/parent identity, executable
+  identity, explicit event-loss reporting, and reviewed access/privacy rules
+  before implementation; arguments may contain secrets. It should capture
+  short-lived descendants without polling races or extra boot-time work.
+  This would support execution audits beyond rust-analyzer. Native
+  rust-analyzer acceptance may use invocation logs and sampled descendants,
+  stating that this evidence is non-exhaustive; it must not depend on this
+  new OS facility.
+
 - **`channel.rs` SeqCst fence audit** (out of scope, ruled
   2026-08-15). The io_channel wake edges now carry their own ordering;
   the SeqCst fences predate that and are likely removable. Removing
@@ -267,3 +284,28 @@ the ruling; nothing here should be picked up without a fresh call.
   re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
   per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
+
+- **virtio queue: smarter allocation-waiter wakeups** (recorded 2026-09-08
+  from `virtio-descriptor-waiters.md`, v03). Releasing a descriptor chain
+  wakes at most two queued allocation waiters, and a waiter that does not
+  fit re-registers at the back of the line. Under the single-owner design
+  the block queue has one submitter that never waits in the driver, and
+  each net queue has one submitter, so at most one waiter exists per queue
+  and the policy is moot. It matters again only if a queue ever gets
+  several independent allocators; the v02 review showed that waking the
+  first waiter only can then starve a fitting waiter behind a non-fitting
+  one once the last in-flight request has completed. Options then: wake
+  every waiter, or select the first that fits from per-entry sizes and a
+  free-descriptor count.
+
+- **Block I/O task: recover the sequential cost** (recorded 2026-09-09 from
+  `virtio-descriptor-waiters.md`). The single-owner task costs 3 to 5
+  percent of sequential throughput against the old driver. Three measured
+  changes recover it and more (593 versus 506 MiB/s for 4 KiB sequential
+  reads): drain the used ring at the start of the task's poll, keep a
+  single-chunk response inline instead of in shared state, and a channel
+  receiver that does not spin on an empty inbox, with the inbox at 16
+  entries. Not adopted because the 64-thread p99 latency rose from 5.9 to
+  10.7 ms and one boot showed TCP throughput halving under 16 saturated disk
+  readers. Pick up only with a matched-load network measurement and the
+  threaded latency probe; patch and data under `build/virtio-waiters-results/`.

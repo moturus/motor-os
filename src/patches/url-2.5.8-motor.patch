@@ -1,0 +1,157 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2546,7 +2546,8 @@
+             windows,
+             target_os = "redox",
+             target_os = "wasi",
+-            target_os = "hermit"
++            target_os = "hermit",
++            target_os = "motor"
+         )
+     ))]
+     #[allow(clippy::result_unit_err)]
+@@ -2594,7 +2595,8 @@
+             windows,
+             target_os = "redox",
+             target_os = "wasi",
+-            target_os = "hermit"
++            target_os = "hermit",
++            target_os = "motor"
+         )
+     ))]
+     #[allow(clippy::result_unit_err)]
+@@ -2719,7 +2721,8 @@
+             windows,
+             target_os = "redox",
+             target_os = "wasi",
+-            target_os = "hermit"
++            target_os = "hermit",
++            target_os = "motor"
+         )
+     ))]
+     #[allow(clippy::result_unit_err)]
+@@ -2943,7 +2946,13 @@
+ 
+ #[cfg(all(
+     feature = "std",
+-    any(unix, target_os = "redox", target_os = "wasi", target_os = "hermit")
++    any(
++        unix,
++        target_os = "redox",
++        target_os = "wasi",
++        target_os = "hermit",
++        target_os = "motor"
++    )
+ ))]
+ fn path_to_file_url_segments(
+     path: &Path,
+@@ -2964,7 +2973,7 @@
+     for component in path.components().skip(1) {
+         empty = false;
+         serialization.push('/');
+-        #[cfg(not(target_os = "wasi"))]
++        #[cfg(not(any(target_os = "wasi", target_os = "motor")))]
+         serialization.extend(percent_encode(
+             component.as_os_str().as_bytes(),
+             SPECIAL_PATH_SEGMENT,
+@@ -2974,6 +2983,11 @@
+             component.as_os_str().to_string_lossy().as_bytes(),
+             SPECIAL_PATH_SEGMENT,
+         ));
++        #[cfg(target_os = "motor")]
++        serialization.extend(percent_encode(
++            component.as_os_str().to_str().ok_or(())?.as_bytes(),
++            SPECIAL_PATH_SEGMENT,
++        ));
+     }
+     if empty {
+         // An URL’s path must not be empty.
+@@ -3059,7 +3073,13 @@
+ 
+ #[cfg(all(
+     feature = "std",
+-    any(unix, target_os = "redox", target_os = "wasi", target_os = "hermit")
++    any(
++        unix,
++        target_os = "redox",
++        target_os = "wasi",
++        target_os = "hermit",
++        target_os = "motor"
++    )
+ ))]
+ fn file_url_segments_to_pathbuf(
+     estimated_capacity: usize,
+@@ -3068,7 +3088,7 @@
+ ) -> Result<PathBuf, ()> {
+     use alloc::vec::Vec;
+     use percent_encoding::percent_decode;
+-    #[cfg(not(target_os = "wasi"))]
++    #[cfg(not(any(target_os = "wasi", target_os = "motor")))]
+     use std::ffi::OsStr;
+     #[cfg(target_os = "hermit")]
+     use std::os::hermit::ffi::OsStrExt;
+@@ -3098,9 +3118,9 @@
+         bytes.push(b'/');
+     }
+ 
+-    #[cfg(not(target_os = "wasi"))]
++    #[cfg(not(any(target_os = "wasi", target_os = "motor")))]
+     let path = PathBuf::from(OsStr::from_bytes(&bytes));
+-    #[cfg(target_os = "wasi")]
++    #[cfg(any(target_os = "wasi", target_os = "motor"))]
+     let path = String::from_utf8(bytes)
+-        .map(|path| PathBuf::from(path))
++        .map(PathBuf::from)
+         .map_err(|_| ())?;
+--- a/tests/unit.rs
++++ b/tests/unit.rs
+@@ -199,6 +199,49 @@
+ }
+ 
+ #[test]
++#[cfg(all(feature = "std", any(unix, target_os = "motor")))]
++fn motor_compatible_file_paths() {
++    use std::path::Path;
++
++    for (path, encoded) in [
++        ("/", "file:///"),
++        ("/a b/%/#/é.rs", "file:///a%20b/%25/%23/%C3%A9.rs"),
++        ("/a\\b", "file:///a%5Cb"),
++    ] {
++        let url = Url::from_file_path(path).unwrap();
++        assert_eq!(url.as_str(), encoded);
++        assert_eq!(url.to_file_path().unwrap(), Path::new(path));
++    }
++    for path in ["", "relative", "../relative"] {
++        assert!(Url::from_file_path(path).is_err());
++        assert!(Url::from_directory_path(path).is_err());
++    }
++    assert_eq!(
++        Url::from_directory_path("/a b").unwrap().as_str(),
++        "file:///a%20b/"
++    );
++    assert_eq!(
++        Url::parse("file://localhost/a")
++            .unwrap()
++            .to_file_path()
++            .unwrap(),
++        Path::new("/a")
++    );
++    for url in [
++        "file://remote/a",
++        "https://example.com/a",
++        "data:text/plain,a",
++    ] {
++        assert!(Url::parse(url).unwrap().to_file_path().is_err());
++    }
++    #[cfg(target_os = "motor")]
++    assert!(Url::parse("file:///bad%FF")
++        .unwrap()
++        .to_file_path()
++        .is_err());
++}
++
++#[test]
+ #[cfg(all(feature = "std", windows))]
+ fn new_path_windows_fun() {
+     assert_from_file_path!(r"C:\foo\bar", "/C:/foo/bar");

@@ -37,6 +37,14 @@ fn rt_churn(iters: u64) -> ! {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next();
+    if mode.as_deref() == Some("stdio-echo") {
+        process::stdio_echo();
+        return;
+    }
+    if mode.as_deref() == Some("process") {
+        process::run_all_tests();
+        return;
+    }
     if mode.as_deref() == Some("rt-churn") {
         let iters = args.next().and_then(|s| s.parse().ok()).unwrap_or(1 << 30);
         rt_churn(iters);

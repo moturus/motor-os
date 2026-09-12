@@ -71,6 +71,7 @@ assembly_dirs:
   - "llvm"
   - "rustc"
   - "helix"
+  - "rust-analyzer"
 assembly_required_executables:
   - "rg/system/bin/rg"
   - "llvm/devtools/bin/cc"
@@ -79,6 +80,7 @@ assembly_required_executables:
   - "rustc/devtools/bin/rustc"
   - "rustc/devtools/rust/bin/rustc"
   - "helix/devtools/helix/hx"
+  - "rust-analyzer/devtools/rust/bin/rust-analyzer"
 source_dirs:
   - source: "src/bin/red"
     destination: "/devtools/src/motor-os/bin/red"

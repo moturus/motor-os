@@ -2,12 +2,14 @@
 
 Stages 1-3 of the Helix port are complete. They were implemented and validated
 between 2026-08-31 and 2026-09-01. Stage 4, local rust-analyzer integration,
-remains deliberately deferred.
+is complete and gated as of 2026-09-10; see
+[helix-rust-analyzer.md](helix-rust-analyzer.md).
 
 The result is a cross-compiled, static-PIE `hx` with ten statically linked
 tree-sitter grammars. It is staged only in the Motor OS development image at
 `/devtools/helix`; it is not part of the base or standard image and is not
-added to `PATH`.
+added to `PATH` by the assembly. The developer overlay now provides the
+`/devtools/bin/hx` launcher on its normal `PATH`.
 
 ## Status
 
@@ -16,10 +18,10 @@ added to `PATH`.
 | 1 — fork and editor bring-up | Complete |
 | 2 — vendored static grammars and full Motor binary | Complete |
 | 3 — assembly, development image, and VM acceptance | Complete |
-| 4 — rust-analyzer and Lorry project graph | Deferred |
+| 4 — native rust-analyzer through Lorry metadata/check | Complete; see [integration record](helix-rust-analyzer.md) |
 
-No Rust standard-library, `moto-rt`, kernel, or boot-time code was changed.
-The only `src/sys` change is an exact dependency override to the Motor
+Stages 1–3 changed no Rust standard-library, `moto-rt`, kernel, or boot-time code.
+Their only `src/sys` change is an exact dependency override to the Motor
 `parking_lot` fork, plus its Tokio regression test. That change was required
 after the initial port exposed an idle-spin latency defect and is covered by
 the core-OS gates below.
@@ -245,11 +247,22 @@ prospective command without it was incomplete.
 ## Current limitations and Stage 4
 
 Version one intentionally has no mouse input by default, suspend/job control,
-external URL launch, system clipboard, OSC 52 clipboard access, dynamic
-grammar loading, or language-server integration. These capabilities fail or
+external URL launch, system clipboard, OSC 52 clipboard access, or dynamic
+grammar loading. These capabilities fail or
 default cleanly rather than partially activating.
 
-Stage 4 will add the local rust-analyzer binary and Lorry-generated project
-graph, then test at least one diagnostic and hover in a VM. It should use the
-central local-file URI layer already present. The server path, graph format,
-staging layout, and Stage 4 acceptance details remain future work.
+Stage 4 uses the now-packaged `/devtools/rust/bin/rust-analyzer`, selected by
+`/user/.config/helix/languages.toml`. Lorry's Cargo-compatible metadata and
+check commands supersede the proposed project JSON generator. The server
+targets Motor with matching std sources and runs without the editor's terminal
+stream. The existing local-file URI layer handles navigation.
+
+The integration also exposed a runtime child-pipe partial-write readiness bug;
+the bounded regression, repair, core gates, editor acceptance, and overnight
+authorization are documented in [helix-rust-analyzer.md](helix-rust-analyzer.md).
+The subsequent user report exposed an abort on ordinary Salsa cancellation;
+[rust-unwinding.md](rust-unwinding.md) records the diagnosis, private analyzer
+library build, new assembly identity, and strengthened editor regression.
+No further Helix fork revision is needed. Native use is documented
+in [build-rustc.md](../build-rustc.md#helix-on-the-developer-image) and the
+developer image's editor guide.

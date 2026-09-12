@@ -5,6 +5,7 @@
 mod admission;
 mod checked_copy_in;
 // mod channel_test;
+mod alloc_bench;
 mod closerace;
 mod command_output;
 mod ctrl_c;
@@ -48,6 +49,7 @@ mod tcp;
 mod threads;
 mod tls;
 mod udp;
+mod virtio;
 mod wait_set;
 mod wakebench;
 mod xor_server;
@@ -1090,6 +1092,22 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {
+        virtio_task_tests::test_premature_reply_drop();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-task") {
+        virtio_task_tests::run_tests();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-descriptors") {
+        virtio::run_tests();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
+        virtio_async::test_premature_completion_drop(args[2] == "block");
+        return;
+    }
     if args.len() == 2 && args[1] == "checked-copy-in-tests" {
         checked_copy_in::run_all_tests();
         return;
@@ -1149,6 +1167,10 @@ fn main() {
         fsbench::run(&args);
         return;
     }
+    if args.len() >= 2 && args[1] == "alloc-bench" {
+        alloc_bench::run();
+        return;
+    }
     if args.len() == 2 && args[1] == "--under-load" {
         UNDER_LOAD.store(true, Ordering::Relaxed);
         args.truncate(1); // Not a subcommand: run the normal suite.
@@ -1178,6 +1200,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
         fs::concurrent_flush_stress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-scattered-writes" {
+        fs::scattered_writes_test();
         return;
     }
     // The FS pressure regression; the suite runs the same body at spam size
@@ -1235,6 +1261,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-shared-listener-restart" {
         spawn_wait_kill::test_shared_listener_restart();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-kill-after-wait" {
+        spawn_wait_kill::test_kill_after_wait();
         return;
     }
     if spawn_wait_kill::is_shared_listener_child(&args) {
@@ -1380,6 +1410,8 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    virtio::run_tests();
+    virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
@@ -1423,6 +1455,7 @@ fn main() {
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
+    spawn_wait_kill::test_kill_after_wait();
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();

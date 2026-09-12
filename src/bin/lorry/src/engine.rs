@@ -52,12 +52,7 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let manifest = match &cli.command {
-        Command::Check(options) => Manifest::load_selected_or_manifest_path(
-            &current,
-            options.manifest_path.as_deref().map(Path::new),
-            cli.package.as_deref(),
-            true,
-        )?,
+        Command::Check(options) => load_check_manifest(&current, options, cli.package.as_deref())?,
         _ => Manifest::load_selected(&current, cli.package.as_deref())?,
     };
     if let Command::Check(options) = &cli.command
@@ -68,6 +63,17 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
             "no library targets found in package `{}`",
             manifest.name
         )));
+    }
+    if let Command::Check(options) = &cli.command {
+        validate_binary_selection(&manifest, options.bin.as_deref())?;
+        if let Some(name) = &options.test
+            && !manifest
+                .integration_tests
+                .iter()
+                .any(|target| target.name == *name)
+        {
+            return Err(unknown_integration_test(&manifest, name));
+        }
     }
     let target_directory = match &cli.command {
         Command::Check(options) => {
@@ -581,6 +587,38 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     }
 }
 
+fn load_check_manifest(
+    current: &Path,
+    options: &CheckOptions,
+    package: Option<&str>,
+) -> Result<Manifest> {
+    if let Some(id) = package.filter(|value| value.starts_with("path+")) {
+        let path = options
+            .manifest_path
+            .as_deref()
+            .ok_or_else(|| Error::failure("a Cargo package ID requires --manifest-path"))?;
+        let manifest = Manifest::load_manifest_path(Path::new(path), None, true)?;
+        let expected = crate::metadata::package::package_id(
+            &manifest,
+            crate::metadata::package::Identity::Root,
+        )?;
+        // Never reinterpret an arbitrary ID as a name or change the selected
+        // manifest: rust-analyzer must be checking exactly the loaded package.
+        if id != expected {
+            return Err(Error::failure(format!(
+                "package ID `{id}` does not match selected package `{expected}`"
+            )));
+        }
+        return Ok(manifest);
+    }
+    Manifest::load_selected_or_manifest_path(
+        current,
+        options.manifest_path.as_deref().map(Path::new),
+        package,
+        true,
+    )
+}
+
 fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result<i32> {
     match build_inner(build, Some((target_root, options)))? {
         BuildOutcome::Check(code) => Ok(code),
@@ -830,7 +868,7 @@ fn build_inner(
     } else {
         None
     };
-    let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.all_targets);
+    let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.selects_tests());
     let test_dependencies = if needs_test_plan {
         let test_plan = dependency_plan(true)?;
         let outputs = match normal.as_ref() {
@@ -1897,7 +1935,12 @@ struct TestOutput<'a> {
 
 impl CheckOptions {
     fn has_target_selector(&self) -> bool {
-        self.all_targets || self.lib || self.bins || self.examples
+        self.all_targets
+            || self.lib
+            || self.bins
+            || self.bin.is_some()
+            || self.test.is_some()
+            || self.examples
     }
 
     fn selects_library(&self) -> bool {
@@ -1905,11 +1948,15 @@ impl CheckOptions {
     }
 
     fn selects_binaries(&self) -> bool {
-        self.all_targets || self.bins || !self.has_target_selector()
+        self.all_targets || self.bins || self.bin.is_some() || !self.has_target_selector()
     }
 
     fn selects_normal_targets(&self) -> bool {
-        self.selects_library() || self.selects_binaries()
+        self.selects_library() || self.selects_binaries() || self.test.is_some()
+    }
+
+    fn selects_tests(&self) -> bool {
+        self.all_targets || self.test.is_some()
     }
 }
 
@@ -1967,6 +2014,15 @@ fn compile_check_targets(
     if options.selects_binaries() && (build.manifest.library.is_none() || normal_library.is_some())
     {
         for target in &build.manifest.binaries {
+            if !options.all_targets
+                && !options.bins
+                && options
+                    .bin
+                    .as_ref()
+                    .is_some_and(|name| *name != target.name)
+            {
+                continue;
+            }
             match check_root_target(
                 build,
                 RootTarget::Binary(target),
@@ -1992,11 +2048,15 @@ fn compile_check_targets(
         }
     }
 
-    if !options.all_targets {
+    if !options.selects_tests() {
         return Ok(success);
     }
 
-    if let Some(target) = build.manifest.library.as_ref().filter(|target| target.test)
+    if let Some(target) = build
+        .manifest
+        .library
+        .as_ref()
+        .filter(|target| target.test && options.all_targets)
         && check_root_target(
             build,
             RootTarget::Library(target),
@@ -2020,7 +2080,12 @@ fn compile_check_targets(
     }
 
     if build.manifest.library.is_none() || normal_library.is_some() {
-        for target in build.manifest.binaries.iter().filter(|target| target.test) {
+        for target in build
+            .manifest
+            .binaries
+            .iter()
+            .filter(|target| target.test && options.all_targets)
+        {
             if check_root_target(
                 build,
                 RootTarget::Binary(target),
@@ -2054,6 +2119,14 @@ fn compile_check_targets(
             temporary_directory: staging,
         };
         for target in &build.manifest.integration_tests {
+            if !options.all_targets
+                && options
+                    .test
+                    .as_ref()
+                    .is_some_and(|name| *name != target.name)
+            {
+                continue;
+            }
             if check_root_target(
                 build,
                 RootTarget::IntegrationTest(target),

@@ -11,6 +11,8 @@ mod virtio_blk;
 mod virtio_device;
 pub mod virtio_net;
 mod virtio_queue;
+#[cfg(feature = "test-support")]
+pub use virtio_queue::tests::{test_descriptor_waiters, test_premature_completion_drop};
 // mod virtio_rng;
 
 use moto_sys::SysHandle;
@@ -18,9 +20,8 @@ pub use pci::le16;
 pub use pci::le32;
 pub use pci::le64;
 
-pub use virtio_blk::BlockDevice;
+pub use virtio_blk::{BlockDevice, RawCompletion};
 pub use virtio_device::{VirtioDevice, VirtioDeviceKind, discover_virtio_devices};
-pub use virtio_queue::ReadManyCompletion;
 pub use virtio_queue::WriteCompletion;
 
 pub(crate) use virtio_device::mapper;

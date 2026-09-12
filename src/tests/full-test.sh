@@ -37,6 +37,9 @@ ROOT_DIR="$WD/../.."
 IMG_DIR="$WD/../../vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
 
+# Host russhd tests also use this key, before the VM tests below.
+chmod 600 "$WD/test.key"
+
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
@@ -52,22 +55,31 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 "$WD/test-toolchain-llvm.sh"
 "$WD/test-toolchain-managed-sources.sh"
 "$WD/test-toolchain-native.sh"
+"$WD/test-toolchain-native-rust-analyzer.sh"
+"$WD/test-toolchain-patched-crates.sh"
 "$WD/test-toolchain-prefix.sh"
 "$WD/test-toolchain-runtime.sh"
+"$WD/test-toolchain-rust-analyzer.sh"
+"$WD/test-toolchain-rust-analyzer-identity.sh"
 "$WD/test-toolchain-state.sh"
 "$WD/test-toolchain-submodules.sh"
 "$WD/test-toolchain-tree-digest.sh"
 "$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
+"$WD/test-dev-memory-contract.sh"
+"$WD/test-rust-analyzer-size-contract.sh"
+python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release
 else
   bash "$WD/test-rmux-copy-status.sh" --self-test
 fi
 if [ "$BUILD" = "release" ]; then
+  "$WD/test-rust-analyzer-sources.sh" --release
   "$WD/test-rust-analyzer.sh" --release
 else
+  "$WD/test-rust-analyzer-sources.sh"
   "$WD/test-rust-analyzer.sh"
 fi
 # Keep a local runtime version bump from breaking only the dev-image suite.
@@ -91,6 +103,10 @@ else
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
+fi
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  "$WD/test-rust-analyzer-size.sh"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -135,6 +151,16 @@ if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
 else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+fi
+
+# Both allocators are host-tested: frusa serves the kernel, frusa_v2 the
+# runtime. Release covers the full stress and concurrency step counts.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
 fi
 
 # The netstack's own tests, under the exact feature closure sys-io builds it
@@ -191,9 +217,6 @@ if [ "$BUILD" = "release" ]; then
 else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
-
-# A fresh checkout leaves the key group-readable; ssh then silently ignores it.
-chmod 600 "$WD/test.key"
 
 SSH_OPTIONS=(
   -F /dev/null
@@ -438,6 +461,12 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest mem-placement")" ||
 echo "$out"
 [ "${out##*$'\n'}" = "mem_blocks: placement PASS" ] ||
   fail "systest mem-placement did not pass: $out"
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  "$WD/test-rust-analyzer-crates.sh"
+  "$WD/test-rust-analyzer-unwind.sh"
+  "$WD/test-rust-analyzer-native.sh"
+fi
 
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
   fail "mkdir returned success after a denied root-level creation"

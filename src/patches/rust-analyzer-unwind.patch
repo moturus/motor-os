@@ -1,0 +1,68 @@
+--- a/unwind/Cargo.toml
++++ b/unwind/Cargo.toml
+@@ -19,6 +19,9 @@
+ [target.'cfg(target_os = "xous")'.dependencies]
+ unwinding = { version = "0.2.7", features = ['rustc-dep-of-std', 'unwinder', 'fde-custom'], default-features = false }
+ 
++[target.'cfg(target_os = "motor")'.dependencies]
++unwinding = { version = "0.2.10", features = ['rustc-dep-of-std', 'unwinder', 'fde-gnu-eh-frame-hdr'], default-features = false }
++
+ [features]
+ 
+ # Only applies for Linux and Fuchsia targets
+--- a/unwind/src/lib.rs
++++ b/unwind/src/lib.rs
+@@ -14,6 +14,9 @@
+ #[cfg(not(all(windows, target_env = "msvc")))]
+ extern crate libc as _;
+ 
++#[cfg(target_os = "motor")]
++extern crate unwinding as _;
++
+ cfg_select! {
+     target_env = "msvc" => {
+         // Windows MSVC no extra unwinder support needed
+@@ -34,6 +37,7 @@
+         all(target_vendor = "fortanix", target_env = "sgx"),
+         all(target_os = "wasi", panic = "unwind"),
+         target_os = "xous",
++        target_os = "motor",
+     ) => {
+         mod libunwind;
+         pub use libunwind::*;
+@@ -48,7 +52,6 @@
+         // no unwinder on the system!
+         // - os=none ("bare metal" targets)
+         // - os=hermit
+-        // - os=motor
+         // - os=uefi
+         // - os=cuda
+         // - nvptx64-nvidia-cuda
+--- a/panic_unwind/src/lib.rs
++++ b/panic_unwind/src/lib.rs
+@@ -36,6 +36,7 @@
+         all(target_family = "windows", target_env = "gnu"),
+         target_os = "psp",
+         target_os = "xous",
++        target_os = "motor",
+         target_os = "solid_asp3",
+         all(target_family = "unix", not(any(target_os = "espidf", target_os = "nuttx"))),
+         all(target_vendor = "fortanix", target_env = "sgx"),
+--- a/std/src/sys/personality/mod.rs
++++ b/std/src/sys/personality/mod.rs
+@@ -29,6 +29,7 @@
+         all(target_family = "windows", target_env = "gnu"),
+         target_os = "psp",
+         target_os = "xous",
++        target_os = "motor",
+         target_os = "solid_asp3",
+         all(target_family = "unix", not(target_os = "espidf"), not(target_os = "nuttx")),
+         all(target_vendor = "fortanix", target_env = "sgx"),
+@@ -41,7 +42,6 @@
+         // - os=uefi
+         // - os=espidf
+         // - os=hermit
+-        // - os=motor
+         // - nvptx64-nvidia-cuda
+         // - arch=avr
+     }
