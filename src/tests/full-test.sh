@@ -83,6 +83,7 @@ else
   "$WD/test-rust-analyzer-sources.sh"
   "$WD/test-rust-analyzer.sh"
 fi
+"$WD/test-rustfmt-sources.sh"
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 

@@ -14,6 +14,10 @@ Decisions recorded:
   binaries and from std's per-platform `init` otherwise (section 4.3).
 - **D3 (design):** in Rust-linked binaries the pure-Rust unwinder owns the
   `_Unwind_*` ABI for Rust and C++ frames alike (section 4.4).
+- **D4 (accepted 2026-09-12):** rustfmt resolves its user configuration on
+  Motor from the fixed paths `/user` (home) and `/user/cfg` (configuration)
+  behind `cfg(target_os = "motor")`; the `dirs` and `dirs-sys` crates are not
+  compiled for Motor and no dirs-sys fork exists (section 4.6).
 
 ## 1. Goal
 
@@ -47,7 +51,12 @@ built artifacts.
   `dirs_sys::home_dir` and `dirs_sys::user_dir`; `dirs-sys 0.5.0` defines them
   only under `cfg(unix)` and its XDG parser imports the Unix `OsStringExt`.
   Motor declares no target family. rustfmt's config lookup therefore does not
-  compile for Motor today.
+  compile for Motor unchanged. rustfmt calls `dirs` in exactly two places,
+  both in `Config::from_resolved_toml_path`. Motor has no home directory in
+  the Unix sense: per-program configuration lives under `/user/cfg`
+  (`img_files/motor-os-dev/devtools/www/filesystem.html`), and the packaged
+  rust-analyzer already compiles `dirs` only off Motor
+  ([rust-analyzer.md](rust-analyzer.md), configuration row).
 - Cargo (tested with the selected host cargo on a Motor-target scratch crate)
   passes `-C panic=abort` for an abort profile and nothing for an unwind
   profile; rustc then uses the target default. That is why D1 flips the
@@ -96,7 +105,9 @@ as Motor OS work, so the motor-os `AGENTS.md` applies instead. Consequences:
 - Source comments in the fork follow the motor-os ratio guideline (about
   1:5) and may be written by the agent.
 - Formatting in the fork uses `./x fmt`, the fork's selected formatter.
-- No edit touches `src/tools/*`; rustfmt is built, not modified.
+- The only `src/tools` edit is rustfmt's user-configuration lookup (4.6),
+  the same shape as the analyzer's existing Motor configuration change;
+  nothing else under `src/tools` is modified.
 - The tests for the fork changes are the motor-os native fixtures in
   section 6, since Motor std cannot run under `./x test` on the host.
 - Nothing here is upstreamed to rust-lang/rust by this plan. If a change is
@@ -366,67 +377,36 @@ command line except ripgrep's carries `-C panic=abort` in both image modes.
 The `src/bin/lorry/Cargo.toml` edit is a profile line only, not Lorry source;
 per AGENTS.md it does not make this Lorry work.
 
-### 4.6 dirs-sys fork
+### 4.6 Rust fork: rustfmt configuration directories (D4)
 
-Upstream moved from GitHub to Codeberg: `https://github.com/dirs-dev/dirs-sys-rs`
-is archived and points at `https://codeberg.org/dirs/dirs-sys-rs`. Neither has a
-0.5.0 tag. Verified on 2026-09-11: the crates.io 0.5.0 archive was cut from
-commit `8bcd4aa2c35990d57a2cff2953793525fc42709c` ("Release 0.5.0"), and the
-Codeberg head `cdfffb62ef3bc94192c62d7b3dc95b234aab4e58` differs from it only
-in `README.md` and the `repository` field of `Cargo.toml`; every source file
-matches the registry archive
-(`e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab`).
+rustfmt looks for `rustfmt.toml` or `.rustfmt.toml` in the input's directory
+and its parents, then in the user's home directory, then in
+`<config dir>/rustfmt`. Upstream obtains the last two from `dirs`, which does
+not compile for Motor (section 2). Motor uses fixed per-user locations
+instead of `HOME` and XDG variables, so the fork answers those two lookups
+behind `cfg(target_os = "motor")` and compiles no `dirs` at all for Motor.
+This mirrors the analyzer fork, which compiles `dirs` only off Motor.
 
-Fork the Codeberg repository at `cdfffb62` into
-`/home/posk/motor-dev/dirs-sys-motor`. Remote, confirmed 2026-09-11:
-`https://github.com/moturus/dirs-sys-rs` (GitHub, like the other moturus
-patched dependencies), branch `motor-os`. The crate being patched is
-`dirs-sys`; `dirs 6.0.0` itself is unchanged. Changes in `src/lib.rs`:
+`src/tools/rustfmt/Cargo.toml`: move `dirs = "6.0"` from `[dependencies]` to
+`[target.'cfg(not(target_os = "motor"))'.dependencies]`.
 
-- Add `#[cfg(target_os = "motor")] mod target_motor { pub fn home_dir() ->
-  Option<PathBuf> }` returning nonempty `HOME`, else `std::env::home_dir()`,
-  and re-export it like the Unix and Redox arms.
-- Widen the `xdg_user_dirs` module and the `target_unix_not_mac` block
-  (`user_dir`, `user_dirs`) from `cfg(all(unix, not(any(macos, ios))))` to also
-  cover `target_os = "motor"`.
-- In `src/xdg_user_dirs.rs`, replace the Unix-only `OsStringExt::from_vec`
-  conversion with a helper: on Unix keep the byte conversion; on Motor use
-  `String::from_utf8(bytes).ok().map(OsString::from)` and skip entries that
-  fail.
+`src/tools/rustfmt/src/config/mod.rs`: the `dirs::home_dir()` and
+`dirs::config_dir()` calls in `resolve_project_file` become calls to two
+module-level helpers, `user_home_dir` and `user_config_dir`. Off Motor they
+forward to `dirs`; on Motor they return `Some("/user")` and
+`Some("/user/cfg")`. The search order is unchanged, so on Motor the user
+files are `/user/rustfmt.toml` (or `/user/.rustfmt.toml`) and then
+`/user/cfg/rustfmt/rustfmt.toml`. `HOME` and `XDG_CONFIG_HOME` are never
+consulted on Motor. The lookup after the project tree stays one
+`fs::metadata` per candidate, so its cost is unchanged.
 
-Tests, in the fork's `src/lib.rs` test module, runnable on Linux and natively
-on Motor through `src/tests/test-rust-analyzer-crates.sh --run-motor` style
-execution: HOME set, HOME empty with std fallback, absolute and relative
-`XDG_CONFIG_HOME`, a `user-dirs.dirs` fixture with valid entries, an invalid
-UTF-8 entry, and unchanged Linux results.
-
-Rust fork root `Cargo.toml`, in the existing `[patch.crates-io]` table:
-
-```toml
-dirs-sys = { git = "https://github.com/moturus/dirs-sys-rs.git", rev = "<full 40-char revision on the motor-os branch>" }
-```
-
-Cargo accepts only one of `branch`, `tag`, or `rev`, so the branch name is
-documentation, not part of the declaration. Until the user publishes the
-fork, candidate builds use a local Git source, never a `path` override:
-
-```toml
-dirs-sys = { git = "file:///home/posk/motor-dev/dirs-sys-motor", rev = "<committed revision>" }
-```
-
-This requires a committed revision in `/home/posk/motor-dev/dirs-sys-motor`
-before the Rust fork consumes it in patch 13. Under the "commit only when
-asked" policy that local commit is an explicit prerequisite the user
-authorizes; it is a commit in the dirs-sys fork only, not in motor-os or the
-Rust fork, and it is never pushed by a build. A `path` override would let
-edits to the sibling checkout change the build without changing the Rust
-manifest, lock, or toolchain key. A Git source with
-a full `rev` is content-addressed: the lock records the commit, the root lock
-hash is already a toolchain identity input, and Cargo verifies the checkout
-against that commit. Switching the URL to GitHub at publication changes the
-lock and therefore the key, which is intended. Regenerate the root lock with
-`cargo update -p dirs-sys` (network for the first fetch of the fork, then
-`--offline`) and confirm the diff touches only the `dirs-sys` source entry.
+The root `Cargo.toml` and `Cargo.lock` are untouched: the lock lists every
+platform's dependencies, and a target-specific table does not change it.
+`cargo metadata --locked --offline` on the root manifest passes and the lock
+hash stays `MOTOR_RUST_ROOT_LOCK_SHA256`. `cargo tree -p rustfmt-nightly
+--target x86_64-unknown-motor` on the root workspace must list neither `dirs`
+nor `dirs-sys`, while the Linux graph keeps `dirs 6.0.0`; the host test in
+6.2 asserts both. No dirs-sys fork, remote, or publication step exists.
 
 ### 4.7 motor-os producer: native rustfmt build
 
@@ -449,7 +429,11 @@ The tool step builds with the stage-1 Linux compiler against the stage-2
 Motor compiler libraries, which the same compiler built; bootstrap also copies
 the binary to `build/x86_64-unknown-motor/stage2/bin/rustfmt`. Confirm both
 paths from the first real build's verbose output and keep the Cargo output
-path as the source of truth. Add `toolchain_validate_native_rustfmt`: the
+path as the source of truth. Bootstrap's rustc step normally keeps only
+`.rmeta` files for most compiler crates because their objects live in
+`librustc_driver.so`; Motor has no shared driver, so the fork keeps every
+Motor `.rlib` in `src/bootstrap/src/core/build_steps/compile.rs` and rustfmt
+links the rlibs. Add `toolchain_validate_native_rustfmt`: the
 binary exists and is executable, contains the build-script string
 `dev (<first ten characters of EFFECTIVE_MOTOR_RUST_REV> <YYYY-MM-DD>)` as one
 contiguous byte sequence (that is how rustfmt's `build.rs` embeds it; the
@@ -573,9 +557,9 @@ formatter.
 ### 4.12 motor-os: toolchain selection and identity
 
 `src/toolchain-versions.sh`: after the fork commits exist, set
-`MOTOR_RUST_REF` and `MOTOR_RUST_REV` to the new branch and revision, update
-`MOTOR_RUST_ROOT_LOCK_SHA256` (dirs-sys entry) and, only if it changed,
-`MOTOR_RUST_LIBRARY_LOCK_SHA256`. Bump `MOTOR_TOOLCHAIN_ID` to
+`MOTOR_RUST_REF` and `MOTOR_RUST_REV` to the new branch and revision.
+`MOTOR_RUST_ROOT_LOCK_SHA256` and `MOTOR_RUST_LIBRARY_LOCK_SHA256` stay: no
+fork patch changes either lock (4.1, 4.6). Bump `MOTOR_TOOLCHAIN_ID` to
 `1.99.0-beta-f47d5bb-motor.dev.2` and `MOTOR_RUSTUP_TOOLCHAIN_BASE` to
 `motor-1.99.0-beta-f47d5bb-dev.2` (confirmed 2026-09-11). The toolchain key changes through
 these existing inputs; no schema change. `rust-toolchain.toml` and the
@@ -708,6 +692,11 @@ SSH.
 - `src/tests/test-toolchain-versions.sh`, `test-toolchain-cutover.sh`: the new
   revision, lock hashes, and toolchain id.
 - imager unit test: required executables count 10 with both rustfmt paths.
+- `src/tests/test-rustfmt-sources.sh`: on the selected compiler's source
+  tree, `cargo tree -p rustfmt-nightly --locked --offline` for the Motor
+  target lists neither `dirs` nor `dirs-sys`, and the Linux graph still
+  lists `dirs 6.0.0`. It runs in `full-test.sh` next to
+  `test-rust-analyzer-sources.sh` and honors `MOTOR_RUST_SOURCE`.
 - Delete `src/tests/test-rust-analyzer-unwind.sh` and its crate in the
   cleanup patch (11), after 6.1 has passed on a candidate.
 
@@ -763,8 +752,8 @@ and 3. Preserve LSP logs and terminal evidence as today.
 `docs/build-rustc.md`: replace the "Native rustfmt is not packaged" sentence
 with the formatting workflow; add a section on panic strategies (default
 unwind, opt-out via profile, native and shell examples, the `rt::init`
-boundary). `docs/toolchain.md` sections 3.2 and 5.2: the unwind default and
-the dirs-sys fork among the patched dependencies. `docs/plans/rust-unwinding.md`
+boundary). `docs/toolchain.md` sections 3.2 and 5.2: the unwind default, and
+that rustfmt adds no patched dependency. `docs/plans/rust-unwinding.md`
 and `docs/plans/helix-rust-analyzer.md`: status paragraphs pointing here.
 The packaged editor guide under `img_files/motor-os-dev`: formatting keys.
 
@@ -781,6 +770,7 @@ with its `rust-toolchain.toml` pointing at the candidate:
 
 ```sh
 MOTOR_RUST_SOURCE=/home/posk/motor-dev/rust-unwind-authoring src/tests/test-rust-analyzer-sources.sh --release
+MOTOR_RUST_SOURCE=/home/posk/motor-dev/rust-unwind-authoring src/tests/test-rustfmt-sources.sh
 src/tests/test-toolchain-native.sh
 src/tests/test-toolchain-native-rust-analyzer.sh
 src/tests/test-toolchain-assembly.sh
@@ -864,16 +854,16 @@ build rather than after it.
 | 9 | motor-os | first candidate: `src/build-motor-os.sh --source-mode authoring --rust-source /home/posk/motor-dev/rust-unwind-authoring --authoring-base <commit>` in the candidate worktree, with the 4.12 cache option; record cold-build time, memory, disk, sizes | producer completes: prefix, native compiler, analyzer, images; manifests valid |
 | 10 | motor-os | 6.6 candidate validation on the first candidate: 6.1 cases in both link modes with ELF validation, `cxx*` cases, native compilation, analyzer cancellation, semantic and resource gates, `test-rust-analyzer-size.sh` after the release image build, `__unw_` sentinel on rustc-main and the analyzer | all pass |
 | 11 | motor-os | 4.9 cleanup: delete the unwind helper, patch, old test and crate; update `MOTOR_OS_RUNTIME_INPUTS` and `src/patches/README.md` | `test-toolchain-versions.sh`, `test-toolchain-assembly.sh`; producer identity derivation succeeds |
-| 12 | dirs-sys fork | 4.6 port and tests; the user commits the fork locally (prerequisite for 13) | Linux tests pass; native tests pass on the candidate developer image |
-| 13 | fork | root manifest entry with the local `file://` Git source and `rev`; lock update | `cargo metadata --locked --offline` on the root workspace; lock diff is the single entry |
+| 12 | fork | 4.6 rustfmt lookup behind `cfg(target_os = "motor")`; `dirs` compiled only off Motor | `cargo metadata --locked --offline` on the root workspace; root lock hash unchanged; Motor graph free of `dirs` and `dirs-sys`; `./x check src/tools/rustfmt` |
+| 13 | motor-os | plan revision for D4; `test-rustfmt-sources.sh` (6.2) wired into `full-test.sh` | sources test passes against the authoring checkout |
 | 14 | motor-os | 4.7 rustfmt bootstrap request and `toolchain_validate_native_rustfmt`; 6.2 native contract test | contract test; second candidate run produces the binary and it passes 4.8 |
 | 15 | motor-os | 4.10 packaging, manifests, imager YAML and test | assembly, selection, imager tests |
 | 16 | motor-os | 6.3 native rustfmt fixtures in `test-candidate-vm.sh`; size ceilings set from the measured build (section 5) | pass on the second candidate's developer image |
 | 17 | motor-os | 4.11 Helix config and 6.4 acceptance | `MOTO_MEMORY_MIB=8192 FULL_TEST_IMAGE=motor-os-dev.qcow2 FULL_TEST_IMAGE_PREBUILT=1 FULL_TEST_VERIFY_DEV_SOURCES=1 src/tests/test-tui.sh --release` in the candidate worktree against the rebuilt candidate developer image |
-| 18 | fork + motor-os | dirs-sys GitHub `rev` pin after publication; 4.12 versions; cutover per section 8 | section 8 gates, including the full suites |
+| 18 | fork + motor-os | 4.12 versions after the fork branch is published; cutover per section 8 | section 8 gates, including the full suites |
 | 19 | motor-os | 6.5 documentation; final fresh developer image; evidence recorded here | full gates already passed |
 
-Patch 4 needs the D2 registration exactly as specified. Patches 3 to 5 and 13
+Patch 4 needs the D2 registration exactly as specified. Patches 3 to 5 and 12
 are fork edits governed by the motor-os rules per section 3. Nothing
 formatter-specific starts before patch 10 passes.
 
@@ -900,10 +890,10 @@ and fresh baseline images are retained; nothing overwrites a completed prefix
 or a user's guest disk. Failed candidates and their logs stay distinguishable
 from accepted artifacts.
 
-Commits and publication only on request. A managed release needs the dirs-sys
-revision reachable from `https://github.com/moturus/dirs-sys-rs`, a
-moturus/rust revision pinning it, matching lock hashes, and the motor-os
-selector update. Builds never create remotes, push, or move refs.
+Commits and publication only on request. A managed release needs the fork
+revision reachable from `https://github.com/moturus/rust`, matching lock
+hashes, and the motor-os selector update. Builds never create remotes, push,
+or move refs.
 
 ## 9. Scope and external writes
 
@@ -914,10 +904,12 @@ External source changes, only in separate checkouts:
   `library/panic_unwind/src/lib.rs`, `library/std/src/sys/personality/mod.rs`,
   `library/std/src/sys/pal/motor/mod.rs`, new
   `library/std/src/sys/pal/motor/eh_frame.rs`,
-  `compiler/rustc_target/src/spec/base/motor.rs`, root `Cargo.toml` and
-  `Cargo.lock`.
-- `/home/posk/motor-dev/dirs-sys-motor`: `src/lib.rs`, `src/xdg_user_dirs.rs`,
-  tests.
+  `compiler/rustc_target/src/spec/base/motor.rs`,
+  `src/tools/rustfmt/Cargo.toml`, `src/tools/rustfmt/src/config/mod.rs`, and
+  `src/bootstrap/src/core/build_steps/compile.rs` (4.7). The root
+  `Cargo.toml` and `Cargo.lock` are not modified. The branch also carries a
+  formatting-only `./x fmt` commit for `library/core/src/num/f32.rs` and
+  `f64.rs` with no Motor change.
 
 Other external writes: `/home/posk/motor-dev/toolchain-state`,
 `/home/posk/motor-dev/toolchains` (new keyed prefix), the authoring
@@ -943,7 +935,7 @@ All four items from the 2026-09-11 review are answered:
    `AGENTS.md` governs (section 3).
 2. **Toolchain id `.dev.2`: agreed** (section 4.12). **dirs-sys remote:**
    fork the Codeberg upstream into `https://github.com/moturus/dirs-sys-rs`,
-   branch `motor-os` (section 4.6).
+   branch `motor-os`; superseded by D4 on 2026-09-12 (no fork exists).
 3. **Size ceilings: agreed** as test-enforced limits set from the first
    measured build with about ten percent margin (section 5).
 4. **ripgrep switches to unwind: confirmed** (section 4.5).
@@ -1007,5 +999,14 @@ Fourth review (2026-09-11), four findings, all incorporated:
 4. The candidate wrapper did not inherit the developer suite's memory
    setting: 6.6 specifies an 8192 MiB default, preserves caller overrides,
    and adds coverage to the existing memory contract test in patch 1.
+
+Fifth revision (2026-09-12, user decision), recorded as D4: the dirs-sys fork
+is replaced by a `cfg(target_os = "motor")` lookup in rustfmt that returns
+`/user` and `/user/cfg`, and `dirs` is compiled only off Motor. The Codeberg
+fork, its `moturus/dirs-sys-rs` remote, the `file://` candidate source, the
+root lock change, and the publication prerequisite no longer apply (second
+review items 2 and 6, third review item 5). The retired local dirs-sys
+checkout is referenced by nothing. `HOME` and `XDG_CONFIG_HOME` are ignored
+on Motor, and the native fixtures assert that (6.3).
 
 No open questions remain. Implementation starts only when the user says so.
