@@ -326,10 +326,12 @@ served request instead of reaching the rest. The squeeze child keeps its
 target rather than holding a fixed amount: under pressure the rt.vdso
 housekeeping tick returns every process's allocator slack, and one return
 can lift the pool past the high watermark and clear the flag for the
-milliseconds until the child drains again. Both episodes count such dips,
-and every refusal check reissues a request served across one; a build that
-serves under pressure keeps serving for the half second that fails the
-check. The standalone form
+moment until the child drains again. The child holds each such dip open
+for at least 50 ms before draining, so a dip that could have influenced a
+request outlasts that request's reply; a request is issued only while the
+flag is up, and a served one is classified by the flag read right after it
+returns: down is a dip (the request goes again once the flag is back), up
+is a real serve that fails the test after recovery. The standalone form
 (`systest test-fs-pressure [n]`, default 100,000 lock acquires) drives a
 build *without* the refusal set into a sys-io abort; use it on a disposable
 release boot when changing this machinery.

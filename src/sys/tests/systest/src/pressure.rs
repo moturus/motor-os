@@ -10,10 +10,12 @@
 //! below the low watermark, but under pressure every process's housekeeping
 //! returns its allocator slack at its next tick, and one return can lift
 //! the pool past the high watermark: the flag clears until the child drains
-//! the pool again, a dip of milliseconds. The child maintains its target for
-//! that reason, and every mid-episode refusal check reissues a request that
-//! was served across a dip, counting the dips; a build that serves under
-//! pressure keeps serving, which is what the checks fail on.
+//! the pool again. The child maintains its target and holds each such dip
+//! open for at least `DIP_HOLD` before draining, so a dip that could have
+//! influenced a request outlasts that request's reply. Every mid-episode
+//! check issues its request while the flag is up and reads the flag right
+//! after a served one: down is a dip and the request goes again, up is a
+//! real serve and the test fails after recovery.
 
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -69,43 +71,68 @@ fn eventually(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
     panic!("not within {secs}s: {what}");
 }
 
+/// How long the squeeze child keeps a dip open before draining again.
+const DIP_HOLD: Duration = Duration::from_millis(50);
+
 /// What one mid-episode request came to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
     /// Refused with `E_OUT_OF_MEMORY`, possibly after serves across dips.
     Refused,
-    /// Served for half a second of retries: the refusal set lacks it.
+    /// Served with the flag up right after: the refusal set lacks it.
     Served,
-    /// The flag stayed down for a second: the squeeze child lost its hold.
+    /// The flag stayed down, or dips kept coming, for seconds: the squeeze
+    /// child lost its hold.
     FlagDown,
     /// Failed with some other error.
     Other,
 }
 
-/// Issues `op` until it is refused. A serve is the flag dipping under a
-/// housekeeping return: the squeeze child has the flag back within
-/// milliseconds, `dips` counts the serve, and `op` goes again. Nothing here
-/// allocates; the caller judges the verdict after recovery.
-fn until_refused(mut op: impl FnMut() -> std::io::Result<()>, dips: &mut usize) -> Verdict {
+/// Waits for the flag to be up; false if it stays down for a second.
+fn flag_up() -> bool {
+    let start = Instant::now();
+    while !moto_sys::memory_pressure() {
+        if start.elapsed() > Duration::from_secs(1) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+/// Issues `op` while the flag is up and classifies the outcome. A serve
+/// with the flag observed down right after it was handled across a dip,
+/// which the squeeze child holds open long enough to be seen here: `undo`
+/// reverses the serve, `dips` counts it, and `op` goes again once the flag
+/// is back. Nothing here allocates; the caller judges after recovery.
+fn until_refused_undo(
+    mut op: impl FnMut() -> std::io::Result<()>,
+    mut undo: impl FnMut(),
+    dips: &mut usize,
+) -> Verdict {
     let start = Instant::now();
     loop {
+        if !flag_up() {
+            return Verdict::FlagDown;
+        }
         match op() {
             Err(ref err) if is_refused(err) => return Verdict::Refused,
             Err(_) => return Verdict::Other,
             Ok(()) => {}
         }
-        *dips += 1;
-        if start.elapsed() > Duration::from_millis(500) {
+        if moto_sys::memory_pressure() {
             return Verdict::Served;
         }
-        let dip = Instant::now();
-        while !moto_sys::memory_pressure() {
-            if dip.elapsed() > Duration::from_secs(1) {
-                return Verdict::FlagDown;
-            }
-            std::thread::sleep(Duration::from_millis(1));
+        undo();
+        *dips += 1;
+        if start.elapsed() > Duration::from_secs(5) {
+            return Verdict::FlagDown;
         }
     }
+}
+
+fn until_refused(op: impl FnMut() -> std::io::Result<()>, dips: &mut usize) -> Verdict {
+    until_refused_undo(op, || {}, dips)
 }
 
 /// Verdict counts for one hammer arm, judged after recovery.
@@ -193,8 +220,8 @@ enum Hand {
     Kernel,
     /// The service accepted, then dropped, the connection.
     Service,
-    /// Neither, through twenty seconds of attempts or a flag that stayed
-    /// down: the service keeps clients, or the squeeze lost its hold.
+    /// Neither: the service kept the client with the flag up throughout,
+    /// or the squeeze lost its hold.
     Neither,
 }
 
@@ -215,37 +242,37 @@ impl Hand {
 /// sees it; when the pool happens to sit high enough in the band, the
 /// mapping is admitted and the service accepts, then drops, the connection.
 /// Both are designed refusals; which fires depends on where in the band the
-/// pool sits. A client the service keeps for five seconds was accepted
-/// across a dip: the probe connects again once the flag is back, `dips`
-/// counting the attempt. The connect error is returned for the caller to
-/// assert on -- immediately or after recovery, per that test's discipline.
+/// pool sits. The probe connects while the flag is up and watches the flag
+/// while it waits for the drop: a client kept through a dip was accepted
+/// across it, so `dips` counts the attempt and the probe connects again
+/// once the flag is back; a client kept with the flag up throughout is
+/// `Neither`. The connect error is returned for the caller to assert on --
+/// immediately or after recovery, per that test's discipline.
 fn probe_fresh_client(service: &str, dips: &mut usize) -> Result<Hand, moto_rt::Error> {
     let start = Instant::now();
     loop {
+        if !flag_up() {
+            return Ok(Hand::Neither);
+        }
         let conn = moto_ipc::io_channel::ClientConnection::connect(service)?;
         let mut dropped = false;
-        for _ in 0..50 {
+        let mut dipped = false;
+        for _ in 0..500 {
             if conn.wake_server().is_err() {
                 dropped = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            dipped |= !moto_sys::memory_pressure();
+            std::thread::sleep(Duration::from_millis(10));
         }
         drop(conn);
         if dropped {
             return Ok(Hand::Service);
         }
-        *dips += 1;
-        if start.elapsed() > Duration::from_secs(20) {
+        if !dipped || start.elapsed() > Duration::from_secs(20) {
             return Ok(Hand::Neither);
         }
-        let dip = Instant::now();
-        while !moto_sys::memory_pressure() {
-            if dip.elapsed() > Duration::from_secs(1) {
-                return Ok(Hand::Neither);
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        *dips += 1;
     }
 }
 
@@ -488,12 +515,14 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     }
 
     // The lock hammer: unbounded per-lock state in sys-io's lock manager.
-    // Pre-refusal this grows sys-io past its floor and the machine dies here.
+    // Pre-refusal this grows sys-io past its floor and the machine dies
+    // here, so acquisitions are retained until recovery; only a lock taken
+    // across a dip is released before its retry.
     let mut locks = Tally::default();
     for handle in &spam_handles {
-        // A lock taken across a dip is released before the retry.
-        locks.count(until_refused(
-            || handle.lock_shared().and_then(|()| handle.unlock()),
+        locks.count(until_refused_undo(
+            || handle.lock_shared(),
+            || handle.unlock().unwrap(),
             &mut dips,
         ));
     }
@@ -578,9 +607,11 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
 }
 
 /// The child side of the squeeze: drain free memory to `target_pages` and
-/// hold it there -- draining again after every mid-episode return, since a
-/// housekeeping tick in any process can hand back more than the gap to the
-/// high watermark -- until the parent writes a line to stdin.
+/// hold it there until the parent writes a line to stdin. A housekeeping
+/// tick in any process can hand back more than the gap to the high
+/// watermark; the child drains again after every such return, but only
+/// after `DIP_HOLD`, so the parent can see the flag down after a request
+/// that the return let through.
 pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
     // The stdin reader ends the squeeze; started before the drain, while its
     // thread charge is still admitted.
@@ -590,11 +621,14 @@ pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
         std::process::exit(0);
     });
 
+    let above_target = || AdmissionStats::get().unwrap().free_for_admission() > target_pages;
     let mut squeezed = false;
     loop {
-        let free = AdmissionStats::get().unwrap().free_for_admission();
-        if free > target_pages && SysMem::alloc(PAGE_SIZE_SMALL, 64).is_ok() {
-            continue;
+        if above_target() {
+            if squeezed {
+                std::thread::sleep(DIP_HOLD);
+            }
+            while above_target() && SysMem::alloc(PAGE_SIZE_SMALL, 64).is_ok() {}
         }
         if !squeezed {
             squeezed = true;

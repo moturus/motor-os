@@ -175,7 +175,22 @@ struct BlockMetrics {
 
 impl BlockMetrics {
     fn read() -> Self {
-        let m = crate::admission::kernel_metric;
+        use moto_stats::Collector;
+
+        let kernel = Collector::kernel();
+        let descs = Collector::describe(&kernel).unwrap();
+        let entries = Collector::query(&kernel).unwrap();
+        let m = |name: &str| {
+            let desc = descs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("no kernel metric '{name}'"));
+            entries
+                .iter()
+                .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
+                .map(|e| e.value)
+                .unwrap_or_else(|| panic!("kernel metric '{name}' not reported"))
+        };
         Self {
             total: m("mem.blocks_total"),
             whole: m("mem.blocks_whole"),
@@ -191,18 +206,15 @@ impl BlockMetrics {
         }
     }
 
-    // Bounds that hold at any moment, not only at quiescent points: the
-    // gauges are collected without a common lock.
+    // Individual bounds that hold at any moment: the gauges are collected
+    // without a common lock, so no relation between two of them is checked
+    // outside a quiescent point.
     fn check_bounds(&self) {
         assert!(self.total > 0, "{self:?}");
-        assert!(
-            self.whole + self.split + self.taken <= self.total,
-            "{self:?}"
-        );
-        assert!(
-            self.whole_low <= 64 && self.whole_low <= self.whole,
-            "{self:?}"
-        );
+        assert!(self.whole <= self.total, "{self:?}");
+        assert!(self.split <= self.total, "{self:?}");
+        assert!(self.taken <= self.total, "{self:?}");
+        assert!(self.whole_low <= 64, "{self:?}");
         assert!(self.free_low <= 64 * 512, "{self:?}");
         assert!(self.reserved > 0, "{self:?}");
     }
@@ -259,8 +271,6 @@ impl Drop for Handle {
 // runs that are physically contiguous and aligned: those can be huge.
 fn physical_runs(mapping: &Mapping) -> (Vec<u64>, u64) {
     let mut phys = Vec::with_capacity(mapping.pages as usize);
-    mapping.blocks(&mut phys);
-    phys.clear();
     for page in 0..mapping.pages {
         phys.push(SysMem::virt_to_phys(mapping.addr + page * PAGE_SIZE_SMALL).unwrap());
     }
