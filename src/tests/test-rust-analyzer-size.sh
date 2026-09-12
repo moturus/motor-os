@@ -24,8 +24,8 @@ measure() {
   printf 'binary_bytes=%s\nrust_src_bytes=%s\n' "$binary" "$sources" > "$evidence/sizes"
   check_size binary "$binary" 33554432
   check_size rust-src "$sources" 83886080
-  [ "$(rg -cx '  - "rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
-  [ "$(rg -cx '  - "rust-analyzer/devtools/rust/bin/rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
+  [ "$(grep -cxF -- '  - "rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
+  [ "$(grep -cxF -- '  - "rust-analyzer/devtools/rust/bin/rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
   for variant in without with; do
     # Only remove the analyzer overlay and its required executable; all other
     # inputs, permissions, source snapshots, and virtual capacity remain equal.
