@@ -311,7 +311,14 @@ lock waiter queued before the squeeze, granted by the one `UNLOCK` served
 mid-episode, covers the grant half of the carve-out. Every mid-episode probe
 records its outcome and is judged after recovery: an assertion inside the
 episode would both allocate and, on a regressed build, stop at the first
-served request instead of reaching the rest. The standalone form
+served request instead of reaching the rest. The squeeze child keeps its
+target rather than holding a fixed amount: under pressure the rt.vdso
+housekeeping tick returns every process's allocator slack, and one return
+can lift the pool past the high watermark and clear the flag for the
+milliseconds until the child drains again. Both episodes count such dips,
+and every refusal check reissues a request served across one; a build that
+serves under pressure keeps serving for the half second that fails the
+check. The standalone form
 (`systest test-fs-pressure [n]`, default 100,000 lock acquires) drives a
 build *without* the refusal set into a sys-io abort; use it on a disposable
 release boot when changing this machinery.

@@ -5,10 +5,19 @@
 //! client connections, and existing connections keep serving. The flag clears
 //! on its own -- from the kernel's free path -- once memory returns above the
 //! high watermark.
+//!
+//! The flag is the kernel's, not the test's. A squeeze child holds the pool
+//! below the low watermark, but under pressure every process's housekeeping
+//! returns its allocator slack at its next tick, and one return can lift
+//! the pool past the high watermark: the flag clears until the child drains
+//! the pool again, a dip of milliseconds. The child maintains its target for
+//! that reason, and every mid-episode refusal check reissues a request that
+//! was served across a dip, counting the dips; a build that serves under
+//! pressure keeps serving, which is what the checks fail on.
 
 use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use moto_sys::SysMem;
 use moto_sys::stats::AdmissionStats;
@@ -41,13 +50,6 @@ fn is_refused(err: &std::io::Error) -> bool {
         || err.raw_os_error() == Some(moto_rt::E_OUT_OF_MEMORY as i32)
 }
 
-fn assert_refused(err: &std::io::Error) {
-    assert!(
-        is_refused(err),
-        "refused operation failed with the wrong error: {err:?}"
-    );
-}
-
 /// Track the deepest free-for-admission sample of a pressure episode.
 fn sample_min(min_free: &mut u64) {
     let free = AdmissionStats::get().unwrap().free_for_admission();
@@ -65,6 +67,73 @@ fn eventually(secs: u64, what: &str, mut cond: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("not within {secs}s: {what}");
+}
+
+/// What one mid-episode request came to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Refused with `E_OUT_OF_MEMORY`, possibly after serves across dips.
+    Refused,
+    /// Served for half a second of retries: the refusal set lacks it.
+    Served,
+    /// The flag stayed down for a second: the squeeze child lost its hold.
+    FlagDown,
+    /// Failed with some other error.
+    Other,
+}
+
+/// Issues `op` until it is refused. A serve is the flag dipping under a
+/// housekeeping return: the squeeze child has the flag back within
+/// milliseconds, `dips` counts the serve, and `op` goes again. Nothing here
+/// allocates; the caller judges the verdict after recovery.
+fn until_refused(mut op: impl FnMut() -> std::io::Result<()>, dips: &mut usize) -> Verdict {
+    let start = Instant::now();
+    loop {
+        match op() {
+            Err(ref err) if is_refused(err) => return Verdict::Refused,
+            Err(_) => return Verdict::Other,
+            Ok(()) => {}
+        }
+        *dips += 1;
+        if start.elapsed() > Duration::from_millis(500) {
+            return Verdict::Served;
+        }
+        let dip = Instant::now();
+        while !moto_sys::memory_pressure() {
+            if dip.elapsed() > Duration::from_secs(1) {
+                return Verdict::FlagDown;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// Verdict counts for one hammer arm, judged after recovery.
+#[derive(Default, Debug)]
+struct Tally {
+    refused: usize,
+    served: usize,
+    flag_down: usize,
+    other: usize,
+}
+
+impl Tally {
+    fn count(&mut self, verdict: Verdict) {
+        match verdict {
+            Verdict::Refused => self.refused += 1,
+            Verdict::Served => self.served += 1,
+            Verdict::FlagDown => self.flag_down += 1,
+            Verdict::Other => self.other += 1,
+        }
+    }
+
+    fn assert_all_refused(&self, requests: usize, what: &str) {
+        assert_eq!(
+            (self.refused, self.served, self.flag_down, self.other),
+            (requests, 0, 0, 0),
+            "{what} not refused under pressure"
+        );
+    }
 }
 
 /// Drive free-for-admission into the pressure band and hold it there:
@@ -96,10 +165,11 @@ fn squeeze_to_pressure() -> crate::subcommand::Subcommand {
     assert_eq!(line.trim(), "squeezed");
 
     // The child's own admitted allocations crossed the low watermark, so the
-    // kernel has already raised the flag.
-    assert!(
-        moto_sys::memory_pressure(),
-        "flag not raised by the squeeze"
+    // kernel has already raised the flag -- barring a dip at this instant.
+    eventually(
+        10,
+        "the flag raised by the squeeze",
+        moto_sys::memory_pressure,
     );
     child
 }
@@ -116,6 +186,28 @@ fn release_squeeze(mut child: crate::subcommand::Subcommand) {
     });
 }
 
+/// Which hand refused a fresh client.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hand {
+    /// Kernel admission refused the channel's mapping.
+    Kernel,
+    /// The service accepted, then dropped, the connection.
+    Service,
+    /// Neither, through twenty seconds of attempts or a flag that stayed
+    /// down: the service keeps clients, or the squeeze lost its hold.
+    Neither,
+}
+
+impl Hand {
+    fn describe(self) -> &'static str {
+        match self {
+            Hand::Kernel => "refused by kernel admission",
+            Hand::Service => "accepted, then dropped by sys-io",
+            Hand::Neither => "neither refused nor dropped",
+        }
+    }
+}
+
 /// Probe a fresh io_channel client mid-episode: it dies at one of two racing
 /// hands. The channel's own eager mapping (~200 pages) usually fails kernel
 /// admission -- the band between the user floor and the low watermark is
@@ -123,19 +215,37 @@ fn release_squeeze(mut child: crate::subcommand::Subcommand) {
 /// sees it; when the pool happens to sit high enough in the band, the
 /// mapping is admitted and the service accepts, then drops, the connection.
 /// Both are designed refusals; which fires depends on where in the band the
-/// pool sits. `Ok(true)` means the service was the dropping hand; the
-/// connect error is returned for the caller to assert on -- immediately or
-/// after recovery, per that test's discipline.
-fn probe_fresh_client(service: &str) -> Result<bool, moto_rt::Error> {
-    match moto_ipc::io_channel::ClientConnection::connect(service) {
-        Ok(conn) => {
-            eventually(5, "the dropped client's server handle died", || {
-                conn.wake_server().is_err()
-            });
-            drop(conn);
-            Ok(true)
+/// pool sits. A client the service keeps for five seconds was accepted
+/// across a dip: the probe connects again once the flag is back, `dips`
+/// counting the attempt. The connect error is returned for the caller to
+/// assert on -- immediately or after recovery, per that test's discipline.
+fn probe_fresh_client(service: &str, dips: &mut usize) -> Result<Hand, moto_rt::Error> {
+    let start = Instant::now();
+    loop {
+        let conn = moto_ipc::io_channel::ClientConnection::connect(service)?;
+        let mut dropped = false;
+        for _ in 0..50 {
+            if conn.wake_server().is_err() {
+                dropped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        Err(err) => Err(err),
+        drop(conn);
+        if dropped {
+            return Ok(Hand::Service);
+        }
+        *dips += 1;
+        if start.elapsed() > Duration::from_secs(20) {
+            return Ok(Hand::Neither);
+        }
+        let dip = Instant::now();
+        while !moto_sys::memory_pressure() {
+            if dip.elapsed() > Duration::from_secs(1) {
+                return Ok(Hand::Neither);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
@@ -174,27 +284,48 @@ fn test_pressure_mode() {
     // the low watermark and the user floor must absorb.
     let entry_free = AdmissionStats::get().unwrap().free_for_admission();
     let mut min_free = entry_free;
+    let mut dips = 0;
 
     // New sockets are refused by sys-io without a syscall...
-    assert_refused(&TcpListener::bind("127.0.0.1:0").unwrap_err());
-    assert_refused(&TcpStream::connect(addr).unwrap_err());
-    assert_refused(&UdpSocket::bind("127.0.0.1:0").unwrap_err());
+    let mut refusals = Tally::default();
+    refusals.count(until_refused(
+        || TcpListener::bind("127.0.0.1:0").map(drop),
+        &mut dips,
+    ));
+    refusals.count(until_refused(
+        || TcpStream::connect(addr).map(drop),
+        &mut dips,
+    ));
+    refusals.count(until_refused(
+        || UdpSocket::bind("127.0.0.1:0").map(drop),
+        &mut dips,
+    ));
     sample_min(&mut min_free);
 
-    // ...a process spawn fails fast in rt.vdso, before any work is done...
-    let spawn_err = std::process::Command::new(std::env::args().next().unwrap())
-        .arg("subcommand")
-        .spawn()
-        .expect_err("spawn succeeded under memory pressure");
-    assert_refused(&spawn_err);
+    // ...a process spawn fails fast in rt.vdso, before any work is done (one
+    // spawned across a dip is reaped)...
+    let exe = std::env::args().next().unwrap();
+    refusals.count(until_refused(
+        || {
+            std::process::Command::new(&exe)
+                .arg("subcommand")
+                .spawn()
+                .map(|mut child| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                })
+        },
+        &mut dips,
+    ));
 
     // ...and a fresh client connection to sys-io is refused at one of the
-    // two hands in `probe_fresh_client`; this test asserts mid-episode.
-    let client_dropped = match probe_fresh_client("sys-io") {
-        Ok(dropped) => dropped,
+    // two hands in `probe_fresh_client`; judged with the rest after
+    // recovery.
+    let client_hand = match probe_fresh_client("sys-io", &mut dips) {
+        Ok(hand) => hand,
         Err(err) => {
             assert_eq!(err, moto_rt::Error::OutOfMemory);
-            false
+            Hand::Kernel
         }
     };
     sample_min(&mut min_free);
@@ -223,17 +354,15 @@ fn test_pressure_mode() {
     // enough for sys-io to be the one to refuse it.
     println!(
         "pressure residual measurements: entry free {entry_free}, min free {min_free}, \
-         residual {} pages; client probe: {}",
+         residual {} pages; client probe: {}; flag dips {dips}",
         entry_free.saturating_sub(min_free),
-        if client_dropped {
-            "accepted, then dropped by sys-io"
-        } else {
-            "refused by kernel admission"
-        },
+        client_hand.describe(),
     );
+    refusals.assert_all_refused(4, "sockets and spawn");
+    assert_ne!(client_hand, Hand::Neither, "fresh sys-io client kept");
     assert!(sys_io_metric("net.pressure_entries") > entries_before);
     assert!(sys_io_metric("net.pressure_refused") >= refused_before + 3);
-    if client_dropped {
+    if client_hand == Hand::Service {
         assert!(sys_io_metric("net.pressure_refused_clients") > clients_refused_before);
     }
 
@@ -331,96 +460,82 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     let clients_refused_before = sys_io_metric_opt("fs.pressure_refused_clients").unwrap_or(0);
 
     let child = squeeze_to_pressure();
+    let mut dips = 0;
 
     // Nothing below asserts until the episode is over: on a pre-refusal
     // build the early probes succeed, and an assert there would end the run
     // before the arm that actually kills sys-io (the lock hammer) ever runs.
     // Classify, then judge after recovery.
     let buf = [0xA5_u8; 2 * 4096];
-    let mut writes_ok = 0_usize;
-    let mut writes_refused = 0_usize;
-    let mut writes_other = 0_usize;
+    let mut writes = Tally::default();
     for i in 0..HAMMER_WRITES {
         // Alternate the request formats: a 4096-byte write donates one page
         // (`shared_pages[SINGLE_PAGE_SLOT]`), an 8192-byte write takes the
         // multi-page format -- a refusal must free the pages of both.
         let len = if i % 2 == 0 { 4096 } else { buf.len() };
-        match file.write_all(&buf[..len]) {
-            Ok(()) => writes_ok += 1,
-            Err(ref err) if is_refused(err) => writes_refused += 1,
-            Err(_) => writes_other += 1,
-        }
+        writes.count(until_refused(|| file.write_all(&buf[..len]), &mut dips));
     }
 
     // Read-only commands are in the refusal set too, and each metadata call
     // resolves its path afresh, donating a page to CMD_STAT -- this arm pins
     // the single-page release branch for a command other than CMD_WRITE.
-    let mut stats_ok = 0_usize;
-    let mut stats_refused = 0_usize;
-    let mut stats_other = 0_usize;
+    let mut stats = Tally::default();
     for _ in 0..HAMMER_STATS {
-        match std::fs::metadata(&path) {
-            Ok(_) => stats_ok += 1,
-            Err(ref err) if is_refused(err) => stats_refused += 1,
-            Err(_) => stats_other += 1,
-        }
+        stats.count(until_refused(
+            || std::fs::metadata(&path).map(drop),
+            &mut dips,
+        ));
     }
 
     // The lock hammer: unbounded per-lock state in sys-io's lock manager.
     // Pre-refusal this grows sys-io past its floor and the machine dies here.
-    let mut locks_ok = 0_usize;
-    let mut locks_refused = 0_usize;
-    let mut locks_other = 0_usize;
+    let mut locks = Tally::default();
     for handle in &spam_handles {
-        match handle.lock_shared() {
-            Ok(()) => locks_ok += 1,
-            Err(ref err) if is_refused(err) => locks_refused += 1,
-            Err(_) => locks_other += 1,
-        }
+        // A lock taken across a dip is released before the retry.
+        locks.count(until_refused(
+            || handle.lock_shared().and_then(|()| handle.unlock()),
+            &mut dips,
+        ));
     }
 
     // UNLOCK is the carve-out, since Drop-based unlock never retries; the
     // waiter-file unlock also hands the queued waiter its grant while the
     // flag is up. A lock acquire stays refused.
-    let acquire_result = lock_probe.try_lock();
+    // The held shared lock makes an exclusive acquire served across a dip
+    // report WouldBlock; served either way, it goes again after the dip.
+    let acquire_verdict = until_refused(
+        || match lock_probe.try_lock() {
+            Ok(()) => lock_probe.unlock(),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+            Err(std::fs::TryLockError::Error(err)) => Err(err),
+        },
+        &mut dips,
+    );
     let unlock_result = lock_held.unlock();
     let waiter_unlock_result = waiter_holder.unlock();
 
     // A fresh FS client dies at one of the same two hands as a net client;
     // judged after recovery.
-    let fs_client_probe = probe_fresh_client("sys-io-fs");
+    let fs_client_probe = probe_fresh_client("sys-io-fs", &mut dips);
 
     release_squeeze(child);
 
     // The episode's verdict, printed and asserted only now: println and the
     // metrics RPC both allocate, which nothing may do while the flag is up.
     println!(
-        "fs under pressure: writes ok/refused/other {writes_ok}/{writes_refused}/{writes_other}, \
-         stats {stats_ok}/{stats_refused}/{stats_other}, \
-         lock acquires {locks_ok}/{locks_refused}/{locks_other}, \
-         acquire refused {}, unlock {unlock_result:?}, waiter unlock {waiter_unlock_result:?}",
-        acquire_result.is_err()
+        "fs under pressure: writes {writes:?}, stats {stats:?}, lock acquires {locks:?}, \
+         acquire {acquire_verdict:?}, unlock {unlock_result:?}, \
+         waiter unlock {waiter_unlock_result:?}, flag dips {dips}"
     );
 
+    writes.assert_all_refused(HAMMER_WRITES, "FS writes");
+    stats.assert_all_refused(HAMMER_STATS, "FS metadata");
+    locks.assert_all_refused(lock_spam, "FS lock acquires");
     assert_eq!(
-        (writes_ok, writes_other, writes_refused),
-        (0, 0, HAMMER_WRITES),
-        "FS writes not refused under pressure"
+        acquire_verdict,
+        Verdict::Refused,
+        "lock acquire under pressure"
     );
-    assert_eq!(
-        (stats_ok, stats_other, stats_refused),
-        (0, 0, HAMMER_STATS),
-        "FS metadata not refused under pressure"
-    );
-    assert_eq!(
-        (locks_ok, locks_other, locks_refused),
-        (0, 0, lock_spam),
-        "FS lock acquires not refused under pressure"
-    );
-    match acquire_result {
-        Err(std::fs::TryLockError::Error(ref err)) => assert_refused(err),
-        ref wrong => panic!("lock acquire under pressure: {wrong:?}"),
-    }
     unlock_result.expect("UNLOCK refused under pressure");
     waiter_unlock_result.expect("waiter-file UNLOCK refused under pressure");
 
@@ -432,13 +547,14 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     });
     waiter.join().unwrap();
 
-    let client_dropped = match fs_client_probe {
-        Ok(dropped) => dropped,
+    let client_hand = match fs_client_probe {
+        Ok(hand) => hand,
         Err(err) => {
             assert_eq!(err, moto_rt::Error::OutOfMemory);
-            false
+            Hand::Kernel
         }
     };
+    assert_ne!(client_hand, Hand::Neither, "fresh sys-io-fs client kept");
 
     // Service resumes on the same handles and the same file.
     file.write_all(&buf).unwrap();
@@ -454,29 +570,39 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     // client counter only if sys-io was the refusing hand.
     let hammered = (HAMMER_WRITES + HAMMER_STATS + lock_spam + 1) as u64;
     assert!(sys_io_metric("fs.pressure_refused") >= refused_before + hammered);
-    if client_dropped {
+    if client_hand == Hand::Service {
         assert!(sys_io_metric("fs.pressure_refused_clients") > clients_refused_before);
     }
 
     println!("test_fs_under_pressure PASS");
 }
 
-/// The child side of `test_pressure_mode`: drain free memory to
-/// `target_pages` and hold it until the parent writes a line to stdin.
+/// The child side of the squeeze: drain free memory to `target_pages` and
+/// hold it there -- draining again after every mid-episode return, since a
+/// housekeeping tick in any process can hand back more than the gap to the
+/// high watermark -- until the parent writes a line to stdin.
 pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
+    // The stdin reader ends the squeeze; started before the drain, while its
+    // thread charge is still admitted.
+    std::thread::spawn(|| {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        std::process::exit(0);
+    });
+
+    let mut squeezed = false;
     loop {
         let free = AdmissionStats::get().unwrap().free_for_admission();
-        if free <= target_pages || SysMem::alloc(PAGE_SIZE_SMALL, 64).is_err() {
-            break;
+        if free > target_pages && SysMem::alloc(PAGE_SIZE_SMALL, 64).is_ok() {
+            continue;
         }
+        if !squeezed {
+            squeezed = true;
+            // The parent must not probe before the squeeze is complete.
+            println!("squeezed");
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
-
-    // The parent must not probe before the squeeze is complete.
-    println!("squeezed");
-
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    std::process::exit(0);
 }
 
 fn test_large_allocs() {
