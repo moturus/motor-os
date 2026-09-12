@@ -36,6 +36,19 @@ DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
+# A top-level invocation runs its goals in one logged sub-make through the
+# driver, which ends a failed build with a summary of exactly what failed.
+ifeq ($(MAKELEVEL),0)
+MAKE_GOALS := $(or $(MAKECMDGOALS),all)
+.PHONY: $(MAKE_GOALS)
+$(firstword $(MAKE_GOALS)):
+	@$(ROOT_DIR)/src/make-driver.sh $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
+ifneq ($(words $(MAKE_GOALS)),1)
+$(filter-out $(firstword $(MAKE_GOALS)),$(MAKE_GOALS)): $(firstword $(MAKE_GOALS))
+	@:
+endif
+else
+
 all: base.img main.img
 images: base.img main.img dev.img
 boot: mbr.bin boot.bin kloader
@@ -328,3 +341,5 @@ clean:
 	rm -f lib/rt.vdso/rt.vdso
 	rm -rf src/bin/lorry/tests/metadata-schema/target
 	rm -rf src/tests/rust-analyzer-smoke/fixtures/motor/target
+
+endif
