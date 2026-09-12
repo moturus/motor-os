@@ -21,7 +21,7 @@ is redesigned or its case is recorded as untested.
 | Module | Role |
 |---|---|
 | `mm/mod.rs` | Constants (direct map at 1 << 46, kernel at 34 MiB physical), page sizes, the raw slab page supplier. |
-| `mm/kheap.rs` | The kernel heap: a bump allocator over the boot heap until memory is initialized, then page-granular allocation from the kernel heap region. |
+| `mm/kheap.rs` | The kernel heap: `frusa_v2` with a per-CPU stage (private blocks and a magazine of freed slots) over a page supplier that bumps from the boot heap until memory is initialized, then allocates from the kernel heap region. |
 | `mm/slab.rs` | Fixed-size slabs with intrusive refcounts (`SlabArc`); used for `Frame`, `Page` and segment descriptors, never deallocated. |
 | `mm/phys.rs` | The physical allocator facade: `Frame` ownership, the fixed mid-page segment, stage-2 release, metrics and statistics. |
 | `mm/phys_blocks/` | The block pool: descriptors, free lists, search, boot shaping and the production instance. |

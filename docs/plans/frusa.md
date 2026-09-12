@@ -1,10 +1,11 @@
 # Frusa v2: the runtime allocator
 
 `frusa_v2` (`src/sys/lib/frusa_v2`) is the allocator behind every process's
-`GlobalAlloc`, wired in by `rt.vdso`. The kernel keeps the original `frusa`
-crate; §8 assesses moving it. §1 to §6 describe the allocator as it is; §7
-is the plan to close the fast-path gap to glibc. This document follows the
-root `AGENTS.md`.
+`GlobalAlloc`, wired in by `rt.vdso`, and behind the kernel heap; §8 is the
+assessment that moved the kernel off the original `frusa` crate and the
+record of the switch. §1 to §6 describe the allocator as it is; §7 is the
+plan to close the fast-path gap to glibc. This document follows the root
+`AGENTS.md`.
 
 ## 1. Overview and constraints
 
@@ -471,11 +472,12 @@ entry path; §7.2 lists it with the other follow-ups.
 
 ## 8. The kernel heap
 
-The kernel's `GlobalAlloc` (`src/sys/kernel/src/mm/kheap.rs`) is the
+The kernel's `GlobalAlloc` (`src/sys/kernel/src/mm/kheap.rs`) was the
 original `frusa` crate behind `RawAllocator`, a page-granular backend that
 bumps from a 2 MiB boot area until memory is initialized and then hands
-out `VmemKind::KernelHeap` pages. This section is the assessment of
-replacing it with `frusa_v2`, measured on 2026-09-10.
+out `VmemKind::KernelHeap` pages. §8.1 to §8.4 are the assessment of
+replacing it with `frusa_v2`, measured on 2026-09-10; §8.5 records the
+switch.
 
 ### 8.1 What a switch needs
 
@@ -618,3 +620,18 @@ swap with the uncached path; the per-CPU `Cache4K`; the magazine in front
 of it. Measure before and after with `systest
 wake-bench` and a flood of object creation. Expect a modest system-level
 effect and a robustness gain at scale.
+
+### 8.5 The switch
+
+Done on 2026-09-12 as one patch, the three pieces of the recommendation
+together. The kernel depends on `frusa_v2` instead of `frusa`; `frusa`
+stays in the tree as a published crate. `kheap.rs` wraps a `Frusa4K` over
+the unchanged `RawAllocator` in a `GlobalAlloc` that consults a static
+per-CPU stage: a `Cache4K` whose shard is the CPU, and per class a
+magazine, the LIFO of §8.4 linked through the slots' first words with the
+limit of §2, popped and pushed with plain loads and stores. Until CPU
+identity is valid (`mm::cpu_initialized`, the same gate as the physical
+allocator's cursors) the shared path serves, so nothing runs at boot; the
+stage is 192 bytes per CPU of static data. `realloc` keeps the same-class
+shortcut. `reclaim()` is unchanged and leaves what the stages hold, as
+§8.1 says. The crate and the runtime are untouched.

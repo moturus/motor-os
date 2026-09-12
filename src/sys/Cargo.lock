@@ -855,7 +855,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 1.3.2",
  "elfloader",
- "frusa",
+ "frusa_v2",
  "intrusive-collections",
  "log",
  "moto-rt",

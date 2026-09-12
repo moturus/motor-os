@@ -1,4 +1,4 @@
-use core::{alloc::Layout, sync::atomic::*};
+use core::{alloc::Layout, cell::Cell, sync::atomic::*};
 
 use super::PAGE_SIZE_SMALL;
 use super::PAGE_SIZE_SMALL_LOG2;
@@ -96,8 +96,116 @@ pub(super) static RAW_ALLOCATOR: RawAllocator = RawAllocator {
     allocated: AtomicU64::new(0),
 };
 
+static FRUSA: frusa_v2::Frusa4K = frusa_v2::Frusa4K::new(&RAW_ALLOCATOR);
+
+/// Size classes of `Frusa4K`: 16 bytes to 4 KiB.
+const CLASSES: usize = 9;
+
+/// One CPU's stage in front of `FRUSA` (docs/plans/frusa.md, section 8):
+/// the allocator's private blocks and, per class, a LIFO of freed slots
+/// linked through their first word. Kernel code is never preempted and
+/// interrupt handlers do not allocate, so an allocation runs to completion
+/// before another can begin on the same CPU: plain loads and stores are
+/// enough, and the CPU is the guard shard.
+#[repr(align(64))]
+struct CpuHeap {
+    cache: frusa_v2::Cache4K,
+    heads: [Cell<*mut u8>; CLASSES],
+    lens: [Cell<u32>; CLASSES],
+}
+
+struct CpuHeaps([CpuHeap; crate::config::MAX_CPUS as usize]);
+
+// Each CPU touches only its own entry, and only from one context at a time.
+unsafe impl Sync for CpuHeaps {}
+
+static CPU_HEAPS: CpuHeaps = CpuHeaps(
+    [const {
+        CpuHeap {
+            cache: frusa_v2::Cache4K::new(),
+            heads: [const { Cell::new(core::ptr::null_mut()) }; CLASSES],
+            lens: [const { Cell::new(0) }; CLASSES],
+        }
+    }; crate::config::MAX_CPUS as usize],
+);
+
+/// This CPU's stage, once CPU identity is valid; before that the shared
+/// path serves.
+fn cpu_heap() -> Option<(&'static CpuHeap, u32)> {
+    super::cpu_initialized().then(|| {
+        let cpu = crate::arch::current_cpu();
+        (&CPU_HEAPS.0[cpu as usize], cpu as u32)
+    })
+}
+
+/// The allocator's class of `layout`, or `None` above 4 KiB.
+fn class_of(layout: &Layout) -> Option<usize> {
+    let size = layout
+        .size()
+        .next_power_of_two()
+        .max(layout.align())
+        .max(16);
+    (size <= 4096).then(|| size.ilog2() as usize - 4)
+}
+
+/// Slots a CPU keeps per class: at most 64, and at most 16 KiB.
+fn magazine_limit(class: usize) -> u32 {
+    ((16 * 1024) >> (class + 4)).min(64)
+}
+
+struct KernelHeap;
+
 #[global_allocator]
-static KHEAP: frusa::Frusa4K = frusa::Frusa4K::new(&RAW_ALLOCATOR);
+static KHEAP: KernelHeap = KernelHeap;
+
+unsafe impl core::alloc::GlobalAlloc for KernelHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let Some((heap, cpu)) = cpu_heap() else {
+            return FRUSA.alloc(layout);
+        };
+        if let Some(class) = class_of(&layout) {
+            let slot = heap.heads[class].get();
+            if !slot.is_null() {
+                heap.heads[class].set(*(slot as *const *mut u8));
+                heap.lens[class].set(heap.lens[class].get() - 1);
+                return slot;
+            }
+        }
+        heap.cache.set_shard(cpu);
+        FRUSA.alloc_cached(&heap.cache, layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let Some((heap, cpu)) = cpu_heap() else {
+            return FRUSA.dealloc(ptr, layout);
+        };
+        if let Some(class) = class_of(&layout) {
+            let len = heap.lens[class].get();
+            if len < magazine_limit(class) {
+                *(ptr as *mut *mut u8) = heap.heads[class].get();
+                heap.heads[class].set(ptr);
+                heap.lens[class].set(len + 1);
+                return;
+            }
+        }
+        heap.cache.set_shard(cpu);
+        FRUSA.dealloc_cached(&heap.cache, ptr, layout)
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+        let class = class_of(&layout);
+        if class.is_some() && class == class_of(&new_layout) {
+            return ptr; // Same class: the slot already fits.
+        }
+        let new_ptr = self.alloc(new_layout);
+        if !new_ptr.is_null() {
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+            self.dealloc(ptr, layout);
+        }
+        new_ptr
+    }
+}
 
 pub fn init(segment: super::MemorySegment) {
     #[cfg(debug_assertions)]
@@ -195,6 +303,8 @@ pub fn heap_stats() -> HeapStats {
     }
 }
 
+/// Returns every batch whose blocks are all free. Slots the CPUs keep
+/// count as in use, so what they hold stays.
 pub fn reclaim() {
-    KHEAP.reclaim();
+    FRUSA.reclaim();
 }

@@ -153,7 +153,7 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
 fi
 
-# Both allocators are host-tested: frusa serves the kernel, frusa_v2 the
+# Both allocator crates are host-tested; frusa_v2 serves the kernel and the
 # runtime. Release covers the full stress and concurrency step counts.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
