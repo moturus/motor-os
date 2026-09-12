@@ -139,6 +139,14 @@ toolchain_validate_native_rustc() {
 	toolchain_validate_native_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" "$binary"
 }
 
+toolchain_validate_native_rustfmt() {
+	local binary="$1" expected_build="$2"
+	[ -x "$binary" ] || toolchain_die "native rustfmt was not produced: $binary" || return
+	grep -aFq "$expected_build" "$binary" ||
+		toolchain_die "native rustfmt lacks the expected build identity" || return
+	toolchain_validate_native_elf "$binary" "$STANDALONE_LLVM_BIN/llvm-readelf" "$binary"
+}
+
 toolchain_render_native_llvm_config() {
 	local real_bin="$1" target_root="$2" real_root
 	local real_bin_q real_root_q target_root_q
@@ -206,7 +214,7 @@ toolchain_generate_native_llvm_config() {
 toolchain_build_native_rustc() {
 	local rust="$1" authoring_base="$2" bootstrap_cache="$3"
 	local expected_digest="$AUTHORING_SOURCE_DIGEST"
-	local prefix_before prefix_after native_llvm_bin target_llvm_root
+	local prefix_before prefix_after native_llvm_bin target_llvm_root rustfmt_date
 	toolchain_generate_cross_wrappers "$ASSEMBLY_SYSROOT" "$STANDALONE_LLVM_BIN" || return
 	native_llvm_bin="$ASSEMBLY_ROOT/native-llvm-config/bin"
 	target_llvm_root="$rust/build/x86_64-unknown-motor/llvm"
@@ -222,7 +230,7 @@ toolchain_build_native_rustc() {
 	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
 		PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache" \
 		./x.py --config "$NATIVE_BOOTSTRAP_CONFIG" build \
-		--stage 2 compiler --host x86_64-unknown-motor \
+		--stage 2 compiler src/tools/rustfmt --host x86_64-unknown-motor \
 		--target x86_64-unknown-motor); then
 		toolchain_reject_assembly "native Rust bootstrap failed"
 		return 1
@@ -242,8 +250,19 @@ toolchain_build_native_rustc() {
 		return 1
 	}
 	RUSTC_MAIN="$rust/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main"
+	RUSTFMT_MAIN="$rust/build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/rustfmt"
 	toolchain_validate_native_rustc "$RUSTC_MAIN" || {
 		toolchain_reject_assembly "native rustc identity validation failed"
+		return 1
+	}
+	rustfmt_date="$(git -C "$rust" log -1 --date=short --format=%cd \
+		"$EFFECTIVE_MOTOR_RUST_REV")" || {
+		toolchain_reject_assembly "effective Rust revision date is unavailable"
+		return 1
+	}
+	toolchain_validate_native_rustfmt "$RUSTFMT_MAIN" \
+		"dev (${EFFECTIVE_MOTOR_RUST_REV:0:10} $rustfmt_date)" || {
+		toolchain_reject_assembly "native rustfmt identity validation failed"
 		return 1
 	}
 }
