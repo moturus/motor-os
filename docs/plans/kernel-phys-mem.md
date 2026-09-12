@@ -16,15 +16,23 @@ backed by a level-2 page-table entry, distinct from sys-io's fixed mid page.
 ## Resume checkpoint (2026-09-11)
 
 Current state, superseding the checkpoint below and the history after it:
-P-1, P0b, P0c, P1a1, P1a2 and P1b are committed and production allocates
-small pages from the block pool (`3738d69d`). P3 is implemented and gated
-(see its section under the progress notes) and committed as `48a2a701`.
-P2 is next; its metric catalog is kernel-only. Two preexisting intermittent
+every patch of the sequence is committed. P1b (`3738d69d`) put the block
+pool into production, P3 (`48a2a701`) derived page kinds from frames, P2
+(`12876267`) added the metrics, P4a (`a1304031`) the owning huge frames,
+P4b (`12c09955`) huge mappings for eligible heaps with sharing refused,
+P5 (`827cff30`) the full sizing rule, and P6 (the commit carrying this
+text) the mixed churn and documentation. Each passed its common gate; the
+developer-image leg was rerun three times for the native Lorry freeze
+below, and one debug leg after the known pressure-probe failure. Two
+preexisting intermittent
 failures recurred during this session's gates and are recorded with
 evidence: the quiet VM exit during pressure tests (now self-reporting on
-the console) and one stall of the developer image's native Lorry phase.
-The `phys::init` boot cost is measured but first-touch dominated on this
-host; the 0.1 ms target is unverified.
+the console) and the developer image's native Lorry freeze (three times
+in about twelve runs, the guest unreachable over ssh; a standing watchdog
+with a QEMU monitor socket waits for the next one). The `phys::init` boot
+cost is measured but first-touch dominated on this host; the 0.1 ms target
+is unverified. After any pressure episode the pool stays mostly split, so
+huge availability is best effort until the pinning pages die.
 
 ## Checkpoint after 5e401fc9
 
@@ -412,6 +420,29 @@ handle alive through its five-second deadline), the failure recorded before
 this allocator existed; the squeeze allocates 64-page pieces, which the
 sizing rule leaves alone. The failed leg's logs are kept under
 `gate-p5/debug-3.*` in the scratchpad and the remaining legs were rerun.
+
+### P6: mixed-size churn and documentation (2026-09-11)
+
+The churn test's sizes widen to 1 through 1024 pages, so huge-eligible
+mappings churn alongside small ones across four threads and their ring of
+cross-thread frees; every constituent small page carries its own pattern.
+docs/oom-handling.md documents the block metrics and the post-pressure
+fragmentation they expose; docs/plans/boot-time.md records items 5 and 7
+as done with the measured `phys::init` costs, their first-touch caveat,
+and the fresh-boot placement results. Its first gate run was cut short by
+a host power-off during the second debug leg (the first had passed). The
+restarted gate's first debug leg failed on the pressure regression's
+fresh-client probe ("the dropped client's server handle died"), the third
+such debug-leg failure of this series. Root cause, measured with
+allocation-free probes: under pressure the rt.vdso housekeeping tick
+returns every process's allocator slack, and one return of about 290
+pages lifts the pool past the high watermark and clears the flag while
+the squeeze child still holds its memory, so sys-io-fs keeps the probe's
+client. Reproduced 4 of 20 runs with 3 MiB of induced slack; the test-side
+fix (a squeeze child that maintains its target, refusal checks that
+reissue a request served across such a dip) is `7fd4a663` and passes 20
+of 20 under the same induced slack. The gate then ran on the
+tree carrying both changes plus a clippy fix in the placement test.
 
 ### P2 is not blocked
 

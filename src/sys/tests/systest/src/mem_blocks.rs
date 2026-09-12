@@ -103,7 +103,9 @@ impl Prng {
 
 // Four threads in a ring: each retains its newest allocations, verifies the
 // oldest before releasing it, and hands every other release to its neighbor
-// so frees cross CPUs and cursors.
+// so frees cross CPUs and cursors. Sizes up to 4 MiB cover huge-eligible
+// mappings; every constituent small page carries its own pattern, so an
+// aliased huge page cannot pass as a touched one.
 fn churn() {
     const THREADS: usize = 4;
     const ITERATIONS: u32 = 512;
@@ -122,7 +124,7 @@ fn churn() {
                 let mut prng = Prng(0x9e37_79b9_7f4a_7c15_u64.wrapping_mul(thread as u64 + 1));
                 let mut retained = VecDeque::new();
                 for iteration in 0..ITERATIONS {
-                    let pages = 1 + prng.next(256);
+                    let pages = 1 + prng.next(1024);
                     let seed = (thread as u64) << 32 | u64::from(iteration);
                     let mapping = Mapping::alloc(pages);
                     mapping.fill(seed);
@@ -263,7 +265,7 @@ fn physical_runs(mapping: &Mapping) -> (Vec<u64>, u64) {
         phys.push(SysMem::virt_to_phys(mapping.addr + page * PAGE_SIZE_SMALL).unwrap());
     }
     let mut runs = 0;
-    for chunk in phys.chunks_exact(512) {
+    for chunk in phys.as_chunks::<512>().0 {
         if chunk[0] % MID == 0
             && chunk
                 .iter()

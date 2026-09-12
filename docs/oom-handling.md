@@ -268,6 +268,17 @@ ordinary operation; the physical allocator running dry means a charge or a
 bounded-work assumption is wrong. Production code must not retry the
 operation or increase a timeout to paper over either.
 
+The block allocator behind the small-page pool reports its own gauges at the
+system scope: `mem.blocks_total`, `mem.blocks_whole`, `mem.blocks_split`,
+`mem.blocks_taken`, `mem.blocks_whole_low`, `mem.pages_reserved` and
+`mem.pages_free_low`, with the cumulative events `mem.block_splits`,
+`mem.block_recombined`, `mem.huge_pages_mapped` and `mem.huge_fallbacks`.
+They are collected without a common lock, so only their bounds hold at any
+moment; `mem.pages_reserved` is constant after boot. A pressure episode that
+drains the pool leaves most blocks split (pages allocated by other processes
+during the squeeze pin them), so huge-page availability afterwards is best
+effort until those pages die; see docs/plans/kernel-phys-mem.md.
+
 Observability: kernel metrics `mem.admission_refused_user`,
 `mem.admission_refused_sys_io`, `mem.admission_reserved_pages`,
 `mem.small_pages_low_water` (availability at admission checks),

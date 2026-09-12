@@ -322,13 +322,26 @@ Userspace (unchanged from the morning plan):
 | 2 kernel placed by the VMM | done: 5-8 ms |
 | 3 APs in parallel, not waited for | 1.7-4.4 ms |
 | 4 IOAPIC entries in use only | 1.2-1.7 ms |
-| 5 phys::init | 0.4 ms (2.5 at 8 GB) |
+| 5 phys::init | done: 0.2-0.7 ms at 1 GB, 0.4-1.9 ms at 8 GB, first-touch dominated (see below) |
 | 6 serial off the path | 1.1 ms |
-| 7 sequential placement | 0 today; 55+ ms on QEMU; enables hugepages |
+| 7 sequential placement | done: per-block free lists place sequentially; 8 MiB of fresh pages land in 6 to 10 blocks |
 | 10-13 userspace | 15-17 ms |
 
 Items 3-6 take kloader plus kernel from the current 8-13 ms to roughly
 5-8 ms.
+
+Items 5 and 7 landed with the block allocator (docs/plans/kernel-phys-mem.md,
+2026-09-11). `phys::init` measured with a temporary probe, release builds,
+three boots each: cloud-hypervisor 0.3-1.6 ms at 1 GB and 0.4-1.5 ms at
+8 GB, QEMU direct kernel 0.19-0.38 ms at 1 GB, Firecracker 0.50-0.58 ms at
+1 GB, the QEMU developer image 0.9-1.9 ms at 8 GB; stage 2 costs 1-6 us.
+The spread between boots exceeds the difference between 1 and 8 GB and a
+lock-free construction loop did not move it, so first-touch faults on fresh
+guest memory dominate on this host (no hugetlbfs pool); the compute cost is
+below the noise and the 0.1 ms target is unverified. Placement: eight 1 MiB
+eager pieces on a fresh boot land in 6 to 10 distinct 2 MiB blocks across
+cloud-hypervisor, Firecracker and QEMU (against 347 regions for 591 frames
+before), which is what hugepage backing needs.
 
 ## Launcher notes
 
