@@ -31,7 +31,7 @@ static BACK_END: BackEndAllocator = BackEndAllocator {};
 /// The process allocator. Every thread that has allocated holds a private
 /// cache in its thread block (see `rt_tls`), which the global allocator
 /// below consults; the runtime's own bookkeeping uses `FRUSA` directly.
-pub(crate) static FRUSA: frusa_v2::Frusa4K = frusa_v2::Frusa4K::new(&BACK_END);
+pub(crate) static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
 
 /// `FRUSA` through the calling thread's cache. A thread gets its block on
 /// its first allocation; until then, and for the block itself, the shared

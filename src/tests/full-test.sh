@@ -153,14 +153,12 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
 fi
 
-# Both allocator crates are host-tested; frusa_v2 serves the kernel and the
-# runtime. Release covers the full stress and concurrency step counts.
+# The allocator crate (kernel heap and runtime) is host-tested. Release
+# covers the full stress and concurrency step counts.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
 else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa_v2/Cargo.toml"
 fi
 
 # The netstack's own tests, under the exact feature closure sys-io builds it

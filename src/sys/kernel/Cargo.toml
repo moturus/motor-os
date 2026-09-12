@@ -10,7 +10,7 @@ edition = "2021"
 # internal dependencies
 moto-rt  = { path = "../lib/moto-rt" , features = ["base"] }
 moto-sys = { path = "../lib/moto-sys", default-features = false, features = ["base"] }
-frusa_v2 = { path = "../lib/frusa_v2" }
+frusa    = { path = "../lib/frusa" }
 
 # external dependencies
 bitflags              = { path = "../../third_party/bitflags"     }

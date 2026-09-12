@@ -96,7 +96,7 @@ pub(super) static RAW_ALLOCATOR: RawAllocator = RawAllocator {
     allocated: AtomicU64::new(0),
 };
 
-static FRUSA: frusa_v2::Frusa4K = frusa_v2::Frusa4K::new(&RAW_ALLOCATOR);
+static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&RAW_ALLOCATOR);
 
 /// Size classes of `Frusa4K`: 16 bytes to 4 KiB.
 const CLASSES: usize = 9;
@@ -109,7 +109,7 @@ const CLASSES: usize = 9;
 /// enough, and the CPU is the guard shard.
 #[repr(align(64))]
 struct CpuHeap {
-    cache: frusa_v2::Cache4K,
+    cache: frusa::Cache4K,
     heads: [Cell<*mut u8>; CLASSES],
     lens: [Cell<u32>; CLASSES],
 }
@@ -122,7 +122,7 @@ unsafe impl Sync for CpuHeaps {}
 static CPU_HEAPS: CpuHeaps = CpuHeaps(
     [const {
         CpuHeap {
-            cache: frusa_v2::Cache4K::new(),
+            cache: frusa::Cache4K::new(),
             heads: [const { Cell::new(core::ptr::null_mut()) }; CLASSES],
             lens: [const { Cell::new(0) }; CLASSES],
         }

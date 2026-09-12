@@ -1,9 +1,12 @@
-# Frusa v2: the runtime allocator
+# Frusa v2: the system allocator
 
-`frusa_v2` (`src/sys/lib/frusa_v2`) is the allocator behind every process's
-`GlobalAlloc`, wired in by `rt.vdso`, and behind the kernel heap; §8 is the
-assessment that moved the kernel off the original `frusa` crate and the
-record of the switch. §1 to §6 describe the allocator as it is; §7 is the
+`frusa` 0.2 (`src/sys/lib/frusa`) is the allocator behind every process's
+`GlobalAlloc`, wired in by `rt.vdso`, and behind the kernel heap. It was
+developed as `frusa_v2` beside the original `frusa` 0.1 crate; on
+2026-09-12 the original was removed and the crate renamed, and this
+document keeps the two names as they were while both existed. §8 is the
+assessment that moved the kernel off the original crate and the record of
+the switch. §1 to §6 describe the allocator as it is; §7 is the
 plan to close the fast-path gap to glibc. This document follows the root
 `AGENTS.md`.
 
@@ -624,8 +627,8 @@ effect and a robustness gain at scale.
 ### 8.5 The switch
 
 Done on 2026-09-12 as one patch, the three pieces of the recommendation
-together. The kernel depends on `frusa_v2` instead of `frusa`; `frusa`
-stays in the tree as a published crate. `kheap.rs` wraps a `Frusa4K` over
+together. The kernel depends on `frusa_v2` instead of `frusa`; the original
+crate was removed and `frusa_v2` renamed to `frusa` the same day. `kheap.rs` wraps a `Frusa4K` over
 the unchanged `RawAllocator` in a `GlobalAlloc` that consults a static
 per-CPU stage: a `Cache4K` whose shard is the CPU, and per class a
 magazine, the LIFO of §8.4 linked through the slots' first words with the

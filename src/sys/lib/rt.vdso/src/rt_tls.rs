@@ -17,7 +17,7 @@ type PerThreadMap = BTreeMap<Key, usize>;
 /// runtime's trampoline. Threads that never exit keep theirs.
 struct ThreadBlock {
     map: PerThreadMap,
-    cache: frusa_v2::Cache4K,
+    cache: frusa::Cache4K,
 }
 
 impl ThreadBlock {
@@ -43,7 +43,7 @@ impl ThreadBlock {
             unsafe {
                 block.write(ThreadBlock {
                     map: PerThreadMap::new(),
-                    cache: frusa_v2::Cache4K::new(),
+                    cache: frusa::Cache4K::new(),
                 })
             };
             tcb.tls = block as usize as u64;
@@ -55,7 +55,7 @@ impl ThreadBlock {
 /// The calling thread's allocator cache, with its guard shard set to the
 /// CPU it is running on. Consulted by the global allocator on every call,
 /// so this is one control-block read.
-pub(crate) fn thread_cache() -> Option<&'static frusa_v2::Cache4K> {
+pub(crate) fn thread_cache() -> Option<&'static frusa::Cache4K> {
     let tcb = moto_sys::UserThreadControlBlock::get();
     if tcb.tls == 0 {
         // First allocation on this thread: the block is created on the
@@ -72,7 +72,7 @@ pub(crate) fn thread_cache() -> Option<&'static frusa_v2::Cache4K> {
 /// The cache if this thread already has a block. Frees use this so that a
 /// thread whose block was released at exit does not get a new one for a
 /// late free.
-pub(crate) fn existing_thread_cache() -> Option<&'static frusa_v2::Cache4K> {
+pub(crate) fn existing_thread_cache() -> Option<&'static frusa::Cache4K> {
     let tcb = moto_sys::UserThreadControlBlock::get();
     if tcb.tls == 0 {
         return None;
