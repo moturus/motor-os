@@ -20,7 +20,10 @@ not cover Salsa cancellation. The diagnosed abort and private Rust library
 repair are tracked in [rust-unwinding.md](rust-unwinding.md). The original
 validation below remains as historical evidence, including the unrelated
 unresolved sys-io abort; it does not establish that the original server was
-usable. See [the usage guide](../build-rustc.md#helix-on-the-developer-image).
+usable. The [rustfmt and standard-unwinding plan](rustfmt.md) now has a local
+candidate that replaces the private build and enables native formatting; its
+managed cutover is pending. See the
+[usage guide](../build-rustc.md#helix-on-the-developer-image).
 
 ## Authorization and baseline
 
@@ -258,10 +261,12 @@ Implementation commits:
 - `5957a0ed`: exact Lorry package IDs and named check-target compatibility.
 - `fa37488d`: background-server terminal ownership and native editor acceptance.
 
-Native rustfmt is not packaged, so Rust auto-formatting and the server's
-format feature are disabled. Analyzer procedural-macro expansion remains off;
-Lorry's existing compiler/build-script policies are unchanged. These limits
-are documented in the developer image's editor guide.
+This integration originally omitted native rustfmt. The unified toolchain
+candidate now packages it and enables the server's format feature and
+format-on-save, with focused native and Helix acceptance passing. See
+[rustfmt.md](rustfmt.md) for the candidate evidence and remaining managed
+cutover. Analyzer procedural-macro expansion remains off; Lorry's existing
+compiler/build-script policies are unchanged.
 
 After the gate VMs stopped, `make -j$(nproc) BUILD=release dev.img` rebuilt a
 fresh packaged image successfully. Build evidence is

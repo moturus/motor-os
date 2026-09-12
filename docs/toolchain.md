@@ -240,8 +240,11 @@ through the root override or its exact name: the Makefile's
 `DO_BUILD`/`DO_CLIPPY` and imager rules, `src/sys/lib/rt.vdso/build.sh`, the
 boot-loader `build.sh` scripts, the host unit tests in
 `src/tests/full-test.sh`, Lorry's ordinary tests, and `cargo fmt`. Native Motor
-rustc is a different binary because it runs on a different host, but it comes
-from the same effective Rust and LLVM revisions as the host toolchain.
+rustc, rust-analyzer, and rustfmt are different binaries because they run on a
+different host, but they come from the same effective Rust and LLVM revisions
+as the host toolchain. The standard-unwind candidate also makes unwind the
+planned `.dev.2` Motor panic strategy; shipped OS binaries retain explicit
+abort profiles.
 
 There is no bootstrap-only Motor rustup toolchain. Rust `x.py` consumes the
 Stage 0 compiler and Cargo selected by `src/stage0` while creating the Motor
@@ -679,7 +682,7 @@ build sequence is:
    mlibc, libunwind/libc++abi/libc++, the native LLVM multicall, and Lua, into
    assembly-keyed directories.
 5. Run the second `x.py` invocation from the same revision for the native Motor
-   rustc (`--host x86_64-unknown-motor`). Its own stage sysroot is
+   rustc and rustfmt (`--host x86_64-unknown-motor`). Its own stage sysroot is
    `build/x86_64-unknown-motor/stage2`, and it may also recreate the Linux
    `stage2`; the installed prefix is unaffected either way. An assembly-scoped
    `llvm-config` adapter keeps `--bindir` on the runnable standalone host tools
@@ -835,10 +838,11 @@ linked; the script reports it but does not delete it. A changed tuple
 installs a new prefix under a new exact name. Later `x.py` invocations,
 including the native rustc build, cannot damage it.
 
-This does not port these tools to run on Motor; it supplies the Linux-host
-tools that drive and check Motor cross-builds. Native Motor tools remain
-separate binaries built from the same pinned source tuple. All resulting host
-binaries and sysroots are local build artifacts; only the source refs and tags are published.
+This bootstrap step supplies the Linux-host tools that drive and check Motor
+cross-builds. Native Motor rustc, rust-analyzer, and rustfmt remain separate
+binaries built from the same pinned source tuple. All resulting host binaries
+and sysroots are local build artifacts; only the source refs and tags are
+published.
 
 The required validation, all of which resolves inside the linked prefix and
 reports the recorded identities without a rustup fallback notice:
@@ -928,7 +932,10 @@ manifest but do not enter either compiler/runtime key.
 The Rust fork's Git patch declarations point at reviewed Motor fork sources.
 For the beta tuple, `stacker`, `libloading`, and `libc` are pinned by full Git
 revision as well as in the lockfile; `ctrlc` is on its named Motor branch,
-with the lockfile recording the exact resolved commit. The forked `stacker`
+with the lockfile recording the exact resolved commit. The standard-unwind
+candidate adds no patched dependency: native rustfmt resolves `/user` and
+`/user/cfg` behind `cfg(target_os = "motor")` and compiles `dirs` only off
+Motor, so the root lockfile is unchanged. The forked `stacker`
 provides Motor's allocation-based stack guard. The `libloading` and `libc`
 forks carry distinct build-metadata versions (`0.9.0+motor.1` and
 `0.2.186+motor.1`) so that multi-workspace vendoring cannot collide with their

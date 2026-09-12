@@ -1,9 +1,10 @@
 # Standard Motor Rust unwinding and native rustfmt
 
-Status: implementation in progress, revised 2026-09-11 after a fourth review
-(section 10). The current-toolchain baseline and candidate VM harness are the
-first implementation patch. No external source changes or publication have
-been made.
+Status: local implementation and candidate validation complete through patch
+17, revised 2026-09-12 for D4. Publication, the managed `.dev.2` cutover, its
+six main-image gates, and the release developer-image gate remain pending.
+The external Rust changes are committed only in the local authoring
+checkout; no remote refs have been created or moved.
 
 Decisions recorded:
 
@@ -629,10 +630,57 @@ guesses of 128 MiB and 160 MiB are upper expectations, not the limits. Report
 total image and sysroot growth too. Once set, a violated bound is
 investigated, never raised.
 
-The first packaged candidate measured a 19,662,152-byte stripped rustfmt, an
+The first packaged candidate, built with the superseded dirs-sys fork,
+measured a 19,662,152-byte stripped rustfmt, an
 84-byte launcher, and 19,726,336 bytes of fresh-qcow2 growth. Both enforced
 ceilings are 21 MiB (22,020,096 bytes), about twelve percent above the measured
-values.
+values. The complete candidate Rust overlay is 259,220,355 bytes, 40,499,838
+bytes above the recorded baseline. Its most recently rebuilt fresh main and
+developer images are 26,214,400 and 616,366,080 bytes. The recorded baseline
+developer image had already been expanded by guest activity, so its 4.25 GB
+host file is not a valid fresh-image growth comparator; the paired rustfmt-only
+images above provide the enforced disk-growth result.
+
+That producer completed in 23 minutes 32 seconds with 2,277,972 KiB peak
+resident memory at Rust revision `60258b08da0e5b5285ceddfe3b4337f625171bf1`;
+its formatter reported `rustfmt 1.10.0-dev (60258b08da 2026-09-11)` and its
+native formatting suite passed in 892 ms.
+
+The D4 candidate, Rust revision `9f2e10270e097f607d00bffd8dae2980ff7c26ef`
+with no dirs-sys, measured a 19,660,056-byte stripped rustfmt, the same
+84-byte launcher, and 19,791,872 bytes of fresh-qcow2 growth, both within
+the ceilings. Its Rust overlay is 259,208,943 bytes; its fresh main and
+developer images are 26,214,400 and 614,203,392 bytes. Its producer completed
+in 40 minutes 50 seconds with 2,924,020 KiB peak resident memory. The packaged
+formatter reports `rustfmt 1.10.0-dev (9f2e10270e 2026-09-12)` and has
+SHA-256 `dcc0a09981b2a7f91640d77cd932533fe15c106d90bd2d03c3abdfe6ba4f4ed7`.
+The complete 6.6 sequence then passed in 3 minutes 19 seconds: both sources
+tests, the producer contract tests, both size gates, the analyzer acceptance
+(21.29 seconds to quiescence), `test-unwind.sh` in every link mode, the native
+formatting suite in 1,152 ms including the `/user/cfg/rustfmt/rustfmt.toml`,
+`/user/rustfmt.toml`, and ignored-environment cases, and the Helix release
+gate with formatting on save, manual formatting, width configuration,
+parser-error recovery, all prior semantic checks, and clean server shutdown.
+
+Two pre-existing test-only defects surfaced during that validation and were
+fixed per AGENTS.md. `test-dev-memory-contract.sh` did not stub
+`test-rustfmt-native.sh` after patch 16 added it to the candidate wrapper;
+the stub and expected sequences now include it, in the native-fixture commit.
+Both size gates counted YAML lines with a host `rg`, which is not a documented
+host prerequisite and was only present in the earlier sessions' harness; they
+use `grep -cxF` now.
+
+Motor-os implementation commits through patch 17 are `24517f53` (candidate
+harness), `70045e78` (unwind fixture), `32007447` (abort profiles), `4b11fda9`
+(installed-std analyzer), `c3e33a49` (ELF validation), `e279fe90` (bootstrap
+cache), `ed4bb6b7` (abort-only C ABI shim and rt.vdso), `ebdf5e3e`
+(cross-language cases), `55b0058b` (candidate unwind modes), `0606f5bc`
+(private-build cleanup), `ed9457df` (D4 plan revision and rustfmt sources
+test), `bcbbf312` (rustfmt build), `cfa9f049` (rustfmt packaging), `35b9789d`
+(native fixtures), `891940e5` (size contract), `1cec7c98` (analyzer size gate
+without host ripgrep), and `6d9cabe3` (Helix formatting). The local Rust fork
+ends at
+`9f2e10270e097f607d00bffd8dae2980ff7c26ef` and its worktree is clean.
 
 ## 6. Tests
 

@@ -2,9 +2,13 @@
 
 The decision to retain a private analyzer-only Rust library is **superseded**
 by the [unified toolchain and rustfmt plan](rustfmt.md). That plan is the current
-design direction; the migration is not implemented yet. The deployed analyzer
-still uses the private build described below. This document preserves the
-earlier repair's evidence and authorization, which do not authorize new work.
+implementation. Its local standard-unwind candidate builds std, rustc, rust-analyzer,
+and rustfmt with standard Motor unwinding and passes the generic Rust/C++
+unwind and analyzer gates. The private build and regression were removed from
+the candidate producer. Publication and the managed `.dev.2` cutover remain pending; the
+selected `.dev.1` image still uses the private build described below. This
+document preserves the earlier repair's evidence and authorization, which do
+not authorize new work.
 
 Complete and gated on 2026-09-10. The release developer image now uses the
 unwinding-enabled analyzer; the packaged SSH workflow, a fresh console run,

@@ -117,6 +117,7 @@ directory and this environment:
 ```text
 CARGO=/devtools/bin/lorry
 PATH=/devtools/bin:/system/bin
+RUSTFMT=/devtools/rust/bin/rustfmt
 TMPDIR=/devtools/tmp
 ```
 
@@ -125,11 +126,14 @@ An editor that owns a session terminal must additionally pass
 editor retains keyboard and Ctrl+C ownership. This launch instruction is
 consumed by Motor before rust-analyzer starts.
 
-Analysis cancellation requires Rust unwinding. The native analyzer recipe
-rebuilds a private copy of the pinned Rust library with a pure Rust unwinder;
-the installed compiler's default abort strategy is unchanged. Older images
-with recipe `motor-native-rust-analyzer-v1` abort on ordinary cancellation and
-must be rebuilt. See [the diagnosis and build scope](plans/rust-unwinding.md).
+Analysis cancellation requires Rust unwinding. The selected `.dev.1` image
+rebuilds a private copy of the pinned Rust library for the analyzer. The
+validated standard-unwind candidate replaces that recipe: the standard Motor
+sysroot supplies the pure Rust unwinder, and the analyzer builds directly
+against the installed std. The managed `.dev.2` cutover remains pending. Older
+images with recipe `motor-native-rust-analyzer-v1` abort on ordinary
+cancellation and must be rebuilt. See
+[the diagnosis and migration record](plans/rust-unwinding.md).
 
 For an admitted, trusted Lorry package, use:
 
@@ -184,8 +188,14 @@ shows documentation, `g d` opens its definition, and `Ctrl-o` returns.
 type from `u32` to `bool` and save with `:w` to see a compiler diagnostic;
 restore `u32` and save to clear it. `Space d` opens document diagnostics.
 The `rt_version` call navigates into the installed Motor standard library.
-Native rustfmt is not packaged, so Rust automatic formatting is disabled;
-saving still runs the compiler check.
+The standard-unwind candidate packages native rustfmt and enables
+format-on-save. Use `:format` to format without saving. A parser error leaves
+the buffer unchanged; fix the source and format again. Project `rustfmt.toml`
+settings are honored; without one, rustfmt reads `/user/rustfmt.toml` and
+then `/user/cfg/rustfmt/rustfmt.toml`, never `HOME` or `XDG_CONFIG_HOME`.
+The selected `.dev.1` image predates native rustfmt, so these formatting
+features become available with the managed `.dev.2` cutover.
+Saving also runs the compiler check.
 
 For other projects, select an admitted Lorry package and prepare its dependencies
 with `lorry vendor` explicitly. A virtual workspace root is not a Lorry package.
@@ -204,14 +214,28 @@ sysroot, a second `x.py` invocation builds rustc for
 verifies that this invocation leaves the installed host prefix byte-for-byte
 unchanged.
 
-The development-image layout is:
+The candidate development-image layout adds rustfmt to the native rustc files:
 
 ```text
 /devtools/rust/bin/rustc
+/devtools/rust/bin/rustfmt
 /devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
 /devtools/bin/rustc          PATH launcher
+/devtools/bin/rustfmt        PATH launcher
 /devtools/bin/cc             native linker driver supplied by the C toolchain
 ```
+
+Use the launcher for formatting from the native shell; it supplies rustfmt's
+writable temporary directory:
+
+```sh
+/devtools/bin/rustfmt --version
+/devtools/bin/rustfmt src/main.rs
+/devtools/bin/rustfmt --check src/main.rs
+```
+
+rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
+syntax error produces a diagnostic and does not replace the source file.
 
 Inside the development VM:
 
@@ -235,6 +259,43 @@ entry point. A Rust program that intentionally links C opts into the C runtime:
 Rust code that uses C++ also passes `-C link-arg=-lc++`. In that link mode,
 mlibc's strong entry point and runtime win over Rust std's weak fallbacks.
 
+### Panic strategy and unwinding
+
+The planned `.dev.2` Motor target defaults ordinary Rust applications to
+`panic=unwind`. A program can catch a panic and continue:
+
+```rust
+let result = std::panic::catch_unwind(|| panic!("example"));
+assert!(result.is_err());
+```
+
+Use an explicit Cargo profile for binaries that must terminate immediately or
+minimize their runtime footprint:
+
+```toml
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+```
+
+For a direct native rustc invocation, pass `-C panic=abort` to opt out:
+
+```sh
+/devtools/bin/rustc -C panic=abort app.rs -o app
+```
+
+Motor OS system binaries declare abort profiles explicitly; the kernel, boot
+code, VDSO, and the `moto-rt` C ABI shim remain abort-only.
+
+Rust std registers the executable's unwind metadata finder from Motor's
+`std::rt::init` path. Binaries linked through mlibc also register it through an
+early constructor so C++ static constructors can unwind before Rust `main`.
+This covers normal Rust executables and Rust/C++ programs. An abort-only
+static library that supplies neither a Rust entry point nor constructors has
+no standalone unwinding initialization.
+
 ## Compiler dependency identities
 
 The Rust fork keeps Motor-only patches in the main compiler workspace while
@@ -250,6 +311,9 @@ packages:
 - `libc` uses `moturus/libc` at
   `22836a72e660c7000b1b00db2f0a345fff4e52b6` and version
   `0.2.186+motor.1` in the main Rust workspace.
+- rustfmt needs no patched dependency: the standard-unwind candidate resolves
+  `/user` and `/user/cfg` behind `cfg(target_os = "motor")` and compiles
+  `dirs` only off Motor.
 - rustc LLVM retains its exact `cc = "=1.2.16"` dependency.
 - Rust std uses published crates.io `moto-rt` 0.17.6, never a path into the
   Motor OS checkout.
