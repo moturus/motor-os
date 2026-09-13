@@ -1,6 +1,6 @@
 [package]
 name = "gears-mock-provider"
-description = "Development-image-only TLS provider mock for Gears."
+description = "Development-image HTTP and HTTPS provider mock for Gears."
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

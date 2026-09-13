@@ -7,7 +7,7 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, Stream};
 
 use crate::{
-    CurlError, CurlResult, HttpsUrl, Options, TransferInfo, client_config, receive_response,
+    CurlError, CurlResult, HttpUrl, Options, Scheme, TransferInfo, client_config, receive_response,
     write_request,
 };
 
@@ -23,49 +23,80 @@ pub fn transfer(
     let started = Instant::now();
     let total_deadline = Deadline::after(started, options.max_time)?;
     let connect_deadline = total_deadline.min(Deadline::after(started, options.connect_timeout)?);
-    let url = HttpsUrl::parse(&options.url)?;
+    let url = HttpUrl::parse(&options.url)?;
+    options.protocols.check(url.scheme())?;
     crate::verbose(
         1,
-        &format!("parsed HTTPS endpoint {}:{}", url.host(), url.port()),
+        &format!(
+            "parsed {} endpoint {}:{}",
+            url.scheme().as_str(),
+            url.host(),
+            url.port()
+        ),
     );
-    let config = client_config(options.ca_cert.as_deref())?;
-    crate::verbose(1, "loaded TLS roots");
-    let server_name = ServerName::try_from(url.host().to_owned())
-        .map_err(|_| CurlError::new(CurlError::MALFORMED_URL, "invalid TLS server name"))?;
+    // HTTP must not depend on a CA file or initialize a TLS connection.
+    let mut connection = if url.scheme() == Scheme::Https {
+        let config = client_config(options.ca_cert.as_deref())?;
+        crate::verbose(1, "loaded TLS roots");
+        let server_name = ServerName::try_from(url.host().to_owned())
+            .map_err(|_| CurlError::new(CurlError::MALFORMED_URL, "invalid TLS server name"))?;
+        Some(ClientConnection::new(config, server_name).map_err(|error| {
+            CurlError::new(
+                CurlError::TLS_CONNECT,
+                format!("failed creating TLS connection: {error}"),
+            )
+        })?)
+    } else {
+        None
+    };
 
     crate::verbose(1, "resolving and connecting TCP");
     let socket = connect(&url, connect_deadline)?;
     crate::verbose(
         2,
         &format!(
-            "TCP connected {:?} -> {:?}; starting TLS handshake",
+            "TCP connected {:?} -> {:?}",
             socket.local_addr(),
             socket.peer_addr()
         ),
     );
     let mut socket = TimedStream::new(socket, connect_deadline, options.connect_timeout);
-    let mut connection = ClientConnection::new(config, server_name).map_err(|error| {
-        CurlError::new(
-            CurlError::TLS_CONNECT,
-            format!("failed creating TLS connection: {error}"),
-        )
-    })?;
-    connection.complete_io(&mut socket).map_err(|error| {
-        CurlError::from_io(error, CurlError::TLS_CONNECT, "TLS handshake failed")
-    })?;
-    crate::verbose(1, "TLS handshake completed");
-    if connection
-        .alpn_protocol()
-        .is_some_and(|protocol| protocol != b"http/1.1")
-    {
-        return Err(CurlError::new(
-            CurlError::TLS_CONNECT,
-            "server selected an unsupported application protocol",
-        ));
+    if let Some(connection) = connection.as_mut() {
+        connection.complete_io(&mut socket).map_err(|error| {
+            CurlError::from_io(error, CurlError::TLS_CONNECT, "TLS handshake failed")
+        })?;
+        crate::verbose(1, "TLS handshake completed");
+        if connection
+            .alpn_protocol()
+            .is_some_and(|protocol| protocol != b"http/1.1")
+        {
+            return Err(CurlError::new(
+                CurlError::TLS_CONNECT,
+                "server selected an unsupported application protocol",
+            ));
+        }
     }
 
     socket.set_limits(total_deadline, options.speed_time);
-    let mut stream = Stream::new(&mut connection, &mut socket);
+    match connection.as_mut() {
+        Some(connection) => exchange(
+            &mut Stream::new(connection, &mut socket),
+            &url,
+            options,
+            body,
+            output,
+        ),
+        None => exchange(&mut socket, &url, options, body, output),
+    }
+}
+
+fn exchange(
+    stream: &mut (impl Read + Write),
+    url: &HttpUrl,
+    options: &Options,
+    body: Option<&[u8]>,
+    output: &mut impl Write,
+) -> CurlResult<TransferInfo> {
     crate::verbose(
         1,
         &format!(
@@ -73,13 +104,13 @@ pub fn transfer(
             body.map_or(0, <[u8]>::len)
         ),
     );
-    write_request(&mut stream, &url, options, body)?;
+    write_request(stream, url, options, body)?;
     stream.flush().map_err(|error| {
         CurlError::from_io(error, CurlError::SEND, "failed sending HTTP request")
     })?;
     crate::verbose(1, "HTTP request flushed; waiting for response");
     let mut progress = SpeedOutput::new(output, options.speed_limit, options.speed_time);
-    let response = receive_response(&mut stream, &url, options.include, &mut progress)?;
+    let response = receive_response(stream, url, options.include, &mut progress)?;
     crate::verbose(
         1,
         &format!(
@@ -97,7 +128,7 @@ pub fn transfer(
     })
 }
 
-fn connect(url: &HttpsUrl, deadline: Deadline) -> CurlResult<TcpStream> {
+fn connect(url: &HttpUrl, deadline: Deadline) -> CurlResult<TcpStream> {
     let addresses = resolve(url.host().to_owned(), url.port(), deadline)?;
     crate::verbose(1, &format!("DNS returned {} address(es)", addresses.len()));
     crate::verbose(

@@ -2,7 +2,40 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::{CurlError, CurlResult};
+use crate::{CurlError, CurlResult, Scheme};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Protocols {
+    Http,
+    #[default]
+    Https,
+    HttpAndHttps,
+}
+
+impl Protocols {
+    fn parse(value: &str) -> CurlResult<Self> {
+        match value {
+            "=http" => Ok(Self::Http),
+            "=https" => Ok(Self::Https),
+            "=http,https" | "=https,http" => Ok(Self::HttpAndHttps),
+            _ => Err(CurlError::usage(
+                "--proto requires =http, =https, or =http,https",
+            )),
+        }
+    }
+
+    pub fn check(self, scheme: Scheme) -> CurlResult<()> {
+        match (self, scheme) {
+            (Self::Http, Scheme::Http) | (Self::Https, Scheme::Https) | (Self::HttpAndHttps, _) => {
+                Ok(())
+            }
+            _ => Err(CurlError::new(
+                CurlError::UNSUPPORTED_PROTOCOL,
+                format!("{} is disabled by the protocol policy", scheme.as_str()),
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
@@ -21,6 +54,7 @@ pub enum DataSource {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Options {
+    pub protocols: Protocols,
     pub verbosity: u8,
     pub silent: bool,
     pub show_error: bool,
@@ -47,6 +81,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            protocols: Protocols::default(),
             verbosity: 0,
             silent: false,
             show_error: false,
@@ -101,7 +136,7 @@ impl Options {
                 "--silent" => options.silent = true,
                 "--show-error" => options.show_error = true,
                 "--include" => options.include = true,
-                "--proto" => require_value(&mut arguments, "--proto", "=https")?,
+                "--proto" => options.protocols = Protocols::parse(&take_value(&mut arguments, "--proto")?)?,
                 "--noproxy" => require_value(&mut arguments, "--noproxy", "*")?,
                 "--tls-max" => require_value(&mut arguments, "--tls-max", "1.3")?,
                 "--connect-timeout" => {
@@ -331,6 +366,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn protocol_sets_are_explicit_and_https_is_the_default() {
+        assert!(Options::default().protocols.check(Scheme::Http).is_err());
+        assert!(Options::default().protocols.check(Scheme::Https).is_ok());
+        for (value, http, https) in [
+            ("=http", true, false),
+            ("=https", false, true),
+            ("=http,https", true, true),
+            ("=https,http", true, true),
+        ] {
+            let Action::Transfer(options) =
+                Options::parse(["--proto", value, "http://example.test/"]).unwrap()
+            else {
+                panic!("expected transfer")
+            };
+            assert_eq!(options.protocols.check(Scheme::Http).is_ok(), http);
+            assert_eq!(options.protocols.check(Scheme::Https).is_ok(), https);
+        }
+        for value in ["http", "=all", "=http,ftp", "", "=https,"] {
+            assert!(Protocols::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn parses_lorry_argument_vector() {
         let action = Options::parse([
             "--disable",
@@ -396,6 +454,8 @@ mod tests {
             "--no-buffer",
             "--include",
             "--http1.1",
+            "--proto",
+            "=https",
             "--noproxy",
             "*",
             "--header",

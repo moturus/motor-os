@@ -27,8 +27,10 @@ pub struct ContextConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub egress_allowlist: Vec<String>,
-    pub allow_plain_http_loopback: bool,
+    pub plain_http_allowlist: Vec<String>,
     pub base_url: String,
+    /// `base_url` is plaintext; its host was checked against both lists.
+    pub plain_http: bool,
     pub model: Option<String>,
     pub models: Vec<String>,
     pub key_file: Option<PathBuf>,
@@ -45,8 +47,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             egress_allowlist: vec!["openrouter.ai".to_string()],
-            allow_plain_http_loopback: false,
+            plain_http_allowlist: Vec::new(),
             base_url: crate::provider::openai_compat::OPENROUTER_BASE_URL.to_string(),
+            plain_http: false,
             model: None,
             models: Vec::new(),
             key_file: None,
@@ -87,7 +90,7 @@ struct RawConfig {
 #[derive(Default, Deserialize)]
 struct RawNet {
     egress_allowlist: Option<Vec<String>>,
-    allow_plain_http_loopback: Option<bool>,
+    plain_http_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -174,16 +177,38 @@ impl Config {
             ));
         }
         let defaults = Self::default();
-        let egress_allowlist = raw
-            .net
-            .egress_allowlist
-            .unwrap_or(defaults.egress_allowlist)
-            .into_iter()
-            .map(|host| validate_host(&host))
-            .collect::<Result<Vec<_>, _>>()?;
+        let egress_allowlist = validate_hosts(
+            raw.net
+                .egress_allowlist
+                .unwrap_or(defaults.egress_allowlist),
+        )?;
+        let plain_http_allowlist =
+            validate_hosts(raw.net.plain_http_allowlist.unwrap_or_default())?;
+        if let Some(host) = plain_http_allowlist
+            .iter()
+            .find(|host| !egress_allowlist.contains(host))
+        {
+            return Err(format!(
+                "net.plain_http_allowlist host {host:?} must also be in net.egress_allowlist"
+            ));
+        }
         let base_url = raw.provider.base_url.unwrap_or(defaults.base_url);
-        crate::provider::Endpoint::new(&base_url)
+        let endpoint = crate::provider::Endpoint::new(&base_url)
             .map_err(|error| format!("bad provider.base_url: {error}"))?;
+        let plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
+        if plain_http {
+            // Refuse at load time, so the user sees this rather than a key
+            // error or a per-request refusal.
+            crate::net::EgressPolicy::new(&egress_allowlist)
+                .with_plain_http_allowlist(&plain_http_allowlist)
+                .check(endpoint.url())
+                .map_err(|error| {
+                    format!(
+                        "provider.base_url: {error}; list the host in both \
+                         net.egress_allowlist and net.plain_http_allowlist"
+                    )
+                })?;
+        }
         for path in [&raw.provider.key_file, &raw.provider.ca_cert]
             .into_iter()
             .flatten()
@@ -257,8 +282,9 @@ impl Config {
         models.retain(|model| seen_models.insert(model.clone()));
         Ok(Self {
             egress_allowlist,
-            allow_plain_http_loopback: raw.net.allow_plain_http_loopback.unwrap_or(false),
+            plain_http_allowlist,
             base_url,
+            plain_http,
             model: raw.provider.model.filter(|model| !model.trim().is_empty()),
             models,
             key_file: raw.provider.key_file,
@@ -278,6 +304,10 @@ fn bounded_seconds(name: &str, value: u64, minimum: u64, maximum: u64) -> Result
         return Err(format!("{name} must be between {minimum} and {maximum}"));
     }
     Ok(Duration::from_secs(value))
+}
+
+fn validate_hosts(hosts: Vec<String>) -> Result<Vec<String>, String> {
+    hosts.iter().map(|host| validate_host(host)).collect()
 }
 
 fn validate_host(host: &str) -> Result<String, String> {
@@ -318,6 +348,80 @@ fn validate_context(context: ContextConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plaintext_hosts_require_explicit_egress_and_use_the_same_matching() {
+        assert!(
+            Config::parse("version = 1")
+                .unwrap()
+                .plain_http_allowlist
+                .is_empty()
+        );
+        let config = Config::parse(
+            r#"version = 1
+[net]
+egress_allowlist = ["192.168.4.1", "Host.Test"]
+plain_http_allowlist = ["192.168.4.1", "host.test"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.plain_http_allowlist, config.egress_allowlist);
+        for host in ["192.168.4.1", "api.host.test"] {
+            let error = Config::parse(&format!(
+                r#"version = 1
+[net]
+egress_allowlist = ["host.test"]
+plain_http_allowlist = ["{host}"]
+"#
+            ))
+            .unwrap_err();
+            assert!(error.contains("net.plain_http_allowlist"));
+            assert!(error.contains("net.egress_allowlist"));
+        }
+        assert!(
+            Config::parse(
+                r#"version = 1
+[net]
+plain_http_allowlist = ["http://host.test"]
+"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_plaintext_endpoint_is_checked_when_the_config_loads() {
+        let text = |net: &str| {
+            format!(
+                r#"version = 1
+[provider]
+base_url = "http://192.168.4.1:8080/v1"
+[net]
+{net}
+"#
+            )
+        };
+        for net in [
+            "",
+            r#"egress_allowlist = ["192.168.4.1"]"#,
+            r#"egress_allowlist = ["192.168.4.1", "host.test"]
+plain_http_allowlist = ["host.test"]"#,
+        ] {
+            let error = Config::parse(&text(net)).unwrap_err();
+            assert!(
+                error.contains("plain HTTP is not allowed"),
+                "{net}: {error}"
+            );
+            assert!(error.contains("net.plain_http_allowlist"), "{net}: {error}");
+        }
+        let config = Config::parse(&text(
+            r#"egress_allowlist = ["192.168.4.1"]
+plain_http_allowlist = ["192.168.4.1"]"#,
+        ))
+        .unwrap();
+        assert!(config.plain_http);
+        assert!(!Config::parse("version = 1").unwrap().plain_http);
+    }
 
     #[test]
     fn minimal_config_has_redesign_defaults() {

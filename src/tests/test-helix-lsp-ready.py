@@ -11,7 +11,10 @@ def ready(lines):
     active = set()
     loaded = scanned = checked = False
     for line in lines:
-        _, separator, payload = line.partition("rust-analyzer <- ")
+        # Only INFO transport records carry wire JSON. ERROR records can
+        # repeat the same arrow with a human-readable ServerError message.
+        _, separator, payload = line.partition(
+            "helix_lsp::transport [INFO] rust-analyzer <- ")
         if not separator:
             continue
         try:
@@ -43,7 +46,7 @@ def ready(lines):
 
 
 def progress(token, kind, **fields):
-    return "rust-analyzer <- " + json.dumps({
+    return "helix_lsp::transport [INFO] rust-analyzer <- " + json.dumps({
         "method": "$/progress", "params": {
             "token": token, "value": {"kind": kind, **fields}}})
 
@@ -76,7 +79,16 @@ class ReadinessTests(unittest.TestCase):
         self.assertTrue(ready(lines + self.scan))
 
     def test_incomplete_log_is_not_ready(self):
-        self.assertFalse(ready([self.check] + self.scan + ['rust-analyzer <- {']))
+        partial = 'helix_lsp::transport [INFO] rust-analyzer <- {'
+        self.assertFalse(ready([self.check] + self.scan + [partial]))
+
+    def test_formatted_content_modified_error_is_not_a_wire_message(self):
+        # Editing during initialization cancels an obsolete signature-help
+        # request. Helix logs its JSON reply and a separate readable error.
+        error = ('helix_lsp::transport [ERROR] rust-analyzer <- '
+                 'ServerError(-32801): content modified')
+        self.assertTrue(ready([error, self.check] + self.scan))
+        self.assertFalse(ready([error, self.check]))
 
 
 if __name__ == "__main__":

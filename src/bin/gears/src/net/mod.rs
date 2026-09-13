@@ -194,7 +194,7 @@ fn split_host_port(authority: &str) -> Option<(String, Option<u16>)> {
 #[derive(Debug, Clone)]
 pub struct EgressPolicy {
     allowlist: Vec<String>,
-    allow_loopback_http: bool,
+    plain_http_allowlist: Vec<String>,
     granted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 }
 
@@ -202,7 +202,7 @@ impl EgressPolicy {
     pub fn new(allowlist: &[String]) -> EgressPolicy {
         EgressPolicy {
             allowlist: allowlist.iter().map(|h| h.to_ascii_lowercase()).collect(),
-            allow_loopback_http: false,
+            plain_http_allowlist: Vec::new(),
             granted: Default::default(),
         }
     }
@@ -225,37 +225,36 @@ impl EgressPolicy {
             .insert(host.to_ascii_lowercase());
     }
 
-    /// Also accept plain HTTP to a loopback address, which the in-process
-    /// mock server speaks. **Tests only**: production egress is HTTPS, and on
-    /// Motor OS the curl crate refuses plain HTTP outright, so nothing built
-    /// on this can quietly become the shipping path.
-    pub fn allow_loopback_http_for_tests(mut self) -> EgressPolicy {
-        self.allow_loopback_http = true;
+    /// Hosts that may also be reached over plain HTTP. Each must be on the
+    /// static allowlist too: a runtime grant never widens this choice to
+    /// unencrypted traffic.
+    pub fn with_plain_http_allowlist(mut self, hosts: &[String]) -> Self {
+        self.plain_http_allowlist = hosts.iter().map(|host| host.to_ascii_lowercase()).collect();
         self
+    }
+
+    /// Plaintext needs the host on both static lists.
+    pub fn plain_http_allowed(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        self.allowlist.contains(&host) && self.plain_http_allowlist.contains(&host)
     }
 
     /// The one gate: a URL passes only if the scheme is permitted *and* the
     /// host is on the allowlist.
     pub fn check(&self, url: &Url) -> Result<(), NetError> {
-        if url.scheme() == Scheme::Http && !(self.allow_loopback_http && is_loopback(url.host())) {
+        let host = url.host();
+        if url.scheme() == Scheme::Http && !self.plain_http_allowed(host) {
             return Err(NetError::Forbidden(format!(
                 "{url}: plain HTTP is not allowed"
             )));
         }
-        if !self.allowlisted(url.host()) && !self.granted.lock().unwrap().contains(url.host()) {
+        if !self.allowlisted(host) && !self.granted.lock().unwrap().contains(host) {
             return Err(NetError::Forbidden(format!(
-                "{} is not on the egress allowlist",
-                url.host()
+                "{host} is not on the egress allowlist"
             )));
         }
         Ok(())
     }
-}
-
-fn is_loopback(host: &str) -> bool {
-    // Literal addresses only: `localhost` is a name, and a name resolves to
-    // whatever the resolver says.
-    host == "127.0.0.1" || host == "::1"
 }
 
 // ---- requests --------------------------------------------------------------
@@ -525,7 +524,7 @@ mod tests {
         ));
         // Subdomains are not implied by the parent.
         assert!(policy.check(&url("https://api.openrouter.ai/x")).is_err());
-        // Plain HTTP, including to loopback, without the test carve-out.
+        // Plain HTTP, including to loopback, without a plaintext grant.
         assert!(policy.check(&url("http://openrouter.ai/api")).is_err());
         assert!(policy.check(&url("http://127.0.0.1:8099/x")).is_err());
     }
@@ -548,13 +547,37 @@ mod tests {
     }
 
     #[test]
-    fn the_loopback_carve_out_relaxes_only_the_scheme() {
-        let policy = EgressPolicy::new(&["127.0.0.1".to_string()]).allow_loopback_http_for_tests();
-        assert!(policy.check(&url("http://127.0.0.1:8099/x")).is_ok());
-        // Still allowlisted-only: another host over plain HTTP stays refused,
-        // and so does a loopback address that was not configured.
-        assert!(policy.check(&url("http://192.168.1.5/x")).is_err());
-        assert!(policy.check(&url("http://[::1]:8099/x")).is_err());
+    fn plaintext_needs_both_static_host_lists() {
+        let policy = EgressPolicy::new(&["192.168.4.1".into(), "host.test".into()])
+            .with_plain_http_allowlist(&[
+                "192.168.4.1".into(),
+                "HOST.TEST".into(),
+                "grant.test".into(),
+            ]);
+        for address in [
+            "http://192.168.4.1:8080/v1",
+            "http://192.168.4.1:9090/v1",
+            "http://host.test/v1",
+        ] {
+            assert!(policy.check(&url(address)).is_ok(), "{address}");
+        }
+        policy.grant("grant.test");
+        for address in [
+            "http://grant.test/v1",
+            "http://api.host.test/v1",
+            "http://192.168.4.2/v1",
+        ] {
+            assert!(policy.check(&url(address)).is_err(), "{address}");
+        }
+        let https_only = EgressPolicy::new(&["192.168.4.1".into()]);
+        assert!(https_only.check(&url("http://192.168.4.1/v1")).is_err());
+        assert!(https_only.check(&url("https://192.168.4.1/v1")).is_ok());
+        assert!(
+            EgressPolicy::new(&[])
+                .with_plain_http_allowlist(&["192.168.4.1".into()])
+                .check(&url("http://192.168.4.1/v1"))
+                .is_err()
+        );
     }
 
     #[test]

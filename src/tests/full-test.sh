@@ -210,6 +210,9 @@ else
   "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh"
 fi
 
+# Gears must exercise the same curl implementation installed in Motor OS.
+bash "$WD/test-gears-http.sh" "${profile_args[@]}"
+
 # sys-init's dependency-free config parser is host-tested separately from its
 # Motor-only process-management binary.
 if [ "$BUILD" = "release" ]; then
@@ -638,6 +641,10 @@ vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
 test_ssh_client_host
+
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  bash "$WD/test-gears-http-vm.sh" "${profile_args[@]}"
+fi
 
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test

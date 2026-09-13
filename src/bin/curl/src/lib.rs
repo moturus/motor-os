@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use error::{CurlError, CurlResult};
 pub use http::{Response, receive_response, write_request};
-pub use options::{Action, DataSource, Options};
+pub use options::{Action, DataSource, Options, Protocols};
 pub use tls::client_config;
 pub use transfer::transfer;
-pub use url::HttpsUrl;
+pub use url::{HttpUrl, Scheme};
 pub use write_out::{TransferInfo, write_out};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -52,7 +52,7 @@ fn motor_getrandom(destination: &mut [u8]) -> Result<(), getrandom::Error> {
 getrandom::register_custom_getrandom!(motor_getrandom);
 
 pub fn help() -> &'static str {
-    "Usage: curl [OPTIONS] --url <HTTPS-URL>\n\
+    "Usage: curl [OPTIONS] --url <HTTP(S)-URL>\n\
 \n\
 Options:\n\
   -v, -vv, -vvv                     Print increasing detail to stdout\n\
@@ -63,7 +63,7 @@ Options:\n\
       --no-buffer                     Unbuffered output (always on)\n\
       --globoff                       Disable URL globbing\n\
       --http1.1                       Use HTTP/1.1\n\
-      --proto =https                  Permit HTTPS only\n\
+      --proto <SET>                   =https (default), =http, or =http,https\n\
       --noproxy *                     Disable proxies\n\
       --disallow-username-in-url      Reject URL user information\n\
       --tlsv1.2                       Require TLS 1.2 or newer\n\
@@ -80,11 +80,11 @@ Options:\n\
       --output -                      Write the response body to stdout\n\
       --write-out <FORMAT>            Write transfer metadata\n\
       --cacert <ABSOLUTE-PATH>        Load trust roots from a PEM file\n\
-      --url <HTTPS-URL>               Set the request URL\n\
+      --url <HTTP(S)-URL>             Set the request URL\n\
       --help                          Print help\n\
       --version                       Print version\n"
 }
 
 pub fn version() -> String {
-    format!("curl {VERSION} (Motor OS) rustls\nProtocols: https\n")
+    format!("curl {VERSION} (Motor OS) rustls\nProtocols: http https\n")
 }

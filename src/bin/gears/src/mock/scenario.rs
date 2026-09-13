@@ -504,9 +504,20 @@ fn tool_round(id: &str, name: &str, arguments: serde_json::Value, done: &str) ->
     ]
 }
 
-pub fn validate_provider_request(name: &str, body: &[u8]) -> Result<(), String> {
+/// `expected_model`, when given, also pins the configured model and streaming
+/// mode: a gate that checks configuration as well as transport.
+pub fn validate_provider_request(
+    name: &str,
+    body: &[u8],
+    expected_model: Option<&str>,
+) -> Result<(), String> {
     let request: serde_json::Value =
         serde_json::from_slice(body).map_err(|error| format!("bad request JSON: {error}"))?;
+    if let Some(model) = expected_model
+        && (request["model"] != model || request["stream"] != true)
+    {
+        return Err(format!("expected model {model:?} with stream true"));
+    }
     let messages = request
         .get("messages")
         .and_then(serde_json::Value::as_array)
@@ -568,6 +579,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_expected_model_pins_the_model_and_streaming_mode() {
+        let model = Some("test/model");
+        assert!(
+            validate_provider_request(
+                "streamed-text",
+                br#"{"model":"test/model","stream":true,"messages":[]}"#,
+                model,
+            )
+            .is_ok()
+        );
+        for body in [
+            br#"{"model":"wrong","stream":true,"messages":[]}"#.as_slice(),
+            br#"{"model":"test/model","stream":false,"messages":[]}"#.as_slice(),
+            br#"{"messages":[]}"#.as_slice(),
+        ] {
+            assert!(validate_provider_request("streamed-text", body, model).is_err());
+            assert!(validate_provider_request("streamed-text", body, None).is_ok());
+        }
+    }
+
+    #[test]
     fn every_advertised_scenario_exists() {
         for scenario in PROVIDER_SCENARIOS {
             assert!(!provider_scenario(scenario).unwrap().is_empty());
@@ -580,12 +612,12 @@ mod tests {
             "messages": [{"role": "user", "content": "go"}],
             "tools": [{"function": {"name": "sh"}}]
         });
-        validate_provider_request("sh-round", good.to_string().as_bytes()).unwrap();
+        validate_provider_request("sh-round", good.to_string().as_bytes(), None).unwrap();
         let bad = serde_json::json!({
             "messages": [{"role": "user", "content": "go"}],
             "tools": []
         });
-        assert!(validate_provider_request("sh-round", bad.to_string().as_bytes()).is_err());
+        assert!(validate_provider_request("sh-round", bad.to_string().as_bytes(), None).is_err());
     }
 
     #[test]

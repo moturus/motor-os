@@ -140,7 +140,8 @@ mod tests {
             request
         });
 
-        let policy = EgressPolicy::new(&["127.0.0.1".to_string()]).allow_loopback_http_for_tests();
+        let policy = EgressPolicy::new(&["127.0.0.1".to_string()])
+            .with_plain_http_allowlist(&["127.0.0.1".to_string()]);
         let client =
             MotorCurl::with_program("curl", policy).with_secret("GEARS_MC_TEST_KEY", "sk-mc-42");
         let url = Url::parse(&format!("http://127.0.0.1:{port}/v1/chat")).unwrap();

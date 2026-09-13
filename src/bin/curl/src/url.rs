@@ -2,9 +2,32 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::{CurlError, CurlResult};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HttpsUrl {
+pub struct HttpUrl {
     original: String,
+    scheme: Scheme,
     host: String,
     port: u16,
     explicit_port: bool,
@@ -12,7 +35,7 @@ pub struct HttpsUrl {
     target: String,
 }
 
-impl HttpsUrl {
+impl HttpUrl {
     pub fn parse(value: &str) -> CurlResult<Self> {
         if !value.is_ascii()
             || value
@@ -21,9 +44,8 @@ impl HttpsUrl {
         {
             return Err(malformed("URL contains invalid characters"));
         }
-        let rest = value
-            .strip_prefix("https://")
-            .ok_or_else(|| malformed("only HTTPS URLs are supported"))?;
+        let (scheme, rest) = split_scheme(value)
+            .ok_or_else(|| malformed("only HTTP and HTTPS URLs are supported"))?;
         if rest.contains('#') {
             return Err(malformed("URL fragments are not supported"));
         }
@@ -38,7 +60,7 @@ impl HttpsUrl {
             return Err(malformed("URL user information is not permitted"));
         }
 
-        let (host, port, explicit_port, ipv6) = parse_authority(authority)?;
+        let (host, port, explicit_port, ipv6) = parse_authority(authority, scheme.default_port())?;
         let target = if suffix.is_empty() {
             "/".to_owned()
         } else if suffix.starts_with('?') {
@@ -49,6 +71,7 @@ impl HttpsUrl {
 
         Ok(Self {
             original: value.to_owned(),
+            scheme,
             host,
             port,
             explicit_port,
@@ -59,6 +82,10 @@ impl HttpsUrl {
 
     pub fn as_str(&self) -> &str {
         &self.original
+    }
+
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
     }
 
     pub fn host(&self) -> &str {
@@ -87,11 +114,11 @@ impl HttpsUrl {
     }
 
     pub fn redirect(&self, location: &str) -> CurlResult<Self> {
-        if location.starts_with("https://") {
+        if split_scheme(location).is_some() {
             return Self::parse(location);
         }
         if location.starts_with("//") {
-            return Self::parse(&format!("https:{location}"));
+            return Self::parse(&format!("{}:{location}", self.scheme.as_str()));
         }
         if location.is_empty()
             || !location.is_ascii()
@@ -122,11 +149,29 @@ impl HttpsUrl {
             let directory_end = base_path.rfind('/').unwrap_or(0) + 1;
             normalize_target(&format!("{}{location}", &base_path[..directory_end]))
         };
-        Self::parse(&format!("https://{}{}", self.authority(), target))
+        Self::parse(&format!(
+            "{}://{}{}",
+            self.scheme.as_str(),
+            self.authority(),
+            target
+        ))
     }
 }
 
-fn parse_authority(authority: &str) -> CurlResult<(String, u16, bool, bool)> {
+/// Schemes are case-insensitive (RFC 3986 §3.1); upstream curl accepts
+/// `HTTP://` and Gears forwards the URL text as configured.
+fn split_scheme(value: &str) -> Option<(Scheme, &str)> {
+    let (scheme, rest) = value.split_once("://")?;
+    if scheme.eq_ignore_ascii_case("http") {
+        Some((Scheme::Http, rest))
+    } else if scheme.eq_ignore_ascii_case("https") {
+        Some((Scheme::Https, rest))
+    } else {
+        None
+    }
+}
+
+fn parse_authority(authority: &str, default_port: u16) -> CurlResult<(String, u16, bool, bool)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let close = rest
             .find(']')
@@ -135,13 +180,13 @@ fn parse_authority(authority: &str) -> CurlResult<(String, u16, bool, bool)> {
         host.parse::<Ipv6Addr>()
             .map_err(|_| malformed("invalid IPv6 address"))?;
         let tail = &rest[close + 1..];
-        let (port, explicit) = parse_port_tail(tail)?;
+        let (port, explicit) = parse_port_tail(tail, default_port)?;
         return Ok((host.to_ascii_lowercase(), port, explicit, true));
     }
 
     let (host, port, explicit) = match authority.rsplit_once(':') {
         Some((host, port)) => (host, parse_port(port)?, true),
-        None => (authority, 443, false),
+        None => (authority, default_port, false),
     };
     if host.is_empty() || host.contains(':') {
         return Err(malformed("invalid host"));
@@ -150,9 +195,9 @@ fn parse_authority(authority: &str) -> CurlResult<(String, u16, bool, bool)> {
     Ok((host.to_ascii_lowercase(), port, explicit, false))
 }
 
-fn parse_port_tail(tail: &str) -> CurlResult<(u16, bool)> {
+fn parse_port_tail(tail: &str, default_port: u16) -> CurlResult<(u16, bool)> {
     if tail.is_empty() {
-        Ok((443, false))
+        Ok((default_port, false))
     } else if let Some(port) = tail.strip_prefix(':') {
         Ok((parse_port(port)?, true))
     } else {
@@ -227,17 +272,17 @@ mod tests {
 
     #[test]
     fn parses_dns_ipv4_and_ipv6_urls() {
-        let url = HttpsUrl::parse("https://Crates.IO/index?q=1").unwrap();
+        let url = HttpUrl::parse("https://Crates.IO/index?q=1").unwrap();
         assert_eq!(url.host(), "crates.io");
         assert_eq!(url.port(), 443);
         assert_eq!(url.authority(), "crates.io");
         assert_eq!(url.request_target(), "/index?q=1");
 
-        let url = HttpsUrl::parse("https://127.0.0.1:8443").unwrap();
+        let url = HttpUrl::parse("https://127.0.0.1:8443").unwrap();
         assert_eq!(url.authority(), "127.0.0.1:8443");
         assert_eq!(url.request_target(), "/");
 
-        let url = HttpsUrl::parse("https://[::1]:443/?x").unwrap();
+        let url = HttpUrl::parse("https://[::1]:443/?x").unwrap();
         assert_eq!(url.host(), "::1");
         assert_eq!(url.authority(), "[::1]:443");
         assert_eq!(url.request_target(), "/?x");
@@ -246,7 +291,10 @@ mod tests {
     #[test]
     fn rejects_unsafe_or_malformed_urls() {
         for value in [
-            "http://example.test/",
+            "ftp://example.test/",
+            "http://user@example.test/",
+            "http://example.test/#fragment",
+            "http://example.test:0/",
             "https://",
             "https://user@example.test/",
             "https://example.test/#fragment",
@@ -255,14 +303,14 @@ mod tests {
             "https://[::1/",
             "https://example.test/\n",
         ] {
-            let error = HttpsUrl::parse(value).unwrap_err();
+            let error = HttpUrl::parse(value).unwrap_err();
             assert_eq!(error.code(), CurlError::MALFORMED_URL, "{value}");
         }
     }
 
     #[test]
     fn resolves_redirect_references() {
-        let base = HttpsUrl::parse("https://example.test/a/b?old").unwrap();
+        let base = HttpUrl::parse("https://example.test/a/b?old").unwrap();
         assert_eq!(
             base.redirect("../c?new").unwrap().as_str(),
             "https://example.test/c?new"
@@ -279,6 +327,45 @@ mod tests {
             base.redirect("//other.test/x").unwrap().as_str(),
             "https://other.test/x"
         );
-        assert!(base.redirect("http://other.test/").is_err());
+        assert_eq!(
+            base.redirect("http://other.test/").unwrap().scheme(),
+            Scheme::Http
+        );
+    }
+
+    #[test]
+    fn http_ports_and_relative_redirects_preserve_the_scheme() {
+        for host in ["example.test", "192.168.4.1", "[::1]"] {
+            let base = HttpUrl::parse(&format!("http://{host}/a/b")).unwrap();
+            assert_eq!(base.scheme(), Scheme::Http);
+            assert_eq!(base.port(), 80);
+            assert_eq!(base.authority(), host);
+            assert_eq!(
+                base.redirect("../c").unwrap().as_str(),
+                format!("http://{host}/c")
+            );
+            assert_eq!(
+                base.redirect("//other.test/x").unwrap().as_str(),
+                "http://other.test/x"
+            );
+            assert_eq!(base.redirect("https://other.test/x").unwrap().port(), 443);
+        }
+        let explicit = HttpUrl::parse("http://192.168.4.1:8080/v1").unwrap();
+        assert_eq!(explicit.port(), 8080);
+        assert_eq!(
+            explicit.redirect("?new").unwrap().as_str(),
+            "http://192.168.4.1:8080/v1?new"
+        );
+    }
+
+    #[test]
+    fn schemes_are_case_insensitive() {
+        let url = HttpUrl::parse("HTTP://192.168.4.1:8080/v1").unwrap();
+        assert_eq!(url.scheme(), Scheme::Http);
+        assert_eq!(url.as_str(), "HTTP://192.168.4.1:8080/v1");
+        let url = HttpUrl::parse("Https://Example.test/").unwrap();
+        assert_eq!((url.scheme(), url.port()), (Scheme::Https, 443));
+        assert_eq!(url.redirect("HTTP://other.test/x").unwrap().port(), 80);
+        assert!(HttpUrl::parse("FTP://example.test/").is_err());
     }
 }

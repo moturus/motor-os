@@ -188,6 +188,12 @@ impl EventSink for AskSink {
 fn load_key(config: &Config, from_env: Option<String>) -> Result<ApiKey, String> {
     match from_env {
         Some(key) => ApiKey::parse(&key, KEY_ENV),
+        // A cloud credential in the default file must not leak in the clear
+        // just because base_url changed.
+        None if config.plain_http && config.key_file.is_none() => Err(format!(
+            "plain HTTP cannot use the implicit default key file; \
+             set provider.key_file or {KEY_ENV} explicitly"
+        )),
         None => ApiKey::load(config.key_file.as_deref()),
     }
 }
@@ -197,10 +203,8 @@ fn connect(
     key: &ApiKey,
     verbosity: u8,
 ) -> Result<OpenAiCompat<HttpBackend>, String> {
-    let mut policy = EgressPolicy::new(&config.egress_allowlist);
-    if config.allow_plain_http_loopback {
-        policy = policy.allow_loopback_http_for_tests();
-    }
+    let policy = EgressPolicy::new(&config.egress_allowlist)
+        .with_plain_http_allowlist(&config.plain_http_allowlist);
     let http = HttpBackend::new(policy)
         .map_err(|error| error.to_string())?
         .with_verbosity(verbosity)

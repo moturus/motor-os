@@ -370,6 +370,11 @@ pub(crate) fn build_argv(req: &HttpRequest, ca_cert: Option<&str>) -> Vec<String
     push("--no-buffer"); // Stream as bytes arrive.
     push("--include"); // The response head first, then the body.
     push("--http1.1"); // Pin the head format; the Motor curl is 1.1-only.
+    push("--proto");
+    push(match req.url.scheme() {
+        super::Scheme::Http => "=http",
+        super::Scheme::Https => "=https",
+    });
     push("--noproxy");
     push("*");
     push("--header");
@@ -730,6 +735,18 @@ mod tests {
             argv.last().unwrap(),
             "https://127.0.0.1:9443/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn curl_is_restricted_to_the_authorized_scheme() {
+        for (url, protocol) in [
+            ("http://192.168.4.1:8080/v1", "=http"),
+            ("https://host.test/v1", "=https"),
+        ] {
+            let argv = build_argv(&request(url), None);
+            assert!(argv.windows(2).any(|pair| pair == ["--proto", protocol]));
+            assert!(!argv.iter().any(|arg| arg == "--location"));
+        }
     }
 
     #[test]

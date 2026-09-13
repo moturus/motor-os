@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run against the already booted developer-image VM; all sources are offline.
+# Run against the already booted developer-image VM. Provisioning fetches only
+# what the analyzer build needs; the crates' own test graphs are fetched here.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WD="$ROOT_DIR/src/tests"
@@ -42,6 +43,10 @@ test_crate() {
 	local name="$1" test_target="$2" source
 	source="$(toolchain_rust_analyzer_crate "$ROOT_DIR" "$MOTORH" \
 		"${CARGO_HOME:-$HOME/.cargo}" "$name" false)"
+	# The published lockfile pins dev-dependencies (bencher, wasm-bindgen-test)
+	# that no build step fetches. `--locked` cannot rewrite it, and the digest
+	# check below confirms the tree is untouched. The tests then run offline.
+	"$cargo" fetch --locked --manifest-path "$source/Cargo.toml"
 	local args=(--release --locked --offline --manifest-path "$source/Cargo.toml"
 		--test "$test_target" --target-dir "$temporary/target")
 	"$cargo" test "${args[@]}"

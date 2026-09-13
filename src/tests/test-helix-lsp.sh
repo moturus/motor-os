@@ -104,6 +104,9 @@ wait_pty_output "[scratch]" "empty Helix startup"
 PTY_OUTPUT=""
 printf ':o src/main.rs\r' >&"$PTY_IN_FD"
 wait_pty_output "main.rs" "opening Rust after Helix startup"
+# The buffer can render before LSP initialization. Wait for didOpen so the
+# insertion and undo are both changes, rather than insertion entering didOpen.
+helix_log_wait '"method":"textDocument/didOpen"' "initial document notification"
 PTY_OUTPUT=""
 printf 'i// analysis edit' >&"$PTY_IN_FD"
 wait_pty_output "INS" "edit during initial analysis"

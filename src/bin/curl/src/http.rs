@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 
-use crate::{CurlError, CurlResult, HttpsUrl, Options};
+use crate::{CurlError, CurlResult, HttpUrl, Options};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HEADERS: usize = 200;
@@ -20,7 +20,7 @@ pub struct Response {
 /// those as arguments).
 pub fn write_request(
     stream: &mut impl Write,
-    url: &HttpsUrl,
+    url: &HttpUrl,
     options: &Options,
     body: Option<&[u8]>,
 ) -> CurlResult<()> {
@@ -83,7 +83,7 @@ pub fn write_request(
 /// reason phrase and every header this parser itself has no use for.
 pub fn receive_response(
     stream: &mut impl Read,
-    url: &HttpsUrl,
+    url: &HttpUrl,
     include: bool,
     output: &mut impl Write,
 ) -> CurlResult<Response> {
@@ -386,14 +386,14 @@ mod tests {
     use super::*;
 
     fn receive(response: &[u8]) -> CurlResult<(Response, Vec<u8>)> {
-        let url = HttpsUrl::parse("https://example.test/old/path").unwrap();
+        let url = HttpUrl::parse("https://example.test/old/path").unwrap();
         let mut body = Vec::new();
         let response = receive_response(&mut &*response, &url, false, &mut body)?;
         Ok((response, body))
     }
 
     fn render(options: &Options, body: Option<&[u8]>) -> String {
-        let url = HttpsUrl::parse("https://example.test:8443/a?q=1").unwrap();
+        let url = HttpUrl::parse("https://example.test:8443/a?q=1").unwrap();
         let mut request = Vec::new();
         write_request(&mut request, &url, options, body).unwrap();
         String::from_utf8(request).unwrap()
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn include_prefixes_the_raw_head_interim_heads_and_reason_intact() {
-        let url = HttpsUrl::parse("https://example.test/x").unwrap();
+        let url = HttpUrl::parse("https://example.test/x").unwrap();
         let wire: &[u8] = b"HTTP/1.1 103 Early Hints\r\nLink: </y>\r\n\r\n\
                             HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3\r\n\
                             Content-Length: 4\r\n\r\nbody";

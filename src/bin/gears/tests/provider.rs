@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 use gears::cancellation::Cancellation;
 use gears::mock::{MockServer, Script, provider_conformance_corpus, sse_response};
 use gears::net::host_curl::HostCurl;
+use gears::net::motor_curl::MotorCurl;
 use gears::net::{EgressPolicy, Timeouts};
 use gears::provider::{
     Endpoint, EventSink, Message, OpenAiCompat, Provider, Request, StreamEvent, ToolSpec,
 };
 
 fn provider(server: &MockServer) -> OpenAiCompat<HostCurl> {
-    let policy = EgressPolicy::new(&["127.0.0.1".to_string()]).allow_loopback_http_for_tests();
+    let policy = EgressPolicy::new(&["127.0.0.1".to_string()])
+        .with_plain_http_allowlist(&["127.0.0.1".to_string()]);
     OpenAiCompat::new(
         HostCurl::new(policy).unwrap(),
         Endpoint::new(&server.url("/v1")).unwrap(),
@@ -66,6 +68,43 @@ fn normalized_request_streams_through_the_real_transport() {
     );
     let body: serde_json::Value = serde_json::from_slice(&server.requests()[0].body).unwrap();
     assert_eq!(body["messages"][0]["role"], "user");
+}
+
+/// The component gate selects the in-tree curl binary; ordinary host tests
+/// exercise the same Motor transport against upstream curl.
+#[test]
+fn provider_streams_through_the_motor_curl_transport() {
+    let program = std::env::var_os("MOTOR_CURL_TEST_PROGRAM").unwrap_or_else(|| "curl".into());
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"hello "}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{"content":"motor"},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let policy =
+        EgressPolicy::new(&["127.0.0.1".into()]).with_plain_http_allowlist(&["127.0.0.1".into()]);
+    let http = MotorCurl::with_program(program.to_str().expect("curl path must be UTF-8"), policy)
+        .with_secret("OPENROUTER_API_KEY", "fixture-motor-key");
+    let provider = OpenAiCompat::new(http, Endpoint::new(&server.url("/v1")).unwrap());
+    let mut rendered = Rendered::default();
+    let completion = provider.complete(&request(), &mut rendered).unwrap();
+    assert_eq!(completion.content, "hello motor");
+    assert_eq!(
+        rendered.events,
+        [
+            StreamEvent::Text("hello ".into()),
+            StreamEvent::Text("motor".into())
+        ]
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].target, "/v1/chat/completions");
+    assert_eq!(
+        requests[0].header("Authorization"),
+        Some("Bearer fixture-motor-key")
+    );
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "test/model");
+    assert_eq!(body["stream"], true);
 }
 
 #[test]

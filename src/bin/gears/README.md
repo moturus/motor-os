@@ -101,14 +101,90 @@ Prompt resources and hook/tool manifests are loaded from the current
 installation when a session is opened. Their hashes are appended as a runtime
 identity; a change produces one notice.
 
+## A llama.cpp server on the VM host
+
+Build and boot the development image from the repository root after setting
+up the Motor toolchain:
+
+    make -j"$(nproc)" dev.img BUILD=release
+    vm_images/release/run-dev.sh
+
+With the standard TAP setup, the host address is 192.168.4.1 and the guest is
+192.168.4.2. Restore the TAP after a host reboot with
+`vm_images/release/create-tap.sh` if needed. On the host, start llama.cpp with
+your model, using a context size the model supports:
+
+    llama-server -m /absolute/path/to/model.gguf --alias local \
+      --host 192.168.4.1 --port 8080 --ctx-size 32768 --parallel 1 --jinja
+
+Tool use requires a model and chat template supporting tool calls. Inside
+Motor OS, create a separate placeholder credential for an unauthenticated
+local server and clear any inherited cloud credential:
+
+    mkdir -p /user/cfg/gears
+    echo local-llama > /user/cfg/gears/local-llama.key
+    unset OPENROUTER_API_KEY
+
+Save this as `/user/cfg/gears.toml`:
+
+```toml
+version = 1
+
+[provider]
+base_url = "http://192.168.4.1:8080/v1"
+model = "local"
+key_file = "/user/cfg/gears/local-llama.key"
+
+[net]
+egress_allowlist = ["192.168.4.1"]
+plain_http_allowlist = ["192.168.4.1"]
+
+[context]
+window_tokens = 32768
+output_reserve_tokens = 4096
+recent_tail_tokens = 8192
+```
+
+The HTTP list must be a subset of the egress list. Both use exact host
+matching: an entry permits any port on that host, not just port 8080. HTTP
+sends prompts and any bearer key without encryption. HTTPS remains the
+default; a TLS failure never falls back to HTTP. A plaintext `base_url`
+whose host is missing from either list is refused when the config loads.
+
+Gears refuses implicit default-key-file fallback over HTTP. An explicit key
+file is allowed, but `OPENROUTER_API_KEY` takes precedence even if inherited
+from the shell. Keep it unset for the file-based setup, or explicitly use
+`OPENROUTER_API_KEY=local-llama` for a one-off invocation. If the server uses
+authentication, supply its matching key instead of the placeholder.
+
+Check the host connection and start Gears from the desired guest workspace:
+
+    /system/bin/curl --proto =http http://192.168.4.1:8080/health
+    /devtools/bin/gears ask "Reply with a short hello."
+    /devtools/bin/gears
+
+Use `--ui line` for the line interface or `-vv` for transport diagnostics.
+Gears appends `/chat/completions` to the configured API root. Match the Gears
+context settings to the server's context capacity.
+
 ## Local tests
 
 Automated tests never use an Internet provider:
 
+    bash src/tests/test-gears-http.sh
+    bash src/tests/test-gears-http.sh --release
     cargo fmt --manifest-path src/bin/gears/Cargo.toml -- --check
     cargo test --manifest-path src/bin/gears/Cargo.toml
     cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets
     cargo test --manifest-path src/bin/gears-mock-provider/Cargo.toml
+
+The component gate runs the three crates' tests and selects the host build
+of Motor curl through `MOTOR_CURL_TEST_PROGRAM` for the provider regression;
+plain `cargo test` uses upstream curl there. The developer-image gate also
+runs guest curl and Gears against the host mock's HTTP endpoint on the TAP
+address:
+
+    src/tests/full-test-dev.sh --release
 
 Build both development-image binaries with:
 
@@ -129,5 +205,8 @@ Motor OS development image under /devtools/tests/gears/; copy the three test
 certificate files into the VM and repeat with /devtools/bin/gears.
 
 Use the streamed-text, sh-round, hook-round, compaction, interrupt-stream,
-usage, malformed-response, and error scenarios as appropriate. A real-provider
+usage, malformed-response, and error scenarios as appropriate. `--plain`
+serves the same scenarios over HTTP without certificates, `--allow-non-loopback`
+permits a non-loopback bind address and peer, and `--expect-model <name>`
+also checks the model the client configured. A real-provider
 check is separate, manual, and must be explicitly authorized.
