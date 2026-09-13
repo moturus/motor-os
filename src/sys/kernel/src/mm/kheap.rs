@@ -101,7 +101,7 @@ static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&RAW_ALLOCATOR);
 /// Size classes of `Frusa4K`: 16 bytes to 4 KiB.
 const CLASSES: usize = 9;
 
-/// One CPU's stage in front of `FRUSA` (docs/plans/frusa.md, section 8):
+/// One CPU's stage in front of `FRUSA` (docs/frusa.md, the kernel heap):
 /// the allocator's private blocks and, per class, a LIFO of freed slots
 /// linked through their first word. Kernel code is never preempted and
 /// interrupt handlers do not allocate, so an allocation runs to completion

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Memory management in Motor OS: pages, stacks, shared memory, and the low-memory admission control that replaces an OOM killer.">
+<meta name="description" content="Memory management in Motor OS: pages and huge pages, the allocator, and the low-memory admission control that replaces an OOM killer.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Memory | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -442,15 +442,17 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">System</div>
 <h1>Memory</h1>
-<p class="lead">Motor OS uses 4 KiB pages, eager mappings by default, and guarded lazy
-stacks. Instead of an OOM killer it has admission control: a memory-growing operation
-is refused before it starts if it would push the machine below a safety floor, and a
-shared "memory pressure" flag lets sys-io shed load before it runs out.</p>
+<p class="lead">Motor OS uses 4 KiB pages, 2 MiB pages for large heaps, eager mappings by
+default, and guarded lazy stacks. Instead of an OOM killer it has admission control: a
+memory-growing operation is refused before it starts if it would push the machine below a
+safety floor, and a shared "memory pressure" flag lets sys-io shed load before it runs out.</p>
 
 <h2>Pages and mappings</h2>
 <ul>
-  <li>Ordinary userspace memory is mapped in 4 KiB pages. 2 MiB pages exist for the I/O
-  manager's device memory only.</li>
+  <li>Ordinary userspace memory is mapped in 4 KiB pages. A heap allocation larger than
+  1 MiB is served with 2 MiB pages where whole ones are available and with 4 KiB pages
+  otherwise; the size returned is rounded to what was mapped. The I/O manager also has a
+  fixed segment of 2 MiB pages for device memory.</li>
   <li>Mappings are eager by default. A process can ask for a lazy heap segment, which is
   backed on first touch. Stacks are always lazy and guarded, so a stack overflow faults
   instead of corrupting a neighbor.</li>
@@ -461,8 +463,29 @@ shared "memory pressure" flag lets sys-io shed load before it runs out.</p>
   <li>A per-process memory limit exists in the kernel but is not exposed yet and is
   unlimited by default.</li>
 </ul>
-<p>The heap allocator in every process is <code>frusa</code>, a small no-std allocator
-written for Motor OS that can grow and give memory back on demand.</p>
+
+<h2>Physical memory</h2>
+<p>The kernel manages RAM as 2 MiB blocks. A block is whole, which means free or serving
+one 2 MiB page, or split into 4 KiB pages. A split block keeps a free list threaded
+through its free pages, and every link carries a check word, so a corrupted or forged link
+is detected rather than followed. Memory below 128 MiB only supplies small pages; above it
+a whole block serves either a huge page or, as a last resort, small pages. Small pages
+are taken from the bottom of memory up and huge pages from the top down, and a block
+whose pages have all been freed becomes whole again, so the two sizes stay apart. Each
+CPU keeps a cursor into the block it last allocated from. The design, the boot-time
+shaping of the pool, and the kernel's virtual layout are in <a href="https://github.com/moturus/motor-os/blob/main/docs/kernel-mm.md"><code>docs/kernel-mm.md</code></a>.</p>
+
+<h2>The allocator</h2>
+<p>Every process's heap, and the kernel's own heap, is <code>frusa</code>, a no-std
+allocator written for Motor OS. Requests up to 4 KiB are rounded to a power-of-two size
+class and served from 64-slot blocks, each tracked by one bitmap; larger requests map pages
+directly. A thread keeps one private block per class for its temporaries, freed objects
+wait on short per-CPU lists, and a pointer is located by a binary search over an
+address-sorted index, so no operation walks the heap and no lock is held across a request
+to the kernel. Memory goes back to the kernel on demand: the runtime returns idle pages
+every five seconds once more than 1 MiB is idle, or as soon as a page is idle while the
+memory-pressure flag is up. The kernel uses the same crate with a per-CPU cache in front
+of it. The design is in <a href="https://github.com/moturus/motor-os/blob/main/docs/frusa.md"><code>docs/frusa.md</code></a>.</p>
 
 <h2>Why admission control</h2>
 <p>Allocating N pages of data also costs page descriptors, page tables, and occasionally a
@@ -480,12 +503,14 @@ kernel objects to processes.</p>
     any process may start a memory-growing operation
 
 SYS_IO_FLOOR (128 pages, 512 KiB) &lt; available &lt;= USER_FLOOR:
-    only sys-io may
+    only system processes may (sys-io, sys-tty, sys-init, strobe)
 
 available &lt;= SYS_IO_FLOOR:
     nobody may; what is left is for kernel work already in flight</code></pre>
-<p>The floors are constants, not configuration: an operator must not be able to configure
-the machine back into physical exhaustion. If measurements ever show they are too
+<p>The reserve between the floors belongs to processes with the system or I/O-manager
+capability; the lower floor keeps its historical sys-io name. The floors are constants, not
+configuration: an operator must not be able to configure the machine back into physical
+exhaustion. If measurements ever show they are too
 small, the floors are raised rather than a new allocation class added.</p>
 
 <h2>How an operation is admitted</h2>
@@ -549,7 +574,8 @@ the two floor gauges. sys-io metrics: <code>net.pressure_active</code>,
 <code>net.pressure_refused_clients</code>, <code>net.pressure_deferred_replenish</code>,
 <code>fs.pressure_refused</code>, and <code>fs.pressure_refused_clients</code>. A single
 syscall (<code>F_QUERY_ADMISSION_STATS</code>) reports availability, reservations, floors,
-and watermarks in one call. See <a href="diagnostics.html">Logs and diagnostics</a> for
+and watermarks in one call. The block pool reports its own gauges, <code>mem.blocks_*</code>
+and <code>mem.pages_*</code>. See <a href="diagnostics.html">Logs and diagnostics</a> for
 how to read metrics.</p>
 
 <h2>Deliberately not built</h2>
@@ -562,7 +588,8 @@ how to read metrics.</p>
   a retry or a longer timeout.</li>
 </ul>
 <p>The full argument, including the measurements that validated the floors, is in
-<code>docs/oom-handling.md</code> in the repository.</p>
+<a href="https://github.com/moturus/motor-os/blob/main/docs/oom-handling.md"><code>docs/oom-handling.md</code></a>; the kernel's physical and virtual memory management is in
+<a href="https://github.com/moturus/motor-os/blob/main/docs/kernel-mm.md"><code>docs/kernel-mm.md</code></a> and the allocator in <a href="https://github.com/moturus/motor-os/blob/main/docs/frusa.md"><code>docs/frusa.md</code></a>.</p>
 <nav class="pager">
 <a class="pager-prev" href="processes.html"><span>Previous</span>Processes and roles</a>
 <a class="pager-next" href="filesystem.html"><span>Next</span>Filesystem</a>

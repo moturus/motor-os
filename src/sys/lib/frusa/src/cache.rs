@@ -2,7 +2,7 @@
 //! touching any shared structure. The caller owns the cache and passes it
 //! to the cached entry points; the crate never looks up thread state.
 //!
-//! Ownership protocol (see `docs/plans/frusa.md` §5.2): a block's `owner`
+//! Ownership protocol (see `docs/frusa.md`, per-thread caches): a block's `owner`
 //! word names the cache holding it. It is set under the partial lock when
 //! the block is popped, and cleared by its owner before the block can be
 //! pushed again. A block with an owner is off the stack, is allocated from

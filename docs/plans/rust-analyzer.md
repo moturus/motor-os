@@ -26,7 +26,7 @@ Both stages are required:
 | Stage | Server host | Analyzed targets | Status |
 |---|---|---|---|
 | 1. Host | Linux | Motor and Linux host | Complete and gated |
-| 2. Guest | Motor OS | Motor only | Complete and gated, including native Helix integration (§4.38); frusa_v2 resolved string hover (§4.37) |
+| 2. Guest | Motor OS | Motor only | Complete and gated, including native Helix integration (§4.38) and the string hover (§4.37) |
 
 The stages share a pinned source revision and an LSP test harness, but produce
 different executables and have different project-loading boundaries. Stage 1
@@ -2728,14 +2728,12 @@ lockfile lines. No tracing patch or external source changes were added.
 Step 24 is complete. Step 25, the string-hover diagnosis, was the last
 implementation item; §4.37 records its resolution.
 
-### 4.37 String-hover investigation: allocator scalability review stop
+### 4.37 String hover
 
-See [the Frusa scalability plan](frusa.md) for the investigation evidence,
-optimization proposal, validation requirements, and decisions awaiting review.
-
-Resolved on 2026-09-09: the runtime now uses `frusa_v2`, and the queued
-`env!`-derived string-hover assertion is restored in the native case, where
-the hover completes in 920 ms; see frusa.md §10.
+Strings render through MIR evaluation, which makes the `env!`-derived string
+hover the case most sensitive to allocator cost; the native case asserts it,
+and the hover completes in 920 ms with the allocator described in
+[docs/frusa.md](../frusa.md).
 
 ### 4.38 Native Helix integration
 

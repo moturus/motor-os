@@ -1,7 +1,6 @@
 //! Allocator profiler. Not a test: `systest alloc-bench` prints per-workload
-//! timings for the process allocator, the same workloads the host harness in
-//! docs/plans/frusa.md §3.2 uses, so the vDSO allocator can be compared
-//! across builds on Motor itself.
+//! timings for the process allocator, the workloads listed in docs/frusa.md,
+//! so the vDSO allocator can be compared across builds on Motor itself.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::time::Instant;

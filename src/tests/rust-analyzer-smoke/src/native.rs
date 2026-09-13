@@ -156,8 +156,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
             case.text_request("textDocument/definition", &source, SOURCE, "GENERATED }")?;
         require_generated_definition(&generated, &root)?;
         // The env!-derived string hover: strings render through MIR
-        // evaluation and were the case that timed out under the old
-        // allocator (docs/plans/frusa.md §1.2).
+        // evaluation, the hover case most sensitive to allocator cost.
         let environment_started = Instant::now();
         let hover = case.text_request("textDocument/hover", &source, SOURCE, "ENVIRONMENT }")?;
         timings["environment_hover_ms"] =

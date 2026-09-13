@@ -636,8 +636,8 @@ fn sparse_holes_test() {
 }
 
 /// A backend that allocates from the allocator it backs, once per request,
-/// as a logging or instrumented backend would. This deadlocks in frusa 0.1,
-/// whose slab lock is held across the backend call.
+/// as a logging or instrumented backend would. It works only because no
+/// lock is held across the backend call.
 struct NestingBackEnd;
 
 static NESTED: Frusa4K = Frusa4K::new(&NestingBackEnd);

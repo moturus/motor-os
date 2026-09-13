@@ -82,18 +82,11 @@ The former sys-tty/kernel-log interleaving item is complete; see
    about 50x faster after a burst (20 ms instead of 1 s per connection), no
    retry noise in the suite, and the close-race reproducer usable at scale.
 
-2. **frusa holds its slab lock across the fallback `SysMem::alloc`.** The
-   allocator's spin lock stays held while a slab grows through the fallback
-   path, i.e. across the syscall; any allocation on that path (a `format!`
-   in a diagnostic, a log record) self-deadlocks the thread, and a thread
-   killed while holding the lock leaves every sibling spinning. A sampling
-   diagnostic in `SysMem::map` reproduced it in 6 of 12 listener-flood runs
-   during the perf run (sys-io stopped with two vCPUs spinning; diagnosed
-   through the qemu monitor). Fix: grow outside the lock (allocate the new
-   block, then take the lock to link it), or make the fallback path
-   allocation-free by contract with a debug assertion. Gain: removes a
-   self-deadlock class from every process, sys-io included, and makes the
-   allocator safe to instrument.
+2. **Resolved: the allocator held its slab lock across the fallback
+   `SysMem::alloc`.** The allocator now holds no lock across a backend call,
+   so a backend may allocate from the allocator it backs and a thread killed
+   in a syscall leaves no sibling spinning; see
+   [the allocator document](../frusa.md).
 
 3. **sys-io never returns allocator slack.** The vdso's `reclaim_resident`
    gives freed slab pages back to the kernel every 5 s, but only in
