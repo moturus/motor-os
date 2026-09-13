@@ -22,6 +22,9 @@ moto-rt = "0.17.6"
 crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"

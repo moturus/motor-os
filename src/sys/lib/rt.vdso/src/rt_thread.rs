@@ -17,9 +17,12 @@ pub extern "C" fn spawn(
         unsafe {
             let rt_args = alloc::boxed::Box::from_raw(thread_arg as usize as *mut RtThreadArgs);
             let thread_fn = rt_args.thread_fn;
-            thread_fn(rt_args.thread_arg);
-            super::rt_tls::on_thread_exiting();
+            let thread_arg = rt_args.thread_arg;
+            // Freed before the exit path releases this thread's allocator
+            // cache, so nothing allocates on this thread after that.
             core::mem::drop(rt_args);
+            thread_fn(thread_arg);
+            super::rt_tls::on_thread_exiting();
         }
         let _ = moto_sys::SysObj::put(SysHandle::SELF);
         unreachable!()

@@ -7,6 +7,7 @@ mod cache;
 mod cache_clean;
 mod cargo_registry;
 mod change_review;
+mod check_message;
 mod clean;
 mod cli;
 mod compatibility;
@@ -45,6 +46,7 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod trace;
+mod tree;
 mod unit;
 mod upgrade;
 mod validation;
@@ -52,7 +54,7 @@ mod vendor;
 mod vendor_lock;
 
 use cli::{Cli, Command};
-use diagnostic::{Error, Result};
+use diagnostic::Result;
 
 const VERSION: &str = "0.1.0";
 
@@ -93,6 +95,7 @@ where
     let cli = Cli::parse(arguments)?;
     let command = match &cli.command {
         Command::Build(_) => Some("build started"),
+        Command::Check(_) => Some("check started"),
         Command::Run(_) => Some("run started"),
         Command::Test(_) => Some("test started"),
         _ => None,
@@ -115,13 +118,13 @@ where
         Command::Clean(options) => clean::execute(options, cli.package.as_deref(), cli.verbosity),
         Command::LocateProject { manifest_path } => compatibility::locate_project(manifest_path),
         Command::Metadata(options) => metadata::execute(&cli, options),
-        Command::Check(_) | Command::Tree(_) => Err(Error::failure(
-            "this Cargo-compatible command is not implemented yet",
-        )),
+        Command::Tree(options) => tree::execute(&cli, options),
         Command::Review => review::execute(&cli),
         Command::Vendor(options) => vendor::execute(&cli, options),
         Command::RustcQuery(options) => compatibility::rustc_query(&cli, options),
-        Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
+        Command::Build(_) | Command::Check(_) | Command::Run(_) | Command::Test(_) => {
+            engine::execute(&cli)
+        }
     }
 }
 
@@ -137,7 +140,7 @@ fn print_help(topic: Option<&str>) {
             "Remove generated Lorry artifacts\n\nUsage: lorry [+toolchain] [GLOBAL] clean [-p NAME] [--release|-r] [--target TRIPLE] [--target-dir DIRECTORY]"
         ),
         Some("check") => println!(
-            "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--examples] [--message-format FORMAT]"
+            "Check a package without linking\n\nUsage: lorry [+toolchain] [GLOBAL] check [-p NAME|PACKAGE_ID] [--manifest-path PATH] [--target-dir DIRECTORY] [--target TRIPLE] [--workspace] [-q|--quiet] [--keep-going] [--all-targets|--lib|--bins|--bin NAME|--test NAME|--examples] [--message-format FORMAT]"
         ),
         Some("metadata") => println!(
             "Describe a package graph\n\nUsage: lorry [+toolchain] [GLOBAL] metadata [-p NAME] --format-version 1 [--manifest-path PATH] [--no-deps] [--filter-platform TRIPLE] [--locked]"

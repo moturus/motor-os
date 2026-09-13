@@ -15,15 +15,16 @@ set -euo pipefail
 WD="$(dirname "$0")"
 ROOT_DIR="$WD/../.."
 
-# Match the native Lorry harness only where compilers run: four concurrent
-# compiler processes need the 4 GiB profile. The repository suite keeps its
-# established default VM memory unless the caller explicitly overrides it.
+# Native analyzer acceptance uses 8 GiB; the separate developer-source phase
+# retains its 4 GiB default. An explicit caller override applies to both.
+REPOSITORY_MEMORY_MIB="${MOTO_MEMORY_MIB:-8192}"
 DEV_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
 
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 
-FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
+MOTO_MEMORY_MIB="$REPOSITORY_MEMORY_MIB" \
+  FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "$@"
 

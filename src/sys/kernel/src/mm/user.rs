@@ -2,10 +2,24 @@ use core::sync::atomic::*;
 
 use alloc::sync::Arc;
 
-use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
-use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID, PAGING_DIRECT_MAP_OFFSET};
+use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
+
+// A direct-map address is usable only while its backing frame is owned.
+pub struct PinnedUserPage {
+    frame: super::slab::SlabArc<super::phys::Frame>,
+    offset: u64,
+}
+
+impl PinnedUserPage {
+    pub fn kernel_addr(&self) -> u64 {
+        self.frame.get().unwrap().start()
+            + self.offset
+            + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET
+    }
+}
 
 #[derive(Debug)]
 pub struct UserStack {
@@ -34,8 +48,8 @@ pub struct UserAddressSpace {
     max_memory: AtomicU64,
     total_usage: AtomicU64,
 
-    // Only sys-io's address space is privileged, i.e. admitted against the
-    // lower kernel floor. Set when its process is created (CAP_IO_MANAGER).
+    // System and I/O-manager address spaces use the lower admission floor.
+    // Set from CAP_SYS | CAP_IO_MANAGER when the process is created.
     privileged: AtomicBool,
 
     // User mem stats are tracked via @inner.
@@ -147,7 +161,7 @@ impl UserAddressSpace {
     /// them, so loading an ordinary process never widens its guard band.
     pub fn mem_class(&self) -> super::admission::MemClass {
         if self.privileged.load(Ordering::Relaxed) {
-            super::admission::MemClass::SysIo
+            super::admission::MemClass::Privileged
         } else {
             super::admission::MemClass::User
         }
@@ -399,13 +413,24 @@ impl UserAddressSpace {
     }
 
     pub fn alloc_user_heap(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-
+        // Ordinary eager private heap above 1 MiB may map huge pages; the
+        // policy is the segment's, not inferred from anything else. Its
+        // mapping never covers less than requested; the rounded size is
+        // what the caller, the statistics and admission all see.
+        let sizing = HeapSizing::new(num_pages);
+        let mapped = sizing.mapped_pages;
+        self.stats_user_add(mapped << PAGE_SIZE_SMALL_LOG2)?;
+        let options = sizing.eligible.then_some(
+            MappingOptions::READABLE
+                | MappingOptions::WRITABLE
+                | MappingOptions::USER_ACCESSIBLE
+                | MappingOptions::HUGE_ELIGIBLE,
+        );
         self.inner
-            .vmem_allocate_pages(VmemKind::User, num_pages, None)
+            .vmem_allocate_pages(VmemKind::User, mapped, options)
             .inspect_err(|_| {
-                log::error!("failed to allocate {num_pages} pages");
-                self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+                log::error!("failed to allocate {mapped} pages");
+                self.stats_user_sub(mapped << PAGE_SIZE_SMALL_LOG2);
             })
     }
 
@@ -553,26 +578,16 @@ impl UserAddressSpace {
     }
 
     pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
-        assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+        super::phys::validate_mmio(phys_addr, num_pages)?;
 
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         self.inner
-            .vmem_allocate_pages(VmemKind::UserMMIO, num_pages, None)
-            .map_or_else(
-                |err| {
-                    self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    Err(err)
-                },
-                |segment| {
-                    self.inner
-                        .mmio_map(phys_addr, segment.start)
-                        .map(|_| segment.start)
-                        .inspect_err(|_| {
-                            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        })
-                },
-            )
+            .mmio_map(phys_addr, num_pages)
+            .map(|segment| segment.start)
+            .inspect_err(|_| {
+                self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            })
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
@@ -592,69 +607,48 @@ impl UserAddressSpace {
             bytes.len() as i64,
         );
 
-        let mut source_start = 0_u64;
+        user_vaddr_start
+            .checked_add(bytes.len() as u64)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut source = bytes;
         let mut dst_start = user_vaddr_start;
-        let mut bytes_left = bytes.len() as u64;
-
-        while bytes_left > 0 {
-            let bytes_to_copy = {
-                let page_end = align_up(dst_start + 1, PAGE_SIZE_SMALL);
-                if page_end - dst_start >= bytes_left {
-                    bytes_left
-                } else {
-                    page_end - dst_start
-                }
-            };
-
-            // vaddr_map_status (not a raw page-table walk) is the authority
-            // here: it rejects zero-page/CoW mappings, which must never be
-            // written through the direct map.
-            let mapping = self.inner.vaddr_map_status(dst_start);
-            let phys_start = match mapping {
-                VaddrMapStatus::Private(addr) => addr,
-                VaddrMapStatus::Shared(addr) => addr,
-                _ => {
-                    log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                }
-            };
-
+        while !source.is_empty() {
+            // Pin under the region lock and retain ownership through the copy.
+            // Frame-less zero/CoW pages and device mappings remain refused.
+            let page = self.pin_user_page(dst_start)?;
+            let bytes_to_copy = source
+                .len()
+                .min((PAGE_SIZE_SMALL - (dst_start & (PAGE_SIZE_SMALL - 1))) as usize);
             unsafe {
                 core::intrinsics::copy_nonoverlapping(
-                    bytes.get_unchecked(source_start as usize) as *const u8,
-                    (phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET) as usize
-                        as *mut u8,
-                    bytes_to_copy as usize,
+                    source.as_ptr(),
+                    page.kernel_addr() as *mut u8,
+                    bytes_to_copy,
                 );
             }
-
-            source_start += bytes_to_copy;
-            dst_start += bytes_to_copy;
-            bytes_left -= bytes_to_copy;
+            dst_start += bytes_to_copy as u64;
+            source = &source[bytes_to_copy..];
         }
 
         Ok(())
     }
 
-    pub fn get_user_page_as_kernel(&self, user_page_addr: u64) -> Result<u64, ErrorCode> {
+    fn pin_user_page(&self, addr: u64) -> Result<PinnedUserPage, ErrorCode> {
+        let (frame, offset) = self
+            .inner
+            .pin_user_page(addr)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        Ok(PinnedUserPage { frame, offset })
+    }
+
+    pub fn get_user_page_as_kernel(
+        &self,
+        user_page_addr: u64,
+    ) -> Result<PinnedUserPage, ErrorCode> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let mapping = self.inner.vaddr_map_status(user_page_addr);
-        let phys_start = match mapping {
-            VaddrMapStatus::Private(addr) => addr,
-            VaddrMapStatus::Shared(addr) => addr,
-            _ => {
-                log::error!(
-                    "{}:{} - get_user_page_as_kernel: bad mapping.",
-                    file!(),
-                    line!()
-                );
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-        };
-
-        Ok(phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET)
+        self.pin_user_page(user_page_addr)
     }
 
     pub fn read_from_user(
@@ -675,33 +669,7 @@ impl UserAddressSpace {
             buf.len() as i64,
         );
 
-        let mut source_start = vaddr_start;
-        let mut remaining_bytes = buf.len() as u64;
-
-        let mut dst_ptr = buf.as_mut_ptr();
-
-        while remaining_bytes > 0 {
-            let phys_start = self.inner.page_table_ref().virt_to_phys(source_start);
-            if phys_start.is_none() {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-            let phys_start = phys_start.unwrap();
-
-            let source_end = align_up(source_start + 1, PAGE_SIZE_SMALL);
-            let size_to_copy = core::cmp::min(source_end - source_start, remaining_bytes);
-            unsafe {
-                core::intrinsics::copy_nonoverlapping(
-                    (phys_start + PAGING_DIRECT_MAP_OFFSET) as usize as *const u8,
-                    dst_ptr,
-                    (size_to_copy) as usize,
-                );
-                dst_ptr = dst_ptr.add(size_to_copy as usize);
-            }
-            source_start += size_to_copy;
-            remaining_bytes -= size_to_copy;
-        }
-
-        Ok(())
+        self.inner.page_table_ref().copy_from_user(vaddr_start, buf)
     }
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
@@ -733,4 +701,237 @@ impl UserAddressSpace {
 
         backtrace
     }
+}
+
+/// The huge-eligible sizing rule for an ordinary heap request of `pages`
+/// small pages: whole 2 MiB units are huge candidates, a tail above 1 MiB
+/// rounds up to one more, and a smaller tail stays small. Small-only
+/// requests (1 MiB and below) map exactly what they ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapSizing {
+    pub eligible: bool,
+    pub huge: u64,
+    pub small: u64,
+    pub mapped_pages: u64,
+}
+
+impl HeapSizing {
+    pub fn new(pages: u64) -> Self {
+        const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
+        if pages <= HUGE_PAGES / 2 {
+            return Self {
+                eligible: false,
+                huge: 0,
+                small: pages,
+                mapped_pages: pages,
+            };
+        }
+        let tail = pages % HUGE_PAGES;
+        let round_up = tail > HUGE_PAGES / 2;
+        let huge = pages / HUGE_PAGES + u64::from(round_up);
+        let small = if round_up { 0 } else { tail };
+        Self {
+            eligible: true,
+            huge,
+            small,
+            mapped_pages: huge.saturating_mul(HUGE_PAGES).saturating_add(small),
+        }
+    }
+}
+
+// Controlled huge mapping tests on private address spaces whose CR3 is never
+// installed, on the live pool while the BSP is alone. With every whole
+// dual-purpose block held, an eligible request falls back to small pages
+// with the policy retained; with exactly one such block free, a dirtied
+// frame maps as a 2 MiB leaf and comes back zeroed; sharing is refused at
+// either eligible endpoint whatever the backing; teardown returns the block.
+#[cfg(debug_assertions)]
+pub fn huge_mapping_self_test() {
+    use super::phys::{allocate_huge_frame, block_metrics};
+    use super::virt::{HUGE_FALLBACKS, HUGE_PAGES_MAPPED};
+    use super::PageType;
+    use super::PAGING_DIRECT_MAP_OFFSET;
+
+    const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let taken_before = block_metrics().taken;
+    let (mapped_before, fallbacks_before) = (
+        HUGE_PAGES_MAPPED.load(Ordering::Relaxed),
+        HUGE_FALLBACKS.load(Ordering::Relaxed),
+    );
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+
+    // Hold every whole dual-purpose block: the pool has no huge page to give
+    // until one is released.
+    let mut held = alloc::vec::Vec::new();
+    while let Ok(frame) = allocate_huge_frame() {
+        held.push(frame);
+    }
+    if held.is_empty() {
+        crate::raw_log!("huge mapping tests SKIPPED: no dual-purpose block");
+        return;
+    }
+    let taken_held = taken_before + held.len() as u64;
+    assert_eq!(block_metrics().taken, taken_held);
+    let table = space.inner.page_table_ref();
+
+    // A refused candidate is served small: 512 small leaves, one fallback,
+    // the policy retained for the segment.
+    let fallback = space.alloc_user_heap(HUGE_PAGES).unwrap();
+    assert_eq!(fallback.size, PAGE_SIZE_MID);
+    assert_eq!(fallback.start & (PAGE_SIZE_MID - 1), 0);
+    for page in [0, 1, HUGE_PAGES - 1] {
+        assert_eq!(
+            table.leaf_kind(fallback.start + page * PAGE_SIZE_SMALL),
+            Some(PageType::SmallPage)
+        );
+    }
+    assert_eq!(HUGE_FALLBACKS.load(Ordering::Relaxed), fallbacks_before + 1);
+    assert_eq!(block_metrics().taken, taken_held);
+
+    // The peer's small-only 2 MiB segments: a populated lazy one as a
+    // source, an unmapped reservation as a destination. Sharing with the
+    // small-backed eligible segment is refused at either end, and the
+    // existing destination keeps its bytes.
+    let lazy = peer.alloc_user_lazy(HUGE_PAGES).unwrap();
+    for page in 0..HUGE_PAGES {
+        // A user write fault on a not-present page.
+        peer.fix_pagefault(lazy.start + page * PAGE_SIZE_SMALL, 6)
+            .unwrap();
+    }
+    peer.copy_to_user(b"lazy", lazy.start).unwrap();
+    let peer_dest = peer.alloc_user_unmapped(HUGE_PAGES).unwrap();
+    space.copy_to_user(b"intact", fallback.start).unwrap();
+    assert_eq!(
+        UserAddressSpace::map_shared(&peer, peer_dest.start, &space, fallback.start, options),
+        refused
+    );
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, fallback.start, &peer, lazy.start, options),
+        refused
+    );
+    assert_eq!(space.read_from_user(fallback.start, 6).unwrap(), b"intact");
+    space.unmap(fallback.start).unwrap();
+    assert_eq!(block_metrics().taken, taken_held);
+
+    // Exactly one whole block free, dirtied first: the eligible request
+    // must map that block as a 2 MiB leaf and zero it before publishing.
+    let frame = held.pop().unwrap();
+    let phys = frame.get().unwrap().start();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (phys + PAGING_DIRECT_MAP_OFFSET) as *mut u8,
+            PAGE_SIZE_MID as usize,
+        )
+    };
+    bytes.fill(0xa5);
+    drop(frame);
+    let huge = space.alloc_user_heap(HUGE_PAGES).unwrap();
+    assert_eq!(huge.size, PAGE_SIZE_MID);
+    assert_eq!(huge.start & (PAGE_SIZE_MID - 1), 0);
+    assert_eq!(table.leaf_kind(huge.start), Some(PageType::MidPage));
+    assert_eq!(table.virt_to_phys(huge.start + 12345), Some(phys + 12345));
+    assert!(
+        bytes.iter().all(|byte| *byte == 0),
+        "a dirtied huge page was not zeroed"
+    );
+    let (pinned, offset) = space
+        .inner
+        .pin_user_page(huge.start + PAGE_SIZE_MID - 1)
+        .unwrap();
+    assert_eq!(pinned.get().unwrap().kind(), PageType::MidPage);
+    assert_eq!(
+        pinned.get().unwrap().start() + offset,
+        phys + PAGE_SIZE_MID - 1
+    );
+    drop(pinned);
+    assert_eq!(HUGE_PAGES_MAPPED.load(Ordering::Relaxed), mapped_before + 1);
+    assert_eq!(block_metrics().taken, taken_held);
+
+    // Sharing is refused with the huge-backed eligible segment at either
+    // end too.
+    space.copy_to_user(b"intact", huge.start).unwrap();
+    assert_eq!(
+        UserAddressSpace::map_shared(&peer, peer_dest.start, &space, huge.start, options),
+        refused
+    );
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, huge.start, &peer, lazy.start, options),
+        refused
+    );
+    assert_eq!(space.read_from_user(huge.start, 6).unwrap(), b"intact");
+
+    // Teardown returns the block; the frame count observes it.
+    space.unmap(huge.start).unwrap();
+    assert_eq!(block_metrics().taken, taken_held - 1);
+    assert_eq!(table.leaf_kind(huge.start), None);
+    drop(held);
+    assert_eq!(block_metrics().taken, taken_before);
+
+    // Small-only sharing still works, the populated 2 MiB lazy segment and
+    // a 1 MiB eager one, into unmapped reservations.
+    let dest = space.alloc_user_unmapped(HUGE_PAGES).unwrap();
+    UserAddressSpace::map_shared(&space, dest.start, &peer, lazy.start, options).unwrap();
+    assert_eq!(space.read_from_user(dest.start, 4).unwrap(), b"lazy");
+    let small = peer.alloc_user_heap(HUGE_PAGES / 2).unwrap();
+    peer.copy_to_user(b"small", small.start).unwrap();
+    let dest = space.alloc_user_unmapped(HUGE_PAGES / 2).unwrap();
+    UserAddressSpace::map_shared(&space, dest.start, &peer, small.start, options).unwrap();
+    assert_eq!(space.read_from_user(dest.start, 5).unwrap(), b"small");
+
+    // The sizing rule and a mixed segment: a request one page over 1 MiB
+    // maps a whole huge page, and 3 MiB maps one huge page followed by 256
+    // small ones. Copies and lookups cross the huge/small boundary, and the
+    // statistics charge exactly the mapped size.
+    for (pages, expected) in [
+        (16, (false, 0, 16, 16)),
+        (256, (false, 0, 256, 256)),
+        (257, (true, 1, 0, 512)),
+        (384, (true, 1, 0, 512)),
+        (512, (true, 1, 0, 512)),
+        (768, (true, 1, 256, 768)),
+        (769, (true, 2, 0, 1024)),
+        (1408, (true, 3, 0, 1536)),
+    ] {
+        let sizing = HeapSizing::new(pages);
+        assert_eq!(
+            (
+                sizing.eligible,
+                sizing.huge,
+                sizing.small,
+                sizing.mapped_pages
+            ),
+            expected,
+            "{pages} pages"
+        );
+    }
+    assert_eq!(HeapSizing::new(u64::MAX).mapped_pages, u64::MAX);
+    let usage_before = space.user_mem_stats().total();
+    let mixed = space.alloc_user_heap(HUGE_PAGES + 256).unwrap();
+    assert_eq!(mixed.size, PAGE_SIZE_MID + 256 * PAGE_SIZE_SMALL);
+    assert_eq!(space.user_mem_stats().total() - usage_before, mixed.size);
+    let boundary = mixed.start + PAGE_SIZE_MID;
+    assert_eq!(table.leaf_kind(mixed.start), Some(PageType::MidPage));
+    assert_eq!(
+        table.leaf_kind(boundary - PAGE_SIZE_SMALL),
+        Some(PageType::MidPage)
+    );
+    assert_eq!(table.leaf_kind(boundary), Some(PageType::SmallPage));
+    space.copy_to_user(b"across", boundary - 3).unwrap();
+    assert_eq!(space.read_from_user(boundary - 3, 6).unwrap(), b"across");
+    let (pinned, offset) = space.inner.pin_user_page(boundary + 5).unwrap();
+    assert_eq!(pinned.get().unwrap().kind(), PageType::SmallPage);
+    assert_eq!(offset, 5);
+    drop(pinned);
+    let rounded = space.alloc_user_heap(HUGE_PAGES / 2 + 1).unwrap();
+    assert_eq!(rounded.size, PAGE_SIZE_MID);
+    assert_eq!(rounded.start & (PAGE_SIZE_MID - 1), 0);
+    space.unmap(rounded.start).unwrap();
+    space.unmap(mixed.start).unwrap();
+    assert_eq!(space.user_mem_stats().total(), usage_before);
+    assert_eq!(block_metrics().taken, taken_before);
+    crate::raw_log!("huge mapping tests PASS");
 }

@@ -504,10 +504,7 @@ fn test_pool_cold_start_coalesces() {
     println!("net_driver::test_pool_cold_start_coalesces PASS");
 }
 
-/// The fail-all policy: with sys-io connects poisoned and the pool cold,
-/// a socket constructor fails promptly instead of hanging; unpoisoning
-/// restores service.
-fn test_sys_io_unavailable_fails_all() {
+fn wait_for_cold_pool() {
     // The pool must be cold, or an existing channel satisfies the
     // reservation without provisioning. Idle channels self-close when
     // their last reservation releases; earlier tests' have drained by now.
@@ -520,7 +517,13 @@ fn test_sys_io_unavailable_fails_all() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
 
+/// The fail-all policy: with sys-io connects poisoned and the pool cold,
+/// a socket constructor fails promptly instead of hanging; unpoisoning
+/// restores service.
+fn test_sys_io_unavailable_fails_all() {
+    wait_for_cold_pool();
     moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
     let result = std::net::UdpSocket::bind("127.0.0.1:0");
     moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
@@ -532,6 +535,44 @@ fn test_sys_io_unavailable_fails_all() {
     let recovered = std::net::UdpSocket::bind("127.0.0.1:0");
     assert!(recovered.is_ok(), "bind did not recover after unpoisoning");
     println!("net_driver::test_sys_io_unavailable_fails_all PASS");
+}
+
+fn test_channel_allocation_failure() {
+    wait_for_cold_pool();
+    moto_rt::internal_helper(0, 4, 1, 0, 0, 0);
+    // Fail after connecting IPC and allocating queue storage. Both bind
+    // veneers must receive the error; neither may publish a partial channel.
+    for _ in 0..4 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
+        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(pool_client_count(), 0);
+    }
+    moto_rt::internal_helper(0, 4, 0, 0, 0, 0);
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0); // No waiters or in-flight provisions.
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    drop((tcp, udp));
+    println!("net_driver::test_channel_allocation_failure PASS");
+}
+
+fn test_pool_runtime_allocation_failure() {
+    wait_for_cold_pool();
+    moto_rt::internal_helper(0, 5, 1, 0, 0, 0);
+    for _ in 0..4 {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
+        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(pool_client_count(), 0);
+    }
+    moto_rt::internal_helper(0, 5, 0, 0, 0, 0);
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    drop((tcp, udp));
+    println!("net_driver::test_pool_runtime_allocation_failure PASS");
 }
 
 /// Accept requests riding donations from two different channels must not
@@ -564,7 +605,7 @@ fn test_accept_ids_unique_across_channels() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let result = runtime.block_on(async {
-        let (client_a, _driver_a) = host_channel().await;
+        let (client_a, driver_a) = host_channel().await;
 
         let listener = moto_io::net::tcp::TcpListener::bind_reserved(
             client_a.try_reserve().unwrap(),
@@ -605,14 +646,19 @@ fn test_accept_ids_unique_across_channels() {
                 None => all_accepted = false,
             }
         }
-        (all_accepted, accepted, peer_threads)
+        (all_accepted, accepted, peer_threads, driver_a)
     });
-    let (all_accepted, accepted, peer_threads) = result;
+    let (all_accepted, accepted, peer_threads, driver_a) = result;
     assert!(all_accepted, "cross-channel accept did not complete");
     for peer in peer_threads {
         peer.join().unwrap();
     }
     drop(accepted);
+    // Socket drops queue their closes; keep A running until it sends them.
+    assert!(
+        runtime.block_on(async { bounded(driver_a, 5).await }),
+        "cross-channel accept driver A did not exit"
+    );
     drop(client_b);
     driver_b_thread.join().unwrap();
     println!("net_driver::test_accept_ids_unique_across_channels PASS");
@@ -678,7 +724,7 @@ fn test_partial_write_raises_writable() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     let saw_edge = runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
 
         let stream = moto_io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -735,13 +781,20 @@ fn test_partial_write_raises_writable() {
         // though the last write was partial, not E_NOT_READY.
         let edges_before = observer.writable.load(Ordering::SeqCst);
         drain_tx.send(()).unwrap();
+        let mut saw_edge = false;
         for _ in 0..2000 {
             if observer.writable.load(Ordering::SeqCst) > edges_before {
-                return true;
+                saw_edge = true;
+                break;
             }
             moto_async::sleep(Duration::from_millis(5)).await;
         }
-        false
+        drop(stream);
+        assert!(
+            bounded(driver_task, 5).await,
+            "partial-write test driver did not exit"
+        );
+        saw_edge
     });
     assert!(saw_edge, "no WRITABLE edge after a partial write");
 
@@ -778,7 +831,7 @@ fn test_connected_udp_ignores_foreign_datagrams() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let rx = moto_io::net::udp::UdpSocket::bind_reserved(
@@ -848,6 +901,11 @@ fn test_connected_udp_ignores_foreign_datagrams() {
             .expect("the peer's datagram was not readable");
         assert_eq!(&buf[..len], b"from-peer");
         assert_eq!(&from, peer.local_addr());
+        drop((rx, peer, outside));
+        assert!(
+            bounded(driver_task, 5).await,
+            "connected-UDP test driver did not exit"
+        );
     });
     println!("net_driver::test_connected_udp_ignores_foreign_datagrams PASS");
 }
@@ -889,7 +947,7 @@ fn test_dropped_futures_leave_no_waiters() {
 
     let mut runtime = moto_async::LocalRuntime::new();
     runtime.block_on(async {
-        let (client, _driver_task) = host_channel().await;
+        let (client, driver_task) = host_channel().await;
 
         let stream = moto_io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -999,6 +1057,11 @@ fn test_dropped_futures_leave_no_waiters() {
             }
         }
         assert_eq!(&acked, b"ack!");
+        drop((stream, udp));
+        assert!(
+            bounded(driver_task, 5).await,
+            "dropped-future test driver did not exit"
+        );
     });
 
     drop(drain_tx);
@@ -1129,4 +1192,6 @@ pub fn run_all_tests() {
     test_channel_failure_wakes_every_waiter();
     test_pool_cold_start_coalesces();
     test_sys_io_unavailable_fails_all();
+    test_channel_allocation_failure();
+    test_pool_runtime_allocation_failure();
 }

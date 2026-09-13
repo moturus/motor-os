@@ -24,6 +24,11 @@ struct KernelLogRingState {
     generation: u64,
 }
 
+struct ConsoleDriver {
+    address_space: Arc<crate::mm::user::UserAddressSpace>,
+    _control_page: crate::mm::user::PinnedUserPage,
+}
+
 struct SerialConsole {
     owner_pid: AtomicU64,
     this_object: Arc<SysObject>,
@@ -32,8 +37,7 @@ struct SerialConsole {
     kernel_log_control_addr: AtomicUsize,
     kernel_log_ring_state: crate::util::SpinLock<KernelLogRingState>,
 
-    console_driver_address_space:
-        crate::util::SpinLock<Option<Arc<crate::mm::user::UserAddressSpace>>>,
+    console_driver: crate::util::SpinLock<Option<ConsoleDriver>>,
 }
 
 static CONSOLE: crate::util::StaticRef<SerialConsole> = crate::util::StaticRef::default_const();
@@ -51,7 +55,7 @@ pub fn init() {
         kernel_log_control_addr: AtomicUsize::new(0),
         kernel_log_ring_state: crate::util::SpinLock::new(KernelLogRingState::default()),
 
-        console_driver_address_space: crate::util::SpinLock::new(None),
+        console_driver: crate::util::SpinLock::new(None),
     })));
 }
 
@@ -98,21 +102,31 @@ pub(super) fn get_for_process(
 
     let address_space = process.address_space().clone();
     let kernel_control_page = match address_space.get_user_page_as_kernel(control_page as u64) {
-        Ok(addr) => addr as usize,
+        Ok(page) => page,
         Err(err) => {
             log::error!("The serial console control block is not mapped: {err:?}");
             return Err(err);
         }
     };
-    let kernel_control_addr = kernel_control_page + control_offset;
+    // Use the logging lock order, and recheck ownership under the lock so
+    // simultaneous registrations cannot replace a published control-page pin.
+    let mut state = CONSOLE.kernel_log_ring_state.lock(line!());
+    let mut driver = CONSOLE.console_driver.lock(line!());
+    if driver.is_some() {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    let kernel_control_addr = kernel_control_page.kernel_addr() as usize + control_offset;
     let control = unsafe { &*(kernel_control_addr as *const KernelLogControl) };
     control.end.store(0, Ordering::Relaxed);
     control.generation.store(0, Ordering::Release);
 
     PERCPU_LOG_GUARD.set(Box::leak(Box::new(crate::util::StaticPerCpu::init())));
 
-    *CONSOLE.console_driver_address_space.lock(line!()) = Some(address_space);
-    *CONSOLE.kernel_log_ring_state.lock(line!()) = KernelLogRingState::default();
+    *driver = Some(ConsoleDriver {
+        address_space,
+        _control_page: kernel_control_page,
+    });
+    *state = KernelLogRingState::default();
 
     CONSOLE
         .uspace_log_buf_addr
@@ -190,8 +204,8 @@ pub fn log_to_uspace(msg: &str) -> bool {
     control.generation.store(odd_generation, Ordering::Relaxed);
     fence(Ordering::Release);
 
-    let address_space_guard = CONSOLE.console_driver_address_space.lock(line!());
-    let address_space = address_space_guard.as_ref().unwrap();
+    let address_space_guard = CONSOLE.console_driver.lock(line!());
+    let address_space = &address_space_guard.as_ref().unwrap().address_space;
 
     let copy_result = copy_to_ring(address_space, uspace_log_buf_addr, state.end, &header)
         .and_then(|()| {

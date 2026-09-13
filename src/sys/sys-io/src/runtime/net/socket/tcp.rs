@@ -105,7 +105,8 @@ const DEFAULT_LINGER_SECS: u32 = 60;
 /// Bound explicit linger to the same interval as an ordinary close. This is
 /// enforced here, at the service boundary, so every client ABI gets the cap.
 const MAX_LINGER_SECS: u32 = DEFAULT_LINGER_SECS;
-/// At configured buffer caps, eight orphaned sockets retain at most 128 MiB.
+/// Eight orphaned sockets retain at most 128 MiB of TCP buffers, plus their
+/// channels' fixed IPC mappings (also retained when no TX pages are queued).
 /// Excess dead-client closes reset rather than pinning more memory or ports.
 const MAX_ORPHAN_LINGERS: usize = 8;
 
@@ -247,9 +248,6 @@ impl HalfOpenGuard {
         listener_id: u64,
     ) -> (Self, bool) {
         stats.tcp_half_open.set(stats.tcp_half_open.get() + 1);
-        stats
-            .tcp_half_open_total
-            .set(stats.tcp_half_open_total.get() + 1);
 
         let may_replenish = budget.admit(listener_id);
         (
@@ -335,12 +333,17 @@ impl MotoSocket {
         remote_addr: SocketAddr,
     ) -> bool {
         let socket = moto_socket.borrow();
-        socket.base.device_idx == device_idx
-            && socket.base.local_addr == local_addr
-            && matches!(
-                &socket.state,
-                super::SocketState::Tcp(state) if state.remote_addr == Some(remote_addr)
-            )
+        if socket.base.device_idx != device_idx {
+            return false;
+        }
+        let super::SocketState::Tcp(state) = &socket.state else {
+            return false;
+        };
+        // A local peer can retain the reverse tuple in TIME-WAIT after the
+        // client releases its port. Reusing it sends the SYN to that retired
+        // connection instead of the listener, so reserve both orientations.
+        (socket.base.local_addr == local_addr && state.remote_addr == Some(remote_addr))
+            || (socket.base.local_addr == remote_addr && state.remote_addr == Some(local_addr))
     }
 
     fn close_handshake_complete(netstack_socket: &moto_netstack::socket::tcp::Socket<'_>) -> bool {
@@ -1892,9 +1895,8 @@ impl MotoSocket {
         }
     }
 
-    /// Client death is a resource boundary: reclaim active and safely-finished
-    /// sockets immediately, while a small global budget lets committed closes
-    /// preserve their stream before their bounded linger expires.
+    /// Channel teardown is a resource boundary: a small global budget lets
+    /// accepted writes finish before their bounded linger expires.
     pub async fn reclaim_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         let was_lingering = moto_socket.borrow().base.lingering;
         if !was_lingering {
@@ -1905,28 +1907,21 @@ impl MotoSocket {
             return;
         }
 
-        let (protocol_closed, time_wait, can_finish_orphaned) =
+        let (protocol_state, already_orphaned) =
             Self::with_tcp_netstack_socket(&moto_socket, |_socket_id, netstack_socket, state| {
-                let protocol_state = netstack_socket.state();
-                let can_finish_orphaned =
-                    state.tx_queue.is_empty() && state.lingerer.is_none() && !state.orphan_linger;
-                (
-                    protocol_state == NetstackTcpState::Closed,
-                    protocol_state == NetstackTcpState::TimeWait,
-                    can_finish_orphaned,
-                )
+                (netstack_socket.state(), state.orphan_linger)
             });
 
-        // A close that has handed every client page to the netstack may finish
-        // after client exit, but only under a small global cap. This includes
-        // teardown initiating close when channel EOF overtakes the client's
-        // already-queued close task. Staged pages or cap overflow reset.
+        // EOF also follows an ordinary last-socket drop, possibly before its
+        // close task or TX drain runs. The socket's ClientSender keeps queued
+        // pages mapped, so drain them under the same cap and deadline as bytes
+        // already in the netstack. Queue placement must not decide delivery.
         // TIME-WAIT needs no slot: the peer completed the close handshake,
         // and the existing linger task retains only the retired tuple.
-        if time_wait {
+        if protocol_state == NetstackTcpState::TimeWait {
             return;
         }
-        if !protocol_closed && can_finish_orphaned {
+        if protocol_state != NetstackTcpState::Closed && !already_orphaned {
             let runtime = moto_socket.borrow().base.runtime.clone();
             let orphan_lingers = runtime.orphan_lingers.get();
             if orphan_lingers < MAX_ORPHAN_LINGERS {

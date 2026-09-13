@@ -108,6 +108,10 @@ impl RustcCommand<'_> {
     pub fn finish(output: &Output, color: bool) -> Result<()> {
         render_rustc_output(&output.stdout, color);
         render_rustc_output(&output.stderr, color);
+        Self::require_success(output)
+    }
+
+    pub fn require_success(output: &Output) -> Result<()> {
         if output.status.success() {
             Ok(())
         } else {
@@ -171,7 +175,7 @@ fn render_rustc_output(bytes: &[u8], color: bool) {
     }
 }
 
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut output = String::with_capacity(text.len());
     let mut index = 0;

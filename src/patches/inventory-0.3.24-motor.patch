@@ -1,0 +1,38 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -536,6 +536,7 @@ macro_rules! __do_submit {
+                     not(target_family = "wasm"),
+                     any(
+                         target_os = "linux",
++                        target_os = "motor",
+                         target_os = "android",
+                         target_os = "dragonfly",
+                         target_os = "freebsd",
+diff --git a/tests/test.rs b/tests/test.rs
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -2,6 +2,23 @@ use std::mem;
+ 
+ pub struct Thing(pub usize);
+ 
++inventory::collect!(Thing);
++inventory::submit!(Thing(7));
++
++mod another_module {
++    inventory::submit!(crate::Thing(42));
++}
++
++#[test]
++fn test_registration() {
++    let mut values: Vec<_> = inventory::iter::<Thing>
++        .into_iter()
++        .map(|thing| thing.0)
++        .collect();
++    values.sort_unstable();
++    assert_eq!(values, [7, 42]);
++}
++
+ #[test]
+ fn test_iter() {
+     assert_eq!(0, mem::size_of::<inventory::iter<Thing>>());

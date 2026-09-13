@@ -3,12 +3,15 @@
 BUILD ?= debug
 
 ROOT_DIR := $(CURDIR)
+# Cleaning does not require a Rust toolchain.
+ifneq ($(sort $(MAKECMDGOALS)),clean)
 TOOLCHAIN_SYSROOT := $(shell rustc --print sysroot 2>/dev/null)
 MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
 	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \
 	test -f "$$stamp" && grep -Ex '[0-9a-f]{64}' "$$stamp"))
 ifeq ($(MOTOR_TOOLCHAIN_KEY),)
-	$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
+$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
+endif
 endif
 OBJ_ROOT := $(ROOT_DIR)/build/obj/$(MOTOR_TOOLCHAIN_KEY)
 
@@ -32,6 +35,19 @@ ASSEMBLY_SELECTOR := $(ROOT_DIR)/src/select-toolchain-assembly.sh
 DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
+
+# A top-level invocation runs its goals in one logged sub-make through the
+# driver, which ends a failed build with a summary of exactly what failed.
+ifeq ($(MAKELEVEL),0)
+MAKE_GOALS := $(or $(MAKECMDGOALS),all)
+.PHONY: $(MAKE_GOALS)
+$(firstword $(MAKE_GOALS)):
+	@$(ROOT_DIR)/src/make-driver.sh $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
+ifneq ($(words $(MAKE_GOALS)),1)
+$(filter-out $(firstword $(MAKE_GOALS)),$(MAKE_GOALS)): $(firstword $(MAKE_GOALS))
+	@:
+endif
+else
 
 all: base.img main.img
 images: base.img main.img dev.img
@@ -316,9 +332,14 @@ clean:
 	rm -rf vm_images
 	rm -rf src/sys/target
 	rm -rf src/boot/*/target
+	rm -rf src/tests/*/target
 	rm -rf src/third_party/*/target
 	rm -rf src/third_party/*/Cargo.lock
-	cd src/imager && cargo clean && rm -rf target
+	rm -rf src/imager/target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
 	rm -f lib/rt.vdso/rt.vdso
+	rm -rf src/bin/lorry/tests/metadata-schema/target
+	rm -rf src/tests/rust-analyzer-smoke/fixtures/motor/target
+
+endif

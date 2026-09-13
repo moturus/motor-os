@@ -98,6 +98,7 @@ fn tcp_connect_processes_syn_ack_and_fin_in_one_poll() {
         sockets.get::<tcp::Socket>(handle).state(),
         tcp::State::CloseWait
     );
+    assert_eq!(iface.take_tcp_half_open_total(), 0);
 }
 
 /// Receive verification is on for every frame, and the device's per-frame
@@ -1674,6 +1675,7 @@ fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
         tcp::State::SynReceived
     );
     assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
+    assert_eq!(iface.take_tcp_half_open_total(), 1);
 
     // The peer never acknowledges. Nothing but the socket's own timeout, which
     // this socket does not have, ends the wait: the rings stay committed while
@@ -1709,6 +1711,95 @@ fn tcp_half_open_stalls_and_unmatched_syn_is_reset() {
     iface.poll(Instant::from_millis(10_002), &mut device, &mut sockets);
     assert_eq!(iface.take_tcp_syn_rst_unmatched(), 0);
     assert_eq!(device.tx_queue.len(), 1, "the unmatched ACK drew no reset");
+    assert_eq!(iface.take_tcp_half_open_total(), 0);
+}
+
+#[test]
+#[cfg(all(feature = "medium-ip", feature = "socket-tcp"))]
+fn tcp_half_open_total_survives_unobserved_handshakes() {
+    use crate::socket::tcp;
+
+    const LOCAL_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 1);
+    const REMOTE_ADDR: Ipv4Address = Ipv4Address::new(192, 168, 1, 2);
+    const LOCAL_PORT: u16 = 49_505;
+
+    fn packet(control: TcpControl, ack_number: Option<TcpSeqNumber>) -> Vec<u8> {
+        let tcp_repr = TcpRepr {
+            src_port: 80,
+            dst_port: LOCAL_PORT,
+            control,
+            seq_number: TcpSeqNumber(if control == TcpControl::Syn {
+                20_000
+            } else {
+                20_001
+            }),
+            ack_number,
+            window_len: 64,
+            window_scale: None,
+            max_seg_size: None,
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload: &[],
+        };
+        let ipv4_repr = Ipv4Repr {
+            src_addr: REMOTE_ADDR,
+            dst_addr: LOCAL_ADDR,
+            next_header: IpProtocol::Tcp,
+            payload_len: tcp_repr.buffer_len(),
+            hop_limit: 64,
+        };
+        let caps = ChecksumCapabilities::default();
+        let mut bytes = vec![0; ipv4_repr.buffer_len() + tcp_repr.buffer_len()];
+        ipv4_repr.emit(&mut Ipv4Packet::new_unchecked(&mut bytes), &caps);
+        tcp_repr.emit(
+            &mut TcpPacket::new_unchecked(&mut bytes[ipv4_repr.buffer_len()..]),
+            &REMOTE_ADDR.into(),
+            &LOCAL_ADDR.into(),
+            &caps,
+        );
+        bytes
+    }
+
+    for (control, state) in [
+        (TcpControl::None, tcp::State::Established),
+        (TcpControl::Rst, tcp::State::Listen),
+    ] {
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        let mut socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; 64]),
+            tcp::SocketBuffer::new(vec![0; 64]),
+        );
+        socket.listen(LOCAL_PORT).unwrap();
+        let handle = sockets.add(0, socket);
+        assert_eq!(iface.take_tcp_half_open_total(), 0);
+
+        device.push_rx(packet(TcpControl::Syn, None));
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        let reply = device.tx_queue.pop_front().unwrap();
+        let ip = Ipv4Packet::new_checked(&reply).unwrap();
+        let syn_ack = TcpPacket::new_checked(ip.payload()).unwrap();
+        assert!(syn_ack.syn() && syn_ack.ack());
+
+        // Retransmission must not count twice. Finish or reset the handshake
+        // before a listener task gets to sample the socket state or metrics.
+        device.push_rx(packet(TcpControl::Syn, None));
+        device.push_rx(packet(control, Some(syn_ack.seq_number() + 1)));
+        iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+        assert_eq!(sockets.get::<tcp::Socket>(handle).state(), state);
+        assert_eq!(iface.take_tcp_half_open_total(), 1);
+        assert_eq!(iface.take_tcp_half_open_total(), 0);
+
+        if state == tcp::State::Listen {
+            device.push_rx(packet(TcpControl::Syn, None));
+            iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+            assert_eq!(
+                sockets.get::<tcp::Socket>(handle).state(),
+                tcp::State::SynReceived
+            );
+            assert_eq!(iface.take_tcp_half_open_total(), 1);
+        }
+    }
 }
 
 #[test]

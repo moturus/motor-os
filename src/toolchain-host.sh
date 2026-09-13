@@ -34,6 +34,7 @@ toolchain_accept_new_prefix() {
 	local prefix="$4" local_moto_rt="$5" cargo_home="$6"
 	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
 		PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache" \
+		MOTOR_RUST_ANALYZER_CARGO_CONFIG="$RUST_ANALYZER_CARGO_CONFIG" \
 		./x.py --config "$BOOTSTRAP_CONFIG" install --stage 2); then
 		toolchain_reject_incomplete_prefix "$prefix" "Rust bootstrap install failed"
 		return 1
@@ -43,6 +44,10 @@ toolchain_accept_new_prefix() {
 		return 1
 	}
 	toolchain_check_postbuild_locks "$rust" "$prefix" || return
+	toolchain_reverify_rust_analyzer "$rust" "$cargo_home" || {
+		toolchain_reject_incomplete_prefix "$prefix" "analyzer patch inputs changed during bootstrap"
+		return 1
+	}
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || {
 		toolchain_reject_incomplete_prefix "$prefix" "Rust sources changed during bootstrap"
@@ -63,7 +68,7 @@ toolchain_accept_new_prefix() {
 
 toolchain_build_selected_host() {
 	local rust="$1" authoring_base="$2" build_root="$3" rustup="$4"
-	local cargo_home="$5" local_moto_rt="$6" expected_digest
+	local cargo_home="$5" local_moto_rt="$6" bootstrap_cache="$7" expected_digest
 	toolchain_capture_starting_locks "$rust" || return
 	toolchain_derive_identity || return
 	expected_digest="$AUTHORING_SOURCE_DIGEST"
@@ -75,12 +80,14 @@ toolchain_build_selected_host() {
 		"$rust" "$authoring_base" "$expected_digest" || return
 	# A stale local runtime fails here, before the LLVM and Rust builds.
 	toolchain_precheck_moto_rt_package "$rust" "$local_moto_rt" "$cargo_home" || return
+	toolchain_prepare_rust_analyzer "$MOTOR" "$rust" "$MOTORH" "$cargo_home" \
+		"$TOOLCHAIN_STATE_ROOT" true || return
 	toolchain_build_standalone_llvm "$rust/src/llvm-project" "$build_root" || return
 	toolchain_generate_cross_wrappers "$BOOTSTRAP_SYSROOT" "$STANDALONE_LLVM_BIN" || return
 	BOOTSTRAP_CONFIG="$TOOLCHAIN_STATE_ROOT/bootstrap.toml"
 	toolchain_generate_bootstrap_config "$BOOTSTRAP_CONFIG" "$rust" \
 		"$TOOLCHAIN_PREFIX" "$BOOTSTRAP_SYSROOT" "$STANDALONE_LLVM_BIN" \
-		"$SELECTED_TOOLCHAIN_DESCRIPTION" || return
+		"$bootstrap_cache" "$SELECTED_TOOLCHAIN_DESCRIPTION" || return
 
 	toolchain_claim_prefix "$TOOLCHAIN_PREFIX" || return
 	if [ "$TOOLCHAIN_PREFIX_REUSED" = true ]; then

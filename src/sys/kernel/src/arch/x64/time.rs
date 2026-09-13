@@ -125,7 +125,15 @@ fn rdtsc() -> u64 {
 // see https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst
 // see https://www.kernel.org/doc/html/latest/virt/kvm/cpuid.html
 pub fn init_pvclock() {
-    enable_kvm_system_time();
+    let cpu = crate::arch::apic_cpu_id_32() as usize;
+    assert!(cpu < crate::config::MAX_CPUS as usize);
+    let ti = &PVCLOCK.vcpu_time_info[cpu].info;
+    enable_kvm_system_time(ti);
+
+    if cpu != crate::arch::bsp() as usize {
+        let _ = read_vcpu_time_info(ti);
+        return;
+    }
 
     // Note: because we count the full boot time from zero TSC as kernel CPU
     // usage, we also have to use zero TSC as system start time to have
@@ -136,12 +144,10 @@ pub fn init_pvclock() {
     update_globals();
 }
 
-fn enable_kvm_system_time() {
-    // Enable KVM system time. This has to be done only once.
-    let ti = &GLOBALS.vcpu_time_info;
+fn enable_kvm_system_time(ti: &PvClockVcpuTimeInfo) {
     let ptr_ti: *const PvClockVcpuTimeInfo = ti;
     let addr_ti = crate::arch::paging::virt_to_phys(ptr_ti as u64).unwrap();
-    assert_eq!(addr_ti % 4, 0);
+    assert_eq!(addr_ti % 64, 0);
 
     const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b564d01;
     // Addr + 1 to enable.
@@ -149,9 +155,10 @@ fn enable_kvm_system_time() {
 }
 
 fn update_globals() {
-    let ptr_wc: *const PvClockWallClock = &GLOBALS.wall_clock as *const _;
+    assert_eq!(crate::arch::apic_cpu_id_32(), crate::arch::bsp() as u32);
+    let ptr_wc: *const PvClockWallClock = &PVCLOCK.wall_clock as *const _;
     let addr_wc = crate::arch::paging::virt_to_phys(ptr_wc as usize as u64).unwrap();
-    assert_eq!(addr_wc % 4, 0);
+    assert_eq!(addr_wc % 64, 0);
 
     const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b564d00;
     super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc);
@@ -177,15 +184,18 @@ fn update_globals() {
             }
         }
         iters += 1;
-        let ver = GLOBALS.wall_clock.version.load(Ordering::Acquire);
+        let ver = PVCLOCK.wall_clock.version.load(Ordering::Acquire);
         if (ver == 0) || (ver & 1 != 0) {
             continue;
         }
 
-        sec = GLOBALS.wall_clock.sec.load(Ordering::Relaxed);
-        nsec = GLOBALS.wall_clock.nsec.load(Ordering::Relaxed);
+        sec = PVCLOCK.wall_clock.sec.load(Ordering::Relaxed);
+        nsec = PVCLOCK.wall_clock.nsec.load(Ordering::Relaxed);
 
-        if GLOBALS.wall_clock.version.load(Ordering::Acquire) == ver {
+        // Seqlock re-check: the fence keeps the field loads above from being
+        // reordered past the second version load (Linux: virt_rmb()).
+        fence(Ordering::Acquire);
+        if PVCLOCK.wall_clock.version.load(Ordering::Relaxed) == ver {
             break;
         }
     }
@@ -195,37 +205,8 @@ fn update_globals() {
 
     GLOBALS.base_nsec.store(base, Ordering::Release);
 
-    let ti = &GLOBALS.vcpu_time_info;
-    let mut tsc_mul: u32;
-    let mut tsc_shift: i8;
-    let mut tsc_ts: u64;
-    let mut system_time: u64;
-
-    let mut iter = 0_u64;
-    loop {
-        iter += 1;
-        let ver = ti.version.load(Ordering::Acquire);
-        if iter > 100_000_000 {
-            panic!("PvClockVcpuTimeInvo update looping: ver = {}", ver);
-        }
-        if ver == 0 || ver & 1 != 0 {
-            core::hint::spin_loop();
-            continue;
-        }
-
-        tsc_mul = ti.tsc_to_system_mul.load(Ordering::Relaxed);
-        tsc_shift = ti.tsc_shift.load(Ordering::Relaxed);
-        tsc_ts = ti.tsc_timestamp.load(Ordering::Relaxed);
-        system_time = ti.system_time.load(Ordering::Relaxed);
-
-        if ti.version.load(Ordering::Acquire) == ver {
-            break;
-        }
-    }
-
-    if tsc_mul == 0 {
-        panic!("PvClockVcpuTimeInfo (KVM clock) not working.");
-    }
+    let ti = &PVCLOCK.vcpu_time_info[crate::arch::bsp() as usize].info;
+    let (tsc_mul, tsc_shift, tsc_ts, system_time) = read_vcpu_time_info(ti);
 
     GLOBALS.tsc_ts.store(tsc_ts, Ordering::Relaxed);
     GLOBALS.tsc_mul.store(tsc_mul, Ordering::Relaxed);
@@ -234,6 +215,34 @@ fn update_globals() {
     GLOBALS
         .tsc_in_sec
         .store(nanos_to_tsc(NANOS_IN_SEC), Ordering::Relaxed);
+}
+
+fn read_vcpu_time_info(ti: &PvClockVcpuTimeInfo) -> (u32, i8, u64, u64) {
+    let mut iter = 0_u64;
+    loop {
+        iter += 1;
+        let ver = ti.version.load(Ordering::Acquire);
+        if iter > 100_000_000 {
+            panic!("PvClockVcpuTimeInfo update looping: ver = {}", ver);
+        }
+        if ver == 0 || ver & 1 != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+
+        let tsc_mul = ti.tsc_to_system_mul.load(Ordering::Relaxed);
+        let tsc_shift = ti.tsc_shift.load(Ordering::Relaxed);
+        let tsc_ts = ti.tsc_timestamp.load(Ordering::Relaxed);
+        let system_time = ti.system_time.load(Ordering::Relaxed);
+
+        // Seqlock re-check: the fence keeps the field loads above from being
+        // reordered past the second version load (Linux: virt_rmb()).
+        fence(Ordering::Acquire);
+        if ti.version.load(Ordering::Relaxed) == ver {
+            assert_ne!(tsc_mul, 0, "PvClockVcpuTimeInfo (KVM clock) not working");
+            return (tsc_mul, tsc_shift, tsc_ts, system_time);
+        }
+    }
 }
 
 fn tsc_to_nanos(tsc: u64) -> u64 {
@@ -300,13 +309,10 @@ pub struct Globals {
 
     // Wallclock base.
     pub base_nsec: AtomicU64,
-
-    wall_clock: PvClockWallClock,
-    vcpu_time_info: super::time::PvClockVcpuTimeInfo,
 }
 
 #[derive(core::fmt::Debug)]
-#[repr(C, align(8))]
+#[repr(C)]
 struct PvClockWallClock {
     version: AtomicU32,
     sec: AtomicU32,
@@ -315,7 +321,7 @@ struct PvClockWallClock {
 
 // See https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst.
 #[derive(core::fmt::Debug)]
-#[repr(C, align(8))]
+#[repr(C)]
 struct PvClockVcpuTimeInfo {
     version: AtomicU32,
     pad0: u32,
@@ -327,4 +333,29 @@ struct PvClockVcpuTimeInfo {
     pad: [u8; 2],
 }
 
+#[repr(C, align(64))]
+struct AlignedPvClockVcpuTimeInfo {
+    info: PvClockVcpuTimeInfo,
+}
+
+/// KVM-owned clock data. Each vCPU gets its own cache-line-sized ABI object.
+/// KVM keeps each vCPU's time info in a single-page cache and silently
+/// ignores an area that crosses a page boundary, so the 64-byte alignment
+/// (4096 % 64 == 0) is what guarantees every 32-byte entry stays within a
+/// page. The wall clock only needs 4-byte alignment.
+#[repr(C, align(64))]
+struct PvClockData {
+    wall_clock: PvClockWallClock,
+    vcpu_time_info: [AlignedPvClockVcpuTimeInfo; crate::config::MAX_CPUS as usize],
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<PvClockWallClock>() == 12);
+    assert!(core::mem::size_of::<PvClockVcpuTimeInfo>() == 32);
+    assert!(core::mem::size_of::<AlignedPvClockVcpuTimeInfo>() == 64);
+    assert!(core::mem::offset_of!(PvClockData, vcpu_time_info) == 64);
+    assert!(core::mem::size_of::<PvClockData>() == 64 * (1 + crate::config::MAX_CPUS as usize));
+};
+
 static GLOBALS: Globals = unsafe { MaybeUninit::<Globals>::zeroed().assume_init() };
+static PVCLOCK: PvClockData = unsafe { MaybeUninit::<PvClockData>::zeroed().assume_init() };

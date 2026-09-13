@@ -1,5 +1,149 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Deferred filesystem flush race (2026-09-09)
+
+Fix after merging the pending filesystem branch, per maintainer direction.
+Recheck the proposed change against that branch before implementing it.
+
+`motor-fs` can acknowledge an explicit flush before committing all preceding
+writes. This is a preexisting production race, shared by the host Tokio and
+Motor OS runtime paths, not an allocator-test defect. During kernel allocator
+validation, the existing host test `tests::resize_truncate_crash_regrow`
+failed with `InvalidData`: main transaction 12 versus logged transaction 11.
+The failure preceded the main VM boot; guest allocator code was not running.
+
+Cause in `src/sys/lib/motor-fs/src/txn_log.rs`: the timeout task takes the
+pending batch out of its shared holder before sending it to the committer.
+An explicit `Flush` can already be queued ahead of that batch. The committer
+then sees an empty holder, flushes earlier device writes, and acknowledges
+the caller; the timeout-owned batch commits afterward. A caller that drops
+and reopens the filesystem after the acknowledgment can overlap that commit.
+`BlockCache::new` reads the pinned log blocks before the main superblock, so
+the reopened cache can combine the previous log with the new superblock.
+
+Temporary ordering logs on the existing concurrent filesystem suite captured
+this sequence for the failing crash/regrow case (capacity 1):
+
+1. Explicit flush requested with transaction 12, four blocks pending.
+2. Timeout takes transaction 12 and queues its batch behind `Flush`.
+3. Committer handles `Flush` with an empty transaction-13 holder and
+   acknowledges completion.
+4. Committer only now consumes transaction 12; the test concurrently reopens
+   and rejects main transaction 12 versus logged transaction 11.
+
+Both preserved disk images had matching transaction-12 headers by the time
+they were copied: the later commit completed, but the reopening cache had
+already observed inconsistent generations. A later consistent image does
+not disprove the race.
+
+Proposed fix: timeout tasks enqueue a transaction-ID-tagged request without
+taking the batch. Only the committer handles that request by checking and
+taking the matching pending batch. This keeps timeout ownership changes
+ordered with explicit flushes. Preserve stale-ID checks, error propagation,
+and the rule that no holder borrow spans an await. Do not mask the defect
+with a longer timer or a reopen retry.
+
+Validation: from `src/sys/lib/motor-fs`, run
+`cargo test --features image-admin` in debug and release; the crate-local
+Cargo configuration supplies `tokio_unstable`. These existing tests are
+already part of `src/tests/full-test.sh`; the eventual production fix also
+needs the normal core-OS gate. No new reproducer or test workaround was added.
+All temporary source logging has been removed. Original failures, ordering
+traces, diagnostic patch, and disk images are retained on the development
+host under `/tmp/kernel-phys-host-shutdown.9ox3kE/` (`DIAGNOSIS.md` indexes them).
+
+This establishes the filesystem test failure's cause, not the earlier quiet
+VM exit during pressure. That separate unresolved finding and its evidence
+remain in Git history (the retired kernel-phys-mem.md plan). Kernel validation resumes
+with this filesystem fix explicitly deferred; no test is skipped or weakened.
+
+## Unresolved native Lorry self-build stall (2026-09-05)
+
+The release developer gate's `native-lorry-self-gate` timed out at its
+unchanged 1,200-second limit in an 8-vCPU/8-GiB VM. Native vendoring had
+verified `Cargo.lock`; the first release build stopped producing output
+after dispatching initial dependencies through `bisync 0.3.0`. A diagnostic
+SSH `ps` also stopped responding. All eight vCPUs were sampled waiting in
+KVM, with no console panic; guest memory pressure and a lost wake remained
+unproven.
+
+Resuming the retained build, 256 synchronized compiler-launch probes, and
+cold builds in a disposable snapshot did not reproduce the stall or record
+a kernel memory-admission refusal. Sharing immutable resolver candidates
+later reduced a separate measured cost, and the complete gate passed with
+unchanged limits and concurrency. That optimization did not diagnose or
+repair the original liveness failure. The maintainer deferred that failure
+and authorized continuing analyzer work.
+
+Evidence was recorded under
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T165416Z-421811/`
+(`summary.txt`, `timings.tsv`, `native.log`, `qemu.log`, `lorry-cross`) and
+`/tmp/motor-ra-url-dev-rebased.log`. Diagnostic logs include
+`/tmp/motor-lorry-diag-{build,samples,spawn-stress,cold-build}.log`,
+`/tmp/motor-lorry-diag-vendor-build{,-timestamps}.log`, and
+`/tmp/motor-lorry-diag-vendor-stacks.log`. A gap in the interactive resident
+log came from host terminal job control stopping SSH, not a guest timer
+failure. Preserve the original timeout independently of later passing gates.
+
+## Unresolved logging RPC stall (2026-09-07)
+
+During kill-after-wait kernel validation, the second debug main-image gate
+stalled after `logging::basic test PASS`. Systest's main thread waited in
+`logging::rotation_and_space_cleanup` -> `rpc_result` ->
+`ClientConnection::do_rpc` -> `SysCpu::wait`, before reaching the kill
+regression. The rotation file stayed at 216,624 bytes while `kernel.log`
+grew and SSH/filesystem reads remained responsive. Strobe was processing
+other records; samples in its filesystem flush/write path did not establish
+the cause or a complete logging-service deadlock.
+
+The gate was deliberately terminated with status 143. The maintainer
+deferred further logging/IPC investigation. Subsequent unchanged main-image
+and developer gates passed, including logging rotation; no test exclusion,
+retry, or timeout change was added. Those passes do not resolve the original
+stall or conclusively exclude interaction with the reviewed kernel change.
+
+Evidence was recorded in `/tmp/motor-kill-full-debug-2.log`,
+`/tmp/motor-kill-debug-2-{console,systest,ps}.log`,
+`/tmp/motor-kill-debug-2-systest-stacks-uploaded.log`,
+`/tmp/motor-kill-debug-2-strobe-stacks-{uploaded,later}.log`, and
+`/tmp/motor-kill-debug-2-log-files{,-later}.log`. The initial debugger requests
+used an absent guest path; only the later uploaded-debugger captures are
+stack evidence. Logging IPC, wake delivery, and other causes remain to be
+distinguished before proposing a production fix.
+
+## Unresolved sys-io abort during listener exhaustion (2026-09-10)
+
+The first release main-image gate during Helix integration failed after
+`test_all_cpu_fault_storm PASS`: aggregate listener exhaustion did not
+complete, sys-io exited with status `0xffffffff`, and the suite reached its
+unchanged 900-second deadline. This status identifies an explicit abort
+(`abort_internal()` exits -1), not the kernel's `u64::MAX` main-thread fault
+status. The abort's root cause remains unresolved.
+
+The diagnostic run of the unchanged systest sequence passed, as did eight
+cycles of the existing listener probe with abort-stack reporting. Those
+probes returned OutOfMemory and recovered. Subsequent release gates 2–4
+passed after all temporary instrumentation was removed; they do not explain
+the original failure. The child-pipe fix and the later client-side network
+allocation fixes do not establish a cause for this sys-io abort.
+
+Evidence paths recorded at the time: the original log is
+`/tmp/motor-helix-ra-main-release-1.log` and the failed image is
+`vm_images/release/motor-os-helix-forensics.qcow2`. Diagnostic logs are
+`/tmp/motor-helix-ra-systest-diagnostic.log`,
+`/tmp/motor-helix-ra-listener-probe.log`, and
+`/tmp/motor-helix-ra-listener-soak.log`; the later gate order is in
+`/tmp/motor-helix-ra-release-gates.log`. Preserve the original failure when
+investigating; do not treat later passes as resolution or external-network
+flakiness.
+
+## Network RX monitor intervention (2026-09-06)
+
+Debug runs 1 and 3 of the network-channel allocation gates exhibited the
+previously diagnosed network RX monitor intervention. Logs were recorded
+under `build/network-allocation.YuWF2O/`. Those gates validated allocation
+refusal and recovery; they did not establish a repair for the RX issue.
+
 ## Open bugs from the 2026-08-28/29 performance run (address soon)
 
 Found while reviewing file I/O and the async runtime; the run's report
@@ -25,18 +169,11 @@ The former sys-tty/kernel-log interleaving item is complete; see
    about 50x faster after a burst (20 ms instead of 1 s per connection), no
    retry noise in the suite, and the close-race reproducer usable at scale.
 
-2. **frusa holds its slab lock across the fallback `SysMem::alloc`.** The
-   allocator's spin lock stays held while a slab grows through the fallback
-   path, i.e. across the syscall; any allocation on that path (a `format!`
-   in a diagnostic, a log record) self-deadlocks the thread, and a thread
-   killed while holding the lock leaves every sibling spinning. A sampling
-   diagnostic in `SysMem::map` reproduced it in 6 of 12 listener-flood runs
-   during the perf run (sys-io stopped with two vCPUs spinning; diagnosed
-   through the qemu monitor). Fix: grow outside the lock (allocate the new
-   block, then take the lock to link it), or make the fallback path
-   allocation-free by contract with a debug assertion. Gain: removes a
-   self-deadlock class from every process, sys-io included, and makes the
-   allocator safe to instrument.
+2. **Resolved: the allocator held its slab lock across the fallback
+   `SysMem::alloc`.** The allocator now holds no lock across a backend call,
+   so a backend may allocate from the allocator it backs and a thread killed
+   in a syscall leaves no sibling spinning; see
+   [the allocator document](../frusa.md).
 
 3. **sys-io never returns allocator slack.** The vdso's `reclaim_resident`
    gives freed slab pages back to the kernel every 5 s, but only in
@@ -49,19 +186,14 @@ The former sys-tty/kernel-log interleaving item is complete; see
    baseline after bursts instead of holding the peak, which matters on small
    VMs and for the memory-pressure model's accounting.
 
-4. **`MAX_BLOCKS_IN_TXN_LOG` 256 stops sys-io on the first large write.**
-   Raising the transaction-log batch from 64 to 256 blocks compiles (the
-   superblock still fits) but the first 20 MB write stops sys-io without a
-   panic. The likely mechanism: `write_blocks_with_completion` posts every
-   16-block chunk of a run before awaiting any, a 256-block batch is 16
-   requests of 18 descriptors = 288 entries against a 256-entry virtqueue,
-   and descriptors are reclaimed only when a completion is awaited -- the
-   shape the July TSO work hit on the net side; 64-block batches post at
-   most 72. Fix: bound the in-flight descriptors per run (await a completion
-   when the queue is full) or derive the batch size from the virtqueue
-   depth. Gain: unblocks the write-path work below (a larger batch is one of
-   its three levers) and removes a latent stall for any device with a
-   smaller queue.
+4. **Resolved 2026-09-09: `MAX_BLOCKS_IN_TXN_LOG` 256 stopped sys-io on the
+   first large write.** The mechanism was descriptor retention: a completion
+   held its descriptors until dropped, and the worker held completions until
+   `Commit`. [`block_io.rs`](../../src/sys/sys-io/src/runtime/fs/block_io.rs)
+   now owns all block-queue traffic in one I/O task that drops completions as
+   the device finishes them, so batch size no longer interacts with queue
+   depth. Raising the batch is still one of the write-path levers below and
+   still unmeasured.
 
 5. **sys-io allocates a Vec of every wait handle on each park.**
    `LocalRuntime::wait` builds the array of registered wait handles anew per
@@ -106,15 +238,10 @@ The former sys-tty/kernel-log interleaving item is complete; see
    snapshot. Gain: tools and scripts read sys-io's counters as soon as the
    VM answers, and the retry loops in the suite can go.
 
-9. **`CpuStatsV1::entry` uses the wrong slice length.**
-    `moto-sys/src/stats.rs` builds the per-CPU slice with
-    `self.num_entries` as its length instead of `num_cpus` (lines 128-131),
-    so the slice overruns into the next entry when there are more entries
-    than CPUs and would panic if a process list ever had fewer entries than
-    CPUs; harmless today only because callers index `[cpu]`. Fix: a one-line
-    length correction with a unit test; moto-sys is a runtime input, so it
-    ships with the next moto-sys bump. Gain: correct per-CPU statistics for
-    `top` and the benchmarks, and no latent panic.
+The former item 9, `CpuStatsV1::entry`'s incorrect slice length, is fixed.
+The correction and three synthetic snapshot tests pass three debug and three
+release full-system gates, plus `full-test-dev.sh --release` (2026-09-06).
+No package publication or stdlib change was needed.
 
 ## Performance follow-ups from the same run (not scheduled)
 
@@ -173,6 +300,32 @@ without). Left on the table, largest first:
 Items moved out of active plans by explicit ruling. Each entry names
 the ruling; nothing here should be picked up without a fresh call.
 
+- **Per-process resident-memory accounting and peaks** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). The current kernel
+  `memory_usage` metric counts virtual mappings, including shared mappings
+  and lazily mapped stacks; it is not resident physical memory (RSS).
+  `MemoryStats::get()` reports physical use for the whole system, not each
+  process. Design per-process resident accounting and high-water reporting,
+  with explicit shared-page attribution and allocation/reclamation semantics,
+  before implementation. This would support reliable memory-regression
+  measurements for rust-analyzer, compilers, and other applications. It is
+  not a prerequisite for native rust-analyzer: use existing counters and
+  label sampled maxima and whole-VM physical usage accurately meanwhile.
+
+- **Complete descendant-process execution audit** (deferred from
+  rust-analyzer by U. Lasiotus, 2026-09-06). `ProcessInfoV1::list` can omit
+  exited processes with no running descendants, and its debug names are
+  limited to 32 bytes. Periodic snapshots therefore cannot establish a
+  complete history of executed programs or arguments. Design an opt-in,
+  bounded execution-event facility with process/parent identity, executable
+  identity, explicit event-loss reporting, and reviewed access/privacy rules
+  before implementation; arguments may contain secrets. It should capture
+  short-lived descendants without polling races or extra boot-time work.
+  This would support execution audits beyond rust-analyzer. Native
+  rust-analyzer acceptance may use invocation logs and sampled descendants,
+  stating that this evidence is non-exhaustive; it must not depend on this
+  new OS facility.
+
 - **`channel.rs` SeqCst fence audit** (out of scope, ruled
   2026-08-15). The io_channel wake edges now carry their own ordering;
   the SeqCst fences predate that and are likely removable. Removing
@@ -210,3 +363,30 @@ the ruling; nothing here should be picked up without a fresh call.
   re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
   per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
+
+- **virtio queue: allocation-waiter hygiene and wakeups** (recorded 2026-09-08).
+  Releasing a descriptor chain wakes at most two queued allocation waiters,
+  and a waiter that does not
+  fit re-registers at the back of the line. Under the single-owner design
+  the block queue has one submitter that never waits in the driver, and
+  each net queue has one submitter. Supporting several independent
+  allocators would require revisiting this policy: waking only the first
+  waiter can starve a fitting waiter behind a non-fitting
+  one once the last in-flight request has completed. Options then: wake
+  every waiter, or select the first that fits from per-entry sizes and a
+  free-descriptor count. That review should also cover duplicate registrations,
+  removal when allocation succeeds on an unrelated poll, and cancellation
+  of a registered `VqAlloc`; stale entries must not consume a live waiter's
+  wakeup.
+
+- **Block I/O task: recover the sequential cost** (recorded 2026-09-09).
+  The single-owner task costs 3 to 5 percent of sequential throughput against
+  the old driver. Three measured
+  changes recover it and more (593 versus 506 MiB/s for 4 KiB sequential
+  reads): drain the used ring at the start of the task's poll, keep a
+  single-chunk response inline instead of in shared state, and a channel
+  receiver that does not spin on an empty inbox, with the inbox at 16
+  entries. Not adopted because the 64-thread p99 latency rose from 5.9 to
+  10.7 ms and one boot showed TCP throughput halving under 16 saturated disk
+  readers. Pick up only with a matched-load network measurement and the
+  threaded latency probe; patch and data under `build/virtio-waiters-results/`.

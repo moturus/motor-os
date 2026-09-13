@@ -60,6 +60,7 @@ GUEST_KEY="$TEST_TMP/test-tui.key"
 GUEST_KNOWN="$TEST_TMP/test-tui-known-hosts"
 GUEST_STREAM_HELPER="$TEST_TMP/test-tui-stream-child.sh"
 GUEST_HELIX_ROOT=""
+HELIX_LSP_EVIDENCE=""
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
@@ -136,6 +137,10 @@ remove_helix_fixtures() {
 
 cleanup() {
   set +e
+  if [ -n "$HELIX_LSP_EVIDENCE" ]; then
+    vm_ssh "cat $helix_lsp_log" > "$HELIX_LSP_EVIDENCE/helix.log"
+    printf '%s' "$PTY_OUTPUT" > "$HELIX_LSP_EVIDENCE/last-terminal-output"
+  fi
   if [ -n "$PTY_IN_FD" ]; then
     exec {PTY_IN_FD}>&-
   fi
@@ -550,14 +555,18 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   [ -n "${HELIX_REV:-}" ] || fail "HELIX_REV is not configured"
 
   helix_bin=/devtools/helix/hx
+  # Exercise the shipped configuration before the isolated editor-only cases.
+  out="$(vm_ssh 'NO_COLOR=1 hx --health rust')"
+  printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /devtools/rust/bin/rust-analyzer' ||
+    fail "default Rust health did not find the native server: '$out'"
+
   helix_short_rev="${HELIX_REV:0:8}"
   GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
-  helix_config="$GUEST_HELIX_ROOT/config"
   helix_cache="$GUEST_HELIX_ROOT/cache"
   helix_tmp="$GUEST_HELIX_ROOT/tmp"
-  helix_env="XDG_CONFIG_HOME=$helix_config XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
+  helix_env="XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
   helix_health_env="$helix_env NO_COLOR=1"
-  for path in "$GUEST_HELIX_ROOT" "$helix_config" "$helix_cache" "$helix_tmp"; do
+  for path in "$GUEST_HELIX_ROOT" "$helix_cache" "$helix_tmp"; do
     vm_ssh "/system/bin/mkdir $path" || fail "cannot create Helix fixture directory $path"
   done
 
@@ -650,6 +659,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   vm_ssh "[ \"\$(cat $helix_rmux)\" = HELIX_RMUX_OK ] && [ \"\$(wc -c < $helix_rmux)\" = 14 ]" ||
     fail "Helix rmux save did not preserve the exact bytes"
 
+  . "$WD/test-helix-lsp.sh"
   remove_helix_fixtures
 fi
 

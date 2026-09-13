@@ -1,5 +1,80 @@
 use std::sync::atomic::Ordering;
 
+pub fn test_listener_cleanup() {
+    use core::future::{Future, poll_fn};
+    use core::task::Poll;
+    use moto_ipc::io_channel::{ClientConnection, Msg, listen};
+
+    let url = format!("systest_listener_cleanup_{}", std::process::id());
+
+    // Registration happens before the first poll, even outside a runtime.
+    drop(listen(&url));
+    assert_eq!(
+        ClientConnection::connect(&url).err(),
+        Some(moto_rt::Error::NotFound)
+    );
+
+    moto_async::LocalRuntime::new().block_on(async {
+        for polled in [false, true] {
+            for connected in [false, true] {
+                let mut listener = Box::pin(listen(&url));
+                if polled {
+                    poll_fn(|cx| {
+                        assert!(listener.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                }
+                let client = connected.then(|| ClientConnection::connect(&url).unwrap());
+                drop(listener);
+                if let Some(client) = client {
+                    assert!(
+                        client.wake_server().is_err(),
+                        "cancelled listener is still alive"
+                    );
+                }
+                assert_eq!(
+                    ClientConnection::connect(&url).err(),
+                    Some(moto_rt::Error::NotFound)
+                );
+            }
+        }
+
+        // The peer can disconnect before the accept future resumes.
+        let mut listener = Box::pin(listen(&url));
+        poll_fn(|cx| {
+            assert!(listener.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(ClientConnection::connect(&url).unwrap());
+        assert!(listener.as_mut().await.is_err());
+        drop(listener);
+
+        // A completed future no longer owns the channel. Each returned half
+        // keeps it alive independently; only dropping both disconnects it.
+        let mut listener = Box::pin(listen(&url));
+        let client = ClientConnection::connect(&url).unwrap();
+        let (sender, mut receiver) = listener.as_mut().await.unwrap();
+        drop(listener);
+        client.wake_server().unwrap();
+
+        let mut msg = Msg::new();
+        msg.id = 41;
+        client.send(msg).unwrap();
+        assert_eq!(receiver.recv().await.unwrap().id, 41);
+        msg.id = 42;
+        sender.send(msg).await.unwrap();
+        assert_eq!(client.recv().unwrap().id, 42);
+        drop(sender);
+        client.wake_server().unwrap();
+        drop(receiver);
+        assert!(client.wake_server().is_err());
+    });
+
+    println!("----- io_channel::test_listener_cleanup PASS");
+}
+
 fn basic_test() {
     let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let waiter = server_started.clone();
@@ -603,6 +678,7 @@ fn test_active_channel_polls() {
 }
 
 pub fn run_all_tests() {
+    test_listener_cleanup();
     basic_test();
     test_ping_pong();
     test_pipelined_queue_wakeups();

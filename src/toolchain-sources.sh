@@ -487,6 +487,9 @@ toolchain_verify_managed_rust() {
   value="$(sha256sum "$rust/library/Cargo.lock" | awk '{print $1}')"
   toolchain_expect_equal "$value" "$MOTOR_RUST_LIBRARY_LOCK_SHA256" \
     "Rust library lock hash mismatch" || return
+  value="$(sha256sum "$rust/src/tools/rust-analyzer/Cargo.lock" | awk '{print $1}')"
+  toolchain_expect_equal "$value" "$MOTOR_RUST_ANALYZER_LOCK_SHA256" \
+    "Rust analyzer lock hash mismatch" || return
   toolchain_assert_clean "$rust" || return
   toolchain_assert_clean "$llvm" || return
   toolchain_assert_clean "$rust/src/tools/cargo" || return

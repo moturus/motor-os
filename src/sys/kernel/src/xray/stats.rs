@@ -164,7 +164,23 @@ pub enum MetricType {
     SchedPollMiss = 63,
     SchedIpiElided = 64,
 
-    TotalMetricTypes = 65,
+    // The block allocator (mm::phys_blocks), at the PID_SYSTEM scope.
+    // Gauges are read from the pool; the low-memory pair scans at most 64
+    // blocks under their locks. The huge-mapping counters are declared here
+    // and produced by the mapping path once huge pages are mapped.
+    MemBlocksTotal = 65,
+    MemBlocksWhole = 66,
+    MemBlocksSplit = 67,
+    MemBlocksTaken = 68,
+    MemBlocksWholeLow = 69,
+    MemPagesReserved = 70,
+    MemPagesFreeLow = 71,
+    MemBlockSplits = 72,
+    MemBlockRecombined = 73,
+    MemHugePagesMapped = 74,
+    MemHugeFallbacks = 75,
+
+    TotalMetricTypes = 76,
 }
 
 impl MetricType {
@@ -252,6 +268,17 @@ impl MetricType {
             MetricType::SchedPollHit => "sched.poll_hit",
             MetricType::SchedPollMiss => "sched.poll_miss",
             MetricType::SchedIpiElided => "sched.ipi_elided",
+            MetricType::MemBlocksTotal => "mem.blocks_total",
+            MetricType::MemBlocksWhole => "mem.blocks_whole",
+            MetricType::MemBlocksSplit => "mem.blocks_split",
+            MetricType::MemBlocksTaken => "mem.blocks_taken",
+            MetricType::MemBlocksWholeLow => "mem.blocks_whole_low",
+            MetricType::MemPagesReserved => "mem.pages_reserved",
+            MetricType::MemPagesFreeLow => "mem.pages_free_low",
+            MetricType::MemBlockSplits => "mem.block_splits",
+            MetricType::MemBlockRecombined => "mem.block_recombined",
+            MetricType::MemHugePagesMapped => "mem.huge_pages_mapped",
+            MetricType::MemHugeFallbacks => "mem.huge_fallbacks",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -323,7 +350,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 68; // struct is 8 * (N + 4) bytes; see the size assert below.
+const PCPU_STATS_CNT: usize = 76; // struct is 8 * (N + 4) bytes; see the size assert below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -336,7 +363,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(576 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 9
+const _: () = assert!(640 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 10
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {
@@ -663,6 +690,21 @@ impl KProcessStats {
             vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
             vals[MetricType::PhysSmallPagesLowWater as usize] =
                 crate::mm::phys::min_free_small_pages();
+
+            let blocks = crate::mm::phys::block_metrics();
+            vals[MetricType::MemBlocksTotal as usize] = blocks.total;
+            vals[MetricType::MemBlocksWhole as usize] = blocks.whole;
+            vals[MetricType::MemBlocksSplit as usize] = blocks.split;
+            vals[MetricType::MemBlocksTaken as usize] = blocks.taken;
+            vals[MetricType::MemBlocksWholeLow as usize] = blocks.whole_low;
+            vals[MetricType::MemPagesReserved as usize] = blocks.pages_reserved;
+            vals[MetricType::MemPagesFreeLow as usize] = blocks.pages_free_low;
+            vals[MetricType::MemBlockSplits as usize] = blocks.splits;
+            vals[MetricType::MemBlockRecombined as usize] = blocks.recombined;
+            vals[MetricType::MemHugePagesMapped as usize] =
+                crate::mm::virt::HUGE_PAGES_MAPPED.load(Ordering::Relaxed);
+            vals[MetricType::MemHugeFallbacks as usize] =
+                crate::mm::virt::HUGE_FALLBACKS.load(Ordering::Relaxed);
         }
 
         out.reserve(n);

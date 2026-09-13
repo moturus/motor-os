@@ -39,11 +39,16 @@ write_assembly() {
 		"$root/images/rg/system/bin" \
 		"$root/images/helix/devtools/helix/runtime/themes" \
 		"$root/images/libc/system/cfg/libc"
+	mkdir -p "$root/images/rust-analyzer/devtools/rust/bin" \
+		"$root/images/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src"
+	printf analyzer > "$root/images/rust-analyzer/devtools/rust/bin/rust-analyzer"
+	printf rust-src > "$root/images/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
 	printf libc > "$root/sysroot/devtools/llvm/lib/libc.a"
 	printf cxx > "$root/sysroot/devtools/llvm/lib/libc++.a"
 	printf shim > "$root/sysroot/devtools/llvm/lib/libmoto_rt_cabi.a"
 	printf llvm > "$root/images/llvm/devtools/llvm/bin/llvm"
 	printf rustc > "$root/images/rustc/devtools/rust/bin/rustc"
+	printf rustfmt > "$root/images/rustc/devtools/rust/bin/rustfmt"
 	printf rg > "$root/images/rg/system/bin/rg"
 	printf hx > "$root/images/helix/devtools/helix/hx"
 	chmod 755 "$root/images/helix/devtools/helix/hx"
@@ -68,7 +73,14 @@ write_assembly() {
 		printf 'helix_tree_sha256=%s\n' "$(toolchain_content_tree_digest \
 			"$root/images/helix" devtools/helix)"
 		printf 'native_configuration_digest=%s\n' "$native_config"
+		printf 'rust_analyzer_inputs_digest=%s\n' "$(toolchain_rust_analyzer_inputs_digest)"
+		printf 'native_rust_analyzer_recipe=motor-native-rust-analyzer-v3-std\n'
+		toolchain_rust_analyzer_manifest_fields
+		printf 'native_rust_analyzer_sha256=%s\n' "$(sha256sum "$root/images/rust-analyzer/devtools/rust/bin/rust-analyzer" | awk '{print $1}')"
+		printf 'rust_src_tree_sha256=%s\n' "$(toolchain_content_tree_digest "$root/images/rust-analyzer" devtools/rust/lib/rustlib/src/rust/library)"
 		printf 'native_rustc_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustc" | awk '{print $1}')"
+		printf 'native_rustfmt_expected_version_base64=%s\n' "$(printf 'rustfmt test version' | base64 -w0)"
+		printf 'native_rustfmt_sha256=%s\n' "$(sha256sum "$root/images/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')"
 		printf 'native_llvm_sha256=%s\n' "$(sha256sum "$root/images/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')"
 		printf 'ripgrep_sha256=%s\n' "$(sha256sum "$root/images/rg/system/bin/rg" | awk '{print $1}')"
 		printf 'libc_sha256=%s\n' "$(sha256sum "$root/sysroot/devtools/llvm/lib/libc.a" | awk '{print $1}')"
@@ -78,7 +90,7 @@ write_assembly() {
 	} > "$manifest"
 	chmod 0444 "$manifest"
 	local overlay
-	for overlay in llvm rustc rg libc helix; do
+	for overlay in llvm rustc rg libc helix rust-analyzer; do
 		mkdir -p "$root/images/$overlay/devtools/toolchain"
 		cp "$manifest" "$root/images/$overlay/devtools/toolchain/manifest"
 		chmod 0444 "$root/images/$overlay/devtools/toolchain/manifest"

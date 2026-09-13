@@ -1,34 +1,30 @@
-use super::stats;
-use async_fs::{AsyncBlockDevice, Block};
+use super::block_io::{self, Message, Reply};
+use async_fs::block_cache::CheckpointedBlock;
 use async_trait::async_trait;
+use moto_async::channel;
 use moto_tooling::iobuf::IoBuf;
-use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
-use std::rc::Rc;
 
-const VIRTIO_BLOCK_SIZE: usize = 512;
 const FS_BLOCK_SIZE: usize = 4096;
-const VIRTIO_BLOCKS_IN_FS_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE; // 8
+const VIRTIO_BLOCKS_IN_FS_BLOCK: u64 = 8;
 
 pub(super) struct VirtioPartition {
-    virtio_bd: Rc<virtio_async::BlockDevice>,
+    inbox: channel::Sender<Message>,
+    flush_supported: bool,
 
     // This partition starts at `virtio_block_offset` and contains `virtio_blocks`.
     virtio_block_offset: u64,
     virtio_blocks: u64,
-
-    fs_stats: Rc<stats::FsStats>,
 }
 
 impl VirtioPartition {
     pub async fn from_virtio_bd(
-        virtio_bd: Rc<virtio_async::BlockDevice>,
+        inbox: channel::Sender<Message>,
+        flush_supported: bool,
         virtio_block_offset: u64,
         virtio_blocks: u64,
-        fs_stats: Rc<stats::FsStats>,
     ) -> Result<Self> {
-        // Virtio blocks/sectors are 512 bytes; everywhere else across Motor OS
-        // block size is 4k, so we validate that the virtio partition was formatted properly.
+        // Virtio sectors are 512 bytes; filesystem blocks are 4K.
         if virtio_blocks & 7 != 0 {
             log::error!(
                 "A VirtIO block device partition has {virtio_blocks} sectors, which is not a multiple of 8."
@@ -37,217 +33,128 @@ impl VirtioPartition {
         }
 
         Ok(Self {
-            virtio_bd,
+            inbox,
+            flush_supported,
             virtio_block_offset,
             virtio_blocks,
-            fs_stats,
         })
     }
-}
 
-/// Joins the write completions of the requests a block run was split into
-/// (one per `seg_max` blocks; a single one on devices with a reasonable
-/// `seg_max`). Resolves when all resolve, with the first error, if any.
-pub struct WrapperCompletion {
-    inner: std::collections::VecDeque<
-        virtio_async::WriteCompletion<Vec<async_fs::block_cache::CheckpointedBlock>>,
-    >,
-    done: Vec<async_fs::block_cache::CheckpointedBlock>,
-    result: Result<()>,
-}
-
-impl Future for WrapperCompletion {
-    type Output = (Vec<async_fs::block_cache::CheckpointedBlock>, Result<()>);
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = &mut *self;
-        while let Some(front) = this.inner.front_mut() {
-            match std::pin::Pin::new(front).poll(cx) {
-                std::task::Poll::Ready((blocks, result)) => {
-                    this.done.extend(blocks);
-                    if this.result.is_ok() {
-                        this.result = result;
-                    }
-                    this.inner.pop_front();
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-
-        std::task::Poll::Ready((
-            core::mem::take(&mut this.done),
-            core::mem::replace(&mut this.result, Ok(())),
-        ))
+    fn first_sector(&self, block_no: u64) -> u64 {
+        block_no * VIRTIO_BLOCKS_IN_FS_BLOCK + self.virtio_block_offset
     }
 }
 
 #[async_trait(?Send)]
 impl async_fs::AsyncBlockDevice for VirtioPartition {
-    type Completion = WrapperCompletion;
+    type Completion = Reply<Vec<CheckpointedBlock>>;
 
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
     }
 
-    /// Read a single 4k block.
     async fn read_block<T: AsMut<IoBuf> + Unpin>(
         &self,
         block_no: u64,
-        block: T,
+        mut block: T,
     ) -> (T, Result<()>) {
-        let started = stats::now_ticks();
-        let first_sector_no =
-            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-        let completion =
-            virtio_async::BlockDevice::post_read(self.virtio_bd.clone(), first_sector_no, block)
-                .await;
-        let result = completion.await;
-
-        let fs_stats = &self.fs_stats;
-        fs_stats.device_reads.set(fs_stats.device_reads.get() + 1);
-        fs_stats
-            .device_read_blocks
-            .set(fs_stats.device_read_blocks.get() + 1);
-        if stats::TIMINGS {
-            let elapsed = stats::now_ticks().wrapping_sub(started);
-            fs_stats
-                .device_read_ticks
-                .set(fs_stats.device_read_ticks.get() + elapsed);
+        assert_eq!(block.as_mut().len(), FS_BLOCK_SIZE);
+        let pages = vec![block.as_mut().phys_addr() as u64];
+        let reply = block_io::send(&self.inbox, block, |reply| Message::Read {
+            first_sector: self.first_sector(block_no),
+            pages,
+            reply,
+        })
+        .await;
+        let (mut block, result) = match reply {
+            Ok(reply) => reply.await,
+            Err((block, error)) => return (block, Err(error)),
+        };
+        if result.is_ok() {
+            block.as_mut().set_len(FS_BLOCK_SIZE);
         }
-        result
+        (block, result)
     }
 
-    /// Read `blocks.len()` consecutive 4k blocks with scatter-gather virtio
-    /// requests of up to `seg_max` blocks each — normally a single request
-    /// for the whole run: one queue notification (a VM exit) and one
-    /// completion interrupt. All requests are posted before any is awaited.
     async fn read_blocks<T: AsMut<IoBuf> + Unpin>(
         &self,
         first_block_no: u64,
-        blocks: Vec<T>,
+        mut blocks: Vec<T>,
     ) -> (Vec<T>, Result<()>) {
-        let started = stats::now_ticks();
-        let mut first_sector_no =
-            first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-        let num_blocks = blocks.len() as u64;
-        let seg_max = self.virtio_bd.seg_max();
-
-        let mut completions = Vec::with_capacity((blocks.len()).div_ceil(seg_max));
-        let mut blocks_iter = blocks.into_iter();
-        loop {
-            let chunk: Vec<T> = blocks_iter.by_ref().take(seg_max).collect();
-            if chunk.is_empty() {
-                break;
+        let pages = blocks
+            .iter_mut()
+            .map(|block| {
+                assert_eq!(block.as_mut().len(), FS_BLOCK_SIZE);
+                block.as_mut().phys_addr() as u64
+            })
+            .collect();
+        let reply = block_io::send(&self.inbox, blocks, |reply| Message::Read {
+            first_sector: self.first_sector(first_block_no),
+            pages,
+            reply,
+        })
+        .await;
+        let (mut blocks, result) = match reply {
+            Ok(reply) => reply.await,
+            Err((blocks, error)) => return (blocks, Err(error)),
+        };
+        if result.is_ok() {
+            for block in &mut blocks {
+                block.as_mut().set_len(FS_BLOCK_SIZE);
             }
-            let chunk_sectors = (chunk.len() * VIRTIO_BLOCKS_IN_FS_BLOCK) as u64;
-            completions.push(
-                virtio_async::BlockDevice::post_read_many(
-                    self.virtio_bd.clone(),
-                    first_sector_no,
-                    chunk,
-                )
-                .await,
-            );
-            first_sector_no += chunk_sectors;
-        }
-
-        let num_requests = completions.len() as u64;
-        let mut blocks = Vec::with_capacity(num_blocks as usize);
-        let mut result = Ok(());
-        for completion in completions {
-            let (chunk, chunk_result) = completion.await;
-            blocks.extend(chunk);
-            if result.is_ok() {
-                result = chunk_result;
-            }
-        }
-
-        let fs_stats = &self.fs_stats;
-        fs_stats
-            .device_reads
-            .set(fs_stats.device_reads.get() + num_requests);
-        fs_stats
-            .device_read_blocks
-            .set(fs_stats.device_read_blocks.get() + num_blocks);
-        if stats::TIMINGS {
-            let elapsed = stats::now_ticks().wrapping_sub(started);
-            fs_stats
-                .device_read_ticks
-                .set(fs_stats.device_read_ticks.get() + elapsed);
         }
         (blocks, result)
     }
 
-    /// Write a single block.
     async fn write_block<T: AsRef<IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
-        let first_sector_no =
-            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-
-        let fs_stats = &self.fs_stats;
-        fs_stats.device_writes.set(fs_stats.device_writes.get() + 1);
-        virtio_async::BlockDevice::post_write(self.virtio_bd.clone(), first_sector_no, block)
-            .await
-            .await
+        assert_eq!(block.as_ref().len(), FS_BLOCK_SIZE);
+        let pages = vec![block.as_ref().phys_addr() as u64];
+        match block_io::send(&self.inbox, block, |reply| Message::Write {
+            first_sector: self.first_sector(block_no),
+            pages,
+            reply,
+        })
+        .await
+        {
+            Ok(reply) => reply.await,
+            Err((block, error)) => (block, Err(error)),
+        }
     }
 
-    /// Write `blocks.len()` consecutive 4k blocks with scatter-gather virtio
-    /// requests of up to `seg_max` blocks each — normally a single request
-    /// for the whole run; see `read_blocks`. All requests are posted before
-    /// the joined completion is returned.
+    /// The caller retains only the buffers and reply, never descriptors.
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<CheckpointedBlock>,
     ) -> Result<Self::Completion> {
-        let num_blocks = blocks.len() as u64;
-        let seg_max = self.virtio_bd.seg_max();
-        let mut first_sector_no =
-            first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-
-        let mut inner = std::collections::VecDeque::with_capacity(blocks.len().div_ceil(seg_max));
-        let mut blocks_iter = blocks.into_iter();
-        loop {
-            let chunk: Vec<async_fs::block_cache::CheckpointedBlock> =
-                blocks_iter.by_ref().take(seg_max).collect();
-            if chunk.is_empty() {
-                break;
-            }
-            let chunk_sectors = (chunk.len() * VIRTIO_BLOCKS_IN_FS_BLOCK) as u64;
-            inner.push_back(
-                virtio_async::BlockDevice::post_write_many(
-                    self.virtio_bd.clone(),
-                    first_sector_no,
-                    chunk,
-                )
-                .await,
-            );
-            first_sector_no += chunk_sectors;
-        }
-
-        let fs_stats = &self.fs_stats;
-        fs_stats
-            .device_writes
-            .set(fs_stats.device_writes.get() + inner.len() as u64);
-        fs_stats
-            .device_write_blocks
-            .set(fs_stats.device_write_blocks.get() + num_blocks);
-
-        Ok(WrapperCompletion {
-            inner,
-            done: Vec::new(),
-            result: Ok(()),
+        let pages = blocks
+            .iter()
+            .map(|block| {
+                let buffer: &IoBuf = block.as_ref();
+                assert_eq!(buffer.len(), FS_BLOCK_SIZE);
+                buffer.phys_addr() as u64
+            })
+            .collect();
+        block_io::send(&self.inbox, blocks, |reply| Message::Write {
+            first_sector: self.first_sector(first_block_no),
+            pages,
+            reply,
         })
+        .await
+        .map_err(|(_, error)| error)
     }
 
-    /// Flush dirty blocks to the underlying storage.
     async fn flush(&self) -> Result<()> {
-        virtio_async::BlockDevice::post_flush(self.virtio_bd.clone()).await
+        if !self.flush_supported {
+            return Err(ErrorKind::Unsupported.into());
+        }
+        let reply = block_io::send(&self.inbox, (), |reply| Message::Flush { reply })
+            .await
+            .map_err(|(_, error)| error)?;
+        reply.await.1
     }
 }

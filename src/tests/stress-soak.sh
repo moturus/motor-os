@@ -83,7 +83,7 @@ CONSOLE_IN="$OUT/console.in"
 RNET_PORT=40000
 HTTP_STD_PORT=8080
 HTTP_AXUM_PORT=8081
-SERVE_DIR=/devtools/www
+SERVE_DIR=/devtools/tmp/www    # writable over sftp; created before the servers start
 
 MON_INTERVAL=20          # monitor tick, seconds
 PROGRESS_INTERVAL=300    # healthy-progress message interval, seconds
@@ -435,8 +435,18 @@ HTTPD=/user/bin/httpd
 HTTPD_AXUM=/user/bin/httpd-axum
 log "binaries: httpd=$HTTPD httpd-axum=$HTTPD_AXUM"
 
-# httpd/-axum serve the dev image's bundled site; every GET reads from fs.
-FETCH_URLPATH="/motor-os-256.png"    # 108776-byte asset => real fs read per GET
+# httpd/-axum serve $SERVE_DIR: upload the soak's own 108776-byte asset
+# there, so every GET is a real fs read. httpd serves only extensions it
+# knows; the bytes behind the .png name are random.
+FETCH_URLPATH="/soak-asset.png"
+head -c 108776 /dev/urandom > "$OUT/soak-asset.png"
+vssh_n "/system/bin/rush -c '[ -d $SERVE_DIR ] || /system/bin/mkdir $SERVE_DIR'" >/dev/null 2>&1 ||
+  gate_fail "could not create $SERVE_DIR"
+printf 'put %s %s%s\n' "$OUT/soak-asset.png" "$SERVE_DIR" "$FETCH_URLPATH" |
+  sftp -b - -F /dev/null -P "$SSH_PORT" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    motor@"$VM_IP" >"$OUT/asset-upload.log" 2>&1 ||
+  gate_fail "could not upload the http fetch asset (see asset-upload.log)"
 log "http fetch target: $SERVE_DIR$FETCH_URLPATH"
 
 # ------------------------------------------------------------------ start servers (one persistent ssh each)
@@ -554,12 +564,15 @@ w_fs_sftp() {
   done
 }
 # In-VM fs write/read churn + process spawn in the development scratch tree.
+# Its own directory: fs-sftp lists /devtools/tmp, and a listing that races a
+# create/remove in the same directory can fail (motor-fs rejects it).
 w_fs_write() {
-  local n=0 f=0 rc a b
+  local n=0 f=0 rc a b dir=/devtools/tmp/strw
+  vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/fs-write.log" 2>&1
   while :; do
-    n=$((n+1)); a="/devtools/tmp/strw-a.$((n%6)).bin"; b="/devtools/tmp/strw-b.$((n%6)).bin"
+    n=$((n+1)); a="$dir/strw-a.$((n%6)).bin"; b="$dir/strw-b.$((n%6)).bin"
     run_timeout 45 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "/system/bin/sh -c '/system/bin/sysbox cp /devtools/www/motor-os-256.png $a && /system/bin/sysbox cp $a $b && /system/bin/sysbox rm $a && /system/bin/sysbox rm $b'" \
+      "/system/bin/sh -c '/system/bin/sysbox cp $SERVE_DIR$FETCH_URLPATH $a && /system/bin/sysbox cp $a $b && /system/bin/sysbox rm $a && /system/bin/sysbox rm $b'" \
       >>"$OUT/fs-write.log" 2>&1; rc=$?
     echo "iter=$n rc=$rc" >>"$OUT/fs-write.log"
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat fs-write "$n" "$f" "$rc" "cp-churn"; pace "$rc"; done
@@ -836,6 +849,13 @@ while :; do
   if [ "$now" -ge "$NEXT_PROGRESS" ]; then
     log "everything is OK; still working; no issues (soak uptime ${up}s / ${DURATION}s)"
     NEXT_PROGRESS=$(( now + PROGRESS_INTERVAL ))
+    # Block allocator gauges and admission refusals over time: a trend is
+    # diagnostic evidence (metadata growth can legitimately pin blocks).
+    {
+      echo "=== uptime=${up}s $(date +%H:%M:%S)"
+      VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1 |
+        grep -aE 'mem\.(blocks_|pages_reserved|pages_free_low|block_|admission_refused|used_pages|phys_small_pages_low_water)' || true
+    } >> "$OUT/blocks.log"
   fi
 
   if [ "$up" -ge "$DURATION" ]; then

@@ -18,7 +18,7 @@ fail() {
     exit 1
 }
 
-if [ -z "${LORRY_TEST_RUSTC:-}" ]; then
+if [ -z "${LORRY_TEST_CARGO:-}" ] || [ -z "${LORRY_TEST_RUSTC:-}" ]; then
     # shellcheck source=current-toolchain.sh
     source "$SCRIPT_DIR/current-toolchain.sh"
     lorry_load_current_toolchain
@@ -138,4 +138,11 @@ grep -F "\"manifest_path\":\"$SOURCE_VIEW/Cargo.toml\"" \
     --filter-platform x86_64-unknown-linux-gnu --locked) >"$WORK/metadata-again.json"
 cmp "$WORK/metadata.json" "$WORK/metadata-again.json"
 
-echo "PASS: cached crates.io acquisition and metadata source views are stable"
+(cd "$PROJECT" && HOME="$HOME_DIR" RUSTC="$RUSTC" \
+    "$LORRY" tree --target x86_64-unknown-linux-gnu) >"$WORK/lorry.tree"
+CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" tree --locked --offline \
+    --manifest-path "$PROJECT/Cargo.toml" --target x86_64-unknown-linux-gnu \
+    >"$WORK/cargo.tree"
+cmp "$WORK/lorry.tree" "$WORK/cargo.tree"
+
+echo "PASS: cached crates.io acquisition, metadata views, and tree output are stable"

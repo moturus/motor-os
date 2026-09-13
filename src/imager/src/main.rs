@@ -872,13 +872,30 @@ mod tests {
         );
         assert_eq!(
             config.assembly_dirs,
-            ["libc", "rg", "llvm", "rustc", "helix"]
+            ["libc", "rg", "llvm", "rustc", "helix", "rust-analyzer"]
         );
-        assert_eq!(config.assembly_required_executables.len(), 7);
+        assert_eq!(config.assembly_required_executables.len(), 10);
+        assert!(config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path == "rust-analyzer/devtools/rust/bin/rust-analyzer"));
+        assert!(!config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path.ends_with("/cargo")));
         assert!(config
             .assembly_required_executables
             .iter()
             .any(|path| path.ends_with("/rustc")));
+        for path in [
+            "rustc/devtools/bin/rustfmt",
+            "rustc/devtools/rust/bin/rustfmt",
+        ] {
+            assert!(config
+                .assembly_required_executables
+                .iter()
+                .any(|candidate| candidate == path));
+        }
         assert!(config
             .assembly_required_executables
             .iter()

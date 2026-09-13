@@ -140,6 +140,11 @@ pub fn test_shared_listener_restart() {
 
     let (mut first, mut first_stdout) = spawn_shared_listener();
     expect_shared_listener_ready(&mut first_stdout);
+
+    // A zero-capacity debugger request must be safe even against a live child.
+    let debug = moto_sys::SysRay::dbg_attach(u64::from(first.id())).unwrap();
+    assert_eq!(moto_sys::SysRay::dbg_list_threads(debug, 0, &mut []), Ok(0));
+    moto_sys::SysRay::dbg_detach(debug).unwrap();
     first.kill().unwrap();
 
     // Retain `first` without waiting: the parent still owns a process handle,
@@ -345,6 +350,31 @@ pub fn smoke_test() {
     assert_eq!(-1, child.wait().unwrap().code().unwrap());
 
     println!("spawn_wait_kill smoke_test PASS");
+}
+
+pub fn test_kill_after_wait() {
+    use moto_sys::{SysCpu, SysHandle};
+    use std::os::motor::process::ChildExt;
+
+    for expected in [0, 1234, -1] {
+        let mut child = subcommand::spawn();
+        if expected == -1 {
+            child.kill();
+        } else {
+            child.do_exit(expected);
+        }
+        assert_eq!(Some(expected), child.wait().unwrap().code());
+
+        // The first wait consumes the exit wake. Cleanup must still complete
+        // on a held terminal process, without changing its original status.
+        child.kill();
+        assert_eq!(Some(expected), child.wait().unwrap().code());
+        let handle = SysHandle::from_u64(child.std_child().sys_handle());
+        SysCpu::kill(handle).unwrap();
+        assert_eq!(Some(expected), child.wait().unwrap().code());
+    }
+
+    println!("test_kill_after_wait PASS");
 }
 
 // Pids are bounded to the i32-positive range and reused after wrap; see

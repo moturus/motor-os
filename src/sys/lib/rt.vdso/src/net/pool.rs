@@ -17,12 +17,19 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use moto_io::net::NetClient;
 use moto_io::net::Reservation;
 use moto_rt::mutex::Mutex;
 use moto_sys::SysHandle;
 
 type WaiterTx = moto_async::oneshot::Sender<Result<Reservation, moto_rt::Error>>;
+
+static FAIL_RUNTIME_CONSTRUCTION_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+pub fn fail_runtime_construction_for_test(fail: bool) {
+    FAIL_RUNTIME_CONSTRUCTION_FOR_TEST.store(fail, Ordering::Release);
+}
 
 struct Waiter {
     id: u64,
@@ -109,6 +116,10 @@ impl NetPool {
                 }
             }
 
+            inner
+                .waiters
+                .try_reserve(1)
+                .map_err(|_| moto_rt::Error::OutOfMemory)?;
             let id = inner.next_waiter_id;
             inner.next_waiter_id += 1;
             inner.waiters.push_back(Waiter { id, tx });
@@ -186,7 +197,23 @@ extern "C" fn channel_thread_entry(ctx: u64) {
     let pool: &'static NetPool = unsafe { &*(ctx as usize as *const NetPool) };
     moto_sys::set_current_thread_name("rt_net::pool_channel").unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async move {
+    let runtime = if FAIL_RUNTIME_CONSTRUCTION_FOR_TEST.load(Ordering::Acquire) {
+        Err(moto_rt::Error::OutOfMemory)
+    } else {
+        moto_async::LocalRuntime::try_new()
+    };
+    let mut runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let mut inner = pool.inner.lock();
+            inner.provisions_in_flight -= 1;
+            inner.fail_waiters(err);
+            drop(inner);
+            exit_channel_thread();
+        }
+    };
+
+    runtime.block_on(async move {
         let (client, driver) = match moto_io::net::connect().await {
             Ok(pair) => pair,
             Err(err) => {
@@ -197,10 +224,24 @@ extern "C" fn channel_thread_entry(ctx: u64) {
             }
         };
 
-        let client = Arc::new(client);
+        let client = match Arc::try_new(client) {
+            Ok(client) => client,
+            Err(_) => {
+                let mut inner = pool.inner.lock();
+                inner.provisions_in_flight -= 1;
+                inner.fail_waiters(moto_rt::Error::OutOfMemory);
+                return;
+            }
+        };
         let satisfied = {
             let mut inner = pool.inner.lock();
             inner.provisions_in_flight -= 1;
+
+            // Publication must not allocate after handing out reservations.
+            if inner.clients.try_reserve(1).is_err() {
+                inner.fail_waiters(moto_rt::Error::OutOfMemory);
+                return;
+            }
 
             // Satisfy up to the channel's capacity of waiters (design 6.1
             // step 5). `next` pins the channel open between sends: a
@@ -249,6 +290,10 @@ extern "C" fn channel_thread_entry(ctx: u64) {
 
     // What the compatibility host's thread-exit hook used to do: reclaim
     // TLS, then exit; the kernel reaps the thread.
+    exit_channel_thread();
+}
+
+fn exit_channel_thread() -> ! {
     unsafe { crate::rt_tls::on_thread_exiting() };
     let _ = moto_sys::SysObj::put(SysHandle::SELF);
     unreachable!("the pool channel thread exited");

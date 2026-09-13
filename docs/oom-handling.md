@@ -37,19 +37,19 @@ backing, or attribute shared kernel-heap objects to individual processes.
 
 ## Memory zones
 
-Two non-configurable low-water marks over free small pages:
+Two non-configurable floors apply after subtracting outstanding reservations
+and the operation's charge:
 
-```text
-available above USER_FLOOR:
-    ordinary processes and sys-io may start memory-growing operations
+- Ordinary address spaces must leave `USER_FLOOR` pages free.
+- Processes with `CAP_SYS` or `CAP_IO_MANAGER` may use the reserve between
+  the floors, but must still leave `SYS_IO_FLOOR` pages for bounded kernel
+  work. This includes strobe and sys-init as well as sys-io and sys-tty.
 
-SYS_IO_FLOOR < available <= USER_FLOOR:
-    only sys-io may start memory-growing operations
-
-available <= SYS_IO_FLOOR:
-    no userspace process, including sys-io, may start one
-    the remaining pages are for bounded kernel work already in flight
-```
+The lower floor and its exported statistics retain their historical `sys_io`
+names. Reserve eligibility does not grant IO-manager permissions or guarantee
+that every allocation succeeds. New address spaces start ordinary and acquire
+their process's eligibility at process creation; a privileged loader does not
+lend its reserve to ordinary children.
 
 The floors are compile-time constants: `USER_FLOOR_PAGES = 256` (1 MiB),
 `SYS_IO_FLOOR_PAGES = 128` (512 KiB), validated by measurement (below). They
@@ -268,6 +268,17 @@ ordinary operation; the physical allocator running dry means a charge or a
 bounded-work assumption is wrong. Production code must not retry the
 operation or increase a timeout to paper over either.
 
+The block allocator behind the small-page pool reports its own gauges at the
+system scope: `mem.blocks_total`, `mem.blocks_whole`, `mem.blocks_split`,
+`mem.blocks_taken`, `mem.blocks_whole_low`, `mem.pages_reserved` and
+`mem.pages_free_low`, with the cumulative events `mem.block_splits`,
+`mem.block_recombined`, `mem.huge_pages_mapped` and `mem.huge_fallbacks`.
+They are collected without a common lock, so only their bounds hold at any
+moment; `mem.pages_reserved` is constant after boot. A pressure episode that
+drains the pool leaves most blocks split (pages allocated by other processes
+during the squeeze pin them), so huge-page availability afterwards is best
+effort until those pages die; see docs/kernel-mm.md.
+
 Observability: kernel metrics `mem.admission_refused_user`,
 `mem.admission_refused_sys_io`, `mem.admission_reserved_pages`,
 `mem.small_pages_low_water` (availability at admission checks),
@@ -311,7 +322,16 @@ lock waiter queued before the squeeze, granted by the one `UNLOCK` served
 mid-episode, covers the grant half of the carve-out. Every mid-episode probe
 records its outcome and is judged after recovery: an assertion inside the
 episode would both allocate and, on a regressed build, stop at the first
-served request instead of reaching the rest. The standalone form
+served request instead of reaching the rest. The squeeze child keeps its
+target rather than holding a fixed amount: under pressure the rt.vdso
+housekeeping tick returns every process's allocator slack, and one return
+can lift the pool past the high watermark and clear the flag for the
+moment until the child drains again. The child holds each such dip open
+for at least 50 ms before draining, so a dip that could have influenced a
+request outlasts that request's reply; a request is issued only while the
+flag is up, and a served one is classified by the flag read right after it
+returns: down is a dip (the request goes again once the flag is back), up
+is a real serve that fails the test after recovery. The standalone form
 (`systest test-fs-pressure [n]`, default 100,000 lock acquires) drives a
 build *without* the refusal set into a sys-io abort; use it on a disposable
 release boot when changing this machinery.

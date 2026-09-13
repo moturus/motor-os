@@ -53,8 +53,8 @@ cargo clippy --target kloader.json -Zjson-target-spec \
 objcopy -I elf64-x86-64 -O binary $(flat_sections "${TARGET_DIR}/kloader/debug/kloader") \
     "${TARGET_DIR}/kloader/debug/kloader" "${BIN_DIR}/kloader.bin"
 
-# The elf file is used by cloud-hypervisor as the bootloader.
-cp "${TARGET_DIR}/kloader/debug/kloader" "${BIN_DIR}/kloader"
+# Stage a stripped ELF for the VMM; retain symbols in the Cargo artifact.
+strip -o "${BIN_DIR}/kloader" "${TARGET_DIR}/kloader/debug/kloader"
 check_sizes
 
 elif [[ $# != 1 ]] ; then
@@ -84,11 +84,10 @@ cargo clippy --release --no-default-features --target kloader.json -Zjson-target
 objcopy -I elf64-x86-64 -O binary $(flat_sections "${TARGET_DIR}/kloader/release/kloader") \
     "${TARGET_DIR}/kloader/release/kloader" "${BIN_DIR}/kloader.bin"
 
-# The elf file is used by cloud-hypervisor as the bootloader.
-cp "${TARGET_DIR}/kloader/release/kloader" "${BIN_DIR}/kloader"
+# Stage a stripped ELF for the VMM; retain the original Cargo artifact.
+strip -o "${BIN_DIR}/kloader" "${TARGET_DIR}/kloader/release/kloader"
 check_sizes
 
 fi
 
 echo "kloader done"
-

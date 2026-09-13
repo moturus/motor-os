@@ -31,6 +31,9 @@ moto-sys = "0.3.0"
 [patch.crates-io]
 crossterm = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"

@@ -3,7 +3,9 @@
 #![feature(random)]
 
 mod admission;
+mod checked_copy_in;
 // mod channel_test;
+mod alloc_bench;
 mod closerace;
 mod command_output;
 mod ctrl_c;
@@ -18,6 +20,8 @@ mod icmp;
 mod io_channel;
 mod kernel_log;
 mod logging;
+mod mem_blocks;
+mod mmio;
 mod moto_async;
 mod mpmc;
 mod net_driver;
@@ -33,8 +37,8 @@ mod stdio_file_relay;
 mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
-mod sysbox_cat;
 mod sys_tty;
+mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_find;
 mod sysbox_less;
@@ -45,6 +49,8 @@ mod tcp;
 mod threads;
 mod tls;
 mod udp;
+mod virtio;
+mod wait_set;
 mod wakebench;
 mod xor_server;
 
@@ -1086,6 +1092,61 @@ pub(crate) fn under_load() -> bool {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {
+        virtio_task_tests::test_premature_reply_drop();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-task") {
+        virtio_task_tests::run_tests();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-descriptors") {
+        virtio::run_tests();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
+        virtio_async::test_premature_completion_drop(args[2] == "block");
+        return;
+    }
+    if args.len() == 2 && args[1] == "checked-copy-in-tests" {
+        checked_copy_in::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-placement" {
+        mem_blocks::placement_subcommand();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-huge-sizes" {
+        mem_blocks::huge_sizes_subcommand();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-validation-tests" {
+        mmio::validation_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-suite" {
+        mmio::ownership_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-fault" {
+        mmio::unmap_fault();
+    }
+    if args.len() == 2 && args[1] == "ipc-listener-tests" {
+        io_channel::test_listener_cleanup();
+        return;
+    }
+    if args.len() == 2 && args[1] == "wait-set-tests" {
+        wait_set::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "admission-class-tests" {
+        admission::test_process_classes();
+        return;
+    }
+    if args.len() == 4 && args[1] == "admission-class-child" {
+        admission::class_child(args[2].parse().unwrap(), args[3].parse().unwrap());
+        return;
+    }
     if args.len() >= 2 && args[1] == "close-race-child" {
         closerace::run_child_mode(&args);
         return;
@@ -1106,6 +1167,10 @@ fn main() {
         fsbench::run(&args);
         return;
     }
+    if args.len() >= 2 && args[1] == "alloc-bench" {
+        alloc_bench::run();
+        return;
+    }
     if args.len() == 2 && args[1] == "--under-load" {
         UNDER_LOAD.store(true, Ordering::Relaxed);
         args.truncate(1); // Not a subcommand: run the normal suite.
@@ -1117,8 +1182,16 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if args.len() == 2 && args[1] == "test-tcp-teardown" {
+        tcp::test_channel_teardown_drains_staged_tcp();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-tcp-shutdown-repro" {
         tcp::test_tcp_shutdown_repro();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-loopback-peer-time-wait" {
+        tcp::test_loopback_peer_time_wait();
         return;
     }
     if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
@@ -1127,6 +1200,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
         fs::concurrent_flush_stress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-scattered-writes" {
+        fs::scattered_writes_test();
         return;
     }
     // The FS pressure regression; the suite runs the same body at spam size
@@ -1184,6 +1261,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-shared-listener-restart" {
         spawn_wait_kill::test_shared_listener_restart();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-kill-after-wait" {
+        spawn_wait_kill::test_kill_after_wait();
         return;
     }
     if spawn_wait_kill::is_shared_listener_child(&args) {
@@ -1319,14 +1400,18 @@ fn main() {
     // Run the service logging test before later tests emit through its logger.
     logging::run_all_tests();
 
+    mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    checked_copy_in::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
     test_concurrent_lazy_memory_map_write();
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    virtio::run_tests();
+    virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
@@ -1349,6 +1434,7 @@ fn main() {
 
     test_syscall();
     test_handle_dup();
+    wait_set::run_all_tests();
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();
@@ -1369,6 +1455,7 @@ fn main() {
     spawn_wait_kill::test_child_id();
     spawn_wait_kill::test_spawn_result_pid();
     spawn_wait_kill::smoke_test();
+    spawn_wait_kill::test_kill_after_wait();
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();

@@ -3,6 +3,7 @@
 #![allow(unused)]
 #![feature(str_from_raw_parts)]
 #![feature(box_into_inner)]
+#![feature(allocator_api)]
 
 mod io_runtime;
 mod load;

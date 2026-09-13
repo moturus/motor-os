@@ -3,13 +3,15 @@
 // they involve heap allocations, and we don't want to do heap allocations
 // while allocating virtual memory, as it results in nasty recursion.
 use core::mem::MaybeUninit;
-use intrusive_collections::{intrusive_adapter, UnsafeRef};
+
+use intrusive_collections::{intrusive_adapter, Bound, UnsafeRef};
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeLink};
 use intrusive_collections::{SinglyLinkedList, SinglyLinkedListLink};
 use moto_sys::ErrorCode;
 
-use crate::mm::{PageType, PAGE_SIZE_SMALL_LOG2};
+use crate::mm::{PageType, PAGE_SIZE_MID, PAGE_SIZE_SMALL_LOG2};
 use crate::util::SpinLock;
+use core::sync::atomic::Ordering;
 
 use super::phys::Frame;
 use super::slab::SlabArc;
@@ -69,8 +71,36 @@ impl Page {
             && !self.tree_link.is_linked()
     }
 
+    // A page's kind is its frame's; an unbacked page (lazy, guard, reserved)
+    // is small. The frame is the only record of it, so nothing can disagree.
+    fn kind(&self) -> PageType {
+        self.frame.get().map_or(PageType::SmallPage, Frame::kind)
+    }
+
+    fn size(&self) -> u64 {
+        self.kind().page_size()
+    }
+
     fn contains(&self, vmem_addr: u64) -> bool {
-        (self.start <= vmem_addr) && (vmem_addr < (self.start + PAGE_SIZE_SMALL))
+        (self.start <= vmem_addr) && (vmem_addr < (self.start + self.size()))
+    }
+}
+
+// Per-page options for page `idx` of `num_pages`: guard ends are unmapped
+// and the interior loses GUARD and LAZY; the segment's creation policy is
+// never a hardware mapping option.
+pub(super) fn page_mapping_options(
+    segment_options: MappingOptions,
+    idx: u64,
+    num_pages: u64,
+) -> MappingOptions {
+    let options = segment_options.difference(MappingOptions::HUGE_ELIGIBLE);
+    if !options.contains(MappingOptions::GUARD) {
+        options
+    } else if idx == 0 || idx == num_pages - 1 {
+        MappingOptions::empty()
+    } else {
+        options.difference(MappingOptions::GUARD | MappingOptions::LAZY)
     }
 }
 
@@ -260,17 +290,21 @@ impl VmemSegment {
         self.segment
     }
 
+    // The greatest page start not above the address, if its kind-sized
+    // extent covers the address: interior addresses of a huge page resolve
+    // to it, and gaps resolve to nothing.
     fn find_page(&self, vmem_addr: u64) -> Option<&Page> {
-        let page_addr = vmem_addr & !(PAGE_SIZE_SMALL - 1);
-        self.pages.find(&page_addr).get()
+        let page = self.pages.upper_bound(Bound::Included(&vmem_addr)).get()?;
+        page.contains(vmem_addr).then_some(page)
     }
 
     fn find_page_mut(&mut self, vmem_addr: u64) -> Option<&mut Page> {
-        let page_addr = vmem_addr & !(PAGE_SIZE_SMALL - 1);
-        self.pages
-            .find(&page_addr)
+        let page = self
+            .pages
+            .upper_bound(Bound::Included(&vmem_addr))
             .clone_pointer()
-            .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })
+            .map(|ptr| unsafe { UnsafeRef::into_raw(ptr).as_mut().unwrap() })?;
+        page.contains(vmem_addr).then_some(page)
     }
 
     pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
@@ -279,6 +313,9 @@ impl VmemSegment {
         let page = self.find_page(vmem_addr).unwrap();
 
         if let Some(frame) = page.frame.get() {
+            if frame.is_mmio() {
+                return VaddrMapStatus::Mmio;
+            }
             let offset = vmem_addr - page.start;
             let phys_addr = frame.start() + offset;
             let refs = page.frame.refs();
@@ -290,6 +327,17 @@ impl VmemSegment {
         } else {
             VaddrMapStatus::Unmapped
         }
+    }
+
+    pub(super) fn pin_user_page(&self, vmem_addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        let page = self.find_page(vmem_addr)?;
+        let frame = page.frame.get()?;
+        if frame.is_mmio() {
+            return None;
+        }
+        // The caller holds the region lock, so unmap cannot release the
+        // mapping's last reference while this owning reference is acquired.
+        Some((page.frame.clone(), vmem_addr - page.start))
     }
 
     pub(super) fn unmap(mut self) -> u64 {
@@ -312,7 +360,7 @@ impl VmemSegment {
                 self.address_space().page_table.unmap_page_no_flush(
                     frame.start(),
                     page.start,
-                    PageType::SmallPage,
+                    frame.kind(),
                 );
                 mapped_pages += 1;
             }
@@ -331,12 +379,13 @@ impl VmemSegment {
         while let Some(page) = cursor.remove() {
             let page_ptr = UnsafeRef::into_raw(page);
             let page_mut = unsafe { page_ptr.as_mut().unwrap() };
-            // The frame is freed here, after the TLB flush above: no CPU can
+            // The size is the frame's, so take it before the frame goes. The
+            // frame is freed here, after the TLB flush above: no CPU can
             // reach a reused frame through a stale translation.
+            sz += page_mut.size();
             page_mut.frame.take();
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
-            sz += PAGE_SIZE_SMALL;
         }
 
         self.segment = MemorySegment::empty_segment();
@@ -355,84 +404,123 @@ impl VmemSegment {
         page.frame = frame;
     }
 
+    // Huge candidates of an eligible segment: its whole 2 MiB units. The
+    // sizing rule already rounded the segment, so a tail is at most 1 MiB
+    // and stays small.
+    fn huge_candidates(&self) -> u64 {
+        if self.mapping_options.contains(MappingOptions::HUGE_ELIGIBLE) {
+            self.segment.size / PAGE_SIZE_MID
+        } else {
+            0
+        }
+    }
+
     pub(super) fn allocate_pages(&mut self) -> Result<(), ErrorCode> {
         assert!(self.segment.size > 0);
         assert!(self.pages.is_empty());
 
         let num_pages = self.segment.size >> PAGE_SIZE_SMALL_LOG2;
+        let huge = self.huge_candidates();
         let mut start = self.segment.start;
-        for idx in 0..num_pages {
-            // Allocate a vmem page.
-            let page = match self.address_space().page_allocator.alloc_page() {
-                Ok(page) => page,
-                Err(err) => {
-                    self.clear();
-                    log::error!("failed to allocate a frame");
-                    return Err(err);
-                }
+        // Huge pages come first in the address order, and after the first
+        // refusal every remaining candidate is served small without asking.
+        let mut refused = false;
+        for _ in 0..huge {
+            debug_assert_eq!(start & (PAGE_SIZE_MID - 1), 0);
+            let options = page_mapping_options(self.mapping_options, 0, num_pages);
+            let frame = if refused {
+                None
+            } else {
+                super::phys::allocate_huge_frame()
+                    .inspect_err(|_| refused = true)
+                    .ok()
             };
-            let page_mut = unsafe { page.as_mut() }.unwrap();
-            debug_assert!(page_mut.is_empty());
-            page_mut.start = start;
-
-            // Determine mapping options for the page.
-            let page_options = {
-                if self.mapping_options.contains(MappingOptions::GUARD) {
-                    if idx == 0 || idx == (num_pages - 1) {
-                        MappingOptions::empty()
-                    } else {
-                        self.mapping_options
-                            .difference(MappingOptions::GUARD | MappingOptions::LAZY)
-                    }
-                } else {
-                    self.mapping_options
+            match frame {
+                Some(frame) => {
+                    self.map_frame(start, frame, options)?;
+                    super::virt::HUGE_PAGES_MAPPED.fetch_add(1, Ordering::Relaxed);
+                    start += PAGE_SIZE_MID;
                 }
-            };
-            page_mut.mapping_options = page_options;
-
-            // Map, if needed.
-            if !page_options.is_empty() && !self.mapping_options.contains(MappingOptions::LAZY) {
-                // Allocate a frame.
-                let frame = match super::phys::allocate_frame(PageType::SmallPage) {
-                    Ok(frame) => frame,
-                    Err(err) => {
-                        assert!(!page_mut.list_link.is_linked()); // TODO: remove.
-                        page_mut.clear();
-                        self.address_space().page_allocator.free_page(page);
-                        self.clear();
-                        log::error!("failed to allocate a frame");
-                        return Err(err);
+                None => {
+                    super::virt::HUGE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                    for _ in 0..(PAGE_SIZE_MID / PAGE_SIZE_SMALL) {
+                        self.map_small(start, options)?;
+                        start += PAGE_SIZE_SMALL;
                     }
-                };
-
-                // Map the frame.
-                if let Err(err) = self.address_space().page_table.map_page(
-                    frame.get().unwrap().start(),
-                    start,
-                    PageType::SmallPage,
-                    page_options,
-                ) {
-                    page_mut.clear();
-                    self.address_space().page_allocator.free_page(page);
-                    self.clear();
-                    return Err(err);
                 }
-
-                // Store the frame in the page.
-                page_mut.frame = frame;
             }
-
-            // Insert the page.
-            self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
-
+        }
+        let first_small = huge * (PAGE_SIZE_MID / PAGE_SIZE_SMALL);
+        for idx in first_small..num_pages {
+            self.map_small(
+                start,
+                page_mapping_options(self.mapping_options, idx, num_pages),
+            )?;
             start += PAGE_SIZE_SMALL;
         }
 
         Ok(())
     }
 
-    pub fn mmio_map(&self, phys_addr: u64, user: bool) -> Result<(), ErrorCode> {
-        let pt = &self.address_space().page_table;
+    // One small page at `start`, mapped now unless the options make it lazy
+    // or unmapped. Any failure tears the whole segment down.
+    fn map_small(&mut self, start: u64, options: MappingOptions) -> Result<(), ErrorCode> {
+        if options.is_empty() || self.mapping_options.contains(MappingOptions::LAZY) {
+            let page = self.new_page(start, options)?;
+            self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
+            return Ok(());
+        }
+        let frame = super::phys::allocate_frame(PageType::SmallPage).inspect_err(|_| {
+            self.clear();
+            log::error!("failed to allocate a frame");
+        })?;
+        self.map_frame(start, frame, options)
+    }
+
+    // A page descriptor at `start` with `options`, or the segment torn down.
+    fn new_page(&mut self, start: u64, options: MappingOptions) -> Result<*mut Page, ErrorCode> {
+        let page = self
+            .address_space()
+            .page_allocator
+            .alloc_page()
+            .inspect_err(|_| {
+                self.clear();
+                log::error!("failed to allocate a page descriptor");
+            })?;
+        let page_mut = unsafe { page.as_mut() }.unwrap();
+        debug_assert!(page_mut.is_empty());
+        page_mut.start = start;
+        page_mut.mapping_options = options;
+        Ok(page)
+    }
+
+    // Map an owned frame of either kind at `start` and record it. The frame
+    // is zeroed by the page table before its PTE is published.
+    fn map_frame(
+        &mut self,
+        start: u64,
+        frame: SlabArc<Frame>,
+        options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let page = self.new_page(start, options)?;
+        let page_mut = unsafe { page.as_mut() }.unwrap();
+        let (phys, kind) = (frame.get().unwrap().start(), frame.get().unwrap().kind());
+        if let Err(err) = self
+            .address_space()
+            .page_table
+            .map_page(phys, start, kind, options)
+        {
+            page_mut.clear();
+            self.address_space().page_allocator.free_page(page);
+            self.clear();
+            return Err(err);
+        }
+        page_mut.frame = frame;
+        self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
+        Ok(())
+    }
+
+    pub fn mmio_map(&mut self, phys_addr: u64, user: bool) -> Result<(), ErrorCode> {
         let start = self.segment.start;
 
         assert!(!self.pages.is_empty());
@@ -449,13 +537,17 @@ impl VmemSegment {
 
         let mut offset = 0;
         for _idx in 0..num_pages {
-            super::phys::fixed_addr_reserve(phys_addr + offset, PageType::SmallPage)?;
-            pt.map_page(
+            let frame = super::phys::mmio_frame(phys_addr + offset)?;
+            self.address_space().page_table.map_page(
                 phys_addr + offset,
                 start + offset,
                 PageType::SmallPage,
                 options,
             )?;
+            let page = self.find_page_mut(start + offset).unwrap();
+            debug_assert!(page.frame.is_null());
+            page.frame = frame;
+            page.mapping_options = options;
             offset += PAGE_SIZE_SMALL;
         }
 
@@ -578,8 +670,25 @@ impl VmemSegment {
         if start + other.segment.size > self.segment.end() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
+        // Segment provenance decides, whatever the actual backing: a huge
+        // page must never reach the small-page replacement loop below.
+        if (self.mapping_options | other.mapping_options).contains(MappingOptions::HUGE_ELIGIBLE) {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
         debug_assert!(!self.pages.is_empty());
         debug_assert!(!other.pages.is_empty());
+
+        // Validate both complete ranges before replacing any destination PTE.
+        let mut source = self.pages.find(&start);
+        for dest in other.pages.iter() {
+            let page = source.get().ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+            if page.frame.get().is_some_and(Frame::is_mmio)
+                || dest.frame.get().is_some_and(Frame::is_mmio)
+            {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            source.move_next();
+        }
 
         let mut self_cursor = self.pages.find(&start);
         let mut other_cursor = other.pages.front();

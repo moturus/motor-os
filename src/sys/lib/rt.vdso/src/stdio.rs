@@ -1511,10 +1511,15 @@ impl ChildStdio {
 
     fn write_data(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         if self.nonblocking.load(Ordering::Acquire) {
-            self.inner.nonblocking_write(buf).inspect_err(|_| {
+            let result = self.inner.nonblocking_write(buf);
+            // A short write fills the pipe. Edge-triggered clients such as
+            // Tokio may clear writable without making a second write that
+            // returns NotReady; the peer draining it must produce a new edge.
+            if !matches!(result, Ok(written) if written == buf.len()) {
                 self.event_source
                     .rearm_interest(moto_rt::poll::POLL_WRITABLE);
-            })
+            }
+            result
         } else {
             self.inner.write(buf)
         }

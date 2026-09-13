@@ -71,8 +71,11 @@ impl<'a, T> Future for LocalMutexWaiter<'a, T> {
                 waiters.insert(self.id, cx.local_waker().clone());
                 wait_queue.push_back(self.id);
             } else {
-                // Update the waker.
-                *waiters.get_mut(&self.id).unwrap() = cx.local_waker().clone();
+                // Update the waker (a no-op unless it changed).
+                waiters
+                    .get_mut(&self.id)
+                    .unwrap()
+                    .clone_from(cx.local_waker());
             }
 
             return core::task::Poll::Pending;
@@ -104,8 +107,11 @@ impl<'a, T> Future for LocalMutexWaiter<'a, T> {
                     waiters.insert(self.id, cx.local_waker().clone());
                     wait_queue.push_back(self.id);
                 } else {
-                    // Update the waker.
-                    *waiters.get_mut(&self.id).unwrap() = cx.local_waker().clone();
+                    // Update the waker (a no-op unless it changed).
+                    waiters
+                        .get_mut(&self.id)
+                        .unwrap()
+                        .clone_from(cx.local_waker());
                 }
 
                 return core::task::Poll::Pending;

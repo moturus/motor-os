@@ -56,6 +56,10 @@ impl LspSession {
         self.process.stderr_tail()
     }
 
+    pub fn clear_notifications(&mut self) {
+        self.dispatcher.clear_notifications();
+    }
+
     pub fn shutdown(&mut self, deadline: Instant) -> io::Result<()> {
         let response = self.request("shutdown", Value::Null, deadline)?;
         if response.get("error").is_some() {

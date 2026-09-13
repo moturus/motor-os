@@ -14,6 +14,9 @@ clap = { version = "4.5.4", default-features = false, features = ["derive", "err
 moto-stats = { path = "../../sys/lib/moto-stats" }
 moto-sys   = { path = "../../sys/lib/moto-sys"   }
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 lto = "fat"

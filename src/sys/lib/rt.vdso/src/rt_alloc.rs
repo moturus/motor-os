@@ -28,8 +28,41 @@ unsafe impl GlobalAlloc for BackEndAllocator {
 
 static BACK_END: BackEndAllocator = BackEndAllocator {};
 
+/// The process allocator. Every thread that has allocated holds a private
+/// cache in its thread block (see `rt_tls`), which the global allocator
+/// below consults; the runtime's own bookkeeping uses `FRUSA` directly.
+pub(crate) static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
+
+/// `FRUSA` through the calling thread's cache. A thread gets its block on
+/// its first allocation; until then, and for the block itself, the shared
+/// path serves.
+struct CachedAlloc;
+
 #[global_allocator]
-static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
+static GLOBAL: CachedAlloc = CachedAlloc;
+
+unsafe impl GlobalAlloc for CachedAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        match super::rt_tls::thread_cache() {
+            Some(cache) => unsafe { FRUSA.alloc_cached(cache, layout) },
+            None => unsafe { FRUSA.alloc(layout) },
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        match super::rt_tls::existing_thread_cache() {
+            Some(cache) => unsafe { FRUSA.dealloc_cached(cache, ptr, layout) },
+            None => unsafe { FRUSA.dealloc(ptr, layout) },
+        }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        match super::rt_tls::thread_cache() {
+            Some(cache) => unsafe { FRUSA.realloc_cached(cache, ptr, layout, new_size) },
+            None => unsafe { FRUSA.realloc(ptr, layout, new_size) },
+        }
+    }
+}
 
 /// Slack -- pages the slabs hold beyond what is in use -- tolerated before
 /// the housekeeping resident returns it to the kernel. Frusa reclaims only
@@ -45,7 +78,8 @@ const RECLAIM_SLACK_BYTES: usize = 1 << 20;
 ///
 /// A reclaim pass write-locks each slab it shrinks against concurrent
 /// allocation, so the cadence stays coarse; the pass itself skips slabs
-/// with less than a page of slack.
+/// with less than a page of slack. Blocks held privately by a thread's
+/// cache are never reclaimed; they return when that thread exits.
 pub(crate) async fn reclaim_resident() {
     const TICK: core::time::Duration = core::time::Duration::from_secs(5);
     loop {
@@ -74,7 +108,7 @@ pub unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {
         sys_alloc(size as usize) as usize as u64
     } else {
         unsafe {
-            FRUSA.alloc(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
+            GLOBAL.alloc(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
                 as u64
         }
     }
@@ -82,8 +116,8 @@ pub unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {
 
 pub unsafe extern "C" fn alloc_zeroed(size: u64, align: u64) -> u64 {
     unsafe {
-        FRUSA.alloc_zeroed(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
-            as u64
+        GLOBAL.alloc_zeroed(Layout::from_size_align(size as usize, align as usize).unwrap())
+            as usize as u64
     }
 }
 
@@ -93,7 +127,7 @@ pub unsafe extern "C" fn dealloc(ptr: u64, size: u64, align: u64) {
         return;
     }
     unsafe {
-        FRUSA.dealloc(
+        GLOBAL.dealloc(
             ptr as usize as *mut u8,
             Layout::from_size_align(size as usize, align as usize).unwrap(),
         )
@@ -102,7 +136,7 @@ pub unsafe extern "C" fn dealloc(ptr: u64, size: u64, align: u64) {
 
 pub unsafe extern "C" fn realloc(ptr: u64, size: u64, align: u64, new_size: u64) -> u64 {
     unsafe {
-        FRUSA.realloc(
+        GLOBAL.realloc(
             ptr as usize as *mut u8,
             Layout::from_size_align(size as usize, align as usize).unwrap(),
             new_size as usize,

@@ -1,5 +1,5 @@
-mod graph;
-mod package;
+pub(crate) mod graph;
+pub(crate) mod package;
 pub mod wire;
 
 use std::collections::BTreeMap;
@@ -166,7 +166,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     )?)
 }
 
-fn publish_sources(
+pub(crate) fn publish_sources(
     cache_root: &std::path::Path,
     config: &Config,
     prepared: &PreparedGraph,

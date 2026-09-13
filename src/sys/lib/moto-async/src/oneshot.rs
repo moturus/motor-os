@@ -110,21 +110,28 @@ impl<T> Drop for Sender<T> {
     }
 }
 
+impl<T> Receiver<T> {
+    /// The channel's outcome so far, without registering a waker.
+    fn poll_state(&mut self) -> Poll<Result<T, moto_rt::Error>> {
+        match self.channel.state.load(Ordering::Acquire) {
+            CHANNEL_FULL => {
+                // Safety: state is FULL, data is initialized and memory valid via Acquire.
+                let val = unsafe { self.channel.data.get().read().assume_init() };
+                self.channel.state.store(CHANNEL_CLOSED, Ordering::Release);
+                Poll::Ready(Ok(val))
+            }
+            CHANNEL_CLOSED => Poll::Ready(Err(moto_rt::Error::NotConnected)),
+            _ => Poll::Pending,
+        }
+    }
+}
+
 impl<T> Future for Receiver<T> {
     type Output = Result<T, moto_rt::Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.channel.state.load(Ordering::Acquire);
-
-        if state == CHANNEL_FULL {
-            // Safety: state is FULL, data is initialized and memory valid via Acquire.
-            let val = unsafe { self.channel.data.get().read().assume_init() };
-            self.channel.state.store(CHANNEL_CLOSED, Ordering::Release);
-            return Poll::Ready(Ok(val));
-        }
-
-        if state == CHANNEL_CLOSED {
-            return Poll::Ready(Err(moto_rt::Error::NotConnected));
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(result) = self.poll_state() {
+            return Poll::Ready(result);
         }
 
         // Register the waker.
@@ -146,18 +153,7 @@ impl<T> Future for Receiver<T> {
         self.channel.waker_lock.store(false, Ordering::Release);
 
         // Re-check the state in case the sender raced here.
-        state = self.channel.state.load(Ordering::Acquire);
-
-        match state {
-            CHANNEL_FULL => {
-                // Safety: safe because state FULL acts as a sync edge.
-                let val = unsafe { self.channel.data.get().read().assume_init() };
-                self.channel.state.store(CHANNEL_CLOSED, Ordering::Release);
-                Poll::Ready(Ok(val))
-            }
-            CHANNEL_CLOSED => Poll::Ready(Err(moto_rt::Error::NotConnected)),
-            _ => Poll::Pending,
-        }
+        self.poll_state()
     }
 }
 

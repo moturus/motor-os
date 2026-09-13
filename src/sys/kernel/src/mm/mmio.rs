@@ -8,10 +8,9 @@ pub struct MmioMapping {
 }
 
 pub fn mmio_map(phys_addr: u64, num_pages: u64) -> Result<MmioMapping, ErrorCode> {
-    assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
+    phys::validate_mmio(phys_addr, num_pages)?;
 
-    let vmem = virt::vmem_allocate_pages(virt::VmemKind::KernelMMIO, num_pages)?;
-    super::virt::KERNEL_ADDRESS_SPACE.mmio_map(phys_addr, vmem.start)?;
+    let vmem = virt::KERNEL_ADDRESS_SPACE.mmio_map(phys_addr, num_pages)?;
 
     Ok(MmioMapping {
         phys_addr,
@@ -21,12 +20,15 @@ pub fn mmio_map(phys_addr: u64, num_pages: u64) -> Result<MmioMapping, ErrorCode
 }
 
 #[allow(dead_code)]
-pub fn mmio_unmap(_mmio_mapping: &MmioMapping) {
-    todo!("VmemSegment is leaked in mmio_map");
+pub fn mmio_unmap(mmio_mapping: &MmioMapping) {
+    virt::vmem_free(mmio_mapping.virt_addr, virt::VmemKind::KernelMMIO);
 }
 
 pub fn mmio_map_region(phys_addr: u64, size: u64) -> Result<MmioMapping, ErrorCode> {
-    let size = align_up(size, PAGE_SIZE_SMALL);
+    let size = size
+        .checked_add(PAGE_SIZE_SMALL - 1)
+        .ok_or(moto_rt::E_INVALID_ARGUMENT)?
+        & !(PAGE_SIZE_SMALL - 1);
     let num_pages = size >> PAGE_SIZE_SMALL_LOG2;
     mmio_map(phys_addr, num_pages)
 }

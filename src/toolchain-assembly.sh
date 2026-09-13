@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Canonical Motor runtime closure and C/native assembly identity.
 
+. "$(dirname "${BASH_SOURCE[0]}")/toolchain-native-rust-analyzer.sh"
+
 toolchain_runtime_closure() {
 	local cargo="$1" root="$2" output packages expected
 	output="$(mktemp)"
@@ -42,12 +44,21 @@ toolchain_selected_lock_digest() {
 
 toolchain_content_tree_digest() (
 	set -euo pipefail
-	local root="$1" temporary record list path relative kind mode content special
+	local root="$1" temporary record list path relative kind mode content special compiler
 	shift
 	temporary="$(mktemp -d)"
 	trap 'rm -rf "$temporary"' EXIT
 	record="$temporary/record"
 	list="$temporary/list"
+	# Bootstrap must still work before the checkout's selected compiler exists.
+	# Build afresh: no cached helper can outlive its source or compiler selection.
+	compiler="$(rustup which rustc 2>/dev/null)" || compiler=
+	if [ -n "$compiler" ]; then
+		"$compiler" --edition=2021 -C opt-level=1 \
+			"$(dirname "${BASH_SOURCE[0]}")/toolchain-content-tree/src/main.rs" \
+			-o "$temporary/serialize" || exit 1
+	fi
+	: > "$temporary/entries"
 	toolchain_serialize_pairs schema motor-runtime-content-v1 > "$record"
 	for path in "$@"; do
 		[ -e "$root/$path" ] || [ -L "$root/$path" ] ||
@@ -59,13 +70,13 @@ toolchain_content_tree_digest() (
 		else
 			printf '%s\0' "$root/$path"
 		fi
-	done | LC_ALL=C sort -zu > "$list"
+	done | LC_ALL=C sort -zu > "$list" || exit 1
 	while IFS= read -r -d '' path; do
 		relative="${path#"$root"/}"
 		content="$path"
 		if [ -L "$path" ]; then
 			kind=symlink; mode=120000; content="$temporary/link"
-			readlink -n "$path" > "$content"
+			if [ -z "$compiler" ]; then readlink -n "$path" > "$content" || exit 1; fi
 		elif [ -f "$path" ]; then
 			kind=file
 			if [ -x "$path" ]; then mode=100755; else mode=100644; fi
@@ -73,14 +84,23 @@ toolchain_content_tree_digest() (
 			toolchain_die "unsupported runtime file kind: $path"
 			exit 1
 		fi
-		toolchain_serialize_pairs path "$relative" kind "$kind" mode "$mode" >> "$record"
-		toolchain_emit_file_field content "$content" >> "$record"
+		if [ -n "$compiler" ]; then
+			printf '%s\0' "$path" "$relative" "$kind" "$mode" >> "$temporary/entries" || exit 1
+		else
+			toolchain_serialize_pairs path "$relative" kind "$kind" mode "$mode" >> "$record"
+			toolchain_emit_file_field content "$content" >> "$record" || exit 1
+		fi
 	done < "$list"
+	if [ -n "$compiler" ]; then
+		"$temporary/serialize" < "$temporary/entries" >> "$record" || exit 1
+	fi
 	sha256sum "$record" | awk '{print $1}'
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v2 target x86_64-unknown-motor \
+	toolchain_hash_pairs schema motor-native-config-v4 target x86_64-unknown-motor \
+		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
+		rustfmt_recipe motor-native-rustfmt-v1 \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
 		lua_version "$MOTOR_LUA_VERSION" \
@@ -175,8 +195,11 @@ toolchain_validate_assembly_outputs() {
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a" \
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" \
 		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" \
 		"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx" \
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" \
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs" \
 		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"; do
 		[ -f "$path" ] || toolchain_die "assembly output is missing: $path" || return
 	done
@@ -212,6 +235,8 @@ llvm_tree_state=$MOTOR_LLVM_TREE_STATE
 authoring_source_digest=$AUTHORING_SOURCE_DIGEST
 root_lock_sha256=$START_RUST_ROOT_LOCK_SHA256
 library_lock_sha256=$START_RUST_LIBRARY_LOCK_SHA256
+rust_analyzer_lock_sha256=$START_RUST_ANALYZER_LOCK_SHA256
+rust_analyzer_inputs_digest=$RUST_ANALYZER_INPUTS_DIGEST
 bootstrap_config_digest=$BOOTSTRAP_CONFIG_DIGEST
 standalone_llvm_config_digest=$STANDALONE_LLVM_CONFIG_DIGEST
 stdlib_moto_rt_version=$LOCKED_MOTO_RT_VERSION
@@ -228,9 +253,16 @@ helix_ref=$HELIX_REF
 helix_rev=$HELIX_REV
 helix_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" devtools/helix)
 native_configuration_digest=$NATIVE_CONFIGURATION_DIGEST
+native_rust_analyzer_recipe=motor-native-rust-analyzer-v3-std
+native_rust_analyzer_expected_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_VERSION" | base64 -w0)
+native_rust_analyzer_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" | awk '{print $1}')
+rust_src_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" devtools/rust/lib/rustlib/src/rust/library)
+$(toolchain_rust_analyzer_manifest_fields)
 host_rustc_verbose_base64=$(printf '%s' "$VALIDATED_RUSTC_VERBOSE" | base64 -w0)
 host_cargo_verbose_base64=$(printf '%s' "$VALIDATED_CARGO_VERBOSE" | base64 -w0)
 native_rustc_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" | awk '{print $1}')
+native_rustfmt_expected_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
+native_rustfmt_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')
 native_llvm_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')
 ripgrep_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" | awk '{print $1}')
 libc_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" | awk '{print $1}')
@@ -242,7 +274,7 @@ EOF
 
 toolchain_generated_manifest_paths() {
 	local root
-	for root in llvm rustc rg libc helix; do
+	for root in llvm rustc rg libc helix rust-analyzer; do
 		printf '%s/%s\n' "$ASSEMBLY_IMAGE_ROOT/$root" devtools/toolchain/manifest
 	done
 }
@@ -253,6 +285,7 @@ toolchain_generated_manifest_paths() {
 toolchain_validate_consumed_assembly() (
 	set -euo pipefail
 	local root="$1" manifest image_manifest field expected actual path
+	local analyzer_inputs analyzer_sources
 	local -a fields expected_values hash_fields hash_paths
 	case "$root" in /*) ;; *) toolchain_die "assembly root is not absolute: $root"; exit 1 ;; esac
 	[[ "$root" != *$'\n'* ]] || {
@@ -290,15 +323,17 @@ toolchain_validate_consumed_assembly() (
 		exit 1
 	}
 
+	analyzer_inputs="$(toolchain_rust_analyzer_inputs_digest)" || exit
+	analyzer_sources="$(toolchain_rust_analyzer_manifest_fields)" || exit
 	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
 		motor_os_runtime_tree mlibc_rev mlibc_tree_state local_moto_rt_version
 		local_moto_sys_version helix_repository helix_ref helix_rev
-		native_configuration_digest)
+		native_configuration_digest rust_analyzer_inputs_digest native_rust_analyzer_recipe)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
 		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
 		"$LOCAL_MOTO_SYS_VERSION" "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV"
-		"$NATIVE_CONFIGURATION_DIGEST")
+		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v3-std)
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
 		actual="$(toolchain_manifest_value "$manifest" "${fields[$field]}")" || {
@@ -312,6 +347,15 @@ toolchain_validate_consumed_assembly() (
 	done
 
 	toolchain_validate_assembly_outputs || exit
+	while IFS='=' read -r field expected; do
+		[ "$(toolchain_manifest_value "$manifest" "$field")" = "$expected" ] || {
+			toolchain_die "assembly analyzer patch identity differs: $field"; exit 1;
+		}
+	done <<< "$analyzer_sources"
+	expected="$(toolchain_manifest_value "$manifest" rust_src_tree_sha256)" || exit
+	actual="$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" \
+		devtools/rust/lib/rustlib/src/rust/library)" || exit
+	[ "$actual" = "$expected" ] || { toolchain_die 'assembly rust-src digest differs'; exit 1; }
 	expected="$(toolchain_manifest_value "$manifest" helix_tree_sha256)" || {
 		toolchain_die "assembly manifest lacks one unique helix_tree_sha256 field"
 		exit 1
@@ -322,10 +366,13 @@ toolchain_validate_consumed_assembly() (
 		toolchain_die "assembly Helix tree digest does not match"
 		exit 1
 	}
-	hash_fields=(native_rustc_sha256 native_llvm_sha256 ripgrep_sha256
+	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_rustfmt_sha256
+		native_llvm_sha256 ripgrep_sha256
 		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
 	hash_paths=(
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"

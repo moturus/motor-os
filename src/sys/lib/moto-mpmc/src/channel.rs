@@ -16,14 +16,21 @@ use crate::select::{Operation, SelectHandle, Token};
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     assert!(cap > 0);
-    let (s, r) = counter::new(flavors::array::Channel::with_capacity(cap));
+    try_bounded(cap).expect("failed to allocate bounded channel")
+}
+
+/// Creates a bounded channel without aborting on allocation failure.
+/// Zero or unrepresentable capacities return InvalidArgument; failure to
+/// allocate either the slots or their shared owner returns OutOfMemory.
+pub fn try_bounded<T>(cap: usize) -> moto_rt::Result<(Sender<T>, Receiver<T>)> {
+    let (s, r) = counter::try_new(flavors::array::Channel::try_with_capacity(cap)?)?;
     let s = Sender {
         flavor: SenderFlavor::Array(s),
     };
     let r = Receiver {
         flavor: ReceiverFlavor::Array(r),
     };
-    (s, r)
+    Ok((s, r))
 }
 
 pub struct Sender<T> {

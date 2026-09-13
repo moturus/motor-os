@@ -11,7 +11,8 @@ moto-rt   = { path = "../moto-rt"   }
 moto-sys  = { path = "../moto-sys"  }
 
 crossbeam = { version = "0.8", default-features = false, features = ["alloc", "crossbeam-queue"] }
-futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4.28"
 
 [features]
+# Construction-only allocator regression; runtime operations remain Motor-only.
+host-construction-test = []

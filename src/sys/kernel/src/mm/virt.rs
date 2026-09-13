@@ -139,7 +139,6 @@ pub enum VmemKind {
     KernelStack,
     KernelStatic, // For things like entry pages, GS, etc.
     User,
-    UserMMIO,
     UserStack,
     Unmapped,
 }
@@ -149,6 +148,7 @@ pub enum VaddrMapStatus {
     Unallocated,
     Unmapped,
     ZeroPageMapped,
+    Mmio,
     Private(u64),
     Shared(u64),
 }
@@ -173,9 +173,11 @@ pub fn vmem_map_reserved_pages(
     phys_start: u64,
     num_pages: u64,
 ) -> Result<MemorySegment, ErrorCode> {
-    KERNEL_ADDRESS_SPACE
-        .kernel_static
-        .map_reserved_pages(phys_start, num_pages, MappingOptions::READABLE)
+    KERNEL_ADDRESS_SPACE.kernel_static.map_reserved_pages(
+        phys_start,
+        num_pages,
+        MappingOptions::READABLE,
+    )
 }
 
 pub fn vmem_free(addr: u64, kind: VmemKind) -> u64 {
@@ -184,6 +186,62 @@ pub fn vmem_free(addr: u64, kind: VmemKind) -> u64 {
 
 pub fn vaddr_map_status(vmem_addr: u64) -> VaddrMapStatus {
     KERNEL_ADDRESS_SPACE.vaddr_map_status(vmem_addr)
+}
+
+// Huge-mapping events, cumulative and including later undone maps: a
+// successful huge PTE installation, and a candidate served small (also the
+// candidates skipped after the first refusal). Produced once huge pages map.
+pub(crate) static HUGE_PAGES_MAPPED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HUGE_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+// The first `align`-aligned start of `size` bytes inside [gap_start,
+// gap_end), with checked arithmetic and an exact end bound.
+fn aligned_start(gap_start: u64, gap_end: u64, size: u64, align: u64) -> Option<u64> {
+    debug_assert!(align.is_power_of_two());
+    let start = gap_start.checked_add(align - 1)? & !(align - 1);
+    let end = start.checked_add(size)?;
+    (end <= gap_end).then_some(start)
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn self_test() {
+    let (small, mid) = (PAGE_SIZE_SMALL, PAGE_SIZE_MID);
+    // Empty region, append and gap placement all reduce to this: an exact
+    // fit, an aligned fit, a gap one byte short, and an aligned gap that is
+    // too narrow once its start is rounded up.
+    assert_eq!(aligned_start(0, 2 * small, small, small), Some(0));
+    assert_eq!(aligned_start(small, 2 * small, small, small), Some(small));
+    assert_eq!(aligned_start(small, 2 * small, 2 * small, small), None);
+    assert_eq!(aligned_start(small, 2 * small - 1, small, small), None);
+    assert_eq!(aligned_start(small, 4 * mid, small, mid), Some(mid));
+    assert_eq!(aligned_start(mid + 1, 6 * mid, 2 * mid, mid), Some(2 * mid));
+    assert_eq!(aligned_start(mid + 1, 4 * mid - 1, 2 * mid, mid), None);
+    assert_eq!(aligned_start(mid, 3 * mid, 2 * mid, mid), Some(mid));
+    assert_eq!(aligned_start(u64::MAX - 100, u64::MAX, small, small), None);
+    assert_eq!(
+        aligned_start(u64::MAX - small + 1, u64::MAX, 1, small),
+        Some(u64::MAX - small + 1)
+    );
+    assert_eq!(
+        aligned_start(u64::MAX - small + 1, u64::MAX, small, small),
+        None
+    );
+
+    // The creation policy never reaches a page; guard handling is unchanged.
+    use super::virt_intrusive::page_mapping_options;
+    let rw = MappingOptions::READABLE | MappingOptions::WRITABLE;
+    let eligible = rw | MappingOptions::HUGE_ELIGIBLE;
+    assert_eq!(page_mapping_options(eligible, 0, 4), rw);
+    assert_eq!(page_mapping_options(eligible, 3, 4), rw);
+    let guarded = eligible | MappingOptions::GUARD | MappingOptions::LAZY;
+    assert_eq!(page_mapping_options(guarded, 0, 4), MappingOptions::empty());
+    assert_eq!(page_mapping_options(guarded, 3, 4), MappingOptions::empty());
+    assert_eq!(page_mapping_options(guarded, 1, 4), rw);
+    assert_eq!(
+        page_mapping_options(rw | MappingOptions::LAZY, 2, 4),
+        rw | MappingOptions::LAZY
+    );
+    crate::raw_log!("virt placement tests PASS");
 }
 
 pub(super) struct VmemRegion {
@@ -243,6 +301,11 @@ impl VmemRegion {
         VaddrMapStatus::Unallocated
     }
 
+    fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        let segments = self.used_segments.lock(line!());
+        segments.find(addr)?.pin_user_page(addr)
+    }
+
     #[allow(unused)]
     pub(super) fn free(&self, addr: u64) -> Result<u64, ErrorCode> {
         if !self.segment.contains(addr) {
@@ -250,7 +313,10 @@ impl VmemRegion {
         }
 
         let mut segments = self.used_segments.lock(line!());
+        self.free_locked(&mut segments, addr)
+    }
 
+    fn free_locked(&self, segments: &mut SegmentMap, addr: u64) -> Result<u64, ErrorCode> {
         if let Some(deleted) = segments.remove(addr) {
             let sz = VmemSegment::unmap(deleted); // Consumes deleted.
 
@@ -289,52 +355,51 @@ impl VmemRegion {
         num_pages: u64,
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
+        let mut segments = self.used_segments.lock(line!());
+        self.allocate_pages_locked(&mut segments, num_pages, mapping_options)
+    }
+
+    fn allocate_pages_locked(
+        &self,
+        segments: &mut SegmentMap,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+    ) -> Result<MemorySegment, ErrorCode> {
         debug_assert!(!self.address_space.is_null());
         debug_assert_ne!(num_pages, 0);
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
-        let mut start = self.segment.start;
+        // Huge-eligible segments start on a 2 MiB boundary, whether or not
+        // any candidate ends up huge.
+        let align = if mapping_options.contains(MappingOptions::HUGE_ELIGIBLE) {
+            PAGE_SIZE_MID
+        } else {
+            PAGE_SIZE_SMALL
+        };
+        let region_start = self.segment.start.max(PAGE_SIZE_SMALL);
+        let region_end = self.segment.end();
 
-        if start == 0 {
-            start = PAGE_SIZE_SMALL
-        }
-
-        let mut found_gap = false;
-        let mut segments = self.used_segments.lock(line!());
-
-        if segments.is_empty() {
-            // If nothing has been allocated, we are good.
-            if size > self.segment.size {
-                log::warn!(
-                    "VmemRegion::allocate_pages: bad size: 0x{:x} vs 0x{:x} available.",
-                    size,
-                    self.segment.size
-                );
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
-            found_gap = true;
-        } else if let Some(last_seg) = segments.last_segment() {
-            // Otherwise, try to add to the end, as this is the fastest.
-            let end = last_seg.segment().end();
-            if (end + size) <= self.segment.end() {
-                start = end;
-                found_gap = true;
-            }
-        }
-
-        if !found_gap {
-            // The worst case: find a gap in the middle.
-            // This is a linear search, but regions should be large
-            // enough to make this a rare/exceptional case.
+        // Appending is the fastest. A map whose segments were all freed still
+        // holds its node slabs, so the last segment, not the map, says
+        // whether the region is empty.
+        let mut start = match segments.last_segment() {
+            None => aligned_start(region_start, region_end, size, align),
+            Some(last_seg) => aligned_start(last_seg.segment().end(), region_end, size, align),
+        };
+        if start.is_none() {
+            // The worst case: find a gap in the middle. This is a linear
+            // search, but regions should be large enough to make this rare.
+            let mut gap_start = region_start;
             for seg in segments.iter() {
-                if seg.vmem_segment().segment().start >= (start + size) {
-                    found_gap = true;
+                let next = seg.vmem_segment().segment();
+                start = aligned_start(gap_start, next.start, size, align);
+                if start.is_some() {
                     break;
                 }
-                start = seg.vmem_segment().segment().end();
+                gap_start = next.end();
             }
         }
 
-        if !found_gap {
+        let Some(start) = start else {
             log::error!(
                 "vmem_allocate: have 0x{:x}, in use 0x{:x}, need 0x{:x}: no gap: OOM",
                 self.segment.size,
@@ -342,7 +407,7 @@ impl VmemRegion {
                 size
             );
             return Err(moto_rt::E_OUT_OF_MEMORY);
-        }
+        };
 
         let mut seg = VmemSegment::new(MemorySegment { start, size }, self, mapping_options);
         seg.allocate_pages()?;
@@ -365,9 +430,9 @@ impl VmemRegion {
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
         debug_assert_eq!(0, phys_start & (PAGE_SIZE_SMALL - 1));
-        let memory_segment = self.allocate_pages(num_pages, MappingOptions::empty())?;
-
         let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = memory_segment.start;
         let mut phys_addr = phys_start;
@@ -420,21 +485,28 @@ impl VmemRegion {
             }
         }
 
-        let memory_segment = self.allocate_pages(frames.len() as u64, MappingOptions::empty())?;
-
+        // Do not expose a reservation that unmap can remove before mapping completes.
         let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = vmem_segment.segment().start;
         for idx in 0..num_pages {
             let frame = frames[idx as usize].take();
 
-            unsafe {
+            let result = unsafe {
                 self.address_space.get().page_table.map_page(
                     frame.get().unwrap().start(),
                     virt_addr,
                     PageType::SmallPage,
                     mapping_options,
-                )?;
+                )
+            };
+            if let Err(err) = result {
+                // Unmap the successful prefix before its frames can be freed.
+                self.free_locked(&mut segments, memory_segment.start)
+                    .unwrap();
+                return Err(err);
             }
 
             vmem_segment.set_frame(virt_addr, frame);
@@ -447,12 +519,30 @@ impl VmemRegion {
     pub(super) fn mmio_map(
         &self,
         phys_addr: u64,
-        virt_addr: u64,
+        num_pages: u64,
         user: bool,
-    ) -> Result<(), ErrorCode> {
-        let segments = self.used_segments.lock(line!());
-        let segment = segments.get(&virt_addr).unwrap();
-        segment.mmio_map(phys_addr, user)
+    ) -> Result<MemorySegment, ErrorCode> {
+        // Reservation, mapping and rollback share the same lock as unmap.
+        let mut segments = self.used_segments.lock(line!());
+        let memory_segment =
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
+        let virt_addr = memory_segment.start;
+        let segment = segments.get_mut(&virt_addr).unwrap();
+        let size = segment.segment().size;
+        let result = segment.mmio_map(phys_addr, user);
+        if result.is_err() {
+            // Tear down the mapped prefix before releasing the reservation lock.
+            assert_eq!(self.free_locked(&mut segments, virt_addr).unwrap(), size);
+            #[cfg(debug_assertions)]
+            {
+                assert!(segments.find(virt_addr).is_none());
+                let pt = &unsafe { self.address_space.get() }.page_table;
+                for offset in (0..size).step_by(PAGE_SIZE_SMALL as usize) {
+                    assert!(pt.virt_to_phys(virt_addr + offset).is_none());
+                }
+            }
+        }
+        result.map(|()| memory_segment)
     }
 
     fn allocate_user_fixed(
@@ -673,6 +763,7 @@ impl KernelAddressSpace {
         match kind {
             VmemKind::KernelHeap => self.kernel_heap.free(addr).unwrap(),
             VmemKind::KernelStack => self.kernel_stacks.free(addr).unwrap(),
+            VmemKind::KernelMMIO => self.kernel_mmio.free(addr).unwrap(),
             _ => panic!(),
         }
     }
@@ -693,8 +784,12 @@ impl KernelAddressSpace {
         status
     }
 
-    pub(super) fn mmio_map(&self, phys_addr: u64, virt_addr: u64) -> Result<(), ErrorCode> {
-        self.kernel_mmio.mmio_map(phys_addr, virt_addr, false)
+    pub(super) fn mmio_map(
+        &self,
+        phys_addr: u64,
+        num_pages: u64,
+    ) -> Result<MemorySegment, ErrorCode> {
+        self.kernel_mmio.mmio_map(phys_addr, num_pages, false)
     }
 }
 
@@ -853,7 +948,7 @@ impl UserAddressSpaceBase {
                     | MappingOptions::LAZY
                     | MappingOptions::GUARD,
             ),
-            VmemKind::UserMMIO | VmemKind::Unmapped => self
+            VmemKind::Unmapped => self
                 .normal_memory
                 .allocate_pages(num_pages, MappingOptions::empty()),
             _ => panic!("Unexpected VmemKind for userspace memory."),
@@ -891,18 +986,22 @@ impl UserAddressSpaceBase {
         }
     }
 
-    pub(super) fn vaddr_map_status(&self, vmem_addr: u64) -> VaddrMapStatus {
-        match vmem_addr {
-            0..=VMEM_USER_END => self.normal_memory.vaddr_map_status(vmem_addr),
+    pub(super) fn pin_user_page(&self, addr: u64) -> Option<(SlabArc<Frame>, u64)> {
+        match addr {
+            0..=VMEM_USER_END => self.normal_memory.pin_user_page(addr),
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory.vaddr_map_status(vmem_addr)
+                self.custom_memory.pin_user_page(addr)
             }
-            _ => VaddrMapStatus::Unallocated,
+            _ => None,
         }
     }
 
-    pub(super) fn mmio_map(&self, phys_addr: u64, virt_addr: u64) -> Result<(), ErrorCode> {
-        self.normal_memory.mmio_map(phys_addr, virt_addr, true)
+    pub(super) fn mmio_map(
+        &self,
+        phys_addr: u64,
+        num_pages: u64,
+    ) -> Result<MemorySegment, ErrorCode> {
+        self.normal_memory.mmio_map(phys_addr, num_pages, true)
     }
 
     pub(super) fn share_with(

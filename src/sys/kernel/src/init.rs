@@ -344,6 +344,14 @@ fn cpu_main(this_cpu: u64) -> ! {
 
         crate::mm::init_mm_bsp_stage2();
         crate::xray::stats::init();
+        #[cfg(debug_assertions)]
+        crate::mm::phys_blocks::test();
+        #[cfg(debug_assertions)]
+        crate::mm::virt::self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::phys::huge_frame_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::huge_mapping_self_test();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and

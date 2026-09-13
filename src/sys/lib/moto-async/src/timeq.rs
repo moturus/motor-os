@@ -8,7 +8,7 @@ use moto_rt::time::Instant;
 
 extern crate alloc;
 
-#[cfg(not(target_os = "motor"))]
+#[cfg(all(not(target_os = "motor"), not(feature = "host-construction-test")))]
 compile_error!("Only Motor OS targets supported.");
 
 /// Handle to a queued timer.
@@ -79,15 +79,19 @@ pub struct TimeQ<T> {
 
 impl<T> Default for TimeQ<T> {
     fn default() -> Self {
-        Self {
-            inner: BinaryHeap::new(),
-            next_seq: 0,
-            cancelled: Rc::new(Cell::new(0)),
-        }
+        Self::try_new().expect("failed to allocate timer queue")
     }
 }
 
 impl<T> TimeQ<T> {
+    pub(crate) fn try_new() -> moto_rt::Result<Self> {
+        Ok(Self {
+            inner: BinaryHeap::new(),
+            next_seq: 0,
+            cancelled: Rc::try_new(Cell::new(0)).map_err(|_| moto_rt::Error::OutOfMemory)?,
+        })
+    }
+
     /// Compact once garbage dominates: a timer cancelled deep in the heap is
     /// only reached when its deadline comes due, and typical deadlines are
     /// seconds away, so without this a hot `select!` loop (the sys-io device

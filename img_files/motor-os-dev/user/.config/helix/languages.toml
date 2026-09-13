@@ -1,0 +1,28 @@
+# Native Cargo compatibility is provided by Lorry. Select it in the server's
+# own environment: cargo.extraEnv only affects the server's children.
+[language-server.rust-analyzer]
+command = "/devtools/rust/bin/rust-analyzer"
+
+[language-server.rust-analyzer.environment]
+CARGO = "/devtools/bin/lorry"
+RUSTFMT = "/devtools/rust/bin/rustfmt"
+PATH = "/devtools/bin:/system/bin:/user/bin"
+TMPDIR = "/devtools/tmp"
+# The background server must not take the editor's session terminal stream.
+MOTURUS_STDIO_NO_TERMINAL = "true"
+
+[language-server.rust-analyzer.config]
+cargo.target = "x86_64-unknown-motor"
+cargo.targetDir = true
+cargo.sysroot = "discover"
+cargo.buildScripts.enable = true
+cargo.buildScripts.useRustcWrapper = false
+check.targets = ["x86_64-unknown-motor"]
+procMacro.enable = false
+files.watcher = "client"
+
+# Formatting is provided by rust-analyzer through the native rustfmt above.
+[[language]]
+name = "rust"
+auto-format = true
+language-servers = ["rust-analyzer"]

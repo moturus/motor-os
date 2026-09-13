@@ -31,6 +31,8 @@ fn handles_requests_notifications_and_clean_shutdown() {
             "experimental/serverStatus"
         ]
     );
+    session.clear_notifications();
+    assert_eq!(session.notifications().count(), 0);
     session.shutdown(deadline).unwrap();
 }
 

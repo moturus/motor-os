@@ -121,23 +121,32 @@ MOTOR_LLVM_TREE_STATE=clean
 AUTHORING_SOURCE_DIGEST=none
 START_RUST_ROOT_LOCK_SHA256="$MOTOR_RUST_ROOT_LOCK_SHA256"
 START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
+START_RUST_ANALYZER_LOCK_SHA256="$MOTOR_RUST_ANALYZER_LOCK_SHA256"
+RUST_ANALYZER_INPUTS_DIGEST="$(toolchain_rust_analyzer_inputs_digest)"
 BOOTSTRAP_CONFIG_DIGEST=test-bootstrap
 LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
 LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
 MOTO_RT_PACKAGE_COMPARISON=exact
 VALIDATED_RUSTC_VERBOSE='rustc test verbose'
 VALIDATED_CARGO_VERBOSE='cargo test verbose'
+VALIDATED_RUSTFMT_VERSION='rustfmt test version'
+VALIDATED_RUST_ANALYZER_VERSION='rust-analyzer test version'
 mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
 	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust" \
 	"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc"
+mkdir -p "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src"
+printf analyzer > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
+printf rust-src > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
 printf libc > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
 printf cxx > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
 printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
 printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
 chmod 755 "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
@@ -145,7 +154,7 @@ printf query > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/h
 printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
 mkdir "${ASSEMBLY_ROOT}.building"
 toolchain_complete_assembly
-for generated in llvm rustc rg libc helix; do
+for generated in llvm rustc rg libc helix rust-analyzer; do
 	manifest="$ASSEMBLY_IMAGE_ROOT/$generated/devtools/toolchain/manifest"
 	[ -f "$manifest" ] || fail "$generated generated root lacks a manifest"
 	cmp -s "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" "$manifest" ||
@@ -162,6 +171,15 @@ if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"
 fi
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
+if toolchain_claim_assembly 2>/dev/null; then fail "changed analyzer was accepted"; fi
+printf analyzer > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
+if toolchain_claim_assembly 2>/dev/null; then fail "changed rust-src was accepted"; fi
+printf rust-src > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
+if toolchain_claim_assembly 2>/dev/null; then fail "changed rustfmt was accepted"; fi
+printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed Helix binary was accepted"

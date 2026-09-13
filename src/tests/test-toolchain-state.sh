@@ -34,9 +34,10 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 rust="$temporary/rust"
 prefix="$temporary/prefix"
-mkdir -p "$rust/library" "$prefix"
+mkdir -p "$rust/library" "$rust/src/tools/rust-analyzer" "$prefix"
 printf 'root lock one\n' > "$rust/Cargo.lock"
 printf 'library lock one\n' > "$rust/library/Cargo.lock"
+printf 'analyzer lock one\n' > "$rust/src/tools/rust-analyzer/Cargo.lock"
 
 select_managed_identity
 toolchain_capture_starting_locks "$rust"
@@ -86,5 +87,18 @@ toolchain_check_postbuild_locks "$rust" "$next_prefix" ||
 	fail "unchanged post-build locks were rejected"
 [ ! -e "$next_prefix/MOTOR-TOOLCHAIN-REJECTED" ] ||
 	fail "unchanged prefix was marked rejected"
+
+analyzer_key="$MOTOR_TOOLCHAIN_KEY"
+printf 'analyzer lock two\n' > "$rust/src/tools/rust-analyzer/Cargo.lock"
+if toolchain_check_postbuild_locks "$rust" "$next_prefix" 2>/dev/null; then
+	fail "analyzer-only lock rewrite was accepted"
+fi
+grep -q "$START_RUST_ANALYZER_LOCK_SHA256.*$POST_RUST_ANALYZER_LOCK_SHA256" \
+	"$next_prefix/MOTOR-TOOLCHAIN-REJECTED" || fail "rejection omits analyzer lock identities"
+toolchain_capture_starting_locks "$rust"
+toolchain_derive_identity
+[ "$MOTOR_TOOLCHAIN_KEY" != "$analyzer_key" ] || fail "analyzer lock did not re-key"
+RUST_ANALYZER_INPUTS_DIGEST="$(printf changed | sha256sum | awk '{print $1}')"
+[ "$MOTOR_TOOLCHAIN_KEY" != "$(toolchain_key)" ] || fail "prepared sources did not re-key"
 
 echo "test-toolchain-state PASS"

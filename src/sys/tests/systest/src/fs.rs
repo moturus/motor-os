@@ -715,6 +715,91 @@ fn resize_test() {
     println!("    ---- FS: resize_test PASS");
 }
 
+/// Retained write completions used to exhaust CHV's 128-entry block queue
+/// before the worker could reach Commit and release their descriptors.
+pub fn scattered_writes_test() {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    const FILES: usize = 248;
+    const STRIDE: usize = 4;
+    const LEN: usize = 1024; // Inline data: each file occupies one entry block.
+    let root = crate::temp_path("systest-fs-scattered-writes");
+    std::fs::create_dir(&root).unwrap();
+    let paths: Vec<_> = (0..FILES).map(|i| root.join(format!("{i:03}"))).collect();
+    for (i, path) in paths.iter().enumerate() {
+        std::fs::write(path, [i as u8; LEN]).unwrap();
+    }
+
+    // Right after boot sys-io's stats provider can be absent for a moment;
+    // wait for it as read_sys_io_fs_metrics waits for its metrics.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let sys_io_provider = loop {
+        if let Some(provider) = moto_stats::Collector::providers()
+            .into_iter()
+            .find(|p| p.id == 2)
+        {
+            break provider;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sys-io stats provider absent"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    // Open during setup: debug logging from open must not split the write batch.
+    let mut files: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .step_by(STRIDE)
+        .map(|(i, path)| {
+            (
+                i,
+                std::fs::OpenOptions::new().write(true).open(path).unwrap(),
+            )
+        })
+        .collect();
+    let flush_file = std::fs::File::open(&paths[0]).unwrap();
+    // Empty the creation batch before measuring the 62 one-block overwrites.
+    moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
+    let before = read_sys_io_fs_metrics(&sys_io_provider);
+    let started = std::time::Instant::now();
+    for (i, file) in &mut files {
+        file.write_all(&[!(*i as u8); LEN]).unwrap();
+    }
+    let overwrite_elapsed = started.elapsed();
+    moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
+    let after = read_sys_io_fs_metrics(&sys_io_provider);
+    let requests = after[8] - before[8]; // FS_DEVICE_WRITES (1010).
+    let blocks = after[11] - before[11]; // FS_DEVICE_WRITE_BLOCKS (1013).
+    println!(
+        "    ---- FS: scattered writes: {requests} global requests, {blocks} global blocks; \
+         overwrites {overwrite_elapsed:?}, through flush {:?}",
+        started.elapsed()
+    );
+    // Debug builds log filesystem activity to the kernel log, whose writes
+    // share these counters, so the batch shape is asserted in release only:
+    // 62 log blocks in 4 requests, the superblock to the log, `runs`
+    // main-area requests for 62 blocks, and the superblock again, i.e. 126
+    // blocks and runs + 6 requests. Fewer than 34 runs would fit a 128-entry
+    // queue and not reproduce the hang: a broken precondition, not a fix.
+    #[cfg(not(debug_assertions))]
+    {
+        assert_eq!(blocks, 126, "the overwrites did not form one batch");
+        let runs = requests.checked_sub(6).unwrap();
+        assert!(runs >= 34, "only {runs} main-area runs; at least 34 needed");
+    }
+
+    drop(files);
+    for (i, path) in paths.iter().enumerate() {
+        let expected = if i % STRIDE == 0 { !(i as u8) } else { i as u8 };
+        assert_eq!(std::fs::read(path).unwrap(), [expected; LEN]);
+    }
+    drop(flush_file);
+    std::fs::remove_dir_all(&root).unwrap();
+    println!("    ---- FS: scattered_writes_test PASS");
+}
+
 /// Regression test for a sys-io reentrancy panic: a `RefCell` double-borrow in
 /// motor-fs's txn_log committer (`spawn_txn_committer_task`).
 ///
@@ -1107,6 +1192,7 @@ fn path_resolution_test() {
 
 pub fn run_tests() {
     println!("running FS tests ...");
+    scattered_writes_test();
     permissions_vdso_test();
     concurrent_flush_stress_test();
     concurrent_large_file_read_test();

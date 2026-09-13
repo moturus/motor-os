@@ -123,9 +123,21 @@ vm_images/release/motor-os-dev.qcow2
 
 The standard image includes generated libc configuration and ripgrep. The
 development image additionally includes LLVM/Clang, the native Rust toolchain,
-headers, libraries, and the complete assembly manifest under
+rust-analyzer with matching `rust-src`, headers, libraries, and the complete assembly manifest under
 `/devtools/toolchain/manifest`. Generated `/devtools` content is never allowed
 to leak into the base or standard image.
+
+Rust-analyzer's small URL and inventory portability patches are checked in
+under `src/patches/`. Provisioning uses pinned, checksum-verified crates.io
+archives and prepares immutable local sources under `$MOTORH/patched-crates/`;
+it needs no additional dependency forks. These inputs also identify the
+Linux-host server. The native binary lives at
+`/devtools/rust/bin/rust-analyzer` and its sources at
+`/devtools/rust/lib/rustlib/src/rust/library`. The image contains no Cargo
+shim and does not launch the server at boot. See the
+[native server guide](build-rustc.md#native-motor-rust-analyzer) for
+the explicit Lorry environment, trusted-project configuration, and current
+acceptance status.
 
 ## Inspecting the selected tuple
 
@@ -229,4 +241,4 @@ Stage 0 compiler is used only internally by `x.py`.
 
 The final stable-release rebase and immutable source tags are intentionally
 deferred until upstream Rust 1.99.0 is published. See
-[toolchain.md](toolchain.md), section 6.1, for that release procedure.
+[toolchain.md](toolchain.md), section 5, for the update and release procedure.

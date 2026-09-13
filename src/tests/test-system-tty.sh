@@ -24,9 +24,9 @@ IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 export MOTO_IMAGE=motor-os-system-tty.img
 
 if [ "$BUILD" = release ]; then
-  make -C "$ROOT_DIR" system-tty.img BUILD=release -j"$(nproc)"
+  make -C "$ROOT_DIR" system-tty.img systest BUILD=release -j"$(nproc)"
 else
-  make -C "$ROOT_DIR" system-tty.img -j"$(nproc)"
+  make -C "$ROOT_DIR" system-tty.img systest -j"$(nproc)"
 fi
 
 chmod 600 "$WD/test.key"
@@ -130,6 +130,24 @@ run_console /user/tmp/system-tty-script-edit-done \
 run_console /user/tmp/system-tty-script-done \
   "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
 
+# The System console can grant both reserve capabilities and can launch
+# unprivileged children. The ordinary SSH shell cannot grant System authority.
+make -C "$ROOT_DIR" systest BUILD="$BUILD" -j"$(nproc)"
+scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
+  motor@192.168.4.2:/user/tmp/admission-systest
+run_console /user/tmp/admission-mode-done \
+  'chmod r-xr-xr-x /user/tmp/admission-systest'
+run_console /user/tmp/admission-class-done \
+  'MOTOR_OS_CAPS=0xd /user/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
+admission_status="$(vm_ssh /system/bin/cat /user/tmp/admission-class.status)"
+admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
+[ "$admission_status" = "0" ] || fail "admission classes exited $admission_status: '$admission_output'"
+[ "$admission_output" = "admission::test_process_classes PASS" ] ||
+  fail "admission classes did not finish: '$admission_output'"
+printf '%s\n' "$admission_output"
+
 ps_output="$(vm_ssh /system/bin/cat /user/tmp/system-tty-ps)"
 listing="$(vm_ssh /system/bin/ls -l /user/tmp)"
 printf '%s\n' "$ps_output" | has_system_process /system/services/sys-tty ||
@@ -138,6 +156,41 @@ printf '%s\n' "$ps_output" | has_system_process /system/bin/rush ||
   fail "the console shell is not System: '$ps_output'"
 printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
   fail "an ordinary external command did not retain System: '$ps_output'"
+
+# Only a System parent may grant CAP_IO_MANAGER. The ordinary SSH shell
+# deliberately cannot launch this test with its required 0x4e mask.
+scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
+  motor@192.168.4.2:/user/tmp/mmio-systest
+# The child is Interactive, so its redirected output must be writable by
+# that role, not just by the System shell creating the redirection.
+vm_ssh 'echo -n > /user/tmp/mmio-validation.log'
+run_console /user/tmp/mmio-validation-done \
+  'MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
+mmio_status="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.status)"
+mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
+[ "$mmio_status" = "0" ] || fail "MMIO validation exited $mmio_status: '$mmio_output'"
+[ "$mmio_output" = "mmio::validation_tests PASS" ] ||
+  fail "MMIO validation did not finish: '$mmio_output'"
+printf '%s\n' "$mmio_output"
+
+for mmio_case in mmio-unmap-suite mmio-unmap-fault; do
+  vm_ssh "echo -n > /user/tmp/$mmio_case.log"
+  run_console "/user/tmp/$mmio_case-done" \
+    "MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
+  mmio_status="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.status)"
+  mmio_output="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.log)"
+  if [ "$mmio_case" = mmio-unmap-suite ]; then
+    [ "$mmio_status" = 0 ] && [ "$mmio_output" = 'mmio::ownership_tests PASS' ] ||
+      fail "MMIO ownership: status=$mmio_status output='$mmio_output'"
+  else
+    [ "$mmio_status" = -1 ] && [ "$mmio_output" = 'mmio::unmap_fault READY' ] ||
+      fail "MMIO fault: status=$mmio_status output='$mmio_output'"
+  fi
+  printf '%s: status=%s %s\n' "$mmio_case" "$mmio_status" "$mmio_output"
+done
+
 printf '%s\n' "$listing" |
   grep -aqE -- '-r-xr-xr--[[:space:]]+[0-9]+[[:space:]]+system-tty-shim$' ||
   fail "the chmod shim did not install the exact mode"

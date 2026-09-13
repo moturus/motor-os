@@ -1,0 +1,9 @@
+config-version = 1
+
+[policy.rules.generated-dependency]
+action = "allow"
+name = "generated-dependency"
+version = "=0.1.0"
+source = "path"
+license = "MIT"
+allow-build-script = true

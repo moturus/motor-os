@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="The text editors that ship with Motor OS: red, a vi-like editor written with Rust std only, and kibim, a small kilo-style editor.">
+<meta name="description" content="Motor OS editors: red, kibim, and Helix with native Rust formatting, completion, navigation, hover, and diagnostics on the developer image.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Editors | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -444,7 +444,55 @@ a.card h3 { color: var(--accent); }
 <h1>Editors</h1>
 <p class="lead">Two editors ship in <code>/user/bin</code>: <strong>red</strong>, which
 behaves like vi and is on every image, and <strong>kibim</strong>, a small kilo-style
-editor on the standard and developer images.</p>
+editor on the standard and developer images. The developer image also includes
+<strong>Helix</strong> with native rust-analyzer integration.</p>
+
+<h2>Helix and Rust on the developer image</h2>
+<p>Run <code>hx</code> from a Rust package directory. Helix starts the native
+rust-analyzer automatically and uses Lorry for project metadata, build scripts,
+and checks on save. Native rustfmt formats Rust buffers. All three programs run
+inside Motor OS.</p>
+<p>The image includes an example that needs no downloads:</p>
+<pre><code>cd /devtools/src/helix-rust-demo
+hx src/main.rs</code></pre>
+<p>Wait for initial source loading and indexing to finish (the LSP spinner stops).
+Put the cursor on <code>ANSWER</code>
+to explore the local module, or on <code>rt_version</code> to navigate into
+Motor's installed standard-library sources.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Helix keys</th><th>Action</th></tr>
+  <tr><td><kbd>Space</kbd>, <kbd>k</kbd></td><td>show type and documentation</td></tr>
+  <tr><td><kbd>g</kbd>, <kbd>d</kbd></td><td>go to definition</td></tr>
+  <tr><td><kbd>Ctrl-o</kbd></td><td>return to the previous location</td></tr>
+  <tr><td><kbd>Ctrl-x</kbd> in insert mode</td><td>request completion</td></tr>
+  <tr><td><code>:format</code></td><td>format the buffer without saving</td></tr>
+  <tr><td><code>:w</code></td><td>format, save, and run the project check</td></tr>
+  <tr><td><kbd>Space</kbd>, <kbd>d</kbd></td><td>open the document diagnostics</td></tr>
+  <tr><td><code>:q</code></td><td>quit</td></tr>
+</table>
+</div>
+<p>For a quick diagnostic, change <code>u32</code> to <code>bool</code> in the
+example's <code>let answer</code> line and save. Restore <code>u32</code> and save
+again to clear the error.</p>
+<p>Rust buffers format automatically when saved. A project
+<code>rustfmt.toml</code> controls formatting in the usual way; without one,
+rustfmt reads <code>/user/rustfmt.toml</code> and then
+<code>/user/cfg/rustfmt/rustfmt.toml</code>. If the source
+has a parser error, rustfmt leaves the buffer unchanged; repair the source and
+use <code>:format</code> or save again.</p>
+<p>Existing projects must be admitted and prepared for <a href="lorry.html">Lorry</a>;
+run <code>lorry vendor</code> explicitly when their dependencies need acquiring.
+Select a package containing <code>Cargo.toml</code>, rather than a virtual workspace
+root. Native analyzer procedural-macro expansion is disabled; compiler checks
+still use Lorry's supported build-script and procedural-macro policies.</p>
+<p>The default server settings are in
+<code>/user/.config/helix/languages.toml</code>. Project settings in
+<code>.helix/languages.toml</code> can override them. If you choose another
+<code>XDG_CONFIG_HOME</code>, copy the native settings to its
+<code>helix/languages.toml</code>. Use <code>hx --health rust</code> to check server
+and parser discovery, <code>:log-open</code> for editor logs, and
+<code>:lsp-restart</code> after changing server settings or project metadata.</p>
 
 <h2>red</h2>
 <p>red is a terminal editor written from scratch with only the Rust standard library:

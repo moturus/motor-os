@@ -255,6 +255,10 @@ pub struct InterfaceInner {
     #[cfg(feature = "socket-udp")]
     udp_tx_unreachable_drops: u64,
 
+    /// Passive Listen -> SynReceived transitions since the last stats drain.
+    #[cfg(feature = "socket-tcp")]
+    tcp_half_open_total: u64,
+
     /// Connection requests that drew the reset path because nothing was
     /// listening for them, since the last
     /// [`Interface::take_tcp_syn_rst_unmatched`]. When the reflector's bucket
@@ -616,6 +620,8 @@ impl Interface {
                 #[cfg(feature = "socket-udp")]
                 udp_tx_unreachable_drops: 0,
                 #[cfg(feature = "socket-tcp")]
+                tcp_half_open_total: 0,
+                #[cfg(feature = "socket-tcp")]
                 tcp_syn_rst_unmatched: 0,
                 #[cfg(feature = "socket-tcp")]
                 tcp_rst_limiter: rate_limit::TokenBucket::new(config.tcp_rst_rate_limit, now),
@@ -698,6 +704,13 @@ impl Interface {
     #[cfg(feature = "socket-udp")]
     pub fn take_udp_tx_unreachable_drops(&mut self) -> u64 {
         core::mem::take(&mut self.inner.udp_tx_unreachable_drops)
+    }
+
+    /// Passive sockets that entered SynReceived, even if they left it before
+    /// the caller observed their state. Reading the count clears it.
+    #[cfg(feature = "socket-tcp")]
+    pub fn take_tcp_half_open_total(&mut self) -> u64 {
+        core::mem::take(&mut self.inner.tcp_half_open_total)
     }
 
     /// Connection requests reset because nothing was listening for them.

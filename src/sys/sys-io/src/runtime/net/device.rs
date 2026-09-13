@@ -686,6 +686,28 @@ pub(super) mod tsval {
     pub(in crate::runtime::net) fn generator() -> u32 {
         NOW.load(Ordering::Relaxed)
     }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn the_timestamp_clock_is_offset_and_advances() -> Result<(), String> {
+        use crate::self_test::{st_assert, st_assert_eq};
+
+        init();
+        let offset = OFFSET.load(Ordering::Relaxed);
+        for _ in 0..2 {
+            init();
+            st_assert_eq!(OFFSET.load(Ordering::Relaxed), offset);
+            let before = moto_rt::time::since_system_start().as_millis();
+            tick();
+            let millis = generator().wrapping_sub(offset);
+            let after = moto_rt::time::since_system_start().as_millis();
+            // The sampled clock must fall inside the actual read interval,
+            // including preemption and the timestamp's 32-bit wrap. Comparing
+            // two estimated offsets instead can underflow at a millisecond
+            // boundary. Zero is also a valid randomly drawn offset.
+            st_assert!(u128::from(millis.wrapping_sub(before as u32)) <= after - before);
+        }
+        Ok(())
+    }
 }
 
 /// Bytes from the CPU's hardware RNG, for one interface at initialization.
@@ -1249,6 +1271,13 @@ impl<'a> NetDev<'a> {
                 .set(stats.udp_tx_unreachable_drops.get() + udp_unreachable);
         }
 
+        let half_open = iface.take_tcp_half_open_total();
+        if half_open != 0 {
+            stats
+                .tcp_half_open_total
+                .set(stats.tcp_half_open_total.get() + half_open);
+        }
+
         let syn_rst = iface.take_tcp_syn_rst_unmatched();
         if syn_rst != 0 {
             stats
@@ -1470,7 +1499,7 @@ pub(crate) mod self_test {
         ),
         (
             "net::device::the_timestamp_clock_is_offset_and_advances",
-            the_timestamp_clock_is_offset_and_advances,
+            tsval::the_timestamp_clock_is_offset_and_advances,
         ),
         (
             "net::device::a_large_config_is_installed_whole",
@@ -1704,45 +1733,6 @@ pub(crate) mod self_test {
         );
         st_assert_eq!(dev.config.cidrs, vec!["2001:db8::2/64".parse().unwrap()]);
         st_assert_eq!(dev.config.routes.len(), 1);
-
-        Ok(())
-    }
-
-    /// [`tsval`]'s contract: the clock is uptime plus a constant drawn once.
-    ///
-    /// Both halves matter and neither is the netstack's to check. Without the
-    /// offset the timestamps on the wire *are* this machine's uptime, told to
-    /// every peer. Without tracking the clock they would never advance, which
-    /// disables PAWS at the peer as surely as never offering the option --
-    /// a TS.Recent that stands still can only ever compare equal.
-    ///
-    /// Testing the relation rather than the two properties separately is what
-    /// lets this run with no wait in it: both terms advance together, so the
-    /// difference holds whether or not a millisecond passes in between. (An
-    /// earlier version of this comment justified that by saying a boot
-    /// self-test must not spend time. The suite is not on the boot path at all
-    /// -- `CMD_SELF_TEST` drives it on demand, under `debug_assertions` -- so
-    /// the real reason is the plainer one: a test that sleeps buys nothing.)
-    fn the_timestamp_clock_is_offset_and_advances() -> Result<(), String> {
-        tsval::init();
-
-        let offset_of = || {
-            tsval::tick();
-            let now = tsval::generator();
-            let uptime = moto_rt::time::since_system_start().as_millis() as u32;
-            now.wrapping_sub(uptime)
-        };
-
-        let first = offset_of();
-        // Zero is what an unoffset clock reads, and only a 1-in-2^32 draw.
-        st_assert!(first != 0);
-
-        // A clock that ignored `tick` would drift away from this by exactly the
-        // milliseconds in between; one that tracked something other than
-        // uptime would not hold the relation at all. One tick of slack, for the
-        // two reads inside `offset_of` landing either side of a millisecond.
-        let second = offset_of();
-        st_assert!(second.wrapping_sub(first) <= 1);
 
         Ok(())
     }

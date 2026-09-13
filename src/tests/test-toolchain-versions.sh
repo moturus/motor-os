@@ -13,7 +13,7 @@ fail() {
 }
 
 toolchain_validate_versions
-[ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v2 ] ||
+[ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v3 ] ||
   fail "unexpected toolchain key schema"
 [ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v3 ] ||
   fail "unexpected assembly key schema"
@@ -37,6 +37,11 @@ original_cargo_rev="$MOTOR_CARGO_REV"
 MOTOR_CARGO_REV="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 [ "$key" != "$(toolchain_clean_key)" ] || fail "Cargo revision did not change the key"
 MOTOR_CARGO_REV="$original_cargo_rev"
+
+original_analyzer_lock="$MOTOR_RUST_ANALYZER_LOCK_SHA256"
+MOTOR_RUST_ANALYZER_LOCK_SHA256="$(printf changed | sha256sum | awk '{print $1}')"
+[ "$key" != "$(toolchain_clean_key)" ] || fail "analyzer lock did not change the key"
+MOTOR_RUST_ANALYZER_LOCK_SHA256="$original_analyzer_lock"
 
 original_build_tools="$MOTOR_BUILD_TOOLS"
 MOTOR_BUILD_TOOLS="cargo,clippy,rustdoc,rustfmt,src"

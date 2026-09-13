@@ -3,16 +3,107 @@
 version = 4
 
 [[package]]
+name = "crossbeam"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "803d13fb3b09d88be9f4dbc29062c66b19bf7170867ceb746d2a8689bf6c7a26"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
 name = "memchr"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+
+[[package]]
+name = "moto-async"
+version = "0.1.0"
+dependencies = [
+ "crossbeam",
+ "log",
+ "moto-mpmc",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-ipc"
+version = "0.2.6"
+dependencies = [
+ "log",
+ "moto-async",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-mpmc"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-rt"
+version = "0.17.6"
+
+[[package]]
+name = "moto-stats"
+version = "0.1.0"
+dependencies = [
+ "moto-ipc",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-sys"
+version = "0.3.0"
+dependencies = [
+ "moto-rt",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -36,6 +127,8 @@ dependencies = [
 name = "rust-analyzer-smoke"
 version = "0.1.0"
 dependencies = [
+ "moto-stats",
+ "moto-sys",
  "serde_json",
 ]
 

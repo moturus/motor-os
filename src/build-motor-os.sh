@@ -15,7 +15,7 @@
 #
 # The tracked img_files directories remain source-only. The standard imager
 # consumes the libc and rg roots; the development imager additionally consumes
-# the LLVM, rustc, and Helix roots.
+# the LLVM, rustc, Helix, and rust-analyzer/rust-src roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
 # live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
@@ -45,6 +45,7 @@ Build the complete Motor OS release environment and all three images, including:
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
   - Helix as /devtools/helix/hx in the development image;
+  - native rust-analyzer and matching rust-src in the development image;
   - all standard and dev-image Motor OS binaries;
   - base, standard, and dev images under vm_images/release.
 
@@ -107,6 +108,9 @@ MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/toolchain-host.sh"
 . "$SCRIPT_DIR/toolchain-assembly.sh"
 . "$SCRIPT_DIR/toolchain-native.sh"
+. "$SCRIPT_DIR/toolchain-patched-crates.sh"
+. "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
+. "$SCRIPT_DIR/patches/crates.sh"
 toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
@@ -299,9 +303,17 @@ build_shim() {
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
 		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
-		run_motor_cargo build --target x86_64-unknown-motor --release )
+		run_motor_cargo build --target x86_64-unknown-motor --release \
+			-Zbuild-std=core,alloc )
 	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
+	if "$B/llvm-nm" "$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
+			awk '$NF == "rust_eh_personality" ||
+				$NF == "DW.ref.rust_eh_personality" ||
+				$NF ~ /^_Unwind_/ || $NF ~ /^__unw_/ { found = 1 }
+				END { exit !found }'; then
+		die "moto-rt-cabi contains unwind runtime references"
+	fi
 	for symbol in motor_start memcpy memmove memset memcmp; do
 		if "$B/llvm-nm" --defined-only \
 				"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
@@ -704,12 +716,23 @@ rustc_stage_image() {
 
 	# The compiler, stripped (~154 MB -> ~98 MB).
 	"$B/llvm-strip" -o "$rust_img/bin/rustc" "$RUSTC_MAIN"
+	toolchain_validate_native_elf "$rust_img/bin/rustc" "$B/llvm-readelf" "$RUSTC_MAIN" ||
+		die "staged rustc ELF validation failed"
 	cat > "$RUSTC_IMG/devtools/bin/rustc" << 'EOF'
 #!/system/bin/rush
 export TMPDIR=/devtools/tmp
 exec /devtools/rust/bin/rustc "$@"
 EOF
 	chmod +x "$RUSTC_IMG/devtools/bin/rustc"
+	"$B/llvm-strip" -o "$rust_img/bin/rustfmt" "$RUSTFMT_MAIN"
+	toolchain_validate_native_elf "$rust_img/bin/rustfmt" "$B/llvm-readelf" "$RUSTFMT_MAIN" ||
+		die "staged rustfmt ELF validation failed"
+	cat > "$RUSTC_IMG/devtools/bin/rustfmt" << 'EOF'
+#!/system/bin/rush
+export TMPDIR=/devtools/tmp
+exec /devtools/rust/bin/rustfmt "$@"
+EOF
+	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
 	# A binary that still carries mlibc's operator-delete panic stub would
 	# abort at runtime; the stub guard must have taken effect.
 	if grep -aq 'operator delete called! delete expressions' "$rust_img/bin/rustc"; then
@@ -892,13 +915,14 @@ main() {
 	log "effective LLVM: $EFFECTIVE_MOTOR_LLVM_REV ($MOTOR_LLVM_TREE_STATE)"
 	toolchain_build_selected_host "$RUST" "$AUTHORING_BASE" "$MOTORH/build/toolchain" \
 		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
-		"$MOTOR/src/sys/lib/moto-rt"
+		"$MOTOR/src/sys/lib/moto-rt" "$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
 	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
 	export PYTHONDONTWRITEBYTECODE=1
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
 	fetch_workspace_sources
+	toolchain_fetch_rust_analyzer "$RUST" "$TOOLCHAIN_PREFIX"
 	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
 	activate_exact_assembly_paths
 	toolchain_claim_assembly
@@ -914,12 +938,17 @@ main() {
 		build_native_llvm
 		build_lua
 		llvm_stage_image
-		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE"
+		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE" \
+			"$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 		rustc_stage_image
 		update_ripgrep_source
 		build_ripgrep
 		prepare_helix_source
 		build_helix
+		if ! toolchain_build_native_rust_analyzer "$RUST" "${CARGO_HOME:-$HOME/.cargo}" "$AUTHORING_BASE"; then
+			toolchain_reject_assembly "native rust-analyzer build or validation failed"
+			return 1
+		fi
 		toolchain_complete_assembly
 	else
 		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
@@ -938,8 +967,10 @@ main() {
 	local required_outputs=(
 		"$LLVM_IMG/devtools/llvm/bin/llvm"
 		"$RUSTC_IMG/devtools/rust/bin/rustc"
+		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 	)

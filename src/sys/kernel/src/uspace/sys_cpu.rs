@@ -15,16 +15,15 @@ use super::syscall::*;
 // thread's retained wait list - no heap allocations.
 const INLINE_WAIT_HANDLES: usize = 16;
 
-fn process_wait_handles(
+fn process_wait_handles<'a>(
     curr: &super::process::Thread,
-    args: &SyscallArgs,
+    args: &'a SyscallArgs,
     next_arg: usize,
-) -> SyscallResult {
+    inline_handles: &'a mut [u64; INLINE_WAIT_HANDLES],
+    heap_handles: &'a mut Vec<u64>,
+) -> Result<&'a [u64], SyscallResult> {
     // NOTE: if this changes, you may need to change sys_ctl::sys_query_handle().
     let flags = args.flags;
-
-    let mut inline_handles = [0_u64; INLINE_WAIT_HANDLES];
-    let mut heap_handles: Vec<u64>;
 
     let handles: &[u64] = if flags & SysCpu::F_HANDLE_ARRAY != 0 {
         let h_ptr = args.args[next_arg];
@@ -32,7 +31,7 @@ fn process_wait_handles(
 
         if h_ptr & 3 != 0 {
             log::debug!("wait handles ptr not aligned");
-            return ResultBuilder::invalid_argument();
+            return Err(ResultBuilder::invalid_argument());
         }
 
         if h_sz
@@ -42,14 +41,14 @@ fn process_wait_handles(
             || (h_sz == 0)
         {
             log::warn!("too many wait handles: {h_sz}");
-            return ResultBuilder::result(moto_rt::E_STORAGE_FULL);
+            return Err(ResultBuilder::result(moto_rt::E_STORAGE_FULL));
         }
 
         let dst: &mut [u64] = if (h_sz as usize) <= INLINE_WAIT_HANDLES {
             &mut inline_handles[..(h_sz as usize)]
         } else {
-            heap_handles = alloc::vec![0_u64; h_sz as usize];
-            &mut heap_handles
+            heap_handles.resize(h_sz as usize, 0);
+            heap_handles
         };
         let dst_bytes =
             unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8) };
@@ -58,7 +57,7 @@ fn process_wait_handles(
             .address_space()
             .read_from_user_into(h_ptr, dst_bytes)
         {
-            return ResultBuilder::result(err);
+            return Err(ResultBuilder::result(err));
         }
         dst
     } else {
@@ -87,7 +86,7 @@ fn process_wait_handles(
                 process.pid().as_u64(),
                 handle.as_u64()
             );
-            return ResultBuilder::bad_handle(handle);
+            return Err(ResultBuilder::bad_handle(handle));
         };
         if obj.sys_object.sibling_dropped() {
             log::debug!(
@@ -95,7 +94,7 @@ fn process_wait_handles(
                 handle.as_u64(),
                 process.pid().as_u64()
             );
-            return ResultBuilder::bad_handle(handle);
+            return Err(ResultBuilder::bad_handle(handle));
         }
 
         if count < INLINE_WAIT_HANDLES {
@@ -107,7 +106,7 @@ fn process_wait_handles(
     }
 
     if count == 0 {
-        return ResultBuilder::ok();
+        return Ok(handles);
     }
 
     for (handle, obj) in staged
@@ -130,16 +129,26 @@ fn process_wait_handles(
             .chain(spill.into_iter().map(|(_, obj)| obj)),
     );
 
-    ResultBuilder::ok()
+    Ok(handles)
 }
 
 fn process_wake_handles(
     curr: &super::process::Thread,
     args: &SyscallArgs,
     next_arg: usize,
-    wakers: &[SysHandle],
+    wait_handles: &[u64],
+    wakers: &super::process::WakerVec,
     timed_out: bool,
 ) -> SyscallResult {
+    // A late object wake can reach an unrelated wait (including a futex's
+    // empty wait). Only acknowledge requested handles; the others remain
+    // pending in their objects' wake counters, not in this thread's queue.
+    let requested = wakers.intersection(wait_handles.iter().copied().map(SysHandle::from_u64));
+    let wakers = requested.as_slice();
+    for waker in wakers {
+        curr.owner().process_wake(waker);
+    }
+
     if wakers.len() <= 6 {
         let mut data = [0_u64; 6];
 
@@ -288,13 +297,18 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         }
     }
 
-    let result = process_wait_handles(curr, args, next_arg);
-    if !result.is_ok() {
-        if let Some(next) = switch_to {
-            next.release_switch_claim();
-        }
-        return result;
-    }
+    let mut inline_handles = [0_u64; INLINE_WAIT_HANDLES];
+    let mut heap_handles = Vec::new();
+    let wait_handles =
+        match process_wait_handles(curr, args, next_arg, &mut inline_handles, &mut heap_handles) {
+            Ok(handles) => handles,
+            Err(result) => {
+                if let Some(next) = switch_to {
+                    next.release_switch_claim();
+                }
+                return result;
+            }
+        };
 
     if let Some(next) = switch_to {
         if (timeout == 0) && (curr.capabilities() & CAP_IO_MANAGER != 0) {
@@ -317,7 +331,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
                 curr.new_timeout(crate::arch::time::Instant::from_u64(timeout));
             }
             let (timed_out, wakers) = curr.wait_and_switch(next);
-            return process_wake_handles(curr, args, next_arg, wakers.as_slice(), timed_out);
+            return process_wake_handles(curr, args, next_arg, wait_handles, &wakers, timed_out);
         }
     } else if wake_this_cpu {
         crate::xray::stats::kernel_stats()
@@ -337,7 +351,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
             .adjust_metric(crate::xray::stats::MetricType::WaitFastPath, 1);
         curr.diag.fast.fetch_add(1, Ordering::Relaxed);
         let wakers = curr.take_wakers();
-        return process_wake_handles(curr, args, next_arg, wakers.as_slice(), false);
+        return process_wake_handles(curr, args, next_arg, wait_handles, &wakers, false);
     }
 
     if timeout != u64::MAX {
@@ -358,7 +372,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         curr.wait()
     };
 
-    process_wake_handles(curr, args, next_arg, wakers.as_slice(), timed_out)
+    process_wake_handles(curr, args, next_arg, wait_handles, &wakers, timed_out)
 }
 
 // W7: do_wake(waker, wake_target, SysHandle::NONE, true), but claiming the
@@ -556,8 +570,8 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     // Need to wait.
     let target_obj = killer.owner().get_object(&target).unwrap();
     target_obj.sys_object.add_waiting_thread(killer, target);
-    if target_obj.wake_count < target_obj.sys_object.wake_count() {
-        // obj has unconsumed wakes, so queue it as a waker to the current thread.
+    if target_obj.wake_count < target_obj.sys_object.wake_count() || target_obj.sys_object.done() {
+        // A prior wait may have consumed the exit wake of a completed process.
         killer.add_waker(target)
     }
 
@@ -697,7 +711,7 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
         return ResultBuilder::invalid_argument();
     };
 
-    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr as usize);
+    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr.kernel_addr() as usize);
     ResultBuilder::ok_1(num_entries as u64)
 }
 

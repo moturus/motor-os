@@ -1,0 +1,18 @@
+# build.sh rebuilds core, alloc, and compiler_builtins with -Zbuild-std so the
+# freestanding VDSO stays abort-only under the unwind-default sysroot. Keep
+# those crates optimized in debug builds, as the prebuilt sysroot crates were;
+# at opt-level 0 every process's runtime ran several times slower.
+[profile.dev.package.core]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.alloc]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.compiler_builtins]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
