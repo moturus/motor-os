@@ -1251,7 +1251,6 @@ name = "moto-async"
 version = "0.1.0"
 dependencies = [
  "crossbeam",
- "futures",
  "log",
  "moto-mpmc",
  "moto-rt",

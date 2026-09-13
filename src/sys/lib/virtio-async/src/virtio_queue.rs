@@ -783,10 +783,8 @@ impl<T> VqCompletion<T> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<(T, Result<(u32)>)> {
         let mut virtq = self.virtqueue.borrow_mut();
-        virtq.completion_waiters[self.chain_head as usize] = Some(cx.local_waker().clone());
 
         if !virtq.header_buffers[self.chain_head as usize].in_use_by_device {
-            virtq.completion_waiters[self.chain_head as usize] = None;
             let consumed = virtq.get_result(self.chain_head);
             let status = if self.expect_blk_status {
                 virtq.get_blk_status(self.chain_head)
@@ -807,7 +805,14 @@ impl<T> VqCompletion<T> {
             return std::task::Poll::Ready((self.data.take().unwrap(), result));
         }
 
-        return std::task::Poll::Pending;
+        // Register only while the device owns the chain; reclaim_used() takes
+        // the waker when it completes. A re-poll with the same waker is free.
+        let waiter = &mut virtq.completion_waiters[self.chain_head as usize];
+        match waiter {
+            Some(waker) => waker.clone_from(cx.local_waker()),
+            None => *waiter = Some(cx.local_waker().clone()),
+        }
+        std::task::Poll::Pending
     } // fn poll()
 }
 

@@ -127,7 +127,12 @@ impl<'a, T> Waiter<'a, T> {
             waiters.insert(self.id, (self.kind, cx.local_waker().clone()));
             self.lock.wait_queue.borrow_mut().push_back(self.id);
         } else {
-            waiters.get_mut(&self.id).unwrap().1 = cx.local_waker().clone();
+            // A no-op unless the waker changed.
+            waiters
+                .get_mut(&self.id)
+                .unwrap()
+                .1
+                .clone_from(cx.local_waker());
         }
     }
 
