@@ -61,8 +61,9 @@ Proposed 2026-09-11; review confirms or changes them before implementation.
   discovery executes from configuration. The fork's `gix-sec` ownership check
   returning `Ok(true)` on Motor is not treated as trust to execute anything.
 - **D7 Panic.** Both binaries build with an explicit `panic = "abort"` profile,
-  independent of [rustfmt.md](rustfmt.md) D1. Errors and cancellation use
-  ordinary returns and RAII; jj's `catch_unwind` uses are audited.
+  overriding the [Motor target's unwind default](../toolchain.md#rust-runtime-and-native-formatting).
+  Errors and cancellation use ordinary returns and RAII; jj's `catch_unwind`
+  uses are audited.
 - **D8 GC.** `jj util gc` and gix repacking return an unsupported error until
   M4. Native garbage collection gets its own plan; push does not depend on it.
 - **D9 Interactive selection.** Descriptions, conflicts and hunk selection use

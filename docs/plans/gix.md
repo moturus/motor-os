@@ -76,9 +76,9 @@ confirms or changes them before implementation.
   the built-in text, binary or union ones aborts the merge before the working
   tree changes. The fork's `gix-sec` ownership check returning `Ok(true)` on
   Motor is not treated as trust to execute anything.
-- **D7 Panic.** An explicit `panic = "abort"` profile, independent of
-  [rustfmt.md](rustfmt.md) D1. Errors and cancellation use ordinary returns
-  and RAII.
+- **D7 Panic.** An explicit `panic = "abort"` profile overrides the
+  [Motor target's unwind default](../toolchain.md#rust-runtime-and-native-formatting).
+  Errors and cancellation use ordinary returns and RAII.
 - **D8 (accepted 2026-09-12) No object deletion.** gix never deletes or
   repacks objects; loose objects accumulate and are measured. Repack and gc
   are M4.

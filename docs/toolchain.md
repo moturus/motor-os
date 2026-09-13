@@ -157,6 +157,61 @@ Both claims use a sibling `.building` directory as the lock and leave a
 validation fails, so a bad product is kept for diagnosis instead of being
 silently rebuilt. Older keyed products are never deleted by a build.
 
+### Rust runtime and native formatting
+
+The selected `.dev.2` Motor target defaults to `panic=unwind`. rustc,
+rustfmt, rust-analyzer, and ordinary applications use the standard Motor
+sysroots; the analyzer's private patched-library build has been retired.
+Salsa cancellation and rustfmt's speculative parsing require real unwinding.
+System binaries retain explicit abort profiles in both image modes;
+packaged ripgrep uses its ordinary release profile and unwinds. Application
+opt-out examples are in [build-rustc.md](build-rustc.md#panic-strategy-and-unwinding).
+
+The VDSO and `moto-rt` C ABI shim build `core` and `alloc` with their own
+abort profiles using `-Zbuild-std=core,alloc`. The VDSO's debug build keeps
+`core`, `alloc`, and `compiler_builtins` optimized without assertions,
+matching the prebuilt sysroot behavior and avoiding runtime latency growth.
+
+Rust std registers the executable's unwind metadata finder during Motor's
+`std::rt::init`. For mlibc-linked binaries it also registers through
+`.init_array.00001`, before ordinary C++ static constructors can throw.
+Both entry paths must keep this registration. The finder reads static ELF
+metadata without allocation, locks, or I/O. A static library with neither
+the Rust entry path nor constructors has no standalone initialization.
+
+In Rust-linked programs containing C++, the pure Rust unwinder owns the
+`_Unwind_*` ABI for both languages. Rust rlibs precede the driver's library
+group, so libunwind's competing implementation is not extracted. Pure C/C++
+programs use LLVM libunwind. Native rustc, rustfmt, and rust-analyzer must
+define `_Unwind_RaiseException` exactly once and contain no `__unw_` symbols.
+
+The finder requires static PIEs linked at nominal address zero, with the
+ELF and program headers mapped in the first readable `PT_LOAD` at file
+offset zero. `__ehdr_start` then gives the load bias. `PT_GNU_EH_FRAME`
+must lie entirely inside a readable load segment. Host cross-links through
+GNU ld and native/clang links through LLD both satisfy this layout; custom
+linker scripts that move the headers are unsupported. The shared validator
+in `src/toolchain-native.sh` checks this layout, unwind-provider symbols,
+constructors, unwind sections, and static-PIE protections on native tools.
+`src/tests/test-unwind.sh` validates its own binaries and exercises both
+entry paths, abort and fat-LTO builds, and Rust/C++ destructor propagation.
+
+Native rustfmt is built by Rust bootstrap with the compiler-private Motor
+rlibs, packaged at `/devtools/rust/bin/rustfmt`, and exposed through the
+`/devtools/bin/rustfmt` launcher. The launcher sets `TMPDIR=/devtools/tmp`.
+Helix selects the binary through its server's `RUSTFMT` environment; see
+the [editor guide](helix.md#native-rust-integration).
+
+rustfmt searches the input directory and its ancestors, then `/user`, then
+`/user/cfg/rustfmt` for `rustfmt.toml` or `.rustfmt.toml`. Motor ignores
+`HOME` and `XDG_CONFIG_HOME` for these lookups; `dirs` and `dirs-sys` are
+compiled only off Motor, with no additional fork. Native fixtures cover
+project and user configuration, ignored environment settings, editions, macros,
+and parser/lexer-error recovery. The size gates bound both the stripped
+formatter and its fresh-image growth at 21 MiB. Source, producer, runtime,
+editor, and size gates are wired into `src/tests/full-test.sh`, with native
+formatting and editor cases in its developer-image branch.
+
 ### Authoring mode
 
 ```sh

@@ -135,7 +135,7 @@ Linux-host server. The native binary lives at
 `/devtools/rust/bin/rust-analyzer` and its sources at
 `/devtools/rust/lib/rustlib/src/rust/library`. The image contains no Cargo
 shim and does not launch the server at boot. See the
-[native server plan](plans/rust-analyzer.md#46-runtime-and-lsp-contract) for
+[native server guide](build-rustc.md#native-motor-rust-analyzer) for
 the explicit Lorry environment, trusted-project configuration, and current
 acceptance status.
 

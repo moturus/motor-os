@@ -104,6 +104,32 @@ Enabling build scripts and procedural macros executes project code on the
 Linux host. Keep them enabled only for this trusted checkout or another
 trusted project; disable both options when inspecting untrusted code.
 
+The matching Linux proc-macro server is discovered under the selected
+prefix's `libexec`; no `procMacro.server` override is needed. Keep the server,
+proc-macro server, and `rust-src` from the same immutable toolchain.
+
+The host also accepts an inline Project JSON object in `linkedProjects`.
+Supply absolute normalized `sysroot`, `sysroot_src`, and crate `root_module`
+paths, plus each crate's edition, target, cfgs, environment, source roots,
+and dependency indices/names. A Motor object still needs
+`cargo.target = "x86_64-unknown-motor"` in initialization options so sysroot
+loading selects the same platform. This seam is tested without build scripts
+or procedural macros; the native server uses Lorry metadata instead.
+
+Custom JSON targets remain unsupported because the pinned analyzer's rustc
+cfg and target-data queries cannot pass their required unstable flags. A
+project can appear loaded with an empty cfg set. Substituting the userspace
+Motor target or hard-coding `cargo.cfgs` does not correctly describe kernel
+or loader code.
+
+The offline host gate covers Motor Cargo, Linux Cargo, and inline Motor
+Project JSON, with wrong-target sentinels, std navigation, and a 60-second
+deadline per case. The Motor Cargo case also checks local proc-macro
+expansion. Run `src/tests/test-rust-analyzer.sh` and its `--release` variant
+after host LSP changes; both run through the corresponding full-test profile.
+The harness sets `CARGO_NET_OFFLINE=true` for Cargo children and retains
+bounded protocol and stderr evidence.
+
 ## Native Motor rust-analyzer
 
 The developer image packages `/devtools/rust/bin/rust-analyzer` and matching
@@ -132,7 +158,7 @@ analyzer builds directly against the installed std. Older `.dev.1` images
 rebuilt a private copy of the pinned Rust library for the analyzer; images
 with recipe `motor-native-rust-analyzer-v1` abort on ordinary
 cancellation and must be rebuilt. See
-[the diagnosis and migration record](plans/rust-unwinding.md).
+[the current runtime contract](toolchain.md#rust-runtime-and-native-formatting).
 
 For an admitted, trusted Lorry package, use:
 
@@ -158,13 +184,71 @@ Build scripts and checks run with the invoking user's existing authority.
 Opening a project is not a sandbox boundary, and `lorry vendor` remains an
 explicit developer action.
 
+Lorry's [inspect and check commands](../src/bin/lorry/README.md#inspect-and-check)
+define the Cargo-compatible boundary, including `metadata`, JSON `check`
+output, named targets, and `tree`. The analyzer also uses the supported
+`locate-project` and read-only `rustc --print` queries. Metadata describes one
+selected package per invocation; input manifests remain immutable. Client
+notifications of manifest or lock changes trigger metadata reloads, and
+build-script input changes trigger a new build-script pass. Run/test/debug
+runnables remain upstream Cargo command templates outside native acceptance.
+
+### Native server build
+
+The server is built from the selected Rust tree's standalone analyzer
+workspace without `in-rust-tree`, against installed Motor std. Its recipe
+in `src/toolchain-native-rust-analyzer.sh` uses `opt-level=s` and
+`motor-clang` with `-C link-self-contained=no -C default-linker-libraries=yes`.
+mlibc startup executes the inventory registrations in `.init_array`.
+Using the bootstrap `motor-rust-cc` wrapper with those default-library flags
+would duplicate the startup object.
+
+Motor fork changes disable implicit analyzer user-configuration lookup
+(`dirs` is compiled only off Motor), stitch the matching `rust-src` directly
+without a sysroot Cargo query, and stream child stdout/stderr through two
+reader threads with a bounded chunk queue. Project metadata still uses
+Lorry. File URI support and constructor registration use the checked-in
+[URL and inventory patches](../src/patches/README.md). Their archive, patch,
+and prepared-tree identities participate in toolchain validation; regular
+builds and tests remain locked and offline.
+
+The staged analyzer retains its `.comment` compiler identity. Packaged
+`rust-src` comes from the selected installed prefix, with executable bits
+cleared only on the staged copy. Native procedural expansion cannot use
+Lorry's static proc-macro helper protocol: the analyzer expects a
+compiler-private server and dynamic libraries. No such server is packaged,
+though rustc may run an admitted static helper during a Lorry check.
+
+### Native acceptance
+
 Native acceptance is integrated under the developer-image branch of
 `src/tests/full-test.sh`, reached by `src/tests/full-test-dev.sh --release`.
 The latter defaults to 8192 MiB for the repository-suite VM and retains
 4096 MiB for its separate developer-source phase; `MOTO_MEMORY_MIB` overrides
-both. Native server acceptance is complete, including the string-hover case
-resolved by the allocator work recorded in the
-[implementation plan](plans/rust-analyzer.md#437-string-hover-investigation-allocator-scalability-review-stop).
+both. `test-rust-analyzer-native.sh` exercises project loading, build-script
+results, semantic requests, saved diagnostics and clearing, multiple roots,
+and shutdown. String hover exercises MIR evaluation and is sensitive to the
+[allocator's](frusa.md) performance; it is included in the native gate.
+
+The resource and size checks retain these limits for the two-project native
+fixture on four vCPUs and 8 GiB of RAM:
+
+| Measurement | Upper limit |
+|---|---:|
+| Complete native case | 90 seconds |
+| Analyzer sampled virtual memory / threads | 2 GiB / 32 |
+| Individual descendant Lorry check sampled virtual memory / threads | 64 MiB / 16 |
+| Whole-VM sampled physical memory | 3 GiB |
+| Stripped analyzer | 32 MiB |
+| rust-src regular-file bytes | 80 MiB |
+| Fresh image growth attributable to the analyzer overlay | 128 MiB |
+
+These are fixture regression limits, not production capacity guarantees.
+The sampler targets 100 ms intervals and records observed gaps and missing
+measurements. Virtual memory is not RSS, sampled maxima are not exact peaks,
+and sampled descendants are not an exhaustive execution audit. Phase timings
+remain measurements. A limit failure requires diagnosis rather than retries,
+worker caps, or automatic threshold increases.
 
 ### Helix on the developer image
 
@@ -178,31 +262,10 @@ cd /devtools/src/helix-rust-demo
 hx src/main.rs
 ```
 
-Starting `hx` without arguments and opening `src/main.rs` with `:o` also works.
-
-After initial source loading and indexing (the LSP spinner stops), place the
-cursor on `ANSWER`: `Space k`
-shows documentation, `g d` opens its definition, and `Ctrl-o` returns.
-`Ctrl-x` requests completion in insert mode. Change the `answer` binding's
-type from `u32` to `bool` and save with `:w` to see a compiler diagnostic;
-restore `u32` and save to clear it. `Space d` opens document diagnostics.
-The `rt_version` call navigates into the installed Motor standard library.
-The standard-unwind candidate packages native rustfmt and enables
-format-on-save. Use `:format` to format without saving. A parser error leaves
-the buffer unchanged; fix the source and format again. Project `rustfmt.toml`
-settings are honored; without one, rustfmt reads `/user/rustfmt.toml` and
-then `/user/cfg/rustfmt/rustfmt.toml`, never `HOME` or `XDG_CONFIG_HOME`.
-The selected `.dev.2` toolchain packages native rustfmt, so these features
-are available on the developer image. Saving also runs the compiler check.
-
-For other projects, select an admitted Lorry package and prepare its dependencies
-with `lorry vendor` explicitly. A virtual workspace root is not a Lorry package.
-Server options are in `/user/.config/helix/languages.toml`, with normal Helix
-project overrides in `.helix/languages.toml`. A custom `XDG_CONFIG_HOME` needs
-the native settings copied into its own `helix/languages.toml`.
-Use `hx --health rust` for discovery, `:log-open` for logs, and `:lsp-restart`
-after changing server settings or project metadata. The
-[Helix integration record](plans/helix-rust-analyzer.md) tracks editor acceptance.
+Wait for initial source loading and indexing before semantic navigation.
+Native rustfmt provides `:format` and format-on-save. The
+[Helix guide](helix.md) covers commands, project configuration, port
+limitations, save recovery, and regression coverage.
 
 ## Native Motor rustc
 
@@ -212,7 +275,7 @@ sysroot, a second `x.py` invocation builds rustc for
 verifies that this invocation leaves the installed host prefix byte-for-byte
 unchanged.
 
-The candidate development-image layout adds rustfmt to the native rustc files:
+The development image packages these native Rust files:
 
 ```text
 /devtools/rust/bin/rustc
@@ -259,7 +322,7 @@ mlibc's strong entry point and runtime win over Rust std's weak fallbacks.
 
 ### Panic strategy and unwinding
 
-The planned `.dev.2` Motor target defaults ordinary Rust applications to
+The selected `.dev.2` Motor target defaults ordinary Rust applications to
 `panic=unwind`. A program can catch a panic and continue:
 
 ```rust
@@ -294,6 +357,10 @@ This covers normal Rust executables and Rust/C++ programs. An abort-only
 static library that supplies neither a Rust entry point nor constructors has
 no standalone unwinding initialization.
 
+The [toolchain runtime contract](toolchain.md#rust-runtime-and-native-formatting)
+describes the single unwind provider for Rust/C++ programs and required ELF
+layout.
+
 ## Compiler dependency identities
 
 The Rust fork keeps Motor-only patches in the main compiler workspace while
@@ -309,7 +376,7 @@ packages:
 - `libc` uses `moturus/libc` at
   `22836a72e660c7000b1b00db2f0a345fff4e52b6` and version
   `0.2.186+motor.1` in the main Rust workspace.
-- rustfmt needs no patched dependency: the standard-unwind candidate resolves
+- rustfmt needs no patched dependency: the Motor fork resolves
   `/user` and `/user/cfg` behind `cfg(target_os = "motor")` and compiles
   `dirs` only off Motor.
 - rustc LLVM retains its exact `cc = "=1.2.16"` dependency.

@@ -105,8 +105,8 @@ download "$project_dir/input.rs" "$temporary/project-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/project-width.rs" ||
   fail 'project rustfmt.toml was not honored'
 
-# Motor's user configuration lives at fixed paths under /user (section 4.6 of
-# docs/plans/rustfmt.md); HOME and XDG_CONFIG_HOME are not consulted.
+# Motor's user configuration lives at fixed paths under /user (see
+# docs/toolchain.md); HOME and XDG_CONFIG_HOME are not consulted.
 printf 'mkdir "%s"\nput "%s" "%s"\n' "$user_config_dir" "$FIXTURES/width.toml" \
   "$user_config_dir/rustfmt.toml" | sftp_batch
 guest_user_paths=("$user_config_dir")

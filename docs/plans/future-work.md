@@ -57,6 +57,93 @@ VM exit during pressure. That separate unresolved finding and its evidence
 remain in Git history (the retired kernel-phys-mem.md plan). Kernel validation resumes
 with this filesystem fix explicitly deferred; no test is skipped or weakened.
 
+## Unresolved native Lorry self-build stall (2026-09-05)
+
+The release developer gate's `native-lorry-self-gate` timed out at its
+unchanged 1,200-second limit in an 8-vCPU/8-GiB VM. Native vendoring had
+verified `Cargo.lock`; the first release build stopped producing output
+after dispatching initial dependencies through `bisync 0.3.0`. A diagnostic
+SSH `ps` also stopped responding. All eight vCPUs were sampled waiting in
+KVM, with no console panic; guest memory pressure and a lost wake remained
+unproven.
+
+Resuming the retained build, 256 synchronized compiler-launch probes, and
+cold builds in a disposable snapshot did not reproduce the stall or record
+a kernel memory-admission refusal. Sharing immutable resolver candidates
+later reduced a separate measured cost, and the complete gate passed with
+unchanged limits and concurrency. That optimization did not diagnose or
+repair the original liveness failure. The maintainer deferred that failure
+and authorized continuing analyzer work.
+
+Evidence was recorded under
+`src/bin/lorry/target/lorry/native-self-tests/self-20260905T165416Z-421811/`
+(`summary.txt`, `timings.tsv`, `native.log`, `qemu.log`, `lorry-cross`) and
+`/tmp/motor-ra-url-dev-rebased.log`. Diagnostic logs include
+`/tmp/motor-lorry-diag-{build,samples,spawn-stress,cold-build}.log`,
+`/tmp/motor-lorry-diag-vendor-build{,-timestamps}.log`, and
+`/tmp/motor-lorry-diag-vendor-stacks.log`. A gap in the interactive resident
+log came from host terminal job control stopping SSH, not a guest timer
+failure. Preserve the original timeout independently of later passing gates.
+
+## Unresolved logging RPC stall (2026-09-07)
+
+During kill-after-wait kernel validation, the second debug main-image gate
+stalled after `logging::basic test PASS`. Systest's main thread waited in
+`logging::rotation_and_space_cleanup` -> `rpc_result` ->
+`ClientConnection::do_rpc` -> `SysCpu::wait`, before reaching the kill
+regression. The rotation file stayed at 216,624 bytes while `kernel.log`
+grew and SSH/filesystem reads remained responsive. Strobe was processing
+other records; samples in its filesystem flush/write path did not establish
+the cause or a complete logging-service deadlock.
+
+The gate was deliberately terminated with status 143. The maintainer
+deferred further logging/IPC investigation. Subsequent unchanged main-image
+and developer gates passed, including logging rotation; no test exclusion,
+retry, or timeout change was added. Those passes do not resolve the original
+stall or conclusively exclude interaction with the reviewed kernel change.
+
+Evidence was recorded in `/tmp/motor-kill-full-debug-2.log`,
+`/tmp/motor-kill-debug-2-{console,systest,ps}.log`,
+`/tmp/motor-kill-debug-2-systest-stacks-uploaded.log`,
+`/tmp/motor-kill-debug-2-strobe-stacks-{uploaded,later}.log`, and
+`/tmp/motor-kill-debug-2-log-files{,-later}.log`. The initial debugger requests
+used an absent guest path; only the later uploaded-debugger captures are
+stack evidence. Logging IPC, wake delivery, and other causes remain to be
+distinguished before proposing a production fix.
+
+## Unresolved sys-io abort during listener exhaustion (2026-09-10)
+
+The first release main-image gate during Helix integration failed after
+`test_all_cpu_fault_storm PASS`: aggregate listener exhaustion did not
+complete, sys-io exited with status `0xffffffff`, and the suite reached its
+unchanged 900-second deadline. This status identifies an explicit abort
+(`abort_internal()` exits -1), not the kernel's `u64::MAX` main-thread fault
+status. The abort's root cause remains unresolved.
+
+The diagnostic run of the unchanged systest sequence passed, as did eight
+cycles of the existing listener probe with abort-stack reporting. Those
+probes returned OutOfMemory and recovered. Subsequent release gates 2–4
+passed after all temporary instrumentation was removed; they do not explain
+the original failure. The child-pipe fix and the later client-side network
+allocation fixes do not establish a cause for this sys-io abort.
+
+Evidence paths recorded at the time: the original log is
+`/tmp/motor-helix-ra-main-release-1.log` and the failed image is
+`vm_images/release/motor-os-helix-forensics.qcow2`. Diagnostic logs are
+`/tmp/motor-helix-ra-systest-diagnostic.log`,
+`/tmp/motor-helix-ra-listener-probe.log`, and
+`/tmp/motor-helix-ra-listener-soak.log`; the later gate order is in
+`/tmp/motor-helix-ra-release-gates.log`. Preserve the original failure when
+investigating; do not treat later passes as resolution or external-network
+flakiness.
+
+## Network RX monitor intervention (2026-09-06)
+
+Debug runs 1 and 3 of the network-channel allocation gates exhibited the
+previously diagnosed network RX monitor intervention. Logs were recorded
+under `build/network-allocation.YuWF2O/`. Those gates validated allocation
+refusal and recovery; they did not establish a repair for the RX issue.
+
 ## Open bugs from the 2026-08-28/29 performance run (address soon)
 
 Found while reviewing file I/O and the async runtime; the run's report
@@ -102,10 +189,11 @@ The former sys-tty/kernel-log interleaving item is complete; see
 4. **Resolved 2026-09-09: `MAX_BLOCKS_IN_TXN_LOG` 256 stopped sys-io on the
    first large write.** The mechanism was descriptor retention: a completion
    held its descriptors until dropped, and the worker held completions until
-   `Commit`. `docs/plans/virtio-descriptor-waiters.md` moved all block-queue
-   traffic behind one I/O task that drops completions as the device finishes
-   them, so batch size no longer interacts with queue depth. Raising the
-   batch is still one of the write-path levers below and still unmeasured.
+   `Commit`. [`block_io.rs`](../../src/sys/sys-io/src/runtime/fs/block_io.rs)
+   now owns all block-queue traffic in one I/O task that drops completions as
+   the device finishes them, so batch size no longer interacts with queue
+   depth. Raising the batch is still one of the write-path levers below and
+   still unmeasured.
 
 5. **sys-io allocates a Vec of every wait handle on each park.**
    `LocalRuntime::wait` builds the array of registered wait handles anew per
@@ -153,9 +241,7 @@ The former sys-tty/kernel-log interleaving item is complete; see
 The former item 9, `CpuStatsV1::entry`'s incorrect slice length, is fixed.
 The correction and three synthetic snapshot tests pass three debug and three
 release full-system gates, plus `full-test-dev.sh --release` (2026-09-06).
-No package publication or stdlib change was needed. See the
-[rust-analyzer gate record](rust-analyzer.md#421-release-gate-budget-stop)
-for the initial cold-build timeout and approved unchanged warm-artifact run.
+No package publication or stdlib change was needed.
 
 ## Performance follow-ups from the same run (not scheduled)
 
@@ -278,22 +364,24 @@ the ruling; nothing here should be picked up without a fresh call.
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
   per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
 
-- **virtio queue: smarter allocation-waiter wakeups** (recorded 2026-09-08
-  from `virtio-descriptor-waiters.md`, v03). Releasing a descriptor chain
-  wakes at most two queued allocation waiters, and a waiter that does not
+- **virtio queue: allocation-waiter hygiene and wakeups** (recorded 2026-09-08).
+  Releasing a descriptor chain wakes at most two queued allocation waiters,
+  and a waiter that does not
   fit re-registers at the back of the line. Under the single-owner design
   the block queue has one submitter that never waits in the driver, and
-  each net queue has one submitter, so at most one waiter exists per queue
-  and the policy is moot. It matters again only if a queue ever gets
-  several independent allocators; the v02 review showed that waking the
-  first waiter only can then starve a fitting waiter behind a non-fitting
+  each net queue has one submitter. Supporting several independent
+  allocators would require revisiting this policy: waking only the first
+  waiter can starve a fitting waiter behind a non-fitting
   one once the last in-flight request has completed. Options then: wake
   every waiter, or select the first that fits from per-entry sizes and a
-  free-descriptor count.
+  free-descriptor count. That review should also cover duplicate registrations,
+  removal when allocation succeeds on an unrelated poll, and cancellation
+  of a registered `VqAlloc`; stale entries must not consume a live waiter's
+  wakeup.
 
-- **Block I/O task: recover the sequential cost** (recorded 2026-09-09 from
-  `virtio-descriptor-waiters.md`). The single-owner task costs 3 to 5
-  percent of sequential throughput against the old driver. Three measured
+- **Block I/O task: recover the sequential cost** (recorded 2026-09-09).
+  The single-owner task costs 3 to 5 percent of sequential throughput against
+  the old driver. Three measured
   changes recover it and more (593 versus 506 MiB/s for 4 KiB sequential
   reads): drain the used ring at the start of the task's poll, keep a
   single-chunk response inline instead of in shared state, and a channel
