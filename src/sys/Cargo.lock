@@ -1427,8 +1427,6 @@ dependencies = [
 name = "rt"
 version = "0.1.0"
 dependencies = [
- "crossbeam",
- "crossbeam-queue",
  "elfloader",
  "frusa",
  "futures",
@@ -1669,7 +1667,6 @@ version = "0.1.0"
 dependencies = [
  "async-fs",
  "async-trait",
- "crossbeam",
  "elfloader",
  "futures",
  "ipnetwork",

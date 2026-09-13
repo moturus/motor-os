@@ -22,7 +22,6 @@ virtio-async     = { path = "../lib/virtio-async"     }
 
 # External.
 async-trait  = "0.1.88"
-crossbeam    = "0.8.4"
 elfloader    = { path = "../../third_party/elfloader" }
 futures      = "0.3"
 ipnetwork    = "0.20.0"
