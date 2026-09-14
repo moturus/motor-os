@@ -103,10 +103,15 @@ toolchain_reverify_rust_analyzer() {
 }
 
 toolchain_fetch_rust_analyzer() {
-	local rust="$1" prefix="$2"
+	local rust="$1" prefix="$2" manifest
 	# Provisioning may acquire sources; native check/build and regular tests are offline.
 	(cd "$rust/src/tools/rust-analyzer" && RUSTC="$prefix/bin/rustc" \
 		"$prefix/bin/cargo" fetch --locked --target x86_64-unknown-motor \
 		--config "$RUST_ANALYZER_CARGO_CONFIG") || return
+	for manifest in "$RUST_ANALYZER_URL_SOURCE/Cargo.toml" \
+		"$RUST_ANALYZER_INVENTORY_SOURCE/Cargo.toml"; do
+		RUSTC="$prefix/bin/rustc" "$prefix/bin/cargo" fetch --locked \
+			--manifest-path "$manifest" || return
+	done
 	toolchain_postbuild_locks_unchanged "$rust"
 }

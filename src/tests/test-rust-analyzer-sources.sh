@@ -27,6 +27,13 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 toolchain_prepare_rust_analyzer "$ROOT_DIR" "$rust" "$MOTORH" \
 	"${CARGO_HOME:-$HOME/.cargo}" "$temporary" false
+# Validate the standalone patched-crate locks before exercising the analyzer
+# workspace, which otherwise does not resolve their development dependencies.
+for manifest in "$RUST_ANALYZER_URL_SOURCE/Cargo.toml" \
+	"$RUST_ANALYZER_INVENTORY_SOURCE/Cargo.toml"; do
+	"$cargo" metadata --manifest-path "$manifest" --locked --offline \
+		--no-deps --format-version 1 >/dev/null
+done
 sysroot="$("$RUSTC" --print sysroot)"
 key="$(cat "$sysroot/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
 toolchain_require_hex toolchain_key "$key" 64

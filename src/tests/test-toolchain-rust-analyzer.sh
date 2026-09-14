@@ -91,15 +91,26 @@ fi
 mkdir -p "$temporary/prefix/bin" "$rust/src/tools/rust-analyzer"
 printf '%s\n' '#!/usr/bin/env bash' \
 	'[ "$RUSTC" = "${0%/cargo}/rustc" ] || exit 3' \
-	'[ "$*" = "fetch --locked --target x86_64-unknown-motor --config $EXPECTED_CONFIG" ] || exit 4' \
-	'[ "$PWD" = "$EXPECTED_WORKSPACE" ] || exit 5' \
+	'case "$*" in' \
+	'  "fetch --locked --target x86_64-unknown-motor --config $EXPECTED_CONFIG")' \
+	'    [ "$PWD" = "$EXPECTED_WORKSPACE" ] || exit 5 ;;' \
+	'  "fetch --locked --manifest-path $EXPECTED_URL/Cargo.toml") ;;' \
+	'  "fetch --locked --manifest-path $EXPECTED_INVENTORY/Cargo.toml") ;;' \
+	'  *) exit 4 ;;' \
+	'esac' \
+	'printf "%s\n" "$*" >> "$FETCH_LOG"' \
 	'exit "${FETCH_STATUS:-0}"' > "$temporary/prefix/bin/cargo"
 chmod +x "$temporary/prefix/bin/cargo"
 RUST_ANALYZER_CARGO_CONFIG="$config"
-export EXPECTED_CONFIG="$config" EXPECTED_WORKSPACE="$rust/src/tools/rust-analyzer"
+RUST_ANALYZER_URL_SOURCE="$url"
+RUST_ANALYZER_INVENTORY_SOURCE="$inventory"
+export EXPECTED_CONFIG="$config" EXPECTED_WORKSPACE="$rust/src/tools/rust-analyzer" \
+	EXPECTED_URL="$url" EXPECTED_INVENTORY="$inventory" \
+	FETCH_LOG="$temporary/fetches"
 toolchain_postbuild_locks_unchanged() { printf checked > "$temporary/locks-checked"; }
 toolchain_fetch_rust_analyzer "$rust" "$temporary/prefix"
 [ "$(cat "$temporary/locks-checked")" = checked ] || fail 'fetch skipped lock validation'
+[ "$(wc -l < "$FETCH_LOG")" = 3 ] || fail 'fetch skipped a patched-crate test graph'
 export FETCH_STATUS=7
 if toolchain_fetch_rust_analyzer "$rust" "$temporary/prefix"; then
 	fail 'Cargo fetch failure was hidden'
