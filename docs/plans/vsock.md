@@ -318,6 +318,28 @@ Stage 3 CID/configuration validation is implemented and parent-reviewed:
   integration; real BAR/device coverage remains for activation tests. Neither
   milestone is complete.
 
+Shared PCI capability metadata validation is implemented and parent-reviewed:
+
+- Parse only supported common/device/notify metadata after checking the
+  consumed 16/20-byte prefix against configuration-space bounds. Reserved
+  types and BAR indices are skipped before indexing; extended capability
+  lengths remain accepted. The first supported metadata instance is selected
+  for each type, and shared device/notify BARs are mapped only once.
+- Guest pure-helper tests cover short/extended lengths, exact-end and
+  out-of-range prefixes, reserved types, and BAR indices. Debug/release
+  builds, targeted Clippy, descriptor/I/O-task/filesystem regressions, and
+  formatting/diff checks passed without new warnings. Parent review corrected
+  a missing notification-loop `break` before these gates. Logs:
+  `/tmp/virtio-cap-meta.gsqhq1/` and `/tmp/virtio-cap-meta-gate.mNm6aE/`.
+- Additional release base-image boots on CHV 52.0 and Firecracker 1.15.1
+  passed the same three guest test groups and SSH/SFTP traffic. The temporary
+  harness used fresh runtime paths and the shared VM lock. Logs:
+  `/tmp/vsock-other-vmm.mz7vi7/`. No vsock device was attached; these are
+  launcher/shared-driver checks, not vsock interoperability or milestone gates.
+- Malformed hardware metadata was not injected. Mapped MMIO access ranges,
+  MSI-X regions, and unsupported I/O BAR selection remain separate work;
+  neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

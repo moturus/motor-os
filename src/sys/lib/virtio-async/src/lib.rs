@@ -18,6 +18,10 @@ pub use virtio_queue::tests::{
     test_premature_completion_drop, test_premature_rx_pool_drop, test_used_id_rejection,
 };
 #[cfg(feature = "test-support")]
+pub mod virtio_test_support {
+    pub use crate::virtio_device::{supported_virtio_cap, valid_virtio_cap_bar};
+}
+#[cfg(feature = "test-support")]
 pub mod vsock_test_support {
     use crate::virtio_device::VirtioDeviceKind;
 

@@ -71,6 +71,22 @@ pub(crate) fn validate_msix_vectors(vectors: Option<u16>, required: u16) -> Resu
     }
 }
 
+pub fn supported_virtio_cap(cap_offset: u8, header: u32) -> Option<u8> {
+    let cap_len = ((header >> 16) & 0xff) as u8;
+    let cfg_type = (header >> 24) as u8;
+    let required_len = match cfg_type {
+        VIRTIO_PCI_CAP_COMMON_CFG | VIRTIO_PCI_CAP_DEVICE_CFG => 16,
+        VIRTIO_PCI_CAP_NOTIFY_CFG => 20,
+        _ => return None,
+    };
+    (cap_len >= required_len && usize::from(cap_offset) + usize::from(required_len) <= 256)
+        .then_some(cfg_type)
+}
+
+pub fn valid_virtio_cap_bar(bar: u8) -> bool {
+    bar < 6
+}
+
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub(super) struct VirtioPciCap {
@@ -85,25 +101,29 @@ pub(super) struct VirtioPciCap {
 }
 
 impl VirtioPciCap {
-    fn init(device_id: PciDeviceID, cap_offset: u8) -> Self {
-        let cfg_type = device_id.read_config_u8(cap_offset + 3);
-        let bar = device_id.read_config_u8(cap_offset + 4);
-        let offset = device_id.read_config_u32(cap_offset + 8);
-        let length = device_id.read_config_u32(cap_offset + 12);
+    fn parse(device_id: PciDeviceID, cap_offset: u8) -> Option<Self> {
+        let header = device_id.read_config_u32(cap_offset);
+        let cfg_type = supported_virtio_cap(cap_offset, header)?;
+        let bar = device_id.read_config_u32(cap_offset.checked_add(4)?) as u8;
+        if !valid_virtio_cap_bar(bar) {
+            return None;
+        }
+        let offset = device_id.read_config_u32(cap_offset.checked_add(8)?);
+        let length = device_id.read_config_u32(cap_offset.checked_add(12)?);
 
         let notify_off_multiplier = if cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG {
-            device_id.read_config_u32(cap_offset + 16)
+            device_id.read_config_u32(cap_offset.checked_add(16)?)
         } else {
             0
         };
 
-        VirtioPciCap {
+        Some(VirtioPciCap {
             cfg_type,
             bar,
             offset,
             length,
             notify_off_multiplier,
-        }
+        })
     }
 }
 
@@ -216,7 +236,9 @@ impl VirtioDevice {
 
         let mut virtio_caps = Vec::<VirtioPciCap>::new();
         for c in caps {
-            virtio_caps.push(VirtioPciCap::init(device_id, c));
+            if let Some(cap) = VirtioPciCap::parse(device_id, c) {
+                virtio_caps.push(cap);
+            }
         }
 
         let mut common_cap: Option<&VirtioPciCap> = None;
@@ -254,7 +276,7 @@ impl VirtioDevice {
         for cap in &virtio_caps {
             if cap.cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG {
                 device_cfg = Some(*cap);
-                if cap.bar != common_cfg.bar {
+                if pci_device.bars[cap.bar as usize].is_none() {
                     pci_device.bars[cap.bar as usize] = Some(PciBar::init(device_id, cap.bar));
                 }
                 log::trace!("VirtIO device_id {device_id:?}: device cap: {cap:?}");
@@ -266,9 +288,10 @@ impl VirtioDevice {
         for cap in &virtio_caps {
             if cap.cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG {
                 notify_cfg = Some(*cap);
-                if cap.bar != common_cfg.bar {
+                if pci_device.bars[cap.bar as usize].is_none() {
                     pci_device.bars[cap.bar as usize] = Some(PciBar::init(device_id, cap.bar));
                 }
+                break;
             }
         }
 

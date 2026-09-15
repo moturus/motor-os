@@ -1,5 +1,6 @@
 pub fn run_tests() {
     virtio_async::test_descriptor_waiters();
+    test_virtio_cap_metadata();
     test_vsock_discovery_features();
     test_vsock_wire();
     for kind in ["block", "network"] {
@@ -81,6 +82,46 @@ pub fn run_tests() {
         );
     }
     println!("virtio descriptor tests PASS");
+}
+
+fn test_virtio_cap_metadata() {
+    use virtio_async::virtio_test_support::{supported_virtio_cap, valid_virtio_cap_bar};
+
+    let header =
+        |cap_len: u8, cfg_type: u8| 9u32 | (u32::from(cap_len) << 16) | (u32::from(cfg_type) << 24);
+    for (offset, cap_len, cfg_type) in [
+        (0x40, 16, 1),
+        (0xf0, 16, 1),
+        (0xf0, 0xff, 4),
+        (0xec, 20, 2),
+        (0xec, 0xff, 2),
+    ] {
+        assert_eq!(
+            supported_virtio_cap(offset, header(cap_len, cfg_type)),
+            Some(cfg_type)
+        );
+    }
+    for (offset, cap_len, cfg_type) in [
+        (0x40, 15, 1),
+        (0x40, 19, 2),
+        (0xf4, 0xff, 1),
+        (0xf0, 0xff, 2),
+        (0x40, 0xff, 0),
+        (0x40, 0xff, 3),
+        (0x40, 0xff, 5),
+        (0x40, 0xff, 0xff),
+    ] {
+        assert_eq!(
+            supported_virtio_cap(offset, header(cap_len, cfg_type)),
+            None
+        );
+    }
+    for bar in [0, 5] {
+        assert!(valid_virtio_cap_bar(bar));
+    }
+    for bar in [6, 0xff] {
+        assert!(!valid_virtio_cap_bar(bar));
+    }
 }
 
 fn test_vsock_discovery_features() {
