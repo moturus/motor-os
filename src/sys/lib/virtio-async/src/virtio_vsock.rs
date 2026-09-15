@@ -456,6 +456,133 @@ impl RxPool {
     }
 }
 
+pub(crate) struct EventCompletion {
+    completion: VqCompletion<()>,
+}
+
+impl EventCompletion {
+    pub(crate) fn head(&self) -> u16 {
+        self.completion.chain_head()
+    }
+
+    pub(crate) fn finish_ordered(mut self, ordered_head: u16) -> Result<Event, EventError> {
+        assert_eq!(
+            self.head(),
+            ordered_head,
+            "ordered vsock event head mismatch"
+        );
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(((), used_len)) = self.completion.do_poll(&mut cx) else {
+            panic!("ordered vsock event completion was not reclaimed")
+        };
+        let used_len = used_len.expect("vsock event completion unexpectedly failed");
+        let bytes = self.completion.read_header::<[u8; EVENT_LEN]>();
+        decode_event(&bytes, used_len)
+    }
+}
+
+pub(crate) fn try_post_event(queue: Rc<RefCell<Virtqueue>>) -> IoResult<EventCompletion> {
+    let (head, data) = {
+        let mut queue = queue.borrow_mut();
+        let Some(head) = queue.alloc_descriptor_chain(1) else {
+            return Err(ErrorKind::WouldBlock.into());
+        };
+        let (event, phys_addr, _) = queue.get_buffer::<[u8; EVENT_LEN]>(head);
+        event.fill(0);
+        (
+            head,
+            UserData {
+                phys_addr,
+                len: EVENT_LEN as u32,
+            },
+        )
+    };
+    Ok(EventCompletion {
+        completion: Virtqueue::add_buffs(queue, &[data], 0, 1, head, ()),
+    })
+}
+
+pub(crate) struct PreparedEventPool {
+    queue: Rc<RefCell<Virtqueue>>,
+    count: usize,
+    completions: Vec<EventCompletion>,
+}
+
+impl PreparedEventPool {
+    pub(crate) fn new(queue: Rc<RefCell<Virtqueue>>) -> IoResult<Self> {
+        let count = usize::from(queue.borrow().queue_size()).min(4);
+        if count == 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let mut completions = Vec::new();
+        completions
+            .try_reserve_exact(count)
+            .map_err(|_| ErrorKind::OutOfMemory)?;
+        Ok(Self {
+            queue,
+            count,
+            completions,
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn len(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn publish(self) -> EventPool {
+        let Self {
+            queue,
+            count,
+            mut completions,
+        } = self;
+        let ordered = Virtqueue::ordered_completions(queue.clone());
+        for _ in 0..count {
+            completions
+                .push(try_post_event(queue.clone()).unwrap_or_else(|err| {
+                    panic!("prepared vsock event publication failed: {err}")
+                }));
+        }
+        EventPool {
+            queue,
+            ordered,
+            completions,
+        }
+    }
+}
+
+/// Device-lifetime event ownership; retain this with the device on failure.
+pub(crate) struct EventPool {
+    queue: Rc<RefCell<Virtqueue>>,
+    ordered: OrderedCompletions,
+    completions: Vec<EventCompletion>,
+}
+
+impl EventPool {
+    pub(crate) fn poll_consume<R>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        consume: impl FnOnce(Result<Event, EventError>) -> R,
+    ) -> std::task::Poll<R> {
+        let std::task::Poll::Ready(head) = self.ordered.poll_next(cx) else {
+            return std::task::Poll::Pending;
+        };
+        let index = self
+            .completions
+            .iter()
+            .position(|completion| completion.head() == head)
+            .expect("ordered vsock event head has no retained completion");
+        let event = self.completions.swap_remove(index).finish_ordered(head);
+        let result = consume(event);
+        assert!(self.completions.len() < self.completions.capacity());
+        self.completions.push(
+            try_post_event(self.queue.clone())
+                .unwrap_or_else(|err| panic!("vsock event repost failed: {err}")),
+        );
+        std::task::Poll::Ready(result)
+    }
+}
+
 /// Decode a copied header after completion. `bytes` need not contain the
 /// separately posted payload; `used_len` covers both descriptors. The caller
 /// may expose the returned payload length only within that posted buffer.

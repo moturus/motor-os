@@ -97,18 +97,29 @@ impl Device {
     }
 
     fn complete_raw(&self, raw_head: u32, consumed: u32, status: u8) {
-        let mut queue = self.queue.borrow_mut();
-        if raw_head < u32::from(queue.queue_size) {
-            let mut tail = raw_head as u16;
-            while queue.get_descriptor(tail).flags & VIRTQ_DESC_F_NEXT != 0 {
-                tail = queue.get_descriptor(tail).next;
-            }
-            // SAFETY: aligned status storage belongs to this simulated device.
-            unsafe {
-                (queue.header_buffers[tail as usize].buf.raw_ptr_mut() as *mut u64)
-                    .write_volatile(status as u64);
+        {
+            let mut queue = self.queue.borrow_mut();
+            if raw_head < u32::from(queue.queue_size) {
+                let mut tail = raw_head as u16;
+                while queue.get_descriptor(tail).flags & VIRTQ_DESC_F_NEXT != 0 {
+                    tail = queue.get_descriptor(tail).next;
+                }
+                // SAFETY: aligned status storage belongs to this simulated device.
+                unsafe {
+                    (queue.header_buffers[tail as usize].buf.raw_ptr_mut() as *mut u64)
+                        .write_volatile(status as u64);
+                }
             }
         }
+        self.publish_used_raw(raw_head, consumed);
+    }
+
+    fn publish_used(&self, head: u16, consumed: u32) {
+        self.publish_used_raw(u32::from(head), consumed);
+    }
+
+    fn publish_used_raw(&self, raw_head: u32, consumed: u32) {
+        let mut queue = self.queue.borrow_mut();
         // SAFETY: the fixture owns the simulated device's ring.
         unsafe {
             let idx = queue.used_ring.idx.read_volatile();
@@ -163,6 +174,7 @@ pub fn test_descriptor_waiters() {
     test_header_buffers();
     test_vsock_rx();
     test_vsock_rx_pool();
+    test_vsock_events();
     test_vsock_tx();
     test_exhausted_self_link();
     test_mixed_chains();
@@ -612,6 +624,12 @@ fn write_rx_header(device: &Device, head: u16, header: &[u8; 44]) {
     scratch[..44].copy_from_slice(header);
 }
 
+fn write_event(device: &Device, head: u16, event: u32) {
+    let mut queue = device.queue.borrow_mut();
+    let scratch: &mut [u8] = queue.header_buffers[head as usize].buf.as_mut();
+    scratch[..4].copy_from_slice(&event.to_le_bytes());
+}
+
 fn available_head(device: &Device, idx: u16) -> u16 {
     let queue = device.queue.borrow();
     let slot = idx & queue.queue_size_mask;
@@ -953,6 +971,135 @@ fn test_vsock_rx_pool() {
     let current = published.wrapping_add(1);
     for offset in 0..4 {
         device.complete(available_head(&device, current.wrapping_add(offset)), 0, 0);
+    }
+    drop(pool);
+}
+
+fn test_vsock_events() {
+    use crate::virtio_vsock::{Event, EventError, PreparedEventPool, try_post_event};
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    for header in &mut device.queue.borrow_mut().header_buffers {
+        <IoBuf as AsMut<[u8]>>::as_mut(&mut header.buf)[..8].fill(0xa5);
+    }
+    let completion = try_post_event(device.queue.clone()).unwrap();
+    let head = completion.head();
+    {
+        let queue = device.queue.borrow();
+        let descriptor = queue.get_descriptor(head);
+        let scratch = &queue.header_buffers[head as usize].buf;
+        assert_eq!(
+            (descriptor.addr, descriptor.len, descriptor.flags),
+            (scratch.phys_addr() as u64, 4, VIRTQ_DESC_F_WRITE)
+        );
+        assert_eq!(
+            &<IoBuf as AsRef<[u8]>>::as_ref(scratch)[..8],
+            &[0, 0, 0, 0, 0xa5, 0xa5, 0xa5, 0xa5]
+        );
+    }
+    write_event(&device, head, 0);
+    device.publish_used(head, 4);
+    device.reclaim();
+    assert_eq!(completion.finish_ordered(head), Ok(Event::TransportReset));
+
+    for (event, used_len, expected) in [
+        (0x7856_3412, 4, Err(EventError::Unknown(0x7856_3412))),
+        (0, 3, Err(EventError::InvalidLength)),
+        (0, 5, Err(EventError::InvalidLength)),
+    ] {
+        let completion = try_post_event(device.queue.clone()).unwrap();
+        let head = completion.head();
+        write_event(&device, head, event);
+        device.publish_used(head, used_len);
+        device.reclaim();
+        assert_eq!(completion.finish_ordered(head), expected);
+    }
+
+    let blocker = device.submit(ready_head(&device, 8), 8, 0);
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let error = match try_post_event(device.queue.clone()) {
+        Err(error) => error,
+        Ok(_) => panic!("full event queue accepted another buffer"),
+    };
+    assert_eq!(error.kind(), ErrorKind::WouldBlock);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+    device.complete(blocker.chain_head, 0, 0);
+    drop(blocker);
+
+    let one = Device::with_size(crate::VirtioDeviceKind::Vsock, 1);
+    assert_eq!(PreparedEventPool::new(one.queue.clone()).unwrap().len(), 1);
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let prepared = PreparedEventPool::new(device.queue.clone()).unwrap();
+    assert_eq!(prepared.len(), 4);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        0
+    );
+    let mut pool = prepared.publish();
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        4
+    );
+    let heads: [u16; 4] = core::array::from_fn(|idx| available_head(&device, idx as u16));
+    let order = [3, 1, 2, 0];
+    for (position, index) in order.into_iter().enumerate() {
+        let head = heads[index];
+        write_event(&device, head, if position == 1 { 7 } else { 0 });
+        device.publish_used(head, if position == 2 { 3 } else { 4 });
+    }
+    device.reclaim();
+    for (position, index) in order.into_iter().enumerate() {
+        let before_repost = 4 + position as u16;
+        let mut cx = ContextBuilder::from_waker(Waker::noop())
+            .local_waker(LocalWaker::noop())
+            .build();
+        assert_eq!(
+            pool.poll_consume(&mut cx, |event| {
+                assert_eq!(
+                    unsafe { *device.queue.borrow().available_ring.next_available_idx },
+                    before_repost
+                );
+                match position {
+                    1 => assert_eq!(event, Err(EventError::Unknown(7))),
+                    2 => assert_eq!(event, Err(EventError::InvalidLength)),
+                    _ => assert_eq!(event, Ok(Event::TransportReset)),
+                }
+                position
+            }),
+            Poll::Ready(position)
+        );
+        let reposted = available_head(&device, before_repost);
+        assert_eq!(reposted, heads[index]);
+        let queue = device.queue.borrow();
+        let scratch: &[u8] = queue.header_buffers[reposted as usize].buf.as_ref();
+        assert_eq!(&scratch[..4], &[0; 4]);
+    }
+
+    let pending_head = available_head(&device, 4);
+    write_event(&device, pending_head, 0);
+    let wake = Rc::new(WakeCount::default());
+    let local_waker = LocalWaker::from(wake.clone());
+    let mut cx = ContextBuilder::from_waker(Waker::noop())
+        .local_waker(&local_waker)
+        .build();
+    assert!(pool.poll_consume(&mut cx, |_| ()).is_pending());
+    device.publish_used(pending_head, 4);
+    assert!(pool.poll_consume(&mut cx, |_| ()).is_pending());
+    device.reclaim();
+    assert_eq!(wake.0.get(), 1);
+    assert_eq!(
+        pool.poll_consume(&mut cx, |event| assert_eq!(
+            event,
+            Ok(Event::TransportReset)
+        )),
+        Poll::Ready(())
+    );
+    for idx in 5..9 {
+        device.publish_used(available_head(&device, idx), 0);
     }
     drop(pool);
 }

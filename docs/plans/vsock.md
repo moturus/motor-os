@@ -244,6 +244,24 @@ Stage 4 fixed RX pool (D7, D17) is implemented and parent-reviewed:
   completion. All corrections preceded guest validation. Events and device
   activation are next; neither milestone is complete.
 
+Stage 4 event completion/pool is implemented and parent-reviewed:
+
+- Publishes one writable four-byte descriptor per event, copies bytes only
+  after completion, and validates the exact used length and event ID. The
+  fixed `min(4, event_descriptors)` pool uses the same ordered accessor and
+  synchronous consume/repost boundary as RX, with capacity reserved before
+  publication. Invalid events replenish normally; no extra queue library,
+  payload allocation, block status, or submission-order waiting is added.
+- Guest fixtures cover scratch initialization/layout, literal reset and
+  unknown IDs, invalid lengths, exhausted admission, pool bounds, reversed
+  completion order, callback-before-repost, scratch reuse, and concrete
+  completion wakeups. Event fixture writes bypass only the synthetic block
+  status write; existing block/net test behavior is preserved.
+- Debug and release base-image/systest builds, targeted Clippy, and guest
+  descriptor/I/O-task/filesystem regressions passed with no new warnings.
+  Formatting/diff checks passed; no initial check failures. Logs:
+  `/tmp/vsock-events.Jh4yKQ/`. Activation and both milestones remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
