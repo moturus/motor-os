@@ -12,31 +12,41 @@ struct Device {
 
 impl Device {
     fn new(device_kind: crate::VirtioDeviceKind) -> Self {
-        const SIZE: u16 = 8;
-        let memory = IoBuf::new_from_size_align(4096).unwrap();
+        Self::with_size(device_kind, 8)
+    }
+
+    fn with_size(device_kind: crate::VirtioDeviceKind, size: u16) -> Self {
+        assert!(size.is_power_of_two() && size <= 256);
+        let queue_sz = u64::from(size);
+        let ring_size = super::super::align_up(18 * queue_sz + 4, 4) + 32 * queue_sz;
+        let allocation_size = usize::try_from(ring_size)
+            .unwrap()
+            .next_power_of_two()
+            .max(4096);
+        let memory = IoBuf::new_from_size_align(allocation_size).unwrap();
         let addr = memory.raw_ptr() as u64;
-        // SAFETY: the owned, aligned page contains all three non-overlapping
-        // rings. No device accesses it; this fixture outlives every completion.
+        // SAFETY: the owned, aligned allocation contains all three
+        // non-overlapping rings and outlives every completion.
         let descriptors = unsafe {
-            std::ptr::write_bytes(addr as *mut u8, 0, 4096);
-            std::slice::from_raw_parts_mut(addr as *mut VirtqDesc, SIZE as usize)
+            std::ptr::write_bytes(addr as *mut u8, 0, allocation_size);
+            std::slice::from_raw_parts_mut(addr as *mut VirtqDesc, size as usize)
         };
         for (idx, desc) in descriptors.iter_mut().enumerate() {
-            desc.next = (idx as u16 + 1) % SIZE;
+            desc.next = (idx as u16 + 1) % size;
         }
-        let used_ring = VirtqUsed::from_addr(addr, SIZE);
+        let used_ring = VirtqUsed::from_addr(addr, size);
         *used_ring.flags = 1; // Suppress doorbells; there is no PCI device.
-        let header_buffers = (0..SIZE)
+        let header_buffers = (0..size)
             .map(|_| HeaderBuffer::new(device_kind).unwrap())
             .collect();
         let queue = Virtqueue {
             virt_addr: addr,
-            queue_size: SIZE,
+            queue_size: size,
             queue_num: 0,
             queue_notify_off: 0,
             device_kind,
             descriptors,
-            available_ring: VirtqAvail::from_addr(addr, SIZE),
+            available_ring: VirtqAvail::from_addr(addr, size),
             used_ring,
             free_head_idx: 0,
             next_used_idx: 0,
@@ -44,10 +54,10 @@ impl Device {
             header_buffers,
             notify_bar: std::ptr::null(),
             notify_offset: 0,
-            queue_size_mask: SIZE - 1,
+            queue_size_mask: size - 1,
             last_kick_idx: 0,
             alloc_waiters: VecDeque::new(),
-            completion_waiters: vec![None; SIZE as usize],
+            completion_waiters: vec![None; size as usize],
             ordered_consumer_claimed: false,
             ordered_waiter: None,
             virtio_f_event_idx_negotiated: false,
@@ -152,6 +162,7 @@ pub fn test_descriptor_waiters() {
     test_used_id_boundary();
     test_header_buffers();
     test_vsock_rx();
+    test_vsock_rx_pool();
     test_vsock_tx();
     test_exhausted_self_link();
     test_mixed_chains();
@@ -455,6 +466,16 @@ pub fn test_premature_completion_drop(block: bool) {
     panic!("premature completion drop was accepted");
 }
 
+/// Run in a child process: the device-lifetime RX owner is not cancellable.
+pub fn test_premature_rx_pool_drop() {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let pool = crate::virtio_vsock::PreparedRxPool::new(device.queue.clone())
+        .unwrap()
+        .publish();
+    drop(pool);
+    panic!("premature vsock RX pool drop was accepted");
+}
+
 /// Run in a child process because Motor OS panics abort the process.
 pub fn test_used_id_rejection(case: &str) {
     let device = Device::new(crate::VirtioDeviceKind::Vsock);
@@ -589,6 +610,19 @@ fn write_rx_header(device: &Device, head: u16, header: &[u8; 44]) {
     let mut queue = device.queue.borrow_mut();
     let scratch: &mut [u8] = queue.header_buffers[head as usize].buf.as_mut();
     scratch[..44].copy_from_slice(header);
+}
+
+fn available_head(device: &Device, idx: u16) -> u16 {
+    let queue = device.queue.borrow();
+    let slot = idx & queue.queue_size_mask;
+    // SAFETY: the fixture owns the simulated driver's available ring.
+    unsafe { core::ptr::addr_of!(queue.available_ring.ring[slot as usize]).read_volatile() }
+}
+
+fn rx_payload_phys(device: &Device, head: u16) -> u64 {
+    let queue = device.queue.borrow();
+    let payload = queue.get_descriptor(queue.get_descriptor(head).next);
+    payload.addr
 }
 
 fn test_vsock_rx() {
@@ -755,6 +789,172 @@ fn test_vsock_rx() {
     );
     device.complete(blocker.chain_head, 0, 0);
     drop(blocker);
+}
+
+fn test_vsock_rx_pool() {
+    use crate::virtio_vsock::{DecodeErrorKind, Operation, PreparedRxPool};
+
+    let tiny = Device::with_size(crate::VirtioDeviceKind::Vsock, 1);
+    let error = match PreparedRxPool::new(tiny.queue.clone()) {
+        Err(error) => error,
+        Ok(_) => panic!("one-descriptor RX queue was accepted"),
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+    let large = Device::with_size(crate::VirtioDeviceKind::Vsock, 256);
+    let prepared = PreparedRxPool::new(large.queue.clone()).unwrap();
+    assert_eq!(prepared.pages().len(), 64);
+    assert_eq!(
+        unsafe { *large.queue.borrow().available_ring.next_available_idx },
+        0
+    );
+    let large_pool = prepared.publish();
+    assert_eq!(
+        unsafe { *large.queue.borrow().available_ring.next_available_idx },
+        64
+    );
+    for idx in 0..64 {
+        large.complete(available_head(&large, idx), 0, 0);
+    }
+    drop(large_pool);
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let start = u16::MAX - 2;
+    {
+        let mut queue = device.queue.borrow_mut();
+        queue.next_used_idx = start;
+        // SAFETY: the fixture owns both simulated ring indices.
+        unsafe {
+            (queue.used_ring.idx as *mut u16).write_volatile(start);
+            queue
+                .available_ring
+                .next_available_idx
+                .write_volatile(start);
+        }
+    }
+    let prepared = PreparedRxPool::new(device.queue.clone()).unwrap();
+    assert_eq!(prepared.pages().len(), 4);
+    let pages: Vec<(u64, *mut u8)> = prepared
+        .pages()
+        .iter()
+        .map(|page| (page.phys_addr() as u64, page.raw_ptr() as *mut u8))
+        .collect();
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        start
+    );
+    let mut pool = prepared.publish();
+    let published = start.wrapping_add(4);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        published
+    );
+    assert!(
+        device
+            .queue
+            .borrow_mut()
+            .alloc_descriptor_chain(1)
+            .is_none()
+    );
+
+    let heads: [u16; 4] =
+        core::array::from_fn(|idx| available_head(&device, start.wrapping_add(idx as u16)));
+    for (index, head) in heads.into_iter().enumerate() {
+        assert_eq!(rx_payload_phys(&device, head), pages[index].0);
+    }
+    let order = [3, 1, 2, 0];
+    for (position, index) in order.into_iter().enumerate() {
+        let head = heads[index];
+        let (header_len, used_len) = match position {
+            0 => (1, 45),
+            1 => (3, 46),
+            2 => (4096, 44 + 4096),
+            _ => (0, 44),
+        };
+        let operation = if position == 3 { 1 } else { 5 };
+        write_rx_header(&device, head, &rx_header(header_len, operation));
+        // SAFETY: the fixture is the device and these posted pages are writable.
+        unsafe {
+            match position {
+                0 => pages[index].1.write(0x30),
+                1 => pages[index].1.write_bytes(0x31, 2),
+                2 => {
+                    pages[index].1.write_bytes(0x32, 4096);
+                    pages[index].1.add(4095).write(0x7f);
+                }
+                _ => {}
+            }
+        }
+        device.complete(head, used_len, 0);
+    }
+    device.reclaim();
+
+    for (position, index) in order.into_iter().enumerate() {
+        let before_repost = published.wrapping_add(position as u16);
+        let mut cx = ContextBuilder::from_waker(Waker::noop())
+            .local_waker(LocalWaker::noop())
+            .build();
+        let result = pool.poll_consume(&mut cx, |decoded, bytes| {
+            assert_eq!(
+                unsafe { *device.queue.borrow().available_ring.next_available_idx },
+                before_repost
+            );
+            match position {
+                0 => assert_eq!((decoded.unwrap().len, bytes), (1, &[0x30][..])),
+                1 => {
+                    let error = decoded.unwrap_err();
+                    assert_eq!(error.kind, DecodeErrorKind::TruncatedPayload);
+                    assert_eq!(error.raw.unwrap().len, 3);
+                    assert!(bytes.is_empty());
+                }
+                2 => {
+                    assert_eq!(decoded.unwrap().len, 4096);
+                    assert_eq!((bytes[0], bytes[4095]), (0x32, 0x7f));
+                }
+                _ => {
+                    assert_eq!(decoded.unwrap().operation, Operation::Request);
+                    assert!(bytes.is_empty());
+                }
+            }
+            position
+        });
+        assert_eq!(result, Poll::Ready(position));
+        let reposted = available_head(&device, before_repost);
+        assert_eq!(rx_payload_phys(&device, reposted), pages[index].0);
+    }
+    assert!(
+        device
+            .queue
+            .borrow_mut()
+            .alloc_descriptor_chain(1)
+            .is_none()
+    );
+
+    let pending_head = available_head(&device, published);
+    write_rx_header(&device, pending_head, &rx_header(0, 1));
+    let wake = Rc::new(WakeCount::default());
+    let local_waker = LocalWaker::from(wake.clone());
+    let mut cx = ContextBuilder::from_waker(Waker::noop())
+        .local_waker(&local_waker)
+        .build();
+    assert!(pool.poll_consume(&mut cx, |_, _| ()).is_pending());
+    device.complete(pending_head, 44, 0);
+    assert!(pool.poll_consume(&mut cx, |_, _| ()).is_pending());
+    device.reclaim();
+    assert_eq!(wake.0.get(), 1);
+    assert_eq!(
+        pool.poll_consume(&mut cx, |decoded, bytes| {
+            assert_eq!(decoded.unwrap().operation, Operation::Request);
+            assert!(bytes.is_empty());
+        }),
+        Poll::Ready(())
+    );
+
+    let current = published.wrapping_add(1);
+    for offset in 0..4 {
+        device.complete(available_head(&device, current.wrapping_add(offset)), 0, 0);
+    }
+    drop(pool);
 }
 
 fn test_vsock_tx() {

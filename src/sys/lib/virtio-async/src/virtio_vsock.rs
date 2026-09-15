@@ -9,7 +9,7 @@ use moto_tooling::iobuf::IoBuf;
 
 use crate::WriteCompletion;
 use crate::virtio_device::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice};
-use crate::virtio_queue::{UserData, Virtqueue, VqCompletion};
+use crate::virtio_queue::{OrderedCompletions, UserData, Virtqueue, VqCompletion};
 
 pub const HEADER_LEN: usize = 44;
 pub const EVENT_LEN: usize = 4;
@@ -352,6 +352,108 @@ pub(crate) fn try_post_rx(
             payload,
         ),
     })
+}
+
+pub(crate) struct PreparedRxPool {
+    queue: Rc<RefCell<Virtqueue>>,
+    pages: Vec<IoBuf>,
+    completions: Vec<RxCompletion>,
+}
+
+impl PreparedRxPool {
+    /// Allocate and validate the fixed RX pool without publishing DMA.
+    pub(crate) fn new(queue: Rc<RefCell<Virtqueue>>) -> IoResult<Self> {
+        let queue_size = queue.borrow().queue_size();
+        if queue_size < 2 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let count = usize::from(queue_size / 2).min(64);
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(count)
+            .map_err(|_| ErrorKind::OutOfMemory)?;
+        let mut completions = Vec::new();
+        completions
+            .try_reserve_exact(count)
+            .map_err(|_| ErrorKind::OutOfMemory)?;
+        for _ in 0..count {
+            let page = IoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
+                .ok_or(ErrorKind::OutOfMemory)?;
+            validate_payload_dma(page.capacity(), page.capacity(), page.phys_addr() as u64)?;
+            pages.push(page);
+        }
+        Ok(Self {
+            queue,
+            pages,
+            completions,
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn pages(&self) -> &[IoBuf] {
+        &self.pages
+    }
+
+    /// Claim the idle ordered cursor and publish every prepared page. All
+    /// fallible memory work has already completed, and the fixed pool fits
+    /// within the queue's descriptor capacity.
+    pub(crate) fn publish(self) -> RxPool {
+        let Self {
+            queue,
+            pages,
+            mut completions,
+        } = self;
+        let ordered = Virtqueue::ordered_completions(queue.clone());
+        for page in pages {
+            let completion = match try_post_rx(queue.clone(), page) {
+                Ok(completion) => completion,
+                Err((err, _)) => panic!("prepared vsock RX publication failed: {err}"),
+            };
+            completions.push(completion);
+        }
+        RxPool {
+            queue,
+            ordered,
+            completions,
+        }
+    }
+}
+
+/// Fixed device-lifetime RX ownership. A later cached failure state must keep
+/// this pool and its device alive; cancelling its task would drop DMA owners.
+pub(crate) struct RxPool {
+    queue: Rc<RefCell<Virtqueue>>,
+    ordered: OrderedCompletions,
+    completions: Vec<RxCompletion>,
+}
+
+impl RxPool {
+    /// Consume one already-reclaimed packet in used-ring order, then repost
+    /// its page. The callback is synchronous and cannot retain the DMA page.
+    pub(crate) fn poll_consume<R>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        consume: impl FnOnce(Result<PacketHeader, DecodeError>, &[u8]) -> R,
+    ) -> std::task::Poll<R> {
+        let std::task::Poll::Ready(head) = self.ordered.poll_next(cx) else {
+            return std::task::Poll::Pending;
+        };
+        let index = self
+            .completions
+            .iter()
+            .position(|completion| completion.head() == head)
+            .expect("ordered vsock RX head has no retained completion");
+        let completion = self.completions.swap_remove(index);
+        let (payload, decoded) = completion.finish_ordered(head);
+        let result = consume(decoded, payload.as_ref());
+        assert!(self.completions.len() < self.completions.capacity());
+        let reposted = match try_post_rx(self.queue.clone(), payload) {
+            Ok(completion) => completion,
+            Err((err, _)) => panic!("vsock RX repost failed: {err}"),
+        };
+        self.completions.push(reposted);
+        std::task::Poll::Ready(result)
+    }
 }
 
 /// Decode a copied header after completion. `bytes` need not contain the

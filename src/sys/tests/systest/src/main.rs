@@ -1110,6 +1110,10 @@ fn main() {
         virtio_async::test_premature_completion_drop(args[2] == "block");
         return;
     }
+    if args.get(1).map(String::as_str) == Some("test-virtio-rx-pool-drop") {
+        virtio_async::test_premature_rx_pool_drop();
+        return;
+    }
     if args.len() == 3 && args[1] == "test-virtio-header-layout" {
         virtio_async::test_header_layout_rejection(&args[2]);
         return;

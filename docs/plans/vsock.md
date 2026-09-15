@@ -223,6 +223,27 @@ Stage 4 private RX submission/completion is implemented and parent-reviewed:
   check logs are retained. Events, the RX pool, and activation remain pending;
   neither milestone is complete.
 
+Stage 4 fixed RX pool (D7, D17) is implemented and parent-reviewed:
+
+- Prepares all pages and completion capacity fallibly before publication,
+  then retains `min(64, rx_descriptors / 2)` pages. Each ordered head resolves
+  its owner, supplies validated bytes or refusal metadata to a synchronous
+  callback, and reposts the same page afterwards without allocation. The
+  active pool must remain with its device, including on cached failure.
+- Guest fixtures cover the 64-page cap, tiny-queue rejection, reversed used
+  order across counter wrap, malformed packets between valid ones, full-page
+  payloads, callback-before-repost, page identity/reuse, and completion-driven
+  wakeup. A child case checks premature pool destruction remains fatal.
+  Both profiles passed these and existing descriptor/I/O-task/filesystem
+  regressions, base-image/systest builds, and targeted Clippy. No new warnings;
+  formatting and diff checks passed.
+- Logs: `/tmp/vsock-rx-pool.s3fbfy/`. The initial targeted check needed an
+  explicit array length in the fixture. Parent review also corrected the
+  fixture to use captured virtual pointers, never dereference physical DMA
+  addresses, and initialize the entire reported full-page payload before
+  completion. All corrections preceded guest validation. Events and device
+  activation are next; neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1591,10 +1612,16 @@ discard an invalid packet before fetching another head. The raw-ring cursor
 advances when a head is fetched; the RX owner must resolve and handle that
 already-ready completion synchronously, before another fetch, repost, or
 await. No per-head token or separate acknowledgement phase is needed.
-Malformed packets must not
-stall ordered consumption or leak buffers. sys-io consumes results in order
-and returns device buffers after moving accepted data into bounded stream
-storage; application reads must not hold device buffers indefinitely.
+Malformed packets must not stall ordered consumption or leak buffers.
+Prepare all RX pages and bookkeeping fallibly before publishing anything;
+claim the idle cursor and publish only after device setup permits it. The
+fixed pool then uses a synchronous consume callback: resolve the next head,
+provide validated bytes and metadata (or empty bytes and refusal metadata),
+and repost the same page after the callback returns. sys-io copies accepted
+bytes into bounded stream storage in that callback; applications never own
+device RX pages. Publication and consumption need no further driver-side
+allocation. Retain the active pool with its device on cached failure;
+cancellation of a client operation must not drop outstanding DMA owners.
 
 No separate sorting pass, completed-head FIFO, per-descriptor sequence tag,
 or per-stream reorder protocol is part of this approach. Test opposite

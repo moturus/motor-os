@@ -15,7 +15,7 @@ mod virtio_vsock;
 #[cfg(feature = "test-support")]
 pub use virtio_queue::tests::{
     test_descriptor_waiters, test_header_layout_rejection, test_ordered_completion_rejection,
-    test_premature_completion_drop, test_used_id_rejection,
+    test_premature_completion_drop, test_premature_rx_pool_drop, test_used_id_rejection,
 };
 #[cfg(feature = "test-support")]
 pub mod vsock_test_support {

@@ -16,6 +16,16 @@ pub fn run_tests() {
             "unexpected premature-drop failure: {stderr}"
         );
     }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("test-virtio-rx-pool-drop")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("virtio completion dropped while the device still owns its DMA buffers"),
+        "unexpected RX-pool-drop failure: {stderr}"
+    );
     for (case, message) in [
         ("get-buffer-size", "virtio header buffer too small"),
         ("read-header-size", "virtio header buffer too small"),
