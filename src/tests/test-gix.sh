@@ -158,6 +158,8 @@ PY
     system_times_are_normalized_and_ordered
   "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
     an_index_shorter_than_its_checksum_is_rejected
+  "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
+    iter::new_from_header::
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"

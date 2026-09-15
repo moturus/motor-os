@@ -80,6 +80,8 @@ fn main() -> Result {
     assert_eq!(graph.num_commits(), 2);
     graph.verify_checksum().map_err(|err| err.into_error())?;
 
+    check_pack_validation(&repo, &output)?;
+
     let capabilities = gix::fs::Capabilities::probe_dir(&worktree);
     assert!(
         capabilities.executable_bit,
@@ -283,5 +285,50 @@ fn main() -> Result {
     );
 
     println!("gix native port fixture PASS");
+    Ok(())
+}
+
+fn check_pack_validation(repo: &gix::Repository, output: &std::path::Path) -> Result {
+    use gix::odb::pack::{self, data::Version};
+
+    let directory = output.join("pack-validation");
+    fs::create_dir(&directory)?;
+    for (version, corrupt_checksum, accepted) in [
+        (Version::V3, false, false),
+        (Version::V2, true, false),
+        (Version::V2, false, true),
+    ] {
+        let mut data = pack::data::header::encode(version, 0).to_vec();
+        let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+        hasher.update(&data);
+        let mut checksum = hasher.try_finalize()?;
+        if corrupt_checksum {
+            checksum.as_mut_slice()[0] ^= 1;
+        }
+        data.extend_from_slice(checksum.as_slice());
+        let result = pack::Bundle::write_to_directory(
+            &mut data.as_slice(),
+            Some(&directory),
+            &mut gix::progress::Discard,
+            &AtomicBool::new(false),
+            Some(repo.objects.clone()),
+            pack::bundle::write::Options {
+                thread_limit: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{version:?}, corrupt={corrupt_checksum}: {result:?}"
+        );
+        if accepted {
+            assert_eq!(result?.index.num_objects, 0);
+        }
+        assert!(
+            fs::read_dir(&directory)?.next().is_none(),
+            "pack writer left temporary files"
+        );
+    }
     Ok(())
 }

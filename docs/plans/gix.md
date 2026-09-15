@@ -7,8 +7,9 @@ and merge-state cleanup, and simplifies complete pack object selection.
 Overlapping failure tests are consolidated. D8 and D9 retain the policies
 accepted on 2026-09-12. Implementation was subsequently approved. M1's
 native dependency port and host/Motor repository fixture are committed;
-Gitoxide revision `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
-on `gix-moturus-cli` and verified on 2026-09-15. Repository opening,
+the port baseline `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
+on `gix-moturus-cli` and verified on 2026-09-15. The subsequent pack-input
+repair is recorded in section 7. Repository opening,
 configuration sanitization, `log` and read-only `status` pass the host and
 Motor component fixtures. Status rejects affected external or required
 filters. The shared cancellation flag and Motor handler are implemented;
@@ -703,6 +704,17 @@ identifies patched sources. A distributable dependency pin requires a
 reviewed fork commit; committing/publishing it is a separately authorized
 step. No Lorry, curl, SSH, kernel, std, moto-rt, mlibc or toolchain-source
 edits are assumed. If necessary, diagnose and discuss them first.
+
+Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
+Gitoxide `b4e6aeaa82be4183af466b7a99484c38322dd260`. In the external
+checkout's `gix-pack/src/data/input/bytes_to_entries.rs`, the streaming
+constructor now returns the existing unsupported-version error for version
+3 instead of asserting. It handles an empty pack's mandatory trailer during
+construction through the existing verifier, preserving each parsing mode.
+The input tests and native pack-writer fixture cover rejection, valid empty
+packs and temporary-file cleanup; focused host and Motor checks pass.
+Object-count allocation bounds remain part of Q6; the decoded-object limit
+does not bound pack metadata storage.
 
 Implementation follow-up, discussed and approved on 2026-09-15: extend Motor
 FS's own-role permission rule to allow `Rx` → `Rwx`, alongside `Rw` → `Rx`.
