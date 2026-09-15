@@ -3016,7 +3016,7 @@ fn perms_monotonic_check() {
 
 #[test]
 fn may_set_matrix() {
-    // (§8.7) exhaustive authority matrix and the one self-role exception.
+    // (§8.7) exhaustive authority matrix and the two self-role exceptions.
     use AccessPermissions::{R, Rw, Rwx, Rx};
     use async_fs::may_set;
     let roles = [Role::None, Role::Interactive, Role::System];
@@ -3036,6 +3036,8 @@ fn may_set_matrix() {
     assert!(may_set(Role::System, Role::System, Rwx, R));
     for role in roles {
         assert!(may_set(role, role, Rw, Rx), "own Rw -> Rx: {role:?}");
+        assert!(may_set(role, role, Rx, Rwx), "own Rx -> Rwx: {role:?}");
+        assert!(!may_set(role, role, Rw, Rwx), "own Rw -> Rwx: {role:?}");
         assert!(!may_set(role, role, Rx, Rw), "own Rx -> Rw: {role:?}");
     }
 }
@@ -3242,18 +3244,18 @@ async fn permissions_authority_test() -> Result<()> {
         perm_of(&mut fs, a, Role::Interactive).await,
         AccessPermissions::Rx
     );
-    // Own-byte widen denied.
+    // Rx may restore write while retaining execute.
+    fs.set_permissions(
+        Role::Interactive,
+        a,
+        Role::Interactive,
+        AccessPermissions::Rwx,
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        fs.set_permissions(
-            Role::Interactive,
-            a,
-            Role::Interactive,
-            AccessPermissions::Rwx
-        )
-        .await
-        .unwrap_err()
-        .kind(),
-        ErrorKind::PermissionDenied
+        perm_of(&mut fs, a, Role::Interactive).await,
+        AccessPermissions::Rwx
     );
     // Strictly-higher target forbidden (None cannot touch System).
     assert_eq!(
@@ -3346,23 +3348,17 @@ async fn permissions_authority_test() -> Result<()> {
     for role in [Role::None, Role::Interactive, Role::System] {
         assert!(!perm_of(&mut fs, s, role).await.can_write());
     }
-    // Write can never be re-granted to anyone.
-    assert!(
-        fs.set_permissions(Role::System, s, Role::System, AccessPermissions::Rwx)
-            .await
-            .is_err()
-    );
-    assert!(
-        fs.set_permissions(Role::System, s, Role::Interactive, AccessPermissions::Rw)
-            .await
-            .is_err()
-    );
-    assert!(
-        fs.set_permissions(Role::System, s, Role::None, AccessPermissions::Rw)
-            .await
-            .is_err()
-    );
-    // Seal survives reopen.
+    // No role may replace execute with write on its own byte.
+    for role in [Role::None, Role::Interactive, Role::System] {
+        assert_eq!(
+            fs.set_permissions(role, s, role, AccessPermissions::Rw)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+    // Executable state survives reopen.
     fs.flush().await?;
     let mut fs = open_fs(FS_TAG).await?;
     assert!(
@@ -3373,8 +3369,8 @@ async fn permissions_authority_test() -> Result<()> {
             .can_write()
     );
 
-    // The one non-narrowing self transition, Rw -> Rx, is available to every
-    // role, cascades write away from lower roles, and still obeys the ceiling.
+    // Both non-narrowing self transitions are available to every role.
+    // Rw -> Rx cascades write away; Rx -> Rwx leaves lower roles unchanged.
     for (idx, role) in [Role::None, Role::Interactive, Role::System]
         .into_iter()
         .enumerate()
@@ -3401,6 +3397,13 @@ async fn permissions_authority_test() -> Result<()> {
                 permissions,
             )
             .await?;
+        assert_eq!(
+            fs.set_permissions(role, entry, role, AccessPermissions::Rwx)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
         fs.set_permissions(role, entry, role, AccessPermissions::Rx)
             .await?;
         assert_eq!(perm_of(&mut fs, entry, role).await, AccessPermissions::Rx);
@@ -3411,6 +3414,9 @@ async fn permissions_authority_test() -> Result<()> {
                 .kind(),
             ErrorKind::PermissionDenied
         );
+        fs.set_permissions(role, entry, role, AccessPermissions::Rwx)
+            .await?;
+        assert_eq!(perm_of(&mut fs, entry, role).await, AccessPermissions::Rwx);
         for lower in [Role::None, Role::Interactive]
             .into_iter()
             .filter(|lower| (*lower as u8) < role as u8)
@@ -3419,27 +3425,32 @@ async fn permissions_authority_test() -> Result<()> {
         }
     }
 
-    let capped = fs
-        .create_entry(
-            Role::System,
-            root,
-            EntryKind::File,
-            "self-rx-capped",
-            RolePermissions::all(AccessPermissions::Rw),
-        )
-        .await?;
-    assert_eq!(
-        fs.set_permissions(
-            Role::Interactive,
-            capped,
-            Role::Interactive,
-            AccessPermissions::Rx,
-        )
-        .await
-        .unwrap_err()
-        .kind(),
-        ErrorKind::PermissionDenied
-    );
+    for (idx, old, new) in [
+        (0, AccessPermissions::Rw, AccessPermissions::Rx),
+        (1, AccessPermissions::Rx, AccessPermissions::Rwx),
+    ] {
+        let permissions = RolePermissions::all(old);
+        let capped = fs
+            .create_entry(
+                Role::System,
+                root,
+                EntryKind::File,
+                &format!("self-capped-{idx}"),
+                permissions,
+            )
+            .await?;
+        assert_eq!(
+            fs.set_permissions(Role::Interactive, capped, Role::Interactive, new)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            fs.metadata(Role::System, capped).await?.permissions()?,
+            permissions
+        );
+    }
     Ok(())
 }
 
@@ -3528,20 +3539,30 @@ async fn exact_permissions_authority_test() -> Result<()> {
         fs.metadata(Role::System, entry).await?.permissions()?
     );
 
-    // Runtime System cannot widen its own byte again.
+    // Runtime System may restore write on its own Rx byte, and may freely set
+    // lower roles in the same monotonic request.
+    let restored = RolePermissions::all(AccessPermissions::Rwx);
+    fs.set_all_permissions(Role::System, entry, restored)
+        .await?;
+    assert_eq!(
+        restored,
+        fs.metadata(Role::System, entry).await?.permissions()?
+    );
+
+    // The exact update API cannot bypass the direct Rw -> Rwx denial, and a
+    // rejected request leaves all role bytes unchanged.
+    let writable = RolePermissions::all(AccessPermissions::Rw);
+    fs.set_all_permissions(Role::System, entry, writable)
+        .await?;
     assert_eq!(
         ErrorKind::PermissionDenied,
-        fs.set_all_permissions(
-            Role::System,
-            entry,
-            RolePermissions::all(AccessPermissions::Rwx),
-        )
-        .await
-        .unwrap_err()
-        .kind()
+        fs.set_all_permissions(Role::System, entry, restored)
+            .await
+            .unwrap_err()
+            .kind()
     );
     assert_eq!(
-        sealed,
+        writable,
         fs.metadata(Role::System, entry).await?.permissions()?
     );
     Ok(())

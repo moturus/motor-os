@@ -194,14 +194,16 @@ impl TryFrom<u8> for AccessPermissions {
 /// to `new`? Governs **authority only**; cross-role monotonicity is a separate
 /// constraint applied by the FS (cap + cascade). See PERMISSIONS_DESIGN.md.
 ///   - target strictly below caller : any change (widen or narrow)
-///   - target == caller (own byte)  : narrow only, plus `Rw` -> `Rx`
+///   - target == caller (own byte)  : narrow, plus `Rw` -> `Rx` and `Rx` -> `Rwx`
 ///   - target strictly above caller : forbidden
 pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPermissions) -> bool {
     use core::cmp::Ordering::*;
     match (caller as u8).cmp(&(target as u8)) {
         Greater => true,
         Equal => {
-            old.can_narrow_to(new) || (old == AccessPermissions::Rw && new == AccessPermissions::Rx)
+            old.can_narrow_to(new)
+                || (old == AccessPermissions::Rw && new == AccessPermissions::Rx)
+                || (old == AccessPermissions::Rx && new == AccessPermissions::Rwx)
         }
         Less => false,
     }

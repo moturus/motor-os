@@ -928,6 +928,7 @@ fn permissions_vdso_test() {
 
     const RW: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
     const RX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+    const RWX: u64 = RW | moto_rt::fs::PERM_EXEC;
 
     let path = crate::temp_path("systest-permissions-vdso");
     let path_str = path.to_str().unwrap();
@@ -935,6 +936,10 @@ fn permissions_vdso_test() {
     std::fs::write(&path, b"permissions").unwrap();
 
     assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RW);
+    assert_eq!(
+        moto_rt::fs::set_perm(path_str, RWX),
+        Err(moto_rt::Error::NotAllowed)
+    );
     moto_rt::fs::set_perm(path_str, RX).unwrap();
     assert_eq!(moto_rt::fs::stat(path_str).unwrap().perm, RX);
 
@@ -942,6 +947,11 @@ fn permissions_vdso_test() {
     assert_eq!(
         moto_rt::fs::get_file_attr(file.as_raw_fd()).unwrap().perm,
         RX
+    );
+    moto_rt::fs::set_file_perm(file.as_raw_fd(), RWX).unwrap();
+    assert_eq!(
+        moto_rt::fs::get_file_attr(file.as_raw_fd()).unwrap().perm,
+        RWX
     );
     moto_rt::fs::set_file_perm(file.as_raw_fd(), moto_rt::fs::PERM_READ).unwrap();
     assert_eq!(
