@@ -13,7 +13,9 @@ pub mod virtio_net;
 mod virtio_queue;
 mod virtio_vsock;
 #[cfg(feature = "test-support")]
-pub use virtio_queue::tests::{test_descriptor_waiters, test_premature_completion_drop};
+pub use virtio_queue::tests::{
+    test_descriptor_waiters, test_header_layout_rejection, test_premature_completion_drop,
+};
 #[cfg(feature = "test-support")]
 pub mod vsock_test_support {
     use crate::virtio_device::VirtioDeviceKind;

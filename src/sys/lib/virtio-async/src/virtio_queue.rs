@@ -127,6 +127,36 @@ struct HeaderBuffer {
     in_use_by_completion: bool,
 }
 
+impl HeaderBuffer {
+    fn new(device_kind: crate::VirtioDeviceKind) -> Result<Self> {
+        let size = match device_kind {
+            crate::VirtioDeviceKind::Vsock => 64,
+            _ => 16,
+        };
+        Ok(Self {
+            buf: IoBuf::new_from_size_align(size).ok_or(ErrorKind::OutOfMemory)?,
+            consumed: 0,
+            in_use_by_device: false,
+            in_use_by_completion: false,
+        })
+    }
+
+    fn assert_layout<T>(&self) {
+        assert_header_layout::<T>(self.buf.capacity(), self.buf.raw_ptr() as usize);
+    }
+}
+
+fn assert_header_layout<T>(capacity: usize, address: usize) {
+    assert!(
+        core::mem::size_of::<T>() <= capacity,
+        "virtio header buffer too small"
+    );
+    assert!(
+        address.is_multiple_of(core::mem::align_of::<T>()),
+        "virtio header buffer is misaligned"
+    );
+}
+
 pub(crate) struct VqAlloc {
     num_to_alloc: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
@@ -263,13 +293,7 @@ impl Virtqueue {
 
         let mut header_buffers = Vec::with_capacity(queue_sz as usize);
         for _ in 0..queue_sz {
-            let buffer = HeaderBuffer {
-                buf: IoBuf::new_from_size_align(16).unwrap(),
-                consumed: 0,
-                in_use_by_device: false,
-                in_use_by_completion: false,
-            };
-            header_buffers.push(buffer);
+            header_buffers.push(HeaderBuffer::new(dev.kind())?);
         }
 
         let mut completion_waiters = Vec::with_capacity(queue_size as usize);
@@ -571,9 +595,9 @@ impl Virtqueue {
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
     pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u64, u16) {
         debug_assert!(idx < self.queue_size);
-        debug_assert!(core::mem::size_of::<T>() <= 16);
         let next = self.get_descriptor_mut(idx).next;
-        // Safety: checked above that the inded and the size are Ok.
+        self.header_buffers[idx as usize].assert_layout::<T>();
+        // Safety: the type's size and alignment were checked above.
         unsafe {
             let pbuf = &mut self.header_buffers[idx as usize].buf;
             let addr = pbuf.raw_ptr_mut() as usize;
@@ -759,14 +783,15 @@ impl<T> VqCompletion<T> {
     /// A copy of the chain head's header buffer, i.e. of whatever the device
     /// wrote into the first descriptor. Only meaningful once the completion
     /// has resolved; the buffer stays ours until this completion is dropped,
-    /// which is what releases the chain.
+    /// which is what releases the chain. The caller must already have valid
+    /// completion ownership.
     pub(crate) fn read_header<H: Copy>(&self) -> H {
-        debug_assert!(core::mem::size_of::<H>() <= 16);
         let virtq = self.virtqueue.borrow();
         let header_buffer = &virtq.header_buffers[self.chain_head as usize];
+        header_buffer.assert_layout::<H>();
         debug_assert!(!header_buffer.in_use_by_device);
-        // SAFETY: the header buffer is 16-byte aligned and at least as large
-        // as H (asserted above), and the device no longer owns it.
+        // SAFETY: size/alignment were checked above, and the device no longer
+        // owns the buffer.
         unsafe { (header_buffer.buf.raw_ptr() as *const H).read_volatile() }
     }
 

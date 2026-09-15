@@ -9,8 +9,9 @@ pub const EVENT_LEN: usize = 4;
 pub const SHUTDOWN_RECEIVE: u32 = 1;
 pub const SHUTDOWN_SEND: u32 = 2;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-struct WireHeader {
+pub(crate) struct WireHeader {
     src_cid: [u8; 8],
     dst_cid: [u8; 8],
     src_port: [u8; 4],

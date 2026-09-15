@@ -133,6 +133,24 @@ Stage 3 shared IRQ/MMIO capacity checks are implemented and parent-reviewed:
   Formatting/diff checks passed. Logs: `/tmp/vsock-capacity.1ukWmk/` (initial)
   and `final.xtVxhg/` beneath it (final). Neither milestone is complete.
 
+Stage 4 header-scratch sizing (D3) is implemented and parent-reviewed:
+
+- Production and memory-backed fixtures share the allocator: 64-byte vsock
+  scratch, unchanged 16-byte block/net scratch, and fallible allocation.
+  Both typed accessors check capacity/alignment in release. No eager zeroing,
+  device activation, extra boot tasks, or completion-ownership changes were
+  added; packet publication will initialize the actual wire bytes.
+- Guest descriptor tests cover exact capacities, valid aligned typed access,
+  the real 44-byte header, and child-process rejection of oversized/misaligned
+  access. Both profiles also passed existing premature-drop, I/O-task, and
+  scattered-write filesystem regressions. Base-image/systest builds, targeted
+  Clippy, formatting, and diff checks passed with no new warnings.
+- The initial build failed on a missing generic type annotation in the new
+  fixture, before guest execution; the annotation was corrected. Logs:
+  `/tmp/vsock-scratch.AbeL6N/` (original failure) and `final.UT8Gf1/` beneath it
+  (final validation). Packet submissions/completions and both milestones
+  remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

@@ -11,7 +11,7 @@ struct Device {
 }
 
 impl Device {
-    fn new() -> Self {
+    fn new(device_kind: crate::VirtioDeviceKind) -> Self {
         const SIZE: u16 = 8;
         let memory = IoBuf::new_from_size_align(4096).unwrap();
         let addr = memory.raw_ptr() as u64;
@@ -27,19 +27,14 @@ impl Device {
         let used_ring = VirtqUsed::from_addr(addr, SIZE);
         *used_ring.flags = 1; // Suppress doorbells; there is no PCI device.
         let header_buffers = (0..SIZE)
-            .map(|_| HeaderBuffer {
-                buf: IoBuf::new_from_size_align(16).unwrap(),
-                consumed: 0,
-                in_use_by_device: false,
-                in_use_by_completion: false,
-            })
+            .map(|_| HeaderBuffer::new(device_kind).unwrap())
             .collect();
         let queue = Virtqueue {
             virt_addr: addr,
             queue_size: SIZE,
             queue_num: 0,
             queue_notify_off: 0,
-            device_kind: crate::VirtioDeviceKind::Block,
+            device_kind,
             descriptors,
             available_ring: VirtqAvail::from_addr(addr, SIZE),
             used_ring,
@@ -134,13 +129,16 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 }
 
 pub fn test_descriptor_waiters() {
+    test_header_buffers();
     test_exhausted_self_link();
     test_mixed_chains();
     for block in [false, true] {
-        let device = Device::new();
-        if !block {
-            device.queue.borrow_mut().device_kind = crate::VirtioDeviceKind::Net;
-        }
+        let kind = if block {
+            crate::VirtioDeviceKind::Block
+        } else {
+            crate::VirtioDeviceKind::Net
+        };
+        let device = Device::new(kind);
         {
             let mut queue = device.queue.borrow_mut();
             queue.next_used_idx = u16::MAX;
@@ -193,7 +191,7 @@ pub fn test_descriptor_waiters() {
 }
 
 fn test_exhausted_self_link() {
-    let device = Device::new();
+    let device = Device::new(crate::VirtioDeviceKind::Block);
     let first = device.submit(ready_head(&device, 2), 2, 0);
     let second = device.submit(ready_head(&device, 2), 2, 0);
     for request in [first, second] {
@@ -224,7 +222,7 @@ fn test_mixed_chains() {
         value: u32,
     }
 
-    let device = Device::new();
+    let device = Device::new(crate::VirtioDeviceKind::Block);
     let mut pending: Vec<Request> = Vec::new();
     let mut finished = Vec::new();
     let mut random = 0xd1b54a32d192ed03u64;
@@ -310,11 +308,98 @@ fn test_mixed_chains() {
 
 /// Run in a child process: dropping an unfinished DMA owner must abort.
 pub fn test_premature_completion_drop(block: bool) {
-    let device = Device::new();
-    if !block {
-        device.queue.borrow_mut().device_kind = crate::VirtioDeviceKind::Net;
-    }
+    let kind = if block {
+        crate::VirtioDeviceKind::Block
+    } else {
+        crate::VirtioDeviceKind::Net
+    };
+    let device = Device::new(kind);
     let completion = device.submit(ready_head(&device, 3), 3, 0);
     drop(completion);
     panic!("premature completion drop was accepted");
+}
+
+fn test_header_buffers() {
+    for (kind, expected) in [
+        (crate::VirtioDeviceKind::Block, 16),
+        (crate::VirtioDeviceKind::Net, 16),
+        (crate::VirtioDeviceKind::Vsock, 64),
+    ] {
+        let device = Device::new(kind);
+        assert!(
+            device
+                .queue
+                .borrow()
+                .header_buffers
+                .iter()
+                .all(|header| header.buf.capacity() == expected)
+        );
+        let head = ready_head(&device, 1);
+        let phys_addr = {
+            let mut queue = device.queue.borrow_mut();
+            let (header, phys_addr, _) = queue.get_buffer::<u64>(head);
+            *header = 0;
+            phys_addr
+        };
+        let completion = Virtqueue::add_buffs(
+            device.queue.clone(),
+            &[UserData { phys_addr, len: 8 }],
+            0,
+            1,
+            head,
+            (),
+        );
+        device.complete(head, 8, expected as u8);
+        device.reclaim();
+        assert_eq!(completion.read_header::<u64>(), expected as u64);
+    }
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let head = ready_head(&device, 1);
+    let expected = crate::virtio_vsock::WireHeader::default();
+    let phys_addr = {
+        let mut queue = device.queue.borrow_mut();
+        let (header, phys_addr, _) = queue.get_buffer::<crate::virtio_vsock::WireHeader>(head);
+        *header = expected;
+        phys_addr
+    };
+    let completion = Virtqueue::add_buffs(
+        device.queue.clone(),
+        &[UserData {
+            phys_addr,
+            len: crate::virtio_vsock::HEADER_LEN as u32,
+        }],
+        0,
+        1,
+        head,
+        (),
+    );
+    device.complete(head, crate::virtio_vsock::HEADER_LEN as u32, 0);
+    device.reclaim();
+    assert_eq!(
+        completion.read_header::<crate::virtio_vsock::WireHeader>(),
+        expected
+    );
+}
+
+/// Run in a child process because Motor OS panics abort the process.
+pub fn test_header_layout_rejection(case: &str) {
+    match case {
+        "get-buffer-size" => {
+            let device = Device::new(crate::VirtioDeviceKind::Block);
+            let head = ready_head(&device, 1);
+            let _ = device.queue.borrow_mut().get_buffer::<[u8; 17]>(head);
+        }
+        "read-header-size" => {
+            let device = Device::new(crate::VirtioDeviceKind::Vsock);
+            let head = ready_head(&device, 1);
+            let completion = device.submit(head, 1, 0);
+            device.complete(head, 0, 0);
+            device.reclaim();
+            let _: [u8; 65] = completion.read_header();
+        }
+        "alignment" => assert_header_layout::<u32>(64, 1),
+        _ => panic!("unknown header-layout rejection case"),
+    }
+    panic!("invalid header layout was accepted");
 }

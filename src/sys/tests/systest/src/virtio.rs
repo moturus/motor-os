@@ -16,6 +16,23 @@ pub fn run_tests() {
             "unexpected premature-drop failure: {stderr}"
         );
     }
+    for (case, message) in [
+        ("get-buffer-size", "virtio header buffer too small"),
+        ("read-header-size", "virtio header buffer too small"),
+        ("alignment", "virtio header buffer is misaligned"),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test-virtio-header-layout")
+            .arg(case)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(message),
+            "unexpected header-layout failure: {stderr}"
+        );
+    }
     println!("virtio descriptor tests PASS");
 }
 
