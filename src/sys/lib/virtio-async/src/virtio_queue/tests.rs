@@ -180,6 +180,7 @@ pub fn test_descriptor_waiters() {
     test_vsock_rx_pool();
     test_vsock_events();
     test_vsock_tx();
+    test_vsock_tx_pool();
     test_exhausted_self_link();
     test_mixed_chains();
     for block in [false, true] {
@@ -1486,6 +1487,187 @@ fn test_vsock_tx() {
     let full = device.submit(ready_head(&device, 8), 8, 0);
     device.complete(full.chain_head, 0, 0);
     drop(full);
+}
+
+fn test_vsock_tx_pool() {
+    use crate::virtio_vsock::{RawHeader, TxPool};
+
+    let tiny = Device::new(crate::VirtioDeviceKind::Vsock);
+    let error = match TxPool::new(tiny.queue.clone()) {
+        Err(error) => error,
+        Ok(_) => panic!("tiny queue accepted a vsock TX pool"),
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    let large = Device::with_size(crate::VirtioDeviceKind::Vsock, 256);
+    let pool = TxPool::new(large.queue.clone()).unwrap();
+    assert_eq!(pool.pages().len(), 64);
+    drop(pool);
+
+    let device = Device::with_size(crate::VirtioDeviceKind::Vsock, 16);
+    let mut pool = TxPool::new(device.queue.clone()).unwrap();
+    assert_eq!(pool.pages().len(), 4);
+    let page_addresses: Vec<_> = pool
+        .pages()
+        .iter()
+        .map(|page| (page.phys_addr() as u64, page.raw_ptr()))
+        .collect();
+    let control = RawHeader {
+        src_cid: 3,
+        dst_cid: 2,
+        src_port: 0x0403_0201,
+        dst_port: 0x0807_0605,
+        len: 0,
+        socket_type: 1,
+        operation: 3,
+        flags: 0,
+        buf_alloc: 0x4433_2211,
+        fwd_cnt: 0x8877_6655,
+    };
+    let mut data = RawHeader {
+        operation: 5,
+        len: 3,
+        ..control
+    };
+
+    let empty_wake = Rc::new(WakeCount::default());
+    let empty_waker = LocalWaker::from(empty_wake.clone());
+    let mut empty_cx = ContextBuilder::from_waker(Waker::noop())
+        .local_waker(&empty_waker)
+        .build();
+    assert!(pool.poll_reclaim_one(&mut empty_cx).is_pending());
+    pool.try_submit(data, &[7, 8, 9]).unwrap();
+    assert_eq!(empty_wake.0.get(), 1);
+    let data_head = available_head(&device, 0);
+    let queue = device.queue.borrow();
+    let header = queue.get_descriptor(data_head);
+    let payload = queue.get_descriptor(header.next);
+    assert_eq!((header.len, header.flags), (44, VIRTQ_DESC_F_NEXT));
+    assert_eq!((payload.len, payload.flags), (3, 0));
+    let payload_ptr = page_addresses
+        .iter()
+        .find_map(|(phys, ptr)| (*phys == payload.addr).then_some(*ptr))
+        .expect("TX descriptor did not use a prepared page");
+    // SAFETY: the matching prepared page remains owned by `pool`'s
+    // completion, and only the initialized descriptor length is read.
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(payload_ptr, 3) },
+        &[7, 8, 9]
+    );
+    let encoded: &[u8] = queue.header_buffers[data_head as usize].buf.as_ref();
+    assert_eq!(&encoded[24..32], &[3, 0, 0, 0, 1, 0, 5, 0]);
+    drop(queue);
+
+    let nonempty_wake = Rc::new(WakeCount::default());
+    let nonempty_waker = LocalWaker::from(nonempty_wake.clone());
+    let mut nonempty_cx = ContextBuilder::from_waker(Waker::noop())
+        .local_waker(&nonempty_waker)
+        .build();
+    assert!(pool.poll_reclaim_one(&mut nonempty_cx).is_pending());
+    pool.try_submit(control, &[]).unwrap();
+    assert_eq!(nonempty_wake.0.get(), 1);
+    let control_head = available_head(&device, 1);
+
+    assert!(pool.poll_reclaim_one(&mut nonempty_cx).is_pending());
+    device.publish_used(control_head, 0);
+    assert!(pool.poll_reclaim_one(&mut nonempty_cx).is_pending());
+    device.reclaim();
+    assert_eq!(nonempty_wake.0.get(), 2);
+    assert!(matches!(
+        pool.poll_reclaim_one(&mut nonempty_cx),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(pool.counts(), (3, 1));
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(payload_ptr, 3) },
+        &[7, 8, 9]
+    );
+    device.publish_used(data_head, 0);
+    device.reclaim();
+    assert!(matches!(
+        pool.poll_reclaim_one(&mut nonempty_cx),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(pool.counts(), (4, 0));
+
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let counts = pool.counts();
+    for (len, bytes) in [(4, &[1, 2, 3][..]), (4097, &[0; 4097][..])] {
+        data.len = len;
+        assert_eq!(
+            pool.try_submit(data, bytes).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(pool.counts(), counts);
+        assert_eq!(
+            unsafe { *device.queue.borrow().available_ring.next_available_idx },
+            before
+        );
+    }
+
+    data.len = 1;
+    for byte in 0..4 {
+        pool.try_submit(data, &[byte]).unwrap();
+    }
+    assert_eq!(pool.counts(), (0, 4));
+    let mut in_flight_pages: Vec<_> = (2..6)
+        .map(|idx| rx_payload_phys(&device, available_head(&device, idx)))
+        .collect();
+    in_flight_pages.sort_unstable();
+    in_flight_pages.dedup();
+    assert_eq!(in_flight_pages.len(), 4);
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    assert_eq!(
+        pool.try_submit(data, &[9]).unwrap_err().kind(),
+        ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+    for _ in 0..8 {
+        pool.try_submit(control, &[]).unwrap();
+    }
+    assert_eq!(
+        pool.try_submit(control, &[]).unwrap_err().kind(),
+        ErrorKind::WouldBlock
+    );
+    for idx in 2..14 {
+        device.complete(available_head(&device, idx), 0, 0);
+    }
+    device.reclaim();
+    for _ in 0..12 {
+        assert!(matches!(
+            pool.poll_reclaim_one(&mut nonempty_cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+    assert_eq!(pool.counts(), (4, 0));
+
+    for _ in 0..16 {
+        pool.try_submit(control, &[]).unwrap();
+    }
+    assert_eq!(pool.counts(), (4, 16));
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    assert_eq!(
+        pool.try_submit(data, &[9]).unwrap_err().kind(),
+        ErrorKind::WouldBlock
+    );
+    assert_eq!(pool.counts(), (4, 16));
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+    for idx in 14..30 {
+        device.complete(available_head(&device, idx), 0, 0);
+    }
+    device.reclaim();
+    for _ in 0..16 {
+        assert!(matches!(
+            pool.poll_reclaim_one(&mut nonempty_cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+    assert_eq!(pool.counts(), (4, 0));
 }
 
 /// Run in a child process because Motor OS panics abort the process.

@@ -293,6 +293,115 @@ pub(crate) fn try_post_tx(
     })
 }
 
+/// Device-lifetime TX ownership. A cached driver failure must retain this
+/// pool until every published DMA chain has completed.
+pub(crate) struct TxPool {
+    queue: Rc<RefCell<Virtqueue>>,
+    pages: Vec<IoBuf>,
+    completions: Vec<WriteCompletion<Option<IoBuf>>>,
+    drainer_waker: Option<std::task::LocalWaker>,
+}
+
+impl TxPool {
+    /// Allocate the fixed data pages and all completion bookkeeping before
+    /// the device can observe a TX descriptor.
+    pub(crate) fn new(queue: Rc<RefCell<Virtqueue>>) -> IoResult<Self> {
+        let queue_size = usize::from(queue.borrow().queue_size());
+        if queue_size < 16 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let page_count = ((queue_size - 8) / 2).min(64);
+        let mut pages = Vec::new();
+        pages
+            .try_reserve_exact(page_count)
+            .map_err(|_| ErrorKind::OutOfMemory)?;
+        let mut completions = Vec::new();
+        completions
+            .try_reserve_exact(queue_size)
+            .map_err(|_| ErrorKind::OutOfMemory)?;
+        for _ in 0..page_count {
+            let page = IoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
+                .ok_or(ErrorKind::OutOfMemory)?;
+            validate_payload_dma(page.capacity(), page.capacity(), page.phys_addr() as u64)?;
+            pages.push(page);
+        }
+        Ok(Self {
+            queue,
+            pages,
+            completions,
+            drainer_waker: None,
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn pages(&self) -> &[IoBuf] {
+        &self.pages
+    }
+
+    /// Validate and synchronously publish one packet. Data pages remain owned
+    /// here until `poll_reclaim_one` observes their DMA completion.
+    pub(crate) fn try_submit(&mut self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
+        let payload_len = u32::try_from(bytes.len()).map_err(|_| ErrorKind::InvalidInput)?;
+        if bytes.len() > PAGE_SIZE_SMALL as usize {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        validate_tx_header(raw, payload_len)?;
+
+        let payload = if bytes.is_empty() {
+            None
+        } else {
+            let mut page = self.pages.pop().ok_or(ErrorKind::WouldBlock)?;
+            page.set_len(bytes.len());
+            <IoBuf as AsMut<[u8]>>::as_mut(&mut page).copy_from_slice(bytes);
+            Some(page)
+        };
+        let completion = match try_post_tx(self.queue.clone(), raw, payload) {
+            Ok(completion) => completion,
+            Err((err, payload)) => {
+                if let Some(page) = payload {
+                    self.pages.push(page);
+                }
+                return Err(err);
+            }
+        };
+        assert!(self.completions.len() < self.completions.capacity());
+        self.completions.push(completion);
+        if let Some(waker) = self.drainer_waker.take() {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// Reclaim one completed chain in any order. Pending polls register the
+    /// same concrete local waker with every in-flight completion.
+    pub(crate) fn poll_reclaim_one(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<IoResult<()>> {
+        for index in 0..self.completions.len() {
+            let ready = self.completions[index].vq_completion.do_poll(cx);
+            if let std::task::Poll::Ready((page, result)) = ready {
+                drop(self.completions.swap_remove(index));
+                if let Some(page) = page {
+                    assert!(self.pages.len() < self.pages.capacity());
+                    self.pages.push(page);
+                }
+                return std::task::Poll::Ready(result.map(|_| ()));
+            }
+        }
+        match &mut self.drainer_waker {
+            Some(waker) => waker.clone_from(cx.local_waker()),
+            None => self.drainer_waker = Some(cx.local_waker().clone()),
+        }
+        std::task::Poll::Pending
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        (self.pages.len(), self.completions.len())
+    }
+}
+
 pub(crate) struct RxCompletion {
     completion: VqCompletion<IoBuf>,
 }

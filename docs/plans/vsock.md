@@ -8,8 +8,9 @@ D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
 Firecracker tests, with no developer-image Firecracker support. Q18 is settled
 in D17: preserve RX used-ring order inside virtio-async using the existing
-queue, without negotiating `IN_ORDER`. Shared reset verification is awaiting
-implementation review in Q19.
+queue, without negotiating `IN_ORDER`. Shared reset verification, malformed
+credit handling, and BAR-boundary validation await implementation review in
+Q19–Q21.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
 implementation has started, with progress recorded below.
@@ -403,6 +404,30 @@ parent-reviewed:
   supported-VMM boots exercise normal MSI-X setup. BAR probing/mapping
   robustness and Q19 remain separate work. No vsock device was activated,
   and neither milestone is complete.
+
+Stage 4 fixed TX pool (D7) is implemented and parent-reviewed:
+
+- One fallible constructor reserves `min(64, (tx_descriptors - 8) / 2)`
+  pages and completion capacity for the whole queue before publication.
+  Validated synchronous submission retains every completion, restores a
+  page on rejected admission, and wakes the drainer for newly posted work.
+  Bounded completion polling recycles one returned owner in any order;
+  it does not sort TX or account for peer credit.
+- Guest queue fixtures cover pool limits, actual descriptor layout/copied
+  bytes, empty/nonempty submission wakeups, unreclaimed pending completion,
+  completion-driven wakeup, opposite completion order, distinct in-flight
+  pages, invalid/oversized input, data saturation with control capacity,
+  and a control-filled ring returning a rejected data page. These are
+  memory-backed queue tests, not attached-vsock hardware transfers. Existing
+  generic premature-completion-drop tests remain; no new pool-drop child
+  fixture or client-cancellation coverage is claimed by this increment.
+- Parent review removed an unnecessary prepared-TX wrapper and strengthened
+  wakeup/rejection coverage before validation. Debug/release builds, targeted
+  Clippy, and descriptor/I/O-task/filesystem regressions passed; formatting
+  and diff checks passed, with no new warnings or initial check failures.
+  Logs: `/tmp/vsock-tx-pool.7bn4lj/` and
+  `/tmp/vsock-tx-pool-gate.sf43rI/`. Device construction, runtime pumps, and
+  both milestones remain pending.
 
 ## Scope and simplicity
 
@@ -1825,3 +1850,37 @@ support. The change adds one MMIO read per initialized block/net device at
 boot and per lazily initialized vsock device, so it needs the AGENTS.md
 boot-latency review before implementation. Existing gate passes have not
 tested this proposed check. Other independently reviewable fixes can proceed.
+
+### Q20. Reset only the stream on impossible peer credit? (awaiting review)
+
+The credit helper can detect an advertised `fwd_cnt` advance greater than
+the payload bytes still outstanding. Reject that update atomically, changing
+neither peer credit field. [Virtio 1.1 sections 5.10.6.3.1–5.10.6.3.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+require valid credit information but do not prescribe the receiver's reaction
+to this violation. This is distinct from a peer shrinking `buf_alloc` below
+outstanding bytes, which simply leaves zero send allowance until credit
+recovers.
+
+Proposed policy: reject the offending packet and reset only its identified
+connection, using the existing reset semantics for its current state. An
+established stream reports `ConnectionReset` after previously validated RX
+has drained; unrelated streams and the device remain operational. Do not
+answer an incoming RST with another RST. The pure arithmetic helper can be
+implemented independently; the Step 7 connection reaction awaits review.
+
+### Q21. Validate BAR boundaries with a bounded cached walk? (awaiting review)
+
+Checking that a capability's BAR index is below six does not prove it names
+a BAR's low register: it can instead name the upper address word of a 64-bit
+BAR. The current mapper can then probe that upper word as a separate BAR.
+An immediate-predecessor check is insufficient, because that predecessor
+may itself be an upper address word whose low bits are not BAR type bits.
+
+Proposed approach: walk from BAR 0 to the requested index, skipping 64-bit
+upper words and caching original values for later mapping/probing. Reject
+an upper-word reference before any probe writes. Read only the needed
+prefix, not all six slots eagerly, and reuse originals when restoring probes.
+This adds at most five previously unnecessary PCI configuration reads per
+device, with no tasks or polling; exact costs depend on the BAR layout and
+which BARs are consumed. These boot-time reads require AGENTS.md review.
+No BAR-layout implementation or live read-count measurement is claimed yet.
