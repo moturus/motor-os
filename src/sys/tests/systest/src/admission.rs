@@ -47,7 +47,36 @@ fn free_pages_upper_bound() -> u64 {
 pub fn test_process_classes() {
     use moto_sys::caps::*;
 
-    assert_ne!(moto_sys::ProcessStaticPage::get().capabilities & CAP_SYS, 0);
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_ne!(own & CAP_SYS, 0);
+    assert_eq!(0, own & CAP_VSOCK);
+
+    let system_default = CAP_SPAWN | CAP_LOG;
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "admission-class-child",
+            &system_default.to_string(),
+            "false",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "System default child: {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let error = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("admission-class-child")
+        .env(
+            MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{:x}", system_default | CAP_VSOCK),
+        )
+        .spawn()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
+
     for (caps, privileged) in [
         (CAP_SYS | CAP_LOG, true),
         (CAP_IO_MANAGER | CAP_INTERACTIVE, true),

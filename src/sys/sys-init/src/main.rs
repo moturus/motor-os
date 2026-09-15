@@ -65,10 +65,8 @@ fn main() {
     #[cfg(debug_assertions)]
     SysRay::log("sys-init started").ok();
 
-    assert_eq!(
-        moto_sys::caps::CAP_SYS,
-        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
-    );
+    let own_caps = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(moto_sys::caps::CAP_SYS, own_caps & moto_sys::caps::CAP_SYS);
 
     let config = match process_config() {
         Ok(c) => c,
@@ -91,6 +89,7 @@ fn main() {
         | moto_sys::caps::CAP_SPAWN
         | moto_sys::caps::CAP_LOG
         | moto_sys::caps::CAP_SPAWN_DETACHED
+        | (own_caps & moto_sys::caps::CAP_VSOCK)
         | role_cap;
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(

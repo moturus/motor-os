@@ -569,8 +569,8 @@ systest_status=0
 set -o pipefail
 # The SSH shell is Interactive, whose unadorned children no longer receive
 # CAP_LOG. The complete suite exercises logging, so grant
-# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE explicitly.
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x4c $TEST_BIN/systest" 2>&1 |
+# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK explicitly.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xcc $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -582,12 +582,13 @@ systest_output="$(cat "$SYSTEST_LOG")"
   fail "systest did not finish with 'systest: ALL PASS'"
 
 # The SSH login shell consumes russhd's one-time capability environment.
-# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE
+# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
+# CAP_VSOCK
 # from that shell to the focused lifetime coordinator so it can create the
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xec $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"

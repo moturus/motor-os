@@ -8,15 +8,74 @@ D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
 Firecracker tests, with no developer-image Firecracker support. No open
 questions remain. Repository and references inspected on 2026-09-14;
-no implementation has started.
+implementation has started, with progress recorded below.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
 the existing block and network drivers' structure and reuse their virtqueue
-implementation and networking IPC machinery. This revision is documentation
-only. Incremental implementation commits are requested once implementation
-is approved; the full repeated gate belongs at the two approved milestones,
-not every commit (D13).
+implementation and networking IPC machinery. Implementation is approved and
+proceeds in small reviewed commits; the full repeated gate belongs at the
+two approved milestones, not every commit (D13).
+
+## Implementation progress
+
+Stage 1 baseline, before source changes at `6918384e`:
+
+- Selected toolchain:
+  `motor-1.99.0-beta-f47d5bb-dev.2-669057dcd9e729bc97418edb8b926b9e7526202a217dfc8dd9dd8dda561ca4e4`
+  (`rustc 1.99.0-dev`, Motor dev.2, LLVM 23.1.0).
+- `make -j"$(nproc)"` and `make -j"$(nproc)" BUILD=release` image builds
+  passed with the existing kloader `clippy::ptr_eq` warning at
+  `src/boot/x64.kloader/src/loader.rs:177`.
+- `src/tests/full-test.sh --release` passed with exit status 0 on QEMU.
+  No debug baseline full-test was run. These are pre-change baseline checks,
+  not the repeated M1/M2 gates or validation of implementation patches.
+- The standard main-image VM logged "most services up" at 108 ms; separate
+  System-console/TUI/terminal-size boots logged 106–108 ms. These are baseline
+  observations, not a controlled boot-time benchmark or acceptance threshold.
+- Local evidence: `/tmp/vsock-baseline.qoT1LL/build-debug.log`,
+  `build-release.log`, and `full-test-release.log` in the same directory.
+
+Stage 2 capability foundation is implemented, parent-reviewed, and validated.
+Wire contracts, driver, IPC, and native vsock API implementation remain pending.
+
+- The initial debug build failed; the original log is preserved at
+  `/tmp/vsock-cap.XxgFum/build-debug.log`. Rush's published moto-sys dependency
+  lacked the new constant; its dependency now uses the in-tree crate.
+- The same build correctly rejected the now-stale runtime assembly because
+  moto-sys content contributes to its identity. Standard/developer images
+  require a matching assembly from `src/build-motor-os.sh`; do not bypass
+  the selector or reuse a mismatched overlay. The documented producer can
+  provision host packages and managed sibling sources, and writes generated
+  artifacts under `/home/posk/motor-dev/assemblies` and related build trees
+  outside this repository. The user authorized this refresh and subsequent
+  builds on 2026-09-15. The refresh passed with host networking setup skipped
+  after checking the existing configuration; all three release images built.
+  Assembly `0a7f8808364649c86f1f81a21651970b9705ba5e15c552fa67f258ce6190bd0b`
+  is pinned and compatible with the current runtime contents; the host Rust
+  toolchain was reused. Log: `/tmp/vsock-assembly.wd1K5M/build-motor-os.log`.
+  No external source-code or toolchain declaration changes are part of the
+  vsock patch.
+- `make base.img systest` passed in debug and release, with the same
+  preexisting kloader warning. On both profiles, the base-image
+  `MOTOR_OS_CAPS=0xcc .../systest capability-policy-tests` passed, as did
+  `src/tests/test-system-tty.sh` (with `--release` for release). These cover
+  default inheritance, explicit grant/denial, and System-parent
+  non-escalation. Both test bodies remain reachable through full-test.
+- Formatting, shell syntax, the existing moto-sys host tests, and separate
+  kernel/userspace, rush, and russhd Clippy checks passed. Clippy still reports
+  preexisting diagnostics in untouched virtio-async and allocation-benchmark
+  code; no diagnostic points to changed code.
+- Evidence is in `/tmp/vsock-cap.XxgFum`: `build-base-systest-*.log`,
+  `guest-capabilities-*-sftp.log`, `system-tty-*.log`, and `clippy-*.log`.
+  Initial invalid feature-combination checks and manual guest-launch errors
+  are retained separately, not counted as passing validation.
+- After the assembly refresh, `src/tests/full-test.sh` and
+  `src/tests/full-test.sh --release` both passed with exit status 0 on QEMU.
+  Logs: `/tmp/vsock-assembly.wd1K5M/full-test-debug.log` and
+  `full-test-release.log` in the same directory. These are one debug and one
+  release full run validating this patch, not the repeated milestone gates;
+  neither M1 nor M2 is complete.
 
 ## Scope and simplicity
 
@@ -43,9 +102,10 @@ not every commit (D13).
 - Add `CAP_VSOCK` (D8). This requires in-tree moto-sys/kernel capability
   changes and edits to every explicit process-launch mask between sys-init
   and an application (constraint 11). No new syscall, kernel vsock driver,
-  Rust-stdlib, moto-rt, libc, or toolchain work is planned. rt.vdso already
-  calls the shared default-capability helper; avoid changing it unless the
-  capability audit demonstrates a need.
+  Rust-stdlib, moto-rt, libc, or toolchain source changes are planned. Changing
+  moto-sys does require normal runtime-assembly regeneration as noted above.
+  rt.vdso already calls the shared default-capability helper; avoid changing
+  it unless the capability audit demonstrates a need.
 - Initialize lazily on authorized native use (D9). An absent device or an
   attached but unused device must add no queue initialization, polling, host
   rendezvous, or background tasks to boot. No hot-plug/unplug or migration
@@ -933,8 +993,8 @@ applications and the test suite:
 | --- | --- | --- |
 | `img_files/{motor-os,motor-os-base,test-system-tty}/system/cfg/sys-init.cfg`, russhd line | `svc:124` | `svc:252` (adds 128) with the comment updated. |
 | Same files, dns-resolver line and strobe launch | `svc:8`; `CAP_SYS \| CAP_LOG` | Unchanged; neither uses vsock. |
-| `src/sys/sys-init/src/main.rs` tty mask | IO manager, spawn, log, detached, role | Add CAP_VSOCK. |
-| `src/sys/sys-tty/src/main.rs` and `src/bin/russhd/src/local_session.rs` shell allowlists | `own & (spawn \| log \| detached \| role)` | Add CAP_VSOCK to the allowlist. |
+| `src/sys/sys-init/src/main.rs` tty mask and `src/sys/sys-tty/src/main.rs` shell mask | IO manager (sys-init only), spawn, log, detached, role | Forward `own & CAP_VSOCK`; preserve unrelated mask semantics. |
+| `src/bin/russhd/src/local_session.rs` shell allowlist | `own & (spawn \| log \| detached \| role)` | Add CAP_VSOCK to the allowlist. |
 | `src/bin/rush/src/sys/motor.rs` `ordinary_child_cap_grant` (System shells) and `detach_cap_grant` | `own & (sys \| spawn \| log)`; `own & (spawn \| log \| detached \| role)` | Add CAP_VSOCK to both allowlists. Non-System rush children use the default helper and need no change. |
 | `full-test.sh`, `full-test-networking.sh`, `stress-soak.sh` systest launches | `MOTOR_OS_CAPS=0x4c` | `0xcc`. |
 | `full-test.sh` stdio suite and `test-terminal-size.sh` rmux launch | `0x6c` | `0xec`. |

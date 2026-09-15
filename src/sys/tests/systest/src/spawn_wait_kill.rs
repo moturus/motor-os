@@ -6,6 +6,7 @@ const SHARED_LISTENER_CHILD: &str = "shared-listener-child";
 const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
 const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
 const CAPS_POLICY_CHILD: &str = "caps-policy-child";
+const DENIED_VSOCK_CHILD: &str = "denied-vsock-child";
 const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
 const EMPTY_ARGS_CHILD: &str = "empty-args-child";
 
@@ -198,15 +199,21 @@ pub fn is_caps_policy_child(args: &[String]) -> bool {
 }
 
 pub fn run_caps_policy_child() -> ! {
-    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN};
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK, ProcessRole};
 
-    let own = CAP_SPAWN | CAP_LOG;
+    let own = CAP_SPAWN | CAP_LOG | CAP_VSOCK;
     assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
-    assert_eq!(CAP_SPAWN, moto_sys::caps::default_child_capabilities(own));
-    assert_eq!(CAP_SPAWN, probe_child_capabilities(None).unwrap());
+    assert_eq!(ProcessRole::None, ProcessRole::from_caps(own));
+
+    let none_default = CAP_SPAWN | CAP_VSOCK;
     assert_eq!(
-        CAP_SPAWN,
-        probe_child_capabilities(Some(&format!("0x{CAP_SPAWN:x}"))).unwrap()
+        none_default,
+        moto_sys::caps::default_child_capabilities(own)
+    );
+    assert_eq!(none_default, probe_child_capabilities(None).unwrap());
+    assert_eq!(
+        none_default,
+        probe_child_capabilities(Some(&format!("0x{none_default:x}"))).unwrap()
     );
 
     let error = probe_child_capabilities(Some(&format!("0x{own:x}"))).unwrap_err();
@@ -217,15 +224,36 @@ pub fn run_caps_policy_child() -> ! {
     std::process::exit(0)
 }
 
+pub fn is_denied_vsock_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == DENIED_VSOCK_CHILD
+}
+
+pub fn run_denied_vsock_child() -> ! {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK};
+
+    let own = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
+    assert_eq!(0x4c, own);
+    assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
+
+    let denied_default = CAP_SPAWN | CAP_INTERACTIVE;
+    assert_eq!(denied_default, probe_child_capabilities(None).unwrap());
+
+    let error = probe_child_capabilities(Some(&format!("0x{:x}", own | CAP_VSOCK))).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
+    std::process::exit(0)
+}
+
 pub fn test_default_capability_policy() {
-    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, ProcessRole};
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK, ProcessRole};
 
     if crate::skip_without_cap_log("test_default_capability_policy") {
         return;
     }
     let own = moto_sys::ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
-    let interactive_default = CAP_SPAWN | CAP_INTERACTIVE;
+    assert_eq!(crate::FULL_RUN_CAPS, own & crate::FULL_RUN_CAPS);
+
+    let interactive_default = CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK;
     assert_eq!(
         interactive_default,
         moto_sys::caps::default_child_capabilities(own)
@@ -233,16 +261,23 @@ pub fn test_default_capability_policy() {
     assert_eq!(interactive_default, probe_child_capabilities(None).unwrap());
     assert_eq!(0, interactive_default & CAP_LOG);
 
-    let explicit = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
+    let explicit = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK;
     assert_eq!(
         explicit,
         probe_child_capabilities(Some(&format!("0x{explicit:x}"))).unwrap()
     );
 
-    let none_mask = CAP_SPAWN | CAP_LOG;
-    let demoted = probe_child_capabilities(Some(&format!("0x{none_mask:x}"))).unwrap();
-    assert_eq!(none_mask, demoted);
-    assert_eq!(ProcessRole::None, ProcessRole::from_caps(demoted));
+    let denied_mask = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
+    assert_eq!(0x4c, denied_mask);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(DENIED_VSOCK_CHILD)
+        .env(
+            moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{denied_mask:x}"),
+        )
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
 
     let error = probe_child_capabilities(Some("not-hex")).unwrap_err();
     assert_eq!(
@@ -254,14 +289,14 @@ pub fn test_default_capability_policy() {
         .arg(CAPS_POLICY_CHILD)
         .env(
             moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-            format!("0x{none_mask:x}"),
+            format!("0x{:x}", CAP_SPAWN | CAP_LOG | CAP_VSOCK),
         )
         .status()
         .unwrap();
     assert_eq!(Some(0), status.code());
 
-    // Keep the role bit named here: this test's restricted child explicitly
-    // proves that a None process cannot grant it.
+    // Keep the role bit named here: the None-role child explicitly proves it
+    // cannot grant Interactive authority.
     assert_ne!(0, own & CAP_INTERACTIVE);
     println!("test_default_capability_policy PASS");
 }

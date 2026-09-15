@@ -86,11 +86,13 @@ pub(crate) fn ensure_temp_dir() {
 }
 
 /// The capabilities a complete run needs; `full-test.sh` grants this set.
-/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE` only and
-/// cannot delegate `CAP_LOG`, so the tests that spawn logging children skip
-/// themselves instead of failing on their first spawn.
-pub(crate) const FULL_RUN_CAPS: u64 =
-    moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_INTERACTIVE;
+/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK`
+/// and cannot delegate `CAP_LOG`, so the tests that spawn logging children
+/// skip themselves instead of failing on their first spawn.
+pub(crate) const FULL_RUN_CAPS: u64 = moto_sys::caps::CAP_SPAWN
+    | moto_sys::caps::CAP_LOG
+    | moto_sys::caps::CAP_INTERACTIVE
+    | moto_sys::caps::CAP_VSOCK;
 
 pub(crate) fn has_cap_log() -> bool {
     moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
@@ -1143,6 +1145,10 @@ fn main() {
         admission::test_process_classes();
         return;
     }
+    if args.len() == 2 && args[1] == "capability-policy-tests" {
+        test_caps();
+        return;
+    }
     if args.len() == 4 && args[1] == "admission-class-child" {
         admission::class_child(args[2].parse().unwrap(), args[3].parse().unwrap());
         return;
@@ -1278,6 +1284,9 @@ fn main() {
     }
     if spawn_wait_kill::is_caps_policy_child(&args) {
         spawn_wait_kill::run_caps_policy_child();
+    }
+    if spawn_wait_kill::is_denied_vsock_child(&args) {
+        spawn_wait_kill::run_denied_vsock_child();
     }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();

@@ -135,9 +135,8 @@ fn main() {
     command.env_clear();
     command.env("HOME", USER_HOME);
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
-    let role_cap = match moto_sys::caps::ProcessRole::from_caps(
-        moto_sys::ProcessStaticPage::get().capabilities,
-    ) {
+    let own_caps = moto_sys::ProcessStaticPage::get().capabilities;
+    let role_cap = match moto_sys::caps::ProcessRole::from_caps(own_caps) {
         moto_sys::caps::ProcessRole::System => moto_sys::caps::CAP_SYS,
         moto_sys::caps::ProcessRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
         moto_sys::caps::ProcessRole::None => 0,
@@ -151,6 +150,7 @@ fn main() {
             moto_sys::caps::CAP_SPAWN
                 | moto_sys::caps::CAP_LOG
                 | moto_sys::caps::CAP_SPAWN_DETACHED
+                | (own_caps & moto_sys::caps::CAP_VSOCK)
                 | role_cap
         ),
     );
