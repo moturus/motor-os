@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     io::{self, Write},
     ops::ControlFlow,
-    sync::atomic::AtomicBool,
+    sync::atomic::Ordering,
 };
 
 use gix::{
@@ -12,7 +12,7 @@ use gix::{
     status::plumbing::index_as_worktree_with_renames::{Recorder, Summary},
 };
 
-use crate::repository::OpenedRepository;
+use crate::{cancellation::Cancellation, repository::OpenedRepository};
 
 struct Change {
     staged: char,
@@ -34,11 +34,13 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn write_to(&self, mut out: impl Write) -> io::Result<()> {
+    pub fn write_to(&self, mut out: impl Write, cancellation: &Cancellation) -> crate::Result {
+        cancellation.check()?;
         if let Some(operation) = self.operation {
             writeln!(out, "operation {operation}")?;
         }
         for (path, change) in &self.changes {
+            cancellation.check()?;
             writeln!(
                 out,
                 "{}{} {}",
@@ -47,14 +49,17 @@ impl Report {
                 path.to_str_lossy().escape_debug()
             )?;
         }
-        out.flush()
+        cancellation.check()?;
+        out.flush()?;
+        cancellation.check()
     }
 }
 
-pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
+pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate::Result<Report> {
+    cancellation.check()?;
     let repo = &opened.repo;
     let index = repo.index_or_empty()?;
-    reject_configured_filters(opened, &index)?;
+    reject_configured_filters(opened, &index, cancellation)?;
 
     let mut changes = BTreeMap::<BString, Change>::new();
     let head_tree = repo.head_tree_id_or_empty()?;
@@ -71,6 +76,9 @@ pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
         Some(&mut pathspec),
         gix::status::tree_index::TrackRenames::Disabled,
         |change, _, _| {
+            if cancellation.flag().load(Ordering::Acquire) {
+                return Ok::<_, Infallible>(ControlFlow::Break(()));
+            }
             let code = match change {
                 gix::diff::index::ChangeRef::Addition { .. } => 'A',
                 gix::diff::index::ChangeRef::Deletion { .. } => 'D',
@@ -84,6 +92,7 @@ pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
             Ok::<_, Infallible>(ControlFlow::Continue(()))
         },
     )?;
+    cancellation.check()?;
 
     let mut recorder = Recorder::default();
     let options = gix::status::index_worktree::Options {
@@ -95,17 +104,20 @@ pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
         rewrites: None,
         thread_limit: None,
     };
-    repo.index_worktree_status(
+    let status = repo.index_worktree_status(
         &index,
         std::iter::empty::<&str>(),
         &mut recorder,
         gix::status::plumbing::index_as_worktree::traits::FastEq,
         IgnoreSubmodules,
         &mut gix::progress::Discard,
-        &AtomicBool::new(false),
+        cancellation.flag(),
         options,
-    )?;
+    );
+    cancellation.check()?;
+    status?;
     for entry in recorder.records {
+        cancellation.check()?;
         let Some(summary) = entry.summary() else {
             continue;
         };
@@ -136,6 +148,7 @@ pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
             Summary::Renamed | Summary::Copied => unreachable!("rewrites are disabled"),
         }
     }
+    cancellation.check()?;
 
     Ok(Report {
         operation: repo.state().map(operation_name),
@@ -146,6 +159,7 @@ pub fn collect(opened: &OpenedRepository) -> crate::Result<Report> {
 fn reject_configured_filters(
     opened: &OpenedRepository,
     index: &gix::index::State,
+    cancellation: &Cancellation,
 ) -> crate::Result {
     let policy = &opened.command_policy;
     if policy.external_filters.is_empty() && policy.required_filters.is_empty() {
@@ -158,6 +172,7 @@ fn reject_configured_filters(
     )?;
     let mut matches = attributes.selected_attribute_matches(["filter"]);
     for entry in index.entries() {
+        cancellation.check()?;
         if !matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
             continue;
         }

@@ -11,7 +11,10 @@ Gitoxide revision `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
 on `gix-moturus-cli` and verified on 2026-09-15. Repository opening,
 configuration sanitization, `log` and read-only `status` pass the host and
 Motor component fixtures. Status rejects affected external or required
-filters. Cancellation, transports and image integration remain M1 work.
+filters. The shared cancellation flag and Motor handler are implemented;
+the host/Motor fixture checks cancellation through status. Live terminal
+interruption and child cleanup will be checked with the HTTPS fixture.
+Transports, resource limits and image integration remain M1 work.
 
 ## 1. Goal and decisions
 

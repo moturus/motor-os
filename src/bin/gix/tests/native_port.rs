@@ -154,6 +154,18 @@ fn main() -> Result {
     ];
     let overrides = overrides.iter().map(String::as_str).collect::<Vec<_>>();
     let opened = motor_gix::repository::open(&fixture, &overrides, false)?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    cancellation.cancel();
+    let cancelled = motor_gix::status::collect(&opened, &cancellation)
+        .err()
+        .ok_or("cancelled status succeeded")?;
+    assert!(motor_gix::cancellation::was_cancelled(cancelled.as_ref()));
+    let cancelled_again = motor_gix::status::collect(&opened, &cancellation)
+        .err()
+        .ok_or("repeated cancelled status succeeded")?;
+    assert!(motor_gix::cancellation::was_cancelled(
+        cancelled_again.as_ref()
+    ));
     assert!(
         opened
             .command_policy

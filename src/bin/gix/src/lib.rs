@@ -1,3 +1,4 @@
+pub mod cancellation;
 pub mod command_config;
 pub mod repository;
 pub mod status;

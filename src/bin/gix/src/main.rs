@@ -8,12 +8,13 @@ use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, repository, status};
+use motor_gix::{Result, cancellation, repository, status};
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
+            let was_cancelled = cancellation::was_cancelled(err.as_ref());
             let mut stderr = io::stderr().lock();
             _ = writeln!(stderr, "gix: {err}");
             let mut source = err.source();
@@ -21,7 +22,11 @@ fn main() -> ExitCode {
                 _ = writeln!(stderr, "  caused by: {err}");
                 source = err.source();
             }
-            ExitCode::FAILURE
+            if was_cancelled {
+                ExitCode::from(130)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -59,6 +64,8 @@ fn run() -> Result {
         .subcommand(Command::new("status").about("Show worktree status"))
         .get_matches();
 
+    let cancellation = cancellation::Cancellation::install()?;
+
     let path = matches
         .get_one::<PathBuf>("repository")
         .expect("the repository path has a default");
@@ -68,14 +75,16 @@ fn run() -> Result {
         .flatten()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let opened = repository::open(path, &overrides, matches.get_flag("config-paths"))?;
+    let opened = repository::open(path, &overrides, matches.get_flag("config-paths"));
+    cancellation.check()?;
+    let opened = opened?;
 
-    match matches.subcommand_name() {
-        Some("log") => log::show(&opened.repo),
-        Some("status") => {
-            let report = status::collect(&opened)?;
-            Ok(report.write_to(io::stdout().lock())?)
-        }
+    let result = match matches.subcommand_name() {
+        Some("log") => log::show(&opened.repo, &cancellation),
+        Some("status") => status::collect(&opened, &cancellation)
+            .and_then(|report| report.write_to(io::stdout().lock(), &cancellation)),
         _ => unreachable!("clap accepts only declared subcommands"),
-    }
+    };
+    cancellation.check()?;
+    result
 }
