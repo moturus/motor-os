@@ -1,14 +1,16 @@
 # Virtio-vsock implementation plan
 
-Status: v2.3. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.5. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
 D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
-Firecracker tests, with no developer-image Firecracker support. The original
-review questions are settled; implementation follow-ups are listed at the end.
-Repository and references inspected on 2026-09-14;
+Firecracker tests, with no developer-image Firecracker support. Q18 is settled
+in D17: preserve RX used-ring order inside virtio-async using the existing
+queue, without negotiating `IN_ORDER`. There are no currently open questions.
+Repository and references inspected on 2026-09-14, with the CID and VMM
+ordering review updated on 2026-09-15;
 implementation has started, with progress recorded below.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
@@ -95,7 +97,7 @@ Stage 2 wire decoding is implemented and parent-reviewed:
   or boot tasks are added here, and neither milestone is complete.
 
 Stage 3 modern-device discovery and feature selection are implemented and
-parent-reviewed; CID snapshots and device initialization remain:
+parent-reviewed; CID validation and device initialization remain:
 
 - Recognize PCI device ID `0x1053` without initializing the device. The private
   driver requires `VERSION_1`, accepts only optional `RING_EVENT_IDX`, and
@@ -113,7 +115,8 @@ parent-reviewed; CID snapshots and device initialization remain:
   this is the intentional behavior covered by `test-sftp.sh`. The harness
   now uses a fresh per-run path. Original logs are retained; no OS change,
   permission bypass, test retry, or weakened assertion was needed.
-- Generation-consistent CID reads are held for Q17; independent work continues.
+- CID reads will reuse the existing PCI helper with the Virtio 1.1 width and
+  reserved-value checks described in constraint 5; no snapshot retry loop.
 
 Stage 3 shared IRQ/MMIO capacity checks are implemented and parent-reviewed:
 
@@ -164,7 +167,8 @@ Stage 4 private TX encoding/submission is implemented and parent-reviewed:
   Logs: `/tmp/vsock-tx.qe5IRA/`. Two initial sub-agent compile-check failures
   required explicit byte-slice `AsRef`/`AsMut` types (tool transcript evidence);
   those checks and the subsequent parent gates passed after correction.
-- The RX completion-order contract needs Q18's decision before implementation.
+- The RX completion-order approach is approved in D17; its implementation and
+  validation remain pending.
 
 ## Scope and simplicity
 
@@ -254,10 +258,15 @@ The following constraints affect the design:
    a future second block device would need nine. No IRQ-sharing framework or
    kernel vector expansion is needed for those examples. Queue sizes remain
    capped at 256; account for aggregate ring use of the existing 2 MiB pool.
-5. `PciBar::read_u64` performs two 32-bit reads. Reading a changing guest CID
-   needs configuration-generation consistency, not an assumption that this
-   helper gives an atomic snapshot. The common-config layout declares
-   `config_generation`, but nothing reads it today.
+5. Reuse `PciBar::read_u64` for the guest CID and reject a nonzero upper word
+   or a reserved guest CID. Only the low 32 bits can change in our Virtio 1.1
+   profile: the upper 32 bits are reserved and zero, and PCI permits separate
+   32-bit accesses to the two halves. Thus a valid CID comes from one atomic
+   low-word read, not an assumed atomic 64-bit snapshot. No configuration-generation
+   accessor, retry loop, or retry-limit policy is needed here
+   (approved 2026-09-15). This reasoning does not generalize to arbitrary
+   changing 64-bit configuration fields or multi-field snapshots.
+   See [Virtio 1.1 sections 4.1.3 and 5.10.4](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html).
 6. `runtime/channel_budget.rs` accounts for net/fs channels. Sharing net's
    endpoint also shares its admission budget; no third channel kind is needed.
 7. `api_net::NetCmd::try_from` and client dispatch assume the current command
@@ -346,15 +355,16 @@ netstack participates in the vsock data path.
 Each numbered step is an implementation stage, not necessarily one commit.
 Split implementation and tests into roughly 100–300 changed lines per patch.
 Keep every intermediate patch buildable, and keep partial functionality
-unpublished until its resource ownership and error paths work. D1–D16 are
+unpublished until its resource ownership and error paths work. D1–D17 are
 the authoritative requirements; stages reference them and describe changes,
 tests, and completion checks. Tests arrive with behavior; the validation
 section groups related commits into the two approved gating milestones.
 
 ### 1. Review the contract and record the baseline
 
-Follow D1–D16 without reopening the agreed scope, including Q16's resolution
-in D16: opt-in raw standard image, no developer-image Firecracker support.
+Follow D1–D17 without reopening the agreed scope, including Q16's resolution
+in D16 and Q18's resolution in D17: opt-in raw standard image, no
+developer-image Firecracker support, and ordered RX delivery in virtio-async.
 
 Record the selected Motor toolchain, baseline image build/test results,
 current boot measurements, and existing warnings. Keep logs for any initial
@@ -421,18 +431,17 @@ Update `VirtioDeviceKind`, the modern PCI ID match, and crate exports. Add
 `VsockDevice` following the existing `from`/initialization/error pattern.
 Require modern features and leave unsupported optional features disabled.
 Do not negotiate vsock-specific features. Check feature confirmation and
-configuration length, and read a generation-consistent CID. Keep discovery
-separate from initialization so
-boot can retain the device without creating its queues.
+configuration length, and read and validate the CID as in constraint 5.
+Keep discovery separate from initialization so boot can retain the device
+without creating its queues.
 
 Use `init_virtqueues(3, 3)`, existing MSI-X assignment, and existing status
 operations. Queue setup refuses a device whose MSI-X table has fewer vectors
 than queues; confirm on each VMM that the vsock device exposes at least
 three vectors, and report a clear initialization error otherwise. Validate
-queue capacity against the chosen packet layout and control reserve. Add
-only the small configuration-read helper necessary for a
-generation-consistent CID read. Use it at lazy activation and transport
-reset.
+queue capacity against the chosen packet layout and control reserve. Use
+the existing PCI read helper at lazy activation and transport reset, with
+the same CID validation at both sites; do not add configuration-read retries.
 
 Extend the mapper's bounded IRQ allocation to the already installed 64–79
 range, returning an error on exhaustion rather than asserting or wrapping
@@ -480,10 +489,23 @@ where header/length validation is needed. Do not request block status for
 vsock chains. TX completion means the device released the buffers, not that
 the remote application consumed the data.
 
+Implement D17's crate-private ordered-completion accessor in
+`virtio_queue.rs`, preserving the existing used-ring order and descriptor
+ownership. In `virtio_vsock.rs`, own the bounded RX buffer/completion pool
+and use each next used head to resolve the corresponding completion before
+delivering a packet to sys-io. Do not poll arbitrary ready futures and then
+sort them, sort by submission order, or add a separate completion FIFO or
+per-descriptor sequence metadata. Keep the existing block/net APIs unchanged.
+
 Extend the real memory-backed queue fixture minimally to cover vsock
 descriptor direction, header-only TX, valid/invalid RX and events,
 out-of-order chain completion, descriptor exhaustion/reuse, and owned-buffer
-lifetime. Preserve the existing premature-drop regression.
+lifetime. Verify ordered packet delivery with multiple completions ready
+before the first poll, opposite submission/completion/polling orders, cursor
+wrap, and buffer reuse. A malformed packet must advance ordered consumption
+without leaking its buffers or stalling later packets. Preserve the existing
+premature-drop regression and run these cases through guest systest in both
+profiles.
 
 ### 5. Build the device pumps and bounded scheduling
 
@@ -492,9 +514,12 @@ single-threaded executor and `Rc` ownership; never hold `RefCell` borrows
 across awaits. Use one TX submission pump (D6); keep RX processing, event
 handling, and TX completion draining independently able to progress.
 
-Maintain a fixed RX pool, promptly repost completed buffers, and copy or
-transfer accepted data into bounded per-stream storage. A blocked application
-must not retain the entire device RX ring. Use a bounded pending-control
+Consume the driver's already ordered RX packets and process them in that
+order in sys-io's connection/credit state machine. Copy or transfer accepted
+payloads into bounded per-stream storage, then promptly return buffers to
+the driver's fixed RX pool for reposting. Do not reorder packets by spawning
+independent per-packet handlers. A blocked application must not retain the
+entire device RX ring. Use a bounded pending-control
 queue or equivalent reserved state, sized per D7. RX must continue while TX
 is full whenever this extra storage can hold the resulting replies, as
 required by the
@@ -515,10 +540,10 @@ as debug: in debug builds the per-queue monitoring task in
 `virtio_queue.rs` polls every second and force-wakes stalled completion
 waiters, so a lost wakeup would surface only in release.
 
-Preserve device used-ring order when delivering RX packets, including across
-counter wrap and malformed packets. Posted-buffer order and individual
-future readiness are not substitutes for that order. Resolve Q18's queue
-metadata/accessor choice before implementing this path.
+Keep queue ordering entirely in virtio-async (D17). sys-io appends payloads
+to the appropriate stream in received order; it neither sorts completions
+nor reconstructs packet sequence. moto-io has no hardware-completion ordering
+logic. Test delivery through the state machine without changing this boundary.
 
 ### 6. Implement and test byte-credit accounting
 
@@ -862,7 +887,7 @@ The test wiring must make the following coverage real:
 
 | Coverage | Execution path |
 | --- | --- |
-| Wire validation and actual queue ownership/exhaustion | Existing virtio-async `test-support` fixture route -> `systest/src/virtio.rs` -> ordinary full-test VM, both profiles. |
+| Wire validation, RX used-ring delivery order, and actual queue ownership/exhaustion | Existing virtio-async `test-support` fixture route -> `systest/src/virtio.rs` -> ordinary full-test VM, both profiles. |
 | Pure credits, connection transitions, and reset handling | Same implementation helpers compiled into guest systest by source include; no separate host suite or sys-io self-test registration. |
 | Capability defaults, delegation, and denial | Systest child-process and native/raw-IPC cases, both profiles. |
 | Native API, real DMA, peer interoperability, and cleanup | `test-vsock.sh` -> guest systest plus local UDS peer on the VMM selected by `--vmm`, both profiles; every VMM at least once per profile at M2 (D13). |
@@ -953,6 +978,9 @@ approved on 2026-09-14; they are requirements, not proposals. This revision
 clarifies backpressure, half-close, lazy initialization, and TX accounting
 without changing the agreed architecture. Q16 is resolved in D16: the raw
 standard image is opt-in, and developer-image Firecracker support is excluded.
+D17 resolves implementation question Q18, approved on 2026-09-15: retain
+RX used-ring order inside virtio-async, with no `IN_ORDER` requirement or
+sorting in sys-io/moto-io.
 
 ### D1. Profile and topology (approved)
 
@@ -971,8 +999,9 @@ standard image is opt-in, and developer-image Firecracker support is excluded.
 ### D2. Ownership (approved)
 
 virtio-async owns packet/event I/O; sys-io owns connection state, credits,
-listeners, and client routing. No socket framework in the driver crate and
-no new reusable protocol crate.
+listeners, and client routing. RX completion ordering and the bounded device
+RX pool belong to virtio-async; sys-io receives packets already ordered (D17).
+No socket framework in the driver crate and no new reusable protocol crate.
 
 ### D3. HeaderBuffer reuse (approved)
 
@@ -1189,11 +1218,13 @@ Firecracker already uses `--enable-pci`; no virtio-MMIO driver is needed.
 | Firecracker | Built-in `vsock` JSON configuration over PCI and UDS. | Installed v1.15.1 with `--enable-pci`; native config stores one device. |
 
 Sources: [Cloud Hypervisor's vsock documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/vsock.md),
-[its config representation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/vmm/src/config.rs),
+[its config representation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/vmm/src/vm_config.rs#L733-L739),
 [Firecracker's vsock builder](https://github.com/firecracker-microvm/firecracker/blob/main/src/vmm/src/vmm_config/vsock.rs),
 and the [vhost-device-vsock README](https://github.com/rust-vmm/vhost-device/blob/main/vhost-device-vsock/README.md).
 These are source/help checks, not completed Motor guest interoperability
-tests.
+tests. D17 records the release-specific ordering-feature audit: CHV and
+Firecracker offer `IN_ORDER`, but the approved QEMU/backend combination does
+not. Therefore it cannot be a required feature for this common driver.
 
 ### D12. Test route (approved)
 
@@ -1359,48 +1390,142 @@ runner, image, and profile; no silent fallback to QEMU or skipped console
 assertions. Standalone networking/stress-soak VMM selection is not added by
 this work.
 
+### D17. RX completion ordering inside virtio-async (approved)
+
+Resolves Q18, approved on 2026-09-15. Preserve the order already recorded in
+the RX used ring instead of reconstructing it from independently ready
+futures. Do not negotiate `VIRTIO_F_IN_ORDER`. Continue supporting the three
+VMM/backend paths in D11 with one common implementation.
+
+| Component | Responsibility |
+| --- | --- |
+| `virtio-async/src/virtio_queue.rs` | Expose the next completion in device used-ring order through a narrow crate-private accessor. Keep existing ring reclamation, DMA ownership, and block/net completion APIs. |
+| `virtio-async/src/virtio_vsock.rs` | Own the bounded RX buffer/completion pool; resolve and validate packets using that ordered accessor before delivering them to sys-io. |
+| sys-io | Process already ordered packets, maintain connection/credit state, and append payloads to each stream's bounded receive buffer. No completion sorting. |
+| moto-io | Expose native streams and manage client IPC/waits. No virtqueue ordering knowledge or sorting. |
+
+#### Can all three VMMs negotiate `VIRTIO_F_IN_ORDER`?
+
+No, for the actual vsock paths approved in D11. The 2026-09-15 audit checked
+the installed VMM versions, their upstream release sources, and the released
+`vhost-device-vsock` 0.3.0 backend. This is source/help evidence, not a live
+Motor guest feature-negotiation test; that backend is not installed yet.
+Recheck its mask if the test prerequisite is pinned to a different release.
+
+| VMM / vsock path | Offers bit 35 (`IN_ORDER`)? | Release-source evidence |
+| --- | --- | --- |
+| QEMU 10.2.1, `vhost-user-vsock-pci` + `vhost-device-vsock` 0.3.0 | No with this backend. The QEMU frontend supports forwarding the bit. | QEMU includes it in [`user_feature_bits`](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/vhost-user-vsock.c#L19-L27), but [`vhost_get_features_ex`](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/vhost.c#L1904-L1916) clears bits absent from the backend. The backend's [`features()`](https://github.com/rust-vmm/vhost-device/blob/vhost-device-vsock-v0.3.0/vhost-device-vsock/src/vhu_vsock.rs#L299-L304) contains `VERSION_1`, `NOTIFY_ON_EMPTY`, `EVENT_IDX`, and the vhost-user protocol-feature bit, not `IN_ORDER`. |
+| Cloud Hypervisor v52.0, built-in PCI vsock | Yes, by default for a fresh device. | [`Vsock::new`](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/device.rs#L368-L405) advertises `VERSION_1 \| IN_ORDER` (`0x0000_0009_0000_0000`), optionally also `ACCESS_PLATFORM`. Its [`PCI common configuration`](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/transport/pci_common_config.rs#L351-L382) exposes the device's mask directly. |
+| Firecracker v1.15.1, built-in PCI vsock | Yes, by default. | [`AVAIL_FEATURES`](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/vsock/device.rs#L52-L57) is `VERSION_1 \| IN_ORDER` (`0x0000_0009_0000_0000`); [`PCI common configuration`](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/transport/pci/common_config.rs#L301-L314) exposes that mask directly. |
+
+QEMU's `in_order` property defaults to off, as confirmed by the installed
+binary's `-device vhost-user-vsock-pci,help` and its
+[property definition](https://github.com/qemu/qemu/blob/v10.2.1/include/hw/virtio/virtio.h#L388-L404).
+Setting it on cannot supply missing backend support: the backend framework
+[returns the backend mask and rejects unsupported acknowledgements](https://github.com/rust-vmm/vhost/blob/vhost-user-backend-v0.20.0/vhost-user-backend/src/handler.rs#L270-L277).
+This is not a claim that every QEMU backend lacks the feature. Do not change
+backends, spoof the feature, or patch external sources to satisfy it.
+
+Consequently, leave negotiation unchanged: require `VERSION_1`, optionally
+accept `EVENT_IDX`, and do not negotiate or require `IN_ORDER`, even where
+offered. This preserves one driver path across the three supported VMMs.
+Observed FIFO behavior without the negotiated bit is not a portable contract.
+
+Also, `IN_ORDER` would not be a feature-mask-only change to this split queue.
+[Virtio 1.1 sections 2.6.5.2 and 2.6.9](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+impose sequential descriptor-chain indices and permit batched completions
+that omit individual used entries. Motor's free-list allocator and
+one-used-entry-at-a-time reclaimer do not implement that negotiated mode.
+Do not enable it without implementing and testing those semantics.
+
+#### Why are the existing block/net futures not sufficient for vsock RX?
+
+Distinguish three orders: posting empty receive buffers, device completion
+in the used ring, and polling ready futures. The device need not use buffers
+in posting order without `IN_ORDER`; the used ring tells the driver which
+buffer was used next. [Virtio 1.1 section 2.5](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+
+The existing [shared queue](../../src/sys/lib/virtio-async/src/virtio_queue.rs)
+already walks that ring correctly in `reclaim_used`, using `next_used_idx`.
+But `reclaim_task` discards the returned chain heads after marking them ready,
+and `VqCompletion::do_poll` returns only that individual buffer and its result.
+It exposes no ordering relationship between two ready completions. Waking
+futures in ring order does not fix this: wakes may coalesce, and a completion
+may already be ready before its first poll. Neither `FuturesUnordered` nor
+a FIFO of submitted futures establishes used-ring delivery order.
+
+For example, post empty buffers A then B. The device puts stream bytes
+`hello` into B, then `world` into A, and publishes used heads B then A.
+The reclaimer marks both ready. Awaiting A then B delivers `worldhello`,
+although the device supplied `helloworld`. Nothing in either successful
+future result indicates the reversal. This is an illustrative permitted
+ordering, not an observed failure of one of these backends.
+
+- Block requests identify their sectors and destination buffers before
+  submission. Reading B's completion before A's does not exchange their data
+  or change which sectors they refer to. Dependencies between writes and
+  flushes still require the existing higher-level sequencing; sorting ready
+  futures would not impose device execution or persistence order. See
+  [`BlockDevice::try_request`](../../src/sys/lib/virtio-async/src/virtio_blk.rs).
+- Net RX delivers independent Ethernet frames into the IP stack. Its current
+  [`rx_task`](../../src/sys/sys-io/src/runtime/net/device.rs) awaits a deque in
+  submission order, but TCP reconstructs byte order from TCP sequence numbers
+  using its [receive assembler](../../src/sys/sys-io/netstack/src/socket/tcp.rs).
+  UDP does not promise ordered delivery. Packet reordering can still hurt
+  latency/throughput; this is not a claim that arbitrary reordering is free
+  or that the current net path needs no further testing. It does not silently
+  redefine the TCP byte stream as polling order.
+- Vsock bypasses that IP/TCP layer. Its wire header has no payload sequence
+  number with which sys-io could repair reordered packets. `buf_alloc` and
+  `fwd_cnt` describe receive-side credit, not the position of this packet's
+  payload. Data and connection-control packets must reach the vsock state
+  machine in their stream order. See the
+  [wire and stream definitions in sections 5.10.6–5.10.6.3](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html).
+  Linux preserves used-ring order by consuming and immediately dispatching
+  each packet in
+  [`virtio_transport_rx_work`](https://github.com/torvalds/linux/blob/v6.18/net/vmw_vsock/virtio_transport.c#L611-L671).
+
+Thus the transport machinery is reusable, but its current independent-future
+interface omits information this new consumer needs. Preserving the whole
+RX used-ring order is the simple way to preserve every stream without a
+per-stream sorting protocol. This does not identify a preexisting block/net
+bug or authorize changing their completion contracts. TX completions remain
+DMA-ownership reclamation; TX packet submission must preserve stream order,
+but sorting TX completion futures is not what provides that guarantee.
+
+#### Ordered accessor and lifetime contract
+
+Use an ordered-head accessor over the existing used ring, with an RX-owner
+cursor and a head-to-owned-completion lookup inside virtio-async. Observe
+only completions already processed by the existing reclaimer; the accessor
+must not reclaim or release a descriptor chain a second time. Initialize
+the consumer cursor before publishing the first RX buffers. Keep the lookup
+bounded by D7's RX pool, not by the number of streams or application reads.
+
+Do not read a ring slot after device reuse. Retain all undelivered buffers
+within the bounded RX pool, consume each ordered result before reposting
+its buffer, and enforce the ring-lag bound across wrapping counters. The
+pool bounds undelivered completions as well as outstanding DMA. Preserve
+the existing wakeup and completion-drop rules; an empty ordered view must
+have a concrete completion wakeup, never a polling timer or a lost wakeup.
+
+For each next used head, resolve and validate its owned completion. Deliver
+the packet or applicable refusal metadata to sys-io in that order, or
+discard an invalid packet before advancing. Malformed packets must not
+stall ordered consumption or leak buffers. sys-io consumes results in order
+and returns device buffers after moving accepted data into bounded stream
+storage; application reads must not hold device buffers indefinitely.
+
+No separate sorting pass, completed-head FIFO, per-descriptor sequence tag,
+or per-stream reorder protocol is part of this approach. Test opposite
+submission/completion/polling orders, multiple completions before the first
+poll, malformed packets between valid packets, cursor wrap, buffer reuse,
+and unchanged block/net behavior through guest systest in both profiles.
+Review the concrete implementation and its ring-lifetime/wakeup invariants
+as an ordinary incremental patch. If those invariants require a different
+mechanism, stop and discuss the deviation instead of silently adding one.
+
 ## Open questions
 
-### Q17. Bound generation-consistent CID reads?
-
-Virtio 1.1 section 2.4.1 recommends reading configuration generation before
-and after a multiword value and repeating when it changes, without specifying
-a retry bound. An indefinitely changing device could therefore occupy sys-io's
-single runtime thread during synchronous first use or transport reset.
-
-Proposed: allow eight complete snapshot attempts, then fail the operation with
-an unstable-configuration error. D9/D14 would cache initialization failure or
-fail the active vsock service with `InternalError`, retaining DMA ownership.
-Eight is a proposed liveness bound, not a protocol constant; it adds no idle
-polling or boot task. A time-based limit is an alternative. User guidance was
-requested on 2026-09-15; hold this helper while independent work continues.
-
-### Q18. Preserve RX completion order with sequence metadata?
-
-The [Virtio 1.1 specification](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
-does not guarantee buffer use in posting order without `VIRTIO_F_IN_ORDER`
-(section 2.5), which this driver does not negotiate. Vsock promises in-order
-streams (section 5.10.6.2). Linux consumes and delivers packets in used-ring
-order through [`virtio_transport_rx_work`](https://github.com/torvalds/linux/blob/v6.18/net/vmw_vsock/virtio_transport.c#L573-L625).
-
-Motor's `reclaim_used` consumes that order but retains only length/readiness
-per completion. If buffers A and B are posted, then completed B and A before
-either future is polled, reading the ready futures in posting order reverses
-the packets. `FuturesUnordered` does not establish a used-ring-order contract
-either. This is a new-driver integration requirement, not an identified bug
-in the existing block/network drivers.
-
-Proposed: record the wrapping `u16 next_used_idx` in each completed head's
-`HeaderBuffer`, and expose it through a private completion accessor without
-changing block/net completion outputs. The vsock RX pump holds completed
-packets within its existing bounded RX pool and delivers or discards only
-the next expected sequence. Do not repost an out-of-order buffer before that
-step: the pool must bound undelivered completions too. Malformed packets
-still advance the expected sequence; tests cover opposite poll/completion
-orders, wrap, and buffer reuse. Verify actual structure size/alignment and
-unchanged block/net behavior during implementation.
-
-Alternative: a vsock-only FIFO of completed heads inside `Virtqueue`, with
-its own consumer/wakeup bookkeeping. Sequence metadata appears smaller and
-keeps the existing completion ownership machinery. User guidance was
-requested on 2026-09-15; hold the RX ordering path pending that choice.
+None currently. Raise any new non-obvious implementation decisions for review
+as required by AGENTS.md.
