@@ -1,6 +1,6 @@
 //! Virtio 1.1 socket wire handling; connection policy belongs to sys-io.
 use core::mem::{offset_of, size_of};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{ErrorKind, Result as IoResult};
 use std::rc::Rc;
 
@@ -8,13 +8,19 @@ use moto_sys::sys_mem::PAGE_SIZE_SMALL;
 use moto_tooling::iobuf::IoBuf;
 
 use crate::WriteCompletion;
-use crate::virtio_device::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice};
+use crate::virtio_device::{
+    VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice, VirtioDeviceKind,
+};
 use crate::virtio_queue::{OrderedCompletions, UserData, Virtqueue, VqCompletion};
 
 pub const HEADER_LEN: usize = 44;
 pub const EVENT_LEN: usize = 4;
 pub const SHUTDOWN_RECEIVE: u32 = 1;
 pub const SHUTDOWN_SEND: u32 = 2;
+
+const VIRTQ_RX: usize = 0;
+const VIRTQ_TX: usize = 1;
+const VIRTQ_EVENT: usize = 2;
 
 pub fn validate_guest_cid(raw: u64) -> IoResult<u32> {
     let cid = u32::try_from(raw).map_err(|_| ErrorKind::InvalidData)?;
@@ -732,6 +738,125 @@ impl EventPool {
                 .unwrap_or_else(|err| panic!("vsock event repost failed: {err}")),
         );
         std::task::Poll::Ready(result)
+    }
+}
+
+type PreparedPools = (PreparedRxPool, TxPool, PreparedEventPool);
+
+pub(crate) fn prepare_pools(queues: &[Rc<RefCell<Virtqueue>>]) -> IoResult<PreparedPools> {
+    if queues.len() != 3 {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    let rx = PreparedRxPool::new(queues[VIRTQ_RX].clone())?;
+    let tx = TxPool::new(queues[VIRTQ_TX].clone())?;
+    let events = PreparedEventPool::new(queues[VIRTQ_EVENT].clone())?;
+    Ok((rx, tx, events))
+}
+
+/// Device-lifetime vsock I/O ownership. Keep this facade alive after
+/// activation, including while sys-io caches a later transport failure.
+pub(crate) struct VsockDevice {
+    guest_cid: Cell<u32>,
+    tx: RefCell<TxPool>,
+    rx: RefCell<Option<RxPool>>,
+    events: RefCell<Option<EventPool>>,
+    // Keep the BAR owner after every queue and DMA owner in drop order.
+    device: Rc<RefCell<VirtioDevice>>,
+}
+
+impl VsockDevice {
+    pub(crate) fn from(device: VirtioDevice) -> IoResult<Rc<Self>> {
+        if !matches!(device.kind(), VirtioDeviceKind::Vsock) {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        // Stabilize the BAR objects before queues retain notification pointers.
+        let device = Rc::new(RefCell::new(device));
+        let retained = device.clone();
+        Self::init(device).inspect_err(|err| {
+            retained.borrow().mark_failed();
+            log::error!("Failed initializing VirtIO vsock device: {err}");
+        })
+    }
+
+    fn init(device: Rc<RefCell<VirtioDevice>>) -> IoResult<Rc<Self>> {
+        let mut raw = device.borrow_mut();
+        raw.init()?;
+        raw.reset();
+        raw.acknowledge_device();
+        raw.acknowledge_driver();
+        negotiate_features(&mut raw)?;
+        let guest_cid = read_guest_cid(&raw)?;
+        raw.init_virtqueues(3, 3)?;
+
+        let (prepared_rx, tx, prepared_events) = prepare_pools(&raw.virtqueues)?;
+        let event_queue = raw.virtqueues[VIRTQ_EVENT].clone();
+        let rx_queue = raw.virtqueues[VIRTQ_RX].clone();
+        let this = Rc::new(Self {
+            guest_cid: Cell::new(guest_cid),
+            tx: RefCell::new(tx),
+            rx: RefCell::new(None),
+            events: RefCell::new(None),
+            device: device.clone(),
+        });
+
+        // No fallible work follows publication. Install every DMA owner before
+        // making the device live, then notify the two preloaded queues.
+        raw.start_queue_tasks()?;
+        *this.events.borrow_mut() = Some(prepared_events.publish_deferred());
+        *this.rx.borrow_mut() = Some(prepared_rx.publish_deferred());
+        raw.write_driver_ok();
+        event_queue.borrow_mut().kick_deferred();
+        rx_queue.borrow_mut().kick_deferred();
+        drop(raw);
+        Ok(this)
+    }
+
+    pub(crate) fn guest_cid(&self) -> u32 {
+        self.guest_cid.get()
+    }
+
+    pub(crate) fn refresh_guest_cid(&self) -> IoResult<u32> {
+        let cid = read_guest_cid(&self.device.borrow())?;
+        self.guest_cid.set(cid);
+        Ok(cid)
+    }
+
+    pub(crate) fn try_send(&self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
+        if raw.src_cid != u64::from(self.guest_cid.get()) {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        self.tx.borrow_mut().try_submit(raw, bytes)
+    }
+
+    pub(crate) fn poll_reclaim_tx(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<IoResult<()>> {
+        self.tx.borrow_mut().poll_reclaim_one(cx)
+    }
+
+    pub(crate) fn poll_receive<R>(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        consume: impl FnOnce(Result<PacketHeader, DecodeError>, &[u8]) -> R,
+    ) -> std::task::Poll<R> {
+        self.rx
+            .borrow_mut()
+            .as_mut()
+            .expect("vsock RX pool is not installed")
+            .poll_consume(cx, consume)
+    }
+
+    pub(crate) fn poll_event<R>(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        consume: impl FnOnce(Result<Event, EventError>) -> R,
+    ) -> std::task::Poll<R> {
+        self.events
+            .borrow_mut()
+            .as_mut()
+            .expect("vsock event pool is not installed")
+            .poll_consume(cx, consume)
     }
 }
 

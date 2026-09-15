@@ -195,6 +195,7 @@ pub fn test_descriptor_waiters() {
     test_vsock_events();
     test_vsock_tx();
     test_vsock_tx_pool();
+    test_vsock_pool_preparation();
     test_exhausted_self_link();
     test_mixed_chains();
     for block in [false, true] {
@@ -1794,6 +1795,116 @@ fn test_vsock_tx_pool() {
         ));
     }
     assert_eq!(pool.counts(), (4, 0));
+}
+
+fn test_vsock_pool_preparation() {
+    use crate::virtio_vsock::prepare_pools;
+
+    let available_idx = |device: &Device| {
+        // SAFETY: the fixture owns and retains the available ring storage.
+        unsafe {
+            device
+                .queue
+                .borrow()
+                .available_ring
+                .next_available_idx
+                .read_volatile()
+        }
+    };
+    let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+    // SAFETY: this initialized mapping outlives every queue and BAR access.
+    unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
+    let notify_bar =
+        Box::new(unsafe { PciBar::from_test_mapping(notify_memory.raw_ptr() as u64, 16) });
+    let rx = Device::with_size(crate::VirtioDeviceKind::Vsock, 2);
+    let tx = Device::with_size(crate::VirtioDeviceKind::Vsock, 16);
+    let events = Device::with_size(crate::VirtioDeviceKind::Vsock, 1);
+    for (device, queue_num, offset) in [(&rx, 0, 8), (&events, 2, 10)] {
+        let mut queue = device.queue.borrow_mut();
+        queue.queue_num = queue_num;
+        *queue.used_ring.flags = 0;
+        queue.set_notify_params(&*notify_bar, offset);
+    }
+    let queues = [rx.queue.clone(), tx.queue.clone(), events.queue.clone()];
+
+    for invalid in [&queues[..0], &queues[..2]] {
+        let error = match prepare_pools(invalid) {
+            Err(error) => error,
+            Ok(_) => panic!("incomplete vsock queue set was accepted"),
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+    let extra = [
+        rx.queue.clone(),
+        tx.queue.clone(),
+        events.queue.clone(),
+        events.queue.clone(),
+    ];
+    let error = match prepare_pools(&extra) {
+        Err(error) => error,
+        Ok(_) => panic!("extra vsock queue was accepted"),
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidData);
+
+    let small_rx = Device::with_size(crate::VirtioDeviceKind::Vsock, 1);
+    let small_tx = Device::new(crate::VirtioDeviceKind::Vsock);
+    for (invalid, label) in [
+        (
+            [
+                small_rx.queue.clone(),
+                tx.queue.clone(),
+                events.queue.clone(),
+            ],
+            "RX",
+        ),
+        (
+            [
+                rx.queue.clone(),
+                small_tx.queue.clone(),
+                events.queue.clone(),
+            ],
+            "TX",
+        ),
+    ] {
+        let error = match prepare_pools(&invalid) {
+            Err(error) => error,
+            Ok(_) => panic!("undersized vsock {label} queue was accepted"),
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+    for device in [&rx, &tx, &events, &small_rx, &small_tx] {
+        assert_eq!(available_idx(device), 0);
+    }
+
+    let (prepared_rx, tx_pool, prepared_events) = prepare_pools(&queues).unwrap();
+    assert_eq!(prepared_rx.pages().len(), 1);
+    assert_eq!(tx_pool.pages().len(), 4);
+    assert_eq!(prepared_events.len(), 1);
+    for device in [&rx, &tx, &events] {
+        assert_eq!(available_idx(device), 0);
+    }
+
+    let event_pool = prepared_events.publish_deferred();
+    let rx_pool = prepared_rx.publish_deferred();
+    assert_eq!(available_idx(&events), 1);
+    assert_eq!(available_idx(&rx), 1);
+    assert_eq!(available_idx(&tx), 0);
+    let bytes: &[u8] = notify_memory.as_ref();
+    assert!(bytes.iter().all(|byte| *byte == 0xa5));
+
+    // This fixture checks publication/kicks, not PCI DRIVER_OK sequencing.
+    events.queue.borrow_mut().kick_deferred();
+    rx.queue.borrow_mut().kick_deferred();
+    let bytes: &[u8] = notify_memory.as_ref();
+    assert_eq!(&bytes[8..12], &[0, 0, 2, 0]);
+    assert!(bytes[..8].iter().all(|byte| *byte == 0xa5));
+    assert!(bytes[12..].iter().all(|byte| *byte == 0xa5));
+
+    events.publish_used(available_head(&events, 0), 0);
+    rx.publish_used(available_head(&rx, 0), 0);
+    drop(event_pool);
+    drop(rx_pool);
+    drop(tx_pool);
 }
 
 /// Run in a child process because Motor OS panics abort the process.

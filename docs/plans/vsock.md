@@ -479,6 +479,32 @@ Stage 3 initial-buffer notification ordering is implemented and parent-reviewed:
   The vsock constructor, runtime integration, Q19–Q21, and both milestones
   remain pending.
 
+Stage 3 device constructor and driver facade are implemented and parent-reviewed:
+
+- The crate-private, unactivated constructor follows block/net's `from`
+  pattern. It stabilizes and retains the original BAR-owning device before
+  creating queues, prepares all three bounded pools, and allocates the outer
+  owner before starting queue tasks. Event then RX owners are published and
+  installed before DRIVER_OK and the two deferred kicks; no returned-error
+  path can abandon published buffers. Shared reset policy is unchanged.
+- Separate pool borrows expose synchronous TX submission, TX reclamation,
+  ordered RX consumption, and event consumption. TX rejects a foreign local
+  CID before touching its pool; CID refresh commits only a validated value.
+  The future sys-io runtime must retain the complete driver on cached failure.
+- Guest fixtures exercise the production three-pool preparation helper with
+  empty/short/extra queue sets, undersized RX/TX, and minimum supported sizes.
+  Rejections and preparation publish nothing. Root added mapped notification
+  storage to verify actual initial event/RX pool publication makes no MMIO
+  writes, then explicit kicks identify queues 2/0 without changing adjacent
+  bytes. Returned completions are reclaimed before fixture owners are freed.
+- Debug/release builds, targeted Clippy, and descriptor/I/O-task/filesystem
+  regressions passed with no new warnings or initial check failures;
+  formatting/diff checks passed. Logs: `/tmp/vsock-device.COL6rU/` and
+  `/tmp/vsock-device-gate.8HSDNS/`. Constructor status/CID MMIO sequencing,
+  failed live initialization, and external facade use remain source-reviewed,
+  not fixture-emulated or tested on attached vsock hardware. Runtime pumps,
+  lazy service activation, Q19–Q21, and both milestones remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1900,6 +1926,28 @@ support. The change adds one MMIO read per initialized block/net device at
 boot and per lazily initialized vsock device, so it needs the AGENTS.md
 boot-latency review before implementation. Existing gate passes have not
 tested this proposed check. Other independently reviewable fixes can proceed.
+
+Pinned-source review on 2026-09-15 supports the one-read proposal for initial
+pre-activation setup, without proving general backend reset completion:
+
+- [QEMU 10.2.1](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/virtio.c#L2253-L2283)
+  stores the requested status synchronously; its
+  [PCI write handler](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/virtio-pci.c#L1679-L1692)
+  invokes reset before returning from a zero-status write.
+- [CHV 52.0](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/transport/pci_device.rs#L1258-L1269)
+  resets queue/common configuration in the write handler; the
+  [common status register](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/transport/pci_common_config.rs#L178-L190)
+  is restored to zero.
+- [Firecracker 1.15.1](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/transport/pci/common_config.rs#L164-L185)
+  stores zero in its serialized reset transition. However, its
+  [PCI reset path](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/transport/pci/device.rs#L904-L940)
+  deliberately leaves status zero even when an activated backend cannot reset,
+  blocking reinitialization instead. Zero alone is therefore not evidence
+  that arbitrary outstanding DMA can be discarded.
+
+These are source-based expectations, not live one-read measurements or policy
+approval. The planned vsock transport-reset event path keeps existing queues
+and DMA owners; it does not reset/reinitialize the PCI device.
 
 ### Q20. Reset only the stream on impossible peer credit? (awaiting review)
 
