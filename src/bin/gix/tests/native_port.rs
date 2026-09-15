@@ -1,4 +1,11 @@
-use std::{fs, io::Read, path::PathBuf, sync::atomic::AtomicBool};
+use std::{
+    ffi::OsStr,
+    fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::AtomicBool,
+};
 
 use gix::{
     bstr::ByteSlice,
@@ -9,7 +16,11 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + 
 
 fn main() -> Result {
     let mut args = std::env::args_os().skip(1);
-    let fixture = PathBuf::from(args.next().ok_or("fixture path required")?);
+    let first = args.next().ok_or("fixture path required")?;
+    if first == OsStr::new("--capture-child") {
+        return capture_child(&args.next().ok_or("capture action required")?);
+    }
+    let fixture = PathBuf::from(first);
     let output = PathBuf::from(args.next().ok_or("output path required")?);
 
     let url = motor_gix::https_url::HttpsUrl::parse("https://EXAMPLE.com:443/repo.git?q=1")?;
@@ -49,6 +60,7 @@ fn main() -> Result {
     }
 
     fs::create_dir(&output)?;
+    check_capture(&output)?;
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
 
@@ -331,4 +343,80 @@ fn check_pack_validation(repo: &gix::Repository, output: &std::path::Path) -> Re
         );
     }
     Ok(())
+}
+
+fn capture_child(action: &OsStr) -> Result {
+    match action.to_str().ok_or("capture action is not UTF-8")? {
+        "echo" => {
+            let mut body = Vec::new();
+            std::io::stdin().read_to_end(&mut body)?;
+            std::io::stdout().write_all(&body)?;
+            std::io::stderr().write_all(b"child diagnostic\n")?;
+        }
+        "stdout-overflow" => {
+            std::io::stdout().write_all(b"overflow")?;
+            std::io::stdout().flush()?;
+            loop {
+                std::thread::park();
+            }
+        }
+        "stderr-overflow" => std::io::stderr().write_all(&vec![b'x'; 65 * 1024])?,
+        "exit130" => std::process::exit(130),
+        _ => return Err("unknown capture action".into()),
+    }
+    Ok(())
+}
+
+fn check_capture(output: &Path) -> Result {
+    let executable = std::env::current_exe()?;
+    let input_path = output.join("capture-input");
+    fs::write(&input_path, b"request body")?;
+    let mut input = fs::File::open(input_path)?;
+    input.seek(SeekFrom::End(0))?;
+    let response = capture_file(&output.join("capture-echo"))?;
+    let mut command = Command::new(&executable);
+    command.args(["--capture-child", "echo"]);
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut captured =
+        motor_gix::curl_capture::capture(command, response, Some(input), 12, &cancellation)?;
+    let mut body = Vec::new();
+    captured.response.read_to_end(&mut body)?;
+    assert!(captured.status.success());
+    assert_eq!(captured.body_size, 12);
+    assert_eq!(body, b"request body");
+    assert_eq!(captured.stderr, b"child diagnostic\n");
+
+    for (action, body_limit, expected) in [
+        ("stdout-overflow", 4, "response exceeded"),
+        ("stderr-overflow", 64, "stderr exceeded"),
+        ("exit130", 64, "operation cancelled"),
+    ] {
+        let mut command = Command::new(&executable);
+        command.args(["--capture-child", action]);
+        let cancellation = motor_gix::cancellation::Cancellation::new();
+        let error = motor_gix::curl_capture::capture(
+            command,
+            capture_file(&output.join(format!("capture-{action}")))?,
+            None,
+            body_limit,
+            &cancellation,
+        )
+        .err()
+        .ok_or("capture case succeeded unexpectedly")?;
+        assert!(error.to_string().contains(expected), "{action}: {error}");
+        if action == "exit130" {
+            assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
+            assert!(cancellation.check().is_err(), "cancellation was not sticky");
+        }
+    }
+    Ok(())
+}
+
+fn capture_file(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
 }
