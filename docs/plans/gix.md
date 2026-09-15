@@ -572,8 +572,8 @@ document revision stops for another review before implementation.
    truncated-index regression, Motor executable-bit set/probe and `gix-fs`
    capabilities. Plain CLI IO with `std::io::IsTerminal`; no TUI, pager or
    progress thread. Cancellation per D7. Link and run the actual Motor
-   binary, including the `strlen` export; the section 3 check proved
-   neither.
+   binary with the selected linker. Add a `strlen` export only if linking
+   requires it; the native bootstrap and repository fixture linked without one.
 3. Implement the common repository policy and HTTPS adapter. Add status/log,
    clone into an exclusively created directory, and fetch. Mark an incomplete
    clone so later authoring refuses it; report its owned partial destination
@@ -689,6 +689,15 @@ identifies patched sources. A distributable dependency pin requires a
 reviewed fork commit; committing/publishing it is a separately authorized
 step. No Lorry, curl, SSH, kernel, std, moto-rt, mlibc or toolchain-source
 edits are assumed. If necessary, diagnose and discuss them first.
+
+Implementation follow-up, discussed and approved on 2026-09-15: extend Motor
+FS's own-role permission rule to allow `Rx` → `Rwx`, alongside `Rw` → `Rx`.
+Retain higher-role ceilings and lower-role narrowing. The Gitoxide checkout
+and executable probe can then use `Rw` → `Rx` → `Rwx` without a new creation
+adapter. An interruption between those calls can leave an `Rx` output;
+M2 recovery must restore write access or replace that owned output before
+opening it for writing. Validate the OS change with three debug and three release
+`full-test.sh` runs, plus `full-test-dev.sh --release`.
 
 A milestone is complete when the installed application passes its gates;
 cross-compilation alone is insufficient. Rollback restores the previous

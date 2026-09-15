@@ -529,11 +529,13 @@ refactoring; and crates that wrap native Linux or Windows APIs will not work.</p
   <code>enable_ctrl_c_events()</code>. There is nothing to catch for termination; a killed
   process just stops.</li>
   <li><strong>No users.</strong> A process's authority is its capability word, and files
-  carry per-role permissions. Write permission on a file cannot be given back once removed;
-  see <a href="filesystem.html">Filesystem</a> for how to replace such a file. <code>~</code> is
+  carry per-role permissions. A role can use <code>rw-</code> &rarr; <code>r-x</code>
+  &rarr; <code>rwx</code> when its higher-role ceiling allows it, but cannot widen
+  itself from <code>r--</code> or <code>---</code>. See
+  <a href="filesystem.html">Filesystem</a> for the transition and replacement rules. <code>~</code> is
   not a home directory in the Unix sense; per-program configuration goes under
   <code>/user/cfg</code>, and temporary files under <code>/user/tmp</code>
-  (<code>TMPDIR</code>). Interactive programs cannot create top-level directories.</li>
+  (<code>TMPDIR</code>). The root directory initially denies Interactive write access.</li>
   <li><strong>No pty.</strong> A terminal is a pipe whose far end behaves like one.
   <code>IsTerminal</code> works; raw mode is a property of the provider, not of the
   descriptor, and the terminal size arrives in the byte stream. Use crossterm, or read
