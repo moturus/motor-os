@@ -148,8 +148,23 @@ Stage 4 header-scratch sizing (D3) is implemented and parent-reviewed:
 - The initial build failed on a missing generic type annotation in the new
   fixture, before guest execution; the annotation was corrected. Logs:
   `/tmp/vsock-scratch.AbeL6N/` (original failure) and `final.UT8Gf1/` beneath it
-  (final validation). Packet submissions/completions and both milestones
-  remain pending.
+  (final validation). RX/event completions and both milestones remain pending.
+
+Stage 4 private TX encoding/submission is implemented and parent-reviewed:
+
+- Reuses `RawHeader`, `HeaderBuffer`, and `WriteCompletion`; publishes one
+  readable descriptor for header-only packets or two for page-backed data.
+  Validates outgoing fields and DMA bounds before admission, preserves raw
+  unknown socket types only for RST, and returns the unchanged payload on
+  invalid input or descriptor exhaustion. No activation or native API is added.
+- Guest fixtures cover literal wire bytes, descriptor layout, shutdown flags,
+  payload ownership, full-queue rejection/recovery, and invalid inputs.
+  Both profiles passed base-image/systest builds, targeted Clippy, and the
+  descriptor, I/O-task, and scattered-write regressions; no new warnings.
+  Logs: `/tmp/vsock-tx.qe5IRA/`. Two initial sub-agent compile-check failures
+  required explicit byte-slice `AsRef`/`AsMut` types (tool transcript evidence);
+  those checks and the subsequent parent gates passed after correction.
+- The RX completion-order contract needs Q18's decision before implementation.
 
 ## Scope and simplicity
 
@@ -499,6 +514,11 @@ timer or an automatic retry loop. Run these wakeup tests in release as well
 as debug: in debug builds the per-queue monitoring task in
 `virtio_queue.rs` polls every second and force-wakes stalled completion
 waiters, so a lost wakeup would surface only in release.
+
+Preserve device used-ring order when delivering RX packets, including across
+counter wrap and malformed packets. Posted-buffer order and individual
+future readiness are not substitutes for that order. Resolve Q18's queue
+metadata/accessor choice before implementing this path.
 
 ### 6. Implement and test byte-credit accounting
 
@@ -1354,3 +1374,33 @@ fail the active vsock service with `InternalError`, retaining DMA ownership.
 Eight is a proposed liveness bound, not a protocol constant; it adds no idle
 polling or boot task. A time-based limit is an alternative. User guidance was
 requested on 2026-09-15; hold this helper while independent work continues.
+
+### Q18. Preserve RX completion order with sequence metadata?
+
+The [Virtio 1.1 specification](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+does not guarantee buffer use in posting order without `VIRTIO_F_IN_ORDER`
+(section 2.5), which this driver does not negotiate. Vsock promises in-order
+streams (section 5.10.6.2). Linux consumes and delivers packets in used-ring
+order through [`virtio_transport_rx_work`](https://github.com/torvalds/linux/blob/v6.18/net/vmw_vsock/virtio_transport.c#L573-L625).
+
+Motor's `reclaim_used` consumes that order but retains only length/readiness
+per completion. If buffers A and B are posted, then completed B and A before
+either future is polled, reading the ready futures in posting order reverses
+the packets. `FuturesUnordered` does not establish a used-ring-order contract
+either. This is a new-driver integration requirement, not an identified bug
+in the existing block/network drivers.
+
+Proposed: record the wrapping `u16 next_used_idx` in each completed head's
+`HeaderBuffer`, and expose it through a private completion accessor without
+changing block/net completion outputs. The vsock RX pump holds completed
+packets within its existing bounded RX pool and delivers or discards only
+the next expected sequence. Do not repost an out-of-order buffer before that
+step: the pool must bound undelivered completions too. Malformed packets
+still advance the expected sequence; tests cover opposite poll/completion
+orders, wrap, and buffer reuse. Verify actual structure size/alignment and
+unchanged block/net behavior during implementation.
+
+Alternative: a vsock-only FIFO of completed heads inside `Virtqueue`, with
+its own consumer/wakeup bookkeeping. Sequence metadata appears smaller and
+keeps the existing completion ownership machinery. User guidance was
+requested on 2026-09-15; hold the RX ordering path pending that choice.

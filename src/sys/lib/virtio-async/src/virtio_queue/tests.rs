@@ -130,6 +130,7 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 
 pub fn test_descriptor_waiters() {
     test_header_buffers();
+    test_vsock_tx();
     test_exhausted_self_link();
     test_mixed_chains();
     for block in [false, true] {
@@ -380,6 +381,211 @@ fn test_header_buffers() {
         completion.read_header::<crate::virtio_vsock::WireHeader>(),
         expected
     );
+}
+
+fn test_vsock_tx() {
+    use crate::virtio_vsock::{RawHeader, try_post_tx, validate_payload_dma};
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let reset = RawHeader {
+        src_cid: 0x7856_3412,
+        dst_cid: 2,
+        src_port: 0x0403_0201,
+        dst_port: 0x0807_0605,
+        len: 0,
+        socket_type: 0x0201,
+        operation: 3,
+        flags: 0,
+        buf_alloc: 0x4433_2211,
+        fwd_cnt: 0x8877_6655,
+    };
+    let control = match try_post_tx(device.queue.clone(), reset, None) {
+        Ok(completion) => completion,
+        Err(_) => panic!("valid header-only vsock TX was rejected"),
+    };
+    let head = control.vq_completion.chain_head;
+    let queue = device.queue.borrow();
+    let descriptor = queue.get_descriptor(head);
+    assert_eq!(
+        descriptor.addr,
+        queue.header_buffers[head as usize].buf.phys_addr() as u64
+    );
+    assert_eq!(descriptor.len, 44);
+    assert_eq!(descriptor.flags, 0);
+    assert_eq!(
+        &<IoBuf as AsRef<[u8]>>::as_ref(&queue.header_buffers[head as usize].buf)[..44],
+        &[
+            0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0,
+            0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        ]
+    );
+    drop(queue);
+    device.complete(head, 0, 0);
+    drop(control);
+
+    for flags in 0..=3 {
+        let shutdown = RawHeader {
+            socket_type: 1,
+            operation: 4,
+            flags,
+            ..reset
+        };
+        let completion = try_post_tx(device.queue.clone(), shutdown, None)
+            .unwrap_or_else(|(err, _)| panic!("valid shutdown rejected: {err}"));
+        device.complete(completion.vq_completion.chain_head, 0, 0);
+        drop(completion);
+    }
+
+    let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+    payload.set_len(3);
+    <IoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[7, 8, 9]);
+    let payload_ptr = payload.raw_ptr();
+    let payload_phys = payload.phys_addr() as u64;
+    let mut data_header = reset;
+    data_header.socket_type = 1;
+    data_header.operation = 5;
+    data_header.len = 3;
+    let mut completion = match try_post_tx(device.queue.clone(), data_header, Some(payload)) {
+        Ok(completion) => completion,
+        Err(_) => panic!("valid data vsock TX was rejected"),
+    };
+    let head = completion.vq_completion.chain_head;
+    let queue = device.queue.borrow();
+    let header_desc = queue.get_descriptor(head);
+    let data_desc = queue.get_descriptor(header_desc.next);
+    assert_eq!(
+        (header_desc.len, header_desc.flags),
+        (44, VIRTQ_DESC_F_NEXT)
+    );
+    assert_eq!(
+        (data_desc.addr, data_desc.len, data_desc.flags),
+        (payload_phys, 3, 0)
+    );
+    let encoded: &[u8] = queue.header_buffers[head as usize].buf.as_ref();
+    assert_eq!(&encoded[24..28], &[3, 0, 0, 0]);
+    drop(queue);
+    device.complete(head, 0, 2);
+    device.reclaim();
+    let mut cx = Context::from_waker(Waker::noop());
+    let Poll::Ready((returned, result)) = Pin::new(&mut completion).poll(&mut cx) else {
+        panic!("completed vsock TX was pending")
+    };
+    let returned = returned.unwrap();
+    assert!(result.is_ok());
+    assert_eq!(returned.raw_ptr(), payload_ptr);
+    assert_eq!(&<IoBuf as AsRef<[u8]>>::as_ref(&returned)[..3], &[7, 8, 9]);
+    drop(completion);
+
+    let blocker = device.submit(ready_head(&device, 8), 8, 0);
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let mut rejected = IoBuf::new_from_size_align(4096).unwrap();
+    rejected.set_len(3);
+    let rejected_ptr = rejected.raw_ptr();
+    let error = match try_post_tx(device.queue.clone(), data_header, Some(rejected)) {
+        Err(error) => error,
+        Ok(_) => panic!("full TX queue accepted another packet"),
+    };
+    assert_eq!(error.0.kind(), ErrorKind::WouldBlock);
+    assert_eq!(error.1.unwrap().raw_ptr(), rejected_ptr);
+    assert!(
+        device
+            .queue
+            .borrow()
+            .header_buffers
+            .iter()
+            .all(|header| header.in_use_by_device)
+    );
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+    device.complete(blocker.chain_head, 0, 0);
+    drop(blocker);
+
+    let before_invalid = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let valid_empty = RawHeader {
+        socket_type: 1,
+        operation: 5,
+        ..reset
+    };
+    for invalid in [
+        RawHeader {
+            src_cid: 1_u64 << 32,
+            ..valid_empty
+        },
+        RawHeader {
+            dst_cid: 1_u64 << 32,
+            ..valid_empty
+        },
+        RawHeader {
+            operation: 8,
+            ..valid_empty
+        },
+        RawHeader {
+            operation: 1,
+            flags: 1,
+            ..valid_empty
+        },
+        RawHeader {
+            operation: 4,
+            flags: 4,
+            ..valid_empty
+        },
+        RawHeader {
+            socket_type: 2,
+            operation: 1,
+            ..valid_empty
+        },
+        RawHeader {
+            len: 1,
+            ..valid_empty
+        },
+    ] {
+        let error = match try_post_tx(device.queue.clone(), invalid, None) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid TX header was accepted"),
+        };
+        assert_eq!(error.0.kind(), ErrorKind::InvalidInput);
+        assert!(error.1.is_none());
+    }
+    assert_eq!(validate_payload_dma(4096, 4096, 4096).unwrap(), 4096);
+    assert!(validate_payload_dma(4096, 1, 1).is_err());
+    assert!(validate_payload_dma(4096, 0, 0).is_err());
+    assert!(validate_payload_dma(4096, 4097, 0).is_err());
+    let mut invalid = IoBuf::new_from_size_align(64).unwrap();
+    invalid.set_len(3);
+    let error = match try_post_tx(device.queue.clone(), data_header, Some(invalid)) {
+        Err(error) => error,
+        Ok(_) => panic!("invalid TX payload was accepted"),
+    };
+    assert_eq!(error.0.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.1.unwrap().capacity(), 64);
+    let mut empty = IoBuf::new_from_size_align(4096).unwrap();
+    empty.set_len(0);
+    data_header.len = 0;
+    let error = match try_post_tx(device.queue.clone(), data_header, Some(empty)) {
+        Err(error) => error,
+        Ok(_) => panic!("empty TX payload was accepted"),
+    };
+    assert_eq!(error.0.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.1.unwrap().len(), 0);
+    data_header.operation = 1;
+    data_header.len = 4096;
+    let payload = IoBuf::new_from_size_align(4096).unwrap();
+    let payload_ptr = payload.raw_ptr();
+    let error = match try_post_tx(device.queue.clone(), data_header, Some(payload)) {
+        Err(error) => error,
+        Ok(_) => panic!("control payload was accepted"),
+    };
+    assert_eq!(error.0.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.1.unwrap().raw_ptr(), payload_ptr);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before_invalid
+    );
+    let full = device.submit(ready_head(&device, 8), 8, 0);
+    device.complete(full.chain_head, 0, 0);
+    drop(full);
 }
 
 /// Run in a child process because Motor OS panics abort the process.

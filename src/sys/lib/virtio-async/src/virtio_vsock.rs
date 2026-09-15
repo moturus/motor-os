@@ -1,8 +1,15 @@
-//! Virtio 1.1 socket wire decoding; connection policy belongs to sys-io.
+//! Virtio 1.1 socket wire handling; connection policy belongs to sys-io.
 use core::mem::{offset_of, size_of};
+use std::cell::RefCell;
 use std::io::{ErrorKind, Result as IoResult};
+use std::rc::Rc;
 
+use moto_sys::sys_mem::PAGE_SIZE_SMALL;
+use moto_tooling::iobuf::IoBuf;
+
+use crate::WriteCompletion;
 use crate::virtio_device::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice};
+use crate::virtio_queue::{UserData, Virtqueue};
 
 pub const HEADER_LEN: usize = 44;
 pub const EVENT_LEN: usize = 4;
@@ -164,6 +171,111 @@ fn raw_header(bytes: &[u8]) -> RawHeader {
         buf_alloc: read_u32(bytes, 36),
         fwd_cnt: read_u32(bytes, 40),
     }
+}
+
+fn encode_header(raw: RawHeader) -> WireHeader {
+    WireHeader {
+        src_cid: raw.src_cid.to_le_bytes(),
+        dst_cid: raw.dst_cid.to_le_bytes(),
+        src_port: raw.src_port.to_le_bytes(),
+        dst_port: raw.dst_port.to_le_bytes(),
+        len: raw.len.to_le_bytes(),
+        socket_type: raw.socket_type.to_le_bytes(),
+        operation: raw.operation.to_le_bytes(),
+        flags: raw.flags.to_le_bytes(),
+        buf_alloc: raw.buf_alloc.to_le_bytes(),
+        fwd_cnt: raw.fwd_cnt.to_le_bytes(),
+    }
+}
+
+pub(crate) fn validate_payload_dma(capacity: usize, len: usize, phys_addr: u64) -> IoResult<u32> {
+    let len = u32::try_from(len).map_err(|_| ErrorKind::InvalidInput)?;
+    if capacity != PAGE_SIZE_SMALL as usize
+        || len == 0
+        || len as usize > capacity
+        || !phys_addr.is_multiple_of(PAGE_SIZE_SMALL)
+    {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    Ok(len)
+}
+
+fn validate_tx_header(raw: RawHeader, payload_len: u32) -> IoResult<()> {
+    if raw.src_cid > u32::MAX as u64
+        || raw.dst_cid > u32::MAX as u64
+        || raw.len != payload_len
+        || (raw.socket_type != 1 && raw.operation != 3)
+    {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    let valid_flags = match raw.operation {
+        4 => raw.flags & !(SHUTDOWN_RECEIVE | SHUTDOWN_SEND) == 0,
+        1 | 2 | 3 | 5 | 6 | 7 => raw.flags == 0,
+        _ => false,
+    };
+    if !valid_flags || (raw.operation != 5 && payload_len != 0) {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+/// Try to publish one TX packet without waiting. Rejection leaves the queue
+/// unpublished and returns the caller's payload unchanged.
+pub(crate) fn try_post_tx(
+    queue: Rc<RefCell<Virtqueue>>,
+    raw: RawHeader,
+    payload: Option<IoBuf>,
+) -> std::result::Result<WriteCompletion<Option<IoBuf>>, (std::io::Error, Option<IoBuf>)> {
+    let payload_data = match payload.as_ref() {
+        Some(bytes) => {
+            validate_payload_dma(bytes.capacity(), bytes.len(), bytes.phys_addr() as u64).map(
+                |len| UserData {
+                    phys_addr: bytes.phys_addr() as u64,
+                    len,
+                },
+            )
+        }
+        None => Ok(UserData {
+            phys_addr: 0,
+            len: 0,
+        }),
+    };
+    let payload_data = match payload_data {
+        Ok(data) => data,
+        Err(err) => return Err((err, payload)),
+    };
+    if let Err(err) = validate_tx_header(raw, payload_data.len) {
+        return Err((err, payload));
+    }
+
+    let descriptor_count = if payload.is_some() { 2 } else { 1 };
+    let (chain_head, header_data) = {
+        let mut queue = queue.borrow_mut();
+        let Some(chain_head) = queue.alloc_descriptor_chain(descriptor_count) else {
+            return Err((ErrorKind::WouldBlock.into(), payload));
+        };
+        let (header, phys_addr, _) = queue.get_buffer::<WireHeader>(chain_head);
+        *header = encode_header(raw);
+        (
+            chain_head,
+            UserData {
+                phys_addr,
+                len: HEADER_LEN as u32,
+            },
+        )
+    };
+    let data = [header_data, payload_data];
+    let descriptors = &data[..descriptor_count as usize];
+    Ok(WriteCompletion {
+        vq_completion: Virtqueue::add_buffs(
+            queue,
+            descriptors,
+            descriptor_count,
+            0,
+            chain_head,
+            payload,
+        ),
+    })
 }
 
 /// Decode a copied header after completion. `bytes` need not contain the
