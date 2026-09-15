@@ -262,6 +262,29 @@ Stage 4 event completion/pool is implemented and parent-reviewed:
   Formatting/diff checks passed; no initial check failures. Logs:
   `/tmp/vsock-events.Jh4yKQ/`. Activation and both milestones remain pending.
 
+Shared initialization prerequisite is implemented and parent-reviewed:
+
+- Source review found that queue allocation started tasks before setup could
+  fail, and the no-MSI-X path succeeded without a usable interrupt handle.
+  The kernel ignores a zero wait handle, leaving an unwakeable task; this
+  analysis did not establish a sys-io panic. Missing/insufficient MSI-X and
+  missing notification capability now fail explicitly before allocation.
+- Queue tasks start as a validated batch from the final `driver_ok` step,
+  not allocation. Queue-owned RAII handles close on failed setup; existing
+  IRQ-number and ring-pool reservations remain monotonic. Net's missing
+  device-configuration check now precedes its feature-time configuration read.
+  No new boot tasks, queue enumeration pass, or teardown framework is added.
+- Guest tests use memory-backed queues and native IPC handles to exercise
+  failed-batch atomicity, delayed/immediate and signaled reclamation,
+  duplicate-start rejection, and handle release with/without task startup.
+  These are not injected PCI/MSI-X failures. Debug/release builds, Clippy,
+  descriptor/I/O-task/filesystem regressions, and SSH/SFTP traffic passed.
+  Formatting/diff checks passed; no new warnings remain.
+- Logs: `/tmp/vsock-init.1EvIqp/`. Two new test Clippy warnings were corrected;
+  their original log is retained. Parent review corrected a fixture owner
+  that outlived its ring storage before any guest run. A separately identified
+  block small-queue limit bug is next; neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -338,10 +361,16 @@ The following constraints affect the design:
 2. A completion owns its descriptors until it is dropped after completion.
    Dropping it while DMA is outstanding asserts. Application cancellation
    therefore cannot directly cancel a submitted device request.
-3. `Virtqueue::allocate_virtqueue` already spawns the IRQ reclamation task.
-   `Virtqueue::drop` has no device teardown implementation. Keep device
+3. Queue allocation no longer starts tasks: the final `driver_ok` step
+   validates all queue wait handles before starting IRQ reclamation and
+   the existing debug monitors. Failed setup releases queue-owned handles,
+   but does not reclaim the shared mapper's ring/IRQ-number reservations.
+   `Virtqueue::drop` still has no device teardown implementation. Keep device
    lifetime separate from socket lifetime; do not promise hot-unplug or
-   reset/recreation of queues as part of socket cleanup.
+   reset/recreation of queues as part of socket cleanup. Setup is still
+   synchronous, before packet publication; a device must not consume buffers
+   before `DRIVER_OK`
+   ([Virtio 1.1 section 2.1.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)).
 4. The sys-io mapper currently permits IRQs 64–69, but the kernel registers
    16 custom IRQs, 64–79 (`src/sys/kernel/src/config.rs` and
    `src/sys/kernel/src/arch/x64/irq.rs`). Reuse

@@ -50,7 +50,8 @@ impl Device {
             used_ring,
             free_head_idx: 0,
             next_used_idx: 0,
-            wait_handle: SysHandle::NONE,
+            wait_handle: RaiiHandle::from(SysHandle::NONE),
+            tasks_started: false,
             header_buffers,
             notify_bar: std::ptr::null(),
             notify_offset: 0,
@@ -168,6 +169,7 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 }
 
 pub fn test_descriptor_waiters() {
+    test_queue_task_start();
     test_ordered_completions();
     test_ordered_waiter();
     test_used_id_boundary();
@@ -234,6 +236,92 @@ pub fn test_descriptor_waiters() {
             drop(full);
         }
     }
+}
+
+fn assert_handle_closed(handle: SysHandle) {
+    match moto_sys::SysObj::dup(handle) {
+        Err(error) => assert_eq!(error, moto_rt::E_BAD_HANDLE),
+        Ok(duplicate) => {
+            moto_sys::SysObj::put(duplicate).unwrap();
+            panic!("queue wait handle remained open");
+        }
+    }
+}
+
+fn test_queue_task_start() {
+    use moto_sys::{SysCpu, SysObj};
+
+    for (vectors, required, accepted) in [
+        (None, 3, false),
+        (Some(0), 3, false),
+        (Some(2), 3, false),
+        (Some(3), 3, true),
+        (Some(4), 3, true),
+        (Some(1), 1, true),
+    ] {
+        assert_eq!(
+            crate::virtio_device::validate_msix_vectors(vectors, required).is_ok(),
+            accepted
+        );
+    }
+
+    let unstarted = Device::new(crate::VirtioDeviceKind::Vsock);
+    let (wake_unstarted, wait_unstarted) =
+        SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0)
+            .expect("failed to create unstarted queue wait pair");
+    unstarted.queue.borrow_mut().set_wait_handle(wait_unstarted);
+    drop(unstarted);
+    assert_handle_closed(wait_unstarted);
+    SysObj::put(wake_unstarted).unwrap();
+
+    let first = Device::new(crate::VirtioDeviceKind::Vsock);
+    let second = Device::new(crate::VirtioDeviceKind::Vsock);
+    let (wake_first, wait_first) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0)
+        .expect("failed to create first queue wait pair");
+    let (wake_second, wait_second) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0)
+        .expect("failed to create second queue wait pair");
+    first.queue.borrow_mut().set_wait_handle(wait_first);
+    let queues = [first.queue.clone(), second.queue.clone()];
+    let strong_counts = queues.each_ref().map(Rc::strong_count);
+    assert_eq!(
+        Virtqueue::start_tasks(&queues).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(queues.each_ref().map(Rc::strong_count), strong_counts);
+    assert!(queues.iter().all(|queue| !queue.borrow().tasks_started));
+
+    second.queue.borrow_mut().set_wait_handle(wait_second);
+    let mut first_completion = first.submit(ready_head(&first, 1), 1, 7);
+    first.complete(first_completion.chain_head, 9, 0);
+    assert_eq!(first.queue.borrow().next_used_idx, 0);
+
+    let mut runtime = moto_async::LocalRuntime::new();
+    runtime.block_on(async {
+        Virtqueue::start_tasks(&queues).unwrap();
+        assert_eq!(
+            Virtqueue::start_tasks(&queues).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        let (value, used_len) = std::future::poll_fn(|cx| first_completion.do_poll(cx)).await;
+        assert_eq!((value, used_len.unwrap()), (7, 9));
+
+        moto_async::yield_now().await;
+        let mut signaled = first.submit(ready_head(&first, 1), 1, 11);
+        first.complete(signaled.chain_head, 13, 0);
+        SysCpu::wake(wake_first).unwrap();
+        let (value, used_len) = std::future::poll_fn(|cx| signaled.do_poll(cx)).await;
+        assert_eq!((value, used_len.unwrap()), (11, 13));
+    });
+    drop(first_completion);
+    drop(runtime);
+    drop(queues);
+    drop(first);
+    drop(second);
+    for wait_handle in [wait_first, wait_second] {
+        assert_handle_closed(wait_handle);
+    }
+    SysObj::put(wake_first).unwrap();
+    SysObj::put(wake_second).unwrap();
 }
 
 fn test_ordered_completions() {

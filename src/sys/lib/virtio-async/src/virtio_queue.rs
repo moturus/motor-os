@@ -8,6 +8,7 @@ use crate::virtio_device::mapper;
 
 use moto_async::AsFuture;
 use moto_sys::SysHandle;
+use moto_sys::syscalls::RaiiHandle;
 use moto_tooling::iobuf::IoBuf;
 
 use std::cell::RefCell;
@@ -225,7 +226,8 @@ pub(super) struct Virtqueue {
     free_head_idx: u16,
     next_used_idx: u16,
 
-    wait_handle: SysHandle,
+    wait_handle: RaiiHandle,
+    tasks_started: bool,
 
     // Most (all?) requests placed into virtqueues have descriptors pointing to
     // a header and a status. These are internal to VirtIO machinery; as our virtqueues
@@ -327,7 +329,8 @@ impl Virtqueue {
             used_ring,
             free_head_idx: 0,
             next_used_idx: 0,
-            wait_handle: SysHandle::NONE,
+            wait_handle: RaiiHandle::from(SysHandle::NONE),
+            tasks_started: false,
             last_kick_idx: 0,
             header_buffers,
             notify_bar: core::ptr::null(),
@@ -341,14 +344,30 @@ impl Virtqueue {
             virtio_f_event_idx_negotiated: false,
         }));
 
-        let self_clone = self_.clone();
-        moto_async::LocalRuntime::spawn(async move {
-            Self::reclaim_task(self_clone).await;
-        });
-
-        #[cfg(debug_assertions)]
-        Self::spawn_monitoring_task(self_.clone());
         Ok(self_)
+    }
+
+    /// Start a complete device's queue tasks. A returned error leaves every
+    /// queue unstarted; validation precedes all task ownership.
+    pub(crate) fn start_tasks(queues: &[Rc<RefCell<Self>>]) -> Result<()> {
+        for queue in queues {
+            let queue = queue.borrow();
+            if queue.wait_handle.syshandle() == SysHandle::NONE || queue.tasks_started {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+        }
+        for queue in queues {
+            queue.borrow_mut().tasks_started = true;
+        }
+        for queue in queues {
+            let reclaim_queue = queue.clone();
+            moto_async::LocalRuntime::spawn(async move {
+                Self::reclaim_task(reclaim_queue).await;
+            });
+            #[cfg(debug_assertions)]
+            Self::spawn_monitoring_task(queue.clone());
+        }
+        Ok(())
     }
 
     #[cfg(debug_assertions)]
@@ -421,7 +440,7 @@ impl Virtqueue {
     }
 
     async fn reclaim_task(this: Rc<RefCell<Self>>) {
-        let wait_handle = this.borrow().wait_handle;
+        let wait_handle = this.borrow().wait_handle.syshandle();
 
         loop {
             let mut virtq = this.borrow_mut();
@@ -444,7 +463,7 @@ impl Virtqueue {
     }
 
     pub fn set_wait_handle(&mut self, handle: SysHandle) {
-        self.wait_handle = handle;
+        self.wait_handle = RaiiHandle::from(handle);
     }
 
     pub fn set_f_event_idx_negotiated(&mut self) {

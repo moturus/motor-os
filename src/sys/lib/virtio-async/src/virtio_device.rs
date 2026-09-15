@@ -64,6 +64,13 @@ pub const VIRTIO_F_RING_EVENT_IDX: u64 = 1u64 << 29;
 pub const VIRTIO_F_VERSION_1: u64 = 1u64 << 32;
 pub const _VIRTIO_F_IN_ORDER: u64 = 1u64 << 35; // Usually is not available.
 
+pub(crate) fn validate_msix_vectors(vectors: Option<u16>, required: u16) -> Result<()> {
+    match vectors {
+        Some(vectors) if vectors >= required => Ok(()),
+        _ => Err(ErrorKind::Unsupported.into()),
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub(super) struct VirtioPciCap {
@@ -534,7 +541,7 @@ impl VirtioDevice {
         virtqueue: &mut Virtqueue,
     ) -> Result<()> {
         if self.msix.is_none() {
-            return Ok(());
+            return Err(ErrorKind::Unsupported.into());
         }
 
         let msix = self.msix.as_ref().unwrap();
@@ -626,6 +633,25 @@ impl VirtioDevice {
         assert!(max_virtqueues <= 64);
         assert!(min_virtqueues <= max_virtqueues);
 
+        let msix_vectors = self.msix.as_ref().map(|msix| msix.msgnum);
+        if let Err(err) = validate_msix_vectors(msix_vectors, min_virtqueues) {
+            match msix_vectors {
+                Some(vectors) => log::error!(
+                    "VirtIO {:?} device has {vectors} MSI-X vectors; at least {min_virtqueues} required.",
+                    self.kind
+                ),
+                None => log::error!(
+                    "VirtIO {:?} device has no MSI-X capability; at least {min_virtqueues} vectors required.",
+                    self.kind
+                ),
+            }
+            return Err(err);
+        }
+        if self.notify_cfg.is_none() {
+            log::error!("VirtIO device has no notification capability.");
+            return Err(ErrorKind::InvalidData.into());
+        }
+
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
@@ -702,7 +728,8 @@ impl VirtioDevice {
     }
 
     // Step 8 (final)
-    pub(super) fn driver_ok(&self) {
+    pub(super) fn driver_ok(&self) -> Result<()> {
+        Virtqueue::start_tasks(&self.virtqueues)?;
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
@@ -713,6 +740,7 @@ impl VirtioDevice {
         let mut status = cfg_bar.readb(status_offset);
         status |= DRIVER_OK_STATUS_BIT;
         cfg_bar.writeb(status_offset, status);
+        Ok(())
     }
 }
 

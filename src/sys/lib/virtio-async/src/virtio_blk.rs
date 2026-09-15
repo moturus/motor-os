@@ -187,7 +187,7 @@ impl BlockDevice {
         dev_mut.acknowledge_driver(); // Step 3
         let (capacity, read_only, seg_max) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         dev_mut.init_virtqueues(1, 1)?; // Step 7
-        dev_mut.driver_ok(); // Step 8
+        dev_mut.driver_ok()?; // Step 8
 
         let virtqueue = dev_mut.virtqueues[0].clone();
 

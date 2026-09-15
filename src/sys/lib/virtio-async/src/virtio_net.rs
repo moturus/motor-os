@@ -261,6 +261,10 @@ impl NetDevice {
         dev_mut.reset();
         dev_mut.acknowledge_device();
 
+        if dev_mut.device_cfg.is_none() {
+            log::warn!("Skiping Virtio NET device without device configuration.");
+            return Err(ErrorKind::Other.into());
+        }
         dev_mut.acknowledge_driver(); // Step 3
         let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         let csum_offload = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_CSUM) != 0;
@@ -280,12 +284,7 @@ impl NetDevice {
             );
             return Err(ErrorKind::InvalidData.into());
         }
-        dev_mut.driver_ok(); // Step 8
-
-        if dev_mut.device_cfg.is_none() {
-            log::warn!("Skiping Virtio NET device without device configuration.");
-            return Err(ErrorKind::Other.into());
-        }
+        dev_mut.driver_ok()?; // Step 8
 
         let virtq_rx = dev_mut.virtqueues[Self::VIRTQ_RX].clone();
         let virtq_tx = dev_mut.virtqueues[Self::VIRTQ_TX].clone();
