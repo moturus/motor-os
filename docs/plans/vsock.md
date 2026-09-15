@@ -429,6 +429,31 @@ Stage 4 fixed TX pool (D7) is implemented and parent-reviewed:
   `/tmp/vsock-tx-pool-gate.sf43rI/`. Device construction, runtime pumps, and
   both milestones remain pending.
 
+Stage 6 pure credit arithmetic is implemented and parent-reviewed:
+
+- The dependency-free sys-io helper checks local occupancy, wraps protocol
+  counters explicitly, rejects impossible peer advances without changing
+  either advertised field, and reports zero allowance after an allocation
+  shrink below outstanding bytes. The single-pump API charges only after
+  successful synchronous publication; it adds no callback, reservation
+  token, rollback ledger, or connection-error policy.
+- The actual production source is included in existing guest I/O-task tests.
+  Both profiles passed initial/partial/exhausted credit, duplicate/changed
+  advertisements, overcharge rejection, atomic invalid updates, intermediate
+  counter-wrap values, checked local overflow, forwarding counts, and
+  independent state. These numerical tests do not exercise real publication,
+  cancellation, IPC page transfer, or a live vsock peer; those remain pending.
+- Debug/release builds, targeted Clippy, and guest descriptor/I/O-task/
+  filesystem regressions passed with no new warnings. The fixture also
+  passes Clippy with `-D warnings` in both profiles; formatting/diff checks
+  passed. Final logs: `/tmp/vsock-credit-gate.DFsWDg/`.
+- Original sub-agent transcript evidence records a check accidentally using
+  the host target, rejected by moto-async's existing Motor-only guard, and a
+  strict sys-io Clippy run rejected by existing warnings in untouched code.
+  Correct-target checks and ordinary baseline-aware Clippy passed; those
+  initial outputs were not saved as log files. No boot work, device activation,
+  or Q20 policy was added. Runtime integration and both milestones remain.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

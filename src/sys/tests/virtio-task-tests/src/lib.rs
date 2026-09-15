@@ -5,6 +5,8 @@ mod device;
 mod stats;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
+#[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
+mod vsock_credit;
 pub(crate) use device::{BlockDevice, RawCompletion};
 
 use std::cell::Cell;
@@ -347,6 +349,7 @@ pub fn test_premature_reply_drop() {
 
 pub fn run_tests() {
     test_virtio_capacity();
+    test_vsock_credit();
     concurrent_requests();
     runtime_wakeups();
     for operation in [0, 1] {
@@ -375,6 +378,180 @@ pub fn run_tests() {
     println!(
         "I/O task model PASS: split capacity, out-of-order errors, buffer ownership, closed inbox, fatal early drop"
     );
+}
+
+fn test_vsock_credit() {
+    use vsock_credit::{CreditAdvertisement as Ad, CreditError as Error, CreditState};
+
+    let mut credit = CreditState::new(128 * 1024).unwrap();
+    assert_eq!(
+        credit.local_advertisement(),
+        Ad {
+            buf_alloc: 128 * 1024,
+            fwd_cnt: 0
+        }
+    );
+    assert_eq!(credit.tx_allowance(), 0);
+    credit.charge_tx_after_publish(0).unwrap();
+    credit
+        .update_peer(Ad {
+            buf_alloc: 10,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    credit.charge_tx_after_publish(4).unwrap();
+    assert_eq!(credit.tx_allowance(), 6);
+    assert_eq!(
+        credit.charge_tx_after_publish(7),
+        Err(Error::TxExceedsPeerCredit)
+    );
+    assert_eq!(credit.tx_allowance(), 6);
+    credit.charge_tx_after_publish(6).unwrap();
+    assert_eq!(credit.tx_allowance(), 0);
+
+    let mut changing = CreditState::new(8).unwrap();
+    changing
+        .update_peer(Ad {
+            buf_alloc: 100,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    changing.charge_tx_after_publish(80).unwrap();
+    changing
+        .update_peer(Ad {
+            buf_alloc: 120,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    assert_eq!(changing.tx_allowance(), 40);
+    changing
+        .update_peer(Ad {
+            buf_alloc: 60,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    assert_eq!(changing.tx_allowance(), 0);
+    changing
+        .update_peer(Ad {
+            buf_alloc: 60,
+            fwd_cnt: 21,
+        })
+        .unwrap();
+    assert_eq!(changing.tx_allowance(), 1);
+    assert_eq!(
+        changing.update_peer(Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: 81
+        }),
+        Err(Error::PeerForwardedBeyondSent)
+    );
+    assert_eq!(changing.tx_allowance(), 1);
+    changing
+        .update_peer(Ad {
+            buf_alloc: 60,
+            fwd_cnt: 22,
+        })
+        .unwrap();
+    assert_eq!(changing.tx_allowance(), 2);
+
+    let mut wrapping = CreditState::new(1).unwrap();
+    wrapping
+        .update_peer(Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    wrapping.charge_tx_after_publish(u32::MAX - 2).unwrap();
+    assert_eq!(wrapping.tx_allowance(), 2);
+    wrapping
+        .update_peer(Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: u32::MAX - 3,
+        })
+        .unwrap();
+    assert_eq!(wrapping.tx_allowance(), u32::MAX - 1);
+    wrapping.charge_tx_after_publish(3).unwrap();
+    assert_eq!(wrapping.tx_allowance(), u32::MAX - 4);
+    wrapping
+        .update_peer(Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: u32::MAX,
+        })
+        .unwrap();
+    assert_eq!(wrapping.tx_allowance(), u32::MAX - 1);
+    wrapping
+        .update_peer(Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    assert_eq!(wrapping.tx_allowance(), u32::MAX);
+    assert_eq!(
+        wrapping.update_peer(Ad {
+            buf_alloc: 17,
+            fwd_cnt: 1
+        }),
+        Err(Error::PeerForwardedBeyondSent)
+    );
+    assert_eq!(wrapping.tx_allowance(), u32::MAX);
+
+    let mut local = CreditState::new(8).unwrap();
+    local.record_received(5).unwrap();
+    assert_eq!(local.rx_allowance(), 3);
+    assert_eq!(
+        local.record_received(4),
+        Err(Error::ReceiveCapacityExceeded)
+    );
+    assert_eq!(
+        local.record_received(usize::MAX),
+        Err(Error::ReceiveCapacityExceeded)
+    );
+    assert_eq!(
+        local.record_forwarded_to_ipc(6),
+        Err(Error::ForwardedBeyondBuffered)
+    );
+    assert_eq!(local.rx_allowance(), 3);
+    local.record_forwarded_to_ipc(3).unwrap();
+    assert_eq!(
+        local.local_advertisement(),
+        Ad {
+            buf_alloc: 8,
+            fwd_cnt: 3
+        }
+    );
+    assert_eq!(local.rx_allowance(), 6);
+
+    let max = u32::MAX as usize;
+    let mut local_wrap = CreditState::new(max).unwrap();
+    local_wrap.record_received(max - 1).unwrap();
+    local_wrap.record_forwarded_to_ipc(max - 2).unwrap();
+    local_wrap.record_received(4).unwrap();
+    local_wrap.record_forwarded_to_ipc(4).unwrap();
+    assert_eq!(
+        local_wrap.local_advertisement(),
+        Ad {
+            buf_alloc: u32::MAX,
+            fwd_cnt: 1
+        }
+    );
+    assert_eq!(
+        CreditState::new(max + 1).err(),
+        Some(Error::CapacityTooLarge)
+    );
+
+    let mut first = CreditState::new(4).unwrap();
+    let second = CreditState::new(6).unwrap();
+    first.record_received(4).unwrap();
+    first.record_forwarded_to_ipc(1).unwrap();
+    assert_eq!(first.rx_allowance(), 1);
+    assert_eq!(
+        second.local_advertisement(),
+        Ad {
+            buf_alloc: 6,
+            fwd_cnt: 0
+        }
+    );
+    assert_eq!((second.rx_allowance(), second.tx_allowance()), (6, 0));
 }
 
 fn test_virtio_capacity() {

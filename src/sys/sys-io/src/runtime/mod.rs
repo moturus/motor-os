@@ -18,6 +18,7 @@ pub(crate) mod channel_budget;
 pub mod fs;
 pub(crate) mod net;
 mod virtio_capacity;
+pub(crate) mod vsock;
 
 // A single 2M page used for VirtIO/MMIO.
 // It's a hack, but we don't need anything more complicated for now.
