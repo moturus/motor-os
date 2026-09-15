@@ -23,7 +23,8 @@ pub mod vsock_test_support {
 
     pub use crate::virtio_vsock::{
         DecodeErrorKind, EVENT_LEN, Event, EventError, HEADER_LEN, Operation, PacketHeader,
-        RawHeader, SocketType, decode_event, decode_packet, select_features,
+        RawHeader, SocketType, decode_event, decode_packet, select_features, validate_guest_cid,
+        validate_vsock_config_len,
     };
 
     pub fn classify_device_id(device_id: u16) -> VirtioDeviceKind {

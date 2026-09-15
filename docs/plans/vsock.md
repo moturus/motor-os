@@ -301,6 +301,23 @@ Shared block-queue limit prerequisite is implemented and parent-reviewed:
   `/tmp/vsock-blk-seg.O17eAB/`. Vsock activation and both milestones remain
   pending.
 
+Stage 3 CID/configuration validation is implemented and parent-reviewed:
+
+- Requires at least eight configuration bytes and a guest CID in
+  `3..=0xffff_fffe` with a zero upper word. The private reader rejects absent
+  or short configuration and missing BAR mappings, then uses the existing
+  low/high-32-bit `PciBar::read_u64` once. No generation accessor or retry loop.
+- Guest pure-helper tests cover valid/reserved CIDs, nonzero high words with
+  otherwise valid low words, and short/extended configuration lengths.
+  Debug/release builds, targeted Clippy, and descriptor/I/O-task/filesystem
+  regressions passed with no new warnings. Formatting/diff checks passed;
+  no initial check failures. Logs: `/tmp/vsock-cid.0J53Yp/`.
+- These tests validate the pure contract, not real VMM configuration reads.
+  The MMIO wrapper was source-reviewed and remains unactivated. Separate
+  generic PCI capability index/range validation is needed before constructor
+  integration; real BAR/device coverage remains for activation tests. Neither
+  milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

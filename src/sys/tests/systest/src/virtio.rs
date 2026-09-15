@@ -85,7 +85,9 @@ pub fn run_tests() {
 
 fn test_vsock_discovery_features() {
     use virtio_async::VirtioDeviceKind;
-    use virtio_async::vsock_test_support::{classify_device_id, select_features};
+    use virtio_async::vsock_test_support::{
+        classify_device_id, select_features, validate_guest_cid, validate_vsock_config_len,
+    };
 
     assert!(matches!(classify_device_id(0x1041), VirtioDeviceKind::Net));
     assert!(matches!(
@@ -121,6 +123,34 @@ fn test_vsock_discovery_features() {
         select_features(!VERSION_1).unwrap_err().kind(),
         std::io::ErrorKind::Unsupported
     );
+
+    for cid in [3, 42, 0xffff_fffe] {
+        assert_eq!(validate_guest_cid(cid.into()).unwrap(), cid);
+    }
+    for cid in [
+        0,
+        1,
+        2,
+        0xffff_ffff,
+        0x1_0000_0000,
+        0x1_0000_0003,
+        0x1_ffff_fffe,
+        u64::MAX,
+    ] {
+        assert_eq!(
+            validate_guest_cid(cid).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+    for length in [0, 7] {
+        assert_eq!(
+            validate_vsock_config_len(length).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+    for length in [8, u32::MAX] {
+        validate_vsock_config_len(length).unwrap();
+    }
 }
 
 fn test_vsock_wire() {
