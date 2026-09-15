@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 name = "gix"
 path = "src/main.rs"
 
+[[test]]
+name = "native-port"
+path = "tests/native_port.rs"
+harness = false
+
 [dependencies]
 clap = { version = "=4.6.0", default-features = false, features = [
     "error-context",
@@ -16,7 +21,7 @@ clap = { version = "=4.6.0", default-features = false, features = [
     "suggestions",
     "usage",
 ] }
-gix = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+gix = { git = "https://github.com/moturus/gitoxide.git", rev = "dc2c61b9e8acce852db121eaed5d87548dd755d8", default-features = false, features = [
     "attributes",
     "blob-diff",
     "blocking-network-client",
@@ -29,10 +34,10 @@ gix = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e4
     "status",
     "worktree-mutation",
 ] }
-gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "dc2c61b9e8acce852db121eaed5d87548dd755d8", default-features = false, features = [
     "io-pipe",
 ] }
-gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "dc2c61b9e8acce852db121eaed5d87548dd755d8", default-features = false, features = [
     "http-client",
 ] }
 
