@@ -1,5 +1,8 @@
 //! Virtio 1.1 socket wire decoding; connection policy belongs to sys-io.
 use core::mem::{offset_of, size_of};
+use std::io::{ErrorKind, Result as IoResult};
+
+use crate::virtio_device::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice};
 
 pub const HEADER_LEN: usize = 44;
 pub const EVENT_LEN: usize = 4;
@@ -39,6 +42,23 @@ const _: () = {
     assert!(offset_of!(WireHeader, buf_alloc) == 36);
     assert!(offset_of!(WireHeader, fwd_cnt) == 40);
 };
+
+/// Virtio 1.1 defines no socket-specific features; reuse only split-ring events.
+pub fn select_features(offered: u64) -> IoResult<u64> {
+    if offered & VIRTIO_F_VERSION_1 == 0 {
+        return Err(ErrorKind::Unsupported.into());
+    }
+
+    Ok(VIRTIO_F_VERSION_1 | (offered & VIRTIO_F_RING_EVENT_IDX))
+}
+
+pub(crate) fn negotiate_features(device: &mut VirtioDevice) -> IoResult<()> {
+    let selected = select_features(device.get_available_features())?;
+    device.write_enabled_features(selected);
+    device.confirm_features()?;
+    device.virtio_features_negotiated = selected;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocketType {

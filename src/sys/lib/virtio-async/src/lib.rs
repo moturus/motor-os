@@ -16,10 +16,16 @@ mod virtio_vsock;
 pub use virtio_queue::tests::{test_descriptor_waiters, test_premature_completion_drop};
 #[cfg(feature = "test-support")]
 pub mod vsock_test_support {
+    use crate::virtio_device::VirtioDeviceKind;
+
     pub use crate::virtio_vsock::{
         DecodeErrorKind, EVENT_LEN, Event, EventError, HEADER_LEN, Operation, PacketHeader,
-        RawHeader, SocketType, decode_event, decode_packet,
+        RawHeader, SocketType, decode_event, decode_packet, select_features,
     };
+
+    pub fn classify_device_id(device_id: u16) -> VirtioDeviceKind {
+        VirtioDeviceKind::from_device_id(device_id)
+    }
 }
 // mod virtio_rng;
 

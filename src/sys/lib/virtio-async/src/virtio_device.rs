@@ -22,17 +22,19 @@ pub enum VirtioDeviceKind {
     Unknown(u16),
     Net,
     Block,
+    Vsock,
     Mem,
     Console,
     Rng,
 }
 
 impl VirtioDeviceKind {
-    fn from_device_id(device_id: u16) -> Self {
+    pub(crate) fn from_device_id(device_id: u16) -> Self {
         match device_id {
             // We work only with standard/modern VirtIO devices.
             0x1041 => VirtioDeviceKind::Net,
             0x1042 => VirtioDeviceKind::Block,
+            0x1053 => VirtioDeviceKind::Vsock,
             0x1045 => VirtioDeviceKind::Mem,
             0x1043 => VirtioDeviceKind::Console,
             0x1044 => VirtioDeviceKind::Rng,

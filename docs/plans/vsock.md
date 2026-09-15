@@ -6,8 +6,9 @@ recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
 D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
-Firecracker tests, with no developer-image Firecracker support. No open
-questions remain. Repository and references inspected on 2026-09-14;
+Firecracker tests, with no developer-image Firecracker support. The original
+review questions are settled; implementation follow-ups are listed at the end.
+Repository and references inspected on 2026-09-14;
 implementation has started, with progress recorded below.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
@@ -90,9 +91,29 @@ Stage 2 wire decoding is implemented and parent-reviewed:
 - `make base.img systest` and targeted virtio-async/systest Clippy passed in
   debug and release, with only the previously recorded warnings; formatting
   and diff checks passed. Logs: `/tmp/vsock-wire.PxfFMs/{build,clippy,guest}-*.log`.
-- Feature-selection tests arrive with stage 3's real helper; actual DMA and
-  queue-capacity coverage arrives with stage 4. No activation or boot tasks
-  are added here, and neither milestone is complete.
+- Actual DMA and queue-capacity coverage arrives with stage 4. No activation
+  or boot tasks are added here, and neither milestone is complete.
+
+Stage 3 modern-device discovery and feature selection are implemented and
+parent-reviewed; CID snapshots and shared-resource capacity work remain:
+
+- Recognize PCI device ID `0x1053` without initializing the device. The private
+  driver requires `VERSION_1`, accepts only optional `RING_EVENT_IDX`, and
+  uses the existing feature-confirmation sequence. No queues/tasks are added.
+- Guest `test-virtio-descriptors` covers the real device classifier and feature
+  selector, including legacy/unknown IDs, missing required features, and
+  ignored unsupported features. Debug and release guest runs passed alongside
+  the existing wire/descriptor tests. Both base-image builds and targeted
+  virtio-async/systest Clippy checks passed; no new warnings remain.
+- Logs: `/tmp/vsock-discovery.e6ysJI/` (initial builds) and its
+  `final-clean.Ij0yeZ/` directory (final builds, Clippy, and guest runs).
+  The initial new test's Clippy identity-operation warning was corrected.
+  An intermediate run in `final.raplX8/` failed before systest because the
+  temporary harness reused an uploaded executable's non-writable guest path;
+  this is the intentional behavior covered by `test-sftp.sh`. The harness
+  now uses a fresh per-run path. Original logs are retained; no OS change,
+  permission bypass, test retry, or weakened assertion was needed.
+- Generation-consistent CID reads are held for Q17; independent work continues.
 
 ## Scope and simplicity
 
@@ -1284,4 +1305,16 @@ this work.
 
 ## Open questions
 
-None. Q16's approved answer is incorporated into D16.
+### Q17. Bound generation-consistent CID reads?
+
+Virtio 1.1 section 2.4.1 recommends reading configuration generation before
+and after a multiword value and repeating when it changes, without specifying
+a retry bound. An indefinitely changing device could therefore occupy sys-io's
+single runtime thread during synchronous first use or transport reset.
+
+Proposed: allow eight complete snapshot attempts, then fail the operation with
+an unstable-configuration error. D9/D14 would cache initialization failure or
+fail the active vsock service with `InternalError`, retaining DMA ownership.
+Eight is a proposed liveness bound, not a protocol constant; it adds no idle
+polling or boot task. A time-based limit is an alternative. User guidance was
+requested on 2026-09-15; hold this helper while independent work continues.

@@ -1,5 +1,6 @@
 pub fn run_tests() {
     virtio_async::test_descriptor_waiters();
+    test_vsock_discovery_features();
     test_vsock_wire();
     for kind in ["block", "network"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -16,6 +17,46 @@ pub fn run_tests() {
         );
     }
     println!("virtio descriptor tests PASS");
+}
+
+fn test_vsock_discovery_features() {
+    use virtio_async::VirtioDeviceKind;
+    use virtio_async::vsock_test_support::{classify_device_id, select_features};
+
+    assert!(matches!(classify_device_id(0x1041), VirtioDeviceKind::Net));
+    assert!(matches!(
+        classify_device_id(0x1042),
+        VirtioDeviceKind::Block
+    ));
+    assert!(matches!(
+        classify_device_id(0x1053),
+        VirtioDeviceKind::Vsock
+    ));
+    assert!(matches!(
+        classify_device_id(0x1001),
+        VirtioDeviceKind::Unknown(0x1001)
+    ));
+    assert!(matches!(
+        classify_device_id(0x1052),
+        VirtioDeviceKind::Unknown(0x1052)
+    ));
+
+    const VERSION_1: u64 = 1 << 32;
+    const EVENT_IDX: u64 = 1 << 29;
+    assert_eq!(select_features(VERSION_1).unwrap(), VERSION_1);
+    assert_eq!(select_features(u64::MAX).unwrap(), VERSION_1 | EVENT_IDX);
+    assert_eq!(
+        select_features(VERSION_1 | EVENT_IDX).unwrap(),
+        VERSION_1 | EVENT_IDX
+    );
+    assert_eq!(
+        select_features(VERSION_1 | EVENT_IDX | (1 << 28) | 3 | (1 << 63)).unwrap(),
+        VERSION_1 | EVENT_IDX
+    );
+    assert_eq!(
+        select_features(!VERSION_1).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
 }
 
 fn test_vsock_wire() {
