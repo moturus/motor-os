@@ -11,8 +11,16 @@ mod virtio_blk;
 mod virtio_device;
 pub mod virtio_net;
 mod virtio_queue;
+mod virtio_vsock;
 #[cfg(feature = "test-support")]
 pub use virtio_queue::tests::{test_descriptor_waiters, test_premature_completion_drop};
+#[cfg(feature = "test-support")]
+pub mod vsock_test_support {
+    pub use crate::virtio_vsock::{
+        DecodeErrorKind, EVENT_LEN, Event, EventError, HEADER_LEN, Operation, PacketHeader,
+        RawHeader, SocketType, decode_event, decode_packet,
+    };
+}
 // mod virtio_rng;
 
 use moto_sys::SysHandle;

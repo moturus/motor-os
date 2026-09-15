@@ -37,7 +37,8 @@ Stage 1 baseline, before source changes at `6918384e`:
   `build-release.log`, and `full-test-release.log` in the same directory.
 
 Stage 2 capability foundation is implemented, parent-reviewed, and validated.
-Wire contracts, driver, IPC, and native vsock API implementation remain pending.
+Wire decoding is also validated below; device I/O, IPC, and native vsock API
+implementation remain pending.
 
 - The initial debug build failed; the original log is preserved at
   `/tmp/vsock-cap.XxgFum/build-debug.log`. Rush's published moto-sys dependency
@@ -76,6 +77,22 @@ Wire contracts, driver, IPC, and native vsock API implementation remain pending.
   `full-test-release.log` in the same directory. These are one debug and one
   release full run validating this patch, not the repeated milestone gates;
   neither M1 nor M2 is complete.
+
+Stage 2 wire decoding is implemented and parent-reviewed:
+
+- The private driver module checks the 44-byte header, little-endian fields,
+  lengths/capacity, CID width, type/op/flags, control payloads, and four-byte
+  events. Incomplete received headers expose no refusal metadata; complete
+  invalid headers retain untrusted metadata. SHUTDOWN accepts flags 0–3.
+- Literal wire examples and malformed-input assertions execute in existing
+  guest `test-virtio-descriptors`, also reached by ordinary systest/full-test.
+  Both profiles passed, including the unchanged descriptor-ownership cases.
+- `make base.img systest` and targeted virtio-async/systest Clippy passed in
+  debug and release, with only the previously recorded warnings; formatting
+  and diff checks passed. Logs: `/tmp/vsock-wire.PxfFMs/{build,clippy,guest}-*.log`.
+- Feature-selection tests arrive with stage 3's real helper; actual DMA and
+  queue-capacity coverage arrives with stage 4. No activation or boot tasks
+  are added here, and neither milestone is complete.
 
 ## Scope and simplicity
 
