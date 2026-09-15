@@ -7,9 +7,8 @@ use std::{
 use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
-mod repository;
 
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+use motor_gix::{Result, repository};
 
 fn main() -> ExitCode {
     match run() {
@@ -68,10 +67,10 @@ fn run() -> Result {
         .flatten()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let repo = repository::open(path, &overrides, matches.get_flag("config-paths"))?;
+    let opened = repository::open(path, &overrides, matches.get_flag("config-paths"))?;
 
     match matches.subcommand_name() {
-        Some("log") => log::show(&repo),
+        Some("log") => log::show(&opened.repo),
         _ => unreachable!("clap accepts only declared subcommands"),
     }
 }

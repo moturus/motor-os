@@ -76,8 +76,11 @@ prepare_user_config() {
   mkdir -p "$temporary/xdg/git" "$temporary/fake-bin"
   printf '[core]\n\tabbrev = 6\n' > "$temporary/xdg/git/config"
   printf '[core]\n\tabbrev = 9\n' > "$temporary/included.gitconfig"
-  printf '[core]\n\tabbrev = 8\n[include]\n\tpath = %s\n' \
-    "$temporary/included.gitconfig" > "$temporary/home/.gitconfig"
+  printf '[merge "path-only"]\n\tdriver = must-not-run\n' \
+    > "$temporary/command-only.gitconfig"
+  printf '[core]\n\tabbrev = 8\n[include]\n\tpath = %s\n\tpath = %s\n' \
+    "$temporary/included.gitconfig" "$temporary/command-only.gitconfig" \
+    > "$temporary/home/.gitconfig"
   cat > "$temporary/fake-bin/git" <<'SH'
 #!/bin/sh
 : > "$GIX_FAKE_GIT_SENTINEL"
@@ -163,7 +166,8 @@ PY
     --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
   verify_log "$temporary/log.out"
   for config_path in "$temporary/xdg/git/config" "$temporary/home/.gitconfig" \
-    "$temporary/included.gitconfig" "$fixture/.git/config"; do
+    "$temporary/included.gitconfig" "$temporary/command-only.gitconfig" \
+    "$fixture/.git/config"; do
     grep -F "$config_path" "$temporary/config-paths.out" >/dev/null ||
       fail "configuration path was not reported: $config_path"
   done

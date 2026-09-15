@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
+use std::{fs, io::Read, path::PathBuf, sync::atomic::AtomicBool};
 
 use gix::{
     bstr::ByteSlice,
@@ -21,7 +21,7 @@ fn main() -> Result {
             "core.checkStat=minimal",
             "core.trustctime=false",
         ])
-        .open(fixture)?
+        .open(&fixture)?
         .to_thread_local();
     let hash = gix::hash::Kind::Sha1;
     let input = File::at(repo.index_path(), hash, false, Default::default())?;
@@ -131,6 +131,108 @@ fn main() -> Result {
         Default::default(),
     )?;
     assert_eq!(reopened.entries().len(), 3);
+
+    fs::write(
+        fixture.join(".git/info/attributes"),
+        "editable filter=blocked\n",
+    )?;
+    let command_sentinel = output.join("external-command-ran");
+    let command = format!("touch {}", command_sentinel.display());
+    let overrides = [
+        format!("filter.blocked.clean={command}"),
+        "filter.blocked.required=true".into(),
+        format!("diff.external={command}"),
+        format!("diff.blocked.command={command}"),
+        format!("diff.blocked.textconv={command}"),
+        format!("merge.blocked.driver={command}"),
+        "merge.text.name=".into(),
+        "merge.default=blocked".into(),
+        format!("core.askPass={command}"),
+        format!("core.sshCommand={command}"),
+        format!("gitoxide.ssh.commandWithoutShellFallback={command}"),
+        format!("credential.helper={command}"),
+    ];
+    let overrides = overrides.iter().map(String::as_str).collect::<Vec<_>>();
+    let opened = motor_gix::repository::open(&fixture, &overrides, false)?;
+    assert!(
+        opened
+            .command_policy
+            .external_filters
+            .contains(b"blocked".as_bstr())
+    );
+    assert!(
+        opened
+            .command_policy
+            .required_filters
+            .contains(b"blocked".as_bstr())
+    );
+    assert!(
+        opened
+            .command_policy
+            .external_merge_drivers
+            .contains(b"blocked".as_bstr())
+    );
+    assert_eq!(
+        opened
+            .command_policy
+            .default_merge_driver
+            .as_ref()
+            .map(|name| name.as_bstr()),
+        Some(b"blocked".as_bstr())
+    );
+    let sanitized = opened.repo.config_snapshot();
+    for key in [
+        "core.askPass",
+        "core.sshCommand",
+        "gitoxide.ssh.commandWithoutShellFallback",
+        "credential.helper",
+        "diff.external",
+        "merge.default",
+    ] {
+        assert!(
+            sanitized.raw_value(key).is_err(),
+            "{key} remains configured"
+        );
+    }
+
+    let filter_options = gix::filter::Pipeline::options(&opened.repo)?;
+    let filter = filter_options
+        .drivers
+        .iter()
+        .find(|driver| driver.name == "blocked")
+        .ok_or("sanitized filter evidence missing")?;
+    assert!(filter.required);
+    assert!(filter.clean.is_none() && filter.smudge.is_none() && filter.process.is_none());
+
+    let diff = opened.repo.diff_resource_cache_for_tree_diff()?;
+    let diff_driver = diff
+        .filter
+        .drivers()
+        .iter()
+        .find(|driver| driver.name == "blocked")
+        .ok_or("sanitized diff driver missing")?;
+    assert!(diff_driver.command.is_none() && diff_driver.binary_to_text_command.is_none());
+    assert!(
+        !opened
+            .command_policy
+            .external_merge_drivers
+            .contains(b"text".as_bstr())
+    );
+    let merge = opened.repo.merge_resource_cache(Default::default())?;
+    assert!(merge.drivers().is_empty());
+    assert!(opened.repo.ssh_connect_options()?.command.is_none());
+
+    let (mut pipeline, index) = opened.repo.filter_pipeline(None)?;
+    let mut converted =
+        pipeline.convert_to_git(b"unchanged\n".as_slice(), "editable".as_ref(), &index)?;
+    let mut actual = Vec::new();
+    converted.read_to_end(&mut actual)?;
+    assert_eq!(actual, b"unchanged\n");
+    assert!(
+        !command_sentinel.exists(),
+        "sanitized library consumer ran an external command"
+    );
+
     println!("gix native port fixture PASS");
     Ok(())
 }

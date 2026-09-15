@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use gix::bstr::ByteSlice;
 
-pub fn show(repo: &gix::Repository) -> super::Result {
+pub fn show(repo: &gix::Repository) -> motor_gix::Result {
     let mut output = io::BufWriter::new(io::stdout().lock());
     for info in repo.head_commit()?.ancestors().all()? {
         let commit = info?.object()?;

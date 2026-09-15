@@ -8,9 +8,10 @@ Overlapping failure tests are consolidated. D8 and D9 retain the policies
 accepted on 2026-09-12. Implementation was subsequently approved. M1's
 native dependency port and host/Motor repository fixture are committed;
 Gitoxide revision `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
-on `gix-moturus-cli` and verified on 2026-09-15. Repository opening and
-`log` pass the host and Motor component fixtures. Configuration
-sanitization, cancellation, status and transports remain M1 work.
+on `gix-moturus-cli` and verified on 2026-09-15. Repository opening,
+configuration sanitization and `log` pass the host and Motor component
+fixtures. Attribute preflight, cancellation, status and transports remain
+M1 work.
 
 ## 1. Goal and decisions
 

@@ -6,6 +6,8 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
+use crate::command_config;
+
 const POLICY_OVERRIDES: [&str; 5] = [
     "core.symlinks=false",
     "core.fileMode=true",
@@ -14,11 +16,16 @@ const POLICY_OVERRIDES: [&str; 5] = [
     "gitoxide.core.useNsec=false",
 ];
 
+pub struct OpenedRepository {
+    pub repo: gix::Repository,
+    pub command_policy: command_config::Policy,
+}
+
 pub fn open(
     path: &Path,
     overrides: &[&str],
     report_config_paths: bool,
-) -> super::Result<gix::Repository> {
+) -> crate::Result<OpenedRepository> {
     reject_environment_paths()?;
     reject_config_paths(overrides)?;
 
@@ -43,12 +50,16 @@ pub fn open(
     let mut repo = gix::open_opts(&selected, options)?;
     validate_locations(&repo, &selected)?;
 
-    // This handle flag is definitive even if repository configuration loaded replacement refs.
-    repo.objects.ignore_replacements = true;
     if report_config_paths {
         report_paths(&repo)?;
     }
-    Ok(repo)
+    let command_policy = command_config::sanitize(&mut repo)?;
+    // This handle flag is definitive even if repository configuration loaded replacement refs.
+    repo.objects.ignore_replacements = true;
+    Ok(OpenedRepository {
+        repo,
+        command_policy,
+    })
 }
 
 fn reject_environment_paths() -> io::Result<()> {
