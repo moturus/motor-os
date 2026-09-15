@@ -518,11 +518,11 @@ impl Virtqueue {
                 if new_idx.wrapping_sub(event_idx).wrapping_sub(1)
                     < new_idx.wrapping_sub(self.last_kick_idx)
                 {
-                    (*self.notify_bar).write_u16(self.notify_offset, 0);
+                    (*self.notify_bar).write_u16(self.notify_offset, self.queue_num);
                     self.last_kick_idx = new_idx;
                 }
             } else if (self.used_ring.flags as *const u16).read_volatile() == 0 {
-                (*self.notify_bar).write_u16(self.notify_offset, 0);
+                (*self.notify_bar).write_u16(self.notify_offset, self.queue_num);
                 self.last_kick_idx = new_idx;
             }
         }

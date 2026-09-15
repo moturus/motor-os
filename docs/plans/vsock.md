@@ -8,7 +8,8 @@ D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
 Firecracker tests, with no developer-image Firecracker support. Q18 is settled
 in D17: preserve RX used-ring order inside virtio-async using the existing
-queue, without negotiating `IN_ORDER`. There are no currently open questions.
+queue, without negotiating `IN_ORDER`. Shared reset verification is awaiting
+implementation review in Q19.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
 implementation has started, with progress recorded below.
@@ -360,6 +361,27 @@ Shared mapped-configuration access checks are implemented and parent-reviewed:
   vsock activation was performed. MSI-X/BAR initialization checks and the
   separately identified hardcoded-zero queue notification value remain;
   neither milestone is complete.
+
+Shared queue notification values are corrected and parent-reviewed:
+
+- Both notification paths now write the queue index instead of zero, as
+  required without `NOTIFICATION_DATA`
+  ([Virtio 1.1 section 4.1.5.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)).
+  A shared notification address cannot identify the queue from its address
+  alone. Suppression, fences, event-index arithmetic, and task counts are
+  unchanged. This issue was found by source review, not an initial VM failure.
+- The existing guest queue fixture uses test-only mapped register storage
+  to inspect real volatile writes for queues 0/1/2, both notification modes,
+  suppression, exact write width/offset, and adjacent bytes. All queue and
+  completion owners drop before the simulated BAR and its backing storage.
+- Debug/release builds, targeted Clippy, and descriptor/I/O-task/filesystem
+  regressions passed, as did the same release groups on CHV and Firecracker.
+  No new warnings; formatting/diff checks passed. Logs:
+  `/tmp/virtio-notify-value.GOkoEO/`, `/tmp/virtio-notify-gate.Aw995F/`, and
+  `/tmp/virtio-notify-other-vmm.ZafiEf/`. The initial fixture compile error
+  needed a mutable binding; parent review then reduced the register allocation
+  to its fully initialized 16 bytes before guest validation. No vsock hardware
+  activation or milestone gate is implied. MSI-X/BAR checks remain next.
 
 ## Scope and simplicity
 
@@ -1764,5 +1786,20 @@ mechanism, stop and discuss the deviation instead of silently adding one.
 
 ## Open questions
 
-None currently. Raise any new non-obvious implementation decisions for review
-as required by AGENTS.md.
+### Q19. Verify shared reset completion with one read? (awaiting review)
+
+`VirtioDevice::reset` currently writes device status zero and immediately
+allows initialization to continue. It never observes reset completion.
+[Virtio 1.1 section 4.1.4.3.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+requires observing zero before reinitialization. This is a preexisting shared
+virtio issue, not a vsock-specific reset or completion-order requirement.
+
+Proposed simple policy: perform one status read after the reset write; return
+an initialization error if it is nonzero, before acknowledging the device or
+starting queues. Keep initialization synchronous with no polling, retries,
+timeout constant, or added task. This deliberately rejects a device whose
+reset has not completed at that read; it does not provide asynchronous-reset
+support. The change adds one MMIO read per initialized block/net device at
+boot and per lazily initialized vsock device, so it needs the AGENTS.md
+boot-latency review before implementation. Existing gate passes have not
+tested this proposed check. Other independently reviewable fixes can proceed.

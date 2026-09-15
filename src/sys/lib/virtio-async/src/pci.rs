@@ -245,6 +245,28 @@ pub(super) struct PciBar {
 }
 
 impl PciBar {
+    /// Build a BAR over fixture-owned mapped memory.
+    ///
+    /// # Safety
+    /// `virt_addr..virt_addr + addr_size` must remain mapped, aligned, and
+    /// readable/writable until this BAR and every pointer to it are dropped.
+    #[cfg(feature = "test-support")]
+    pub(crate) unsafe fn from_test_mapping(virt_addr: u64, addr_size: u64) -> Self {
+        assert!(virt_addr.is_multiple_of(8));
+        assert!(addr_size >= 2);
+        Self {
+            pci_device_id: PciDeviceID::new(0, 0, 0),
+            idx: 0,
+            offset: 0,
+            phys_addr: 0,
+            addr_size,
+            virt_addr,
+            is_64: false,
+            is_prefetchable: false,
+            is_mmio: true,
+        }
+    }
+
     pub(crate) fn contains_cap_access(
         &self,
         cap_offset: u32,

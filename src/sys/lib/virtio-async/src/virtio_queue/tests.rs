@@ -170,6 +170,7 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 
 pub fn test_descriptor_waiters() {
     test_block_seg_max();
+    test_notifications();
     test_queue_task_start();
     test_ordered_completions();
     test_ordered_waiter();
@@ -236,6 +237,66 @@ pub fn test_descriptor_waiters() {
             device.complete(full.chain_head, 0, 0);
             drop(full);
         }
+    }
+}
+
+fn test_notifications() {
+    for (queue_num, event_idx, suppressed) in [
+        (0, false, false),
+        (1, false, false),
+        (2, false, true),
+        (1, true, true),
+        (2, true, false),
+    ] {
+        let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+        // SAFETY: initialize the bytes observed below before constructing the
+        // test BAR; the allocation remains owned through every volatile access.
+        unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
+        // SAFETY: 16-byte-aligned `notify_memory` is mapped and writable, and is
+        // dropped after the queue and boxed BAR below.
+        let notify_bar = Box::new(unsafe {
+            PciBar::from_test_mapping(
+                notify_memory.raw_ptr() as u64,
+                notify_memory.capacity() as u64,
+            )
+        });
+        let device = Device::new(crate::VirtioDeviceKind::Vsock);
+        {
+            let mut queue = device.queue.borrow_mut();
+            queue.queue_num = queue_num;
+            if event_idx {
+                queue.set_f_event_idx_negotiated();
+                // SAFETY: the fixture owns the used ring storage.
+                unsafe {
+                    (queue.used_ring.avail_event as *mut u16).write_volatile(if suppressed {
+                        1
+                    } else {
+                        0
+                    });
+                }
+            } else {
+                *queue.used_ring.flags = u16::from(suppressed);
+            }
+            queue.set_notify_params(&*notify_bar, 8);
+        }
+
+        let head = ready_head(&device, 1);
+        let completion = device.submit(head, 1, 0);
+        let bytes: &[u8] = notify_memory.as_ref();
+        let expected = if suppressed { 0xa5a5 } else { queue_num };
+        assert_eq!(
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+            expected
+        );
+        assert!(bytes[..8].iter().all(|byte| *byte == 0xa5));
+        assert!(bytes[10..16].iter().all(|byte| *byte == 0xa5));
+
+        device.complete(head, 1, 0);
+        device.reclaim();
+        drop(completion);
+        drop(device);
+        drop(notify_bar);
+        drop(notify_memory);
     }
 }
 
