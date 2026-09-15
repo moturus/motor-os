@@ -1,5 +1,6 @@
 pub mod cancellation;
 pub mod command_config;
+pub mod https_url;
 pub mod repository;
 pub mod status;
 

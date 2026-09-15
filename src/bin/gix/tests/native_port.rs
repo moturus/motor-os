@@ -11,6 +11,43 @@ fn main() -> Result {
     let mut args = std::env::args_os().skip(1);
     let fixture = PathBuf::from(args.next().ok_or("fixture path required")?);
     let output = PathBuf::from(args.next().ok_or("output path required")?);
+
+    let url = motor_gix::https_url::HttpsUrl::parse("https://EXAMPLE.com:443/repo.git?q=1")?;
+    assert_eq!(url.as_str(), "https://example.com/repo.git?q=1");
+    assert_eq!(
+        url.same_origin_redirect("https://example.COM:443/else?q=2")?
+            .as_str(),
+        "https://example.com/else?q=2"
+    );
+    let ipv6 = motor_gix::https_url::HttpsUrl::parse("https://[2001:0db8::1]:8443?q")?;
+    assert_eq!(ipv6.as_str(), "https://[2001:db8::1]:8443/?q");
+    let ipv4 = motor_gix::https_url::HttpsUrl::parse("https://127.0.0.1:444/repo")?;
+    assert_eq!(ipv4.as_str(), "https://127.0.0.1:444/repo");
+    for invalid in [
+        "http://example.com/",
+        "HTTPS://example.com/",
+        "https://user@example.com/",
+        "https://example.com/white space",
+        "https://café.example/",
+        "https://example.com/#fragment",
+        "https://example.com\\@other/",
+        "https://example.com:0/",
+        "https://2001:db8::1/",
+        "https://127.1/",
+        "https://exa_mple.com/",
+    ] {
+        assert!(
+            motor_gix::https_url::HttpsUrl::parse(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    for redirect in [
+        "https://other.example/repo.git",
+        "https://example.com:8443/repo.git",
+    ] {
+        assert!(url.same_origin_redirect(redirect).is_err(), "{redirect}");
+    }
+
     fs::create_dir(&output)?;
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
