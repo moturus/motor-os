@@ -560,7 +560,7 @@ impl Virtqueue {
         self.notify_offset = notify_offset;
     }
 
-    fn update_and_increment_available_idx(&mut self, head: u16) {
+    fn update_and_increment_available_idx<const NOTIFY: bool>(&mut self, head: u16) {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
         mfence();
@@ -578,7 +578,21 @@ impl Virtqueue {
                 .write_volatile(next_idx);
             next_idx
         };
-        self.notify_device_if_needed(new_idx);
+        if NOTIFY {
+            self.notify_device_if_needed(new_idx);
+        } else {
+            // Order the available index before a later DRIVER_OK write.
+            mfence();
+        }
+    }
+
+    /// Notify after a bounded batch was published with notifications deferred.
+    /// The caller must invoke this only after setting DRIVER_OK.
+    pub(crate) fn kick_deferred(&mut self) {
+        let new_idx = unsafe { self.available_ring.next_available_idx.read_volatile() };
+        if new_idx != self.last_kick_idx {
+            self.notify_device_if_needed(new_idx);
+        }
     }
 
     pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {
@@ -700,6 +714,32 @@ impl Virtqueue {
         chain_head: u16,
         bytes: T,
     ) -> VqCompletion<T> {
+        Self::add_buffs_with_notification::<T, true>(
+            this, data, outgoing, incoming, chain_head, bytes,
+        )
+    }
+
+    pub(crate) fn add_buffs_deferred<T>(
+        this: Rc<RefCell<Self>>,
+        data: &[UserData],
+        outgoing: u16,
+        incoming: u16,
+        chain_head: u16,
+        bytes: T,
+    ) -> VqCompletion<T> {
+        Self::add_buffs_with_notification::<T, false>(
+            this, data, outgoing, incoming, chain_head, bytes,
+        )
+    }
+
+    fn add_buffs_with_notification<T, const NOTIFY: bool>(
+        this: Rc<RefCell<Self>>,
+        data: &[UserData],
+        outgoing: u16,
+        incoming: u16,
+        chain_head: u16,
+        bytes: T,
+    ) -> VqCompletion<T> {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
@@ -729,7 +769,7 @@ impl Virtqueue {
 
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
-        this_mut.update_and_increment_available_idx(chain_head);
+        this_mut.update_and_increment_available_idx::<NOTIFY>(chain_head);
         core::mem::drop(this_mut);
 
         VqCompletion {

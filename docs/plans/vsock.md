@@ -454,6 +454,31 @@ Stage 6 pure credit arithmetic is implemented and parent-reviewed:
   initial outputs were not saved as log files. No boot work, device activation,
   or Q20 policy was added. Runtime integration and both milestones remain.
 
+Stage 3 initial-buffer notification ordering is implemented and parent-reviewed:
+
+- RX/event preparation now publishes its initial batch without notifications;
+  a narrow explicit kick reuses existing suppression and wrapping EVENT_IDX
+  arithmetic after DRIVER_OK. Shared device setup separates task start from
+  DRIVER_OK without changing block/net callers. Immediate submissions and
+  RX/event reposts retain their previous notification path and fences. No
+  persistent queue mode, extra boot reads, or additional tasks are introduced.
+- Memory-backed guest queue tests inspect notification bytes, batch indices
+  and heads, queues 0/1/2, suppression/unsuppression, combined suppression and
+  counter wrap, and repeated kicks with no new work. Initial pool calls and
+  immediate repost wiring were source-reviewed; the fixture does not emulate
+  PCI initialization or a device observing DRIVER_OK.
+- Debug/release builds, targeted Clippy, and descriptor/I/O-task/filesystem
+  regressions passed, as did these release groups on CHV and Firecracker.
+  No new warnings; formatting/diff checks passed. Logs:
+  `/tmp/vsock-deferred.D7Hx5d/`, `/tmp/vsock-deferred-gate.zWYckv/`, and
+  `/tmp/vsock-deferred-other-vmm.6CjTs4/`. The first fixture compile error was
+  an ambiguous byte-slice conversion, corrected with explicit slice bindings;
+  the first strict Clippy check rejected existing warnings in unchanged code.
+  Parent review added the combined suppression/wrap case before final gates.
+- All VM runs used existing block/net devices, without attached vsock hardware.
+  The vsock constructor, runtime integration, Q19–Q21, and both milestones
+  remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

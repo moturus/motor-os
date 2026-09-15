@@ -93,6 +93,20 @@ impl Device {
         }
     }
 
+    fn submit_deferred(&self, head: u16, value: u32) -> VqCompletion<u32> {
+        Virtqueue::add_buffs_deferred(
+            self.queue.clone(),
+            &[UserData {
+                phys_addr: 0,
+                len: 1,
+            }],
+            0,
+            1,
+            head,
+            value,
+        )
+    }
+
     fn complete(&self, head: u16, consumed: u32, status: u8) {
         self.complete_raw(u32::from(head), consumed, status);
     }
@@ -295,6 +309,118 @@ fn test_notifications() {
         device.complete(head, 1, 0);
         device.reclaim();
         drop(completion);
+        drop(device);
+        drop(notify_bar);
+        drop(notify_memory);
+    }
+
+    for (queue_num, event_idx, suppressed, start_idx) in [
+        (0, false, false, 0),
+        (1, false, true, 0),
+        (2, true, false, 0),
+        (1, true, true, 0),
+        (2, true, false, u16::MAX - 1),
+        (1, true, true, u16::MAX - 1),
+    ] {
+        let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+        // SAFETY: the allocation remains live through all volatile accesses.
+        unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
+        // SAFETY: the owned allocation is aligned, mapped, writable, and
+        // outlives the queue's raw BAR pointer.
+        let notify_bar = Box::new(unsafe {
+            PciBar::from_test_mapping(
+                notify_memory.raw_ptr() as u64,
+                notify_memory.capacity() as u64,
+            )
+        });
+        let device = Device::new(crate::VirtioDeviceKind::Vsock);
+        let new_idx = start_idx.wrapping_add(2);
+        {
+            let mut queue = device.queue.borrow_mut();
+            queue.queue_num = queue_num;
+            queue.last_kick_idx = start_idx;
+            // SAFETY: the fixture owns the available ring storage.
+            unsafe {
+                queue
+                    .available_ring
+                    .next_available_idx
+                    .write_volatile(start_idx);
+            }
+            if event_idx {
+                queue.set_f_event_idx_negotiated();
+                // SAFETY: the fixture owns the used ring storage.
+                unsafe {
+                    (queue.used_ring.avail_event as *mut u16).write_volatile(if suppressed {
+                        new_idx
+                    } else {
+                        start_idx
+                    });
+                }
+            } else {
+                *queue.used_ring.flags = u16::from(suppressed);
+            }
+            queue.set_notify_params(&*notify_bar, 8);
+        }
+
+        let first_head = ready_head(&device, 1);
+        let first = device.submit_deferred(first_head, 10);
+        let second_head = ready_head(&device, 1);
+        let second = device.submit_deferred(second_head, 11);
+        {
+            let queue = device.queue.borrow();
+            // SAFETY: the fixture owns the available ring storage.
+            assert_eq!(
+                unsafe { queue.available_ring.next_available_idx.read_volatile() },
+                new_idx
+            );
+            assert_eq!(
+                queue.available_ring.ring[(start_idx & queue.queue_size_mask) as usize],
+                first_head
+            );
+            assert_eq!(
+                queue.available_ring.ring
+                    [(start_idx.wrapping_add(1) & queue.queue_size_mask) as usize],
+                second_head
+            );
+        }
+        let bytes: &[u8] = notify_memory.as_ref();
+        assert!(bytes.iter().all(|byte| *byte == 0xa5));
+
+        device.queue.borrow_mut().kick_deferred();
+        if suppressed {
+            let bytes: &[u8] = notify_memory.as_ref();
+            assert!(bytes.iter().all(|byte| *byte == 0xa5));
+            let queue = &mut *device.queue.borrow_mut();
+            if event_idx {
+                // SAFETY: the fixture owns the used ring storage.
+                unsafe {
+                    (queue.used_ring.avail_event as *mut u16).write_volatile(start_idx);
+                }
+            } else {
+                *queue.used_ring.flags = 0;
+            }
+            queue.kick_deferred();
+        }
+        let bytes: &[u8] = notify_memory.as_ref();
+        assert_eq!(
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+            queue_num
+        );
+        assert!(bytes[..8].iter().all(|byte| *byte == 0xa5));
+        assert!(bytes[10..16].iter().all(|byte| *byte == 0xa5));
+
+        // A second kick without another publication must not touch MMIO.
+        // SAFETY: the fixture owns the initialized notification storage.
+        unsafe { notify_memory.raw_ptr_mut().add(8).write_bytes(0xa5, 2) };
+        device.queue.borrow_mut().kick_deferred();
+        let bytes: &[u8] = notify_memory.as_ref();
+        assert!(bytes.iter().all(|byte| *byte == 0xa5));
+
+        device.complete(first_head, 1, 0);
+        device.complete(second_head, 1, 0);
+        device.reclaim();
+        drop(first);
+        drop(second);
         drop(device);
         drop(notify_bar);
         drop(notify_memory);
@@ -663,7 +789,7 @@ pub fn test_premature_rx_pool_drop() {
     let device = Device::new(crate::VirtioDeviceKind::Vsock);
     let pool = crate::virtio_vsock::PreparedRxPool::new(device.queue.clone())
         .unwrap()
-        .publish();
+        .publish_deferred();
     drop(pool);
     panic!("premature vsock RX pool drop was accepted");
 }
@@ -1006,7 +1132,7 @@ fn test_vsock_rx_pool() {
         unsafe { *large.queue.borrow().available_ring.next_available_idx },
         0
     );
-    let large_pool = prepared.publish();
+    let large_pool = prepared.publish_deferred();
     assert_eq!(
         unsafe { *large.queue.borrow().available_ring.next_available_idx },
         64
@@ -1041,7 +1167,7 @@ fn test_vsock_rx_pool() {
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
         start
     );
-    let mut pool = prepared.publish();
+    let mut pool = prepared.publish_deferred();
     let published = start.wrapping_add(4);
     assert_eq!(
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
@@ -1219,7 +1345,7 @@ fn test_vsock_events() {
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
         0
     );
-    let mut pool = prepared.publish();
+    let mut pool = prepared.publish_deferred();
     assert_eq!(
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
         4

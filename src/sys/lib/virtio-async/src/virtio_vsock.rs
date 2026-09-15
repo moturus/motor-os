@@ -437,6 +437,13 @@ impl RxCompletion {
 /// and queue unchanged; successful publication exposes no old payload bytes.
 pub(crate) fn try_post_rx(
     queue: Rc<RefCell<Virtqueue>>,
+    payload: IoBuf,
+) -> std::result::Result<RxCompletion, (std::io::Error, IoBuf)> {
+    try_post_rx_with_notification::<true>(queue, payload)
+}
+
+fn try_post_rx_with_notification<const NOTIFY: bool>(
+    queue: Rc<RefCell<Virtqueue>>,
     mut payload: IoBuf,
 ) -> std::result::Result<RxCompletion, (std::io::Error, IoBuf)> {
     let payload_data = match validate_payload_dma(
@@ -466,16 +473,26 @@ pub(crate) fn try_post_rx(
         )
     };
     payload.set_len(0);
-    Ok(RxCompletion {
-        completion: Virtqueue::add_buffs(
+    let completion = if NOTIFY {
+        Virtqueue::add_buffs(
             queue,
             &[header_data, payload_data],
             0,
             2,
             chain_head,
             payload,
-        ),
-    })
+        )
+    } else {
+        Virtqueue::add_buffs_deferred(
+            queue,
+            &[header_data, payload_data],
+            0,
+            2,
+            chain_head,
+            payload,
+        )
+    };
+    Ok(RxCompletion { completion })
 }
 
 pub(crate) struct PreparedRxPool {
@@ -518,10 +535,10 @@ impl PreparedRxPool {
         &self.pages
     }
 
-    /// Claim the idle ordered cursor and publish every prepared page. All
-    /// fallible memory work has already completed, and the fixed pool fits
-    /// within the queue's descriptor capacity.
-    pub(crate) fn publish(self) -> RxPool {
+    /// Claim the idle ordered cursor and publish every prepared page without
+    /// notifying. All fallible memory work is complete and the fixed pool fits
+    /// the queue; the caller kicks once after setting DRIVER_OK.
+    pub(crate) fn publish_deferred(self) -> RxPool {
         let Self {
             queue,
             pages,
@@ -529,7 +546,7 @@ impl PreparedRxPool {
         } = self;
         let ordered = Virtqueue::ordered_completions(queue.clone());
         for page in pages {
-            let completion = match try_post_rx(queue.clone(), page) {
+            let completion = match try_post_rx_with_notification::<false>(queue.clone(), page) {
                 Ok(completion) => completion,
                 Err((err, _)) => panic!("prepared vsock RX publication failed: {err}"),
             };
@@ -606,6 +623,12 @@ impl EventCompletion {
 }
 
 pub(crate) fn try_post_event(queue: Rc<RefCell<Virtqueue>>) -> IoResult<EventCompletion> {
+    try_post_event_with_notification::<true>(queue)
+}
+
+fn try_post_event_with_notification<const NOTIFY: bool>(
+    queue: Rc<RefCell<Virtqueue>>,
+) -> IoResult<EventCompletion> {
     let (head, data) = {
         let mut queue = queue.borrow_mut();
         let Some(head) = queue.alloc_descriptor_chain(1) else {
@@ -621,9 +644,12 @@ pub(crate) fn try_post_event(queue: Rc<RefCell<Virtqueue>>) -> IoResult<EventCom
             },
         )
     };
-    Ok(EventCompletion {
-        completion: Virtqueue::add_buffs(queue, &[data], 0, 1, head, ()),
-    })
+    let completion = if NOTIFY {
+        Virtqueue::add_buffs(queue, &[data], 0, 1, head, ())
+    } else {
+        Virtqueue::add_buffs_deferred(queue, &[data], 0, 1, head, ())
+    };
+    Ok(EventCompletion { completion })
 }
 
 pub(crate) struct PreparedEventPool {
@@ -654,7 +680,9 @@ impl PreparedEventPool {
         self.count
     }
 
-    pub(crate) fn publish(self) -> EventPool {
+    /// Publish the initial event buffers without notifying; the caller kicks
+    /// once after setting DRIVER_OK.
+    pub(crate) fn publish_deferred(self) -> EventPool {
         let Self {
             queue,
             count,
@@ -662,10 +690,10 @@ impl PreparedEventPool {
         } = self;
         let ordered = Virtqueue::ordered_completions(queue.clone());
         for _ in 0..count {
-            completions
-                .push(try_post_event(queue.clone()).unwrap_or_else(|err| {
-                    panic!("prepared vsock event publication failed: {err}")
-                }));
+            completions.push(
+                try_post_event_with_notification::<false>(queue.clone())
+                    .unwrap_or_else(|err| panic!("prepared vsock event publication failed: {err}")),
+            );
         }
         EventPool {
             queue,

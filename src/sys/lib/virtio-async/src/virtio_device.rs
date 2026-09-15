@@ -807,19 +807,29 @@ impl VirtioDevice {
         }
     }
 
-    // Step 8 (final)
-    pub(super) fn driver_ok(&self) -> Result<()> {
-        Virtqueue::start_tasks(&self.virtqueues)?;
+    /// Start every queue task only after all fallible device setup succeeds.
+    pub(super) fn start_queue_tasks(&self) -> Result<()> {
+        Virtqueue::start_tasks(&self.virtqueues)
+    }
+
+    /// Make the device live. Vsock publishes initial buffers before this call
+    /// and sends their deferred notifications afterwards.
+    pub(super) fn write_driver_ok(&self) {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
         let status_offset = self.common_cfg.offset as u64
             + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64;
 
-        // Step 5: write FEATURES_OK
+        // Step 8 (final): write DRIVER_OK.
         let mut status = cfg_bar.readb(status_offset);
         status |= DRIVER_OK_STATUS_BIT;
         cfg_bar.writeb(status_offset, status);
+    }
+
+    pub(super) fn driver_ok(&self) -> Result<()> {
+        self.start_queue_tasks()?;
+        self.write_driver_ok();
         Ok(())
     }
 }
