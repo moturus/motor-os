@@ -33,6 +33,19 @@ pub fn run_tests() {
             "unexpected header-layout failure: {stderr}"
         );
     }
+    for case in ["queue-size", "u16-wrap", "u32-max"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test-virtio-used-id")
+            .arg(case)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("virtio used descriptor ID out of range"),
+            "unexpected used-ID failure: {stderr}"
+        );
+    }
     println!("virtio descriptor tests PASS");
 }
 

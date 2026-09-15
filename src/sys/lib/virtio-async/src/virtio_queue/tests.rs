@@ -81,19 +81,28 @@ impl Device {
     }
 
     fn complete(&self, head: u16, consumed: u32, status: u8) {
+        self.complete_raw(u32::from(head), consumed, status);
+    }
+
+    fn complete_raw(&self, raw_head: u32, consumed: u32, status: u8) {
         let mut queue = self.queue.borrow_mut();
-        let mut tail = head;
-        while queue.get_descriptor(tail).flags & VIRTQ_DESC_F_NEXT != 0 {
-            tail = queue.get_descriptor(tail).next;
+        if raw_head < u32::from(queue.queue_size) {
+            let mut tail = raw_head as u16;
+            while queue.get_descriptor(tail).flags & VIRTQ_DESC_F_NEXT != 0 {
+                tail = queue.get_descriptor(tail).next;
+            }
+            // SAFETY: aligned status storage belongs to this simulated device.
+            unsafe {
+                (queue.header_buffers[tail as usize].buf.raw_ptr_mut() as *mut u64)
+                    .write_volatile(status as u64);
+            }
         }
-        // SAFETY: aligned status storage belongs to this simulated device.
+        // SAFETY: the fixture owns the simulated device's ring.
         unsafe {
-            (queue.header_buffers[tail as usize].buf.raw_ptr_mut() as *mut u64)
-                .write_volatile(status as u64);
             let idx = queue.used_ring.idx.read_volatile();
             let slot = (idx & queue.queue_size_mask) as usize;
             queue.used_ring.ring[slot] = VirtqUsedElem {
-                id: head as u32,
+                id: raw_head,
                 len: consumed,
             };
             (queue.used_ring.idx as *mut u16).write_volatile(idx.wrapping_add(1));
@@ -129,6 +138,7 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 }
 
 pub fn test_descriptor_waiters() {
+    test_used_id_boundary();
     test_header_buffers();
     test_vsock_tx();
     test_exhausted_self_link();
@@ -189,6 +199,21 @@ pub fn test_descriptor_waiters() {
             drop(full);
         }
     }
+}
+
+fn test_used_id_boundary() {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    device.queue.borrow_mut().free_head_idx = 7;
+    let mut completion = device.submit(ready_head(&device, 1), 1, 7);
+    assert_eq!(completion.chain_head, device.queue.borrow().queue_size - 1);
+    device.complete(completion.chain_head, 9, 0);
+    device.reclaim();
+    let mut cx = Context::from_waker(Waker::noop());
+    let Poll::Ready((value, result)) = completion.do_poll(&mut cx) else {
+        panic!("valid boundary used ID was not reclaimed")
+    };
+    assert_eq!(value, 7);
+    assert_eq!(result.unwrap(), 9);
 }
 
 fn test_exhausted_self_link() {
@@ -318,6 +343,22 @@ pub fn test_premature_completion_drop(block: bool) {
     let completion = device.submit(ready_head(&device, 3), 3, 0);
     drop(completion);
     panic!("premature completion drop was accepted");
+}
+
+/// Run in a child process because Motor OS panics abort the process.
+pub fn test_used_id_rejection(case: &str) {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let completion = device.submit(ready_head(&device, 1), 1, 0);
+    let raw_head = match case {
+        "queue-size" => u32::from(device.queue.borrow().queue_size),
+        "u16-wrap" => 0x1_0000,
+        "u32-max" => u32::MAX,
+        _ => panic!("unknown used-ID rejection case"),
+    };
+    device.complete_raw(raw_head, 0, 0);
+    device.reclaim();
+    drop(completion);
+    panic!("invalid used ID was accepted");
 }
 
 fn test_header_buffers() {

@@ -170,6 +170,23 @@ Stage 4 private TX encoding/submission is implemented and parent-reviewed:
 - The RX completion-order approach is approved in D17; its implementation and
   validation remain pending.
 
+Shared-queue prerequisite: full-width used-ID validation is implemented and
+parent-reviewed:
+
+- The existing reclaimer narrowed the device's 32-bit used ID before checking
+  it, so `0x1_0000` could complete descriptor zero. It now rejects an ID outside
+  the queue before narrowing, indexing, or changing DMA ownership. This
+  predates vsock; the user authorized virtio-related bug fixes on 2026-09-15.
+- Guest descriptor tests cover the last valid ID and child-process rejection
+  of the queue size, `0x1_0000`, and `u32::MAX`, checking the guard diagnostic.
+  Both profiles passed these cases, existing ownership/I/O-task tests, and
+  scattered-write filesystem regressions. Base-image/systest builds, targeted
+  Clippy, formatting, and diff checks passed with no new warnings.
+- Logs: `/tmp/vsock-used-id.5eQDzj/`. The initial targeted compile check failed
+  because a fixture passed `()` instead of its existing `u32` value; that
+  mechanical correction and the final checks are recorded separately. This
+  patch adds no ordered accessor or activation; neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -370,6 +387,9 @@ Record the selected Motor toolchain, baseline image build/test results,
 current boot measurements, and existing warnings. Keep logs for any initial
 failure. Diagnose a newly encountered preexisting bug before discussing an
 out-of-scope fix, following AGENTS.md. Make no external-repository changes.
+On 2026-09-15, the user explicitly included all virtio-related preexisting
+bugs in this work. Diagnose and fix them in small, separately reviewed and
+validated patches; continue to raise non-obvious design or policy choices.
 
 ### 2. Define capability and wire contracts, with guest tests
 

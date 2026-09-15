@@ -690,7 +690,12 @@ impl Virtqueue {
         let head = self.next_used_idx & self.queue_size_mask;
         let elem = &self.used_ring.ring[head as usize];
 
-        let chain_head = elem.id as u16;
+        let raw_chain_head = elem.id;
+        assert!(
+            raw_chain_head < u32::from(self.queue_size),
+            "virtio used descriptor ID out of range"
+        );
+        let chain_head = raw_chain_head as u16;
         self.header_buffers[chain_head as usize].consumed = elem.len;
 
         let mut curr = chain_head;
@@ -719,7 +724,6 @@ impl Virtqueue {
         }
 
         self.next_used_idx = self.next_used_idx.wrapping_add(1);
-        assert!(chain_head < self.queue_size);
         if let Some(waker) = self.completion_waiters[chain_head as usize].take() {
             waker.wake();
         }

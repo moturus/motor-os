@@ -1114,6 +1114,10 @@ fn main() {
         virtio_async::test_header_layout_rejection(&args[2]);
         return;
     }
+    if args.len() == 3 && args[1] == "test-virtio-used-id" {
+        virtio_async::test_used_id_rejection(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "checked-copy-in-tests" {
         checked_copy_in::run_all_tests();
         return;
