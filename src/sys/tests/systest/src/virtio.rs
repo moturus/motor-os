@@ -46,6 +46,30 @@ pub fn run_tests() {
             "unexpected used-ID failure: {stderr}"
         );
     }
+    for (case, message) in [
+        ("duplicate", "ordered completion consumer already claimed"),
+        ("busy", "ordered completion consumer requires an idle queue"),
+        (
+            "device-overrun",
+            "ordered completion cursor exceeded by device",
+        ),
+        (
+            "reclaimer-overrun",
+            "ordered completion cursor exceeded by reclaimer",
+        ),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test-virtio-ordered-completion")
+            .arg(case)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(message),
+            "unexpected ordered-completion failure: {stderr}"
+        );
+    }
     println!("virtio descriptor tests PASS");
 }
 

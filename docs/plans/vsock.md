@@ -167,8 +167,8 @@ Stage 4 private TX encoding/submission is implemented and parent-reviewed:
   Logs: `/tmp/vsock-tx.qe5IRA/`. Two initial sub-agent compile-check failures
   required explicit byte-slice `AsRef`/`AsMut` types (tool transcript evidence);
   those checks and the subsequent parent gates passed after correction.
-- The RX completion-order approach is approved in D17; its implementation and
-  validation remain pending.
+- The RX completion-order approach is approved in D17; accessor progress is
+  recorded below. The packet/completion pool remains pending.
 
 Shared-queue prerequisite: full-width used-ID validation is implemented and
 parent-reviewed:
@@ -186,6 +186,23 @@ parent-reviewed:
   because a fixture passed `()` instead of its existing `u32` value; that
   mechanical correction and the final checks are recorded separately. This
   patch adds no ordered accessor or activation; neither milestone is complete.
+
+Stage 4 ordered-completion accessor (D17) is implemented and parent-reviewed:
+
+- A crate-private, one-shot idle-queue cursor observes retained used heads
+  after the normal reclaimer processes them. Raw-device and reclaimed lag
+  checks cover counter wrap; one completion waiter supplies wakeups. Fetching
+  a head neither reclaims nor frees descriptors. Existing block/net APIs,
+  feature negotiation, and boot tasks are unchanged.
+- Guest fixtures cover a full-ring precompleted batch in reversed used order,
+  independently polled futures, wrap/reuse, descriptor retention, an unreclaimed
+  head remaining pending, waiter replacement/drop, and rejection of duplicate
+  or busy claims and raw/reclaimed overruns. Debug and release passed, together
+  with existing descriptor, I/O-task, and scattered-write regressions.
+- Base-image/systest builds, targeted Clippy, formatting, and diff checks passed
+  with no new warnings. Logs: `/tmp/vsock-order.EVlyIY/`. RX packet validation
+  through this accessor and the bounded RX pool are next; neither milestone
+  is complete.
 
 ## Scope and simplicity
 
@@ -1522,6 +1539,13 @@ must not reclaim or release a descriptor chain a second time. Initialize
 the consumer cursor before publishing the first RX buffers. Keep the lookup
 bounded by D7's RX pool, not by the number of streams or application reads.
 
+The concrete accessor claims one idle queue once and holds a wrapping cursor
+plus one queue-level completion waiter. Check both device-published and
+reclaimed lag against queue capacity before reading the retained slot;
+exactly one ring's worth is valid. An empty poll waits for the existing
+reclaimer, which wakes it after advancing its boundary. Dropping the cursor
+removes its waiter without releasing DMA ownership or reopening the claim.
+
 Do not read a ring slot after device reuse. Retain all undelivered buffers
 within the bounded RX pool, consume each ordered result before reposting
 its buffer, and enforce the ring-lag bound across wrapping counters. The
@@ -1531,7 +1555,11 @@ have a concrete completion wakeup, never a polling timer or a lost wakeup.
 
 For each next used head, resolve and validate its owned completion. Deliver
 the packet or applicable refusal metadata to sys-io in that order, or
-discard an invalid packet before advancing. Malformed packets must not
+discard an invalid packet before fetching another head. The raw-ring cursor
+advances when a head is fetched; the RX owner must resolve and handle that
+already-ready completion synchronously, before another fetch, repost, or
+await. No per-head token or separate acknowledgement phase is needed.
+Malformed packets must not
 stall ordered consumption or leak buffers. sys-io consumes results in order
 and returns device buffers after moving accepted data into bounded stream
 storage; application reads must not hold device buffers indefinitely.

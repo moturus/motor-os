@@ -48,6 +48,8 @@ impl Device {
             last_kick_idx: 0,
             alloc_waiters: VecDeque::new(),
             completion_waiters: vec![None; SIZE as usize],
+            ordered_consumer_claimed: false,
+            ordered_waiter: None,
             virtio_f_event_idx_negotiated: false,
         };
         Self {
@@ -130,6 +132,13 @@ fn poll_alloc(alloc: &mut VqAlloc, waker: &LocalWaker) -> Poll<u16> {
     Pin::new(alloc).poll(&mut cx)
 }
 
+fn poll_ordered(cursor: &mut OrderedCompletions, waker: &LocalWaker) -> Poll<u16> {
+    let mut cx = ContextBuilder::from_waker(Waker::noop())
+        .local_waker(waker)
+        .build();
+    cursor.poll_next(&mut cx)
+}
+
 fn ready_head(device: &Device, len: u16) -> u16 {
     match poll_alloc(&mut device.alloc(len), LocalWaker::noop()) {
         Poll::Ready(head) => head,
@@ -138,6 +147,8 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 }
 
 pub fn test_descriptor_waiters() {
+    test_ordered_completions();
+    test_ordered_waiter();
     test_used_id_boundary();
     test_header_buffers();
     test_vsock_tx();
@@ -199,6 +210,104 @@ pub fn test_descriptor_waiters() {
             drop(full);
         }
     }
+}
+
+fn test_ordered_completions() {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let start = u16::MAX - 3;
+    {
+        let mut queue = device.queue.borrow_mut();
+        queue.next_used_idx = start;
+        // SAFETY: the fixture owns the simulated device's ring.
+        unsafe {
+            (queue.used_ring.idx as *mut u16).write_volatile(start);
+            queue
+                .available_ring
+                .next_available_idx
+                .write_volatile(start);
+        }
+    }
+    let mut ordered = Virtqueue::ordered_completions(device.queue.clone());
+    let mut completions = Vec::new();
+    for value in 0..8 {
+        let head = ready_head(&device, 1);
+        completions.push(Some(device.submit(head, 1, value)));
+    }
+    let completion_order = [7, 6, 5, 4, 3, 2, 1, 0];
+    for index in completion_order {
+        let completion = completions[index].as_ref().unwrap();
+        device.complete(completion.chain_head, index as u32 + 20, 0);
+    }
+    device.reclaim();
+    let reclaimed = device.queue.borrow().next_used_idx;
+    assert_eq!(reclaimed, start.wrapping_add(8));
+
+    // Polling the individual futures in submission order does not change the
+    // order retained by the used ring.
+    let mut cx = Context::from_waker(Waker::noop());
+    for (value, completion) in completions.iter_mut().enumerate() {
+        let Poll::Ready((data, result)) = completion.as_mut().unwrap().do_poll(&mut cx) else {
+            panic!("precompleted request was pending")
+        };
+        assert_eq!(data, value as u32);
+        assert_eq!(result.unwrap(), value as u32 + 20);
+    }
+    for (position, index) in completion_order.into_iter().enumerate() {
+        let expected = completions[index].as_ref().unwrap().chain_head;
+        assert_eq!(
+            poll_ordered(&mut ordered, LocalWaker::noop()),
+            Poll::Ready(expected)
+        );
+        if position == 0 {
+            assert!(
+                device
+                    .queue
+                    .borrow_mut()
+                    .alloc_descriptor_chain(1)
+                    .is_none()
+            );
+        }
+        drop(completions[index].take());
+    }
+    assert_eq!(device.queue.borrow().next_used_idx, reclaimed);
+
+    // Only after ordered handling releases the old pool may a descriptor be
+    // reused and complete into the wrapped ring.
+    let reused = device.submit(ready_head(&device, 1), 1, 99);
+    let reused_head = reused.chain_head;
+    device.complete(reused_head, 7, 0);
+    device.reclaim();
+    assert_eq!(
+        poll_ordered(&mut ordered, LocalWaker::noop()),
+        Poll::Ready(reused_head)
+    );
+    drop(reused);
+}
+
+fn test_ordered_waiter() {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let mut ordered = Virtqueue::ordered_completions(device.queue.clone());
+    let first = Rc::new(WakeCount::default());
+    let second = Rc::new(WakeCount::default());
+    let first_waker = LocalWaker::from(first.clone());
+    let second_waker = LocalWaker::from(second.clone());
+    assert!(poll_ordered(&mut ordered, &first_waker).is_pending());
+    assert!(poll_ordered(&mut ordered, &second_waker).is_pending());
+    let completion = device.submit(ready_head(&device, 1), 1, 0);
+    device.complete(completion.chain_head, 0, 0);
+    assert!(poll_ordered(&mut ordered, &second_waker).is_pending());
+    device.reclaim();
+    assert_eq!((first.0.get(), second.0.get()), (0, 1));
+    assert_eq!(
+        poll_ordered(&mut ordered, &second_waker),
+        Poll::Ready(completion.chain_head)
+    );
+    drop(completion);
+    assert!(poll_ordered(&mut ordered, &second_waker).is_pending());
+    drop(ordered);
+    let queue = device.queue.borrow();
+    assert!(queue.ordered_consumer_claimed);
+    assert!(queue.ordered_waiter.is_none());
 }
 
 fn test_used_id_boundary() {
@@ -359,6 +468,43 @@ pub fn test_used_id_rejection(case: &str) {
     device.reclaim();
     drop(completion);
     panic!("invalid used ID was accepted");
+}
+
+/// Run in a child process because Motor OS panics abort the process.
+pub fn test_ordered_completion_rejection(case: &str) {
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    let mut ordered = Virtqueue::ordered_completions(device.queue.clone());
+    match case {
+        "duplicate" => {
+            let _duplicate = Virtqueue::ordered_completions(device.queue.clone());
+        }
+        "busy" => {
+            let other = Device::new(crate::VirtioDeviceKind::Vsock);
+            let _completion = other.submit(ready_head(&other, 1), 1, 0);
+            let _ordered = Virtqueue::ordered_completions(other.queue.clone());
+        }
+        "device-overrun" => {
+            let idx = ordered
+                .next_used_idx
+                .wrapping_add(device.queue.borrow().queue_size + 1);
+            let queue = device.queue.borrow_mut();
+            // SAFETY: the fixture owns the simulated device's ring.
+            unsafe { (queue.used_ring.idx as *mut u16).write_volatile(idx) };
+            drop(queue);
+            let _ = poll_ordered(&mut ordered, LocalWaker::noop());
+        }
+        "reclaimer-overrun" => {
+            let mut queue = device.queue.borrow_mut();
+            let idx = ordered.next_used_idx.wrapping_add(queue.queue_size + 1);
+            queue.next_used_idx = idx;
+            // SAFETY: the fixture owns the simulated device's ring.
+            unsafe { (queue.used_ring.idx as *mut u16).write_volatile(idx) };
+            drop(queue);
+            let _ = poll_ordered(&mut ordered, LocalWaker::noop());
+        }
+        _ => panic!("unknown ordered-completion rejection case"),
+    }
+    panic!("invalid ordered completion use was accepted");
 }
 
 fn test_header_buffers() {

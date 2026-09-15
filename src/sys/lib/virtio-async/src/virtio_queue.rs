@@ -162,6 +162,18 @@ pub(crate) struct VqAlloc {
     virtqueue: Rc<RefCell<Virtqueue>>,
 }
 
+/// A one-shot view of completions in device used-ring order.
+///
+/// Capture this cursor on an idle queue before publishing RX buffers. The
+/// owner must retain all undelivered completions, then synchronously resolve
+/// and handle each returned head before polling again or reposting its buffer.
+/// That bounded-pool discipline prevents overwrite of an unread ring slot;
+/// this cursor does not own or release descriptor chains itself.
+pub(crate) struct OrderedCompletions {
+    virtqueue: Rc<RefCell<Virtqueue>>,
+    next_used_idx: u16,
+}
+
 impl VqAlloc {
     pub(crate) fn new(virtqueue: Rc<RefCell<Virtqueue>>, num_to_alloc: u16) -> Self {
         Self {
@@ -237,6 +249,9 @@ pub(super) struct Virtqueue {
 
     // For each slot we may have a waker.
     completion_waiters: Vec<Option<std::task::LocalWaker>>,
+
+    ordered_consumer_claimed: bool,
+    ordered_waiter: Option<std::task::LocalWaker>,
 
     virtio_f_event_idx_negotiated: bool,
 }
@@ -320,6 +335,8 @@ impl Virtqueue {
             queue_size_mask: queue_size - 1,
             alloc_waiters: VecDeque::new(),
             completion_waiters,
+            ordered_consumer_claimed: false,
+            ordered_waiter: None,
 
             virtio_f_event_idx_negotiated: false,
         }));
@@ -356,6 +373,7 @@ impl Virtqueue {
                 }
 
                 let alloc_waiters = vq.alloc_waiters.len();
+                let ordered_waiters = usize::from(vq.ordered_waiter.is_some());
                 let mut completion_waiters = 0;
                 let mut cw_idx = 0;
                 for (idx, cw) in vq.completion_waiters.iter().enumerate() {
@@ -366,12 +384,12 @@ impl Virtqueue {
                 }
 
                 let has_used = vq.has_new_used();
-                if has_used && (alloc_waiters + completion_waiters > 0) {
+                if has_used && (alloc_waiters + completion_waiters + ordered_waiters > 0) {
                     errors += 1;
                     let device_used_idx = unsafe { vq.used_ring.idx.read_volatile() };
 
                     log::error!(
-                        "vq {:?}:{}: aw: {alloc_waiters} cw: {completion_waiters} driver used: 0x{driver_used_idx:x} device used: 0x{device_used_idx:x} idx: 0x{cw_idx:x}",
+                        "vq {:?}:{}: aw: {alloc_waiters} cw: {completion_waiters} ow: {ordered_waiters} driver used: 0x{driver_used_idx:x} device used: 0x{device_used_idx:x} idx: 0x{cw_idx:x}",
                         vq.device_kind,
                         vq.queue_num
                     );
@@ -431,6 +449,35 @@ impl Virtqueue {
 
     pub fn set_f_event_idx_negotiated(&mut self) {
         self.virtio_f_event_idx_negotiated = true;
+    }
+
+    pub(crate) fn ordered_completions(this: Rc<RefCell<Self>>) -> OrderedCompletions {
+        let next_used_idx = {
+            let mut virtq = this.borrow_mut();
+            assert!(
+                !virtq.ordered_consumer_claimed,
+                "ordered completion consumer already claimed"
+            );
+            mfence();
+            let device_used_idx = unsafe { virtq.used_ring.idx.read_volatile() };
+            assert_eq!(
+                device_used_idx, virtq.next_used_idx,
+                "ordered completion consumer requires no pending used entries"
+            );
+            assert!(
+                virtq
+                    .header_buffers
+                    .iter()
+                    .all(|header| !header.in_use_by_device && !header.in_use_by_completion),
+                "ordered completion consumer requires an idle queue"
+            );
+            virtq.ordered_consumer_claimed = true;
+            virtq.next_used_idx
+        };
+        OrderedCompletions {
+            virtqueue: this,
+            next_used_idx,
+        }
     }
 
     fn notify_device_if_needed(&mut self, new_idx: u16) {
@@ -724,6 +771,9 @@ impl Virtqueue {
         }
 
         self.next_used_idx = self.next_used_idx.wrapping_add(1);
+        if let Some(waker) = self.ordered_waiter.take() {
+            waker.wake();
+        }
         if let Some(waker) = self.completion_waiters[chain_head as usize].take() {
             waker.wake();
         }
@@ -765,6 +815,59 @@ impl Virtqueue {
             (self.header_buffers[last as usize].buf.raw_ptr() as *const u64).read_volatile()
         };
         status as u8
+    }
+}
+
+impl OrderedCompletions {
+    pub(crate) fn poll_next(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<u16> {
+        let mut virtq = self.virtqueue.borrow_mut();
+        mfence();
+        let device_used_idx = unsafe { virtq.used_ring.idx.read_volatile() };
+        let reclaimed_lag = virtq.next_used_idx.wrapping_sub(self.next_used_idx);
+        let device_lag = device_used_idx.wrapping_sub(self.next_used_idx);
+        assert!(
+            reclaimed_lag <= virtq.queue_size,
+            "ordered completion cursor exceeded by reclaimer"
+        );
+        assert!(
+            device_lag <= virtq.queue_size,
+            "ordered completion cursor exceeded by device"
+        );
+        assert!(
+            reclaimed_lag <= device_lag,
+            "ordered completion reclaimer passed device"
+        );
+
+        if reclaimed_lag == 0 {
+            match &mut virtq.ordered_waiter {
+                Some(waker) => waker.clone_from(cx.local_waker()),
+                None => virtq.ordered_waiter = Some(cx.local_waker().clone()),
+            }
+            return std::task::Poll::Pending;
+        }
+
+        let slot = self.next_used_idx & virtq.queue_size_mask;
+        let raw_head =
+            unsafe { core::ptr::addr_of!(virtq.used_ring.ring[slot as usize].id).read_volatile() };
+        assert!(
+            raw_head < u32::from(virtq.queue_size),
+            "virtio used descriptor ID out of range"
+        );
+        let head = raw_head as u16;
+        let header = &virtq.header_buffers[head as usize];
+        assert!(
+            !header.in_use_by_device && header.in_use_by_completion,
+            "ordered completion is not retained by its owner"
+        );
+        self.next_used_idx = self.next_used_idx.wrapping_add(1);
+        virtq.ordered_waiter = None;
+        std::task::Poll::Ready(head)
+    }
+}
+
+impl Drop for OrderedCompletions {
+    fn drop(&mut self) {
+        self.virtqueue.borrow_mut().ordered_waiter = None;
     }
 }
 
