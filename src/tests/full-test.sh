@@ -112,6 +112,7 @@ fi
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-size.sh"
   "$WD/test-rustfmt-size.sh"
+  "$WD/test-gix.sh" --host
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -430,6 +431,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-crates.sh"
   "$WD/test-rust-analyzer-native.sh"
   "$WD/test-rustfmt-native.sh"
+  "$WD/test-gix.sh" --guest
 fi
 
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
