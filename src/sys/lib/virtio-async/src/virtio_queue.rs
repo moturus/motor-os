@@ -887,6 +887,10 @@ pub(crate) struct VqCompletion<T> {
 }
 
 impl<T> VqCompletion<T> {
+    pub(crate) fn chain_head(&self) -> u16 {
+        self.chain_head
+    }
+
     /// A copy of the chain head's header buffer, i.e. of whatever the device
     /// wrote into the first descriptor. Only meaningful once the completion
     /// has resolved; the buffer stays ours until this completion is dropped,

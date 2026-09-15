@@ -204,6 +204,25 @@ Stage 4 ordered-completion accessor (D17) is implemented and parent-reviewed:
   through this accessor and the bounded RX pool are next; neither milestone
   is complete.
 
+Stage 4 private RX submission/completion is implemented and parent-reviewed:
+
+- Publishes a zeroed 44-byte header and one page-aligned 4 KiB payload, both
+  writable, using the existing completion ownership. Rejected admission
+  preserves the buffer; successful admission clears its visible length.
+  Ordered completion first establishes DMA completion, then copies/validates
+  the header. Valid packets expose only validated payload bytes; invalid
+  packets return the same zero-length buffer and applicable refusal metadata.
+- Guest fixtures cover poisoned scratch, descriptor addresses/directions,
+  short/full-page/control packets, invalid used/payload lengths, buffer
+  identity/release, and invalid/full-queue admission without publication.
+  Debug and release passed these and existing descriptor/I/O-task/filesystem
+  regressions. Base-image/systest builds, targeted Clippy, formatting, and
+  diff checks passed with no new warnings.
+- Logs: `/tmp/vsock-rx.VOkuco/`. The initial targeted check's direct `IoBuf`
+  indexing error was corrected to an explicit byte slice; original and final
+  check logs are retained. Events, the RX pool, and activation remain pending;
+  neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -519,6 +538,17 @@ header-only control or four-byte event. Respect physical page boundaries;
 virtual contiguity does not imply physical contiguity. Verify backend packet
 splitting against posted RX capacity and reject invalid used lengths without
 resizing to a peer-provided length.
+
+The 2026-09-15 source check supports this layout: the pinned
+[CHV receive path](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/csm/connection.rs#L208-L231),
+[Firecracker receive path](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/vsock/csm/connection.rs#L217-L241),
+and [QEMU backend receive path](https://github.com/rust-vmm/vhost-device/blob/vhost-device-vsock-v0.3.0/vhost-device-vsock/src/vsock_conn.rs#L158-L176)
+limit each stream read to posted payload capacity and peer credit. Each
+reports header plus actual payload as the used length:
+[CHV](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/device.rs#L134-L164),
+[Firecracker](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/vsock/device.rs#L167-L205),
+and [QEMU backend](https://github.com/rust-vmm/vhost-device/blob/vhost-device-vsock-v0.3.0/vhost-device-vsock/src/vhu_vsock_thread.rs#L600-L615).
+This does not replace the planned real-peer multi-packet tests.
 
 Return buffers on valid and invalid completions so the runtime can reuse
 them. Use a dedicated receive completion wrapper, like `NetReadCompletion`,
@@ -1029,7 +1059,9 @@ sorting in sys-io/moto-io.
 - Preserve sys-io's second-block-device rejection until multiple filesystems
   arrive. Do not change root-disk selection or implement secondary-disk use.
 - Multiple NICs should continue working; new multi-NIC testing/fixing is out
-  of scope. Existing tests and ordinary networking regressions still run.
+  of scope except as needed for diagnosed virtio-related bugs under the
+  subsequent scope authorization in stage 1. Existing tests and ordinary
+  networking regressions still run.
 - Host CID 2 is the only required peer. Guest-to-guest routing and
   guest-local loopback are not implemented or tested.
 

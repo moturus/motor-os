@@ -151,6 +151,7 @@ pub fn test_descriptor_waiters() {
     test_ordered_waiter();
     test_used_id_boundary();
     test_header_buffers();
+    test_vsock_rx();
     test_vsock_tx();
     test_exhausted_self_link();
     test_mixed_chains();
@@ -568,6 +569,192 @@ fn test_header_buffers() {
         completion.read_header::<crate::virtio_vsock::WireHeader>(),
         expected
     );
+}
+
+fn rx_header(payload_len: u32, operation: u16) -> [u8; crate::virtio_vsock::HEADER_LEN] {
+    let mut header = [0; crate::virtio_vsock::HEADER_LEN];
+    header[0..8].copy_from_slice(&2_u64.to_le_bytes());
+    header[8..16].copy_from_slice(&0x7856_3412_u64.to_le_bytes());
+    header[16..20].copy_from_slice(&0x0403_0201_u32.to_le_bytes());
+    header[20..24].copy_from_slice(&0x0807_0605_u32.to_le_bytes());
+    header[24..28].copy_from_slice(&payload_len.to_le_bytes());
+    header[28..30].copy_from_slice(&1_u16.to_le_bytes());
+    header[30..32].copy_from_slice(&operation.to_le_bytes());
+    header[36..40].copy_from_slice(&0x4433_2211_u32.to_le_bytes());
+    header[40..44].copy_from_slice(&0x8877_6655_u32.to_le_bytes());
+    header
+}
+
+fn write_rx_header(device: &Device, head: u16, header: &[u8; 44]) {
+    let mut queue = device.queue.borrow_mut();
+    let scratch: &mut [u8] = queue.header_buffers[head as usize].buf.as_mut();
+    scratch[..44].copy_from_slice(header);
+}
+
+fn test_vsock_rx() {
+    use crate::virtio_vsock::{DecodeErrorKind, Operation, PacketHeader, try_post_rx};
+
+    let device = Device::new(crate::VirtioDeviceKind::Vsock);
+    {
+        let mut queue = device.queue.borrow_mut();
+        for header in &mut queue.header_buffers {
+            let scratch: &mut [u8] = header.buf.as_mut();
+            scratch[..crate::virtio_vsock::HEADER_LEN].fill(0xa5);
+        }
+    }
+    let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+    payload.set_len(3);
+    <IoBuf as AsMut<[u8]>>::as_mut(&mut payload).fill(0xaa);
+    let payload_ptr = payload.raw_ptr_mut();
+    let payload_phys = payload.phys_addr() as u64;
+    let rx = try_post_rx(device.queue.clone(), payload)
+        .unwrap_or_else(|(err, _)| panic!("valid RX buffer rejected: {err}"));
+    let head = rx.head();
+    {
+        let queue = device.queue.borrow();
+        let header_desc = queue.get_descriptor(head);
+        let payload_desc = queue.get_descriptor(header_desc.next);
+        let header_phys = queue.header_buffers[head as usize].buf.phys_addr() as u64;
+        assert_eq!(
+            (header_desc.addr, header_desc.len, header_desc.flags),
+            (header_phys, 44, 3)
+        );
+        assert_eq!(
+            (payload_desc.addr, payload_desc.len, payload_desc.flags),
+            (payload_phys, 4096, 2)
+        );
+        let scratch: &[u8] = queue.header_buffers[head as usize].buf.as_ref();
+        assert!(scratch[..44].iter().all(|byte| *byte == 0));
+        assert!(queue.header_buffers[head as usize].in_use_by_completion);
+    }
+    write_rx_header(&device, head, &rx_header(3, 5));
+    // SAFETY: the completion owns this posted page; the fixture is the device.
+    unsafe { std::ptr::copy_nonoverlapping([7, 8, 9].as_ptr(), payload_ptr, 3) };
+    device.complete(head, 47, 0);
+    device.reclaim();
+    let (payload, decoded) = rx.finish_ordered(head);
+    assert_eq!(payload.raw_ptr(), payload_ptr);
+    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&payload), &[7, 8, 9]);
+    assert_eq!(
+        decoded.unwrap(),
+        PacketHeader {
+            src_cid: 2,
+            dst_cid: 0x7856_3412,
+            src_port: 0x0403_0201,
+            dst_port: 0x0807_0605,
+            len: 3,
+            socket_type: crate::virtio_vsock::SocketType::Stream,
+            operation: Operation::ReadWrite,
+            flags: 0,
+            buf_alloc: 0x4433_2211,
+            fwd_cnt: 0x8877_6655,
+        }
+    );
+
+    let mut full_payload = IoBuf::new_from_size_align(4096).unwrap();
+    full_payload.set_len(4096);
+    <IoBuf as AsMut<[u8]>>::as_mut(&mut full_payload).fill(0x55);
+    let full_ptr = full_payload.raw_ptr_mut();
+    let full = try_post_rx(device.queue.clone(), full_payload)
+        .unwrap_or_else(|(err, _)| panic!("full-capacity RX buffer rejected: {err}"));
+    let head = full.head();
+    write_rx_header(&device, head, &rx_header(4096, 5));
+    // SAFETY: the completion owns this posted page; the fixture is the device.
+    unsafe {
+        full_ptr.write(1);
+        full_ptr.add(4095).write(2);
+    }
+    device.complete(head, 44 + 4096, 0);
+    device.reclaim();
+    let (full_payload, decoded) = full.finish_ordered(head);
+    assert_eq!(decoded.unwrap().len, 4096);
+    assert_eq!(full_payload.len(), 4096);
+    let full_bytes: &[u8] = full_payload.as_ref();
+    assert_eq!((full_bytes[0], full_bytes[4095]), (1, 2));
+
+    let control = try_post_rx(
+        device.queue.clone(),
+        IoBuf::new_from_size_align(4096).unwrap(),
+    )
+    .unwrap_or_else(|(err, _)| panic!("control RX buffer rejected: {err}"));
+    let head = control.head();
+    write_rx_header(&device, head, &rx_header(0, 1));
+    device.complete(head, 44, 0);
+    device.reclaim();
+    let (payload, decoded) = control.finish_ordered(head);
+    assert_eq!(decoded.unwrap().operation, Operation::Request);
+    assert_eq!(payload.len(), 0);
+
+    for (header_len, used_len, expected, expected_raw_len) in [
+        (0, 43, DecodeErrorKind::ShortHeader, None),
+        (
+            0,
+            44 + 4096 + 1,
+            DecodeErrorKind::UsedLengthExceedsCapacity,
+            Some(0),
+        ),
+        (
+            4097,
+            44 + 4096,
+            DecodeErrorKind::PayloadExceedsCapacity,
+            Some(4097),
+        ),
+        (3, 46, DecodeErrorKind::TruncatedPayload, Some(3)),
+    ] {
+        let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+        payload.set_len(3);
+        <IoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[4, 5, 6]);
+        let ptr = payload.raw_ptr();
+        let rx = try_post_rx(device.queue.clone(), payload)
+            .unwrap_or_else(|(err, _)| panic!("malformed RX fixture rejected: {err}"));
+        let head = rx.head();
+        write_rx_header(&device, head, &rx_header(header_len, 5));
+        device.complete(head, used_len, 0);
+        device.reclaim();
+        let (payload, error) = rx.finish_ordered(head);
+        let error = error.unwrap_err();
+        assert_eq!(error.kind, expected);
+        assert_eq!(error.raw.map(|raw| raw.len), expected_raw_len);
+        assert_eq!(payload.raw_ptr(), ptr);
+        assert_eq!(payload.len(), 0);
+    }
+
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let mut invalid = IoBuf::new_from_size_align(64).unwrap();
+    invalid.set_len(3);
+    <IoBuf as AsMut<[u8]>>::as_mut(&mut invalid)[..3].copy_from_slice(&[1, 2, 3]);
+    let invalid_ptr = invalid.raw_ptr();
+    let (error, invalid) = match try_post_rx(device.queue.clone(), invalid) {
+        Err(rejected) => rejected,
+        Ok(_) => panic!("invalid RX buffer was accepted"),
+    };
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(invalid.raw_ptr(), invalid_ptr);
+    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&invalid), &[1, 2, 3]);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+
+    let blocker = device.submit(ready_head(&device, 8), 8, 0);
+    let mut rejected = IoBuf::new_from_size_align(4096).unwrap();
+    rejected.set_len(1);
+    <IoBuf as AsMut<[u8]>>::as_mut(&mut rejected)[0] = 9;
+    let rejected_ptr = rejected.raw_ptr();
+    let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
+    let (error, rejected) = match try_post_rx(device.queue.clone(), rejected) {
+        Err(rejected) => rejected,
+        Ok(_) => panic!("full RX queue accepted another buffer"),
+    };
+    assert_eq!(error.kind(), ErrorKind::WouldBlock);
+    assert_eq!(rejected.raw_ptr(), rejected_ptr);
+    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&rejected), &[9]);
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        before
+    );
+    device.complete(blocker.chain_head, 0, 0);
+    drop(blocker);
 }
 
 fn test_vsock_tx() {

@@ -9,7 +9,7 @@ use moto_tooling::iobuf::IoBuf;
 
 use crate::WriteCompletion;
 use crate::virtio_device::{VIRTIO_F_RING_EVENT_IDX, VIRTIO_F_VERSION_1, VirtioDevice};
-use crate::virtio_queue::{UserData, Virtqueue};
+use crate::virtio_queue::{UserData, Virtqueue, VqCompletion};
 
 pub const HEADER_LEN: usize = 44;
 pub const EVENT_LEN: usize = 4;
@@ -272,6 +272,82 @@ pub(crate) fn try_post_tx(
             descriptors,
             descriptor_count,
             0,
+            chain_head,
+            payload,
+        ),
+    })
+}
+
+pub(crate) struct RxCompletion {
+    completion: VqCompletion<IoBuf>,
+}
+
+impl RxCompletion {
+    pub(crate) fn head(&self) -> u16 {
+        self.completion.chain_head()
+    }
+
+    /// Finish a completion selected by the ordered used-ring cursor. This must
+    /// not wait: the cursor exposes only heads processed by the reclaimer.
+    pub(crate) fn finish_ordered(
+        mut self,
+        ordered_head: u16,
+    ) -> (IoBuf, Result<PacketHeader, DecodeError>) {
+        assert_eq!(self.head(), ordered_head, "ordered vsock RX head mismatch");
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready((mut payload, used_len)) = self.completion.do_poll(&mut cx)
+        else {
+            panic!("ordered vsock RX completion was not reclaimed")
+        };
+        let used_len = used_len.expect("vsock RX completion unexpectedly failed");
+        let header = self.completion.read_header::<[u8; HEADER_LEN]>();
+        let decoded = decode_packet(&header, used_len, payload.capacity());
+        if let Ok(header) = decoded {
+            payload.set_len(header.len as usize);
+        }
+        (payload, decoded)
+    }
+}
+
+/// Try to publish one RX buffer without waiting. Rejection leaves the buffer
+/// and queue unchanged; successful publication exposes no old payload bytes.
+pub(crate) fn try_post_rx(
+    queue: Rc<RefCell<Virtqueue>>,
+    mut payload: IoBuf,
+) -> std::result::Result<RxCompletion, (std::io::Error, IoBuf)> {
+    let payload_data = match validate_payload_dma(
+        payload.capacity(),
+        payload.capacity(),
+        payload.phys_addr() as u64,
+    ) {
+        Ok(len) => UserData {
+            phys_addr: payload.phys_addr() as u64,
+            len,
+        },
+        Err(err) => return Err((err, payload)),
+    };
+    let (chain_head, header_data) = {
+        let mut queue = queue.borrow_mut();
+        let Some(chain_head) = queue.alloc_descriptor_chain(2) else {
+            return Err((ErrorKind::WouldBlock.into(), payload));
+        };
+        let (header, phys_addr, _) = queue.get_buffer::<[u8; HEADER_LEN]>(chain_head);
+        header.fill(0);
+        (
+            chain_head,
+            UserData {
+                phys_addr,
+                len: HEADER_LEN as u32,
+            },
+        )
+    };
+    payload.set_len(0);
+    Ok(RxCompletion {
+        completion: Virtqueue::add_buffs(
+            queue,
+            &[header_data, payload_data],
+            0,
+            2,
             chain_head,
             payload,
         ),
