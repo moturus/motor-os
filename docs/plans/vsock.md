@@ -1,6 +1,6 @@
 # Virtio-vsock implementation plan
 
-Status: v2.5. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.6. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
@@ -8,9 +8,12 @@ D15 and D16. Follow-up review corrections and simplifications are retained.
 Q16 is settled in D16: an explicitly requested `raw.img` target for standard
 Firecracker tests, with no developer-image Firecracker support. Q18 is settled
 in D17: preserve RX used-ring order inside virtio-async using the existing
-queue, without negotiating `IN_ORDER`. Shared reset verification, malformed
-credit handling, BAR-boundary validation, and the integrated-pump milestone
-dependency await implementation review in Q19–Q22.
+queue, without negotiating `IN_ORDER`. Q19 and Q20 are approved in D18 and
+D19: one-read shared reset verification and connection-local rejection of
+impossible peer credit. Q22 is approved in D13: integrated pumps and IPC
+accounting belong in M2, with all gate counts and test coverage retained.
+Q21 is deferred in D20: defending against buggy or malicious VMMs is out of
+scope, with the BAR-boundary concern recorded in `future-work.md`.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
 implementation has started, with progress recorded below.
@@ -522,8 +525,8 @@ Shared modern PCI discovery no longer rejects revision zero:
   `/tmp/virtio-revision-gate.A29VEj/`, and
   `/tmp/virtio-revision-other-vmm.2mFG6R/`.
 - Revision-zero hardware was not injected, and no vsock device was activated.
-  M1/M2 remain pending; Q22 records the dependency preventing literal Stage 5
-  completion before the connection/IPC implementation.
+  M1/M2 remain pending; the Q22 adjustment now recorded in D13 addresses the
+  dependency of integrated Stage 5 pumps on the connection/IPC implementation.
 
 Stage 5/6 bounded receive storage is implemented and parent-reviewed:
 
@@ -546,7 +549,17 @@ Stage 5/6 bounded receive storage is implemented and parent-reviewed:
   passed. Logs: `/tmp/vsock-stream-buffer-*.log` and
   `/tmp/vsock-rx-buffer-gate.ZeNVXk/`. These tests copy actual bytes but do not
   reserve real IPC pages, perform DMA, or prove allocator-specific deque
-  layout. Runtime pumps, Q19–Q22, and both milestone gates remain pending.
+  layout. Runtime pumps and both milestone gates remain pending.
+
+Follow-up decisions approved on 2026-09-15, without additional source changes:
+
+- Q19's reset check (D18), including its one MMIO read per initialization,
+  and Q20's connection-local invalid-credit reaction (D19) are approved but
+  not yet implemented. Earlier progress entries record implementation status
+  at each patch, not outstanding approval requests.
+- Q22's foundation/integration boundary is reflected in D13 and the stages
+  and validation schedule below. Neither milestone is complete. Q21 is
+  deferred under D20; no BAR-layout walk is approved or implemented.
 
 ## Scope and simplicity
 
@@ -554,6 +567,9 @@ Stage 5/6 bounded receive storage is implemented and parent-reviewed:
   the existing split virtqueues and MSI-X support. No legacy transport,
   packed-ring implementation, alternate queue library, or VMM-specific guest
   protocol.
+- Defending against buggy or malicious VMMs is out of scope (D20). Continue
+  normal protocol validation and guest-driver correctness work; do not add
+  defensive PCI metadata checks for Q21.
 - Native Motor OS I/O using existing in-tree libraries and Rust facilities.
   Preserve moto-io's `no_std` boundary by using `core`, `alloc`, and native
   APIs there; do not add a dependency on `std` or virtio-async to moto-io.
@@ -739,14 +755,14 @@ netstack participates in the vsock data path.
 Each numbered step is an implementation stage, not necessarily one commit.
 Split implementation and tests into roughly 100–300 changed lines per patch.
 Keep every intermediate patch buildable, and keep partial functionality
-unpublished until its resource ownership and error paths work. D1–D17 are
+unpublished until its resource ownership and error paths work. D1–D20 are
 the authoritative requirements; stages reference them and describe changes,
 tests, and completion checks. Tests arrive with behavior; the validation
 section groups related commits into the two approved gating milestones.
 
 ### 1. Review the contract and record the baseline
 
-Follow D1–D17 without reopening the agreed scope, including Q16's resolution
+Follow D1–D20 without reopening the agreed scope, including Q16's resolution
 in D16 and Q18's resolution in D17: opt-in raw standard image, no
 developer-image Firecracker support, and ordered RX delivery in virtio-async.
 
@@ -757,6 +773,8 @@ out-of-scope fix, following AGENTS.md. Make no external-repository changes.
 On 2026-09-15, the user explicitly included all virtio-related preexisting
 bugs in this work. Diagnose and fix them in small, separately reviewed and
 validated patches; continue to raise non-obvious design or policy choices.
+The later D20 scope decision excludes hardening against buggy or malicious
+VMMs; it does not defer guest-driver bugs affecting valid devices.
 
 ### 2. Define capability and wire contracts, with guest tests
 
@@ -821,6 +839,11 @@ Do not negotiate vsock-specific features. Check feature confirmation and
 configuration length, and read and validate the CID as in constraint 5.
 Keep discovery separate from initialization so boot can retain the device
 without creating its queues.
+
+Apply D18 in the shared reset path: after writing zero, read status once and
+fail initialization if nonzero, before ACKNOWLEDGE or queue-task startup.
+Propagate the error through block/net/vsock initialization; add no reset
+polling or retry path. This is not a change to vsock transport-reset events.
 
 Use `init_virtqueues(3, 3)`, existing MSI-X assignment, and existing status
 operations. Queue setup refuses a device whose MSI-X table has fewer vectors
@@ -907,6 +930,10 @@ profiles.
 
 ### 5. Build the device pumps and bounded scheduling
 
+The bounded storage and driver poll/send facilities are M1 foundations.
+Implement this stage's integrated pumps and scheduling alongside the M2
+connection/IPC work, not as idle placeholder tasks before it (D13).
+
 Add the proposed `src/sys/sys-io/src/runtime/vsock.rs`. Use the existing
 single-threaded executor and `Rc` ownership; never hold `RefCell` borrows
 across awaits. Use one TX submission pump (D6); keep RX processing, event
@@ -945,6 +972,10 @@ logic. Test delivery through the state machine without changing this boundary.
 
 ### 6. Implement and test byte-credit accounting
 
+Pure credit arithmetic and bounded receive storage belong to M1. Integration
+with real TX publication, connection state, IPC ownership, and control-message
+scheduling belongs to M2, with the corresponding behavioral tests (D13).
+
 Add a small credit-state helper, independent of PCI and IPC. Track local
 receive capacity/occupancy, local forwarded count, transmitted payload count,
 and the peer's advertised allocation/forwarded count. Keep header and control
@@ -957,6 +988,9 @@ is valid; never let an invalid advertisement become a huge writable window.
 Accept ordinary zero-credit conditions, distinguish them from impossible
 counter advances, and account for advertised buffer-size changes without
 panicking. Validate any claimed consumption against what was actually sent.
+Reject impossible advances atomically, preserving both peer credit fields;
+the connection state machine rejects the packet and resets only that stream
+under D19. A reduced allocation alone is backpressure, not a reset cause.
 
 Implement D6's TX publication and RX-to-IPC accounting boundaries. Update
 peer credit from appropriate incoming packets and include current local
@@ -992,12 +1026,16 @@ response handling verifies the expected peer and state. Reserve receive and
 control resources before accepting a connection. Check unknown tuples and
 unsupported socket types before delivering data, including protocol-required
 RST replies. Do not generate a reset-response loop for an incoming RST.
+Apply D19's connection-local reset on impossible peer credit without admitting
+the offending packet's payload or changing the stored peer credit fields.
 
 Record state transitions in tests as inputs and expected outputs: emitted
 control packets, byte/accounting changes, state, and waiter notifications.
 Cover refusal, unexpected responses, duplicate requests, wrong destinations,
-data before establishment, and stale packets after closure. Implement only
-the approved scope; unsupported operations need explicit errors (D14).
+data before establishment, and stale packets after closure. Test D19's
+invalid-credit reaction, validated-RX drain before `ConnectionReset`, no
+RST-response loop, and continued operation of unrelated streams. Implement
+only the approved scope; unsupported operations need explicit errors (D14).
 
 ### 8. Implement bind, listen, and accept
 
@@ -1301,12 +1339,16 @@ or clippy warnings and do not broaden existing warning suppressions.
 D13 changes the default per-commit repeated gate to a milestone-based gate
 with two repeated milestones:
 
-- M1, foundations: stages 1–6, covering capability delegation, modern device
-  support, shared-queue changes, and credit arithmetic. Fully gate this
-  related group before moving into the client/server integration.
-- M2, complete integration: stages 7–15, covering state machines, shared
-  networking IPC, native API, lazy activation, cleanup, and all three VMMs.
-  Full gates include the complete new vsock phase by this milestone.
+- M1, foundations: capability delegation, modern device support, shared-queue
+  changes and fixed pools, pure credit arithmetic, and bounded receive
+  storage, with their executable guest fixtures. Gate these foundations
+  before client/server integration; M1 does not require the integrated
+  Stage 5 pumps or Stage 6 connection/IPC accounting and scheduling.
+- M2, complete integration: those integrated Stage 5/6 behaviors alongside
+  stages 7–15's state machines, shared networking IPC, native API, lazy
+  activation, cleanup, and all three VMMs. Full gates include the complete
+  new vsock phase by this milestone. Q22 changes only the dependency boundary,
+  not the tests required or the gate counts; neither milestone is complete.
 
 Each small implementation commit must build and run its affected guest
 systest cases in debug and release, plus directly affected existing queue,
@@ -1379,6 +1421,9 @@ standard image is opt-in, and developer-image Firecracker support is excluded.
 D17 resolves implementation question Q18, approved on 2026-09-15: retain
 RX used-ring order inside virtio-async, with no `IN_ORDER` requirement or
 sorting in sys-io/moto-io.
+D18 and D19 resolve Q19 and Q20, approved on 2026-09-15. The same review
+approved Q22's dependency adjustment in D13. D20 records the subsequent
+decision to defer Q21 and exclude hardening against buggy or malicious VMMs.
 
 ### D1. Profile and topology (approved)
 
@@ -1646,14 +1691,27 @@ missing coverage with a debug-only test.
 
 ### D13. Gate schedule (approved)
 
-Incremental commits grouped into two repeated milestones, M1 (stages 1–6)
-and M2 (stages 7–15), each gated by three passing debug and three passing
-release main-image full-test runs on the default VMM. M2 adds one debug and
-one release run with `--vmm chv` and with `--vmm fc` (D16). Every commit
-runs its affected guest tests in both profiles. Do not reduce case coverage,
-skip a VMM, weaken assertions, or add retries to save gate time. A failed
-milestone stops progression for diagnosis; preserve the original failure
-even if a later diagnostic run passes.
+Incremental commits are grouped into two repeated milestones. Q22's approved
+adjustment replaces the original literal stages 1–6 / 7–15 boundary:
+
+- M1: capability, modern-driver/shared-queue, fixed-pool, pure credit, and
+  bounded receive-storage foundations, with executable guest fixtures.
+- M2: integrated Stage 5 pumps and Stage 6 accounting/scheduling alongside
+  stages 7–15's connection, IPC, native API, activation, cleanup, and VMM work.
+
+RX dispatch and event reactions need connection state; TX scheduling needs
+real per-stream work; the reserved-page copy boundary needs IPC ownership.
+Implement and test them together in M2. Idle pumps or a substitute transport
+framework are not M1 requirements or substitutes for integration coverage.
+
+Each milestone still requires three passing debug and three passing release
+main-image full-test runs on the default VMM. M2 adds one debug and one
+release run with `--vmm chv` and with `--vmm fc` (D16). Every commit runs its
+affected guest tests in both profiles; bring required test plumbing forward.
+No case is dropped or counted as covered by a weaker fixture. Do not skip a
+VMM, weaken assertions, or add retries to save gate time. A failed milestone
+stops progression for diagnosis; preserve the original failure even if a
+later diagnostic run passes. Neither milestone is complete yet.
 
 ### D14. Error mapping (approved)
 
@@ -1670,7 +1728,7 @@ the TCP mappings are unchanged, and moto-rt is not expanded.
 | Invalid CID or port, including port 0 or `0xffffffff` on connect | `InvalidArgument` |
 | Bind conflict | `AlreadyInUse` |
 | Connect refused by the peer, including no listener or exhausted peer admission/backlog capacity | `NotConnected` |
-| Established stream reset by the peer or by transport reset | `ConnectionReset` |
+| Established stream reset by the peer, by transport reset, or for impossible peer credit (D19) | `ConnectionReset` |
 | Write after local SEND or peer RECEIVE shutdown, or on an orderly closed stream | `NotConnected` |
 | Connect deadline expired | `TimedOut` |
 | Local stream/listener admission limit, or allocation failure for a new socket's required buffer/reservation | `OutOfMemory` |
@@ -1950,9 +2008,7 @@ Review the concrete implementation and its ring-lifetime/wakeup invariants
 as an ordinary incremental patch. If those invariants require a different
 mechanism, stop and discuss the deviation instead of silently adding one.
 
-## Open questions
-
-### Q19. Verify shared reset completion with one read? (awaiting review)
+### D18. Shared reset completion check (Q19, approved)
 
 `VirtioDevice::reset` currently writes device status zero and immediately
 allows initialization to continue. It never observes reset completion.
@@ -1960,17 +2016,17 @@ allows initialization to continue. It never observes reset completion.
 requires observing zero before reinitialization. This is a preexisting shared
 virtio issue, not a vsock-specific reset or completion-order requirement.
 
-Proposed simple policy: perform one status read after the reset write; return
-an initialization error if it is nonzero, before acknowledging the device or
+Perform one status read after the reset write; return an initialization
+error if it is nonzero, before acknowledging the device or
 starting queues. Keep initialization synchronous with no polling, retries,
 timeout constant, or added task. This deliberately rejects a device whose
 reset has not completed at that read; it does not provide asynchronous-reset
 support. The change adds one MMIO read per initialized block/net device at
-boot and per lazily initialized vsock device, so it needs the AGENTS.md
-boot-latency review before implementation. Existing gate passes have not
-tested this proposed check. Other independently reviewable fixes can proceed.
+boot and per lazily initialized vsock device. The user approved this policy
+and boot-time cost on 2026-09-15. Implementation and validation of the check
+remain pending; existing gate passes did not exercise it.
 
-Pinned-source review on 2026-09-15 supports the one-read proposal for initial
+Pinned-source review on 2026-09-15 supports the one-read policy for initial
 pre-activation setup, without proving general backend reset completion:
 
 - [QEMU 10.2.1](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/virtio.c#L2253-L2283)
@@ -1988,60 +2044,37 @@ pre-activation setup, without proving general backend reset completion:
   blocking reinitialization instead. Zero alone is therefore not evidence
   that arbitrary outstanding DMA can be discarded.
 
-These are source-based expectations, not live one-read measurements or policy
-approval. The planned vsock transport-reset event path keeps existing queues
-and DMA owners; it does not reset/reinitialize the PCI device.
+These are source-based expectations, not live one-read measurements. The
+planned vsock transport-reset event path keeps existing queues and DMA
+owners; it does not reset/reinitialize the PCI device.
 
-### Q20. Reset only the stream on impossible peer credit? (awaiting review)
+### D19. Connection-local invalid-credit rejection (Q20, approved)
 
-The credit helper can detect an advertised `fwd_cnt` advance greater than
-the payload bytes still outstanding. Reject that update atomically, changing
+The credit helper already rejects an advertised `fwd_cnt` advance greater
+than the payload bytes still outstanding. Rejection is atomic, changing
 neither peer credit field. [Virtio 1.1 sections 5.10.6.3.1–5.10.6.3.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
 require valid credit information but do not prescribe the receiver's reaction
 to this violation. This is distinct from a peer shrinking `buf_alloc` below
 outstanding bytes, which simply leaves zero send allowance until credit
 recovers.
 
-Proposed policy: reject the offending packet and reset only its identified
-connection, using the existing reset semantics for its current state. An
+Reject the offending packet and reset only its identified connection, using
+the existing reset semantics for its current state. An
 established stream reports `ConnectionReset` after previously validated RX
 has drained; unrelated streams and the device remain operational. Do not
-answer an incoming RST with another RST. The pure arithmetic helper can be
-implemented independently; the Step 7 connection reaction awaits review.
+answer an incoming RST with another RST. The user approved this policy on
+2026-09-15; the Stage 7 connection reaction and its tests remain to be
+implemented in M2. Pure-helper tests do not cover that reaction.
 
-### Q21. Validate BAR boundaries with a bounded cached walk? (awaiting review)
+### D20. VMM defensive hardening (Q21, deferred)
 
-Checking that a capability's BAR index is below six does not prove it names
-a BAR's low register: it can instead name the upper address word of a 64-bit
-BAR. The current mapper can then probe that upper word as a separate BAR.
-An immediate-predecessor check is insufficient, because that predecessor
-may itself be an upper address word whose low bits are not BAR type bits.
+Per the user's 2026-09-15 direction, defending against buggy or malicious
+VMMs is outside this work. Do not implement Q21's BAR-layout walk or add its
+boot-time PCI reads. The concern is recorded briefly in
+[future-work.md](future-work.md#deferred-pci-bar-boundary-hardening-2026-09-15).
+This does not remove approved protocol validation or D18's standard reset
+completion check. No existing validation is removed as part of this decision.
 
-Proposed approach: walk from BAR 0 to the requested index, skipping 64-bit
-upper words and caching original values for later mapping/probing. Reject
-an upper-word reference before any probe writes. Read only the needed
-prefix, not all six slots eagerly, and reuse originals when restoring probes.
-This adds at most five previously unnecessary PCI configuration reads per
-device, with no tasks or polling; exact costs depend on the BAR layout and
-which BARs are consumed. These boot-time reads require AGENTS.md review.
-No BAR-layout implementation or live read-count measurement is claimed yet.
+## Open questions
 
-### Q22. Put integrated runtime pumps in M2? (awaiting review)
-
-The current M1 boundary says stages 1–6 must be complete before client/server
-integration. However, Stage 5's RX dispatch and event reactions need Stage 7's
-connection states, TX scheduling needs actual per-stream work and ordering,
-and the reserved-page copy boundary needs stages 9–10's IPC ownership. The
-driver poll/send APIs, fixed pools, pure credits, and bounded receive storage
-can be built independently; idle pumps or a substitute transport framework
-would not satisfy the planned integrated behavior or its tests.
-
-Proposed boundary: M1 gates the capability, modern-driver/shared-queue,
-credit-arithmetic, and bounded-storage foundations, including their executable
-guest fixtures. Implement and validate the integrated runtime pumps alongside
-the connection/IPC work in M2. Keep both milestones' three debug and three
-release main-image full runs, M2's additional CHV/FC runs, and every patch's
-affected guest gates unchanged. No case is dropped or counted as covered by
-a weaker fixture. D13 and the validation schedule remain unchanged until this
-dependency adjustment is approved; neither milestone may be declared complete
-on the current partial implementation.
+None currently. Raise new non-obvious decisions before implementing them.

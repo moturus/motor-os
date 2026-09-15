@@ -1,5 +1,18 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Deferred PCI BAR-boundary hardening (2026-09-15)
+
+Defending against buggy or malicious VMMs is outside the current vsock
+work, per maintainer direction (vsock plan Q21). The shared virtio mapper
+checks that a BAR selector is below six, but not whether it names the upper
+half of a 64-bit BAR; malformed VMM metadata could therefore make it probe
+the wrong register or derive an invalid mapping. No such failure was
+observed on tested QEMU, CHV, or Firecracker configurations.
+
+If this hardening is revisited, validate BAR boundaries before probing,
+using a bounded cached walk from BAR0. Review its additional boot-time PCI
+reads then; no change or extra boot work is scheduled now.
+
 ## Deferred filesystem flush race (2026-09-09)
 
 Fix after merging the pending filesystem branch, per maintainer direction.
