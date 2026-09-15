@@ -2,6 +2,7 @@ pub mod cancellation;
 pub mod command_config;
 pub mod curl;
 pub mod curl_capture;
+pub mod http;
 pub mod http_request;
 pub mod https_url;
 pub mod repository;

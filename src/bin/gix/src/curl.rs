@@ -95,25 +95,42 @@ fn command_with_nonce(
     Ok(command)
 }
 
-fn validate_headers(headers: &[String]) -> io::Result<()> {
-    let mut bytes = 0usize;
+pub fn collect_headers(
+    headers: impl IntoIterator<Item = impl AsRef<str>>,
+) -> io::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let mut bytes = 0;
     for header in headers {
-        bytes = bytes
-            .checked_add(header.len())
-            .filter(|bytes| *bytes <= MAX_HEADER_BYTES)
-            .ok_or_else(|| input("Git HTTP request headers exceed their byte limit"))?;
-        let Some((name, value)) = header.split_once(':') else {
-            return Err(input("malformed Git HTTP request header"));
-        };
-        if !matches!(
-            name.to_ascii_lowercase().as_str(),
-            "accept" | "content-type" | "git-protocol" | "user-agent"
-        ) || value
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte == 0x7f)
-        {
-            return Err(input("unsupported Git HTTP request header"));
-        }
+        let header = header.as_ref();
+        validate_header(header, &mut bytes)?;
+        result.push(header.to_owned());
+    }
+    Ok(result)
+}
+
+fn validate_headers(headers: &[String]) -> io::Result<()> {
+    let mut bytes = 0;
+    headers
+        .iter()
+        .try_for_each(|header| validate_header(header, &mut bytes))
+}
+
+fn validate_header(header: &str, bytes: &mut usize) -> io::Result<()> {
+    *bytes = bytes
+        .checked_add(header.len())
+        .filter(|bytes| *bytes <= MAX_HEADER_BYTES)
+        .ok_or_else(|| input("Git HTTP request headers exceed their byte limit"))?;
+    let Some((name, value)) = header.split_once(':') else {
+        return Err(input("malformed Git HTTP request header"));
+    };
+    if !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "accept" | "content-type" | "git-protocol" | "user-agent"
+    ) || value
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == 0x7f)
+    {
+        return Err(input("unsupported Git HTTP request header"));
     }
     Ok(())
 }
@@ -276,6 +293,10 @@ mod tests {
             "User-Agent: git/2",
         ]
         .map(str::to_owned);
+        assert_eq!(
+            collect_headers(headers.iter().map(String::as_str)).expect("bounded headers"),
+            headers
+        );
         let prepared = command_with_nonce(&url, Path::new("/ca.pem"), &headers, true, NONCE)
             .expect("valid request");
         assert_eq!(prepared.get_program(), CURL);

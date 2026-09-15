@@ -13,7 +13,7 @@ use crate::{
     https_url::HttpsUrl,
 };
 
-const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const DISCOVERY_SUFFIX: &str = "info/refs?service=git-upload-pack";
 const RESULT_SUFFIX: &str = "git-upload-pack";

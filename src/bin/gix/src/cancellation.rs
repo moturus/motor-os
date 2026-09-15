@@ -103,6 +103,13 @@ pub fn was_cancelled(mut error: &(dyn Error + 'static)) -> bool {
         if error.is::<Cancelled>() {
             return true;
         }
+        if let Some(inner) = error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+        {
+            error = inner;
+            continue;
+        }
         let Some(source) = error.source() else {
             return false;
         };
