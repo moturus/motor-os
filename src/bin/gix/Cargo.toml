@@ -1,0 +1,49 @@
+[package]
+name = "motor-gix"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "gix"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "=4.6.0", default-features = false, features = [
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
+gix = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+    "attributes",
+    "blob-diff",
+    "blocking-network-client",
+    "dirwalk",
+    "excludes",
+    "index",
+    "merge",
+    "revision",
+    "sha1",
+    "status",
+    "worktree-mutation",
+] }
+gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+    "io-pipe",
+] }
+gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "4604ac322369a2e429a805cf6e5b7267712283f1", default-features = false, features = [
+    "http-client",
+] }
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt = "0.17.6"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
