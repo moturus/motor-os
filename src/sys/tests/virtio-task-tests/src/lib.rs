@@ -1,12 +1,14 @@
 extern crate self as virtio_async;
 #[path = "../../../sys-io/src/runtime/fs/block_io.rs"]
 mod block_io;
+#[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
+mod credit;
 mod device;
 mod stats;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
-#[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
-mod vsock_credit;
+#[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
+mod vsock_rx_buffer;
 pub(crate) use device::{BlockDevice, RawCompletion};
 
 use std::cell::Cell;
@@ -350,6 +352,7 @@ pub fn test_premature_reply_drop() {
 pub fn run_tests() {
     test_virtio_capacity();
     test_vsock_credit();
+    test_vsock_stream_buffer();
     concurrent_requests();
     runtime_wakeups();
     for operation in [0, 1] {
@@ -381,7 +384,7 @@ pub fn run_tests() {
 }
 
 fn test_vsock_credit() {
-    use vsock_credit::{CreditAdvertisement as Ad, CreditError as Error, CreditState};
+    use credit::{CreditAdvertisement as Ad, CreditError as Error, CreditState};
 
     let mut credit = CreditState::new(128 * 1024).unwrap();
     assert_eq!(
@@ -552,6 +555,105 @@ fn test_vsock_credit() {
         }
     );
     assert_eq!((second.rx_allowance(), second.tx_allowance()), (6, 0));
+}
+
+fn test_vsock_stream_buffer() {
+    use credit::{CreditAdvertisement as Ad, CreditError};
+    use vsock_rx_buffer::StreamBuffer;
+
+    let mut stream = StreamBuffer::new(8).unwrap();
+    assert_eq!(
+        stream.credit().local_advertisement(),
+        Ad {
+            buf_alloc: 8,
+            fwd_cnt: 0
+        }
+    );
+    stream.try_append_packet(b"abc").unwrap();
+    stream.try_append_packet(b"d").unwrap();
+    stream.try_append_packet(b"ef").unwrap();
+    assert_eq!(stream.credit().rx_allowance(), 2);
+
+    let before = stream.credit().local_advertisement();
+    assert_eq!(
+        stream.try_append_packet(b"XYZ"),
+        Err(CreditError::ReceiveCapacityExceeded)
+    );
+    assert_eq!(stream.credit().local_advertisement(), before);
+    assert_eq!(stream.credit().rx_allowance(), 2);
+
+    let mut empty = [];
+    assert_eq!(stream.copy_into_reserved(&mut empty), 0);
+    stream.try_append_packet(b"").unwrap();
+    assert_eq!(stream.credit().local_advertisement(), before);
+
+    let mut first = [0; 4];
+    assert_eq!(stream.copy_into_reserved(&mut first), 4);
+    assert_eq!(&first, b"abcd");
+    assert_eq!(
+        stream.credit().local_advertisement(),
+        Ad {
+            buf_alloc: 8,
+            fwd_cnt: 4
+        }
+    );
+
+    for packet in [b"g".as_slice(), b"hi", b"jkl"] {
+        stream.try_append_packet(packet).unwrap();
+    }
+    assert_eq!(stream.credit().rx_allowance(), 0);
+
+    let mut one = [0];
+    assert_eq!(stream.copy_into_reserved(&mut one), 1);
+    assert_eq!(&one, b"e");
+    let mut two = [0; 2];
+    assert_eq!(stream.copy_into_reserved(&mut two), 2);
+    assert_eq!(&two, b"fg");
+    let mut rest = [0; 5];
+    assert_eq!(stream.copy_into_reserved(&mut rest), 5);
+    assert_eq!(&rest, b"hijkl");
+    assert_eq!(stream.credit().rx_allowance(), 8);
+    assert_eq!(stream.credit().local_advertisement().fwd_cnt, 12);
+
+    stream
+        .update_peer(Ad {
+            buf_alloc: 3,
+            fwd_cnt: 0,
+        })
+        .unwrap();
+    stream.charge_tx_after_publish(2).unwrap();
+    assert_eq!(stream.credit().tx_allowance(), 1);
+
+    let mut independent = StreamBuffer::new(3).unwrap();
+    independent.try_append_packet(b"xy").unwrap();
+    assert_eq!(independent.credit().rx_allowance(), 1);
+    let mut page_prefix = [0xa5; 5];
+    assert_eq!(independent.copy_into_reserved(&mut page_prefix), 2);
+    assert_eq!(&page_prefix[..2], b"xy");
+    assert_eq!(&page_prefix[2..], &[0xa5; 3]);
+    assert_eq!(independent.credit().local_advertisement().fwd_cnt, 2);
+    assert_eq!(independent.copy_into_reserved(&mut page_prefix), 0);
+    assert_eq!(page_prefix, [b'x', b'y', 0xa5, 0xa5, 0xa5]);
+    assert_eq!(independent.credit().local_advertisement().fwd_cnt, 2);
+    assert_eq!(stream.credit().rx_allowance(), 8);
+
+    let mut zero = StreamBuffer::new(0).unwrap();
+    zero.try_append_packet(b"").unwrap();
+    assert_eq!(
+        zero.try_append_packet(b"z"),
+        Err(CreditError::ReceiveCapacityExceeded)
+    );
+    assert_eq!(zero.copy_into_reserved(&mut one), 0);
+    assert_eq!(zero.credit().local_advertisement().fwd_cnt, 0);
+
+    if usize::BITS > u32::BITS {
+        let too_large = usize::try_from(u32::MAX).unwrap().checked_add(1).unwrap();
+        let err = match StreamBuffer::new(too_large) {
+            Ok(_) => panic!("accepted a capacity larger than the wire field"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
 }
 
 fn test_virtio_capacity() {

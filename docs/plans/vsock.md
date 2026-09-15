@@ -525,6 +525,29 @@ Shared modern PCI discovery no longer rejects revision zero:
   M1/M2 remain pending; Q22 records the dependency preventing literal Stage 5
   completion before the connection/IPC implementation.
 
+Stage 5/6 bounded receive storage is implemented and parent-reviewed:
+
+- One concrete stream buffer owns a pre-reserved byte deque and its credit
+  state. The credit state's fixed logical capacity remains authoritative
+  even if the allocation is larger. Packet admission is all-or-nothing;
+  copying an ordered prefix into already-reserved storage advances forwarding
+  by exactly the copied byte count and removes those bytes. There is no
+  mutable credit accessor, duplicate occupancy field, or per-stream TX ring.
+  Future stream admission supplies D7's 128 KiB capacity; nothing is activated
+  or allocated at boot by this private helper.
+- Source-included guest tests cover tiny packets, interleaved appends/drains,
+  exact fill, rejected packets preserving earlier data/accounting, zero
+  operations/capacity, independent streams, and over-wide capacity rejection
+  before allocation. Partial destination fills preserve the unused suffix;
+  copying again from the empty buffer changes neither bytes nor credit.
+- Debug/release builds, targeted Clippy, and descriptor/I/O-task/filesystem
+  regressions passed without new warnings or initial failures. Direct fixture
+  Clippy with `-D warnings` passed in both profiles; formatting/diff checks
+  passed. Logs: `/tmp/vsock-stream-buffer-*.log` and
+  `/tmp/vsock-rx-buffer-gate.ZeNVXk/`. These tests copy actual bytes but do not
+  reserve real IPC pages, perform DMA, or prove allocator-specific deque
+  layout. Runtime pumps, Q19–Q22, and both milestone gates remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
