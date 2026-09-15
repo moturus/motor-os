@@ -47,6 +47,14 @@ const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 
+pub(crate) fn effective_seg_max(queue_size: u16, offered: usize) -> Result<usize> {
+    let half_queue = usize::from(queue_size) / 2;
+    if half_queue <= 2 {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    Ok(offered.clamp(1, half_queue - 2))
+}
+
 // See struct virtio_blk_req in VirtIO spec.
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -187,14 +195,22 @@ impl BlockDevice {
         dev_mut.acknowledge_driver(); // Step 3
         let (capacity, read_only, seg_max) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         dev_mut.init_virtqueues(1, 1)?; // Step 7
-        dev_mut.driver_ok()?; // Step 8
-
-        let virtqueue = dev_mut.virtqueues[0].clone();
 
         // Requests also need a header and a status descriptor; keep each
         // chain within half the queue.
-        let queue_size = virtqueue.borrow().queue_size() as usize;
-        let seg_max = seg_max.clamp(1, queue_size / 2 - 2);
+        let queue_size = dev_mut.virtqueues[0].borrow().queue_size();
+        let seg_max = match effective_seg_max(queue_size, seg_max) {
+            Ok(seg_max) => seg_max,
+            Err(err) => {
+                log::error!(
+                    "Virtio BLOCK queue has {queue_size} descriptors; at least 8 required."
+                );
+                return Err(err);
+            }
+        };
+
+        dev_mut.driver_ok()?; // Step 8
+        let virtqueue = dev_mut.virtqueues[0].clone();
 
         log::debug!(
             "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {} seg_max: {}.",

@@ -285,6 +285,22 @@ Shared initialization prerequisite is implemented and parent-reviewed:
   that outlived its ring storage before any guest run. A separately identified
   block small-queue limit bug is next; neither milestone is complete.
 
+Shared block-queue limit prerequisite is implemented and parent-reviewed:
+
+- Source review found that the half-queue segment limit was calculated after
+  `DRIVER_OK`: sizes 1/2 underflowed in debug (wrapped in release), while size
+  4 supplied invalid clamp bounds in both profiles. The driver now rejects
+  these sizes before subtraction, clamping, or task/device activation.
+  Supported queues retain the same limits, including two payload segments at
+  size 8 and 126 at size 256; the single-filesystem policy is unchanged.
+- The production helper runs through guest descriptor tests with rejected
+  sizes and zero, one, exact-limit, and maximum offered segment counts.
+  Both profiles passed builds, targeted Clippy, descriptor/I/O-task tests,
+  and real scattered-write regressions. Formatting/diff checks passed with
+  no new warnings or initial check failures. Logs:
+  `/tmp/vsock-blk-seg.O17eAB/`. Vsock activation and both milestones remain
+  pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

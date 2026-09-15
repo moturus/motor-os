@@ -169,6 +169,7 @@ fn ready_head(device: &Device, len: u16) -> u16 {
 }
 
 pub fn test_descriptor_waiters() {
+    test_block_seg_max();
     test_queue_task_start();
     test_ordered_completions();
     test_ordered_waiter();
@@ -235,6 +236,35 @@ pub fn test_descriptor_waiters() {
             device.complete(full.chain_head, 0, 0);
             drop(full);
         }
+    }
+}
+
+fn test_block_seg_max() {
+    for queue_size in [1, 2, 4] {
+        for offered in [0, 1, usize::MAX] {
+            assert_eq!(
+                crate::virtio_blk::effective_seg_max(queue_size, offered)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidData
+            );
+        }
+    }
+
+    for (queue_size, offered, expected) in [
+        (8, 0, 1),
+        (8, 1, 1),
+        (8, 2, 2),
+        (8, usize::MAX, 2),
+        (256, 0, 1),
+        (256, 1, 1),
+        (256, 126, 126),
+        (256, usize::MAX, 126),
+    ] {
+        assert_eq!(
+            crate::virtio_blk::effective_seg_max(queue_size, offered).unwrap(),
+            expected
+        );
     }
 }
 
