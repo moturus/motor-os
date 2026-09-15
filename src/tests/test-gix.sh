@@ -161,6 +161,9 @@ PY
     an_index_shorter_than_its_checksum_is_rejected
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
     iter::new_from_header::
+  "$cargo" test "${external[@]}" -p gix --test gix \
+    --features blocking-network-client,worktree-mutation \
+    clone::blocking_io::from_shallow_allowed_by_default
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"

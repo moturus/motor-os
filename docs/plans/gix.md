@@ -12,10 +12,11 @@ on `gix-moturus-cli` and verified on 2026-09-15. The subsequent pack-input
 repair is recorded in section 7. Repository opening,
 configuration sanitization, `log` and read-only `status` pass the host and
 Motor component fixtures. Status rejects affected external or required
-filters. The shared cancellation flag and Motor handler are implemented;
-the host/Motor fixture checks cancellation through status. Live terminal
-interruption and child cleanup will be checked with the HTTPS fixture.
-Transports, resource limits and image integration remain M1 work.
+filters. The shared cancellation flag, Motor handler and HTTPS adapter are
+implemented. Temporary live host and Motor probes passed V2 discovery and
+POST, same-origin redirects, unread malformed-response cleanup and PTY
+Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
+commands, resource limits and image integration remain M1 work.
 
 ## 1. Goal and decisions
 
@@ -175,6 +176,12 @@ Source paths below are relative to the pinned fork:
 | `gix-transport/src/client/blocking_io/{ssh/program_kind,file,request}.rs` | SSH adds unsupported `SendEnv` except in V1. Child drop kills/reaps without returning successful completion. `into_parts()` exposes a raw pack writer. |
 | `gix-pack/src/data/output` | Full-object `Entry::from_data()` and `FromEntriesIter` exist. `count::objects()` with `TreeAdditionsComparedToAncestor` clears its change collector before each parent and pushes after the loop while the shared seen-set persists, so an object new against the first parent of a merge commit is dropped; `iter_from_counts()` has one mode, which copies pack deltas, and can emit invalid sentinels for missing objects. Neither is used for push. |
 | `gix-diff/src/tree/function.rs` | Tree diffs report changed entries, not the root tree object. An empty left-hand tree enumerates all descendants with the same collector. |
+
+At reviewed application commit `69a00937676642980283f106160557750a76dcc3`,
+the HTTPS implementation is 1,718 lines including tests: `curl.rs` 417,
+`curl_capture.rs` 294, `http_request.rs` 417, `http.rs` 444 and
+`https_url.rs` 146. These files contain the fixed curl invocation, bounded
+capture and Git-specific URL, response and transport policy.
 
 **Preexisting defect, Q7 (discussed and approved for repair):**
 `gix-index/src/file/init.rs::File::at()`
@@ -704,6 +711,18 @@ identifies patched sources. A distributable dependency pin requires a
 reviewed fork commit; committing/publishing it is a separately authorized
 step. No Lorry, curl, SSH, kernel, std, moto-rt, mlibc or toolchain-source
 edits are assumed. If necessary, diagnose and discuss them first.
+
+Clone policy integration, implementation follow-up on 2026-09-15:
+the external checkout now provides the small
+`PrepareFetch::repository_mut()` accessor in reviewed commit
+`419b494a869dc976caceb1dee108ce92dee1ae33`. It exposes the contained
+repository before fetch so the application can validate paths, sanitize
+configuration and set `objects.ignore_replacements` without duplicating
+the library's clone/ref/HEAD orchestration, and returns `None` after a
+successful fetch consumes that handle. The application uses reviewed commit
+`419b494a869dc976caceb1dee108ce92dee1ae33`; publication remains pending,
+and the application must not be published as usable until that fork commit
+is available from the declared remote.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
 Gitoxide `b4e6aeaa82be4183af466b7a99484c38322dd260`. In the external

@@ -320,7 +320,7 @@ dependencies = [
 [[package]]
 name = "gix"
 version = "0.86.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-actor",
  "gix-attributes",
@@ -378,7 +378,7 @@ dependencies = [
 [[package]]
 name = "gix-actor"
 version = "0.41.2"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-date",
@@ -388,7 +388,7 @@ dependencies = [
 [[package]]
 name = "gix-attributes"
 version = "0.34.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-features",
@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "gix-bitmap"
 version = "0.3.3"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-error",
 ]
@@ -412,7 +412,7 @@ dependencies = [
 [[package]]
 name = "gix-chunk"
 version = "0.7.3"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-error",
 ]
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "gix-command"
 version = "0.9.2"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-path",
@@ -432,7 +432,7 @@ dependencies = [
 [[package]]
 name = "gix-commitgraph"
 version = "0.38.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-chunk",
@@ -445,7 +445,7 @@ dependencies = [
 [[package]]
 name = "gix-config"
 version = "0.59.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-config-value",
@@ -463,7 +463,7 @@ dependencies = [
 [[package]]
 name = "gix-config-value"
 version = "0.19.1"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -475,7 +475,7 @@ dependencies = [
 [[package]]
 name = "gix-credentials"
 version = "0.39.1"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-command",
@@ -493,7 +493,7 @@ dependencies = [
 [[package]]
 name = "gix-date"
 version = "0.15.6"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-error",
@@ -504,7 +504,7 @@ dependencies = [
 [[package]]
 name = "gix-diff"
 version = "0.66.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-attributes",
@@ -527,7 +527,7 @@ dependencies = [
 [[package]]
 name = "gix-dir"
 version = "0.28.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-discover",
@@ -546,7 +546,7 @@ dependencies = [
 [[package]]
 name = "gix-discover"
 version = "0.54.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "dunce",
@@ -560,7 +560,7 @@ dependencies = [
 [[package]]
 name = "gix-error"
 version = "0.2.5"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
 ]
@@ -568,7 +568,7 @@ dependencies = [
 [[package]]
 name = "gix-features"
 version = "0.49.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -586,7 +586,7 @@ dependencies = [
 [[package]]
 name = "gix-filter"
 version = "0.33.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "encoding_rs",
@@ -606,7 +606,7 @@ dependencies = [
 [[package]]
 name = "gix-fs"
 version = "0.22.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-features",
@@ -619,7 +619,7 @@ dependencies = [
 [[package]]
 name = "gix-glob"
 version = "0.27.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -630,7 +630,7 @@ dependencies = [
 [[package]]
 name = "gix-hash"
 version = "0.26.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "faster-hex",
  "gix-features",
@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "gix-hashtable"
 version = "0.16.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-hash",
  "hashbrown 0.17.1",
@@ -651,7 +651,7 @@ dependencies = [
 [[package]]
 name = "gix-ignore"
 version = "0.22.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-glob",
@@ -663,7 +663,7 @@ dependencies = [
 [[package]]
 name = "gix-imara-diff"
 version = "0.2.4"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "hashbrown 0.17.1",
@@ -672,7 +672,7 @@ dependencies = [
 [[package]]
 name = "gix-index"
 version = "0.54.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -701,7 +701,7 @@ dependencies = [
 [[package]]
 name = "gix-lock"
 version = "24.0.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-tempfile",
  "gix-utils",
@@ -711,7 +711,7 @@ dependencies = [
 [[package]]
 name = "gix-merge"
 version = "0.19.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-command",
@@ -736,17 +736,17 @@ dependencies = [
 [[package]]
 name = "gix-motor-filetime"
 version = "0.1.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 
 [[package]]
 name = "gix-motor-tempfile"
 version = "0.1.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 
 [[package]]
 name = "gix-negotiate"
 version = "0.34.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "gix-commitgraph",
@@ -759,7 +759,7 @@ dependencies = [
 [[package]]
 name = "gix-object"
 version = "0.63.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-actor",
@@ -777,7 +777,7 @@ dependencies = [
 [[package]]
 name = "gix-odb"
 version = "0.83.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "arc-swap",
  "gix-features",
@@ -799,7 +799,7 @@ dependencies = [
 [[package]]
 name = "gix-pack"
 version = "0.73.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "clru",
  "gix-chunk",
@@ -820,7 +820,7 @@ dependencies = [
 [[package]]
 name = "gix-packetline"
 version = "0.22.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "faster-hex",
@@ -831,7 +831,7 @@ dependencies = [
 [[package]]
 name = "gix-path"
 version = "0.12.4"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-trace",
@@ -842,7 +842,7 @@ dependencies = [
 [[package]]
 name = "gix-pathspec"
 version = "0.19.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -856,7 +856,7 @@ dependencies = [
 [[package]]
 name = "gix-prompt"
 version = "0.16.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-command",
  "gix-config-value",
@@ -868,7 +868,7 @@ dependencies = [
 [[package]]
 name = "gix-protocol"
 version = "0.64.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bisync",
  "bstr",
@@ -893,7 +893,7 @@ dependencies = [
 [[package]]
 name = "gix-quote"
 version = "0.7.2"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-error",
@@ -903,7 +903,7 @@ dependencies = [
 [[package]]
 name = "gix-ref"
 version = "0.66.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-actor",
  "gix-features",
@@ -922,7 +922,7 @@ dependencies = [
 [[package]]
 name = "gix-refspec"
 version = "0.44.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-hash",
@@ -934,7 +934,7 @@ dependencies = [
 [[package]]
 name = "gix-revision"
 version = "0.48.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "bstr",
@@ -952,7 +952,7 @@ dependencies = [
 [[package]]
 name = "gix-revwalk"
 version = "0.34.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-commitgraph",
  "gix-date",
@@ -967,7 +967,7 @@ dependencies = [
 [[package]]
 name = "gix-sec"
 version = "0.14.2"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "gix-path",
@@ -978,7 +978,7 @@ dependencies = [
 [[package]]
 name = "gix-shallow"
 version = "0.13.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-hash",
@@ -990,7 +990,7 @@ dependencies = [
 [[package]]
 name = "gix-status"
 version = "0.33.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "filetime",
@@ -1015,7 +1015,7 @@ dependencies = [
 [[package]]
 name = "gix-submodule"
 version = "0.33.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-config",
@@ -1029,7 +1029,7 @@ dependencies = [
 [[package]]
 name = "gix-tempfile"
 version = "24.0.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "dashmap",
  "gix-fs",
@@ -1042,12 +1042,12 @@ dependencies = [
 [[package]]
 name = "gix-trace"
 version = "0.1.21"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 
 [[package]]
 name = "gix-transport"
 version = "0.58.1"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "base64",
  "bstr",
@@ -1066,7 +1066,7 @@ dependencies = [
 [[package]]
 name = "gix-traverse"
 version = "0.60.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bitflags 2.13.1",
  "gix-commitgraph",
@@ -1082,7 +1082,7 @@ dependencies = [
 [[package]]
 name = "gix-url"
 version = "0.37.1"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-path",
@@ -1094,7 +1094,7 @@ dependencies = [
 [[package]]
 name = "gix-utils"
 version = "0.3.5"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "fastrand",
@@ -1105,7 +1105,7 @@ dependencies = [
 [[package]]
 name = "gix-validate"
 version = "0.11.3"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
 ]
@@ -1113,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "gix-worktree"
 version = "0.55.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-attributes",
@@ -1130,7 +1130,7 @@ dependencies = [
 [[package]]
 name = "gix-worktree-state"
 version = "0.33.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "bstr",
  "gix-features",
@@ -1148,7 +1148,7 @@ dependencies = [
 [[package]]
 name = "gix-worktree-stream"
 version = "0.35.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "gix-attributes",
  "gix-error",
@@ -1165,7 +1165,7 @@ dependencies = [
 [[package]]
 name = "gix-zlib"
 version = "0.1.0"
-source = "git+https://github.com/moturus/gitoxide.git?rev=b4e6aeaa82be4183af466b7a99484c38322dd260#b4e6aeaa82be4183af466b7a99484c38322dd260"
+source = "git+https://github.com/moturus/gitoxide.git?rev=419b494a869dc976caceb1dee108ce92dee1ae33#419b494a869dc976caceb1dee108ce92dee1ae33"
 dependencies = [
  "thiserror",
  "zlib-rs",
