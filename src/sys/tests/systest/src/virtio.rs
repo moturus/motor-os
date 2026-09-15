@@ -86,8 +86,8 @@ pub fn run_tests() {
 
 fn test_virtio_cap_metadata() {
     use virtio_async::virtio_test_support::{
-        checked_virtio_notify_offset, supported_virtio_cap, valid_virtio_cap_access,
-        valid_virtio_cap_bar,
+        checked_virtio_notify_offset, msix_region_lengths, supported_virtio_cap,
+        valid_msix_cap_offset, valid_virtio_cap_access, valid_virtio_cap_bar,
     };
 
     let header =
@@ -124,6 +124,59 @@ fn test_virtio_cap_metadata() {
     }
     for bar in [6, 0xff] {
         assert!(!valid_virtio_cap_bar(bar));
+    }
+
+    for offset in [0x40, 0xf4] {
+        assert!(valid_msix_cap_offset(offset));
+    }
+    for offset in [0xf8, 0xfc] {
+        assert!(!valid_msix_cap_offset(offset));
+    }
+    for (vectors, table_length, pba_length) in [
+        (1, 16, 8),
+        (64, 1024, 8),
+        (65, 1040, 16),
+        (2048, 32768, 256),
+    ] {
+        assert_eq!(
+            msix_region_lengths(vectors),
+            Some((table_length, pba_length))
+        );
+        assert!(valid_virtio_cap_access(
+            0x100 + table_length,
+            0x100,
+            table_length,
+            0,
+            table_length,
+            8
+        ));
+        assert!(!valid_virtio_cap_access(
+            0xff + table_length,
+            0x100,
+            table_length,
+            0,
+            table_length,
+            8
+        ));
+        assert!(valid_virtio_cap_access(
+            0x200 + pba_length,
+            0x200,
+            pba_length,
+            0,
+            pba_length,
+            8
+        ));
+        assert!(!valid_virtio_cap_access(
+            0x1ff + pba_length,
+            0x200,
+            pba_length,
+            0,
+            pba_length,
+            8
+        ));
+    }
+    for vectors in [0, 2049, u16::MAX] {
+        assert_eq!(msix_region_lengths(vectors), None);
     }
 
     assert!(valid_virtio_cap_access(0x106, 0x100, 6, 0, 6, 4));

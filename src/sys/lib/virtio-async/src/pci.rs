@@ -285,6 +285,10 @@ impl PciBar {
         )
     }
 
+    pub(crate) fn contains_access(&self, offset: u64, length: u64, alignment: u64) -> bool {
+        valid_virtio_cap_access(self.addr_size, offset, length, 0, length, alignment)
+    }
+
     pub(crate) fn notify_offset(
         &self,
         cap_offset: u32,

@@ -87,6 +87,18 @@ pub fn valid_virtio_cap_bar(bar: u8) -> bool {
     bar < 6
 }
 
+pub fn valid_msix_cap_offset(offset: u8) -> bool {
+    usize::from(offset) + 12 <= 256
+}
+
+pub fn msix_region_lengths(vectors: u16) -> Option<(u64, u64)> {
+    if !(1..=2048).contains(&vectors) {
+        return None;
+    }
+    let vectors = u64::from(vectors);
+    Some((vectors * 16, vectors.div_ceil(64) * 8))
+}
+
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub(super) struct VirtioPciCap {
@@ -321,7 +333,7 @@ impl VirtioDevice {
     }
 
     // Step 0: see virtio_pci_device::init() in osv.
-    pub(crate) fn init(&mut self) {
+    pub(crate) fn init(&mut self) -> Result<()> {
         // Set bus master, enable I/O and memory space.
         let mut command = self.pci_device.id.read_config_u16(pci::PCI_CFG_COMMAND);
         command |= pci::PCI_COMMAND_BUS_MASTER | pci::PCI_COMMAND_BUS_IO | pci::PCI_COMMAND_BUS_MEM;
@@ -332,7 +344,7 @@ impl VirtioDevice {
         // Enable MSI-X.
         let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSIX);
         if !caps.is_empty() {
-            self.enable_msix(caps[0]);
+            self.enable_msix(caps[0])?;
         } else {
             let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSI);
             if !caps.is_empty() {
@@ -342,36 +354,48 @@ impl VirtioDevice {
                 );
             }
         }
+        Ok(())
     }
 
-    #[allow(unused_variables)]
-    fn enable_msix(&mut self, offset: u8) {
+    fn enable_msix(&mut self, offset: u8) -> Result<()> {
         assert!(self.msix.is_none());
 
         // see void function::msix_enable() in drivers/pci-function.cc in osv.
         let location = offset;
-        let ctrl = self
-            .pci_device
-            .id
-            .read_config_u16(location + pci::PCIR_MSIX_CTRL);
+        if !valid_msix_cap_offset(location) {
+            log::error!(
+                "VirtIO {:?} device has truncated MSI-X capability at 0x{location:x}.",
+                self.kind
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+        let ctrl_offset = location
+            .checked_add(pci::PCIR_MSIX_CTRL)
+            .ok_or(ErrorKind::InvalidData)?;
+        let table_cfg_offset = location
+            .checked_add(pci::PCIR_MSIX_TABLE)
+            .ok_or(ErrorKind::InvalidData)?;
+        let pba_cfg_offset = location
+            .checked_add(pci::PCIR_MSIX_PBA)
+            .ok_or(ErrorKind::InvalidData)?;
+        let ctrl = self.pci_device.id.read_config_u16(ctrl_offset);
         let msgnum = (ctrl & pci::PCIM_MSIXCTRL_TABLE_SIZE) + 1;
 
-        let mut val: u32 = self
-            .pci_device
-            .id
-            .read_config_u32(location + pci::PCIR_MSIX_TABLE);
+        let mut val: u32 = self.pci_device.id.read_config_u32(table_cfg_offset);
         let table_bar = (val & pci::PCIM_MSIX_BIR_MASK) as u8;
         let table_offset: u32 = val & !pci::PCIM_MSIX_BIR_MASK;
 
-        val = self
-            .pci_device
-            .id
-            .read_config_u32(location + pci::PCIR_MSIX_PBA);
+        val = self.pci_device.id.read_config_u32(pba_cfg_offset);
         let pba_bar = (val & pci::PCIM_MSIX_BIR_MASK) as u8;
         let pba_offset: u32 = val & !pci::PCIM_MSIX_BIR_MASK;
 
-        assert!(table_bar < 6);
-        assert!(pba_bar < 6);
+        if !valid_virtio_cap_bar(table_bar) || !valid_virtio_cap_bar(pba_bar) {
+            log::error!(
+                "VirtIO {:?} device has invalid MSI-X BARs: table {table_bar}, PBA {pba_bar}.",
+                self.kind
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
 
         let msix = Msix {
             msgnum,
@@ -391,6 +415,24 @@ impl VirtioDevice {
                 Some(PciBar::init(self.pci_device.id, msix.pba_bar));
         }
 
+        let (table_length, pba_length) =
+            msix_region_lengths(msix.msgnum).ok_or(ErrorKind::InvalidData)?;
+        let table_bar = self.pci_device.bars[msix.table_bar as usize]
+            .as_ref()
+            .unwrap();
+        let pba_bar = self.pci_device.bars[msix.pba_bar as usize]
+            .as_ref()
+            .unwrap();
+        if !table_bar.contains_access(u64::from(msix.table_offset), table_length, 8)
+            || !pba_bar.contains_access(u64::from(msix.pba_offset), pba_length, 8)
+        {
+            log::error!(
+                "VirtIO {:?} device has MSI-X table/PBA outside mapped BARs.",
+                self.kind
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
         // Disable INTX.
         let mut command = self.pci_device.id.read_config_u16(pci::PCI_CFG_COMMAND);
         command |= pci::PCI_COMMAND_INTX_DISABLE;
@@ -399,26 +441,21 @@ impl VirtioDevice {
             .write_config_u16(pci::PCI_CFG_COMMAND, command);
 
         // Enable MSIX.
-        let mut msix_ctrl = self
-            .pci_device
-            .id
-            .read_config_u16(msix.location + pci::PCIR_MSIX_CTRL);
+        let mut msix_ctrl = self.pci_device.id.read_config_u16(ctrl_offset);
         msix_ctrl |= pci::PCIM_MSIXCTRL_MSIX_ENABLE;
         msix_ctrl |= pci::PCIM_MSIXCTRL_FUNCTION_MASK;
-        self.pci_device
-            .id
-            .write_config_u16(msix.location + pci::PCIR_MSIX_CTRL, msix_ctrl);
+        self.pci_device.id.write_config_u16(ctrl_offset, msix_ctrl);
         // Validate success.
-        assert_eq!(
-            msix_ctrl,
-            self.pci_device
-                .id
-                .read_config_u16(msix.location + pci::PCIR_MSIX_CTRL)
-        );
+        let readback = self.pci_device.id.read_config_u16(ctrl_offset);
+        if readback != msix_ctrl {
+            log::error!(
+                "VirtIO {:?} device failed to enable/mask MSI-X: wrote 0x{msix_ctrl:x}, read 0x{readback:x}.",
+                self.kind
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
 
         // Mask off all entries.
-        let table_bar = &(self.pci_device.bars[msix.table_bar as usize]);
-        let table_bar = table_bar.as_ref().unwrap();
         for idx in 0..msix.msgnum {
             const PCI_MSIX_ENTRY_VECTOR_CTRL: u64 = 12;
             const PCI_MSIX_ENTRY_SIZE: u64 = 16;
@@ -433,16 +470,16 @@ impl VirtioDevice {
         }
         // Unmask the main block (see void function::msix_enable() in drivers/pci-function.cc in osv).
         msix_ctrl &= !pci::PCIM_MSIXCTRL_FUNCTION_MASK;
-        self.pci_device
-            .id
-            .write_config_u16(msix.location + pci::PCIR_MSIX_CTRL, msix_ctrl);
+        self.pci_device.id.write_config_u16(ctrl_offset, msix_ctrl);
         // Validate success.
-        assert_eq!(
-            msix_ctrl,
-            self.pci_device
-                .id
-                .read_config_u16(msix.location + pci::PCIR_MSIX_CTRL)
-        );
+        let readback = self.pci_device.id.read_config_u16(ctrl_offset);
+        if readback != msix_ctrl {
+            log::error!(
+                "VirtIO {:?} device failed to unmask MSI-X: wrote 0x{msix_ctrl:x}, read 0x{readback:x}.",
+                self.kind
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
 
         log::debug!(
             "MSI-X enabled for {:?} : {:?}.",
@@ -450,6 +487,7 @@ impl VirtioDevice {
             self.pci_device.id
         );
         self.msix = Some(Box::new(msix));
+        Ok(())
     }
 
     // Indicate that the driver encountered an error and it has given up on the device.

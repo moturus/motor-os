@@ -256,7 +256,7 @@ impl NetDevice {
 
     fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<Self>> {
         let mut dev_mut = dev.borrow_mut();
-        dev_mut.init();
+        dev_mut.init()?;
         dev_mut.reset();
         dev_mut.acknowledge_device();
 

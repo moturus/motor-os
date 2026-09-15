@@ -383,6 +383,27 @@ Shared queue notification values are corrected and parent-reviewed:
   to its fully initialized 16 bytes before guest validation. No vsock hardware
   activation or milestone gate is implied. MSI-X/BAR checks remain next.
 
+Shared MSI-X metadata and mapped-region checks are implemented and
+parent-reviewed:
+
+- Reject truncated capability prefixes and invalid table/PBA BAR indices
+  before field reads or indexing. Validate both complete regions against
+  their mapped BARs before table writes. Existing enablement readbacks now
+  return initialization errors instead of panicking; block/net propagate
+  those errors. No extra hardware reads, tasks, or reset policy are added.
+- Guest pure-helper tests cover exact-end/truncated metadata, vector-count
+  boundaries, PBA rounding, and exact-end/one-byte-short table/PBA mappings.
+  Debug/release builds, targeted Clippy, descriptor/I/O-task/filesystem
+  regressions, and the same release groups on CHV and Firecracker passed.
+  Formatting/diff checks passed with no new warnings or compile failures;
+  the initial formatting check required only line wrapping. Logs:
+  `/tmp/virtio-msix.hJGoIK/`, `/tmp/virtio-msix-gate.uTFBso/`, and
+  `/tmp/virtio-msix-other-vmm.FAlPEL/`.
+- Malformed hardware and enablement failures were not injected; actual
+  supported-VMM boots exercise normal MSI-X setup. BAR probing/mapping
+  robustness and Q19 remain separate work. No vsock device was activated,
+  and neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1651,8 +1672,9 @@ VMM/backend paths in D11 with one common implementation.
 No, for the actual vsock paths approved in D11. The 2026-09-15 audit checked
 the installed VMM versions, their upstream release sources, and the released
 `vhost-device-vsock` 0.3.0 backend. This is source/help evidence, not a live
-Motor guest feature-negotiation test; that backend is not installed yet.
-Recheck its mask if the test prerequisite is pinned to a different release.
+Motor guest feature-negotiation test. The backend has since been installed
+as recorded in D11, but has not yet been exercised by a Motor guest. Recheck
+its mask if the test prerequisite is pinned to a different release.
 
 | VMM / vsock path | Offers bit 35 (`IN_ORDER`)? | Release-source evidence |
 | --- | --- | --- |
