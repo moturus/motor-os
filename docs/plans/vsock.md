@@ -95,7 +95,7 @@ Stage 2 wire decoding is implemented and parent-reviewed:
   or boot tasks are added here, and neither milestone is complete.
 
 Stage 3 modern-device discovery and feature selection are implemented and
-parent-reviewed; CID snapshots and shared-resource capacity work remain:
+parent-reviewed; CID snapshots and device initialization remain:
 
 - Recognize PCI device ID `0x1053` without initializing the device. The private
   driver requires `VERSION_1`, accepts only optional `RING_EVENT_IDX`, and
@@ -114,6 +114,24 @@ parent-reviewed; CID snapshots and shared-resource capacity work remain:
   now uses a fresh per-run path. Original logs are retained; no OS change,
   permission bypass, test retry, or weakened assertion was needed.
 - Generation-consistent CID reads are held for Q17; independent work continues.
+
+Stage 3 shared IRQ/MMIO capacity checks are implemented and parent-reviewed:
+
+- The mapper reserves IRQs 64–79 without wrapping, and checks page-rounded
+  allocations before advancing the existing 2 MiB pool cursor. Exact-end
+  allocations fit; invalid/exhausted requests return errors without consuming
+  capacity. DMA zeroing, ring layout, device-count policy, and the multi-block
+  guard are unchanged.
+- The production reservation helpers are source-included by the existing
+  guest I/O-task tests. Both profiles passed rounding, overflow, exact-end,
+  exhaustion, and count-independent reservation cases, plus existing
+  descriptor/task ownership and actual scattered-write filesystem regressions.
+- Final base-image/systest builds and virtio-async/sys-io/systest Clippy passed
+  in debug and release. The initial build's deprecated atomic method warning
+  was corrected to the selected toolchain's `try_update`; remaining diagnostics
+  are in untouched virtio-async, sys-io/netstack, and allocation-benchmark code.
+  Formatting/diff checks passed. Logs: `/tmp/vsock-capacity.1ukWmk/` (initial)
+  and `final.xtVxhg/` beneath it (final). Neither milestone is complete.
 
 ## Scope and simplicity
 

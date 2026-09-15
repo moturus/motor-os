@@ -17,6 +17,7 @@ use std::io::Result as IoResult;
 pub(crate) mod channel_budget;
 pub mod fs;
 pub(crate) mod net;
+mod virtio_capacity;
 
 // A single 2M page used for VirtIO/MMIO.
 // It's a hack, but we don't need anything more complicated for now.
@@ -36,15 +37,16 @@ pub fn init() {
 }
 
 // Return (phys_addr, virt_addr).
-pub fn alloc_mmio_region(size: u64) -> (u64, u64) {
+pub fn alloc_mmio_region(size: u64) -> IoResult<(u64, u64)> {
     use moto_sys::sys_mem;
 
     static BUMP: AtomicU64 = AtomicU64::new(0);
 
-    let size = moto_sys::align_up(size, sys_mem::PAGE_SIZE_SMALL);
-    assert_eq!(0, size & (sys_mem::PAGE_SIZE_SMALL - 1));
-    let start = BUMP.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
-    assert!(start + size < sys_mem::PAGE_SIZE_MID);
+    const _: () = {
+        assert!(virtio_capacity::MMIO_PAGE_SIZE == sys_mem::PAGE_SIZE_SMALL);
+        assert!(virtio_capacity::MMIO_POOL_SIZE == sys_mem::PAGE_SIZE_MID);
+    };
+    let (start, size) = virtio_capacity::reserve_mmio(&BUMP, size)?;
 
     let virt_addr = MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed) + start;
     let phys_addr = moto_sys::SysMem::virt_to_phys(virt_addr).unwrap();
@@ -53,7 +55,7 @@ pub fn alloc_mmio_region(size: u64) -> (u64, u64) {
     // alloc_user_mid_pages); virtqueues expect zeroed rings.
     unsafe { core::ptr::write_bytes(virt_addr as usize as *mut u8, 0, size as usize) };
 
-    (phys_addr, virt_addr)
+    Ok((phys_addr, virt_addr))
 }
 
 fn conn_name(handle: SysHandle) -> String {
@@ -90,7 +92,7 @@ struct Mapper {
     next_irq_num: AtomicU8,
 }
 static MAPPER: Mapper = Mapper {
-    next_irq_num: AtomicU8::new(64),
+    next_irq_num: AtomicU8::new(virtio_capacity::IRQ_START),
 };
 
 impl virtio_async::KernelAdapter for Mapper {
@@ -108,15 +110,14 @@ impl virtio_async::KernelAdapter for Mapper {
     }
 
     fn alloc_contiguous_pages(&self, sz: u64) -> IoResult<u64> {
-        let (_, addr) = crate::runtime::alloc_mmio_region(sz);
+        let (_, addr) = crate::runtime::alloc_mmio_region(sz)?;
         Ok(addr)
     }
 
     // Register a custom IRQ and an associated wait handle; the library will then use
     // the wait handle with wait() below.
     fn create_irq_wait_handle(&self) -> IoResult<(SysHandle, u8)> {
-        let next_irq_num = self.next_irq_num.fetch_add(1, Ordering::AcqRel);
-        assert!(next_irq_num < 70);
+        let next_irq_num = virtio_capacity::reserve_irq(&self.next_irq_num)?;
 
         moto_sys::SysObj::get(
             SysHandle::KERNEL,
