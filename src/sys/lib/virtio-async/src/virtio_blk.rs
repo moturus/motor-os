@@ -9,7 +9,6 @@ use std::io::Result;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::WriteCompletion;
 use crate::virtio_queue::ReadCompletion;
@@ -290,16 +289,14 @@ impl BlockDevice {
 
         let read_only = (features_acked & VIRTIO_BLK_F_RO) != 0;
 
-        let device_cfg = dev.device_cfg.as_ref().unwrap();
-        let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]
-            .as_ref()
-            .unwrap();
-        let capacity = cfg_bar.read_u64(device_cfg.offset as u64);
+        let required_config_len = if seg_max_offered { 16 } else { 8 };
+        let (cfg_bar, config_offset) = dev.device_config(required_config_len)?;
+        let capacity = cfg_bar.read_u64(config_offset);
 
         // struct virtio_blk_config: capacity: u64, size_max: u32, seg_max: u32.
         // The seg_max field is valid only if the feature was offered.
         let seg_max = if seg_max_offered {
-            cfg_bar.read_u32(device_cfg.offset as u64 + 12) as usize
+            cfg_bar.read_u32(config_offset + 12) as usize
         } else {
             1
         };

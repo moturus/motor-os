@@ -9,7 +9,6 @@ use moto_sys::sys_mem::PAGE_SIZE_SMALL;
 use moto_tooling::iobuf::IoBuf;
 
 use super::le16;
-use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::WriteCompletion;
 use crate::virtio_queue::Virtqueue;
@@ -429,21 +428,22 @@ impl NetDevice {
         #[cfg(debug_assertions)]
         log::debug!("NET features acked: 0x{features_acked:x}");
 
-        let device_cfg = dev.device_cfg.as_ref().unwrap();
-        let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]
-            .as_ref()
-            .unwrap();
+        let required_config_len = if (features_acked & VIRTIO_NET_F_MTU) != 0 {
+            core::mem::size_of::<VirtioNetConfig>() as u32
+        } else {
+            6
+        };
+        let (cfg_bar, config_offset) = dev.device_config(required_config_len)?;
 
         let mut mac: [u8; 6] = [0; 6];
         for (index, b) in mac.iter_mut().enumerate() {
-            *b = cfg_bar.readb(device_cfg.offset as u64 + index as u64);
+            *b = cfg_bar.readb(config_offset + index as u64);
         }
 
         log::debug!("NET MAC: {:02x?}", mac);
 
         let mtu = if (features_acked & VIRTIO_NET_F_MTU) != 0 {
-            let mtu = cfg_bar
-                .read_u16(device_cfg.offset as u64 + offset_of!(VirtioNetConfig, mtu) as u64);
+            let mtu = cfg_bar.read_u16(config_offset + offset_of!(VirtioNetConfig, mtu) as u64);
             if mtu < 68 {
                 log::error!(
                     "Virtio NET device {:?}: bad MTU: {}.",

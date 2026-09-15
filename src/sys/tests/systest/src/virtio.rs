@@ -85,7 +85,10 @@ pub fn run_tests() {
 }
 
 fn test_virtio_cap_metadata() {
-    use virtio_async::virtio_test_support::{supported_virtio_cap, valid_virtio_cap_bar};
+    use virtio_async::virtio_test_support::{
+        checked_virtio_notify_offset, supported_virtio_cap, valid_virtio_cap_access,
+        valid_virtio_cap_bar,
+    };
 
     let header =
         |cap_len: u8, cfg_type: u8| 9u32 | (u32::from(cap_len) << 16) | (u32::from(cfg_type) << 24);
@@ -122,12 +125,58 @@ fn test_virtio_cap_metadata() {
     for bar in [6, 0xff] {
         assert!(!valid_virtio_cap_bar(bar));
     }
+
+    assert!(valid_virtio_cap_access(0x106, 0x100, 6, 0, 6, 4));
+    assert!(valid_virtio_cap_access(0x138, 0x100, 56, 0, 56, 4));
+    for cap_length in [8, u64::from(u32::MAX)] {
+        assert!(valid_virtio_cap_access(0x108, 0x100, cap_length, 0, 8, 4));
+    }
+    for access in [
+        (0x108, 0x100, 0, 0, 8, 4),
+        (0x108, 0x100, 7, 0, 8, 4),
+        (0x107, 0x100, 8, 0, 8, 4),
+        (0x108, 0x102, 8, 0, 6, 4),
+        (0x108, 0x100, 8, 4, 6, 4),
+        (0x108, 0x100, 8, 0, 0, 4),
+        (0x108, 0x100, 8, 0, 8, 0),
+        (0x108, 0x100, 8, 0, 8, 3),
+        (u64::MAX, 0, u64::MAX, u64::MAX, 1, 1),
+        (u64::MAX, u64::MAX, 2, 1, 1, 1),
+        (u64::MAX, u64::MAX - 1, 2, 0, 2, 1),
+    ] {
+        assert!(!valid_virtio_cap_access(
+            access.0, access.1, access.2, access.3, access.4, access.5
+        ));
+    }
+
+    assert_eq!(checked_virtio_notify_offset(4, 2, 2, 0, 0), Some(2));
+    assert_eq!(
+        checked_virtio_notify_offset(0x110, 0x100, 0x10, 2, 7),
+        Some(0x10e)
+    );
+    assert_eq!(
+        checked_virtio_notify_offset(0x102, 0x100, u32::MAX, 0, 0),
+        Some(0x100)
+    );
+    for notify in [
+        (4, 2, 1, 0, 0),
+        (0x112, 0x100, 0x10, 2, 8),
+        (8, 2, 4, 1, 1),
+        (8, 1, 4, 1, 1),
+        (0x101, 0x100, 2, 0, 0),
+        (u64::MAX, 0, u32::MAX, u32::MAX, u16::MAX),
+    ] {
+        assert_eq!(
+            checked_virtio_notify_offset(notify.0, notify.1, notify.2, notify.3, notify.4),
+            None
+        );
+    }
 }
 
 fn test_vsock_discovery_features() {
     use virtio_async::VirtioDeviceKind;
     use virtio_async::vsock_test_support::{
-        classify_device_id, select_features, validate_guest_cid, validate_vsock_config_len,
+        classify_device_id, select_features, validate_guest_cid,
     };
 
     assert!(matches!(classify_device_id(0x1041), VirtioDeviceKind::Net));
@@ -182,15 +231,6 @@ fn test_vsock_discovery_features() {
             validate_guest_cid(cid).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-    }
-    for length in [0, 7] {
-        assert_eq!(
-            validate_vsock_config_len(length).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidData
-        );
-    }
-    for length in [8, u32::MAX] {
-        validate_vsock_config_len(length).unwrap();
     }
 }
 

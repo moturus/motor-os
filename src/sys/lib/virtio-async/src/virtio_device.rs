@@ -183,6 +183,20 @@ impl VirtioDevice {
         self.kind
     }
 
+    pub(super) fn device_config(&self, required: u32) -> Result<(&PciBar, u64)> {
+        let config = self.device_cfg.as_ref().ok_or(ErrorKind::InvalidData)?;
+        let bar = self
+            .pci_device
+            .bars
+            .get(config.bar as usize)
+            .and_then(Option::as_ref)
+            .ok_or(ErrorKind::InvalidData)?;
+        if !bar.contains_cap_access(config.offset, config.length, 0, u64::from(required), 4) {
+            return Err(ErrorKind::InvalidData.into());
+        }
+        Ok((bar, u64::from(config.offset)))
+    }
+
     // VirtIO device initialization steps, see osv virtio.cc, virtio-rng.cc,
     // and section 3.1.1 in VirtIO 1.1. spec:
     //   step 0 parse/init
@@ -257,16 +271,15 @@ impl VirtioDevice {
         let common_cfg = common_cap.unwrap();
         log::trace!("VirtIO device_id {device_id:?}: common cap (cfg): {common_cfg:?}");
 
-        let min_len = core::mem::size_of::<VirtioPciCommonCfgLayout>();
-        if (common_cfg.length as usize) < min_len {
-            log::warn!("VirtIO device_id {device_id:?}: VirtioPciCommonCfg: bad length.");
-            return Err(ErrorKind::InvalidData.into());
-        }
-
         let mut pci_device = PciDevice::new(device_id);
         pci_device.bars[common_cfg.bar as usize] = Some(PciBar::init(device_id, common_cfg.bar));
 
         let cfg_bar: &PciBar = pci_device.bars[common_cfg.bar as usize].as_ref().unwrap();
+        let common_len = core::mem::size_of::<VirtioPciCommonCfgLayout>() as u64;
+        if !cfg_bar.contains_cap_access(common_cfg.offset, common_cfg.length, 0, common_len, 4) {
+            log::warn!("VirtIO device_id {device_id:?}: invalid common configuration range.");
+            return Err(ErrorKind::InvalidData.into());
+        }
         let status = cfg_bar.readb(
             common_cfg.offset as u64 + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64,
         );
@@ -728,11 +741,17 @@ impl VirtioDevice {
             let notify_cap = self.notify_cfg.unwrap();
             let notify_bar = self.pci_device.bars[notify_cap.bar as usize]
                 .as_ref()
-                .unwrap() as *const PciBar;
-            let notify_offset = notify_cap.offset as u64
-                + (notify_cap.notify_off_multiplier as u64
-                    * virtq_borrowed.queue_notify_off as u64);
-            virtq_borrowed.set_notify_params(notify_bar, notify_offset);
+                .unwrap();
+            let Some(notify_offset) = notify_bar.notify_offset(
+                notify_cap.offset,
+                notify_cap.length,
+                notify_cap.notify_off_multiplier,
+                virtq_borrowed.queue_notify_off,
+            ) else {
+                log::error!("VirtIO queue notification address is outside its capability.");
+                return Err(ErrorKind::InvalidData.into());
+            };
+            virtq_borrowed.set_notify_params(notify_bar as *const PciBar, notify_offset);
 
             core::mem::drop(virtq_borrowed);
             virtqueues.push(virtqueue);

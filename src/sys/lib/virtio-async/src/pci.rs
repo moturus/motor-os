@@ -33,6 +33,53 @@ pub const PCIM_MSIXCTRL_FUNCTION_MASK: u16 = 0x4000;
 
 pub const PCI_MSIX_ENTRY_CTRL_MASKBIT: u32 = 1;
 
+pub fn valid_virtio_cap_access(
+    bar_size: u64,
+    cap_offset: u64,
+    cap_length: u64,
+    relative_offset: u64,
+    access_length: u64,
+    alignment: u64,
+) -> bool {
+    if access_length == 0 || !alignment.is_power_of_two() {
+        return false;
+    }
+    let Some(relative_end) = relative_offset.checked_add(access_length) else {
+        return false;
+    };
+    if relative_end > cap_length {
+        return false;
+    }
+    let Some(access_offset) = cap_offset.checked_add(relative_offset) else {
+        return false;
+    };
+    cap_offset.is_multiple_of(alignment)
+        && access_offset.is_multiple_of(alignment)
+        && access_offset
+            .checked_add(access_length)
+            .is_some_and(|end| end <= bar_size)
+}
+
+pub fn checked_virtio_notify_offset(
+    bar_size: u64,
+    cap_offset: u32,
+    cap_length: u32,
+    multiplier: u32,
+    queue_offset: u16,
+) -> Option<u64> {
+    let relative_offset = u64::from(multiplier) * u64::from(queue_offset);
+    let cap_offset = u64::from(cap_offset);
+    valid_virtio_cap_access(
+        bar_size,
+        cap_offset,
+        u64::from(cap_length),
+        relative_offset,
+        2,
+        2,
+    )
+    .then_some(cap_offset + relative_offset)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PciDeviceID {
     pub bus: u8,
@@ -198,6 +245,40 @@ pub(super) struct PciBar {
 }
 
 impl PciBar {
+    pub(crate) fn contains_cap_access(
+        &self,
+        cap_offset: u32,
+        cap_length: u32,
+        relative_offset: u64,
+        access_length: u64,
+        alignment: u64,
+    ) -> bool {
+        valid_virtio_cap_access(
+            self.addr_size,
+            u64::from(cap_offset),
+            u64::from(cap_length),
+            relative_offset,
+            access_length,
+            alignment,
+        )
+    }
+
+    pub(crate) fn notify_offset(
+        &self,
+        cap_offset: u32,
+        cap_length: u32,
+        multiplier: u32,
+        queue_offset: u16,
+    ) -> Option<u64> {
+        checked_virtio_notify_offset(
+            self.addr_size,
+            cap_offset,
+            cap_length,
+            multiplier,
+            queue_offset,
+        )
+    }
+
     pub fn init(pci_device_id: PciDeviceID, idx: u8) -> Self {
         let offset = (idx << 2) + 0x10; // these are [0..5]
         let bar = pci_device_id.read_config_u32(offset);

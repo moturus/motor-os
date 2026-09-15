@@ -16,13 +16,6 @@ pub const EVENT_LEN: usize = 4;
 pub const SHUTDOWN_RECEIVE: u32 = 1;
 pub const SHUTDOWN_SEND: u32 = 2;
 
-pub fn validate_vsock_config_len(length: u32) -> IoResult<()> {
-    if length < size_of::<u64>() as u32 {
-        return Err(ErrorKind::InvalidData.into());
-    }
-    Ok(())
-}
-
 pub fn validate_guest_cid(raw: u64) -> IoResult<u32> {
     let cid = u32::try_from(raw).map_err(|_| ErrorKind::InvalidData)?;
     if !(3..u32::MAX).contains(&cid) {
@@ -84,17 +77,10 @@ pub(crate) fn negotiate_features(device: &mut VirtioDevice) -> IoResult<()> {
 }
 
 pub(crate) fn read_guest_cid(device: &VirtioDevice) -> IoResult<u32> {
-    let config = device.device_cfg.as_ref().ok_or(ErrorKind::InvalidData)?;
-    validate_vsock_config_len(config.length)?;
-    let bar = device
-        .pci_device
-        .bars
-        .get(config.bar as usize)
-        .and_then(Option::as_ref)
-        .ok_or(ErrorKind::InvalidData)?;
+    let (bar, config_offset) = device.device_config(8)?;
     // Virtio 1.1 reserves the upper word as zero, so the existing low/high
     // 32-bit read needs no configuration-generation retry.
-    validate_guest_cid(bar.read_u64(config.offset as u64))
+    validate_guest_cid(bar.read_u64(config_offset))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

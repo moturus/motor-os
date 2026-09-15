@@ -340,6 +340,27 @@ Shared PCI capability metadata validation is implemented and parent-reviewed:
   MSI-X regions, and unsupported I/O BAR selection remain separate work;
   neither milestone is complete.
 
+Shared mapped-configuration access checks are implemented and parent-reviewed:
+
+- Common configuration is checked before its first MMIO access. Block, net,
+  and vsock use one device-configuration accessor to validate their consumed
+  prefixes; vsock's separate length validator was removed. Notification
+  addresses are checked against both the capability and mapped BAR before
+  queue use. Checks require the actual field alignment, not aligned lengths,
+  and ignore unused extended tails. Hot-path PCI accesses are unchanged.
+- Guest tests cover exact-end/short/extended regions, six-byte net config,
+  two-byte notifications, misalignment, all checked-add failure boundaries,
+  and maximum notification arithmetic. Debug/release builds, targeted Clippy,
+  descriptor/I/O-task/filesystem regressions, and formatting/diff checks passed
+  without new warnings or initial check failures. Logs:
+  `/tmp/virtio-mmio-range.GjqBSs/` and `/tmp/virtio-mmio-gate.AB4j7s/`.
+- CHV and Firecracker release base-image boots also passed these guest groups
+  and SSH/SFTP with the new range checks. Logs:
+  `/tmp/virtio-mmio-other-vmm.qDcdb0/`. No malformed hardware injection or
+  vsock activation was performed. MSI-X/BAR initialization checks and the
+  separately identified hardcoded-zero queue notification value remain;
+  neither milestone is complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1397,7 +1418,7 @@ gate arrangement D16. Keep all guest protocol/API code identical across
 VMMs and make missing prerequisites a clear gate failure, never a successful
 skip.
 
-Pin the released `vhost-device-vsock` crate version in `test-vsock.sh`,
+Pin the released `vhost-device-vsock` crate version `0.3.0` in `test-vsock.sh`,
 document installation in `docs/tools.md`, and check the binary/version
 before launching. Installation is developer setup, not test work. QEMU
 needs a separate vhost-user control socket as well as the peer UDS path.
@@ -1405,7 +1426,7 @@ Firecracker already uses `--enable-pci`; no virtio-MMIO driver is needed.
 
 | VMM | Transport/backend | Evidence and remaining validation |
 | --- | --- | --- |
-| QEMU | Modern `vhost-user-vsock-pci` plus UDS `vhost-device-vsock`; shared guest RAM. | Installed QEMU 10.2.1 exposes that device. `vhost-device-vsock` is not on PATH; install from its released crate at the pinned version during setup, never during a test. |
+| QEMU | Modern `vhost-user-vsock-pci` plus UDS `vhost-device-vsock`; shared guest RAM. | Installed QEMU 10.2.1 exposes that device. Released backend `0.3.0` was installed in an isolated setup directory as recorded below; add its `bin` directory to PATH for tests. |
 | Cloud Hypervisor | Built-in `--vsock cid=3,socket=<path>`. | Installed v52.0; native vsock config is a singleton and its protocol is streams over UDS. |
 | Firecracker | Built-in `vsock` JSON configuration over PCI and UDS. | Installed v1.15.1 with `--enable-pci`; native config stores one device. |
 
@@ -1417,6 +1438,13 @@ These are source/help checks, not completed Motor guest interoperability
 tests. D17 records the release-specific ordering-feature audit: CHV and
 Firecracker offer `IN_ORDER`, but the approved QEMU/backend combination does
 not. Therefore it cannot be a required feature for this common driver.
+
+Development setup on 2026-09-15 installed the locked released crate into
+`/tmp/vsock-vhost-backend.6RFS2s/`; its binary reports
+`vhost-device-vsock 0.3.0`. The install log is `install.log` there. This was
+an explicit setup download/build, not test execution; no external source
+files were edited. The dependency `nix 0.29.0` emitted a future-compatibility
+warning. No backend or VMM interoperability test is implied by installation.
 
 ### D12. Test route (approved)
 

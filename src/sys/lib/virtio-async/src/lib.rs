@@ -19,6 +19,7 @@ pub use virtio_queue::tests::{
 };
 #[cfg(feature = "test-support")]
 pub mod virtio_test_support {
+    pub use crate::pci::{checked_virtio_notify_offset, valid_virtio_cap_access};
     pub use crate::virtio_device::{supported_virtio_cap, valid_virtio_cap_bar};
 }
 #[cfg(feature = "test-support")]
@@ -28,7 +29,6 @@ pub mod vsock_test_support {
     pub use crate::virtio_vsock::{
         DecodeErrorKind, EVENT_LEN, Event, EventError, HEADER_LEN, Operation, PacketHeader,
         RawHeader, SocketType, decode_event, decode_packet, select_features, validate_guest_cid,
-        validate_vsock_config_len,
     };
 
     pub fn classify_device_id(device_id: u16) -> VirtioDeviceKind {
