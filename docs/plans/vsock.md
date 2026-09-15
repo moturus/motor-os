@@ -561,6 +561,22 @@ Follow-up decisions approved on 2026-09-15, without additional source changes:
   and validation schedule below. Neither milestone is complete. Q21 is
   deferred under D20; no BAR-layout walk is approved or implemented.
 
+Shared reset completion check (D18) is implemented and parent-reviewed:
+
+- Reset writes zero and reads status exactly once. Nonzero returns an
+  initialization error, propagated by block/net/vsock before ACKNOWLEDGE or
+  queue startup. There is no polling, retry, task, or transport-reset change.
+- Debug/release builds, targeted Clippy, and existing guest descriptor,
+  I/O-task, and scattered-write regressions passed on QEMU; the same release
+  guest groups passed on CHV and Firecracker. Normal block/net initialization
+  exercises the new read. No new warnings or initial check failures;
+  selected-toolchain formatting and diff checks passed.
+- Logs: `/tmp/virtio-reset.nJa8bu/`, `/tmp/vsock-reset-gate.mlFnfA/`, and
+  `/tmp/vsock-reset-other-vmm.FudnJ5/`. The nonzero-status branch remains
+  source-reviewed, not injection-tested; no new production test hook was
+  added. No vsock device was attached. M1 foundations are ready for D13's
+  repeated full gates; neither milestone is complete yet.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2010,8 +2026,8 @@ mechanism, stop and discuss the deviation instead of silently adding one.
 
 ### D18. Shared reset completion check (Q19, approved)
 
-`VirtioDevice::reset` currently writes device status zero and immediately
-allows initialization to continue. It never observes reset completion.
+Before this change, `VirtioDevice::reset` wrote device status zero and
+immediately allowed initialization to continue without observing completion.
 [Virtio 1.1 section 4.1.4.3.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
 requires observing zero before reinitialization. This is a preexisting shared
 virtio issue, not a vsock-specific reset or completion-order requirement.
@@ -2023,8 +2039,8 @@ timeout constant, or added task. This deliberately rejects a device whose
 reset has not completed at that read; it does not provide asynchronous-reset
 support. The change adds one MMIO read per initialized block/net device at
 boot and per lazily initialized vsock device. The user approved this policy
-and boot-time cost on 2026-09-15. Implementation and validation of the check
-remain pending; existing gate passes did not exercise it.
+and boot-time cost on 2026-09-15. Implementation and normal-device validation
+are recorded in the progress section; the failure branch is source-reviewed.
 
 Pinned-source review on 2026-09-15 supports the one-read policy for initial
 pre-activation setup, without proving general backend reset completion:

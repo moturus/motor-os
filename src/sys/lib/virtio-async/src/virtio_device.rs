@@ -497,15 +497,24 @@ impl VirtioDevice {
     }
 
     // Step 1
-    pub(crate) fn reset(&self) {
+    pub(crate) fn reset(&self) -> Result<()> {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
-        cfg_bar.writeb(
-            self.common_cfg.offset as u64
-                + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64,
-            0,
-        );
+        let status_offset = self.common_cfg.offset as u64
+            + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64;
+
+        cfg_bar.writeb(status_offset, 0);
+        let status = cfg_bar.readb(status_offset);
+        if status != 0 {
+            log::error!(
+                "VirtioDevice {:?}: reset did not complete, status is 0x{status:x}.",
+                self.pci_device.id
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        Ok(())
     }
 
     // Step 2

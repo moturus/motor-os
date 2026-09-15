@@ -781,7 +781,7 @@ impl VsockDevice {
     fn init(device: Rc<RefCell<VirtioDevice>>) -> IoResult<Rc<Self>> {
         let mut raw = device.borrow_mut();
         raw.init()?;
-        raw.reset();
+        raw.reset()?;
         raw.acknowledge_device();
         raw.acknowledge_driver();
         negotiate_features(&mut raw)?;
