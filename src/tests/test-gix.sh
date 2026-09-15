@@ -46,7 +46,7 @@ git_fixture() {
   clean_git -C "$fixture" "$@"
 }
 build_fixture() {
-  local link_id utf8_name
+  local initial_id link_id utf8_name
   utf8_name=$'caf\xc3\xa9'
   clean_git init -q --initial-branch=main "$fixture"
   git_fixture config user.name "Motor Test"
@@ -58,9 +58,11 @@ build_fixture() {
   link_id="$(printf editable | git_fixture hash-object -w --stdin)"
   git_fixture update-index --add --cacheinfo "120000,$link_id,link"
   GIT_AUTHOR_DATE=2001-01-01T00:00:00Z GIT_COMMITTER_DATE=2001-01-01T00:00:00Z git_fixture commit -qm initial
+  initial_id="$(git_fixture rev-parse HEAD)"
   printf 'other\n' > "$fixture/editable"
   git_fixture add editable
   git_fixture update-index --chmod=+x editable
+  git_fixture update-index --add --cacheinfo "160000,$initial_id,nested"
   GIT_AUTHOR_DATE=2001-01-02T00:00:00Z GIT_COMMITTER_DATE=2001-01-02T00:00:00Z git_fixture commit -qm second
   git_fixture commit-graph write --reachable
   git_fixture pack-refs --all
@@ -69,6 +71,8 @@ build_fixture() {
   git_fixture fsck --strict
   [ "$(git_fixture count-objects -v | sed -n 's/^count: //p')" = 0 ] ||
     fail "fixture contains loose objects"
+  # Motor represents indexed symlinks as ordinary files containing the link text.
+  printf editable > "$fixture/link"
 }
 build_fixture
 git_fixture log --format='%h %s' --abbrev=12 > "$temporary/expected.log"
@@ -86,7 +90,12 @@ prepare_user_config() {
 : > "$GIX_FAKE_GIT_SENTINEL"
 exit 97
 SH
-  chmod +x "$temporary/fake-bin/git"
+  cat > "$temporary/fake-bin/filter" <<'SH'
+#!/bin/sh
+: > "$GIX_FILTER_SENTINEL"
+exit 97
+SH
+  chmod +x "$temporary/fake-bin/git" "$temporary/fake-bin/filter"
 }
 prepare_policy_fixture() {
   local parent_id
@@ -161,6 +170,7 @@ PY
     env -i "PATH=$temporary/fake-bin:$PATH" "HOME=$temporary/home"
     "XDG_CONFIG_HOME=$temporary/xdg"
     "GIX_FAKE_GIT_SENTINEL=$temporary/git-invoked"
+    "GIX_FILTER_SENTINEL=$temporary/filter-invoked"
   )
   "${app_env[@]}" "$gix_binary" -r "$fixture" -c core.abbrev=12 \
     --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
@@ -209,6 +219,48 @@ if result.returncode == 0:
 if b"Broken pipe" not in result.stderr or b"panicked" in result.stderr:
     raise SystemExit(f"unexpected broken-pipe diagnostic: {result.stderr!r}")
 PY
+
+  printf 'editable filter=blocked\n' > "$fixture/.git/info/attributes"
+  git_fixture config filter.blocked.clean "$temporary/fake-bin/filter"
+  git_fixture config filter.blocked.required true
+  if "${app_env[@]}" "$gix_binary" -r "$fixture" status \
+    > "$temporary/filter-status.out" 2> "$temporary/filter-status.err"; then
+    fail "status accepted a required external filter"
+  fi
+  grep -F "tracked path 'editable' uses unsupported filter 'blocked'" \
+    "$temporary/filter-status.err" >/dev/null || fail "filter rejection was not reported"
+  [ ! -e "$temporary/filter-invoked" ] || fail "status invoked an external filter"
+  git_fixture config --unset-all filter.blocked.clean
+  git_fixture config --unset-all filter.blocked.required
+  printf '\n[filter "required-only"]\n\trequired\n' >> "$fixture/.git/config"
+  printf 'editable filter=required-only\n' > "$fixture/.git/info/attributes"
+  if "${app_env[@]}" "$gix_binary" -r "$fixture" status \
+    > "$temporary/required-status.out" 2> "$temporary/required-status.err"; then
+    fail "status accepted an implicit required filter"
+  fi
+  grep -F "unsupported filter 'required-only'" "$temporary/required-status.err" >/dev/null ||
+    fail "implicit required filter rejection was not reported"
+  git_fixture config --remove-section filter.required-only
+  rm "$fixture/.git/info/attributes"
+
+  printf 'staged\n' > "$fixture/editable"
+  git_fixture add editable
+  printf 'unstaged\n' > "$fixture/editable"
+  git_fixture rm --cached -q link
+  printf 'untracked\n' > "$fixture/untracked"
+  : > "$fixture/.git/MERGE_HEAD"
+  cat > "$temporary/expected.status" <<'EOF'
+operation merge
+MM editable
+D? link
+?? untracked
+EOF
+  index_before="$(sha256sum "$fixture/.git/index")"
+  "${app_env[@]}" "$gix_binary" -r "$fixture" status > "$temporary/status.out"
+  cmp "$temporary/expected.status" "$temporary/status.out" >/dev/null ||
+    fail "gix status output differs from the expected state"
+  [ "$(sha256sum "$fixture/.git/index")" = "$index_before" ] ||
+    fail "gix status modified the source index"
   [ ! -e "$temporary/git-invoked" ] || fail "repository open invoked installed Git"
   echo "test-gix host PASS"
   exit
@@ -288,4 +340,20 @@ vm_ssh \
   "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_root/gix -r $guest_root/fixture -c core.abbrev=12 log" \
   > "$temporary/guest.log"
 verify_log "$temporary/guest.log"
+vm_ssh /system/bin/mv "$guest_root/fixture/.git" "$guest_root/output/worktree/.git"
+printf 'UTF8\n' > "$temporary/native-edit"
+printf 'put "%s" "%s"\n' \
+  "$temporary/native-edit" "$guest_root/output/worktree/café" | "${sftp_command[@]}"
+vm_ssh \
+  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_root/gix -r $guest_root/output/worktree status" \
+  > "$temporary/guest.status"
+cat > "$temporary/expected-guest.status" <<'EOF'
+ M café
+EOF
+cmp "$temporary/expected-guest.status" "$temporary/guest.status" >/dev/null ||
+  fail "native gix status output differs from the expected state"
+printf 'get "%s" "%s"\n' "$guest_root/output/worktree/.git/index" "$temporary/guest-source.index" |
+  "${sftp_command[@]}"
+cmp "$fixture/.git/index" "$temporary/guest-source.index" >/dev/null ||
+  fail "native gix status modified the source index"
 echo "test-gix guest PASS"

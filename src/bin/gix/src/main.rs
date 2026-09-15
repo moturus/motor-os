@@ -8,7 +8,7 @@ use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, repository};
+use motor_gix::{Result, repository, status};
 
 fn main() -> ExitCode {
     match run() {
@@ -56,6 +56,7 @@ fn run() -> Result {
                 .global(true),
         )
         .subcommand(Command::new("log").about("Show commit history"))
+        .subcommand(Command::new("status").about("Show worktree status"))
         .get_matches();
 
     let path = matches
@@ -71,6 +72,10 @@ fn run() -> Result {
 
     match matches.subcommand_name() {
         Some("log") => log::show(&opened.repo),
+        Some("status") => {
+            let report = status::collect(&opened)?;
+            Ok(report.write_to(io::stdout().lock())?)
+        }
         _ => unreachable!("clap accepts only declared subcommands"),
     }
 }

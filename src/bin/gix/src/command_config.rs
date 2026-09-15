@@ -47,8 +47,12 @@ fn inspect(repo: &gix::Repository) -> crate::Result<Policy> {
         {
             policy.external_filters.insert(name.to_owned());
         }
-        if let Some(value) = section.value("required") {
-            if bool::from(gix::config::Boolean::try_from(value.as_bstr())?) {
+        if let Some(value) = section.value_implicit("required") {
+            let required = match value {
+                Some(value) => bool::from(gix::config::Boolean::try_from(value.as_bstr())?),
+                None => true,
+            };
+            if required {
                 policy.required_filters.insert(name.to_owned());
             } else {
                 policy.required_filters.remove(name);

@@ -27,7 +27,7 @@ fn main() -> Result {
     let input = File::at(repo.index_path(), hash, false, Default::default())?;
     assert_eq!(
         input.entries().len(),
-        3,
+        4,
         "read a real Git index with its checksum"
     );
     input.verify_entries()?;
@@ -130,7 +130,7 @@ fn main() -> Result {
         false,
         Default::default(),
     )?;
-    assert_eq!(reopened.entries().len(), 3);
+    assert_eq!(reopened.entries().len(), 4);
 
     fs::write(
         fixture.join(".git/info/attributes"),

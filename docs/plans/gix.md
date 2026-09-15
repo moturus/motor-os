@@ -9,9 +9,9 @@ accepted on 2026-09-12. Implementation was subsequently approved. M1's
 native dependency port and host/Motor repository fixture are committed;
 Gitoxide revision `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
 on `gix-moturus-cli` and verified on 2026-09-15. Repository opening,
-configuration sanitization and `log` pass the host and Motor component
-fixtures. Attribute preflight, cancellation, status and transports remain
-M1 work.
+configuration sanitization, `log` and read-only `status` pass the host and
+Motor component fixtures. Status rejects affected external or required
+filters. Cancellation, transports and image integration remain M1 work.
 
 ## 1. Goal and decisions
 
@@ -164,6 +164,7 @@ Source paths below are relative to the pinned fork:
 | `gix-index/src/entry/stat.rs`, `gix-status/src/index_as_worktree/function.rs` | Retained stat caches must be checked against the old index timestamp before publishing a new index. The serializer does not invalidate racy entries for the caller. |
 | `gix-worktree-state/src/checkout/entry.rs` | Checkout truncates files before writing; overwrite can recursively delete colliding directories. Check outcome errors/collisions and interruption even on `Ok`. |
 | `gix/src/repository/merge.rs`, `gix/src/merge.rs` | `merge_commits()` internally builds configured filter/driver caches. Outcomes include resolved conflicts; `is_unresolved()` and `index_changed_after_applying_conflicts()` already exist. |
+| `gix/src/status` | Use the lower-level tree/index and index/worktree comparisons with a no-op submodule callback. The high-level adapter can reopen the parent outside the sanitized snapshot. Do not publish index-cache updates during read-only status. |
 | `gix/src/open/repository.rs`, `gix-odb/src/store_impls/dynamic/mod.rs` | The pinned replacement-ref configuration boolean is inverted. Use the direct `repo.objects.ignore_replacements = true` control before object access; reapply it to newly opened or converted handles. A local replacement-ref diagnostic confirmed this avoids the unrelated defect without a fork change. |
 | `gix-ref/src/store/file/transaction/commit.rs` | Ref transactions can publish partially; ordinary symbolic HEAD edits skip switch's reflog. Reflogs require an identity. |
 | `gix/src/repository/{identity,object}.rs` | Generic reflog identity fallback exists; `new_commit()` writes a commit object without updating refs. |
