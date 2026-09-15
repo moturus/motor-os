@@ -5,8 +5,12 @@ Q1–Q7 remain resolved. This revision separates the operation lock from
 the record, uses three recovery states, fixes index-cache preservation
 and merge-state cleanup, and simplifies complete pack object selection.
 Overlapping failure tests are consolidated. D8 and D9 retain the policies
-accepted on 2026-09-12. Implementation and commits remain stopped until
-this revision is reviewed.
+accepted on 2026-09-12. Implementation was subsequently approved. M1's
+native dependency port and host/Motor repository fixture are committed;
+Gitoxide revision `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
+on `gix-moturus-cli` and verified on 2026-09-15. Repository opening and
+`log` pass the host and Motor component fixtures. Configuration
+sanitization, cancellation, status and transports remain M1 work.
 
 ## 1. Goal and decisions
 
@@ -102,8 +106,8 @@ discussion. Section 4 incorporates the approved recovery scope.
 
 ## 2. First-release command surface (Q3, with Q4 recovery additions)
 
-Global options: `-r REPOSITORY`, `-c key=value`, help and deterministic
-version information. Paths are literal worktree-relative paths; support
+Global options: `-r REPOSITORY`, `-c key=value`, `--config-paths`, help and
+deterministic version information. Paths are literal worktree-relative paths; support
 `--` for names starting with a dash. No pathspec language initially.
 
 | Command | Contract |
@@ -159,6 +163,7 @@ Source paths below are relative to the pinned fork:
 | `gix-index/src/entry/stat.rs`, `gix-status/src/index_as_worktree/function.rs` | Retained stat caches must be checked against the old index timestamp before publishing a new index. The serializer does not invalidate racy entries for the caller. |
 | `gix-worktree-state/src/checkout/entry.rs` | Checkout truncates files before writing; overwrite can recursively delete colliding directories. Check outcome errors/collisions and interruption even on `Ok`. |
 | `gix/src/repository/merge.rs`, `gix/src/merge.rs` | `merge_commits()` internally builds configured filter/driver caches. Outcomes include resolved conflicts; `is_unresolved()` and `index_changed_after_applying_conflicts()` already exist. |
+| `gix/src/open/repository.rs`, `gix-odb/src/store_impls/dynamic/mod.rs` | The pinned replacement-ref configuration boolean is inverted. Use the direct `repo.objects.ignore_replacements = true` control before object access; reapply it to newly opened or converted handles. A local replacement-ref diagnostic confirmed this avoids the unrelated defect without a fork change. |
 | `gix-ref/src/store/file/transaction/commit.rs` | Ref transactions can publish partially; ordinary symbolic HEAD edits skip switch's reflog. Reflogs require an identity. |
 | `gix/src/repository/{identity,object}.rs` | Generic reflog identity fallback exists; `new_commit()` writes a commit object without updating refs. |
 | `gix-transport/src/client/blocking_io/{ssh/program_kind,file,request}.rs` | SSH adds unsupported `SendEnv` except in V1. Child drop kills/reaps without returning successful completion. `into_parts()` exposes a raw pack writer. |
@@ -225,9 +230,13 @@ again before each mutation; sections 5 and 6 refer to it:
 - One precedence for explicit user configuration, supported environment,
   repository data and `-c` overrides, with `-c` final for supported
   settings; document the actual gix precedence and report the
-  configuration paths. Reject unselected index/worktree path overrides.
-  Configuration cannot override filesystem limitations, process policy,
-  lock behavior or limits.
+  configuration paths. The initial load order is XDG configuration,
+  `~/.gitconfig` with includes in place, repository-local configuration,
+  repeated `-c` values, then fixed filesystem policy. Initially only `HOME`
+  and `XDG_CONFIG_HOME` may select environment-backed configuration paths;
+  mapped environment overrides and environment configuration are denied.
+  Reject unselected index/worktree path overrides. Configuration cannot
+  override filesystem limitations, process policy, lock behavior or limits.
 - Strip executable settings from the in-memory configuration consumed by
   library helpers: `core.sshCommand`, `GIT_SSH_COMMAND`, `GIT_SSH`,
   askpass, credential helpers, external diff/textconv, filter and
@@ -554,8 +563,8 @@ states from the initial client.
 
 Implement 100–300-line patches where practical, with meaningful tests for
 each behavior. Gate completed functional steps, rather than requiring a
-full runtime matrix for preparatory edits. Q1–Q7 are resolved, but this
-document revision stops for another review before implementation.
+full runtime matrix for preparatory edits. Q1–Q7 are resolved and
+implementation is approved.
 
 ### M1 — small application, local inspection and HTTPS acquisition
 
@@ -723,18 +732,18 @@ replace the earlier SSH-first and host-assisted-repair recommendations.
 | Q1 — Application/distribution | Approved: small `src/bin/gix` application over the pinned libraries, ordinary developer-image build integration. |
 | Q2 — Transport | Corrected: **HTTPS first, SSH later**. Anonymous HTTPS clone/fetch is M1; SSH clone/fetch/push is M3. |
 | Q3 — Commands | Approved: section 2's narrow surface, lightweight tags and explicit single-ref push, with its listed deferrals. D8/D9 remain accepted. |
-| Q4 — Recovery | Approved after discussion: explicit recovery on Motor, a shared tree/index helper, a small operation record, ORIG_HEAD where appropriate, read-only reflogs and extensions to existing failure tests. Retain the clean-start requirement and D9 discard policy; no general replay journal or power-loss guarantee. The subsequent review is incorporated in v05: a persistent advisory-lock file separate from the three-state record, the target ref and intended commit, a full index rebuild without retained stat caches, and owned merge-state cleanup before record removal. The proposed `reflog`/`ORIG_HEAD` deferral remains a scope question at the end of this document. |
+| Q4 — Recovery | Approved after discussion: explicit recovery on Motor, a shared tree/index helper, a small operation record and extensions to existing failure tests. Retain the clean-start requirement and D9 discard policy; no general replay journal or power-loss guarantee. The subsequent review is incorporated in v05: a persistent advisory-lock file separate from the three-state record, the target ref and intended commit, a full index rebuild without retained stat caches, and owned merge-state cleanup before record removal. The approved v05 implementation scope defers the earlier proposal's read-only `reflog` command and `ORIG_HEAD`, as D13 describes. |
 | Q5 — Reflog identity | Approved: existing generic committer fallback for non-authoring reflogs only; authored commits require configured identity. |
 | Q6 — Limits | Approved: one small fixture and one representative development repository, with measured transport/allocation/count/disk limits. This approves the method; it supplies no numerical thresholds. Select and record the workload and limits during implementation. |
 | Q7 — Existing index defect | Approved: narrow length check in the external `gix-index/src/file/init.rs` reader port and one truncated-index regression. No source fix in this document-only revision. |
 
-### Recovery discussion retained for review
+### Recovery discussion
 
 The approved scope provides recovery on Motor for the supported local
 operations. Section 2 uses `recover` for repair of a recorded operation;
 `branch create NAME OID` retains an earlier commit whose ID is known.
-Reflogs continue to be written, but the proposed scope has no command to
-inspect them. The command spelling and detailed flow are part of review.
+Reflogs continue to be written, but the approved first-release scope has
+no command to inspect them.
 
 Git's per-file lock publication and ordinary lock cleanup do not make an
 entire worktree transition atomic. Its checkout can leave partial changes,
@@ -759,9 +768,7 @@ on storage and fsync behavior and is separate work; no new Motor storage
 guarantee is assumed. [Git reflog](https://git-scm.com/docs/git-reflog),
 [Git fsync policy](https://github.com/git/git/blob/master/Documentation/config/core.adoc).
 
-Open scope question retained from v03/v04: should read-only `reflog` and
-`ORIG_HEAD` remain deferred? The earlier Q4 approval included them; the
-current proposal defers them to keep the first release small. The v05
-locking, index, recovery, pack-selection and test changes incorporate the
-subsequent discussion. Do not implement or commit this document revision
-until reviewed.
+The v05 revision was reviewed, committed and approved for implementation,
+including D13's `reflog`/`ORIG_HEAD` deferral. There are no remaining scope
+questions from that review. Q6's workload and numerical limits remain an
+implementation measurement task.

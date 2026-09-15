@@ -13,6 +13,7 @@ mode="${1:-}"
 temporary="$(mktemp -d)"
 guest_root=
 guest_created=0
+policy_head_id=
 fail() { echo "test-gix: $*" >&2; exit 1; }
 cleanup() {
   local status=$?
@@ -70,6 +71,34 @@ build_fixture() {
     fail "fixture contains loose objects"
 }
 build_fixture
+git_fixture log --format='%h %s' --abbrev=12 > "$temporary/expected.log"
+prepare_user_config() {
+  mkdir -p "$temporary/xdg/git" "$temporary/fake-bin"
+  printf '[core]\n\tabbrev = 6\n' > "$temporary/xdg/git/config"
+  printf '[core]\n\tabbrev = 9\n' > "$temporary/included.gitconfig"
+  printf '[core]\n\tabbrev = 8\n[include]\n\tpath = %s\n' \
+    "$temporary/included.gitconfig" > "$temporary/home/.gitconfig"
+  cat > "$temporary/fake-bin/git" <<'SH'
+#!/bin/sh
+: > "$GIX_FAKE_GIT_SENTINEL"
+exit 97
+SH
+  chmod +x "$temporary/fake-bin/git"
+}
+prepare_policy_fixture() {
+  local parent_id
+  git_fixture config core.abbrev 7
+  git_fixture config core.useReplaceRefs false
+  policy_head_id="$(git_fixture rev-parse HEAD)"
+  parent_id="$(git_fixture rev-parse HEAD^)"
+  mkdir -p "$fixture/.git/refs/replace"
+  printf '%s\n' "$parent_id" > "$fixture/.git/refs/replace/$policy_head_id"
+  printf '%s\n' "$policy_head_id" > "$fixture/.git/info/grafts"
+}
+verify_log() {
+  cmp "$temporary/expected.log" "$1" >/dev/null ||
+    fail "gix log differs from the clean host Git result"
+}
 verify_index() {
   local actual expected
   expected="$(git_fixture rev-parse 'HEAD^{tree}')"
@@ -120,6 +149,63 @@ PY
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
+
+  "$cargo" build "${common[@]}" --bin gix
+  gix_binary="$APP_DIR/target/component-test/release/gix"
+  prepare_user_config
+  prepare_policy_fixture
+  app_env=(
+    env -i "PATH=$temporary/fake-bin:$PATH" "HOME=$temporary/home"
+    "XDG_CONFIG_HOME=$temporary/xdg"
+    "GIX_FAKE_GIT_SENTINEL=$temporary/git-invoked"
+  )
+  "${app_env[@]}" "$gix_binary" -r "$fixture" -c core.abbrev=12 \
+    --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
+  verify_log "$temporary/log.out"
+  for config_path in "$temporary/xdg/git/config" "$temporary/home/.gitconfig" \
+    "$temporary/included.gitconfig" "$fixture/.git/config"; do
+    grep -F "$config_path" "$temporary/config-paths.out" >/dev/null ||
+      fail "configuration path was not reported: $config_path"
+  done
+  for variable in GIT_INDEX_FILE GIT_WORK_TREE; do
+    if "${app_env[@]}" "$variable=$temporary/unselected" \
+      "$gix_binary" -r "$fixture" log \
+      > "$temporary/$variable.out" 2> "$temporary/$variable.err"; then
+      fail "$variable override was accepted"
+    fi
+    grep -F "$variable is not supported" "$temporary/$variable.err" >/dev/null ||
+      fail "$variable rejection was not reported"
+  done
+  git_fixture config gitoxide.core.indexFile "$temporary/unselected-index"
+  if "${app_env[@]}" "$gix_binary" -r "$fixture" log \
+    > "$temporary/config-index.out" 2> "$temporary/config-index.err"; then
+    fail "repository index override was accepted"
+  fi
+  grep -F "repository configuration selected a different index" \
+    "$temporary/config-index.err" >/dev/null || fail "repository index rejection was not reported"
+  git_fixture config --unset gitoxide.core.indexFile
+  "${app_env[@]}" python3 - "$gix_binary" "$fixture" <<'PY'
+import os
+import subprocess
+import sys
+
+read_fd, write_fd = os.pipe()
+os.close(read_fd)
+try:
+    result = subprocess.run(
+        [sys.argv[1], "-r", sys.argv[2], "log"],
+        stdout=write_fd,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+finally:
+    os.close(write_fd)
+if result.returncode == 0:
+    raise SystemExit("closed stdout was reported as success")
+if b"Broken pipe" not in result.stderr or b"panicked" in result.stderr:
+    raise SystemExit(f"unexpected broken-pipe diagnostic: {result.stderr!r}")
+PY
+  [ ! -e "$temporary/git-invoked" ] || fail "repository open invoked installed Git"
   echo "test-gix host PASS"
   exit
 fi
@@ -134,44 +220,68 @@ native_env=(
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes"
 )
 env "${native_env[@]}" "$cargo" build "${common[@]}" \
-  --target x86_64-unknown-motor --test native-port \
+  --target x86_64-unknown-motor --bin gix --test native-port \
   --message-format json-render-diagnostics > "$messages"
-binary="$(python3 - "$messages" <<'PY'
+artifact_paths="$(python3 - "$messages" <<'PY'
 import json
 import pathlib
 import sys
 
-executables = []
+targets = {"native-port": [], "gix": []}
 for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     message = json.loads(line)
-    if (
-        message.get("reason") == "compiler-artifact"
-        and message["target"]["name"] == "native-port"
-        and message.get("executable")
-    ):
-        executables.append(message["executable"])
-if len(executables) != 1:
-    raise SystemExit("native-port executable was not found exactly once")
-print(executables[0])
+    if message.get("reason") != "compiler-artifact" or not message.get("executable"):
+        continue
+    name = message["target"]["name"]
+    kind = message["target"]["kind"]
+    if name == "native-port" and kind == ["test"]:
+        targets[name].append(message["executable"])
+    elif name == "gix" and kind == ["bin"]:
+        targets[name].append(message["executable"])
+for name in ["native-port", "gix"]:
+    if len(targets[name]) != 1:
+        raise SystemExit(f"{name} executable was not found exactly once")
+    print(targets[name][0])
 PY
 )"
+mapfile -t executables <<< "$artifact_paths"
+[ "${#executables[@]}" -eq 2 ] || fail "native executables were not found"
+native_port_binary="${executables[0]}"
+gix_binary="${executables[1]}"
 
 guest_root="/devtools/tmp/gix-test-$$"
 vm_ssh /system/bin/mkdir "$guest_root"
 guest_created=1
 vm_ssh /system/bin/mkdir "$guest_root/fixture"
+vm_ssh /system/bin/mkdir "$guest_root/home"
+vm_ssh /system/bin/mkdir "$guest_root/xdg"
 sftp_command=(
   sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts"
   -i "$WD/test.key" -b - motor@192.168.4.2
 )
 {
-  printf 'put "%s" "%s"\n' "$binary" "$guest_root/native-port"
+  printf 'put "%s" "%s"\n' "$native_port_binary" "$guest_root/native-port"
   printf 'chmod 755 "%s"\n' "$guest_root/native-port"
+  printf 'put "%s" "%s"\n' "$gix_binary" "$guest_root/gix"
+  printf 'chmod 755 "%s"\n' "$guest_root/gix"
   printf 'put -r "%s" "%s"\n' "$fixture/.git" "$guest_root/fixture"
 } | "${sftp_command[@]}"
 vm_ssh "$guest_root/native-port" "$guest_root/fixture" "$guest_root/output"
 printf 'get "%s" "%s"\n' "$guest_root/output/written.index" "$temporary/guest.index" |
   "${sftp_command[@]}"
 verify_index "$temporary/guest.index"
+
+prepare_policy_fixture
+vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
+{
+  printf 'put "%s" "%s"\n' "$fixture/.git/config" "$guest_root/fixture/.git/config"
+  printf 'put "%s" "%s"\n' \
+    "$fixture/.git/refs/replace/$policy_head_id" "$guest_root/fixture/.git/refs/replace/$policy_head_id"
+  printf 'put "%s" "%s"\n' "$fixture/.git/info/grafts" "$guest_root/fixture/.git/info/grafts"
+} | "${sftp_command[@]}"
+vm_ssh \
+  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_root/gix -r $guest_root/fixture -c core.abbrev=12 log" \
+  > "$temporary/guest.log"
+verify_log "$temporary/guest.log"
 echo "test-gix guest PASS"
