@@ -9,8 +9,8 @@ Q16 is settled in D16: an explicitly requested `raw.img` target for standard
 Firecracker tests, with no developer-image Firecracker support. Q18 is settled
 in D17: preserve RX used-ring order inside virtio-async using the existing
 queue, without negotiating `IN_ORDER`. Shared reset verification, malformed
-credit handling, and BAR-boundary validation await implementation review in
-Q19–Q21.
+credit handling, BAR-boundary validation, and the integrated-pump milestone
+dependency await implementation review in Q19–Q22.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
 implementation has started, with progress recorded below.
@@ -504,6 +504,26 @@ Stage 3 device constructor and driver facade are implemented and parent-reviewed
   failed live initialization, and external facade use remain source-reviewed,
   not fixture-emulated or tested on attached vsock hardware. Runtime pumps,
   lazy service activation, Q19–Q21, and both milestones remain pending.
+
+Shared modern PCI discovery no longer rejects revision zero:
+
+- Removed the revision-register read and stale legacy-device heuristic.
+  Modern device IDs, capabilities, and required features still select the
+  supported transport. This follows
+  [Virtio 1.1 section 4.1.2.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html),
+  which requires accepting every PCI Revision ID. The issue was identified
+  by source/specification review, not a failing supported-VMM boot.
+- Existing guest modern/legacy/unknown-ID and feature tests remain the
+  relevant contract coverage; no artificial ignored-revision parameter or
+  PCI injection seam was added. Debug/release builds, targeted Clippy, and
+  descriptor/I/O-task/filesystem regressions passed, as did these release
+  groups on CHV and Firecracker. No new warnings or initial check failures;
+  formatting/diff checks passed. Logs: `/tmp/virtio-revision.1xA619/`,
+  `/tmp/virtio-revision-gate.A29VEj/`, and
+  `/tmp/virtio-revision-other-vmm.2mFG6R/`.
+- Revision-zero hardware was not injected, and no vsock device was activated.
+  M1/M2 remain pending; Q22 records the dependency preventing literal Stage 5
+  completion before the connection/IPC implementation.
 
 ## Scope and simplicity
 
@@ -1982,3 +2002,23 @@ This adds at most five previously unnecessary PCI configuration reads per
 device, with no tasks or polling; exact costs depend on the BAR layout and
 which BARs are consumed. These boot-time reads require AGENTS.md review.
 No BAR-layout implementation or live read-count measurement is claimed yet.
+
+### Q22. Put integrated runtime pumps in M2? (awaiting review)
+
+The current M1 boundary says stages 1–6 must be complete before client/server
+integration. However, Stage 5's RX dispatch and event reactions need Stage 7's
+connection states, TX scheduling needs actual per-stream work and ordering,
+and the reserved-page copy boundary needs stages 9–10's IPC ownership. The
+driver poll/send APIs, fixed pools, pure credits, and bounded receive storage
+can be built independently; idle pumps or a substitute transport framework
+would not satisfy the planned integrated behavior or its tests.
+
+Proposed boundary: M1 gates the capability, modern-driver/shared-queue,
+credit-arithmetic, and bounded-storage foundations, including their executable
+guest fixtures. Implement and validate the integrated runtime pumps alongside
+the connection/IPC work in M2. Keep both milestones' three debug and three
+release main-image full runs, M2's additional CHV/FC runs, and every patch's
+affected guest gates unchanged. No case is dropped or counted as covered by
+a weaker fixture. D13 and the validation schedule remain unchanged until this
+dependency adjustment is approved; neither milestone may be declared complete
+on the current partial implementation.

@@ -31,7 +31,7 @@ pub enum VirtioDeviceKind {
 impl VirtioDeviceKind {
     pub(crate) fn from_device_id(device_id: u16) -> Self {
         match device_id {
-            // We work only with standard/modern VirtIO devices.
+            // Modern IDs select this transport; PCI Revision ID may be any value.
             0x1041 => VirtioDeviceKind::Net,
             0x1042 => VirtioDeviceKind::Block,
             0x1053 => VirtioDeviceKind::Vsock,
@@ -249,13 +249,6 @@ impl VirtioDevice {
         if status & pci::PCI_STATUS_CAP_LIST == 0 {
             log::warn!("VirtIO device_id {device_id:?}: wrong status: {status:x}");
             return Err(ErrorKind::InvalidData.into());
-        }
-
-        let reg_2 = device_id.read_config_u32(0x08);
-        let revision_id = (reg_2 & 0xff) as u8;
-        if revision_id == 0 {
-            log::warn!("VirtIO device_id {device_id:?}: legacy device_id (revision_id)");
-            return Err(ErrorKind::Unsupported.into());
         }
 
         let caps = device_id.find_capabilities(pci::PCI_CAP_VENDOR);
