@@ -125,6 +125,7 @@ common=(--manifest-path "$APP_DIR/Cargo.toml" --release --locked --offline
   --target-dir "$APP_DIR/target/component-test")
 
 if [ "$mode" = --host ]; then
+  "$cargo" test "${common[@]}" --lib
   metadata="$temporary/metadata.json"
   "$cargo" metadata --manifest-path "$APP_DIR/Cargo.toml" --locked --offline \
     --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$metadata"
