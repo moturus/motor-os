@@ -1206,6 +1206,24 @@ and parent-reviewed:
   All cases remain transitively included in full-test. Accept and Q30's
   final-slot cancellation repair remain pending.
 
+D16's IP-disabled discovery phase now uses the selected VMM:
+
+- `test-vsock.sh` runs its existing present/disabled guest assertions on
+  QEMU, CHV, or Firecracker, including capability/error precedence and current
+  CID queries without IP networking. It reuses the strict serial helper and
+  preserves the same guest commands, status markers, liveness checks, and
+  deadlines. QEMU alone starts the pinned UDS backend/shared RAM; each run
+  owns and reaps its processes exactly once.
+- All three VMMs passed the full vsock phase in debug and release, including
+  all seventeen peer cases. Evidence: `/tmp/vsock-d16-discovery-gate.AtDQcd/`.
+  Observed phase times, including incremental image builds, were 26/32/18
+  seconds for QEMU/CHV/FC debug and 37/14/13 seconds for release. These are
+  harness timings, not the outstanding stage 15 performance measurements.
+- Shell syntax, invalid/duplicate option checks, and early developer-FC
+  rejection pass. The isolated raw discovery image remains test-only; normal
+  suite images and formats are unchanged. Full-test selector exposure,
+  non-selected boot checks, and developer selector propagation remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2515,8 +2533,11 @@ Running the whole suite on every VMM in every run is too long. Instead:
 | Developer-image phases | `dev.img` -> `motor-os-dev.qcow2` | Not supported; no raw developer image or Firecracker gate requirement. |
 | Non-selected VMM boot check in the standard suite only | Main qcow2 image | `base.img` -> raw `motor-os-base.img`; does not request `raw.img`. |
 
-The IP-disabled vsock image is an isolated variant of the selected suite
-image, using that VMM's format; it must not overwrite the ordinary image.
+The IP-disabled vsock discovery phase uses the existing isolated raw
+`motor-os-vsock-test.img` on all three VMMs, which all support raw disks.
+Its test-only overlay and installed systest do not overwrite any ordinary
+image. The peer phase still uses the selected standard/developer suite image
+and format from the table above; this adds no Firecracker developer support.
 
 | Guest launch site | Required propagation/change |
 | --- | --- |

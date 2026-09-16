@@ -44,34 +44,60 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$VMM" in qemu|chv|fc) ;; *) echo "test-vsock: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
+  echo "test-vsock: Firecracker does not support developer images" >&2
+  exit 2
+fi
 
 WD="$(dirname "$0")"
 ROOT_DIR="$WD/../.."
-IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
+. "$WD/vm-cleanup.sh"
+. "$WD/vm-test-selection.sh"
+. "$WD/vm-test-serial.sh"
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-vsock.XXXXXX")"
 echo "test-vsock: logs preserved in $LOG_DIR"
 
-for tool in cloud-hypervisor-static flock pgrep rg script; do
+for tool in flock rg; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "test-vsock: required host tool is missing: $tool" >&2
     exit 1
   }
 done
+case "$VMM" in
+  qemu)
+    VHOST_DEVICE_VSOCK="${VHOST_DEVICE_VSOCK:-vhost-device-vsock}"
+    discovery_tools=(qemu-system-x86_64 "$VHOST_DEVICE_VSOCK")
+    ;;
+  chv) discovery_tools=(cloud-hypervisor-static pgrep script) ;;
+  fc) discovery_tools=(firecracker) ;;
+esac
+for tool in "${discovery_tools[@]}"; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "test-vsock: required host tool is missing: $tool" >&2
+    exit 1
+  }
+done
+if [ "$VMM" = qemu ]; then
+  backend_version="$("$VHOST_DEVICE_VSOCK" --version)"
+  [ "$backend_version" = "vhost-device-vsock 0.3.0" ] || {
+    echo "test-vsock: expected vhost-device-vsock 0.3.0, got '$backend_version'" >&2
+    exit 1
+  }
+fi
 
-# The selected-VMM peer phase performs its own prerequisite checks before it
-# builds or launches. The existing serial discovery cases remain CHV-only
-# until their D16 conversion.
+# Both the peer and IP-disabled serial discovery phases use the selected VMM.
 outgoing_args=(--vmm "$VMM")
 [ "$BUILD" = release ] && outgoing_args=(--release "${outgoing_args[@]}")
 "$WD/test-vsock-outgoing.sh" "${outgoing_args[@]}"
 
+select_test_vm "$ROOT_DIR" "$BUILD" system-console "$VMM"
 make -C "$ROOT_DIR" vsock-test.img BUILD="$BUILD" -j"$(nproc)"
 
 run_discovery() (
   local mode="$1"
-  local runtime_dir console_log first_byte chv_command
-  local wrapper_pid="" chv_pid="" wrapper_status=0 cleanup_status=0
+  local runtime_dir console_log first_byte backend_status=0 cleanup_status=0
+  local -a runner_args=()
   runtime_dir="$(mktemp -d "$LOG_DIR/$mode-runtime.XXXXXX")"
   console_log="$LOG_DIR/$mode-console.log"
   mkfifo "$runtime_dir/console-in"
@@ -79,75 +105,77 @@ run_discovery() (
   export MOTO_IMAGE=motor-os-vsock-test.img
   export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
   export MOTO_SMP="${MOTO_SMP:-4}"
-  export MOTO_CHV_RUNTIME_DIR="$runtime_dir"
+  export MOTO_CHV_RUNTIME_DIR="$runtime_dir/chv"
+  export MOTO_FC_RUNTIME_DIR="$runtime_dir/fc"
+  export MOTO_FC_VSOCK_UDS=''
+  export SERIAL_VM_HAS_SSH=0
+  VMM_PID=""
+  VM_CHILD_PID=""
+  BACKEND_PID=""
 
   fail() {
-    echo "test-vsock: CHV $BUILD $mode: $*" >&2
+    echo "test-vsock: $TEST_VM_LABEL $BUILD $mode: $*" >&2
     tail -100 "$console_log" >&2 || true
     exit 1
   }
 
-  vm_alive() {
-    local children
-    kill -0 "$wrapper_pid" 2>/dev/null || return 1
-    children="$(pgrep -P "$wrapper_pid" || true)"
-    [ "$(printf '%s\n' "$children" | sed '/^$/d' | wc -l)" -eq 1 ] || return 1
-    chv_pid="$children"
-    kill -0 "$chv_pid" 2>/dev/null
+  stop_backend() {
+    local owned_pid
+    [ -n "$BACKEND_PID" ] || return 0
+    owned_pid="$BACKEND_PID"
+    if kill -0 "$owned_pid" 2>/dev/null; then
+      kill "$owned_pid" 2>/dev/null || return 1
+    fi
+    wait "$owned_pid" || backend_status=$?
+    # The sole wait released ownership; clear before status validation can
+    # return through cleanup with a stale, already-reaped pid.
+    BACKEND_PID=""
+    case "$backend_status" in 0|143) ;; *) return 1 ;; esac
+    ! kill -0 "$owned_pid" 2>/dev/null || return 1
   }
 
   cleanup() {
     local status=$?
     trap - EXIT
+    set +e
     exec 3>&-
-    if [ -n "$chv_pid" ] && kill -0 "$chv_pid" 2>/dev/null; then
-      # Leave script alive: its normal SIGCHLD path reaps this direct child.
-      kill "$chv_pid" 2>/dev/null || cleanup_status=1
-    elif [ -z "$chv_pid" ] && [ -n "$wrapper_pid" ] &&
-        kill -0 "$wrapper_pid" 2>/dev/null; then
-      # Launch failed before ownership of a direct child could be established.
-      kill "$wrapper_pid" 2>/dev/null || cleanup_status=1
-    fi
-    if [ -n "$wrapper_pid" ]; then
-      wait "$wrapper_pid" || wrapper_status=$?
-      case "$wrapper_status" in
-        0|143) ;;
-        *) cleanup_status=1 ;;
-      esac
-    fi
-    if [ -n "$chv_pid" ] && kill -0 "$chv_pid" 2>/dev/null; then
-      echo "test-vsock: owned CHV pid $chv_pid survived wrapper teardown" >&2
-      cleanup_status=1
-    fi
-    echo "test-vsock: CHV $BUILD $mode wrapper exit $wrapper_status after owned teardown"
-    if [ "$status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
-      status=1
-    fi
+    stop_serial_test_vm || cleanup_status=1
+    stop_backend || cleanup_status=1
+    [ "$status" -ne 0 ] || status="$cleanup_status"
     exit "$status"
   }
   trap cleanup EXIT
 
-  local -a runner=("$IMG_DIR/run-chv.sh")
-  if [ "$mode" = present ]; then
-    runner+=(--vsock "cid=3,socket=$runtime_dir/vsock")
+  if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
+    # Preserve the existing full-test knob's intentional shell splitting.
+    runner_args+=(${FULL_TEST_QEMU_ARGS})
   fi
-  printf -v chv_command '%q ' "${runner[@]}"
-  chv_command="exec $chv_command"
+  if [ "$mode" = present ]; then
+    case "$VMM" in
+      qemu)
+        export MOTO_SHARED_MEM=1
+        "$VHOST_DEVICE_VSOCK" --guest-cid 3 --socket "$runtime_dir/vhost" \
+          --uds-path "$runtime_dir/vsock" --queue-size 256 \
+          > "$runtime_dir/backend.log" 2>&1 &
+        BACKEND_PID="$!"
+        for _ in $(seq 1 100); do
+          [ -S "$runtime_dir/vhost" ] && break
+          kill -0 "$BACKEND_PID" 2>/dev/null || fail "vsock backend exited before readiness"
+          sleep 0.1
+        done
+        [ -S "$runtime_dir/vhost" ] || fail "vsock backend did not become ready"
+        kill -0 "$BACKEND_PID" 2>/dev/null || fail "vsock backend exited at readiness"
+        runner_args+=(-chardev "socket,id=vsock,path=$runtime_dir/vhost" \
+          -device vhost-user-vsock-pci,chardev=vsock)
+        ;;
+      chv) runner_args+=(--vsock "cid=3,socket=$runtime_dir/vsock") ;;
+      fc) export MOTO_FC_VSOCK_UDS="$runtime_dir/vsock" ;;
+    esac
+  fi
 
-  # CHV only accepts serial input from a TTY. script supplies the PTY, forwards
-  # termination to its direct exec'ed child, and suppresses host-side echo.
   exec 3<> "$runtime_dir/console-in"
-  script -qef -E never -c "$chv_command" /dev/null \
-    < "$runtime_dir/console-in" > "$console_log" 2>&1 &
-  wrapper_pid=$!
-
-  for _ in $(seq 1 100); do
-    vm_alive && break
-    kill -0 "$wrapper_pid" 2>/dev/null || fail "CHV wrapper exited during launch"
-    sleep 0.1
-  done
-  vm_alive || fail "CHV child did not start"
-  echo "test-vsock: CHV $BUILD $mode wrapper=$wrapper_pid child=$chv_pid"
+  start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$console_log" \
+    "$runtime_dir/console-in" "${runner_args[@]}"
 
   wait_line() {
     local offset="$1" pattern="$2" description="$3"
@@ -156,7 +184,7 @@ run_discovery() (
           rg -a "$pattern" >/dev/null; then
         return
       fi
-      vm_alive || fail "owned CHV exited while waiting for $description"
+      serial_test_vm_alive || fail "owned $TEST_VM_LABEL exited while waiting for $description"
       sleep 0.5
     done
     fail "console did not emit $description"
@@ -173,8 +201,11 @@ run_discovery() (
     rg -a '^VSOCK_DISCOVERY_STATUS=0$' >/dev/null || fail "guest test returned failure"
   tail -c "+$first_byte" "$console_log" | filter_vm_console | tr -d '\r' |
     rg -a "^vsock discovery: $mode PASS$" >/dev/null || fail "guest PASS marker missing"
-  vm_alive || fail "owned CHV exited before the final liveness check"
-  echo "test-vsock: CHV $BUILD $mode guest status=0 PASS"
+  serial_test_vm_alive || fail "owned $TEST_VM_LABEL exited before the final liveness check"
+  if [ "$VMM" = qemu ] && [ "$mode" = present ]; then
+    kill -0 "$BACKEND_PID" 2>/dev/null || fail "owned backend exited before the final liveness check"
+  fi
+  echo "test-vsock: $TEST_VM_LABEL $BUILD $mode guest status=0 PASS"
 )
 
 run_discovery present

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Selected-VMM outgoing-peer phase. The existing IP-disabled
-# serial discovery cases remain separate until their D16 conversion lands.
+# Selected-VMM peer phase; IP-disabled serial discovery lives in test-vsock.sh.
 
 if [ "${TEST_VSOCK_TIMEOUT_ACTIVE:-0}" != 1 ]; then
   export TEST_VSOCK_TIMEOUT_ACTIVE=1
