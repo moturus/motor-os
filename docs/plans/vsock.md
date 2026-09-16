@@ -3132,3 +3132,30 @@ Under the recommended lifecycle fix, a canceled accept on a still-live channel
 may retain one Q28 pending-call slot until a peer arrives or the listener drops;
 the existing late-success-close behavior then reclaims the child. Document and
 test that bound rather than claiming prompt server-side request cancellation.
+
+### Q31. Unrelated kernel thread-creation rollback leak
+
+The release developer gates on both QEMU and CHV exposed
+`stats: process dropped with 1 active threads` during the existing unwind
+abort test. Read-only diagnosis found a preexisting race: `spawn_thread`
+constructs a thread and publishes its self/join objects before checking the
+process's Running state. If process exit wins before insertion into the thread
+map, the error path does not undo construction. Exit cannot find that thread
+in the map, and its object cycles and active-thread accounting survive.
+Its kernel stack also remains in the global kernel address space because
+`Thread::cleanup` never runs; user-stack pages are reclaimed with the process
+address space. The live process listing retained a DEAD unwind child with
+one active thread.
+
+This is not VMM- or virtio-specific. The same diagnostic is in the pre-vsock
+QEMU baseline (`/tmp/vsock-baseline.qoT1LL/full-test-release.log`) and M1
+logs. Current evidence is in
+`/tmp/vsock-d16-developer-gate.NEOmKO/{qemu,chv}-full-test.log`; the relevant
+paths are `kernel/src/uspace/process.rs::{spawn_thread, Thread::new}` and
+`kernel/src/xray/stats.rs::process_dropped`.
+
+Recommend a separate reviewed kernel rollback fix, with the existing unwind
+test plus thread/accounting regressions. This broadens the explicitly approved
+virtio-bug scope: await approval before kernel edits. Alternatively, record
+the diagnosed bug for separate work. Do not suppress the diagnostic or treat
+the passing functional suite as proof that thread cleanup is correct.
