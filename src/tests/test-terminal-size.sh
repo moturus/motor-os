@@ -49,11 +49,34 @@ set -e
 WD="$(dirname "$0")"
 
 BUILD="debug"
-if [ "${1:-}" = "--release" ]; then
-  BUILD="release"
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "test-terminal-size: duplicate --release" >&2; exit 2; }
+      BUILD=release; SEEN_RELEASE=1; shift ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-terminal-size: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "test-terminal-size: --vmm requires qemu, chv, or fc" >&2; exit 2; }
+      VMM="$2"; SEEN_VMM=1; shift 2 ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-terminal-size: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"; SEEN_VMM=1; shift ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2; exit 2 ;;
+  esac
+done
+case "$VMM" in qemu|chv|fc) ;; *) echo "test-terminal-size: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
+  echo "test-terminal-size: Firecracker does not support developer images" >&2
+  exit 2
 fi
 ROOT_DIR="$WD/../.."
-IMG_DIR="$WD/../../vm_images/$BUILD"
+. "$WD/vm-test-selection.sh"
+TEST_VM_PHASE=standard
+[ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ] || TEST_VM_PHASE=developer
+select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   MOTOR_TEST_ROOT=/devtools
@@ -66,8 +89,15 @@ RMUX_TMPDIR="$TEST_TMP/test-terminal-size-rmux"
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
-IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
+IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
+export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+export MOTO_SMP="${MOTO_SMP:-4}"
+case "$VMM:$MOTO_IMAGE" in
+  fc:*.img|fc:*.raw|qemu:*.qcow2|qemu:*.img|qemu:*.raw|chv:*.qcow2|chv:*.img|chv:*.raw) ;;
+  fc:*) echo "test-terminal-size: Firecracker requires a raw image, not '$MOTO_IMAGE'" >&2; exit 2 ;;
+  *) echo "test-terminal-size: unsupported image filename '$MOTO_IMAGE'" >&2; exit 2 ;;
+esac
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = "release" ]; then
@@ -91,6 +121,7 @@ SSH_OPTIONS=(
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
+. "$WD/vm-test-serial.sh"
 
 fail() {
   echo "test-terminal-size: $*" >&2
@@ -108,11 +139,15 @@ RMUX_CONSOLE_STARTED=0
 # a check that fails here is not reproducible on demand, and the bytes are the
 # only evidence of what the terminal actually said.
 SCRATCH="$(mktemp -d)"
+export MOTO_CHV_RUNTIME_DIR="$SCRATCH/chv"
+export MOTO_FC_RUNTIME_DIR="$SCRATCH/fc"
+export MOTO_FC_VSOCK_UDS=''
 VMM_PID=""
+VM_CHILD_PID=""
 TEST_ROOT_CREATED=0
 
 save_red_stderr() {
-  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
+  if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
       motor@192.168.4.2 "/system/bin/cat $TEST_TMP/red-*.stderr" > "$RED_STDERR_LOG"
     if [ "$RMUX_CONSOLE_STARTED" = "1" ]; then
@@ -124,7 +159,7 @@ save_red_stderr() {
 
 remove_test_root() {
   if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
-    kill -0 "$VMM_PID" 2>/dev/null; then
+    serial_test_vm_alive; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
       motor@192.168.4.2 /system/bin/rm -r "$MOTOR_TEST_ROOT" >/dev/null 2>&1
     TEST_ROOT_CREATED=0
@@ -132,13 +167,15 @@ remove_test_root() {
 }
 
 cleanup() {
+  local status=$?
+  trap - EXIT
   set +e
   save_red_stderr
   remove_test_root
-  stop_vm "$VMM_PID"
-  VMM_PID=""
   exec 3>&- 4>&-
+  stop_serial_test_vm || status=1
   rm -rf "$SCRATCH"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -150,18 +187,17 @@ start_red() {
 }
 
 # The serial console's stdin: the fifo stays open on fd 3 so the console can be
-# answered at any point, and qemu never sees EOF until cleanup.
+# answered at any point, and the VMM never sees EOF until cleanup.
 mkfifo "$SCRATCH/console-in"
 
-echo "test-terminal-size: starting a $BUILD VM; console log in $CONSOLE_LOG"
-"$IMG_DIR/run-qemu.sh" < "$SCRATCH/console-in" > "$CONSOLE_LOG" 2>&1 &
-VMM_PID="$!"
-exec 3> "$SCRATCH/console-in"
+exec 3<> "$SCRATCH/console-in"
+start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
+  "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
-    fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
+  if ! serial_test_vm_alive; then
+    fail "$TEST_VM_LABEL exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
   sleep 1
 done
@@ -520,7 +556,10 @@ sleep 2
 # answered and so was told 80x24 -- it is the report reaching *it* that makes
 # `$COLUMNS` right for the editor it launches, one hop further in.
 exec 4>&3
-RMUX_REFRESH='\001\001r'    # doubled past qemu's console, see `settled_bar`
+RMUX_REFRESH='\001r'
+if [ "$VMM" = qemu ]; then
+  RMUX_REFRESH='\001\001r'  # doubled past QEMU's monitor, see `settled_bar`
+fi
 start_red console-rmux >&3
 first="$(settled_bar "$CONSOLE_LOG" "")"
 
@@ -550,8 +589,8 @@ sleep 4
 echo "-- russhd pty session --"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
-    fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
+  if ! serial_test_vm_alive; then
+    fail "$TEST_VM_LABEL exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
   sleep 1
 done
@@ -823,7 +862,6 @@ bars="$(cat "$SCRATCH/rmux-pane-bars")"
 
 save_red_stderr
 remove_test_root
-stop_vm "$VMM_PID"
-VMM_PID=""
+stop_serial_test_vm
 
 echo "-------- TEST-TERMINAL-SIZE PASS ---------"

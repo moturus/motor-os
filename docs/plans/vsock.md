@@ -1100,6 +1100,24 @@ cases and owned teardown passed on QEMU in debug and release, with syntax
 and diff checks: `/tmp/vsock-outgoing-ownership-gate.qeS5wh/`. This is a
 test-only correction, not a VMM or guest-runtime change.
 
+D16's selected-VMM terminal-size path is implemented and parent-reviewed:
+
+- `test-terminal-size.sh` uses the shared selector and serial lifecycle,
+  including FC's explicitly built standard raw image. Existing resize,
+  editor, rmux, and SSH assertions remain unchanged; developer-image FC is
+  rejected before building.
+- The first CHV run exposed a harness bug: rmux refresh used doubled Ctrl+A
+  to pass QEMU's monitor, but CHV/FC deliver both bytes directly to the guest.
+  Only QEMU now doubles the prefix. The original failure is preserved in
+  `/tmp/vsock-d16-terminal-size-gate.uHhSg4/`; no timeout, assertion, or VMM
+  change was needed.
+- All cases and builds then passed on QEMU, CHV, and FC in debug and release,
+  including owned teardown. CLI rejection, syntax, and diff checks passed.
+  Logs and saved console/editor evidence:
+  `/tmp/vsock-d16-terminal-size-fixed-gate.bhpiVj/`. Full-test already reaches
+  the default path; developer-image validation and suite selector propagation
+  remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2791,3 +2809,28 @@ channel model. A small fixed/pre-reserved queue avoids a new per-channel
 reservation-tracking scheme. Alternatively, match TCP's 1,024-call limit.
 Await user choice before implementing this bound; bind/drop and incoming
 backlog work do not depend on it.
+
+### Q29. Real transport-reset integration coverage
+
+Existing guest fixtures separately cover connection reset, CID-index refresh,
+and event-buffer decoding/reposting, but not the combined sys-io event handler
+and native notifications. Firecracker 1.15.1 can supply a real reset with
+`Pause -> SnapshotCreate -> Resume` in the same process, without restoring or
+migrating the VM: its [snapshot documentation](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/docs/snapshotting/snapshot-support.md#vsock-device-reset)
+explicitly describes the transport-reset event during snapshot creation.
+
+Recommend an FC-only case in the existing acceptance phase, with a guest/peer
+readiness barrier, native reset/error and buffered-RX assertions, and listener
+reuse after resume. Require a guest verdict; API success alone does not prove
+event delivery. This needs snapshot files (about 1 GiB for the default test
+VM), but no production injection hook, VMM changes, restore test, or new
+host-only suite. It covers same-CID reset, not a live CID change.
+
+The other configured VMM paths cannot provide this event: QEMU's
+[vhost-user-vsock device](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/vhost-user-vsock.c#L83-L88)
+is unmigratable, while its transport-reset sender is a post-load callback;
+[CHV 52's restore path](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/device.rs)
+queues per-connection RST packets instead of a transport-reset event.
+Await approval before adding snapshot orchestration beyond stage 13's current
+fixture-only approach. Alternatively, retain the fixtures and explicitly
+accept the remaining integration-coverage gap; do not claim it is tested.
