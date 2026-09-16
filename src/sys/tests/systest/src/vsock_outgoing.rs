@@ -20,6 +20,10 @@ const TRANSFER_DONE: &[u8] = b"transfer:done";
 const CASE_DONE: &[u8] = b"case:done";
 const CANCEL_READY: &[u8] = b"cancel:ready";
 const ROLES_READY: &[u8] = b"roles:ready";
+const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
+const UNRELATED_PING: &[u8] = b"unrelated:ping";
+const UNRELATED_PONG: &[u8] = b"unrelated:pong";
+const DRAIN_STARTED: &[u8] = b"drain:started";
 const CANCEL_POLLS: usize = 4;
 const PAGES_PER_SUBCHANNEL: usize = CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize;
 
@@ -33,6 +37,7 @@ enum Action {
     CancelWrite { tail: usize },
     CancelBeforePollDrop,
     CancelQueuedConnect,
+    StalledReader { total: usize },
 }
 
 impl Action {
@@ -45,6 +50,7 @@ impl Action {
                 | Self::CancelRead { .. }
                 | Self::CancelWrite { .. }
                 | Self::CancelQueuedConnect
+                | Self::StalledReader { .. }
         )
     }
 }
@@ -83,12 +89,15 @@ fn parse_action(args: &[String]) -> Action {
         },
         [action] if action == "cancel-before-poll-drop" => Action::CancelBeforePollDrop,
         [action] if action == "cancel-queued-connect" => Action::CancelQueuedConnect,
+        [action, total] if action == "stalled-reader" => Action::StalledReader {
+            total: parse_size(total),
+        },
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
-             or cancel-queued-connect"
+             cancel-queued-connect, or stalled-reader TOTAL"
         ),
     }
 }
@@ -418,6 +427,22 @@ async fn run_action(
             assert_eq!(client.reservations(), 2);
             write_frame(sync, CASE_DONE).await;
             vec![counter]
+        }
+        Action::StalledReader { total } => {
+            let sync = sync.unwrap();
+            expect_frame(sync, STALLED_DATA_READY).await;
+
+            // Establish that data is held for this stream, but leave every
+            // byte unread while an independent stream makes round-trip progress.
+            stream.readable().await;
+            write_frame(sync, UNRELATED_PING).await;
+            expect_frame(sync, UNRELATED_PONG).await;
+
+            write_frame(sync, DRAIN_STARTED).await;
+            read_pattern(stream, total).await;
+            expect_frame(sync, TRANSFER_DONE).await;
+            write_frame(sync, CASE_DONE).await;
+            Vec::new()
         }
     }
 }

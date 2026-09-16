@@ -277,6 +277,7 @@ run_outgoing_case cancel-read 257
 run_outgoing_case cancel-write 16384
 run_outgoing_case cancel-before-poll-drop
 run_outgoing_case cancel-queued-connect
+run_outgoing_case stalled-reader 1048576
 
 stop_vmm_owned "$VMM_PID"
 VMM_PID=""

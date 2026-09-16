@@ -24,6 +24,10 @@ const CASE_DONE: &[u8] = b"case:done";
 const CANCEL_READY: &[u8] = b"cancel:ready";
 const ROLES_READY: &[u8] = b"roles:ready";
 const RAW_SUBCHANNEL_BYTES: usize = 64 * 1024;
+const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
+const UNRELATED_PING: &[u8] = b"unrelated:ping";
+const UNRELATED_PONG: &[u8] = b"unrelated:pong";
+const DRAIN_STARTED: &[u8] = b"drain:started";
 
 struct SocketPath(PathBuf);
 
@@ -38,6 +42,7 @@ enum Action {
     CancelWrite { tail: usize },
     CancelBeforePollDrop,
     CancelQueuedConnect,
+    StalledReader { total: usize },
 }
 
 impl Action {
@@ -57,6 +62,7 @@ impl Action {
             Self::CancelWrite { tail } => format!("cancel-write {tail}"),
             Self::CancelBeforePollDrop => "cancel-before-poll-drop".into(),
             Self::CancelQueuedConnect => "cancel-queued-connect".into(),
+            Self::StalledReader { total } => format!("stalled-reader {total}"),
         }
     }
 
@@ -69,6 +75,7 @@ impl Action {
                 | Self::CancelRead { .. }
                 | Self::CancelWrite { .. }
                 | Self::CancelQueuedConnect
+                | Self::StalledReader { .. }
         )
     }
 }
@@ -134,12 +141,15 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         }),
         ("cancel-before-poll-drop", []) => Ok(Action::CancelBeforePollDrop),
         ("cancel-queued-connect", []) => Ok(Action::CancelQueuedConnect),
+        ("stalled-reader", [total]) => Ok(Action::StalledReader {
+            total: parse_size(total)?,
+        }),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
-             cancel-queued-connect",
+             cancel-queued-connect | stalled-reader TOTAL",
         )),
     }
 }
@@ -180,9 +190,16 @@ fn send_pattern(stream: &mut UnixStream, total: usize) -> io::Result<()> {
     if total == 0 {
         return write_frame(stream, &[]);
     }
-    let mut offset = 0;
-    while offset < total {
-        let len = (total - offset).min(MAX_FRAME);
+    send_pattern_from(stream, 0, total)
+}
+
+fn send_pattern_from(stream: &mut UnixStream, start: usize, total: usize) -> io::Result<()> {
+    let end = start
+        .checked_add(total)
+        .ok_or_else(|| invalid("pattern range overflow"))?;
+    let mut offset = start;
+    while offset < end {
+        let len = (end - offset).min(MAX_FRAME);
         let payload: Vec<_> = (offset..offset + len).map(pattern_byte).collect();
         write_frame(stream, &payload)?;
         offset += len;
@@ -380,6 +397,28 @@ fn run() -> io::Result<()> {
                 }
                 write_frame(&mut sync, TRANSFER_DONE)?;
                 expect_frame(&mut sync, CASE_DONE)?;
+            }
+            Action::StalledReader { total } => {
+                if total <= MAX_FRAME {
+                    return Err(invalid("stalled-reader transfer must exceed one frame"));
+                }
+                send_pattern_from(&mut data, 0, MAX_FRAME)?;
+                let writer = thread::spawn(move || {
+                    send_pattern_from(&mut data, MAX_FRAME, total - MAX_FRAME)?;
+                    Ok::<_, io::Error>(data)
+                });
+
+                write_frame(&mut sync, STALLED_DATA_READY)?;
+                expect_frame(&mut sync, UNRELATED_PING)?;
+                write_frame(&mut sync, UNRELATED_PONG)?;
+                expect_frame(&mut sync, DRAIN_STARTED)?;
+
+                let data = writer
+                    .join()
+                    .map_err(|_| invalid("stalled-reader writer panicked"))??;
+                write_frame(&mut sync, TRANSFER_DONE)?;
+                expect_frame(&mut sync, CASE_DONE)?;
+                drop(data);
             }
             _ => unreachable!(),
         }

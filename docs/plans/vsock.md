@@ -1030,6 +1030,20 @@ M2's listener accept IPC contract is implemented and parent-reviewed:
   This defines the wire contract only; incoming admission and accept delivery
   remain integration work.
 
+M2's unread-stream progress fixture is implemented and parent-reviewed:
+
+- Leave readable data untouched while an unrelated stream completes a framed
+  round trip; then validate an exact ordered 1 MiB transfer and ordinary
+  driver/reservation cleanup. The host retains the data connection until the
+  guest acknowledges completion. No timing-based saturation assertion is used.
+- This proves independent progress and lossless resumption, not an observed
+  128 KiB/64 KiB saturation threshold: public APIs expose no occupancy counts,
+  and host UDS buffering cannot identify which layer holds queued bytes.
+- All fifteen outgoing cases, builds, targeted Clippy, formatting, and shell
+  checks passed on CHV in debug and release with no new warnings. Evidence:
+  `/tmp/vsock-stalled-reader-gate.mLHjs8/`. Full-test reaches the added case
+  through its existing vsock phase; remaining M2 coverage is still required.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
