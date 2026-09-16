@@ -462,7 +462,7 @@ PY
     > "$temporary/filter-status.out" 2> "$temporary/filter-status.err"; then
     fail "status accepted a required external filter"
   fi
-  grep -F "tracked path 'editable' uses unsupported filter 'blocked'" \
+  grep -F "path 'editable' uses unsupported filter 'blocked'" \
     "$temporary/filter-status.err" >/dev/null || fail "filter rejection was not reported"
   [ ! -e "$temporary/filter-invoked" ] || fail "status invoked an external filter"
   git_fixture config --unset-all filter.blocked.clean

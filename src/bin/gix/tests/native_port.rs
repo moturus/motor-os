@@ -114,6 +114,24 @@ fn main() -> Result {
     assert_eq!(fs::read(fixture.join("caf\u{e9}"))?, b"utf8\n");
     assert_eq!(fs::read(fixture.join("link"))?, b"editable");
     assert!(fs::symlink_metadata(fixture.join("link"))?.is_file());
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut converter = motor_gix::stage_blob::Converter::new(repo, &state)?;
+    let editable = converter
+        .stage(
+            b"editable".as_bstr(),
+            Some(Mode::FILE_EXECUTABLE),
+            &cancellation,
+        )?
+        .ok_or("checked-out editable file is missing")?;
+    assert_eq!(editable.mode, Mode::FILE_EXECUTABLE);
+    assert_eq!(editable.stat.size, 6);
+    assert_eq!(repo.find_blob(editable.id)?.data, b"other\n");
+    let link = converter
+        .stage(b"link".as_bstr(), Some(Mode::SYMLINK), &cancellation)?
+        .ok_or("checked-out link text is missing")?;
+    assert_eq!(link.mode, Mode::SYMLINK);
+    assert_eq!(link.stat.size, 8);
+    assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);

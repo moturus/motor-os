@@ -13,6 +13,7 @@ pub mod mutation;
 pub mod network;
 pub mod repository;
 pub mod selection;
+pub mod stage_blob;
 pub mod status;
 mod tracked_filters;
 pub mod tree_index;
