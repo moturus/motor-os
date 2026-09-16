@@ -1287,30 +1287,34 @@ fn test_vsock_rx_pool() {
         let mut cx = ContextBuilder::from_waker(Waker::noop())
             .local_waker(LocalWaker::noop())
             .build();
-        let result = pool.poll_consume(&mut cx, |decoded, bytes| {
-            assert_eq!(
-                unsafe { *device.queue.borrow().available_ring.next_available_idx },
-                before_repost
-            );
-            match position {
-                0 => assert_eq!((decoded.unwrap().len, bytes), (1, &[0x30][..])),
-                1 => {
-                    let error = decoded.unwrap_err();
-                    assert_eq!(error.kind, DecodeErrorKind::TruncatedPayload);
-                    assert_eq!(error.raw.unwrap().len, 3);
-                    assert!(bytes.is_empty());
+        let result = pool.poll_consume(
+            &mut cx,
+            |decoded, bytes| {
+                assert_eq!(
+                    unsafe { *device.queue.borrow().available_ring.next_available_idx },
+                    before_repost
+                );
+                match position {
+                    0 => assert_eq!((decoded.unwrap().len, bytes), (1, &[0x30][..])),
+                    1 => {
+                        let error = decoded.unwrap_err();
+                        assert_eq!(error.kind, DecodeErrorKind::TruncatedPayload);
+                        assert_eq!(error.raw.unwrap().len, 3);
+                        assert!(bytes.is_empty());
+                    }
+                    2 => {
+                        assert_eq!(decoded.unwrap().len, 4096);
+                        assert_eq!((bytes[0], bytes[4095]), (0x32, 0x7f));
+                    }
+                    _ => {
+                        assert_eq!(decoded.unwrap().operation, Operation::Request);
+                        assert!(bytes.is_empty());
+                    }
                 }
-                2 => {
-                    assert_eq!(decoded.unwrap().len, 4096);
-                    assert_eq!((bytes[0], bytes[4095]), (0x32, 0x7f));
-                }
-                _ => {
-                    assert_eq!(decoded.unwrap().operation, Operation::Request);
-                    assert!(bytes.is_empty());
-                }
-            }
-            position
-        });
+                position
+            },
+            || true,
+        );
         assert_eq!(result, Poll::Ready(position));
         let reposted = available_head(&device, before_repost);
         assert_eq!(rx_payload_phys(&device, reposted), pages[index].0);
@@ -1330,21 +1334,29 @@ fn test_vsock_rx_pool() {
     let mut cx = ContextBuilder::from_waker(Waker::noop())
         .local_waker(&local_waker)
         .build();
-    assert!(pool.poll_consume(&mut cx, |_, _| ()).is_pending());
+    assert!(pool.poll_consume(&mut cx, |_, _| (), || true).is_pending());
     device.complete(pending_head, 44, 0);
-    assert!(pool.poll_consume(&mut cx, |_, _| ()).is_pending());
+    assert!(pool.poll_consume(&mut cx, |_, _| (), || true).is_pending());
     device.reclaim();
     assert_eq!(wake.0.get(), 1);
     assert_eq!(
-        pool.poll_consume(&mut cx, |decoded, bytes| {
-            assert_eq!(decoded.unwrap().operation, Operation::Request);
-            assert!(bytes.is_empty());
-        }),
+        pool.poll_consume(
+            &mut cx,
+            |decoded, bytes| {
+                assert_eq!(decoded.unwrap().operation, Operation::Request);
+                assert!(bytes.is_empty());
+            },
+            || false,
+        ),
         Poll::Ready(())
+    );
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        published.wrapping_add(4)
     );
 
     let current = published.wrapping_add(1);
-    for offset in 0..4 {
+    for offset in 0..3 {
         device.complete(available_head(&device, current.wrapping_add(offset)), 0, 0);
     }
     drop(pool);
@@ -1433,18 +1445,22 @@ fn test_vsock_events() {
             .local_waker(LocalWaker::noop())
             .build();
         assert_eq!(
-            pool.poll_consume(&mut cx, |event| {
-                assert_eq!(
-                    unsafe { *device.queue.borrow().available_ring.next_available_idx },
-                    before_repost
-                );
-                match position {
-                    1 => assert_eq!(event, Err(EventError::Unknown(7))),
-                    2 => assert_eq!(event, Err(EventError::InvalidLength)),
-                    _ => assert_eq!(event, Ok(Event::TransportReset)),
-                }
-                position
-            }),
+            pool.poll_consume(
+                &mut cx,
+                |event| {
+                    assert_eq!(
+                        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+                        before_repost
+                    );
+                    match position {
+                        1 => assert_eq!(event, Err(EventError::Unknown(7))),
+                        2 => assert_eq!(event, Err(EventError::InvalidLength)),
+                        _ => assert_eq!(event, Ok(Event::TransportReset)),
+                    }
+                    position
+                },
+                || true,
+            ),
             Poll::Ready(position)
         );
         let reposted = available_head(&device, before_repost);
@@ -1461,19 +1477,28 @@ fn test_vsock_events() {
     let mut cx = ContextBuilder::from_waker(Waker::noop())
         .local_waker(&local_waker)
         .build();
-    assert!(pool.poll_consume(&mut cx, |_| ()).is_pending());
+    assert!(pool.poll_consume(&mut cx, |_| (), || true).is_pending());
     device.publish_used(pending_head, 4);
-    assert!(pool.poll_consume(&mut cx, |_| ()).is_pending());
+    assert!(pool.poll_consume(&mut cx, |_| (), || true).is_pending());
     device.reclaim();
     assert_eq!(wake.0.get(), 1);
+    let repost = Cell::new(true);
     assert_eq!(
-        pool.poll_consume(&mut cx, |event| assert_eq!(
-            event,
-            Ok(Event::TransportReset)
-        )),
+        pool.poll_consume(
+            &mut cx,
+            |event| {
+                assert_eq!(event, Ok(Event::TransportReset));
+                repost.set(false);
+            },
+            || repost.get(),
+        ),
         Poll::Ready(())
     );
-    for idx in 5..9 {
+    assert_eq!(
+        unsafe { *device.queue.borrow().available_ring.next_available_idx },
+        8
+    );
+    for idx in 5..8 {
         device.publish_used(available_head(&device, idx), 0);
     }
     drop(pool);

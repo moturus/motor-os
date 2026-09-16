@@ -638,6 +638,7 @@ impl RxPool {
         &mut self,
         cx: &mut std::task::Context<'_>,
         consume: impl FnOnce(Result<PacketHeader, DecodeError>, &[u8]) -> R,
+        repost: impl FnOnce() -> bool,
     ) -> std::task::Poll<R> {
         let std::task::Poll::Ready(head) = self.ordered.poll_next(cx) else {
             return std::task::Poll::Pending;
@@ -650,12 +651,14 @@ impl RxPool {
         let completion = self.completions.swap_remove(index);
         let (payload, decoded) = completion.finish_ordered(head);
         let result = consume(decoded, payload.as_ref());
-        assert!(self.completions.len() < self.completions.capacity());
-        let reposted = match try_post_rx(self.queue.clone(), payload) {
-            Ok(completion) => completion,
-            Err((err, _)) => panic!("vsock RX repost failed: {err}"),
-        };
-        self.completions.push(reposted);
+        if repost() {
+            assert!(self.completions.len() < self.completions.capacity());
+            let reposted = match try_post_rx(self.queue.clone(), payload) {
+                Ok(completion) => completion,
+                Err((err, _)) => panic!("vsock RX repost failed: {err}"),
+            };
+            self.completions.push(reposted);
+        }
         std::task::Poll::Ready(result)
     }
 }
@@ -778,6 +781,7 @@ impl EventPool {
         &mut self,
         cx: &mut std::task::Context<'_>,
         consume: impl FnOnce(Result<Event, EventError>) -> R,
+        repost: impl FnOnce() -> bool,
     ) -> std::task::Poll<R> {
         let std::task::Poll::Ready(head) = self.ordered.poll_next(cx) else {
             return std::task::Poll::Pending;
@@ -789,11 +793,13 @@ impl EventPool {
             .expect("ordered vsock event head has no retained completion");
         let event = self.completions.swap_remove(index).finish_ordered(head);
         let result = consume(event);
-        assert!(self.completions.len() < self.completions.capacity());
-        self.completions.push(
-            try_post_event(self.queue.clone())
-                .unwrap_or_else(|err| panic!("vsock event repost failed: {err}")),
-        );
+        if repost() {
+            assert!(self.completions.len() < self.completions.capacity());
+            self.completions.push(
+                try_post_event(self.queue.clone())
+                    .unwrap_or_else(|err| panic!("vsock event repost failed: {err}")),
+            );
+        }
         std::task::Poll::Ready(result)
     }
 }
@@ -814,6 +820,7 @@ pub(crate) fn prepare_pools(queues: &[Rc<RefCell<Virtqueue>>]) -> IoResult<Prepa
 /// activation, including while sys-io caches a later transport failure.
 pub struct VsockDevice {
     guest_cid: Cell<u32>,
+    repost_buffers: Cell<bool>,
     tx: RefCell<TxPool>,
     rx: RefCell<Option<RxPool>>,
     events: RefCell<Option<EventPool>>,
@@ -850,6 +857,7 @@ impl VsockDevice {
         let rx_queue = raw.virtqueues[VIRTQ_RX].clone();
         let this = Rc::new(Self {
             guest_cid: Cell::new(guest_cid),
+            repost_buffers: Cell::new(true),
             tx: RefCell::new(tx),
             rx: RefCell::new(None),
             events: RefCell::new(None),
@@ -878,6 +886,11 @@ impl VsockDevice {
         Ok(cid)
     }
 
+    /// Permanently retire returned RX/event buffers instead of reposting them.
+    pub fn stop_reposting(&self) {
+        self.repost_buffers.set(false);
+    }
+
     pub fn try_send(&self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
         if raw.src_cid != u64::from(self.guest_cid.get()) {
             return Err(ErrorKind::InvalidInput.into());
@@ -901,7 +914,7 @@ impl VsockDevice {
             .borrow_mut()
             .as_mut()
             .expect("vsock RX pool is not installed")
-            .poll_consume(cx, consume)
+            .poll_consume(cx, consume, || self.repost_buffers.get())
     }
 
     pub fn poll_event<R>(
@@ -913,7 +926,7 @@ impl VsockDevice {
             .borrow_mut()
             .as_mut()
             .expect("vsock event pool is not installed")
-            .poll_consume(cx, consume)
+            .poll_consume(cx, consume, || self.repost_buffers.get())
     }
 }
 

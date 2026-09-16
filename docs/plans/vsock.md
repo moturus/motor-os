@@ -1473,6 +1473,21 @@ Accept isolation and process-exit fixtures are implemented and gated:
   hashes, and Clippy passed with no new warnings. Final evidence:
   `/tmp/vsock-a28-cleanup-fixed-gate.LkmztB/`.
 
+D26's returned-DMA retirement primitive is implemented:
+
+- RX/event pools check whether to repost after the completion's consumer
+  runs. The device can permanently disable reposting from within an event
+  callback, before that event buffer would be recycled. Returned memory may
+  then be released; outstanding completions and their DMA remain owned.
+- Existing guest descriptor fixtures cover unchanged used-ring ordering,
+  normal reposts, retirement without advancing the available index, and a
+  stop decision made inside the event callback. Premature-drop assertions
+  remain intact. This is queue-level coverage, not a live reset test.
+- Both profiles passed image builds, descriptor/component/native-network
+  suites, formatting, tested-source hashes, and targeted Clippy without new
+  warnings. Evidence: `/tmp/vsock-a29-dma-gate.wDcm2q/`. Runtime permanent
+  failure and removal of CID-refresh logic follow in the next patch.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
