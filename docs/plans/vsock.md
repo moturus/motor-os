@@ -1561,6 +1561,28 @@ Stage 15's measurement fixtures are implemented and gated:
   limits, and error/drop semantics. Final repeated-capacity/close fixtures
   and M2's full gate remain outstanding.
 
+The final close/reuse and repeated-capacity fixtures are implemented:
+
+- Repeat full 64-stream admission, strict rejection of stream 65, listener
+  removal, and EOF for every child twice. The host cleanup token precedes
+  cycle two, proving all 63 non-control slots can be admitted again without
+  sleeps, polling, or a retry. Memory observations are not substituted for
+  this exact admission assertion.
+- Both endpoints initiate closure without awaiting peer EOF: the guest
+  queues SEND shutdown, then a control token releases the host's Unix write
+  close (full virtio peer closure under D24). Preserve a shutdown RPC that
+  completes immediately; otherwise accept only the two defined race results,
+  published success or orderly peer-first `NotConnected`. Require clean EOF,
+  reject reset/other errors, then exchange exact data on another accepted
+  connection using the same listener. Same-channel barriers prove native
+  teardown records drain before reservation-count checks.
+- Both profiles passed component/native-network tests, all twenty peer
+  actions, and discovery on QEMU, CHV, and FC. Builds, formatting, hashes,
+  and Clippy passed without new warnings or test failures. Evidence:
+  `/tmp/vsock-orderly-capacity-gate.t7iyaB/`. All planned implementation and
+  incremental checks are complete; freeze this tree for M2's repeated full
+  gate before claiming completion.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.

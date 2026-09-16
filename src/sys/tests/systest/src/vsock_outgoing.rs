@@ -41,6 +41,14 @@ const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
 const NATIVE_ACCEPT_CLOSE_READY: &[u8] = b"native-accept:close-ready";
 const NATIVE_ACCEPT_CLOSED: &[u8] = b"closed";
 const NATIVE_ACCEPT_CLOSED_READY: &[u8] = b"native-accept:closed-ready";
+const NATIVE_ACCEPT_SIMULTANEOUS_READY: &[u8] = b"native-accept:simultaneous-ready";
+const NATIVE_ACCEPT_SIMULTANEOUS_CONNECTED: &[u8] = b"native-accept:simultaneous-connected";
+const NATIVE_ACCEPT_SIMULTANEOUS_STARTED: &[u8] = b"native-accept:simultaneous-started";
+const NATIVE_ACCEPT_SIMULTANEOUS_CLOSED: &[u8] = b"native-accept:simultaneous-closed";
+const NATIVE_ACCEPT_REUSE_CONNECTED: &[u8] = b"native-accept:reuse-connected";
+const NATIVE_ACCEPT_REUSED: &[u8] = b"native-accept:reused";
+const NATIVE_ACCEPT_REUSE_PAYLOAD: &[u8] = b"reuse";
+const NATIVE_ACCEPT_REUSE_REPLY: &[u8] = b"reused";
 const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
 const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
 const NATIVE_ACCEPT_EXIT_READY: &[u8] = b"native-accept:exit-ready";
@@ -542,8 +550,7 @@ async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
     write_frame(stream, LISTENER_REBOUND).await;
 }
 
-async fn run_global_stream_capacity(stream: &VsockStream) {
-    let control_only = sys_io_memory_usage();
+async fn run_global_stream_capacity_cycle(stream: &VsockStream) -> u64 {
     let mut listeners = Vec::with_capacity(CAPACITY_LISTENERS);
     for offset in 0..CAPACITY_LISTENERS {
         listeners.push(
@@ -563,6 +570,16 @@ async fn run_global_stream_capacity(stream: &VsockStream) {
     }
     write_frame(stream, CAPACITY_DROPPED).await;
     expect_frame(stream, CAPACITY_CLEARED).await;
+
+    capacity_full
+}
+
+async fn run_global_stream_capacity(stream: &VsockStream) {
+    let control_only = sys_io_memory_usage();
+    let capacity_full = run_global_stream_capacity_cycle(stream).await;
+    // EOF for every child is the causal cleanup barrier. Repeating the exact
+    // 64-stream admission proves all stream slots returned without waiting.
+    run_global_stream_capacity_cycle(stream).await;
     let after_cleanup = sys_io_memory_usage();
 
     let admitted_streams = (GLOBAL_STREAM_LIMIT - 1) as i128;
@@ -655,6 +672,63 @@ async fn run_native_accept(
     moto_io::net::vsock::availability(&accept_client)
         .await
         .unwrap();
+    assert_eq!(accept_client.reservations(), 1);
+
+    write_frame(control, NATIVE_ACCEPT_SIMULTANEOUS_READY).await;
+    expect_frame(control, NATIVE_ACCEPT_SIMULTANEOUS_CONNECTED).await;
+    let simultaneous = listener
+        .accept_reserved(accept_client.try_reserve().unwrap())
+        .await
+        .unwrap();
+    let mut shutdown = Box::pin(simultaneous.shutdown_async(Shutdown::Write));
+    let first_poll = {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        shutdown.as_mut().poll(&mut context)
+    };
+    write_frame(control, NATIVE_ACCEPT_SIMULTANEOUS_STARTED).await;
+    // The host's Unix write-close represents full virtio peer closure. It
+    // races the local SEND. Ok means SEND publication won; NotConnected means
+    // the orderly peer close terminalized first. No reset error is accepted.
+    let shutdown_result = match first_poll {
+        Poll::Ready(result) => {
+            // The host has not been released yet, so an immediate completion
+            // must be successful local publication.
+            assert_eq!(result, Ok(()));
+            result
+        }
+        Poll::Pending => shutdown.as_mut().await,
+    };
+    drop(shutdown);
+    assert!(matches!(
+        shutdown_result,
+        Ok(()) | Err(moto_rt::E_NOT_CONNECTED)
+    ));
+    read_eof(&simultaneous).await;
+    assert_eq!(
+        simultaneous.try_write(&[b"after simultaneous close"]),
+        Err(moto_rt::E_NOT_CONNECTED)
+    );
+    drop(simultaneous);
+    moto_io::net::vsock::availability(&accept_client)
+        .await
+        .unwrap();
+    write_frame(control, NATIVE_ACCEPT_SIMULTANEOUS_CLOSED).await;
+
+    expect_frame(control, NATIVE_ACCEPT_REUSE_CONNECTED).await;
+    let reused = listener
+        .accept_reserved(accept_client.try_reserve().unwrap())
+        .await
+        .unwrap();
+    let mut reuse = [0_u8; NATIVE_ACCEPT_REUSE_PAYLOAD.len()];
+    read_exact(&reused, &mut reuse).await;
+    assert_eq!(reuse, NATIVE_ACCEPT_REUSE_PAYLOAD);
+    write_all(&reused, NATIVE_ACCEPT_REUSE_REPLY).await;
+    drop(reused);
+    moto_io::net::vsock::availability(&accept_client)
+        .await
+        .unwrap();
+    write_frame(control, NATIVE_ACCEPT_REUSED).await;
     assert_eq!(accept_client.reservations(), 1);
 
     // Polling once registers and queues an empty-listener accept. Dropping

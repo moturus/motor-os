@@ -42,6 +42,14 @@ const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
 const NATIVE_ACCEPT_CLOSE_READY: &[u8] = b"native-accept:close-ready";
 const NATIVE_ACCEPT_CLOSED: &[u8] = b"closed";
 const NATIVE_ACCEPT_CLOSED_READY: &[u8] = b"native-accept:closed-ready";
+const NATIVE_ACCEPT_SIMULTANEOUS_READY: &[u8] = b"native-accept:simultaneous-ready";
+const NATIVE_ACCEPT_SIMULTANEOUS_CONNECTED: &[u8] = b"native-accept:simultaneous-connected";
+const NATIVE_ACCEPT_SIMULTANEOUS_STARTED: &[u8] = b"native-accept:simultaneous-started";
+const NATIVE_ACCEPT_SIMULTANEOUS_CLOSED: &[u8] = b"native-accept:simultaneous-closed";
+const NATIVE_ACCEPT_REUSE_CONNECTED: &[u8] = b"native-accept:reuse-connected";
+const NATIVE_ACCEPT_REUSED: &[u8] = b"native-accept:reused";
+const NATIVE_ACCEPT_REUSE_PAYLOAD: &[u8] = b"reuse";
+const NATIVE_ACCEPT_REUSE_REPLY: &[u8] = b"reused";
 const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
 const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
 const NATIVE_ACCEPT_EXIT_READY: &[u8] = b"native-accept:exit-ready";
@@ -439,6 +447,32 @@ fn expect_guest_refusal(base: &str, port: u32) -> io::Result<()> {
     }
 }
 
+fn run_global_capacity_cycle(base: &str, control: &mut UnixStream) -> io::Result<()> {
+    expect_frame(control, CAPACITY_READY)?;
+    let mut connections = Vec::with_capacity(GLOBAL_STREAM_LIMIT - 1);
+    for listener in 0..CAPACITY_LISTENERS {
+        let count = if listener + 1 == CAPACITY_LISTENERS {
+            LISTENER_BACKLOG - 1
+        } else {
+            LISTENER_BACKLOG
+        };
+        let port = CAPACITY_PORT_START + listener as u32;
+        for _ in 0..count {
+            connections.push(connect_guest(base, port)?);
+        }
+    }
+    assert_eq!(connections.len(), GLOBAL_STREAM_LIMIT - 1);
+    expect_guest_refusal(base, CAPACITY_PORT_START + CAPACITY_LISTENERS as u32 - 1)?;
+
+    write_frame(control, CAPACITY_FULL)?;
+    expect_frame(control, CAPACITY_PROGRESS)?;
+    expect_frame(control, CAPACITY_DROPPED)?;
+    for connection in &mut connections {
+        expect_eof(connection)?;
+    }
+    write_frame(control, CAPACITY_CLEARED)
+}
+
 fn accept_pair(listener: &UnixListener, deadline: Instant) -> io::Result<(UnixStream, UnixStream)> {
     let mut first = configure_stream(accept_before(listener, deadline)?)?;
     let mut second = configure_stream(accept_before(listener, deadline)?)?;
@@ -708,6 +742,27 @@ fn run() -> io::Result<()> {
                 drop(closed);
                 write_frame(&mut stream, NATIVE_ACCEPT_CLOSED_READY)?;
 
+                expect_frame(&mut stream, NATIVE_ACCEPT_SIMULTANEOUS_READY)?;
+                let mut simultaneous = connect_guest(base, NATIVE_ACCEPT_PORT)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_SIMULTANEOUS_CONNECTED)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_SIMULTANEOUS_STARTED)?;
+                // This Unix write-close becomes full virtio peer shutdown in
+                // the pinned UDS proxies while retaining the host read side.
+                simultaneous.shutdown(Shutdown::Write)?;
+                expect_eof(&mut simultaneous)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_SIMULTANEOUS_CLOSED)?;
+
+                let mut reused = connect_guest(base, NATIVE_ACCEPT_PORT)?;
+                reused.write_all(NATIVE_ACCEPT_REUSE_PAYLOAD)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_REUSE_CONNECTED)?;
+                let mut reply = [0_u8; NATIVE_ACCEPT_REUSE_REPLY.len()];
+                reused.read_exact(&mut reply)?;
+                if reply != NATIVE_ACCEPT_REUSE_REPLY {
+                    return Err(invalid("native accepted reuse reply mismatch"));
+                }
+                expect_eof(&mut reused)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_REUSED)?;
+
                 expect_frame(&mut stream, NATIVE_ACCEPT_CANCEL_READY)?;
                 let mut canceled = connect_guest(base, NATIVE_ACCEPT_PORT)?;
                 expect_eof(&mut canceled)?;
@@ -728,29 +783,8 @@ fn run() -> io::Result<()> {
                 expect_frame(&mut stream, CASE_DONE)?;
             }
             Action::GlobalStreamCapacity => {
-                expect_frame(&mut stream, CAPACITY_READY)?;
-                let mut connections = Vec::with_capacity(GLOBAL_STREAM_LIMIT - 1);
-                for listener in 0..CAPACITY_LISTENERS {
-                    let count = if listener + 1 == CAPACITY_LISTENERS {
-                        LISTENER_BACKLOG - 1
-                    } else {
-                        LISTENER_BACKLOG
-                    };
-                    let port = CAPACITY_PORT_START + listener as u32;
-                    for _ in 0..count {
-                        connections.push(connect_guest(base, port)?);
-                    }
-                }
-                assert_eq!(connections.len(), GLOBAL_STREAM_LIMIT - 1);
-                expect_guest_refusal(base, CAPACITY_PORT_START + CAPACITY_LISTENERS as u32 - 1)?;
-
-                write_frame(&mut stream, CAPACITY_FULL)?;
-                expect_frame(&mut stream, CAPACITY_PROGRESS)?;
-                expect_frame(&mut stream, CAPACITY_DROPPED)?;
-                for connection in &mut connections {
-                    expect_eof(connection)?;
-                }
-                write_frame(&mut stream, CAPACITY_CLEARED)?;
+                run_global_capacity_cycle(base, &mut stream)?;
+                run_global_capacity_cycle(base, &mut stream)?;
 
                 expect_frame(&mut stream, CAPACITY_REBOUND)?;
                 let mut rebound = connect_guest(base, CAPACITY_PORT_START)?;
