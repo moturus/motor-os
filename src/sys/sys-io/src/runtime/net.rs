@@ -198,7 +198,11 @@ impl NetRuntime {
         sender: &channel_budget::ClientSender,
     ) {
         msg.status = self.vsock_availability_status(sender.remote_handle(), &msg);
-        let _ = sender.send(msg).await;
+        if msg.status == moto_rt::E_OK {
+            let _ = self.send_vsock_success(msg, sender).await;
+        } else {
+            let _ = sender.send(msg).await;
+        }
     }
 
     async fn spawn_net_runtime(&self) {

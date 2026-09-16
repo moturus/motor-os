@@ -62,6 +62,7 @@ pub(super) struct VsockRuntime {
     controls: VecDeque<PendingControl>,
     submit_notify: Option<Rc<moto_async::LocalNotify>>,
     control_space: Option<Rc<moto_async::LocalNotify>>,
+    failure_notify: Option<Rc<moto_async::LocalNotify>>,
     next_tx_socket: u64,
     pumps_started: bool,
 }
@@ -74,6 +75,7 @@ impl VsockRuntime {
             controls: VecDeque::new(),
             submit_notify: None,
             control_space: None,
+            failure_notify: None,
             next_tx_socket: 0,
             pumps_started: false,
         }
@@ -124,6 +126,19 @@ impl VsockRuntime {
             .as_ref()
             .expect("activated vsock has no control-space notifier")
             .clone()
+    }
+
+    fn failure_notify(&mut self) -> Rc<moto_async::LocalNotify> {
+        self.failure_notify
+            .get_or_insert_with(|| Rc::new(moto_async::LocalNotify::new()))
+            .clone()
+    }
+
+    fn failure_error(&self) -> Option<moto_rt::Error> {
+        match &self.device {
+            DeviceState::Failed { error, .. } => Some(*error),
+            _ => None,
+        }
     }
 
     fn notify_submit(&self) {
@@ -359,6 +374,24 @@ impl NetRuntime {
         Ok(())
     }
 
+    fn fail_vsock_activation(&self) -> moto_rt::Error {
+        let notify = {
+            let mut inner = self.inner.borrow_mut();
+            if let DeviceState::Failed { error, .. } = &inner.vsock.device {
+                return *error;
+            }
+            inner.vsock.device = DeviceState::Failed {
+                driver: None,
+                error: moto_rt::Error::InternalError,
+            };
+            inner.vsock.failure_notify.clone()
+        };
+        if let Some(notify) = notify {
+            notify.notify_all();
+        }
+        moto_rt::Error::InternalError
+    }
+
     fn activate_vsock(&self) -> Result<Rc<VsockDevice>, moto_rt::Error> {
         {
             let inner = self.inner.borrow();
@@ -378,11 +411,8 @@ impl NetRuntime {
                 .try_reserve_exact(MAX_PENDING_CONTROLS)
                 .is_err()
             {
-                inner.vsock.device = DeviceState::Failed {
-                    driver: None,
-                    error: moto_rt::Error::InternalError,
-                };
-                return Err(moto_rt::Error::InternalError);
+                drop(inner);
+                return Err(self.fail_vsock_activation());
             }
             inner.vsock.submit_notify = Some(Rc::new(moto_async::LocalNotify::new()));
             inner.vsock.control_space = Some(Rc::new(moto_async::LocalNotify::new()));
@@ -396,11 +426,7 @@ impl NetRuntime {
             Ok(driver) => driver,
             Err(err) => {
                 log::error!("Failed to activate virtio-vsock: {err}");
-                self.inner.borrow_mut().vsock.device = DeviceState::Failed {
-                    driver: None,
-                    error: moto_rt::Error::InternalError,
-                };
-                return Err(moto_rt::Error::InternalError);
+                return Err(self.fail_vsock_activation());
             }
         };
         {
@@ -439,6 +465,30 @@ impl NetRuntime {
         }
     }
 
+    pub(super) async fn send_vsock_success(
+        &self,
+        mut response: io_channel::Msg,
+        sender: &ClientSender,
+    ) -> bool {
+        let notify = self.inner.borrow_mut().vsock.failure_notify();
+        loop {
+            let mut failed = core::pin::pin!(notify.notified().fuse());
+            let failure = { self.inner.borrow().vsock.failure_error() };
+            if let Some(error) = failure {
+                response.status = error.into();
+                return sender.send(response).await.is_ok();
+            }
+            let mut send = core::pin::pin!(sender.send(response).fuse());
+            let sent = futures::select_biased! {
+                _ = failed => None,
+                result = send => Some(result.is_ok()),
+            };
+            if let Some(sent) = sent {
+                return sent;
+            }
+        }
+    }
+
     async fn vsock_local_cid(
         &self,
         request: io_channel::Msg,
@@ -447,7 +497,7 @@ impl NetRuntime {
         api_vsock::decode_local_cid_request(&request)?;
         let driver = self.activate_vsock()?;
         let response = api_vsock::encode_local_cid_response(&request, driver.guest_cid())?;
-        let _ = sender.send(response).await;
+        let _ = self.send_vsock_success(response, sender).await;
         Ok(())
     }
 
@@ -485,7 +535,7 @@ impl NetRuntime {
 
         let base = SocketBase::new_vsock_listener(socket_id, self.clone(), sender.clone());
         MotoSocket::new_vsock_listener(base, listener).map_err(map_allocation_error)?;
-        if sender.send(response).await.is_err() {
+        if !self.send_vsock_success(response, sender).await {
             let _ = self.remove_vsock_listener(socket_id, sender.remote_handle());
         }
         Ok(())
@@ -550,7 +600,7 @@ impl NetRuntime {
         self.remove_vsock_listener(request.handle, sender.remote_handle())?;
         if request.id != 0 {
             request.status = moto_rt::E_OK;
-            let _ = sender.send(request).await;
+            let _ = self.send_vsock_success(request, sender).await;
         }
         Ok(())
     }
@@ -744,19 +794,13 @@ impl NetRuntime {
         self.inner.borrow().vsock.notify_submit();
 
         loop {
-            let result = {
+            let ready = {
                 let socket = socket.borrow();
                 let state = socket.unwrap_vsock();
-                if state.connection.shutdown_published(flags) {
-                    Some(Ok(()))
-                } else if state.connection.terminal_cause().is_some() {
-                    Some(Err(connection_write_error(&state.connection)))
-                } else {
-                    None
-                }
+                state.connection.terminal_cause().is_some()
+                    || state.connection.shutdown_published(flags)
             };
-            if let Some(result) = result {
-                result?;
+            if ready {
                 break;
             }
             notify.notified().await;
@@ -764,10 +808,28 @@ impl NetRuntime {
 
         let output_lock = socket.borrow().unwrap_vsock().output_lock.clone();
         let _guard = output_lock.lock().await;
-        let mut response = request;
-        response.status = moto_rt::E_OK;
-        sender.send(response).await?;
-        Ok(())
+        loop {
+            let mut changed = core::pin::pin!(notify.notified().fuse());
+            let mut response = request;
+            response.status = {
+                let socket = socket.borrow();
+                let state = socket.unwrap_vsock();
+                match state.connection.terminal_cause() {
+                    Some(TerminalCause::InternalError) => moto_rt::E_INTERNAL_ERROR,
+                    _ if state.connection.shutdown_published(flags) => moto_rt::E_OK,
+                    Some(_) => connection_write_error(&state.connection).into(),
+                    None => unreachable!("shutdown response lost its completion state"),
+                }
+            };
+            let mut send = core::pin::pin!(sender.send(response).fuse());
+            let result = futures::select_biased! {
+                _ = changed => None,
+                result = send => Some(result),
+            };
+            if let Some(result) = result {
+                return result;
+            }
+        }
     }
 
     fn vsock_close(
@@ -1463,8 +1525,11 @@ impl NetRuntime {
     }
 
     fn fail_vsock_device(&self) {
-        let (sockets, listeners) = {
+        let (sockets, listeners, failure_notify) = {
             let mut inner = self.inner.borrow_mut();
+            if matches!(&inner.vsock.device, DeviceState::Failed { .. }) {
+                return;
+            }
             let driver = inner.vsock.retained_driver();
             if let Some(driver) = &driver {
                 driver.stop_reposting();
@@ -1489,7 +1554,7 @@ impl NetRuntime {
                     .borrow();
                 *slot = Some((socket_id, socket.sender().remote_handle()));
             }
-            (sockets, listeners)
+            (sockets, listeners, inner.vsock.failure_notify.clone())
         };
         for socket in sockets.into_iter().flatten() {
             let (socket_id, unaccepted) = {
@@ -1500,6 +1565,7 @@ impl NetRuntime {
                 state.pending_reset = false;
                 state.reset_queued = false;
                 state.connection.device_failed();
+                state.notified_flags = 0;
                 state.connect_notify.notify_all();
                 state.rx_notify.notify_one();
                 state.state_notify.notify_one();
@@ -1528,6 +1594,9 @@ impl NetRuntime {
                 .expect("indexed vsock listener disappeared during device failure");
         }
         self.vsock_control_released();
+        if let Some(notify) = failure_notify {
+            notify.notify_all();
+        }
     }
 
     async fn vsock_connect_task(&self, weak: Weak<RefCell<MotoSocket>>, request: io_channel::Msg) {
@@ -1769,31 +1838,46 @@ impl NetRuntime {
             };
             let output_lock = socket.borrow().unwrap_vsock().output_lock.clone();
             let _guard = output_lock.lock().await;
-            let message = {
-                let mut socket = socket.borrow_mut();
-                let socket_id = socket.socket_id();
-                let state = socket.unwrap_vsock_mut();
-                if !state.client_ready {
-                    continue;
-                }
-                let (flags, cause) = state.state_change();
-                if flags == state.notified_flags {
-                    None
-                } else {
-                    state.notified_flags = flags;
-                    Some(
-                        api_vsock::state_changed(socket_id, flags, cause)
-                            .expect("vsock state produced an invalid notification"),
-                    )
-                }
-            };
-            if let Some(message) = message {
+            if !socket.borrow().unwrap_vsock().client_ready {
+                continue;
+            }
+            let sent = loop {
+                let mut changed = core::pin::pin!(notify.notified().fuse());
+                let message = {
+                    let socket = socket.borrow();
+                    let socket_id = socket.socket_id();
+                    let state = socket.unwrap_vsock();
+                    let (flags, cause) = state.state_change();
+                    (flags != state.notified_flags).then(|| {
+                        (
+                            api_vsock::state_changed(socket_id, flags, cause)
+                                .expect("vsock state produced an invalid notification"),
+                            flags,
+                        )
+                    })
+                };
+                let Some((message, flags)) = message else {
+                    break true;
+                };
                 let sender = socket.borrow().sender().clone();
-                if sender.send(message).await.is_err() {
-                    drop(_guard);
-                    self.start_vsock_cleanup(&socket);
+                let mut send = core::pin::pin!(sender.send(message).fuse());
+                let result = futures::select_biased! {
+                    _ = changed => None,
+                    result = send => Some(result),
+                };
+                let Some(result) = result else {
                     continue;
+                };
+                if result.is_ok() {
+                    socket.borrow_mut().unwrap_vsock_mut().notified_flags = flags;
+                    break true;
                 }
+                break false;
+            };
+            if !sent {
+                drop(_guard);
+                self.start_vsock_cleanup(&socket);
+                continue;
             }
             let finish = socket.borrow().unwrap_vsock().terminal_ready_to_drop();
             let socket_id = socket.borrow().socket_id();
@@ -1877,6 +1961,9 @@ impl NetRuntime {
                     (page, len, orderly_reset)
                 };
                 let socket_id = socket.borrow().socket_id();
+                // Encoding transfers the page into a Copy message. Keep this
+                // publication serialized ahead of a later failure state; the
+                // native side discards queued RX when it observes that state.
                 let message = api_vsock::stream_rx_msg(socket_id, page, len, 0);
                 let sent = sender.send(message).await.is_ok();
                 drop(_guard);

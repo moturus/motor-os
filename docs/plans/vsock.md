@@ -1517,6 +1517,29 @@ D26's permanent runtime/native failure transition is implemented:
   includes its component fixtures; failure-aware publication under reply-ring
   backpressure remains a separate follow-up.
 
+D26's failure-aware reply publication is implemented and reviewed:
+
+- Success replies for availability, CID, bind, and listener drop register a
+  lazily allocated failure notifier before rechecking state. Shutdown and
+  stream-state replies similarly recheck before publication after reply-ring
+  backpressure. A failed activation wakes existing query waiters without
+  assuming device pumps started. The permanent transition is idempotent.
+- Keep failure notification separate from the TX pump's exclusive wake
+  permit. Update published state flags only after enqueue, and ensure device
+  `InternalError` can supersede an earlier per-stream terminal notification.
+- One RX message whose page ownership was already encoded into a raw IPC
+  message remains serialized before the failure notification. Canceling that
+  send would lose page ownership. Native processing claims/discards it when
+  failure arrives; unstaged RX is discarded immediately. This preserves
+  bounded ownership without a new IPC cancellation API or a claim of instant
+  cross-process retraction.
+- Fresh debug/release descriptor/component/native-network tests, all twenty
+  peer cases, and discovery passed on all three VMMs. Builds, formatting,
+  source hashes, and Clippy passed with no new warnings. Evidence:
+  `/tmp/vsock-a29-publication-gate.zzlr5S/`. Those live runs exercise normal
+  traffic and teardown, not injected reset/backpressure combinations. A29's
+  implementation is complete; Stage 15 and the full M2 gate remain.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
