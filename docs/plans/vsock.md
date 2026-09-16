@@ -1,6 +1,6 @@
 # Virtio-vsock implementation plan
 
-Status: v2.8. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.9. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
@@ -29,6 +29,13 @@ resolved by diagnosis in D24: the failing test assumed transparent
 Unix-socket half-close, and the
 same test fails against Linux. Correct the Motor test protocol, keep all
 VMMs unchanged, and retain the directional stream API/protocol requirements.
+Q28 is settled in D25: eight pending accept calls per listener, separately
+from its eight-stream backlog. Q29 is settled in D26: a transport reset
+permanently disables vsock; no snapshot/reset recovery or snapshot tests.
+Q31 is approved in D27 as a separate kernel fix with its own three debug,
+three release, and one release developer-suite gate before commit. Q30's
+requested simplification is recorded in D28: discard abandoned operations
+and fix channel ownership without a cancellation protocol or new IPC API.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -36,6 +43,7 @@ the existing block and network drivers' structure and reuse their virtqueue
 implementation and networking IPC machinery. Implementation is approved and
 proceeds in small reviewed commits; the full repeated gate belongs at the
 two approved milestones, not every commit (D13).
+The explicitly requested D27 kernel gate is an exception to that grouping.
 
 ## Implementation progress
 
@@ -1351,8 +1359,14 @@ D16's developer-suite selector and strict teardown are implemented:
   rejected a CR-prefixed PASS line; correcting the exact-line parser verified
   the original successful run without rerunning tests (`collector-diagnosis.md`).
 - These functional passes do not resolve the preexisting kernel thread
-  rollback leak diagnosed during the runs (Q31). Kernel changes await scope
-  approval. Q28–Q30 and the complete M2 gate also remain outstanding.
+  rollback leak diagnosed during the runs (Q31). The user subsequently
+  approved a separate kernel fix and full gate (D27). Pending accepts and
+  permanent reset failure are now specified by D25/D26, but not implemented;
+  D28's cleanup simplification and the complete M2 gate remain outstanding.
+
+The progress entries above describe behavior at each incremental commit.
+D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
+proposals: remove recovery rather than extending it.
 
 ## Scope and simplicity
 
@@ -1367,7 +1381,8 @@ D16's developer-suite selector and strict teardown are implemented:
   Preserve moto-io's `no_std` boundary by using `core`, `alloc`, and native
   APIs there; do not add a dependency on `std` or virtio-async to moto-io.
 - Reliable byte streams with connect, listen/accept, bidirectional I/O,
-  shutdown, and transport-reset handling. Virtio 1.1 defines only stream
+  shutdown, and permanent failure on transport reset (D26). Snapshot/migration
+  support and reset recovery are out of scope. Virtio 1.1 defines only stream
   sockets: no seqpacket/datagram API or associated feature negotiation,
   message reassembly, or record-boundary handling in this work (D1).
 - Support one vsock device. Do not assume that there is only one NIC or that
@@ -1643,8 +1658,8 @@ operations. Queue setup refuses a device whose MSI-X table has fewer vectors
 than queues; confirm on each VMM that the vsock device exposes at least
 three vectors, and report a clear initialization error otherwise. Validate
 queue capacity against the chosen packet layout and control reserve. Use
-the existing PCI read helper at lazy activation and transport reset, with
-the same CID validation at both sites; do not add configuration-read retries.
+the existing PCI read helper and CID validation at lazy activation; do not
+refresh the CID after transport reset or add configuration-read retries (D26).
 
 Extend the mapper's bounded IRQ allocation to the already installed 64–79
 range, returning an error on exhaustion rather than asserting or wrapping
@@ -1838,6 +1853,9 @@ Keep a listener table separate from active streams. Follow D8 for binding
 the current local CID, explicit ports, and automatic ports. Reject conflicts
 deterministically. Use the fixed backlog from D7,
 with each pending accepted stream charged to its owner and global limits.
+Separately cap pending accept RPCs at eight per listener (D25); return
+`OutOfMemory` at that bound. Pre-reserve the small queue and do not add
+per-channel request bookkeeping just to enforce it.
 
 Create a stream only after reserving its resources. Queue it for accept
 without changing the listener's identity. Define how data arriving between
@@ -1994,20 +2012,24 @@ a request, shuts down its SEND side, and still receives the guest response.
 Verify peer RECEIVE and local SEND shutdown stop subsequent local writes,
 and an orderly close is not reported as `ConnectionReset`.
 
-Continuously service the event queue. On transport reset, refresh the CID,
-terminate active and connecting streams, discard unaccepted streams from
-the old transport, and wake affected clients; keep listeners usable with
-the current CID. Validate and replenish event buffers, including after an
-unknown event. The event path in
-[Linux's virtio transport](https://github.com/torvalds/linux/blob/master/net/vmw_vsock/virtio_transport.c)
-is a useful cross-check for CID refresh and event-buffer recycling.
+Service the event queue while the device is ready. A transport-reset event
+permanently changes vsock to the cached failed state (D26). Fail pending
+connects, accepts, reads, writes, shutdowns, and queries; terminate listeners
+and streams; discard queued TX and buffered RX. Future vsock operations,
+including availability queries, return the cached `InternalError` after
+the capability check. Do not refresh the CID, preserve listeners, reactivate
+the device, or retry. Other services sharing the NET channel remain usable.
+Validate event buffers and replenish them only while ready; an unknown event
+does not itself cause recovery or device reinitialization.
 
-Remove unsent old-connection packets and prevent late completions from
-changing new socket state. A transport-reset event does not itself return
+Remove unsent packets and prevent late completions from reviving socket
+state. A transport-reset event does not itself return
 DMA ownership of every outstanding descriptor. Keep submitted completions
-alive and reap them through the existing queue; never implement reset by
-dropping all queue futures. Do not reset/recreate the whole device to close
-one socket.
+alive and reclaim only descriptors actually returned through the existing
+queue. Stop posting or reposting buffers; discard returned packets instead
+of dispatching them. Keep unreclaimed DMA memory pinned for the device's
+remaining lifetime. Logical operation errors are not fabricated virtqueue
+completions. Do not reset/recreate the device or drop device-owned futures.
 
 On channel failure or client exit, remove that client's listeners, abort or
 finish its streams under D10, and drain/release pages, pending replies,
@@ -2015,15 +2037,15 @@ waiters, timers, and reservations. Keep cleanup idempotent across peer reset,
 client drop, and late reply races. Device failure must be distinguishable
 from a single stream failure (D9, D14).
 
-In guest systest fixtures, test reset during connect, queued accept, read,
-credit-blocked write, and in-flight DMA. Test the same CID and a changed CID,
-repeated events, invalid
-event lengths, listener continuity, stale completions, and bounded resource
-counts after repeated create/use/drop cycles. No migration test, new sys-io
-self-test, or production event-injection command is planned. Distinguish
-fixture coverage from actual VMM-triggered reset coverage; if another test
-hook is necessary, discuss it first (D12). Transport reset remains required
-Virtio 1.1 behavior even though migration support is out of scope.
+In existing guest systest fixtures, test permanent failure during connect,
+queued accept, read, credit-blocked write, and in-flight DMA. Verify immediate
+errors, buffered-data discard, later-operation errors, repeated-event
+idempotence, stale completions, and no reposting after failure. Retain event
+length validation and ordinary create/use/drop resource-count tests. Do not
+add snapshots, restore, live CID-change tests, a sys-io self-test, or a
+production injection command. Label fixture coverage honestly: there is no
+claim of live VMM-triggered reset coverage. D26 deliberately excludes reset
+recovery; this is a terminal safety path, not snapshot support.
 
 ### 14. Add a hermetic host/guest acceptance phase
 
@@ -2087,8 +2109,8 @@ The acceptance cases are:
 - Capability inheritance and denial, including raw IPC attempts; no-device
   errors and attached-but-idle/first-use behavior. Vsock still works with IP
   disabled, including no loopback, without starting the IP backend.
-- Transport-reset handler/listener recovery through the guest fixture route,
-  clearly labeled as such, not migration or a new sys-io self-test.
+- Permanent device failure on transport reset through existing guest
+  fixtures (D26), clearly labeled as such; no listener recovery or snapshots.
 - Block and TCP/UDP I/O while vsock transfers run, plus a no-device VM run
   verifying existing services and prompt native unavailability errors. Keep
   the existing NIC/block topology; multi-NIC tests/fixes and enabling multiple
@@ -2333,12 +2355,13 @@ bounds may be revised only with review, based on the stage 15 measurements.
 | Resource | Starting bound |
 | --- | --- |
 | Queue sizes | Use existing negotiated power-of-two sizes, capped at 256; require RX capacity of at least two, TX at least 16 for the reserve below, and event at least one. |
-| RX payloads | `min(64, rx_descriptors / 2)` page-sized buffers, reposted promptly. |
+| RX payloads | `min(64, rx_descriptors / 2)` page-sized buffers, reposted promptly while ready. |
 | TX payloads | `min(64, (tx_descriptors - 8) / 2)` page-sized buffers; reserve eight descriptors for control. |
 | Events / pending control | Up to four posted event buffers; 64 pending control records, coalescing credit updates. |
 | Stream receive buffer | Fixed 128 KiB in sys-io, allocated/charged before establishing a connection. |
 | Stream IPC / pending TX | Existing 16 pages per direction per reservation; no additional per-stream TX ring. |
 | Stream/listener admission | 64 streams globally, counting connecting, unaccepted, and closing states; 32 listeners, backlog eight each, still within the global stream cap. |
+| Pending accepts | Eight waiting accept RPCs per listener, independent of its stream backlog (D25). |
 | Per-channel admission | Existing four data reservations and channel budget; no separate quota framework. |
 
 At 256 descriptors per queue, the RX/TX pools hold at most 512 KiB of
@@ -2349,6 +2372,8 @@ the 64 MiB Firecracker interactive default is not the full-suite budget.
 Admission/allocation failures follow D14 without killing existing streams;
 temporary I/O capacity exhaustion is backpressure, not `OutOfMemory`.
 Allocate on demand, not at boot or for every potential connection.
+After permanent device failure, retire returned RX/event buffers without
+reposting; retain any still-device-owned memory (D26).
 
 Pack small payloads into byte buffers, bounding metadata independently of
 wire packet count. Round-robin ready streams with bounded work per turn;
@@ -2430,8 +2455,9 @@ devices without initializing their queues. Failed initialization leaves
 vsock unavailable while fs/IP continue; cache the failure and do not
 automatically retry, rescan, or rebuild queues. A fatal later configuration
 failure similarly fails vsock clients without dropping outstanding DMA
-ownership. Normal transport reset follows the protocol and keeps listeners
-operational when the refreshed configuration is valid.
+ownership. A transport-reset event uses the same permanent failed state
+(D26); listeners do not survive and the CID is not refreshed. Availability
+reports the cached failure instead of merely reporting previous discovery.
 
 ### D10. Deadlines and close (approved)
 
@@ -2454,8 +2480,11 @@ Native policy: explicit async shutdown drains accepted TX before sending
 shutdown; Drop or client exit starts nonblocking bounded cleanup with a
 single 8-second budget including pending-data drain, then a forced reset if
 necessary. Keep already validated buffered RX readable before reporting a
-reset, distinguish orderly EOF, and never reuse an old tuple before terminal
-cleanup. A completed write is local acceptance, not proof of peer receipt.
+connection-local peer/protocol reset, distinguish orderly EOF, and never
+reuse an old tuple before terminal cleanup. A completed write is local
+acceptance, not proof of peer receipt.
+Device-wide failure, including transport reset, instead discards buffered
+RX and fails pending operations immediately (D26).
 
 Shutdown is directional and permanent. Peer SEND shutdown produces local
 EOF after queued RX data, but leaves local writes usable. Local SEND or peer
@@ -2547,13 +2576,13 @@ the TCP mappings are unchanged, and moto-rt is not expanded.
 | Condition | Error |
 | --- | --- |
 | No vsock device discovered | `NotFound` |
-| Device initialization or later configuration failed (cached) | `InternalError` |
+| Device initialization, later configuration, or transport reset permanently failed the device (cached) | `InternalError` |
 | Caller lacks CAP_VSOCK | `NotAllowed` |
 | Unsupported operation, socket type, or option | `NotImplemented` |
 | Invalid CID or port, including port 0 or `0xffffffff` on connect | `InvalidArgument` |
 | Bind conflict | `AlreadyInUse` |
 | Connect refused by the peer, including no listener or exhausted peer admission/backlog capacity | `NotConnected` |
-| Established stream reset by the peer, by transport reset, or for a protocol violation covered by D19/D22 | `ConnectionReset` |
+| Established stream reset by the peer or for a protocol violation covered by D19/D22 | `ConnectionReset` |
 | Write after local SEND or peer RECEIVE shutdown, or on an orderly closed stream | `NotConnected` |
 | Connect deadline expired | `TimedOut` |
 | Local stream/listener admission limit, or allocation failure for a new socket's required buffer/reservation | `OutOfMemory` |
@@ -2564,6 +2593,8 @@ the TCP mappings are unchanged, and moto-rt is not expanded.
 Peer SEND shutdown alone is not a write error (D10). Retain the terminal
 reset cause rather than turning `ConnectionReset` into `NotConnected`
 merely because the stream is now closed; drain validated RX first per D10.
+This is connection-local behavior. Device-wide failure uses `InternalError`
+and discards buffered RX rather than delaying the error (D26).
 
 Peer-credit stalls, full queues/buffers, and busy IPC pages on established
 streams are ordinary backpressure. Preserve accepted bytes and return a
@@ -2821,11 +2852,13 @@ Prepare all RX pages and bookkeeping fallibly before publishing anything;
 claim the idle cursor and publish only after device setup permits it. The
 fixed pool then uses a synchronous consume callback: resolve the next head,
 provide validated bytes and metadata (or empty bytes and refusal metadata),
-and repost the same page after the callback returns. sys-io copies accepted
-bytes into bounded stream storage in that callback; applications never own
+and repost the same page after the callback returns while ready. sys-io
+copies accepted bytes into bounded stream storage in that callback; applications never own
 device RX pages. Publication and consumption need no further driver-side
 allocation. Retain the active pool with its device on cached failure;
 cancellation of a client operation must not drop outstanding DMA owners.
+After failure, consume only returned completions, without dispatch callbacks
+or reposting; retain buffers whose ownership has not returned (D26).
 
 No separate sorting pass, completed-head FIFO, per-descriptor sequence tag,
 or per-stream reorder protocol is part of this approach. Test opposite
@@ -2874,7 +2907,8 @@ pre-activation setup, without proving general backend reset completion:
 
 These are source-based expectations, not live one-read measurements. The
 planned vsock transport-reset event path keeps existing queues and DMA
-owners; it does not reset/reinitialize the PCI device.
+owners solely for safe reclamation/retention; it does not reset/reinitialize
+the PCI device or attempt transport recovery (D26).
 
 ### D19. Connection-local invalid-credit rejection (Q20, approved)
 
@@ -2910,7 +2944,9 @@ completion check. No existing validation is removed as part of this decision.
 The user confirmed that discovery follows D14: return `NotAllowed` when
 CAP_VSOCK is missing and `NotFound` when the device is absent. Check the
 capability first, so a denied caller receives `NotAllowed` even without a
-device. Return success when an authorized caller's device was discovered.
+device. Return success when an authorized caller's device is dormant or
+ready; a discovered device that has permanently failed returns its cached
+`InternalError` (D26).
 Discovery does not initialize queues, read the CID, or start device pumps.
 
 Use `availability(&NetClient) -> Result<(), moto_rt::Error>` with the existing
@@ -3057,52 +3093,67 @@ peer cannot complete before the existing two-second connect deadline, and
 check reservation reclamation. Do not accept either error interchangeably
 or add VMM-specific production logic. D14's error mapping is unchanged.
 
-## Open questions
+### D25. Eight pending accepts (Q28, approved)
 
-### Q28. Pending accept-call bound
+Allow eight waiting accept RPCs per listener, separately from D7's eight
+unaccepted streams. The former stores request metadata and its requesting
+channel; the latter owns streams and RX buffers charged to the global cap.
+Use a small fixed/pre-reserved queue and return `OutOfMemory` for a ninth
+pending call. Four native reservations per channel do not replace this
+server-side limit: raw IPC and requests from multiple channels still obey it.
+Do not copy TCP's larger 1,024-call queue or introduce a new quota framework.
 
-D7 bounds unaccepted incoming connections at eight per listener, but does
-not give a numeric bound for accept RPCs waiting for a future connection.
-These are separate queues: the former owns established streams/RX buffers;
-the latter owns request metadata and the requesting channel. Four native
-reservations per channel do not themselves bound raw IPC requests or requests
-from several channels belonging to one process.
+### D26. Permanent failure on device reset (Q29, approved)
 
-The existing TCP listener caps pending accepts at 1,024 and returns
-`OutOfMemory` when full (`runtime/net/tcp_listener.rs`). For vsock, recommend
-eight pending accepts per listener, with the same error at the limit, while
-retaining the independent eight-stream backlog and four-reservation native
-channel model. A small fixed/pre-reserved queue avoids a new per-channel
-reservation-tracking scheme. Alternatively, match TCP's 1,024-call limit.
-Await user choice before implementing this bound; bind/drop and incoming
-backlog work do not depend on it.
+If the device resets, leave it off for the rest of sys-io's lifetime. Use
+the existing cached device-failure state and `InternalError`, wake pending
+vsock operations with that error, and keep future operations erroneous.
+Discard buffered RX and queued TX rather than preserving successful reads
+or graceful delivery. Fail listeners and pending accepts as well as streams;
+do not fail TCP/UDP that share the native NET channel.
 
-### Q29. Real transport-reset integration coverage
+Remove CID refresh, listener rebinding/continuity, and reset-recovery logic.
+No snapshots, restore/migration support, or FC snapshot orchestration is
+part of this work. Keep small existing guest fixtures for terminal failure,
+error propagation, and resource safety; do not claim live reset coverage.
 
-Existing guest fixtures separately cover connection reset, CID-index refresh,
-and event-buffer decoding/reposting, but not the combined sys-io event handler
-and native notifications. Firecracker 1.15.1 can supply a real reset with
-`Pause -> SnapshotCreate -> Resume` in the same process, without restoring or
-migrating the VM: its [snapshot documentation](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/docs/snapshotting/snapshot-support.md#vsock-device-reset)
-explicitly describes the transport-reset event during snapshot creation.
+This does not waive memory safety: outstanding DMA is still device-owned
+until completion. Stop new submissions/reposting, reap returned descriptors
+without dispatching their contents, and retain unreclaimed buffers/queues.
+Do not fabricate virtqueue completions, drop their futures, or reinitialize
+the device. The permanent failure transition is idempotent. D18's initial
+pre-activation status-reset check is unrelated and unchanged.
 
-Recommend an FC-only case in the existing acceptance phase, with a guest/peer
-readiness barrier, native reset/error and buffered-RX assertions, and listener
-reuse after resume. Require a guest verdict; API success alone does not prove
-event delivery. This needs snapshot files (about 1 GiB for the default test
-VM), but no production injection hook, VMM changes, restore test, or new
-host-only suite. It covers same-CID reset, not a live CID change.
+### D27. Separate kernel thread-creation rollback fix (Q31, approved)
 
-The other configured VMM paths cannot provide this event: QEMU's
-[vhost-user-vsock device](https://github.com/qemu/qemu/blob/v10.2.1/hw/virtio/vhost-user-vsock.c#L83-L88)
-is unmigratable, while its transport-reset sender is a post-load callback;
-[CHV 52's restore path](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/device.rs)
-queues per-connection RST packets instead of a transport-reset event.
-Await approval before adding snapshot orchestration beyond stage 13's current
-fixture-only approach. Alternatively, retain the fixtures and explicitly
-accept the remaining integration-coverage gap; do not claim it is tested.
+The release developer gates on both QEMU and CHV exposed
+`stats: process dropped with 1 active threads` during the existing unwind
+abort test. `spawn_thread` constructs a thread and publishes its self/join
+objects before checking the process's Running state. If process exit wins
+before insertion into the thread map, the error path does not undo
+construction. Exit cannot find that thread in the map, so its object cycles
+and active-thread accounting survive. Its kernel stack remains in the
+global kernel address space because `Thread::cleanup` never runs; user-stack
+pages are reclaimed with the process address space. The live process listing
+retained a DEAD unwind child with one active thread.
 
-### Q30. Disconnect when the native driver exits
+This predates vsock and is not VMM-specific. The diagnostic is also in the
+QEMU baseline (`/tmp/vsock-baseline.qoT1LL/full-test-release.log`) and M1
+logs. Current evidence is in
+`/tmp/vsock-d16-developer-gate.NEOmKO/{qemu,chv}-full-test.log`; relevant code
+is `kernel/src/uspace/process.rs::{spawn_thread, Thread::new}` and
+`kernel/src/xray/stats.rs::process_dropped`.
+
+The user explicitly approved a separate reviewed kernel patch. Prevent or
+undo unpublished construction safely, cover the exit race through existing guest
+tests, and retain the unwind test. Before committing this patch, run three
+passing debug and three passing release `src/tests/full-test.sh` runs, plus
+one `src/tests/full-test-dev.sh --release`. These are fresh patch-specific
+gates, not earlier passes or a deferral to M2. Preserve failures and diagnose
+them; do not suppress the diagnostic or count functional success as proof
+of correct thread reclamation. No external/toolchain source change is needed.
+
+### D28. Drop abandoned operations on driver exit (Q30, simplified)
 
 The existing weak connect waiter closes a successful canceled request only
 while the channel's RX task still runs. Releasing the last reservation starts
@@ -3124,59 +3175,40 @@ and hit its documented single wake-target assertion; the corrected diagnostic
 uses a separate runtime thread. Both failures are preserved, and all temporary
 diagnostic edits were removed. Neither run is a validation pass.
 
-Recommend fixing channel lifetime rather than adding a vsock cancellation
-protocol. After both native driver tasks finish draining:
+The user permits discarding abandoned work in this edge case. Require only
+bounded resource ownership, memory safety, and prompt error completion;
+do not preserve success or data delivery for the canceled operation. Remove
+the proposed cancel-open protocol and explicit IPC disconnect API.
 
-1. Fail residual RPC waiters as `NotConnected` and prevent new RPC admission
-   on the closed channel, including reservation-free availability/CID queries.
-2. Explicitly release the IPC peer handle, idempotently. Add a narrow
-   `io_channel::ClientConnection::disconnect(&self)` facility; the current
-   connection only disconnects in `Drop` and cannot be mutably borrowed
-   through the channel's shared `Arc`.
-3. Keep the client mapping alive until normal `Drop`; retained callers and
-   page references make unmapping at driver completion unsafe. Make eventual
-   `Drop` tolerate the already-released handle.
+Use existing ownership and teardown instead:
 
-The server's `Receiver::poll_recv` drains queued ring messages before reporting
-disconnect, and sys-io handles vsock TX inline before taking the next message.
-Its existing disconnect cleanup retains accepted TX under D10's deadline.
-This preserves final queued data without waiting indefinitely for an idle
-accept reply. Test retained-client final-slot cancellation, residual queries,
-and queued-TX Drop, plus the affected TCP/UDP/native and IPC regressions.
+1. Make `NetClient` a weak handle to the channel. The driver, reservations,
+   and actual in-flight operations retain strong ownership. Keeping an idle
+   client after its driver finishes must not keep sys-io's peer alive.
+2. Reject reservation-free queries on a closing/dead channel. After the
+   existing RX/TX tasks finish, use the existing failure path to resolve
+   residual waiters as `NotConnected` and leave admission closed. Do not wait
+   for a late successful connect/accept or add per-request cancellation state.
+3. Let normal `ClientConnection::Drop` release the mapping and peer handle
+   once real owners leave. Handle an unstarted driver's Drop without a new
+   allocation or stranded channel. Preserve ordinary socket Drop's existing
+   queued-TX drain; this edge-case policy does not weaken TCP/UDP or D10.
 
-The alternative is an append-only vsock cancel-open command keyed by request
-ID, with server bookkeeping for cancellation before admission, while pending,
-and after a successful reply. It avoids changing shared channel lifetime but
-adds protocol state that the lifetime fix does not need. Await user choice
-before either implementation; listener bind/drop and D16 do not depend on it.
-Under the recommended lifecycle fix, a canceled accept on a still-live channel
-may retain one Q28 pending-call slot until a peer arrives or the listener drops;
-the existing late-success-close behavior then reclaims the child. Document and
-test that bound rather than claiming prompt server-side request cancellation.
+"Drop everything" means logical work, not freeing borrowed memory. A retained
+in-flight future may hold an inert channel until polled after its error wake
+or dropped; no new work is admitted. Do not forcibly unmap its pages. Sys-io
+copies TX into device-owned buffers before DMA, whose existing global owners
+remain until completion independently of client teardown. No per-socket
+virtqueue cancellation is needed.
 
-### Q31. Unrelated kernel thread-creation rollback leak
+Test retained-client final-slot cancellation, later queries returning errors,
+unstarted-driver Drop, and ordinary queued-TX Drop through existing guest
+routes. A canceled accept on a still-live channel may retain one of D25's
+eight pending-call slots until a peer arrives or the listener drops; existing
+late-success cleanup then reclaims the child. Bound and document that case
+instead of adding a prompt server-side cancellation protocol.
 
-The release developer gates on both QEMU and CHV exposed
-`stats: process dropped with 1 active threads` during the existing unwind
-abort test. Read-only diagnosis found a preexisting race: `spawn_thread`
-constructs a thread and publishes its self/join objects before checking the
-process's Running state. If process exit wins before insertion into the thread
-map, the error path does not undo construction. Exit cannot find that thread
-in the map, and its object cycles and active-thread accounting survive.
-Its kernel stack also remains in the global kernel address space because
-`Thread::cleanup` never runs; user-stack pages are reclaimed with the process
-address space. The live process listing retained a DEAD unwind child with
-one active thread.
+## Open questions
 
-This is not VMM- or virtio-specific. The same diagnostic is in the pre-vsock
-QEMU baseline (`/tmp/vsock-baseline.qoT1LL/full-test-release.log`) and M1
-logs. Current evidence is in
-`/tmp/vsock-d16-developer-gate.NEOmKO/{qemu,chv}-full-test.log`; the relevant
-paths are `kernel/src/uspace/process.rs::{spawn_thread, Thread::new}` and
-`kernel/src/xray/stats.rs::process_dropped`.
-
-Recommend a separate reviewed kernel rollback fix, with the existing unwind
-test plus thread/accounting regressions. This broadens the explicitly approved
-virtio-bug scope: await approval before kernel edits. Alternatively, record
-the diagnosed bug for separate work. Do not suppress the diagnostic or treat
-the passing functional suite as proof that thread cleanup is correct.
+None currently. Stop for review if implementation requires a non-obvious
+deviation from these decisions.
