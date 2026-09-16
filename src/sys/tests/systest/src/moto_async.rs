@@ -1030,6 +1030,71 @@ fn test_yield_to_io_services_system_handle() {
     moto_sys::SysObj::put(handle_here).unwrap();
     moto_sys::SysObj::put(handle_there).unwrap();
     assert!(turns > 0);
+
+    // Invalid registrations must not block a valid latched wake behind them
+    // for one I/O turn. Dropped futures intentionally remain registered until
+    // the kernel reports their now-disconnected handles.
+    let (live_wake, live_wait) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let (bad_peer, bad_wait) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let stale_waits = moto_async::LocalRuntime::new().block_on(async {
+        let live = live_wait.as_future();
+        let bad = bad_wait.as_future();
+        let mut stale_waits = Vec::new();
+        for _ in 0..8 {
+            let (peer, stale) =
+                moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+            let stale_future = stale.as_future();
+            moto_sys::SysObj::put(peer).unwrap();
+            drop(stale_future);
+            stale_waits.push(stale);
+        }
+
+        moto_sys::SysObj::put(bad_peer).unwrap();
+        SysCpu::wake(live_wake).unwrap();
+        moto_async::yield_to_io().await;
+        std::future::poll_fn(|cx| match live.do_poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => {
+                panic!("one I/O turn did not service a wake behind invalid handles")
+            }
+        })
+        .await
+        .unwrap();
+        let bad_result = std::future::poll_fn(|cx| match bad.do_poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("one I/O turn did not report an invalid handle"),
+        })
+        .await;
+        assert_eq!(bad_result, Err(moto_rt::Error::BadHandle));
+        stale_waits
+    });
+    moto_sys::SysObj::put(live_wake).unwrap();
+    moto_sys::SysObj::put(live_wait).unwrap();
+    moto_sys::SysObj::put(bad_wait).unwrap();
+    for stale in stale_waits {
+        moto_sys::SysObj::put(stale).unwrap();
+    }
+
+    // The blocking scheduler path must also report a retained bad future
+    // instead of sleeping on another healthy, unsignaled registration.
+    let (bad_peer, bad_wait) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let (healthy_peer, healthy_wait) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let bad_result = moto_async::LocalRuntime::new().block_on(async {
+        let healthy = healthy_wait.as_future();
+        let bad = bad_wait.as_future();
+        moto_sys::SysObj::put(bad_peer).unwrap();
+        let result = bad.await;
+        drop(healthy);
+        result
+    });
+    assert_eq!(bad_result, Err(moto_rt::Error::BadHandle));
+    moto_sys::SysObj::put(bad_wait).unwrap();
+    moto_sys::SysObj::put(healthy_peer).unwrap();
+    moto_sys::SysObj::put(healthy_wait).unwrap();
     println!("----- moto_async::test_yield_to_io_services_system_handle PASS");
 }
 

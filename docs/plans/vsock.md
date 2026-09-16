@@ -1245,6 +1245,29 @@ corrected without changing production memory admission:
   ordinary pressure episodes, in `/tmp/vsock-shared-fixes-clean-gate.5GQhNV/`.
   This is the incremental D13 gate, not the outstanding M2 repeated gate.
 
+The observed shared virtio wake stall was in Motor's local executor, not the
+VMM or completion ordering:
+
+- Live diagnostics found a current interrupt threshold and an already
+  delivered, latched IRQ, but 96 consecutive waits containing that device
+  future had returned `BadHandle`. Kernel wait-set validation rejects the
+  whole set before delivering valid wakes. The runtime removed only one
+  disconnected registration per I/O turn, delaying device progress behind
+  a batch of disconnected IPC clients.
+- `LocalRuntimeInner::wait` now drains recognized invalid registrations in
+  the same turn, reusing its handle vector. Each pass removes an entry;
+  subsequent passes are nonblocking because error waiters may already be
+  runnable. Preserve unknown-handle behavior and do not repeat the processed
+  wake target. No kernel, VMM, backend, or syscall change is needed.
+- The existing guest async test now checks a latched healthy wake behind
+  eight dropped registrations plus a retained bad future, and the blocking
+  scheduler path with an unsignaled healthy handle. The first assertion
+  fails on the old runtime and passes with the fix. Evidence:
+  `/tmp/vsock-stack-wait-diagnostic.lJi4BS/` and
+  `/tmp/vsock-shared-progress-regression.BCjdkB/`. Clean debug/release full
+  suites passed without queue-stall recovery in
+  `/tmp/vsock-shared-fixes-clean-gate.5GQhNV/`; Clippy adds no warnings.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
