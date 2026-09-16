@@ -1,6 +1,6 @@
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -9,6 +9,7 @@ mod cache;
 mod cache_response;
 mod cache_store;
 mod connections;
+mod redirect;
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CacheMode {
@@ -37,6 +38,10 @@ struct Args {
     #[arg(long, requires = "ssl_cert")]
     ssl_key: Option<String>,
 
+    /// Listen on HTTP port 80 and redirect to this exact HTTPS URL; requires TLS on 443.
+    #[arg(long, requires = "ssl_cert")]
+    http_redirect_url: Option<redirect::RedirectUrl>,
+
     /// Maximum admitted TCP connections, including TLS handshakes and idle clients.
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
@@ -57,8 +62,16 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     let args = Args::parse();
+    if args.http_redirect_url.is_some() && args.addr.port() != 443 {
+        Args::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--http-redirect-url requires --addr on port 443",
+            )
+            .exit();
+    }
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -113,24 +126,51 @@ async fn main() {
             PathBuf::from(ssl_cert),
             PathBuf::from(args.ssl_key.as_ref().unwrap()),
         )
-        .await
-        .unwrap();
+        .await?;
 
-        let listener = std::net::TcpListener::bind(args.addr).unwrap();
-        tracing::info!("listening on {}", listener.local_addr().unwrap());
+        let listener = std::net::TcpListener::bind(args.addr)?;
+        // Bind both sockets before reporting readiness. A required redirect
+        // listener must not silently disappear when its port is unavailable.
+        let redirect_server = if let Some(url) = args.http_redirect_url {
+            let mut address = args.addr;
+            address.set_port(80);
+            let redirect_listener = std::net::TcpListener::bind(address).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("cannot bind HTTP redirect listener at {address}: {error}"),
+                )
+            })?;
+            let mut server = axum_server::from_tcp(redirect_listener).acceptor(
+                connections::HeaderDeadline::new(admission.clone(), deadline),
+            );
+            configure_headers(&mut server, deadline);
+            Some((server, url.router(), address))
+        } else {
+            None
+        };
+        tracing::info!("listening on {}", listener.local_addr()?);
         let mut server = axum_server::from_tcp_rustls(listener, config).map(|acceptor| {
             connections::HeaderDeadline::new(acceptor.acceptor(admission), deadline)
         });
         configure_headers(&mut server, deadline);
-        server.serve(app.into_make_service()).await.unwrap();
+        if let Some((redirect_server, redirect_app, address)) = redirect_server {
+            tracing::info!("HTTP redirect on {address}");
+            tokio::try_join!(
+                server.serve(app.into_make_service()),
+                redirect_server.serve(redirect_app.into_make_service()),
+            )?;
+        } else {
+            server.serve(app.into_make_service()).await?;
+        }
     } else {
-        let listener = std::net::TcpListener::bind(args.addr).unwrap();
-        tracing::info!("listening on {}", listener.local_addr().unwrap());
+        let listener = std::net::TcpListener::bind(args.addr)?;
+        tracing::info!("listening on {}", listener.local_addr()?);
         let mut server = axum_server::from_tcp(listener)
             .acceptor(connections::HeaderDeadline::new(admission, deadline));
         configure_headers(&mut server, deadline);
-        server.serve(app.into_make_service()).await.unwrap();
+        server.serve(app.into_make_service()).await?;
     };
+    Ok(())
 }
 
 fn configure_headers<A>(server: &mut axum_server::Server<A>, deadline: std::time::Duration) {
