@@ -64,6 +64,12 @@ not total process RSS: active responses can still reference evicted bytes.
 also checks default caching, disabled caching, expiry, deletion, and large-file
 streaming. No cache is populated at server startup.
 
+Set `HTTPD_AXUM_BENCH=1` when running the HTTP test to also report preparation
+and complete loopback-request timings with caching on and off. It measures a
+256-byte file, 64 samples after four warm-ups, for both burst traffic and requests
+spaced 20 ms apart. It drains each debug event immediately. Timings are diagnostic
+only; correctness, cache pressure, and concurrent-fill checks remain assertions.
+
 The HTTP test also checks two requests on a TLS connection, validating the server
 certificate against the bundled localhost test certificate and checking ALPN.
 The fixture certificate expires in September 2036. Regenerate it and its DER

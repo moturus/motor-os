@@ -1,6 +1,7 @@
 use crate::common::{request, Server};
 use std::io::BufReader;
 use std::time::Duration;
+mod bench;
 
 pub fn check() {
     let server = Server::start(None, &[]);
@@ -52,4 +53,39 @@ pub fn check() {
     drop(io);
     server.stop();
     println!("httpd-axum cache freshness and streaming tests passed");
+    pressure();
+    if std::env::var_os("HTTPD_AXUM_BENCH").is_some() {
+        bench::run();
+    }
+}
+
+fn pressure() {
+    let server = Server::start(None, &["--cache-size-mb", "1"]);
+    let mut io = BufReader::new(server.connect());
+    let content = vec![b'x'; 256 * 1024];
+    for i in 0..4 {
+        std::fs::write(server.directory.join(i.to_string()), &content).unwrap();
+        assert_eq!(request(&mut io, "GET", &format!("/{i}"), "").body, content);
+    }
+    std::fs::write(server.directory.join("0"), b"evicted").unwrap();
+    std::fs::write(server.directory.join("3"), b"still cached").unwrap();
+    assert_eq!(request(&mut io, "GET", "/0", "").body, b"evicted");
+    assert_eq!(request(&mut io, "GET", "/3", "").body, content);
+    std::fs::write(server.directory.join("parallel"), b"concurrent fill").unwrap();
+    let jobs: Vec<_> = (0..16)
+        .map(|_| {
+            let stream = server.connect();
+            std::thread::spawn(move || {
+                let response = request(&mut BufReader::new(stream), "GET", "/parallel", "");
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"concurrent fill");
+            })
+        })
+        .collect();
+    for job in jobs {
+        job.join().unwrap();
+    }
+    drop(io);
+    server.stop();
+    println!("httpd-axum cache pressure and concurrent fill tests passed");
 }

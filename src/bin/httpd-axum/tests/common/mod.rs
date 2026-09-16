@@ -92,6 +92,12 @@ impl Server {
         self.output.read_to_string(&mut logs).unwrap();
         logs
     }
+
+    pub fn next_log(&mut self) -> String {
+        let mut line = String::new();
+        assert_ne!(self.output.read_line(&mut line).unwrap(), 0);
+        line
+    }
 }
 
 impl Drop for Server {
