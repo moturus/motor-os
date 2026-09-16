@@ -16,7 +16,11 @@ fn empty(status: StatusCode) -> Response {
 }
 
 pub fn respond(file: &CachedFile, method: &Method, headers: &HeaderMap) -> Response {
-    let modified = date(&file.headers, header::LAST_MODIFIED);
+    let conditional = headers.contains_key(header::IF_UNMODIFIED_SINCE)
+        || headers.contains_key(header::IF_MODIFIED_SINCE);
+    let modified = conditional
+        .then(|| date(&file.headers, header::LAST_MODIFIED))
+        .flatten();
     if let Some(since) = date(headers, header::IF_UNMODIFIED_SINCE) {
         if modified.is_none_or(|modified| modified > since) {
             return empty(StatusCode::PRECONDITION_FAILED);
