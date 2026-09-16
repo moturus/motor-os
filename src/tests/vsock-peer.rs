@@ -71,6 +71,7 @@ const CAPACITY_REUSED: &[u8] = b"capacity:reused";
 const CAPACITY_PORT_START: u32 = 70_010;
 const CAPACITY_LISTENERS: usize = 8;
 const GLOBAL_STREAM_LIMIT: usize = 64;
+const SMALL_ECHO_ROUNDTRIPS: usize = 128;
 
 struct SocketPath(PathBuf);
 
@@ -645,7 +646,10 @@ fn run() -> io::Result<()> {
         let mut stream = configure_stream(accept_before(&listener, deadline)?)?;
         match action {
             Action::Echo(total) => {
-                echo_exact(&mut stream, total)?;
+                let roundtrips = if total == 1 { SMALL_ECHO_ROUNDTRIPS } else { 1 };
+                for _ in 0..roundtrips {
+                    echo_exact(&mut stream, total)?;
+                }
                 stream.shutdown(Shutdown::Write)?;
             }
             Action::Send(total) => {

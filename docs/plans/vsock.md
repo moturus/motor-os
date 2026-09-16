@@ -1540,6 +1540,25 @@ D26's failure-aware reply publication is implemented and reviewed:
   traffic and teardown, not injected reset/backpressure combinations. A29's
   implementation is complete; Stage 15 and the full M2 gate remain.
 
+Stage 15's measurement fixtures are implemented and gated:
+
+- Existing discovery reports attached-unused, dormant, activated, absent,
+  and disabled-endpoint process memory and 100 ms CPU/wait/wake samples,
+  including actual intervals and observer cost. First/warm CID queries are
+  timed separately. All measurement work is in systest, not the boot path.
+- Repeat the existing framed one-byte exchange 128 times on one stream;
+  report aggregate/mean RTT. Existing global-capacity, duplex, and concurrent
+  block/TCP/UDP cases report whole-process footprint and payload rates while
+  retaining exact bytes, EOF, credit, and cleanup checks. No threshold,
+  timeout, or resource limit changed.
+- Both profiles passed native/component tests and all twenty peer actions
+  plus discovery on all VMMs; builds, formatting, hashes, and Clippy passed
+  without new warnings. Evidence: `/tmp/vsock-stage15-gate.b3pd2N/`. QEMU's
+  System/IP-disabled boot pair used matching shared memory; its standard
+  no-device boot kept default backing. Detailed observations and caveats
+  accompany the API documentation. Final repeated-capacity/close fixtures
+  and M2's full gate remain outstanding.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.

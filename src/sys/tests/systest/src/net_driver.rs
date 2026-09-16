@@ -16,6 +16,104 @@ use crate::net_harness::{bounded, bounded_output, host_channel};
 const VSOCK_DISCOVERY_DENIED_CHILD: &str = "vsock-discovery-denied-child";
 const VSOCK_FOREIGN_ACCEPT_CHILD: &str = "vsock-foreign-accept-child";
 const VSOCK_EXIT_ACCEPT_CHILD: &str = "vsock-exit-accept-child";
+const VSOCK_IDLE_SAMPLE: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+struct VsockMeasurement {
+    memory_bytes: u64,
+    cpu_tsc: u64,
+    waits: u64,
+    wakes: u64,
+    observed_tsc: u64,
+}
+
+struct VsockMetrics {
+    kernel: moto_stats::ProviderInfo,
+    memory: u32,
+    cpu: u32,
+    waits: u32,
+    wakes: u32,
+}
+
+impl VsockMetrics {
+    fn new() -> Self {
+        let kernel = moto_stats::Collector::kernel();
+        let descriptions = moto_stats::Collector::describe(&kernel).unwrap();
+        let metric = |name: &str| {
+            descriptions
+                .iter()
+                .find(|metric| metric.name == name)
+                .unwrap_or_else(|| panic!("missing kernel metric {name}"))
+                .id
+        };
+        Self {
+            kernel,
+            memory: metric("memory_usage"),
+            cpu: metric("cpu_usage"),
+            waits: metric("sys_cpu_waits"),
+            wakes: metric("sys_cpu_wakes"),
+        }
+    }
+
+    fn snapshot(&self) -> VsockMeasurement {
+        let read = |metric| {
+            moto_stats::Collector::read(&self.kernel, metric, moto_sys::stats::PID_SYS_IO).unwrap()
+        };
+        VsockMeasurement {
+            memory_bytes: read(self.memory),
+            waits: read(self.waits),
+            wakes: read(self.wakes),
+            cpu_tsc: read(self.cpu),
+            observed_tsc: moto_rt::time::Instant::now().as_u64(),
+        }
+    }
+
+    async fn measure_idle(&self, topology: &str, state: &str) -> VsockMeasurement {
+        let before = self.snapshot();
+        moto_async::sleep(VSOCK_IDLE_SAMPLE).await;
+        let after = self.snapshot();
+        // observed_tsc follows the CPU read in both snapshots, so this
+        // denominator spans the same cumulative CPU samples. It includes the
+        // ending snapshot's other three kernel queries.
+        let elapsed_tsc = after.observed_tsc.saturating_sub(before.observed_tsc);
+        let elapsed_ns = moto_rt::time::Instant::from_u64(after.observed_tsc)
+            .duration_since(moto_rt::time::Instant::from_u64(before.observed_tsc))
+            .as_nanos();
+        let cpu_tsc = after.cpu_tsc.saturating_sub(before.cpu_tsc);
+        let cpu_fraction = if elapsed_tsc == 0 {
+            0.0
+        } else {
+            cpu_tsc as f64 / elapsed_tsc as f64
+        };
+        println!(
+            "vsock measurement: topology={topology} state={state} requested_idle_ms={} \
+             sample_interval_ns={elapsed_ns} sample_interval_tsc_ticks={elapsed_tsc} \
+             sys_io_cpu_tsc_delta={cpu_tsc} \
+             sys_io_cpu_fraction={cpu_fraction:.6} sys_io_waits_delta={} \
+             sys_io_wakes_delta={} sys_io_memory_bytes={}",
+            VSOCK_IDLE_SAMPLE.as_millis(),
+            after.waits.saturating_sub(before.waits),
+            after.wakes.saturating_sub(before.wakes),
+            after.memory_bytes,
+        );
+        after
+    }
+}
+
+fn report_vsock_memory(
+    topology: &str,
+    transition: &str,
+    before: VsockMeasurement,
+    after: VsockMeasurement,
+) {
+    let delta = i128::from(after.memory_bytes) - i128::from(before.memory_bytes);
+    println!(
+        "vsock measurement: topology={topology} transition={transition} \
+         sys_io_memory_before_bytes={} sys_io_memory_after_bytes={} \
+         sys_io_memory_delta_bytes={delta}",
+        before.memory_bytes, after.memory_bytes,
+    );
+}
 
 async fn expect_raw_vsock_error(
     sender: &moto_ipc::io_channel::Sender,
@@ -573,6 +671,26 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
 }
 
 fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
+    let topology = match (mode, with_ip) {
+        ("present", false) => "system-ip-disabled/vsock-present",
+        ("disabled", false) => "system-ip-disabled/shared-endpoint-disabled",
+        ("absent", true) => "standard-nic-present/vsock-absent",
+        _ => "nonstandard",
+    };
+    let metrics = VsockMetrics::new();
+    println!(
+        "vsock measurement: topology={topology} observer=4-kernel-queries-per-snapshot \
+         interval=cpu-sample-to-cpu-sample memory_scope=whole-sys-io-process"
+    );
+    let initial_state = match mode {
+        "present" => "attached-unused",
+        "absent" => "device-absent",
+        "disabled" => "shared-endpoint-disabled",
+        _ => panic!("unknown vsock discovery mode: {mode}"),
+    };
+    let initial =
+        moto_async::LocalRuntime::new().block_on(metrics.measure_idle(topology, initial_state));
+
     if mode == "disabled" {
         assert_eq!(
             moto_ipc::io_channel::ClientConnection::connect("sys-io").err(),
@@ -596,8 +714,45 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         let (client, driver_task) = host_channel().await;
         assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
         assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
-        assert_eq!(moto_io::net::vsock::local_cid(&client).await, expected_cid);
-        assert_eq!(moto_io::net::vsock::local_cid(&client).await, expected_cid);
+        let after_availability = metrics.snapshot();
+        let dormant = if mode == "present" {
+            // This transition also contains the NET channel and availability
+            // RPC. memory_usage covers the whole sys-io process, so neither
+            // transition is an exact allocator or device-residency measure.
+            report_vsock_memory(
+                topology,
+                "attached-unused-to-dormant",
+                initial,
+                after_availability,
+            );
+            metrics
+                .measure_idle(topology, "dormant-after-availability")
+                .await
+        } else {
+            after_availability
+        };
+
+        let first_started = moto_rt::time::Instant::now();
+        let first_cid = moto_io::net::vsock::local_cid(&client).await;
+        let first_elapsed = first_started.elapsed();
+        assert_eq!(first_cid, expected_cid);
+        let warm_started = moto_rt::time::Instant::now();
+        let warm_cid = moto_io::net::vsock::local_cid(&client).await;
+        let warm_elapsed = warm_started.elapsed();
+        assert_eq!(warm_cid, expected_cid);
+
+        if mode == "present" {
+            let activated = metrics.snapshot();
+            report_vsock_memory(topology, "dormant-to-activated", dormant, activated);
+            println!(
+                "vsock measurement: topology={topology} first_local_cid_ns={} \
+                 warm_local_cid_ns={} permanent_cid={}",
+                first_elapsed.as_nanos(),
+                warm_elapsed.as_nanos(),
+                first_cid.unwrap(),
+            );
+            metrics.measure_idle(topology, "activated").await;
+        }
         assert_eq!(client.reservations(), 0);
         crate::net_harness::drain_host_channel(client, driver_task).await;
 

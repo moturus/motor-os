@@ -69,7 +69,9 @@ const CAPACITY_REBOUND: &[u8] = b"capacity:rebound";
 const CAPACITY_REUSED: &[u8] = b"capacity:reused";
 const CAPACITY_PORT_START: u32 = 70_010;
 const CAPACITY_LISTENERS: usize = 8;
+const GLOBAL_STREAM_LIMIT: usize = 64;
 const CANCEL_POLLS: usize = 4;
+const SMALL_ECHO_ROUNDTRIPS: usize = 128;
 const PAGES_PER_SUBCHANNEL: usize = CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize;
 
 enum Action {
@@ -292,6 +294,19 @@ fn expect_child_marker(reader: &mut impl BufRead, expected: &str) {
 
 fn pattern(start: usize, len: usize) -> Vec<u8> {
     (start..start + len).map(pattern_byte).collect()
+}
+
+fn print_throughput(label: &str, bytes: usize, elapsed: Duration) {
+    let elapsed_ns = elapsed.as_nanos().max(1);
+    let bytes_per_second = bytes as u128 * 1_000_000_000 / elapsed_ns;
+    println!(
+        "vsock measurement: {label} aggregate_vsock_payload_bytes={bytes} elapsed_us={} payload_bytes_per_second={bytes_per_second}",
+        elapsed.as_micros()
+    );
+}
+
+fn sys_io_memory_usage() -> u64 {
+    crate::kernel_metric("memory_usage", moto_sys::stats::PID_SYS_IO)
 }
 
 fn fill_tx_without_yield(stream: &VsockStream) -> usize {
@@ -528,6 +543,7 @@ async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
 }
 
 async fn run_global_stream_capacity(stream: &VsockStream) {
+    let control_only = sys_io_memory_usage();
     let mut listeners = Vec::with_capacity(CAPACITY_LISTENERS);
     for offset in 0..CAPACITY_LISTENERS {
         listeners.push(
@@ -539,6 +555,7 @@ async fn run_global_stream_capacity(stream: &VsockStream) {
     // The host has now admitted 63 incoming streams and observed strict
     // refusal of the next. This control stream is the 64th live stream.
     expect_frame(stream, CAPACITY_FULL).await;
+    let capacity_full = sys_io_memory_usage();
     write_frame(stream, CAPACITY_PROGRESS).await;
 
     for listener in listeners {
@@ -546,6 +563,17 @@ async fn run_global_stream_capacity(stream: &VsockStream) {
     }
     write_frame(stream, CAPACITY_DROPPED).await;
     expect_frame(stream, CAPACITY_CLEARED).await;
+    let after_cleanup = sys_io_memory_usage();
+
+    let admitted_streams = (GLOBAL_STREAM_LIMIT - 1) as i128;
+    let full_delta = capacity_full as i128 - control_only as i128;
+    let cleanup_delta = after_cleanup as i128 - control_only as i128;
+    // These snapshots cover the whole sys-io process, not attributed vsock
+    // allocations; the delta also includes listener and allocator retention.
+    println!(
+        "vsock measurement: global-stream-capacity sys_io_whole_process_bytes control_only={control_only} capacity_full={capacity_full} after_cleanup={after_cleanup} full_delta={full_delta} full_delta_per_admitted_stream={} cleanup_delta={cleanup_delta}",
+        full_delta / admitted_streams
+    );
 
     let rebound = crate::net_driver::RawVsockListener::bind(CAPACITY_PORT_START).await;
     write_frame(stream, CAPACITY_REBOUND).await;
@@ -759,21 +787,41 @@ async fn run_action(
                 let mut empty = [];
                 assert_eq!(stream.try_read(&mut [&mut empty]), Ok(0));
             }
-            write_pattern(stream, total).await;
-            read_pattern(stream, total).await;
+            if total == 1 {
+                let started = Instant::now();
+                for _ in 0..SMALL_ECHO_ROUNDTRIPS {
+                    // Keep the existing framed one-byte request and exact
+                    // pattern validation; only repeat it on this same stream.
+                    write_pattern(stream, total).await;
+                    read_pattern(stream, total).await;
+                }
+                let aggregate_ns = started.elapsed().as_nanos();
+                println!(
+                    "vsock measurement: framed_echo_bytes=1 roundtrips={} \
+                     aggregate_rtt_ns={aggregate_ns} mean_rtt_ns={}",
+                    SMALL_ECHO_ROUNDTRIPS,
+                    aggregate_ns / SMALL_ECHO_ROUNDTRIPS as u128,
+                );
+            } else {
+                write_pattern(stream, total).await;
+                read_pattern(stream, total).await;
+            }
             read_eof(stream).await;
             Vec::new()
         }
         Action::Duplex { send, echo } => {
+            let started = Instant::now();
             let writer = async {
                 write_pattern(stream, echo).await;
             };
             let reader = async {
                 read_pattern(stream, send).await;
                 read_pattern(stream, echo).await;
-                read_eof(stream).await;
             };
             futures::join!(writer, reader);
+            let elapsed = started.elapsed();
+            read_eof(stream).await;
+            print_throughput("duplex", send + echo * 2, elapsed);
             Vec::new()
         }
         Action::LocalSendShutdown { send, receive } => {
@@ -964,6 +1012,7 @@ async fn run_action(
 
             expect_frame(sync, COEXIST_READY).await;
             ready_rx.await.unwrap();
+            let started = Instant::now();
             start_tx.send(()).unwrap();
             write_frame(sync, COEXIST_START).await;
             let ((), io_progress) = futures::join!(
@@ -980,6 +1029,8 @@ async fn run_action(
             );
             io_done.unwrap();
             io_thread.join().unwrap();
+            let elapsed = started.elapsed();
+            print_throughput("coexistence", COEXIST_PHASE_BYTES * 2 * 2, elapsed);
             Vec::new()
         }
         Action::IncomingBacklog => {
