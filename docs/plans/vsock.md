@@ -16,7 +16,8 @@ Q21 is deferred in D20: defending against buggy or malicious VMMs is out of
 scope, with the BAR-boundary concern recorded in `future-work.md`.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
-implementation has started, with progress recorded below.
+M1 foundations have passed their repeated full gate. M2 integration is next,
+with progress recorded below.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -576,6 +577,22 @@ Shared reset completion check (D18) is implemented and parent-reviewed:
   source-reviewed, not injection-tested; no new production test hook was
   added. No vsock device was attached. M1 foundations are ready for D13's
   repeated full gates; neither milestone is complete yet.
+
+M1 foundation milestone is complete at `d77b038e`:
+
+- Three debug and three release main-image build/full-test cycles passed on
+  QEMU, with source unchanged throughout the six cycles. Each cycle ran
+  `make -j"$(nproc)"` in its selected profile followed by
+  `src/tests/full-test.sh` (with `--release` for release). No gate failure,
+  retry, timeout increase, or test exclusion was needed.
+- Logs: `/tmp/vsock-m1-gate.oGRjOm/build-{debug,release}-{1,2,3}.log` and
+  `full-test-{debug,release}-{1,2,3}.log` in the same directory. All six full
+  suites finished with the full-test PASS marker and exit status zero.
+- This gates the capability, shared-driver/queue, fixed-pool, credit, and
+  bounded-storage foundations. It does not claim attached-vsock PCI/DMA,
+  peer interoperability, runtime pumps, connection/IPC/native API, or D19's
+  integrated reaction. Those remain M2 work under D13. Earlier pending
+  milestone statements describe the state at their respective increments.
 
 ## Scope and simplicity
 
@@ -1364,7 +1381,8 @@ with two repeated milestones:
   stages 7–15's state machines, shared networking IPC, native API, lazy
   activation, cleanup, and all three VMMs. Full gates include the complete
   new vsock phase by this milestone. Q22 changes only the dependency boundary,
-  not the tests required or the gate counts; neither milestone is complete.
+  not the tests required or the gate counts. M1 is complete as recorded above;
+  M2 remains pending.
 
 Each small implementation commit must build and run its affected guest
 systest cases in debug and release, plus directly affected existing queue,
@@ -1727,7 +1745,8 @@ affected guest tests in both profiles; bring required test plumbing forward.
 No case is dropped or counted as covered by a weaker fixture. Do not skip a
 VMM, weaken assertions, or add retries to save gate time. A failed milestone
 stops progression for diagnosis; preserve the original failure even if a
-later diagnostic run passes. Neither milestone is complete yet.
+later diagnostic run passes. M1 is complete as recorded in the progress
+section; M2 remains pending.
 
 ### D14. Error mapping (approved)
 
