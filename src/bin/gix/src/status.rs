@@ -102,7 +102,7 @@ pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate:
                 .emit_untracked(gix::dir::walk::EmissionMode::Matching),
         ),
         rewrites: None,
-        thread_limit: None,
+        thread_limit: Some(1),
     };
     let status = repo.index_worktree_status(
         &index,

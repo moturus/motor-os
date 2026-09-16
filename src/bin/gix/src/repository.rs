@@ -8,12 +8,15 @@ use gix::bstr::ByteSlice;
 
 use crate::command_config;
 
-const POLICY_OVERRIDES: [&str; 5] = [
+const POLICY_OVERRIDES: [&str; 8] = [
     "core.symlinks=false",
     "core.fileMode=true",
     "core.checkStat=minimal",
     "core.trustCTime=false",
     "gitoxide.core.useNsec=false",
+    "gitoxide.objects.allocLimit=16777216",
+    "index.threads=1",
+    "pack.threads=1",
 ];
 
 pub struct OpenedRepository {
@@ -26,15 +29,25 @@ pub fn open(
     overrides: &[&str],
     report_config_paths: bool,
 ) -> crate::Result<OpenedRepository> {
-    reject_environment_paths()?;
-    reject_config_paths(overrides)?;
-
+    let options = open_options(overrides)?;
     let selected = fs::canonicalize(path).map_err(|err| {
         io::Error::new(
             err.kind(),
             format!("cannot access repository '{}': {err}", path.display()),
         )
     })?;
+    let mut repo = gix::open_opts(&selected, options)?;
+    let command_policy = apply_policy(&mut repo, &selected, report_config_paths)?;
+    Ok(OpenedRepository {
+        repo,
+        command_policy,
+    })
+}
+
+pub(crate) fn open_options(overrides: &[&str]) -> io::Result<gix::open::Options> {
+    reject_environment_paths()?;
+    reject_config_paths(overrides)?;
+
     let mut permissions = gix::open::Permissions::isolated();
     permissions.config.git = true;
     permissions.config.user = true;
@@ -42,24 +55,26 @@ pub fn open(
     permissions.env.home = gix::sec::Permission::Allow;
     permissions.env.xdg_config_home = gix::sec::Permission::Allow;
 
-    let options = gix::open::Options::isolated()
+    Ok(gix::open::Options::isolated()
         .permissions(permissions)
         .strict_config(true)
         .cli_overrides(overrides.iter().copied())
-        .config_overrides(POLICY_OVERRIDES);
-    let mut repo = gix::open_opts(&selected, options)?;
-    validate_locations(&repo, &selected)?;
+        .config_overrides(POLICY_OVERRIDES))
+}
 
+pub(crate) fn apply_policy(
+    repo: &mut gix::Repository,
+    selected: &Path,
+    report_config_paths: bool,
+) -> crate::Result<command_config::Policy> {
+    validate_locations(repo, selected)?;
     if report_config_paths {
-        report_paths(&repo)?;
+        report_paths(repo)?;
     }
-    let command_policy = command_config::sanitize(&mut repo)?;
+    let command_policy = command_config::sanitize(repo)?;
     // This handle flag is definitive even if repository configuration loaded replacement refs.
     repo.objects.ignore_replacements = true;
-    Ok(OpenedRepository {
-        repo,
-        command_policy,
-    })
+    Ok(command_policy)
 }
 
 fn reject_environment_paths() -> io::Result<()> {

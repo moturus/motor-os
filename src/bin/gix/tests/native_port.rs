@@ -87,10 +87,12 @@ fn main() -> Result {
         1,
         "force the packed-ref large-file path"
     );
-    let graph = gix::commitgraph::File::at(repo.git_dir().join("objects/info/commit-graph"))
+    let graph = gix::commitgraph::Graph::from_info_dir(&repo.git_dir().join("objects/info"))
         .map_err(|err| err.into_error())?;
     assert_eq!(graph.num_commits(), 2);
-    graph.verify_checksum().map_err(|err| err.into_error())?;
+    graph
+        .verify_integrity(|_| Ok::<_, std::io::Error>(()))
+        .map_err(|err| err.into_error())?;
 
     check_pack_validation(&repo, &output)?;
 
@@ -302,6 +304,33 @@ fn main() -> Result {
 
 fn check_pack_validation(repo: &gix::Repository, output: &std::path::Path) -> Result {
     use gix::odb::pack::{self, data::Version};
+
+    let roundtrip = output.join("pack-roundtrip");
+    fs::create_dir(&roundtrip)?;
+    let mut packs = 0;
+    for entry in fs::read_dir(repo.objects.store_ref().path().join("pack"))? {
+        let path = entry?.path();
+        if path.extension() != Some(OsStr::new("pack")) {
+            continue;
+        }
+        packs += 1;
+        let source = pack::data::File::at(&path, gix::hash::Kind::Sha1)?;
+        let outcome = pack::Bundle::write_to_directory(
+            &mut std::io::BufReader::new(fs::File::open(&path)?),
+            Some(&roundtrip),
+            &mut gix::progress::Discard,
+            &AtomicBool::new(false),
+            Some(repo.objects.clone()),
+            pack::bundle::write::Options {
+                thread_limit: Some(1),
+                alloc_limit_bytes: Some(16 * 1024 * 1024),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(outcome.index.num_objects, source.num_objects());
+        assert!(outcome.index.num_objects > 0);
+    }
+    assert_eq!(packs, 1, "fixture has one real pack to rewrite and index");
 
     let directory = output.join("pack-validation");
     fs::create_dir(&directory)?;

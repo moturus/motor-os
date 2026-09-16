@@ -749,6 +749,95 @@ deltas. These figures justify the initial buffer limits; decoded objects,
 metadata/counts, other file readers and temporary disk still need bounds,
 followed by native workload validation.
 
+Q6 local reader patch, reviewed as external commit
+`e2d6d57464c3b99428968ec7321ddcadf986011a`: added a small bounded regular-file
+reader in external `gix-features/src/fs.rs`, tested through the existing
+`gix-features/tests/features.rs` target and `tests/fs/mod.rs`. The Motor
+paths of `gix-index/src/file/init.rs` and
+`gix-ref/src/store/packed/buffer.rs` use it. Both owned input files have a
+16 MiB ceiling; an index's existing allocation option may lower it.
+The representative worktree index is 191,524 bytes and packed refs are
+237 bytes. Read from the same opened file, check size before fallible
+allocation, and reject short reads or growth. No dependency, global
+budget or host mapping change was added. Host boundary/reader tests and
+Motor checks pass. These readers also pass the integrated host/Motor
+fixture at the current application pin; publication remains pending.
+
+Q6 pack-metadata patch, reviewed as external commit
+`a75943823b7698c8375ac2887df46e97b5e67a70`: in external
+`gix-pack/src/cache/delta/mod.rs` and `tree.rs`, limit a native delta tree
+to 65,536 actual entries before adding roots or either kind of delta.
+Initial reservations are clamped to that ceiling: a thin-pack iterator's upper
+bound includes possible inserted bases, so the estimate alone must not
+reject a pack that fits. Main item-vector reservations are fallible.
+The count bounds the associated metadata, work queues and sorting storage
+without a general allocation manager, and keeps valid delta depth within
+the existing 16-bit representation. The representative history has 36,568
+objects. One compact test uses a tiny private limit; non-Motor count policy
+is unchanged. Focused tests, Motor checks, and the integrated host/Motor
+fixture pass; publication is pending.
+
+Q6 commit-graph patch, reviewed as external commit
+`80bf4bd9c4d3f55d9d428aedb19ae7a478a0178b`: in external
+`gix-commitgraph`, bound each
+native graph file to 16 MiB, an opened graph's retained files to 32 MiB
+and 256 files, and chain text to 32 KiB. Reuse the bounded reader by
+declaring `gix-features` as a direct dependency; it is already an
+unconditional transitive dependency through `gix-hash`, so no package or
+feature closure is added. Scope: `gix-commitgraph/Cargo.toml`, the external
+`Cargo.lock` (one dependency edge), `src/lib.rs`, `src/native.rs`,
+`src/file/init.rs` and `src/init.rs`. Keep the existing host mapping and
+normal graph parsing. One compact helper test covers the limits; the
+existing repository fixture now contains a two-file graph chain. Host tests,
+host/Motor checks and native integration pass; publication is pending.
+
+Q6 traversal allocation patch, reviewed as external commit
+`30706245e9f815348a355cf5429786b8a202dbe3`: in external
+`gix-pack/src/cache/delta/traverse/resolve.rs` and `mod.rs`, give each
+native traversal a cumulative 512 MiB allowance for new decoded byte-buffer
+allocations. Charge the requested new capacity before each fallible exact
+reserve when a root, delta-instruction or result buffer must grow. Reusing
+an existing capacity costs nothing; dropping a buffer does not refund the
+allowance. This conservative bound avoids per-buffer ownership guards.
+Serial and parallel workers share one private context for the individual
+and cumulative limits; existing non-Motor reserve behavior and public
+options remain unchanged. Use one small boundary test
+plus existing traversal tests. The allowance is an initial value to check
+against the representative native history, not a process-memory ceiling.
+Pack buffers, metadata, graph/index/ref storage, and temporary disk have
+separate limits. Host boundary/serial/parallel tests, Motor checks and the native pack
+rewrite fixture pass; representative native history validation remains due.
+
+Q6 stream-inflation patch, reviewed as external commit
+`063015ceca3a46f7ffb9d375076058683f40c61a`: in the external checkout's
+`gix-pack/src/data/input/bytes_to_entries.rs`, reject native declared
+decoded sizes above 16 MiB before inflation, and stop inflation after at
+most the declared size plus one byte. A false small declaration then
+returns the existing size-mismatch error without inflating the whole
+payload. Keep normal hash/trailer parsing and non-Motor behavior. Use one
+tiny host helper test and the existing input/bundle tests. Fetch uses
+verification mode, so a limit error fails the operation. Focused tests and
+host/Motor checks pass; application pin integration and publication are pending.
+
+Next Q6 temporary-pack patch: in external `gix-pack/src/bundle/write/`,
+change `mod.rs`, `types.rs` and add a private `limited_file.rs` helper.
+Bound native temporary pack extent to 128 MiB, including inserted thin-pack
+bases and the final trailer. Wrap the file inside the existing buffered
+writer, track position through reads/writes/seeks, and reject excess writes
+before they reach disk. Header rewrites do not consume extra allowance.
+Retain existing buffering, flush-before-publication and owned-tempfile
+cleanup; do not query file position or metadata on every write. Use tiny
+boundary checks and one ordinary limit-failure cleanup check with existing
+writer types. Non-Motor files keep their unbounded policy.
+
+Application resource policy: `src/bin/gix/src/repository.rs` now supplies
+the fixed 16 MiB object allocation setting and single-worker index/pack
+settings before repository open, with common options/policy helpers for
+clone reuse. `status.rs` explicitly selects one worker. The existing log
+fixture supplies a conflicting `-c` allocation setting to check that fixed
+policy wins. The native fixture now rewrites a real pack for host Git
+verification as well as checking a two-file graph chain.
+
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
 `PrepareFetch::repository_mut()` accessor introduced in reviewed commit
@@ -757,7 +846,7 @@ repository before fetch so the application can validate paths, sanitize
 configuration and set `objects.ignore_replacements` without duplicating
 the library's clone/ref/HEAD orchestration, and returns `None` after a
 successful fetch consumes that handle. The application uses reviewed commit
-`68c53270d9275ed76d4418a6186027b8f012eba2`; publication of this revision
+`30706245e9f815348a355cf5429786b8a202dbe3`; publication of this revision
 on `gix-moturus-cli` remains pending.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
@@ -768,8 +857,8 @@ constructor now returns the existing unsupported-version error for version
 construction through the existing verifier, preserving each parsing mode.
 The input tests and native pack-writer fixture cover rejection, valid empty
 packs and temporary-file cleanup; focused host and Motor checks pass.
-Object-count allocation bounds remain part of Q6; the decoded-object limit
-does not bound pack metadata storage.
+The later Q6 metadata patch above supplies the separate entry-count bound;
+the decoded-object limit alone does not bound pack metadata storage.
 
 Implementation follow-up, discussed and approved on 2026-09-15: extend Motor
 FS's own-role permission rule to allow `Rx` → `Rwx`, alongside `Rw` → `Rx`.

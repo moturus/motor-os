@@ -59,12 +59,15 @@ build_fixture() {
   git_fixture update-index --add --cacheinfo "120000,$link_id,link"
   GIT_AUTHOR_DATE=2001-01-01T00:00:00Z GIT_COMMITTER_DATE=2001-01-01T00:00:00Z git_fixture commit -qm initial
   initial_id="$(git_fixture rev-parse HEAD)"
+  git_fixture commit-graph write --reachable --split=no-merge
   printf 'other\n' > "$fixture/editable"
   git_fixture add editable
   git_fixture update-index --chmod=+x editable
   git_fixture update-index --add --cacheinfo "160000,$initial_id,nested"
   GIT_AUTHOR_DATE=2001-01-02T00:00:00Z GIT_COMMITTER_DATE=2001-01-02T00:00:00Z git_fixture commit -qm second
-  git_fixture commit-graph write --reachable
+  git_fixture commit-graph write --reachable --split=no-merge
+  [ "$(wc -l < "$fixture/.git/objects/info/commit-graphs/commit-graph-chain")" -eq 2 ] ||
+    fail "fixture does not contain a two-file commit-graph chain"
   git_fixture pack-refs --all
   git_fixture repack -adq
   git_fixture prune-packed
@@ -118,6 +121,13 @@ verify_index() {
   [ "$actual" = "$expected" ] || fail "written index does not reproduce fixture tree"
 }
 
+verify_pack() {
+  local indices=("$1"/*.idx)
+  [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
+    fail "rewritten fixture pack index was not found exactly once"
+  clean_git verify-pack -- "${indices[0]}"
+}
+
 cargo="$(cd "$ROOT_DIR" && rustup which cargo)"
 export RUSTC="$(cd "$ROOT_DIR" && rustup which rustc)"
 export RUSTDOC="$(cd "$ROOT_DIR" && rustup which rustdoc)"
@@ -164,8 +174,9 @@ PY
     system_times_are_normalized_and_ordered
   "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
     an_index_shorter_than_its_checksum_is_rejected
-  "$cargo" test "${external[@]}" -p gix-pack --lib \
-    mmap::tests::native_reads_enforce_file_and_live_limits_and_release_reservations
+  "$cargo" test "${external[@]}" -p gix-features --test features fs::
+  "$cargo" test "${external[@]}" -p gix-commitgraph --lib --features sha1 native::tests::
+  "$cargo" test "${external[@]}" -p gix-pack --lib --features sha1,streaming-input
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
     iter::new_from_header::
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
@@ -176,6 +187,7 @@ PY
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
+  verify_pack "$temporary/host-output/pack-roundtrip"
 
   "$cargo" build "${common[@]}" --bin gix
   gix_binary="$APP_DIR/target/component-test/release/gix"
@@ -188,6 +200,7 @@ PY
     "GIX_FILTER_SENTINEL=$temporary/filter-invoked"
   )
   "${app_env[@]}" "$gix_binary" -r "$fixture" -c core.abbrev=12 \
+    -c gitoxide.objects.allocLimit=0 \
     --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
   verify_log "$temporary/log.out"
   for config_path in "$temporary/xdg/git/config" "$temporary/home/.gitconfig" \
@@ -342,6 +355,9 @@ vm_ssh "$guest_root/native-port" "$guest_root/fixture" "$guest_root/output"
 printf 'get "%s" "%s"\n' "$guest_root/output/written.index" "$temporary/guest.index" |
   "${sftp_command[@]}"
 verify_index "$temporary/guest.index"
+printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-roundtrip" "$temporary/guest-pack" |
+  "${sftp_command[@]}"
+verify_pack "$temporary/guest-pack"
 
 prepare_policy_fixture
 vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
@@ -352,7 +368,7 @@ vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
   printf 'put "%s" "%s"\n' "$fixture/.git/info/grafts" "$guest_root/fixture/.git/info/grafts"
 } | "${sftp_command[@]}"
 vm_ssh \
-  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_root/gix -r $guest_root/fixture -c core.abbrev=12 log" \
+  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_root/gix -r $guest_root/fixture -c core.abbrev=12 -c gitoxide.objects.allocLimit=0 log" \
   > "$temporary/guest.log"
 verify_log "$temporary/guest.log"
 vm_ssh /system/bin/mv "$guest_root/fixture/.git" "$guest_root/output/worktree/.git"
