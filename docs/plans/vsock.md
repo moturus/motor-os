@@ -867,6 +867,20 @@ and parent-reviewed:
 - Serial-console phases, selected-VMM CLI propagation, and permanent boot
   checks remain required before claiming D16 or M2 completion.
 
+M2's shutdown/close/state-notification IPC codecs are implemented and reviewed:
+
+- Shutdown carries nonzero RECEIVE/SEND flags and a zero payload; close is
+  handle-only. Socket ownership and stale-handle errors stay server-side.
+  State events carry cumulative local-direction/terminal flags with `E_OK`
+  status and a separate native reset/configuration-error cause. Orderly
+  termination has no error cause. Invalid flags, causes, and reserved payload
+  bytes are rejected in release without copying TCP's state enum or mapper.
+- Ordinary guest native-net wire fixtures, the complete native-net/mio
+  suites, base-image/systest/mio builds, formatting, and targeted Clippy passed
+  in debug and release without new warnings. Evidence:
+  `/tmp/vsock-control-codec-gate.9IyTY2/`. Functional shutdown/drain/close
+  behavior still requires the runtime/native stream integration.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

@@ -4,6 +4,15 @@ use moto_ipc::io_channel;
 
 use crate::api_net::{self, NetCmd};
 
+pub const SHUTDOWN_RECEIVE: u32 = 1;
+pub const SHUTDOWN_SEND: u32 = 2;
+const SHUTDOWN_BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
+
+pub const STATE_READ_CLOSED: u32 = 1;
+pub const STATE_WRITE_CLOSED: u32 = 2;
+pub const STATE_TERMINAL: u32 = 4;
+const STATE_ALL: u32 = STATE_READ_CLOSED | STATE_WRITE_CLOSED | STATE_TERMINAL;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VsockAddr {
     pub cid: u32,
@@ -22,6 +31,15 @@ pub struct ConnectResponse {
     pub local: VsockAddr,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamStateChange {
+    pub handle: u64,
+    pub flags: u32,
+    pub cause: Option<moto_rt::Error>,
+}
+
+/// Build a discovery request with zero handle, flags, and payload. Its echoed
+/// native status reports availability without reserving a socket or transport.
 pub fn availability_request() -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = NetCmd::VsockAvailability as u16;
@@ -112,6 +130,102 @@ pub fn decode_connect_response(msg: &io_channel::Msg) -> moto_rt::Result<Connect
     })
 }
 
+/// Build a shutdown control with a nonzero RECEIVE/SEND subset and zero
+/// payload. The server resolves unknown or stale handles.
+pub fn shutdown_request(handle: u64, flags: u32) -> moto_rt::Result<io_channel::Msg> {
+    if flags == 0 || flags & !SHUTDOWN_BOTH != 0 {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockStreamShutdown as u16;
+    msg.handle = handle;
+    msg.flags = flags;
+    Ok(msg)
+}
+
+pub fn decode_shutdown_request(msg: &io_channel::Msg) -> moto_rt::Result<u32> {
+    if msg.command != NetCmd::VsockStreamShutdown as u16
+        || msg.flags == 0
+        || msg.flags & !SHUTDOWN_BOTH != 0
+        || !payload_is_zero(&msg.payload)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(msg.flags)
+}
+
+/// Build a handle-only close request. Handle validity is server-owned.
+pub fn close_request(handle: u64) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockStreamClose as u16;
+    msg.handle = handle;
+    msg
+}
+
+pub fn decode_close_request(msg: &io_channel::Msg) -> moto_rt::Result<()> {
+    if msg.command != NetCmd::VsockStreamClose as u16
+        || msg.flags != 0
+        || !payload_is_zero(&msg.payload)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Build an E_OK notification with cumulative local state in `flags`, a native
+/// terminal cause in `args_32[0]`, and zero remaining payload. A zero cause
+/// denotes either a nonterminal update or an orderly terminal state.
+pub fn state_changed(
+    handle: u64,
+    flags: u32,
+    cause: Option<moto_rt::Error>,
+) -> moto_rt::Result<io_channel::Msg> {
+    if flags & !STATE_ALL != 0
+        || cause.is_some() && flags & STATE_TERMINAL == 0
+        || !matches!(
+            cause,
+            None | Some(moto_rt::Error::ConnectionReset | moto_rt::Error::InternalError)
+        )
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::EvtVsockStreamStateChanged as u16;
+    msg.handle = handle;
+    msg.flags = flags;
+    msg.status = moto_rt::E_OK;
+    msg.payload.args_32_mut()[0] = cause.map_or(0, |cause| cause as u32);
+    Ok(msg)
+}
+
+pub fn decode_state_changed(msg: &io_channel::Msg) -> moto_rt::Result<StreamStateChange> {
+    if msg.command != NetCmd::EvtVsockStreamStateChanged as u16 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    msg.status()?;
+    if msg.flags & !STATE_ALL != 0 || !msg.payload.args_8()[4..].iter().all(|byte| *byte == 0) {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    let cause = match msg.payload.args_32()[0] {
+        0 => None,
+        value if value == moto_rt::E_CONNECTION_RESET as u32 => {
+            Some(moto_rt::Error::ConnectionReset)
+        }
+        value if value == moto_rt::E_INTERNAL_ERROR as u32 => Some(moto_rt::Error::InternalError),
+        _ => return Err(moto_rt::Error::InvalidData),
+    };
+    if cause.is_some() && msg.flags & STATE_TERMINAL == 0 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    Ok(StreamStateChange {
+        handle: msg.handle,
+        flags: msg.flags,
+        cause,
+    })
+}
+
+// This is syntactic validation only. sys-io decides which non-host CIDs the
+// current transport supports and returns NotImplemented for unsupported ones.
 fn valid_peer(addr: VsockAddr) -> bool {
     addr.cid >= 2 && addr.cid != u32::MAX && valid_port(addr.port)
 }
@@ -122,4 +236,8 @@ fn valid_local(addr: VsockAddr) -> bool {
 
 fn valid_port(port: u32) -> bool {
     port != 0 && port != u32::MAX
+}
+
+fn payload_is_zero(payload: &io_channel::Payload) -> bool {
+    payload.args_64() == &[0; 3]
 }

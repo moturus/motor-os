@@ -5,6 +5,8 @@ pub fn run_wire_tests() {
     test_command_values();
     test_connect_codec();
     test_connect_response_codec();
+    test_control_codec();
+    test_state_change_codec();
     println!("vsock::run_wire_tests PASS");
 }
 
@@ -157,4 +159,119 @@ fn test_connect_response_codec() {
             Some(moto_rt::Error::InvalidArgument)
         );
     }
+}
+
+fn test_control_codec() {
+    for flags in [
+        api_vsock::SHUTDOWN_RECEIVE,
+        api_vsock::SHUTDOWN_SEND,
+        api_vsock::SHUTDOWN_RECEIVE | api_vsock::SHUTDOWN_SEND,
+    ] {
+        let request = api_vsock::shutdown_request(0x99, flags).unwrap();
+        assert_eq!(request.command, NetCmd::VsockStreamShutdown as u16);
+        assert_eq!(request.handle, 0x99);
+        assert_eq!(request.flags, flags);
+        assert_eq!(request.payload.args_64(), &[0; 3]);
+        assert_eq!(api_vsock::decode_shutdown_request(&request), Ok(flags));
+    }
+    for flags in [0, 4, u32::MAX] {
+        assert_eq!(
+            api_vsock::shutdown_request(1, flags).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+    let shutdown = api_vsock::shutdown_request(0, api_vsock::SHUTDOWN_RECEIVE).unwrap();
+    let mut bad = [shutdown; 3];
+    bad[0].command = NetCmd::VsockStreamClose as u16;
+    bad[1].flags = 4;
+    bad[2].payload.args_8_mut()[23] = 1;
+    for request in bad {
+        assert_eq!(
+            api_vsock::decode_shutdown_request(&request).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+
+    let close = api_vsock::close_request(0x123);
+    assert_eq!(close.command, NetCmd::VsockStreamClose as u16);
+    assert_eq!(close.handle, 0x123);
+    assert_eq!(close.flags, 0);
+    assert_eq!(close.payload.args_64(), &[0; 3]);
+    assert_eq!(api_vsock::decode_close_request(&close), Ok(()));
+    let mut bad = [close; 3];
+    bad[0].command = NetCmd::VsockStreamShutdown as u16;
+    bad[1].flags = 1;
+    bad[2].payload.args_8_mut()[0] = 1;
+    for request in bad {
+        assert_eq!(
+            api_vsock::decode_close_request(&request).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+}
+
+fn test_state_change_codec() {
+    let cases = [
+        (api_vsock::STATE_READ_CLOSED, None),
+        (api_vsock::STATE_TERMINAL, None),
+        (
+            api_vsock::STATE_READ_CLOSED | api_vsock::STATE_TERMINAL,
+            Some(moto_rt::Error::ConnectionReset),
+        ),
+        (
+            api_vsock::STATE_READ_CLOSED
+                | api_vsock::STATE_WRITE_CLOSED
+                | api_vsock::STATE_TERMINAL,
+            Some(moto_rt::Error::InternalError),
+        ),
+    ];
+    for (flags, cause) in cases {
+        let event = api_vsock::state_changed(0x44, flags, cause).unwrap();
+        assert_eq!(event.command, NetCmd::EvtVsockStreamStateChanged as u16);
+        assert_eq!(event.handle, 0x44);
+        assert_eq!(event.status, moto_rt::E_OK);
+        assert_eq!(event.flags, flags);
+        let mut expected = [0_u8; 24];
+        expected[..4].copy_from_slice(&cause.map_or(0, |err| err as u32).to_le_bytes());
+        assert_eq!(event.payload.args_8(), &expected);
+        assert_eq!(
+            api_vsock::decode_state_changed(&event).unwrap(),
+            api_vsock::StreamStateChange {
+                handle: 0x44,
+                flags,
+                cause,
+            }
+        );
+    }
+
+    assert_eq!(
+        api_vsock::state_changed(1, 0, Some(moto_rt::Error::ConnectionReset)).err(),
+        Some(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(
+        api_vsock::state_changed(1, api_vsock::STATE_TERMINAL, Some(moto_rt::Error::TimedOut))
+            .err(),
+        Some(moto_rt::Error::InvalidArgument)
+    );
+    let event = api_vsock::state_changed(1, api_vsock::STATE_TERMINAL, None).unwrap();
+    let mut bad = [event; 4];
+    bad[0].flags = 8;
+    bad[1].payload.args_32_mut()[0] = moto_rt::E_CONNECTION_RESET as u32;
+    bad[1].flags = 0;
+    bad[2].payload.args_32_mut()[0] = moto_rt::E_TIMED_OUT as u32;
+    bad[3].payload.args_8_mut()[4] = 1;
+    for event in bad {
+        assert_eq!(
+            api_vsock::decode_state_changed(&event).err(),
+            Some(moto_rt::Error::InvalidData)
+        );
+    }
+
+    let mut error = event;
+    error.status = moto_rt::E_CONNECTION_RESET;
+    error.flags = u32::MAX;
+    assert_eq!(
+        api_vsock::decode_state_changed(&error).err(),
+        Some(moto_rt::Error::ConnectionReset)
+    );
 }
