@@ -22,6 +22,9 @@ checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
 (`NotFound` if absent), without activating the device.
 Q24–Q25 are settled in D22: wrong-state packets and payloads exceeding
 advertised credit reset only their identified connection.
+Q26 asks whether to include a preexisting shared NET IPC validation fix
+found while preparing the next integration slice; source work is paused
+pending that scope decision, as required by `AGENTS.md`.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -2390,4 +2393,25 @@ protocol validation. Unrelated connections and the device remain operational.
 
 ## Open questions
 
-None currently. Raise new non-obvious decisions before implementing them.
+### Q26. Include the preexisting shared NET subchannel validation fix?
+
+Source review found that `runtime/net/socket/tcp.rs::tcp_connect` passes
+client-controlled payload byte 23 directly to
+`moto_sys_io::api_net::io_subchannel_mask`. NET ingress does not validate
+that field. The helper only has `debug_assert!(idx < IO_SUBCHANNELS)` before
+shifting its 16-page mask; there are four valid indices, 0–3. Normal moto-io
+constructs valid indices, but raw IPC clients are not constrained by it.
+
+An out-of-range index reaches a panic in debug (`panic = "abort"` for sys-io),
+while release removes the guard and performs an oversized shift instead of
+rejecting the request. The unchecked call predates vsock (present at baseline
+`6918384e`). UDP bind also calls the helper with the same client field and
+must be examined if a shared fix is authorized. This is source-level
+diagnosis; no malformed-request VM test has been run yet.
+
+This is guest NET IPC validation, not a virtio device/queue bug or the
+deferred malicious-VMM hardening. May this work include a small release-mode
+bounds check and guest regression, or should it be recorded separately while
+vsock alone gets validated decoding? The existing raw TCP setup tests in
+`systest/src/tcp.rs` provide a full-test-wired regression route; no new test
+framework or production injection hook is needed.
