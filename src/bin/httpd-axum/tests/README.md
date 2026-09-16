@@ -36,3 +36,16 @@ immediate visibility of file edits, and default/debug logging. Run it on Motor
 with `HTTPD_AXUM_BIN` and `TMPDIR` as above. Startup readiness comes from the
 bound-address log, without connection retries. Request timings are available
 with `RUST_LOG=httpd_axum=debug`; `prepare_us` excludes body reads and transmission.
+
+The HTTP test also checks two requests on a TLS connection, validating the server
+certificate against the bundled localhost test certificate and checking ALPN.
+The fixture certificate expires in September 2036. Regenerate it and its DER
+copy together with the test-only private key:
+
+```sh
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+  -keyout tests/fixtures/key.pem -out tests/fixtures/cert.pem -days 3650 \
+  -subj /CN=localhost -addext 'subjectAltName=DNS:localhost' \
+  -addext 'basicConstraints=critical,CA:FALSE'
+openssl x509 -in tests/fixtures/cert.pem -outform DER -out tests/fixtures/cert.der
+```

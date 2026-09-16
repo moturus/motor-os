@@ -13,6 +13,14 @@ pub struct Server {
 
 impl Server {
     pub fn start(logging: Option<&str>, extra: &[&str]) -> Self {
+        Self::start_with_tls(logging, extra, false)
+    }
+
+    pub fn start_tls(logging: Option<&str>, extra: &[&str]) -> Self {
+        Self::start_with_tls(logging, extra, true)
+    }
+
+    fn start_with_tls(logging: Option<&str>, extra: &[&str], tls: bool) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -23,6 +31,17 @@ impl Server {
         let binary = std::env::var_os("HTTPD_AXUM_BIN")
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_httpd-axum").into());
         let mut command = Command::new(binary);
+        if tls {
+            let cert = directory.join("cert.pem");
+            let key = directory.join("key.pem");
+            std::fs::write(&cert, include_bytes!("../fixtures/cert.pem")).unwrap();
+            std::fs::write(&key, include_bytes!("../fixtures/key.pem")).unwrap();
+            command
+                .arg("--ssl-cert")
+                .arg(cert)
+                .arg("--ssl-key")
+                .arg(key);
+        }
         command
             .args(["-a", "127.0.0.1:0", "-d"])
             .arg(&directory)
