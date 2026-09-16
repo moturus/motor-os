@@ -973,6 +973,21 @@ incremental gates; the complete M2 milestone remains pending:
   Clippy pass without new warnings. Final evidence is the `corrected-*` and
   `admission-*` logs in `/tmp/vsock-outgoing-gate.P6UYYi/`.
 
+M2's native read/write waiter-cancellation fixtures are implemented and gated:
+
+- Cancel `readable`/`read_future` before host data and full close; cancel
+  `writable`/`write_future` after filling all sixteen IPC pages without
+  yielding. An explicit role-consumed acknowledgment makes that page-capacity
+  check deterministic. Live I/O then resumes, with exact 80 KiB TX validation.
+- Check canceled-waker counters only after the driver drains and reservations
+  return to zero. The test uses public native APIs and the existing host peer;
+  no production hooks, retries, or shutdown/timeout changes were added.
+- The complete outgoing phase (now twelve cases), builds, and targeted
+  systest Clippy passed on CHV in debug and release; the two preexisting
+  systest warnings remain unchanged. Evidence:
+  `/tmp/vsock-waiter-cancel-gate.E7I0no/`. These cases are wired transitively
+  into full-test; connect cancellation and the remaining M2 cases are pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

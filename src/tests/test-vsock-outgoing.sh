@@ -269,6 +269,8 @@ run_outgoing_case duplex 1048576 1048576
 run_outgoing_case local-send-shutdown 4096 4096
 run_outgoing_case local-receive-shutdown 4096 4096
 run_outgoing_case unix-peer-close 4096
+run_outgoing_case cancel-read 257
+run_outgoing_case cancel-write 16384
 
 stop_vmm_owned "$VMM_PID"
 VMM_PID=""

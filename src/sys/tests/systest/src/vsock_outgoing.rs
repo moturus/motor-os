@@ -1,6 +1,12 @@
+use core::future::Future;
+use core::task::{Context, Poll};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Wake, Waker};
 
 use moto_io::net::vsock::{Shutdown, VsockAddr, VsockStream};
+use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
+use moto_sys_io::api_net::IO_SUBCHANNELS;
 
 use crate::net_harness::{bounded, host_channel};
 
@@ -12,6 +18,10 @@ const RECEIVE_SHUTDOWN_DONE: &[u8] = b"shutdown:receive";
 const CONTINUE: &[u8] = b"continue";
 const TRANSFER_DONE: &[u8] = b"transfer:done";
 const CASE_DONE: &[u8] = b"case:done";
+const CANCEL_READY: &[u8] = b"cancel:ready";
+const ROLES_READY: &[u8] = b"roles:ready";
+const CANCEL_POLLS: usize = 4;
+const PAGES_PER_SUBCHANNEL: usize = CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize;
 
 enum Action {
     Echo(usize),
@@ -19,6 +29,8 @@ enum Action {
     LocalSendShutdown { send: usize, receive: usize },
     LocalReceiveShutdown { receive: usize, send: usize },
     UnixPeerClose { receive: usize },
+    CancelRead { receive: usize },
+    CancelWrite { tail: usize },
 }
 
 impl Action {
@@ -53,10 +65,17 @@ fn parse_action(args: &[String]) -> Action {
         [action, receive] if action == "unix-peer-close" => Action::UnixPeerClose {
             receive: parse_size(receive),
         },
+        [action, receive] if action == "cancel-read" => Action::CancelRead {
+            receive: parse_size(receive),
+        },
+        [action, tail] if action == "cancel-write" => Action::CancelWrite {
+            tail: parse_size(tail),
+        },
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
-             local-receive-shutdown RECEIVE_N SEND_N, or unix-peer-close RECEIVE_N"
+             local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
+             cancel-read RECEIVE_N, or cancel-write TAIL_N"
         ),
     }
 }
@@ -136,6 +155,62 @@ fn assert_read_eof(stream: &VsockStream) {
     assert_eq!(stream.try_read(&mut [&mut unexpected]), Ok(0));
 }
 
+struct CountWake(AtomicUsize);
+
+impl Wake for CountWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn poll_pending<F: Future>(future: F) -> Arc<CountWake> {
+    let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+    let waker = Waker::from(counter.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+    counter
+}
+
+fn assert_not_woken(counters: &[Arc<CountWake>]) {
+    assert!(
+        counters
+            .iter()
+            .all(|counter| counter.0.load(Ordering::Relaxed) == 0),
+        "a canceled vsock future retained a waiter"
+    );
+}
+
+fn pattern(start: usize, len: usize) -> Vec<u8> {
+    (start..start + len).map(pattern_byte).collect()
+}
+
+fn fill_tx_without_yield(stream: &VsockStream) -> usize {
+    let mut accepted = 0;
+    for _ in 0..=PAGES_PER_SUBCHANNEL {
+        let page = pattern(accepted, PAGE_SIZE);
+        match stream.try_write(&[&page]) {
+            Ok(PAGE_SIZE) => accepted += PAGE_SIZE,
+            Ok(len) => panic!("full-page write accepted only {len} bytes"),
+            Err(moto_rt::E_NOT_READY) => {
+                assert_eq!(accepted, PAGES_PER_SUBCHANNEL * PAGE_SIZE);
+                return accepted;
+            }
+            Err(error) => panic!("subchannel page fill failed: {error:?}"),
+        }
+    }
+    panic!("vsock subchannel did not apply bounded page backpressure")
+}
+
+async fn write_raw_pattern(stream: &VsockStream, start: usize, len: usize) {
+    let bytes = pattern(start, len);
+    write_all(stream, &bytes).await;
+}
+
 async fn write_pattern(stream: &VsockStream, total: usize) {
     if total == 0 {
         write_frame(stream, &[]).await;
@@ -194,7 +269,11 @@ async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<Vsock
     stream
 }
 
-async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Action) {
+async fn run_action(
+    stream: &VsockStream,
+    sync: Option<&VsockStream>,
+    action: Action,
+) -> Vec<Arc<CountWake>> {
     match action {
         Action::Echo(total) => {
             if total == 0 {
@@ -205,6 +284,7 @@ async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Ac
             write_pattern(stream, total).await;
             read_pattern(stream, total).await;
             read_eof(stream).await;
+            Vec::new()
         }
         Action::Duplex { send, echo } => {
             let writer = async {
@@ -216,6 +296,7 @@ async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Ac
                 read_eof(stream).await;
             };
             futures::join!(writer, reader);
+            Vec::new()
         }
         Action::LocalSendShutdown { send, receive } => {
             let sync = sync.unwrap();
@@ -229,6 +310,7 @@ async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Ac
             read_pattern(stream, receive).await;
             expect_frame(sync, TRANSFER_DONE).await;
             write_frame(sync, CASE_DONE).await;
+            Vec::new()
         }
         Action::LocalReceiveShutdown { receive, send } => {
             let sync = sync.unwrap();
@@ -246,6 +328,7 @@ async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Ac
             );
             write_frame(sync, CASE_DONE).await;
             expect_frame(sync, TRANSFER_DONE).await;
+            Vec::new()
         }
         Action::UnixPeerClose { receive } => {
             let sync = sync.unwrap();
@@ -256,6 +339,47 @@ async fn run_action(stream: &VsockStream, sync: Option<&VsockStream>, action: Ac
                 Err(moto_rt::E_NOT_CONNECTED)
             );
             write_frame(sync, CASE_DONE).await;
+            Vec::new()
+        }
+        Action::CancelRead { receive } => {
+            let sync = sync.unwrap();
+            let mut counters = Vec::new();
+            for _ in 0..CANCEL_POLLS {
+                counters.push(poll_pending(stream.readable()));
+                let mut byte = [0_u8; 1];
+                let mut bufs = [&mut byte[..]];
+                counters.push(poll_pending(stream.read_future(&mut bufs)));
+            }
+            write_frame(sync, CANCEL_READY).await;
+            read_pattern(stream, receive).await;
+            // The selected UDS proxy maps host SHUT_WR to full stream close;
+            // this challenges stale read waiters, not SEND-only semantics.
+            read_eof(stream).await;
+            expect_frame(sync, TRANSFER_DONE).await;
+            write_frame(sync, CASE_DONE).await;
+            counters
+        }
+        Action::CancelWrite { tail } => {
+            let sync = sync.unwrap();
+            // The host consumed both role frames. Its acknowledgement also
+            // lets the driver return the data stream's framing page before
+            // the exact per-subchannel capacity assertion below.
+            expect_frame(sync, ROLES_READY).await;
+            let accepted = fill_tx_without_yield(stream);
+            let probe = [0x5a_u8; PAGE_SIZE];
+            let mut counters = Vec::new();
+            for _ in 0..CANCEL_POLLS {
+                counters.push(poll_pending(stream.writable()));
+                let bufs = [&probe[..]];
+                counters.push(poll_pending(stream.write_future(&bufs)));
+            }
+            write_frame(sync, CANCEL_READY).await;
+            write_raw_pattern(stream, accepted, tail).await;
+            stream.shutdown_async(Shutdown::Write).await.unwrap();
+            write_frame(sync, SEND_SHUTDOWN_DONE).await;
+            expect_frame(sync, TRANSFER_DONE).await;
+            write_frame(sync, CASE_DONE).await;
+            counters
         }
     }
 }
@@ -284,10 +408,12 @@ pub fn run(args: &[String]) {
         } else {
             None
         };
-        run_action(&stream, sync.as_deref(), action).await;
+        let counters = run_action(&stream, sync.as_deref(), action).await;
         drop(sync);
         drop(stream);
-        bounded(driver_task, 5).await && client.reservations() == 0
+        let completed = bounded(driver_task, 5).await && client.reservations() == 0;
+        assert_not_woken(&counters);
+        completed
     });
     assert!(
         completed,

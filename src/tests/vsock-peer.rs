@@ -21,6 +21,9 @@ const RECEIVE_SHUTDOWN_DONE: &[u8] = b"shutdown:receive";
 const CONTINUE: &[u8] = b"continue";
 const TRANSFER_DONE: &[u8] = b"transfer:done";
 const CASE_DONE: &[u8] = b"case:done";
+const CANCEL_READY: &[u8] = b"cancel:ready";
+const ROLES_READY: &[u8] = b"roles:ready";
+const RAW_SUBCHANNEL_BYTES: usize = 64 * 1024;
 
 struct SocketPath(PathBuf);
 
@@ -31,6 +34,8 @@ enum Action {
     LocalSendShutdown { send: usize, receive: usize },
     LocalReceiveShutdown { receive: usize, send: usize },
     UnixPeerClose { receive: usize },
+    CancelRead { receive: usize },
+    CancelWrite { tail: usize },
 }
 
 impl Action {
@@ -46,6 +51,8 @@ impl Action {
                 format!("local-receive-shutdown {receive} {send}")
             }
             Self::UnixPeerClose { receive } => format!("unix-peer-close {receive}"),
+            Self::CancelRead { receive } => format!("cancel-read {receive}"),
+            Self::CancelWrite { tail } => format!("cancel-write {tail}"),
         }
     }
 
@@ -55,6 +62,8 @@ impl Action {
             Self::LocalSendShutdown { .. }
                 | Self::LocalReceiveShutdown { .. }
                 | Self::UnixPeerClose { .. }
+                | Self::CancelRead { .. }
+                | Self::CancelWrite { .. }
         )
     }
 }
@@ -112,10 +121,17 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         ("unix-peer-close", [receive]) => Ok(Action::UnixPeerClose {
             receive: parse_size(receive)?,
         }),
+        ("cancel-read", [receive]) => Ok(Action::CancelRead {
+            receive: parse_size(receive)?,
+        }),
+        ("cancel-write", [tail]) => Ok(Action::CancelWrite {
+            tail: parse_size(tail)?,
+        }),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
-             local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N",
+             local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
+             cancel-read RECEIVE_N | cancel-write TAIL_N",
         )),
     }
 }
@@ -218,6 +234,28 @@ fn receive_pattern(stream: &mut UnixStream, total: usize) -> io::Result<()> {
     Ok(())
 }
 
+fn receive_raw_pattern(stream: &mut UnixStream, total: usize) -> io::Result<()> {
+    let mut received = 0;
+    let mut buf = [0_u8; 16 * 1024];
+    while received < total {
+        let capacity = (total - received).min(buf.len());
+        let len = stream.read(&mut buf[..capacity])?;
+        if len == 0 {
+            return Err(invalid("EOF before raw pattern completed"));
+        }
+        for (index, byte) in buf[..len].iter().enumerate() {
+            if *byte != pattern_byte(received + index) {
+                return Err(invalid(format!(
+                    "raw pattern corrupt at offset {}",
+                    received + index
+                )));
+            }
+        }
+        received += len;
+    }
+    Ok(())
+}
+
 fn expect_frame(stream: &mut UnixStream, expected: &[u8]) -> io::Result<()> {
     let actual = read_frame(stream)?.ok_or_else(|| invalid("EOF before control frame"))?;
     if actual == expected {
@@ -304,6 +342,25 @@ fn run() -> io::Result<()> {
             Action::UnixPeerClose { receive } => {
                 send_pattern(&mut data, receive)?;
                 data.shutdown(Shutdown::Write)?;
+                expect_frame(&mut sync, CASE_DONE)?;
+            }
+            Action::CancelRead { receive } => {
+                expect_frame(&mut sync, CANCEL_READY)?;
+                send_pattern(&mut data, receive)?;
+                data.shutdown(Shutdown::Write)?;
+                write_frame(&mut sync, TRANSFER_DONE)?;
+                expect_frame(&mut sync, CASE_DONE)?;
+            }
+            Action::CancelWrite { tail } => {
+                write_frame(&mut sync, ROLES_READY)?;
+                expect_frame(&mut sync, CANCEL_READY)?;
+                let total = RAW_SUBCHANNEL_BYTES
+                    .checked_add(tail)
+                    .filter(|total| *total <= MAX_TRANSFER)
+                    .ok_or_else(|| invalid("cancel-write byte count exceeds fixture bound"))?;
+                receive_raw_pattern(&mut data, total)?;
+                expect_frame(&mut sync, SEND_SHUTDOWN_DONE)?;
+                write_frame(&mut sync, TRANSFER_DONE)?;
                 expect_frame(&mut sync, CASE_DONE)?;
             }
             _ => unreachable!(),
