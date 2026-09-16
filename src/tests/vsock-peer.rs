@@ -28,6 +28,13 @@ const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
 const UNRELATED_PING: &[u8] = b"unrelated:ping";
 const UNRELATED_PONG: &[u8] = b"unrelated:pong";
 const DRAIN_STARTED: &[u8] = b"drain:started";
+const LISTENER_READY: &[u8] = b"listener:ready";
+const BACKLOG_READY: &[u8] = b"backlog:ready";
+const LISTENER_DROPPED: &[u8] = b"listener:dropped";
+const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
+const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const INCOMING_PORT: u32 = 70_001;
+const LISTENER_BACKLOG: usize = 8;
 
 struct SocketPath(PathBuf);
 
@@ -43,6 +50,7 @@ enum Action {
     CancelBeforePollDrop,
     CancelQueuedConnect,
     StalledReader { total: usize },
+    IncomingBacklog,
 }
 
 impl Action {
@@ -63,6 +71,7 @@ impl Action {
             Self::CancelBeforePollDrop => "cancel-before-poll-drop".into(),
             Self::CancelQueuedConnect => "cancel-queued-connect".into(),
             Self::StalledReader { total } => format!("stalled-reader {total}"),
+            Self::IncomingBacklog => "incoming-backlog".into(),
         }
     }
 
@@ -144,12 +153,13 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         ("stalled-reader", [total]) => Ok(Action::StalledReader {
             total: parse_size(total)?,
         }),
+        ("incoming-backlog", []) => Ok(Action::IncomingBacklog),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
-             cancel-queued-connect | stalled-reader TOTAL",
+             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog",
         )),
     }
 }
@@ -314,6 +324,54 @@ fn configure_stream(stream: UnixStream) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
+fn connect_guest(base: &str) -> io::Result<UnixStream> {
+    let mut stream = configure_stream(UnixStream::connect(base)?)?;
+    stream.write_all(format!("CONNECT {INCOMING_PORT}\n").as_bytes())?;
+    let mut ack = [0_u8; 32];
+    let mut len = 0;
+    loop {
+        if len == ack.len() {
+            return Err(invalid("vsock CSM acknowledgement is too long"));
+        }
+        stream.read_exact(&mut ack[len..len + 1])?;
+        len += 1;
+        if ack[len - 1] == b'\n' {
+            break;
+        }
+    }
+    let ack = std::str::from_utf8(&ack[..len])
+        .map_err(|_| invalid("vsock CSM acknowledgement is not UTF-8"))?;
+    let port = ack
+        .strip_prefix("OK ")
+        .and_then(|ack| ack.strip_suffix('\n'))
+        .filter(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| invalid(format!("invalid vsock CSM acknowledgement: {ack:?}")))?;
+    port.parse::<u32>()
+        .map_err(|_| invalid(format!("invalid vsock CSM port: {port:?}")))?;
+    Ok(stream)
+}
+
+fn expect_eof(stream: &mut UnixStream) -> io::Result<()> {
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte)? {
+        0 => Ok(()),
+        _ => Err(invalid("guest-initiated reset carried unexpected data")),
+    }
+}
+
+fn expect_guest_refusal(base: &str) -> io::Result<()> {
+    let mut stream = configure_stream(UnixStream::connect(base)?)?;
+    stream.write_all(format!("CONNECT {INCOMING_PORT}\n").as_bytes())?;
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(invalid(
+            "refused backlog connection received a CSM acknowledgement",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 fn accept_pair(listener: &UnixListener, deadline: Instant) -> io::Result<(UnixStream, UnixStream)> {
     let mut first = configure_stream(accept_before(listener, deadline)?)?;
     let mut second = configure_stream(accept_before(listener, deadline)?)?;
@@ -445,6 +503,25 @@ fn run() -> io::Result<()> {
                 if stream.read(&mut unexpected)? != 0 {
                     return Err(invalid("dropped stream carried excess data"));
                 }
+            }
+            Action::IncomingBacklog => {
+                expect_frame(&mut stream, LISTENER_READY)?;
+                let mut connections = Vec::with_capacity(LISTENER_BACKLOG);
+                for _ in 0..LISTENER_BACKLOG {
+                    connections.push(connect_guest(base)?);
+                }
+                expect_guest_refusal(base)?;
+                for connection in &mut connections {
+                    connection.write_all(b"early")?;
+                }
+                write_frame(&mut stream, BACKLOG_READY)?;
+
+                expect_frame(&mut stream, LISTENER_DROPPED)?;
+                for connection in &mut connections {
+                    expect_eof(connection)?;
+                }
+                write_frame(&mut stream, BACKLOG_CLEARED)?;
+                expect_frame(&mut stream, LISTENER_REBOUND)?;
             }
             _ => unreachable!(),
         }

@@ -109,13 +109,13 @@ impl TupleIndex {
 
     /// Admit a child against a live listener. Children may share its local
     /// port, but their complete tuples remain unique after the listener drops.
+    /// Peer source ports are wire identities, not native connect targets.
     pub(crate) fn reserve_accepted(
         &mut self,
         listener_id: u64,
         socket_id: u64,
         peer: VsockAddr,
     ) -> Result<ConnectionTuple, AdmissionError> {
-        validate_connect_port(peer.port)?;
         if self.streams.len() == MAX_STREAMS {
             return Err(AdmissionError::StreamLimit);
         }

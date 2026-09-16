@@ -24,6 +24,12 @@ const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
 const UNRELATED_PING: &[u8] = b"unrelated:ping";
 const UNRELATED_PONG: &[u8] = b"unrelated:pong";
 const DRAIN_STARTED: &[u8] = b"drain:started";
+const LISTENER_READY: &[u8] = b"listener:ready";
+const BACKLOG_READY: &[u8] = b"backlog:ready";
+const LISTENER_DROPPED: &[u8] = b"listener:dropped";
+const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
+const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const INCOMING_PORT: u32 = 70_001;
 const CANCEL_POLLS: usize = 4;
 const PAGES_PER_SUBCHANNEL: usize = CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize;
 
@@ -38,6 +44,7 @@ enum Action {
     CancelBeforePollDrop,
     CancelQueuedConnect,
     StalledReader { total: usize },
+    IncomingBacklog,
 }
 
 impl Action {
@@ -92,12 +99,13 @@ fn parse_action(args: &[String]) -> Action {
         [action, total] if action == "stalled-reader" => Action::StalledReader {
             total: parse_size(total),
         },
+        [action] if action == "incoming-backlog" => Action::IncomingBacklog,
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
-             cancel-queued-connect, or stalled-reader TOTAL"
+             cancel-queued-connect, stalled-reader TOTAL, or incoming-backlog"
         ),
     }
 }
@@ -442,6 +450,22 @@ async fn run_action(
             read_pattern(stream, total).await;
             expect_frame(sync, TRANSFER_DONE).await;
             write_frame(sync, CASE_DONE).await;
+            Vec::new()
+        }
+        Action::IncomingBacklog => {
+            let listener = crate::net_driver::RawVsockListener::bind(INCOMING_PORT).await;
+            write_frame(stream, LISTENER_READY).await;
+            expect_frame(stream, BACKLOG_READY).await;
+
+            listener.close().await;
+            write_frame(stream, LISTENER_DROPPED).await;
+            expect_frame(stream, BACKLOG_CLEARED).await;
+
+            crate::net_driver::RawVsockListener::bind(INCOMING_PORT)
+                .await
+                .close()
+                .await;
+            write_frame(stream, LISTENER_REBOUND).await;
             Vec::new()
         }
     }

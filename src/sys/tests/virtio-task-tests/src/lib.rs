@@ -6,6 +6,8 @@ mod connection;
 #[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
 mod credit;
 mod device;
+#[path = "../../../sys-io/src/runtime/vsock/listener.rs"]
+mod listener;
 #[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
 mod rx_buffer;
 mod stats;
@@ -365,6 +367,7 @@ pub fn run_tests() {
     test_vsock_shutdown_state();
     test_vsock_output_state();
     test_vsock_admission();
+    test_vsock_listener();
     concurrent_requests();
     runtime_wakeups();
     for operation in [0, 1] {
@@ -1170,6 +1173,30 @@ fn test_vsock_output_state() {
     assert!(reset.local_read_closed());
     assert!(!reset.has_buffered_rx());
 
+    let mut peer_reset = Connection::new_incoming(&request).unwrap();
+    packet.operation = Operation::ReadWrite;
+    packet.len = 4;
+    assert_eq!(peer_reset.receive(&packet, b"peer"), Rx::None);
+    packet.operation = Operation::Reset;
+    packet.len = 0;
+    assert_eq!(peer_reset.receive(&packet, b""), Rx::None);
+    assert!(peer_reset.has_buffered_rx());
+    assert!(!peer_reset.local_receive_shutdown());
+    assert!(!peer_reset.abandon_unread_rx());
+    assert!(peer_reset.local_receive_shutdown());
+
+    let mut abandoned = Connection::new_incoming(&request).unwrap();
+    packet.operation = Operation::ReadWrite;
+    packet.len = 4;
+    assert_eq!(abandoned.receive(&packet, b"gone"), Rx::None);
+    assert!(abandoned.abandon_unread_rx());
+    assert!(abandoned.has_buffered_rx());
+    assert!(abandoned.local_receive_shutdown());
+    assert_eq!(
+        abandoned.terminal_cause(),
+        Some(TerminalCause::ConnectionReset)
+    );
+
     let mut failed = Connection::new_incoming(&request).unwrap();
     assert_eq!(failed.receive(&packet, b"last"), Rx::None);
     assert!(failed.device_failed());
@@ -1279,6 +1306,12 @@ fn test_vsock_admission() {
     let child = index.reserve_accepted(1, 4, addr(8, 90_000)).unwrap();
     let sibling = index.reserve_accepted(1, 5, addr(9, 90_000)).unwrap();
     assert_eq!(child.local, addr(11, 70_000));
+    for port in [0, u32::MAX] {
+        let incoming = index.reserve_accepted(1, 8, addr(2, port)).unwrap();
+        assert_eq!(incoming, tuple(11, 70_000, 2, port));
+        assert_eq!(index.stream_socket(incoming), Some(8));
+        assert_eq!(index.remove_stream(8), Some(incoming));
+    }
     let unchanged = index.counts();
     assert_eq!(
         index.reserve_accepted(1, 6, child.peer),
@@ -1330,6 +1363,24 @@ fn test_vsock_admission() {
     streams.remove_stream(2).unwrap();
     streams.reserve_accepted(1, 66, addr(4, 100_000)).unwrap();
     assert_eq!(streams.counts(), (64, 1));
+}
+
+fn test_vsock_listener() {
+    let mut listener = listener::ListenerState::new().unwrap();
+    for socket_id in 1..=listener::BACKLOG as u64 {
+        assert!(listener.has_capacity());
+        listener.push(socket_id);
+    }
+    assert!(!listener.has_capacity());
+    assert!(listener.remove(4));
+    assert!(!listener.remove(4));
+    assert!(listener.has_capacity());
+    listener.push(9);
+    assert_eq!(
+        std::iter::from_fn(|| listener.pop()).collect::<Vec<_>>(),
+        [1, 2, 3, 5, 6, 7, 8, 9]
+    );
+    assert!(listener.has_capacity());
 }
 
 fn test_virtio_capacity() {

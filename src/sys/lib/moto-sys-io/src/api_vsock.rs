@@ -77,7 +77,7 @@ pub fn availability_response(msg: &io_channel::Msg) -> Result<(), moto_rt::Error
 /// Build a connect request. The peer occupies payload bytes 0..8, bytes
 /// 8..23 are reserved as zero, and byte 23 carries the shared-channel index.
 pub fn connect_request(peer: VsockAddr, subchannel_idx: u8) -> moto_rt::Result<io_channel::Msg> {
-    if !valid_peer(peer) || subchannel_idx >= api_net::IO_SUBCHANNELS {
+    if !valid_connect_peer(peer) || subchannel_idx >= api_net::IO_SUBCHANNELS {
         return Err(moto_rt::Error::InvalidArgument);
     }
     let mut msg = io_channel::Msg::new();
@@ -98,7 +98,7 @@ pub fn decode_connect_request(msg: &io_channel::Msg) -> moto_rt::Result<ConnectR
         || msg.handle != 0
         || msg.flags != 0
         || !msg.payload.args_8()[8..23].iter().all(|byte| *byte == 0)
-        || !valid_peer(peer)
+        || !valid_connect_peer(peer)
         || subchannel_idx >= api_net::IO_SUBCHANNELS
     {
         return Err(moto_rt::Error::InvalidArgument);
@@ -260,6 +260,7 @@ pub fn decode_listener_accept_request(msg: &io_channel::Msg) -> moto_rt::Result<
 /// Encode a successful accept response while preserving request identity.
 /// The new stream handle is in `handle`; payload bytes 0..16 contain fixed-
 /// width local CID/port followed by peer CID/port, and bytes 16..24 are zero.
+/// The peer's wire source port spans all u32 values, unlike a connect target.
 pub fn encode_listener_accept_response(
     request: &io_channel::Msg,
     handle: u64,
@@ -269,7 +270,7 @@ pub fn encode_listener_accept_response(
     if request.command != NetCmd::VsockListenerAccept as u16
         || handle == 0
         || !valid_local(local)
-        || !valid_peer(peer)
+        || !valid_peer_cid(peer.cid)
     {
         return Err(moto_rt::Error::InvalidArgument);
     }
@@ -302,7 +303,7 @@ pub fn decode_listener_accept_response(msg: &io_channel::Msg) -> moto_rt::Result
     if msg.handle == 0
         || msg.flags != 0
         || !valid_local(local)
-        || !valid_peer(peer)
+        || !valid_peer_cid(peer.cid)
         || !msg.payload.args_8()[16..].iter().all(|byte| *byte == 0)
     {
         return Err(moto_rt::Error::InvalidData);
@@ -471,8 +472,12 @@ pub fn stream_rx_msg(
 
 // This is syntactic validation only. sys-io decides which non-host CIDs the
 // current transport supports and returns NotImplemented for unsupported ones.
-fn valid_peer(addr: VsockAddr) -> bool {
-    addr.cid >= 2 && addr.cid != u32::MAX && valid_port(addr.port)
+fn valid_connect_peer(addr: VsockAddr) -> bool {
+    valid_peer_cid(addr.cid) && valid_port(addr.port)
+}
+
+fn valid_peer_cid(cid: u32) -> bool {
+    cid >= 2 && cid != u32::MAX
 }
 
 fn valid_local(addr: VsockAddr) -> bool {

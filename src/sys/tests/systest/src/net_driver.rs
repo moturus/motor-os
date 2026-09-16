@@ -86,6 +86,34 @@ async fn raw_vsock_listener_drop(
     assert_eq!(response.status(), Ok(()));
 }
 
+pub struct RawVsockListener {
+    owner: moto_ipc::io_channel::Sender,
+    owner_rx: moto_ipc::io_channel::Receiver,
+    handle: u64,
+    next_id: u64,
+}
+
+impl RawVsockListener {
+    pub async fn bind(port: u32) -> Self {
+        let (owner, mut owner_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut request = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        request.id = 0x564f_7000;
+        let response = raw_vsock_response(&owner, &mut owner_rx, request).await;
+        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        assert_eq!(listener.local.port, port);
+        Self {
+            owner,
+            owner_rx,
+            handle: listener.handle,
+            next_id: request.id + 1,
+        }
+    }
+
+    pub async fn close(mut self) {
+        raw_vsock_listener_drop(&self.owner, &mut self.owner_rx, self.handle, self.next_id).await;
+    }
+}
+
 pub async fn test_raw_vsock_listener_bind() {
     const EXPLICIT_PORT: u32 = 0xf123_4567;
     const QUOTA_PORT_START: u32 = 0xf200_0000;

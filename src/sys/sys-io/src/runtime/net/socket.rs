@@ -21,7 +21,7 @@ pub(super) enum SocketState {
     Udp(udp::UdpState),
     Tcp(tcp::TcpState),
     Vsock(super::vsock::VsockSocketState),
-    VsockListener,
+    VsockListener(crate::runtime::vsock::listener::ListenerState),
 }
 
 impl SocketState {
@@ -194,8 +194,8 @@ impl Drop for MotoSocket {
                 super::vsock::on_socket_drop(base, vsock_state);
                 return;
             }
-            (SocketBackend::VsockListener, SocketState::VsockListener) => {
-                super::vsock::on_listener_drop(base);
+            (SocketBackend::VsockListener, SocketState::VsockListener(listener)) => {
+                super::vsock::on_listener_drop(base, listener);
                 return;
             }
             _ => panic!("socket state/backend mismatch"),
@@ -242,7 +242,7 @@ impl MotoSocket {
     }
 
     pub(super) fn is_vsock_listener(&self) -> bool {
-        matches!(self.state, SocketState::VsockListener)
+        matches!(self.state, SocketState::VsockListener(_))
     }
 
     pub(super) fn new_ip(
@@ -310,7 +310,10 @@ impl MotoSocket {
         Ok(this)
     }
 
-    pub(super) fn new_vsock_listener(base: SocketBase) -> std::io::Result<Rc<RefCell<Self>>> {
+    pub(super) fn new_vsock_listener(
+        base: SocketBase,
+        listener: crate::runtime::vsock::listener::ListenerState,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
@@ -326,7 +329,7 @@ impl MotoSocket {
 
         let this = Rc::new(RefCell::new(Self {
             base,
-            state: SocketState::VsockListener,
+            state: SocketState::VsockListener(listener),
         }));
         assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
         assert!(
@@ -390,5 +393,21 @@ impl MotoSocket {
             panic!("not a vsock stream")
         };
         state
+    }
+
+    pub(super) fn unwrap_vsock_listener(&self) -> &crate::runtime::vsock::listener::ListenerState {
+        let SocketState::VsockListener(listener) = &self.state else {
+            panic!("not a vsock listener")
+        };
+        listener
+    }
+
+    pub(super) fn unwrap_vsock_listener_mut(
+        &mut self,
+    ) -> &mut crate::runtime::vsock::listener::ListenerState {
+        let SocketState::VsockListener(listener) = &mut self.state else {
+            panic!("not a vsock listener")
+        };
+        listener
     }
 }

@@ -20,6 +20,7 @@ use super::socket::{MotoSocket, SocketBase};
 use crate::runtime::channel_budget::ClientSender;
 use crate::runtime::vsock::admission::{AdmissionError, ConnectionTuple, TupleIndex, VsockAddr};
 use crate::runtime::vsock::connection::{Connection, ReceiveOutcome, TerminalCause};
+use crate::runtime::vsock::listener::ListenerState;
 
 const MAX_PENDING_CONTROLS: usize = 64;
 const MAX_PENDING_TX_PAGES: usize = 16;
@@ -196,6 +197,7 @@ pub(super) struct VsockSocketState {
     connection: Connection,
     tx_pages: VecDeque<TxPage>,
     subchannel_mask: u64,
+    listener_id: Option<u64>,
     connect_notify: Rc<moto_async::LocalNotify>,
     rx_notify: Rc<moto_async::LocalNotify>,
     state_notify: Rc<moto_async::LocalNotify>,
@@ -210,6 +212,18 @@ pub(super) struct VsockSocketState {
 
 impl VsockSocketState {
     fn new(connection: Connection, subchannel_mask: u64) -> Result<Self, moto_rt::Error> {
+        Self::with_owner(connection, subchannel_mask, None)
+    }
+
+    fn new_unaccepted(connection: Connection, listener_id: u64) -> Result<Self, moto_rt::Error> {
+        Self::with_owner(connection, 0, Some(listener_id))
+    }
+
+    fn with_owner(
+        connection: Connection,
+        subchannel_mask: u64,
+        listener_id: Option<u64>,
+    ) -> Result<Self, moto_rt::Error> {
         let mut tx_pages = VecDeque::new();
         tx_pages
             .try_reserve_exact(MAX_PENDING_TX_PAGES)
@@ -218,6 +232,7 @@ impl VsockSocketState {
             connection,
             tx_pages,
             subchannel_mask,
+            listener_id,
             connect_notify: Rc::new(moto_async::LocalNotify::new()),
             rx_notify: Rc::new(moto_async::LocalNotify::new()),
             state_notify: Rc::new(moto_async::LocalNotify::new()),
@@ -282,7 +297,7 @@ pub(super) fn on_socket_drop(base: &mut SocketBase, state: &mut VsockSocketState
     assert!(removed_again.is_none());
 }
 
-pub(super) fn on_listener_drop(base: &mut SocketBase) {
+pub(super) fn on_listener_drop(base: &mut SocketBase, listener: &mut ListenerState) {
     assert!(
         base.runtime()
             .inner
@@ -292,6 +307,9 @@ pub(super) fn on_listener_drop(base: &mut SocketBase) {
             .remove_listener(base.socket_id())
             .is_some()
     );
+    while let Some(socket_id) = listener.pop() {
+        base.runtime().reset_unaccepted(socket_id);
+    }
 }
 
 impl NetRuntime {
@@ -396,6 +414,7 @@ impl NetRuntime {
     ) -> Result<(), moto_rt::Error> {
         let requested_port = api_vsock::decode_listener_bind_request(&request)?;
         let driver = self.activate_vsock()?;
+        let listener = ListenerState::new().map_err(map_allocation_error)?;
         let local_cid = driver.guest_cid();
         let (socket_id, response) = {
             let mut inner = self.inner.borrow_mut();
@@ -421,7 +440,7 @@ impl NetRuntime {
         };
 
         let base = SocketBase::new_vsock_listener(socket_id, self.clone(), sender.clone());
-        MotoSocket::new_vsock_listener(base).map_err(map_allocation_error)?;
+        MotoSocket::new_vsock_listener(base, listener).map_err(map_allocation_error)?;
         if sender.send(response).await.is_err() {
             let _ = self.remove_vsock_listener(socket_id, sender.remote_handle());
         }
@@ -937,6 +956,11 @@ impl NetRuntime {
         }
         state.connect_notify.notify_all();
         state.state_notify.notify_one();
+        let remove_unaccepted = state.listener_id.is_some() && state.terminal_ready_to_drop();
+        drop(socket);
+        if remove_unaccepted {
+            self.remove_vsock_socket(socket_id);
+        }
     }
 
     fn vsock_control_released(&self) {
@@ -1072,6 +1096,13 @@ impl NetRuntime {
             .then(|| self.inner.borrow().vsock.tuples.stream_socket(tuple))
             .flatten();
         let Some(socket_id) = socket_id else {
+            if header.dst_cid == local_cid
+                && header.operation == Operation::Request
+                && self.admit_vsock_request(&header)
+            {
+                self.inner.borrow().vsock.notify_submit();
+                return Ok(());
+            }
             if let Some(raw) = RawHeader::refusal(local_cid, header.into()) {
                 let _ = self
                     .inner
@@ -1133,8 +1164,83 @@ impl NetRuntime {
         if orderly_reset {
             self.queue_vsock_reset(socket_id);
         }
+        let remove_unaccepted = {
+            let socket = socket.borrow();
+            let state = socket.unwrap_vsock();
+            state.listener_id.is_some() && state.terminal_ready_to_drop()
+        };
+        if remove_unaccepted {
+            self.remove_vsock_socket(socket_id);
+        }
         self.inner.borrow().vsock.notify_submit();
         Ok(())
+    }
+
+    fn admit_vsock_request(&self, header: &PacketHeader) -> bool {
+        let local = VsockAddr {
+            cid: header.dst_cid,
+            port: header.dst_port,
+        };
+        let peer = VsockAddr {
+            cid: header.src_cid,
+            port: header.src_port,
+        };
+        let (listener_id, listener, sender) = {
+            let inner = self.inner.borrow();
+            let Some(listener_id) = inner.vsock.tuples.listener_socket(local) else {
+                return false;
+            };
+            let listener = inner
+                .sockets
+                .get(&listener_id)
+                .cloned()
+                .expect("vsock listener index has no common socket");
+            let listener_ref = listener.borrow();
+            if !listener_ref.unwrap_vsock_listener().has_capacity() {
+                return false;
+            }
+            let sender = listener_ref.sender().clone();
+            drop(listener_ref);
+            (listener_id, listener, sender)
+        };
+        let Ok(connection) = Connection::new_incoming(header) else {
+            return false;
+        };
+        let Ok(state) = VsockSocketState::new_unaccepted(connection, listener_id) else {
+            return false;
+        };
+        let (socket_id, tuple) = {
+            let mut inner = self.inner.borrow_mut();
+            let socket_id = inner.next_socket_id();
+            let Ok(tuple) = inner
+                .vsock
+                .tuples
+                .reserve_accepted(listener_id, socket_id, peer)
+            else {
+                return false;
+            };
+            (socket_id, tuple)
+        };
+        let base = SocketBase::new_vsock(socket_id, self.clone(), tuple, sender);
+        if MotoSocket::new_vsock(base, state).is_err() {
+            return false;
+        }
+        listener
+            .borrow_mut()
+            .unwrap_vsock_listener_mut()
+            .push(socket_id);
+        // The RX pump reserved one control slot before consuming REQUEST, and
+        // admission has no await point at which another task could take it.
+        self.inner
+            .borrow_mut()
+            .vsock
+            .queue_control(PendingControl::Stream {
+                socket_id,
+                operation: Operation::Response,
+                flags: 0,
+            })
+            .expect("RX control-space reservation was lost during REQUEST admission");
+        true
     }
 
     fn queue_vsock_reset(&self, socket_id: u64) {
@@ -1151,6 +1257,29 @@ impl NetRuntime {
             }
         }
         self.inner.borrow().vsock.notify_submit();
+    }
+
+    fn reset_unaccepted(&self, socket_id: u64) {
+        let socket = self.inner.borrow().sockets.get(&socket_id).cloned();
+        let Some(socket) = socket else {
+            return;
+        };
+        let needs_reset = {
+            let mut socket = socket.borrow_mut();
+            let state = socket.unwrap_vsock_mut();
+            assert!(state.listener_id.is_some());
+            state.tx_pages.clear();
+            let needs_reset = state.connection.abandon_unread_rx() || state.pending_reset;
+            state.connect_notify.notify_all();
+            state.rx_notify.notify_one();
+            state.state_notify.notify_one();
+            needs_reset
+        };
+        if matches!(self.inner.borrow().vsock.device, DeviceState::Ready(_)) && needs_reset {
+            self.queue_vsock_reset(socket_id);
+        } else {
+            self.remove_vsock_socket(socket_id);
+        }
     }
 
     async fn vsock_event_pump(&self) {
@@ -1192,15 +1321,22 @@ impl NetRuntime {
             sockets
         };
         for socket in sockets.into_iter().flatten() {
-            let mut socket = socket.borrow_mut();
-            let state = socket.unwrap_vsock_mut();
-            state.tx_pages.clear();
-            state.pending_reset = false;
-            state.reset_queued = false;
-            state.connection.transport_reset();
-            state.connect_notify.notify_all();
-            state.rx_notify.notify_one();
-            state.state_notify.notify_one();
+            let (socket_id, unaccepted) = {
+                let mut socket = socket.borrow_mut();
+                let socket_id = socket.socket_id();
+                let state = socket.unwrap_vsock_mut();
+                state.tx_pages.clear();
+                state.pending_reset = false;
+                state.reset_queued = false;
+                state.connection.transport_reset();
+                state.connect_notify.notify_all();
+                state.rx_notify.notify_one();
+                state.state_notify.notify_one();
+                (socket_id, state.listener_id.is_some())
+            };
+            if unaccepted {
+                self.remove_vsock_socket(socket_id);
+            }
         }
         self.vsock_control_released();
     }
@@ -1222,15 +1358,22 @@ impl NetRuntime {
             sockets
         };
         for socket in sockets.into_iter().flatten() {
-            let mut socket = socket.borrow_mut();
-            let state = socket.unwrap_vsock_mut();
-            state.tx_pages.clear();
-            state.pending_reset = false;
-            state.reset_queued = false;
-            state.connection.device_failed();
-            state.connect_notify.notify_all();
-            state.rx_notify.notify_one();
-            state.state_notify.notify_one();
+            let (socket_id, unaccepted) = {
+                let mut socket = socket.borrow_mut();
+                let socket_id = socket.socket_id();
+                let state = socket.unwrap_vsock_mut();
+                state.tx_pages.clear();
+                state.pending_reset = false;
+                state.reset_queued = false;
+                state.connection.device_failed();
+                state.connect_notify.notify_all();
+                state.rx_notify.notify_one();
+                state.state_notify.notify_one();
+                (socket_id, state.listener_id.is_some())
+            };
+            if unaccepted {
+                self.remove_vsock_socket(socket_id);
+            }
         }
         self.vsock_control_released();
     }
@@ -1633,6 +1776,13 @@ impl NetRuntime {
                 return;
             };
             assert!(inner.vsock.tuples.remove_stream(socket_id).is_some());
+            let listener_id = socket.borrow().unwrap_vsock().listener_id;
+            if let Some(listener) = listener_id.and_then(|id| inner.sockets.get(&id).cloned()) {
+                listener
+                    .borrow_mut()
+                    .unwrap_vsock_listener_mut()
+                    .remove(socket_id);
+            }
             {
                 let socket = socket.borrow();
                 let state = socket.unwrap_vsock();

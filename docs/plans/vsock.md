@@ -1135,6 +1135,35 @@ M2 cleanup review and listener-capacity coverage are complete for this slice:
   targeted Clippy checks passed with unchanged baseline warnings. Evidence:
   `/tmp/vsock-failure-quota-gate.A3pv6o/`. M2 remains incomplete.
 
+M2's incoming REQUEST/backlog slice is implemented and parent-reviewed:
+
+- A listener has eight pre-reserved FIFO child IDs; connections remain in
+  the common socket/client maps. Admission reserves receive storage and
+  control capacity before publishing RESPONSE. Listener drop abandons
+  unconsumable bytes and retains each locally required reset until it is
+  published; an already received peer RST does not provoke a reset loop.
+  Reset/failure also removes unaccepted children. Admission and teardown
+  land together in this larger slice because RESPONSE makes the connection
+  live to its peer.
+- The initial QEMU debug gate failed on its first host CONNECT. Targeted
+  existing-test diagnostics confirmed a valid REQUEST with source port zero;
+  our tuple admission wrongly applied the native connect-target restriction.
+  Admission and accept-response codecs now preserve all `u32` source ports,
+  with zero/MAX fixtures and unchanged native destination restrictions (D8).
+  Original evidence: `/tmp/vsock-incoming-backlog-gate.0nqaJU/` and
+  `/tmp/vsock-incoming-qemu-diag.1Jhh4U/`. No VMM/backend change was made.
+- All sixteen peer cases passed on QEMU, CHV, and FC in both profiles after
+  removing temporary diagnostics. The new case proves eight handshakes,
+  ninth-connection refusal, listener-drop closure, and same-port rebind.
+  Host early writes do not prove guest delivery before an independent sync
+  frame; buffered-RX/reset semantics have source-included fixture coverage,
+  while integrated early-data delivery awaits accept.
+- Debug/release builds, complete native-net/mio and task/descriptor guest
+  regressions, CHV's full vsock phase, formatting, and targeted Clippy passed
+  with unchanged baseline warnings. Evidence:
+  `/tmp/vsock-incoming-backlog-fixed-gate.PyOX7R/`. Native accept, owner-channel
+  loss coverage, and the remaining M2 gates are still pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2173,6 +2202,17 @@ Tuples stay reserved through close so automatic reuse cannot attach to an
 old connection. Linux uses `0xffffffff` as its wildcard and reserves ports
 below 1024; these native conventions differ but do not affect wire
 interoperability.
+
+Those restrictions apply to native bind/connect requests, not an incoming
+peer's source port. Preserve the complete `u32` source port in accepted
+tuples and accept replies, including 0 and `0xffffffff`.
+[Virtio 1.1 section 5.10.6.2](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+does not reserve wire port values; Linux's
+[receive/listen path](https://github.com/torvalds/linux/blob/v6.12/net/vmw_vsock/virtio_transport_common.c#L1410-L1524)
+also copies the source port without applying userspace bind sentinels.
+In particular, vhost-device-vsock 0.3.0 starts allocating host source ports
+at zero. Reusing connect-target validation here incorrectly refused its
+first incoming connection; no backend adjustment is needed.
 
 ### D9. Lazy initialization (approved)
 

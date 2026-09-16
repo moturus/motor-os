@@ -317,6 +317,21 @@ fn test_listener_accept_codec() {
             peer,
         }
     );
+    for port in [0, u32::MAX] {
+        let peer = VsockAddr { cid: 2, port };
+        let response =
+            api_vsock::encode_listener_accept_response(&accept, 0x52, local, peer).unwrap();
+        assert_eq!(
+            api_vsock::decode_listener_accept_response(&response)
+                .unwrap()
+                .peer,
+            peer
+        );
+        assert_eq!(
+            api_vsock::connect_request(peer, 0).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
     let mut error = response;
     error.status = moto_rt::E_NOT_CONNECTED;
     error.handle = 0;
