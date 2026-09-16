@@ -13,14 +13,18 @@ pub struct Server {
 
 impl Server {
     pub fn start(logging: Option<&str>, extra: &[&str]) -> Self {
-        Self::start_with_tls(logging, extra, false)
+        Self::start_with_tls(logging, extra, false, "127.0.0.1:0")
     }
 
     pub fn start_tls(logging: Option<&str>, extra: &[&str]) -> Self {
-        Self::start_with_tls(logging, extra, true)
+        Self::start_tls_at(logging, extra, "127.0.0.1:0")
     }
 
-    fn start_with_tls(logging: Option<&str>, extra: &[&str], tls: bool) -> Self {
+    pub fn start_tls_at(logging: Option<&str>, extra: &[&str], address: &str) -> Self {
+        Self::start_with_tls(logging, extra, true, address)
+    }
+
+    fn start_with_tls(logging: Option<&str>, extra: &[&str], tls: bool, address: &str) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -43,7 +47,7 @@ impl Server {
                 .arg(key);
         }
         command
-            .args(["-a", "127.0.0.1:0", "-d"])
+            .args(["-a", address, "-d"])
             .arg(&directory)
             .args(extra)
             .env("NO_COLOR", "1")
@@ -122,9 +126,19 @@ pub fn request<S: Read + Write>(
     path: &str,
     headers: &str,
 ) -> Response {
+    request_with_host(io, method, path, "localhost", headers)
+}
+
+pub fn request_with_host<S: Read + Write>(
+    io: &mut BufReader<S>,
+    method: &str,
+    path: &str,
+    host: &str,
+    headers: &str,
+) -> Response {
     write!(
         io.get_mut(),
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{headers}\r\n"
     )
     .unwrap();
     io.get_mut().flush().unwrap();

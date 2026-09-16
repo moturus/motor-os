@@ -37,6 +37,22 @@ are not exposed by the current Hyper API and are not enforced by this flag.
 The HTTP/2 tests check both cleartext and certificate-validated TLS, repeat
 requests on one connection (including a cache hit), and verify admission limits.
 
+`--http-redirect-url=https://example.com/landing` enables a separate port-80
+listener on the same bind IP; it requires TLS credentials and `--addr` on port
+443. Every accepted HTTP request receives 308 with that exact URL as `Location`.
+Incoming Host/forwarding headers, paths and queries do not affect the destination.
+The configured URL may contain its own port, path, query and fragment; it must
+be an absolute HTTPS URL without credentials, with non-ASCII characters escaped.
+Without the flag no additional listener opens. Both listeners share the connection
+budget and header deadlines, and startup fails if either required port cannot bind.
+
+`--test redirect` checks fixed responses without binding sockets. The `http` test
+automatically exercises real ports 80 and 443 on Motor OS, including disabled
+redirects, occupied port 80, exact Location, HTTPS content, shared admission and
+deadlines. Run that test alone in the disposable VM with those ports free. Host
+runs can enable the same checks with `HTTPD_AXUM_REDIRECT_TESTS=1` when the process
+has permission to bind both ports; regular host HTTP tests use ephemeral ports.
+
 `--test fs_path` checks the filesystem serving path and reports per-operation
 timings, response preparation, and body collection without network I/O. It
 compares burst traffic with requests spaced 20 ms apart and reports a batched

@@ -1,6 +1,7 @@
 mod cache;
 mod common;
 mod http2;
+mod redirect_live;
 
 use common::{request, Server};
 use std::io::{BufReader, Read, Write};
@@ -115,6 +116,11 @@ fn main() {
     drop(io);
     assert!(!server.stop().contains("response prepared"));
     http2::check();
+    // Motor permits standard service ports. Host runs can opt in when ports
+    // 80/443 are available and the test process has permission to bind them.
+    if cfg!(target_os = "motor") || std::env::var_os("HTTPD_AXUM_REDIRECT_TESTS").is_some() {
+        redirect_live::check();
+    }
     println!("httpd-axum HTTP/1, HTTP/2, TLS, and logging tests passed");
 }
 
