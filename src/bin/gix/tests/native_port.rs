@@ -9,7 +9,10 @@ use std::{
 
 use gix::{
     bstr::ByteSlice,
-    index::{File, entry::Mode},
+    index::{
+        File,
+        entry::{Flags, Mode, Stage},
+    },
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -132,6 +135,7 @@ fn main() -> Result {
     assert_eq!(link.mode, Mode::SYMLINK);
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
+    check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);
@@ -384,6 +388,257 @@ fn check_init(output: &Path) -> Result {
         .ok_or("cancelled init succeeded")?;
     assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
     assert!(!cancelled.try_exists()?);
+    Ok(())
+}
+
+fn check_add(output: &Path, executable_source: &Path, gitlink_id: gix::ObjectId) -> Result {
+    let repository = output.join("add-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(&repository, &[], false, &cancellation)?;
+    let opened = motor_gix::repository::open(&repository, &[], false)?;
+    let repo = &opened.repo;
+
+    for (path, data) in [
+        ("modified", b"old\n".as_slice()),
+        ("deleted", b"delete\n"),
+        ("ignored-tracked", b"old ignored\n"),
+        ("file-parent", b"old parent\n"),
+        ("directory/old", b"old child\n"),
+        ("link-preserved", b"old-target"),
+    ] {
+        let path = repository.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, data)?;
+    }
+    fs::copy(executable_source, repository.join("executable"))?;
+    let executable = OpenOptions::new()
+        .read(true)
+        .open(repository.join("executable"))?;
+    #[cfg(target_os = "motor")]
+    {
+        use std::os::fd::AsRawFd;
+
+        // Motor copies RWX files as RX; this fixture needs an editable executable.
+        moto_rt::fs::set_file_perm(
+            executable.as_raw_fd(),
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
+        )
+        .map_err(|error| format!("cannot make executable fixture writable: {error:?}"))?;
+    }
+    assert!(gix::index::fs::Metadata::from_file(&executable)?.is_executable());
+
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    let conflict_ids = [
+        repo.write_blob(b"base\n")?.detach(),
+        repo.write_blob(b"ours\n")?.detach(),
+        repo.write_blob(b"theirs\n")?.detach(),
+    ];
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.publish_edited_index(|index| {
+        index
+            .entry_mut_by_path_and_stage(b"link-preserved".as_bstr(), Stage::Unconflicted)
+            .ok_or("staged link seed missing")?
+            .mode = Mode::SYMLINK;
+        for (stage, id) in [Stage::Base, Stage::Ours, Stage::Theirs]
+            .into_iter()
+            .zip(conflict_ids)
+        {
+            index.dangerously_push_entry(
+                Default::default(),
+                id,
+                Flags::from_stage(stage),
+                Mode::FILE,
+                b"conflict".as_bstr(),
+            );
+        }
+        for path in ["gitlink", "missing-gitlink", "blocked-parent/nested"] {
+            index.dangerously_push_entry(
+                Default::default(),
+                gitlink_id,
+                Flags::empty(),
+                Mode::COMMIT,
+                path.as_bytes().as_bstr(),
+            );
+        }
+        Ok(())
+    })?;
+    drop(guard);
+
+    fs::write(repository.join("modified"), b"new\n")?;
+    fs::remove_file(repository.join("deleted"))?;
+    fs::write(repository.join("ignored-tracked"), b"new ignored\n")?;
+    fs::write(repository.join("added"), b"added\n")?;
+    fs::write(repository.join("conflict"), b"resolved\n")?;
+    fs::write(repository.join("link-preserved"), b"new-target")?;
+    fs::write(repository.join("executable"), b"new executable\n")?;
+    fs::write(
+        repository.join(".gitignore"),
+        b"ignored-new\nignored-tracked\n",
+    )?;
+    fs::write(repository.join("ignored-new"), b"ignored\n")?;
+
+    fs::remove_file(repository.join("file-parent"))?;
+    fs::create_dir(repository.join("file-parent"))?;
+    fs::write(repository.join("file-parent/child"), b"child\n")?;
+    fs::remove_file(repository.join("directory/old"))?;
+    fs::remove_dir(repository.join("directory"))?;
+    fs::write(repository.join("directory"), b"now a file\n")?;
+
+    fs::create_dir(repository.join("gitlink"))?;
+    fs::write(
+        repository.join("gitlink/untracked-child"),
+        b"must not stage\n",
+    )?;
+    fs::write(repository.join("blocked-parent"), b"replacement\n")?;
+
+    motor_gix::add::run(
+        &opened,
+        false,
+        &["file-parent/child".into(), "directory/old".into()],
+        &cancellation,
+    )?;
+    let partial = repo.open_index()?;
+    for absent in ["file-parent", "directory/old", "directory"] {
+        assert!(partial.entry_range(absent.as_bytes().as_bstr()).is_none());
+    }
+    assert!(
+        partial
+            .entry_range(b"file-parent/child".as_bstr())
+            .is_some()
+    );
+    expect_add_rejected(
+        &opened,
+        &[".".into(), "ignored-new".into()],
+        "explicit path 'ignored-new' is ignored",
+    )?;
+
+    expect_add_rejected(
+        &opened,
+        &["ignored-new".into()],
+        "explicit path 'ignored-new' is ignored",
+    )?;
+    let oversized = fs::File::create(repository.join("oversized"))?;
+    oversized.set_len(16 * 1024 * 1024 + 1)?;
+    drop(oversized);
+    expect_add_rejected(
+        &opened,
+        &["oversized".into()],
+        "cannot stage 'oversized': the worktree file exceeds the 16 MiB limit",
+    )?;
+    fs::remove_file(repository.join("oversized"))?;
+    expect_add_rejected(
+        &opened,
+        &["blocked-parent".into()],
+        "cannot stage 'blocked-parent': an indexed descendant is a gitlink",
+    )?;
+    fs::remove_file(repository.join("blocked-parent"))?;
+    fs::create_dir(repository.join("blocked-parent"))?;
+
+    fs::write(
+        repository.join(".git/info/attributes"),
+        b"modified filter=blocked\n",
+    )?;
+    let filtered = motor_gix::repository::open(
+        &repository,
+        &[
+            "filter.blocked.clean=must-not-run",
+            "filter.blocked.required=true",
+        ],
+        false,
+    )?;
+    expect_add_rejected(
+        &filtered,
+        &["modified".into()],
+        "path 'modified' uses unsupported filter 'blocked'",
+    )?;
+    drop(filtered);
+    fs::remove_file(repository.join(".git/info/attributes"))?;
+
+    motor_gix::add::run(&opened, false, &[".".into()], &cancellation)?;
+    let index = File::at(
+        repo.index_path(),
+        repo.object_hash(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(index.entries().len(), 12);
+    for absent in [
+        "deleted",
+        "ignored-new",
+        "file-parent",
+        "directory/old",
+        "gitlink/untracked-child",
+    ] {
+        assert!(
+            index.entry_range(absent.as_bytes().as_bstr()).is_none(),
+            "{absent}"
+        );
+    }
+    for (path, mode, data) in [
+        ("modified", Mode::FILE, b"new\n".as_slice()),
+        ("added", Mode::FILE, b"added\n"),
+        ("ignored-tracked", Mode::FILE, b"new ignored\n"),
+        ("conflict", Mode::FILE, b"resolved\n"),
+        ("file-parent/child", Mode::FILE, b"child\n"),
+        ("directory", Mode::FILE, b"now a file\n"),
+        ("link-preserved", Mode::SYMLINK, b"new-target"),
+        ("executable", Mode::FILE_EXECUTABLE, b"new executable\n"),
+    ] {
+        assert_index_blob(repo, &index, path, mode, data)?;
+    }
+    for path in ["gitlink", "missing-gitlink", "blocked-parent/nested"] {
+        let entry = index
+            .entry_by_path(path.as_bytes().as_bstr())
+            .ok_or("preserved gitlink missing")?;
+        assert_eq!((entry.mode, entry.id), (Mode::COMMIT, gitlink_id), "{path}");
+    }
+    assert!(index.entry_by_path(b".gitignore".as_bstr()).is_some());
+    assert!(!repo.git_dir().join("index.lock").exists());
+    Ok(())
+}
+
+fn expect_add_rejected(
+    opened: &motor_gix::repository::OpenedRepository,
+    paths: &[String],
+    expected: &str,
+) -> Result {
+    let index_path = opened.repo.index_path();
+    let before = fs::read(&index_path)?;
+    let error = motor_gix::add::run(
+        opened,
+        false,
+        paths,
+        &motor_gix::cancellation::Cancellation::new(),
+    )
+    .expect_err("add unexpectedly succeeded");
+    assert!(error.to_string().contains(expected), "{error}");
+    assert_eq!(
+        fs::read(&index_path)?,
+        before,
+        "rejected add changed the index"
+    );
+    assert!(!opened.repo.git_dir().join("index.lock").exists());
+    Ok(())
+}
+
+fn assert_index_blob(
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    path: &str,
+    mode: Mode,
+    data: &[u8],
+) -> Result {
+    let entry = index
+        .entry_by_path_and_stage(path.as_bytes().as_bstr(), Stage::Unconflicted)
+        .ok_or("expected staged entry missing")?;
+    assert_eq!(entry.mode, mode, "{path}");
+    assert_eq!(repo.find_blob(entry.id)?.data, data, "{path}");
+    assert_eq!(
+        index.entry_range(path.as_bytes().as_bstr()).unwrap().len(),
+        1
+    );
     Ok(())
 }
 

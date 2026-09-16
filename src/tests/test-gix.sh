@@ -218,6 +218,38 @@ verify_index() {
   [ "$actual" = "$expected" ] || fail "written index does not reproduce fixture tree"
 }
 
+verify_add_repository() {
+  local repository="$1" listing="$temporary/add-index" tree
+  clean_git -C "$repository" ls-files --stage > "$listing"
+  [ "$(wc -l < "$listing")" -eq 12 ] || fail "add fixture index has the wrong entry count"
+  grep -Eq '^100755 [0-9a-f]{40} 0[[:space:]]+executable$' "$listing" ||
+    fail "add did not preserve executable mode"
+  grep -Eq '^120000 [0-9a-f]{40} 0[[:space:]]+link-preserved$' "$listing" ||
+    fail "add did not preserve symlink mode"
+  for path in gitlink missing-gitlink blocked-parent/nested; do
+    grep -Eq "^160000 [0-9a-f]{40} 0[[:space:]]+$path$" "$listing" ||
+      fail "add did not preserve gitlink $path"
+  done
+  [ -z "$(clean_git -C "$repository" ls-files --unmerged)" ] ||
+    fail "add did not resolve the regular-file conflict"
+  for path in deleted ignored-new file-parent directory/old gitlink/untracked-child; do
+    ! grep -Eq "[[:space:]]$path$" "$listing" || fail "add retained forbidden path $path"
+  done
+  [ "$(clean_git -C "$repository" show :modified)" = new ] ||
+    fail "add staged the wrong modified content"
+  [ "$(clean_git -C "$repository" show :ignored-tracked)" = 'new ignored' ] ||
+    fail "add did not update a tracked ignored path"
+  [ "$(clean_git -C "$repository" show :conflict)" = resolved ] ||
+    fail "add staged the wrong conflict resolution"
+  [ "$(clean_git -C "$repository" show :file-parent/child)" = child ] ||
+    fail "add did not replace an indexed file with a child"
+  [ "$(clean_git -C "$repository" show :directory)" = 'now a file' ] ||
+    fail "add did not replace an indexed directory with a file"
+  tree="$(clean_git -C "$repository" write-tree)"
+  clean_git -C "$repository" cat-file -e "$tree^{tree}"
+  clean_git -C "$repository" fsck --strict --no-dangling >/dev/null
+}
+
 verify_pack() {
   local indices=("$1"/*.idx)
   [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
@@ -307,6 +339,7 @@ PY
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
+  verify_add_repository "$temporary/host-output/add-repository"
   verify_pack "$temporary/host-output/pack-roundtrip"
   verify_pack "$temporary/host-output/pack-thin"
 
@@ -575,6 +608,10 @@ verify_pack "$temporary/guest-pack"
 printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-thin" "$temporary/guest-thin-pack" |
   "${sftp_command[@]}"
 verify_pack "$temporary/guest-thin-pack"
+
+printf 'get -r "%s" "%s"\n' "$guest_root/output/add-repository" "$temporary/guest-add" |
+  "${sftp_command[@]}"
+verify_add_repository "$temporary/guest-add"
 
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix init $guest_root/init"
 printf 'get "%s" "%s"\n' "$guest_root/init/.git/HEAD" "$temporary/guest-init-head" |
