@@ -21,6 +21,7 @@ pub(super) enum SocketState {
     Udp(udp::UdpState),
     Tcp(tcp::TcpState),
     Vsock(super::vsock::VsockSocketState),
+    VsockListener,
 }
 
 impl SocketState {
@@ -71,6 +72,7 @@ pub(super) struct IpSocketBackend {
 pub(super) enum SocketBackend {
     Ip(IpSocketBackend),
     Vsock(crate::runtime::vsock::admission::ConnectionTuple),
+    VsockListener,
 }
 
 impl SocketBase {
@@ -112,6 +114,20 @@ impl SocketBase {
             socket_id,
             runtime,
             backend: SocketBackend::Vsock(tuple),
+            client_sender,
+            lingering: false,
+        }
+    }
+
+    pub(super) fn new_vsock_listener(
+        socket_id: u64,
+        runtime: super::NetRuntime,
+        client_sender: ClientSender,
+    ) -> Self {
+        Self {
+            socket_id,
+            runtime,
+            backend: SocketBackend::VsockListener,
             client_sender,
             lingering: false,
         }
@@ -178,6 +194,10 @@ impl Drop for MotoSocket {
                 super::vsock::on_socket_drop(base, vsock_state);
                 return;
             }
+            (SocketBackend::VsockListener, SocketState::VsockListener) => {
+                super::vsock::on_listener_drop(base);
+                return;
+            }
             _ => panic!("socket state/backend mismatch"),
         }
 
@@ -219,6 +239,10 @@ impl MotoSocket {
 
     pub(super) fn is_vsock(&self) -> bool {
         matches!(self.state, SocketState::Vsock(_))
+    }
+
+    pub(super) fn is_vsock_listener(&self) -> bool {
+        matches!(self.state, SocketState::VsockListener)
     }
 
     pub(super) fn new_ip(
@@ -273,6 +297,36 @@ impl MotoSocket {
         let this = Rc::new(RefCell::new(Self {
             base,
             state: SocketState::Vsock(state),
+        }));
+        assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
+        assert!(
+            inner
+                .clients
+                .get_mut(&client_handle)
+                .unwrap()
+                .sockets
+                .insert(socket_id)
+        );
+        Ok(this)
+    }
+
+    pub(super) fn new_vsock_listener(base: SocketBase) -> std::io::Result<Rc<RefCell<Self>>> {
+        let runtime = base.runtime.clone();
+        let socket_id = base.socket_id;
+        let client_handle = base.client_sender.remote_handle();
+        let mut inner = runtime.inner.borrow_mut();
+        if !inner
+            .clients
+            .get(&client_handle)
+            .is_some_and(|client| !client.shutting_down)
+        {
+            inner.vsock.tuples.remove_listener(socket_id);
+            return Err(ErrorKind::NotConnected.into());
+        }
+
+        let this = Rc::new(RefCell::new(Self {
+            base,
+            state: SocketState::VsockListener,
         }));
         assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
         assert!(

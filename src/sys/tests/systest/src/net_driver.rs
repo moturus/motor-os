@@ -35,7 +35,7 @@ async fn expect_raw_vsock_error(
     assert_eq!(response.status(), Err(expected));
 }
 
-fn raw_vsock_controls(first_id: u64) -> [moto_ipc::io_channel::Msg; 2] {
+fn raw_vsock_controls(first_id: u64) -> [moto_ipc::io_channel::Msg; 3] {
     let mut shutdown = moto_sys_io::api_vsock::shutdown_request(
         0xfeed_cafe,
         moto_sys_io::api_vsock::SHUTDOWN_SEND,
@@ -44,7 +44,104 @@ fn raw_vsock_controls(first_id: u64) -> [moto_ipc::io_channel::Msg; 2] {
     shutdown.id = first_id;
     let mut close = moto_sys_io::api_vsock::close_request(0xfeed_cafe);
     close.id = first_id + 1;
-    [shutdown, close]
+    let mut drop = moto_sys_io::api_vsock::listener_drop_request(0xfeed_cafe);
+    drop.id = first_id + 2;
+    [shutdown, close, drop]
+}
+
+fn raw_vsock_bind(id: u64) -> moto_ipc::io_channel::Msg {
+    let mut bind = moto_sys_io::api_vsock::listener_bind_request(70_000).unwrap();
+    bind.id = id;
+    bind
+}
+
+async fn raw_vsock_response(
+    sender: &moto_ipc::io_channel::Sender,
+    receiver: &mut moto_ipc::io_channel::Receiver,
+    request: moto_ipc::io_channel::Msg,
+) -> moto_ipc::io_channel::Msg {
+    sender.send(request).await.unwrap();
+    let response = bounded_output(receiver.recv(), 2)
+        .await
+        .unwrap_or_else(|| panic!("timed out waiting for raw vsock response {:#x}", request.id))
+        .unwrap();
+    assert_eq!(response.id, request.id);
+    assert_eq!(response.command, request.command);
+    assert_eq!(response.wake_handle, request.wake_handle);
+    response
+}
+
+async fn raw_vsock_listener_drop(
+    sender: &moto_ipc::io_channel::Sender,
+    receiver: &mut moto_ipc::io_channel::Receiver,
+    handle: u64,
+    id: u64,
+) {
+    let mut request = moto_sys_io::api_vsock::listener_drop_request(handle);
+    request.id = id;
+    let response = raw_vsock_response(sender, receiver, request).await;
+    assert_eq!(response.handle, handle);
+    assert_eq!(response.flags, 0);
+    assert_eq!(response.payload.args_64(), &[0; 3]);
+    assert_eq!(response.status(), Ok(()));
+}
+
+pub async fn test_raw_vsock_listener_bind() {
+    const EXPLICIT_PORT: u32 = 0xf123_4567;
+
+    let (owner, mut owner_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    let mut bind = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    bind.id = 0x564f_6000;
+    bind.wake_handle = 0x1234;
+    let response = raw_vsock_response(&owner, &mut owner_rx, bind).await;
+    let explicit = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    assert_eq!(explicit.local.port, EXPLICIT_PORT);
+
+    let mut conflict = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    conflict.id = bind.id + 1;
+    expect_raw_vsock_error(
+        &owner,
+        &mut owner_rx,
+        conflict,
+        moto_rt::Error::AlreadyInUse,
+    )
+    .await;
+
+    let mut auto = moto_sys_io::api_vsock::listener_bind_request(0).unwrap();
+    auto.id = bind.id + 2;
+    let response = raw_vsock_response(&owner, &mut owner_rx, auto).await;
+    let auto = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    assert!((49_152..u32::MAX).contains(&auto.local.port));
+    assert_eq!(auto.local.cid, explicit.local.cid);
+    assert_ne!(auto.local.port, explicit.local.port);
+    assert_ne!(auto.handle, explicit.handle);
+
+    let (foreign, mut foreign_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    let mut foreign_drop = moto_sys_io::api_vsock::listener_drop_request(explicit.handle);
+    foreign_drop.id = bind.id + 3;
+    expect_raw_vsock_error(
+        &foreign,
+        &mut foreign_rx,
+        foreign_drop,
+        moto_rt::Error::NotFound,
+    )
+    .await;
+
+    raw_vsock_listener_drop(&owner, &mut owner_rx, explicit.handle, bind.id + 4).await;
+    let mut stale_drop = moto_sys_io::api_vsock::listener_drop_request(explicit.handle);
+    stale_drop.id = bind.id + 5;
+    expect_raw_vsock_error(&owner, &mut owner_rx, stale_drop, moto_rt::Error::NotFound).await;
+    let mut rebound = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    rebound.id = bind.id + 6;
+    let response = raw_vsock_response(&owner, &mut owner_rx, rebound).await;
+    let rebound = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    assert_eq!(rebound.local.cid, explicit.local.cid);
+    assert_eq!(rebound.local.port, EXPLICIT_PORT);
+    assert_ne!(rebound.handle, explicit.handle);
+
+    raw_vsock_listener_drop(&owner, &mut owner_rx, auto.handle, bind.id + 7).await;
+    raw_vsock_listener_drop(&owner, &mut owner_rx, rebound.handle, bind.id + 8).await;
+    println!("net_driver::test_raw_vsock_listener_bind PASS");
 }
 
 pub fn is_vsock_discovery_denied_child(args: &[String]) -> bool {
@@ -130,6 +227,13 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
             expect_raw_vsock_error(&sender, &mut receiver, request, moto_rt::Error::NotAllowed)
                 .await;
         }
+        expect_raw_vsock_error(
+            &sender,
+            &mut receiver,
+            raw_vsock_bind(connect.id + 5),
+            moto_rt::Error::NotAllowed,
+        )
+        .await;
     });
     std::process::exit(0)
 }
@@ -199,6 +303,13 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
 
         if mode == "absent" {
             expect_raw_vsock_error(&sender, &mut receiver, connect, moto_rt::Error::NotFound).await;
+            expect_raw_vsock_error(
+                &sender,
+                &mut receiver,
+                raw_vsock_bind(connect.id + 5),
+                moto_rt::Error::NotFound,
+            )
+            .await;
         }
         for request in raw_vsock_controls(connect.id + 2) {
             expect_raw_vsock_error(&sender, &mut receiver, request, moto_rt::Error::NotFound).await;

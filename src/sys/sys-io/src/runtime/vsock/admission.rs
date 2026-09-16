@@ -158,6 +158,14 @@ impl TupleIndex {
         Some(self.listeners.swap_remove(index).0)
     }
 
+    /// A transport reset invalidates old stream tuples, but listeners keep
+    /// their ports and follow the device's refreshed guest CID.
+    pub(crate) fn refresh_listener_cid(&mut self, local_cid: u32) {
+        for (local, _) in &mut self.listeners {
+            local.cid = local_cid;
+        }
+    }
+
     pub(crate) fn counts(&self) -> (usize, usize) {
         (self.streams.len(), self.listeners.len())
     }

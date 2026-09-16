@@ -1044,6 +1044,25 @@ M2's unread-stream progress fixture is implemented and parent-reviewed:
   `/tmp/vsock-stalled-reader-gate.mLHjs8/`. Full-test reaches the added case
   through its existing vsock phase; remaining M2 coverage is still required.
 
+M2's sys-io listener bind/drop ownership slice is implemented and parent-reviewed:
+
+- Listener state lives in the existing socket/client maps, with only a
+  secondary port index. CAP validation precedes decode and lazy activation;
+  bind is transactional, and acknowledged drop removes local ownership before
+  replying. The bind address is a snapshot at synchronous admission; a later
+  transport reset may refresh the listener CID, even before reply delivery.
+- Raw guest checks cover explicit/high and automatic ports, collision,
+  foreign/stale drop, drop/rebind, CID consistency, denial, and absence. The
+  existing tuple fixture verifies CID refresh preserves listener IDs/ports
+  and old stream tuples while new children use the refreshed CID. This is not
+  live transport-reset injection. First outgoing use still activates by connect.
+- Debug/release builds, complete native-net/mio and task/descriptor guest
+  regressions, the full currently wired CHV vsock phase, formatting, and
+  targeted Clippy passed without new warnings. Evidence:
+  `/tmp/vsock-listener-bind-runtime-gate.EpFQAN/`. Tests remain transitively
+  wired into full-test. Peer REQUEST/backlog/accept handling and native
+  `VsockListener` are not yet implemented; Q28 awaits a pending-accept bound.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2718,5 +2737,20 @@ requirements.
 
 ## Open questions
 
-None currently. Stop for review if implementation requires a new non-obvious
-decision beyond the approved scope.
+### Q28. Pending accept-call bound
+
+D7 bounds unaccepted incoming connections at eight per listener, but does
+not give a numeric bound for accept RPCs waiting for a future connection.
+These are separate queues: the former owns established streams/RX buffers;
+the latter owns request metadata and the requesting channel. Four native
+reservations per channel do not themselves bound raw IPC requests or requests
+from several channels belonging to one process.
+
+The existing TCP listener caps pending accepts at 1,024 and returns
+`OutOfMemory` when full (`runtime/net/tcp_listener.rs`). For vsock, recommend
+eight pending accepts per listener, with the same error at the limit, while
+retaining the independent eight-stream backlog and four-reservation native
+channel model. A small fixed/pre-reserved queue avoids a new per-channel
+reservation-tracking scheme. Alternatively, match TCP's 1,024-call limit.
+Await user choice before implementing this bound; bind/drop and incoming
+backlog work do not depend on it.

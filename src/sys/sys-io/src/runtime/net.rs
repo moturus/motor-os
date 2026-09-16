@@ -798,6 +798,8 @@ impl NetRuntime {
                 | NetCmd::VsockStreamTx
                 | NetCmd::VsockStreamShutdown
                 | NetCmd::VsockStreamClose
+                | NetCmd::VsockListenerBind
+                | NetCmd::VsockListenerDrop
         ) {
             self.on_vsock_msg(msg, sender).await;
             return;

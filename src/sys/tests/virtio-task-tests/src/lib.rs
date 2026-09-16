@@ -1267,23 +1267,32 @@ fn test_vsock_admission() {
     );
     assert_eq!(index.counts(), unchanged);
 
+    let unchanged = index.counts();
+    index.refresh_listener_cid(11);
+    for (port, socket_id) in [(70_000, 1), (49_152, 2), (49_153, 7)] {
+        assert_eq!(index.listener_socket(addr(3, port)), None);
+        assert_eq!(index.listener_socket(addr(11, port)), Some(socket_id));
+    }
+    assert_eq!(index.counts(), unchanged);
+    assert_eq!(index.stream_socket(outgoing), Some(3));
+
     let child = index.reserve_accepted(1, 4, addr(8, 90_000)).unwrap();
     let sibling = index.reserve_accepted(1, 5, addr(9, 90_000)).unwrap();
-    assert_eq!(child.local, addr(3, 70_000));
+    assert_eq!(child.local, addr(11, 70_000));
     let unchanged = index.counts();
     assert_eq!(
         index.reserve_accepted(1, 6, child.peer),
         Err(AdmissionError::TupleInUse)
     );
     assert_eq!(index.counts(), unchanged);
-    assert_eq!(index.remove_listener(1), Some(addr(3, 70_000)));
+    assert_eq!(index.remove_listener(1), Some(addr(11, 70_000)));
     assert_eq!(
-        index.reserve_listener(6, 3, 70_000),
+        index.reserve_listener(6, 11, 70_000),
         Err(AdmissionError::PortInUse)
     );
     assert_eq!(index.remove_stream(4), Some(child));
     assert_eq!(index.remove_stream(5), Some(sibling));
-    assert_eq!(index.reserve_listener(6, 3, 70_000), Ok(70_000));
+    assert_eq!(index.reserve_listener(6, 11, 70_000), Ok(70_000));
 
     assert_eq!(
         find_ephemeral(u32::MAX - 1, |port| {

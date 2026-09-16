@@ -454,6 +454,7 @@ pub fn run(args: &[String]) {
         port: args[1].parse().expect("invalid peer port"),
     };
     let action = parse_action(&args[2..]);
+    let test_listener_bind = matches!(&action, Action::Echo(0));
     let verdict = args[2..].join(" ");
 
     let completed = moto_async::LocalRuntime::new().block_on(async {
@@ -476,6 +477,9 @@ pub fn run(args: &[String]) {
         drop(stream);
         let completed = bounded(driver_task, 5).await && client.reservations() == 0;
         assert_not_woken(&counters);
+        if test_listener_bind {
+            crate::net_driver::test_raw_vsock_listener_bind().await;
+        }
         completed
     });
     assert!(
