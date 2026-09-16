@@ -302,6 +302,8 @@ PY
   "$cargo" test "${external[@]}" -p gix --test gix \
     --features blocking-network-client,worktree-mutation \
     clone::blocking_io::from_shallow_allowed_by_default
+  "$cargo" test "${external[@]}" -p gix --test gix \
+    --features blocking-network-client,worktree-mutation init::
   "$cargo" test "${common[@]}" --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"

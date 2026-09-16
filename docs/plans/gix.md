@@ -13,8 +13,8 @@ gates, `full-test-dev.sh --release`, and the representative native HTTPS
 clone pass. The published dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
 limits and measured results. M2 has not been integrated. Its init review
-found a library directory-creation race; the proposed external fix awaits
-discussion at the end of this document.
+found a library directory-creation race; the narrow external fix was
+discussed and approved on 2026-09-16, as recorded at the end of this document.
 
 ## 1. Goal and decisions
 
@@ -1131,7 +1131,7 @@ errors with their cause, add one focused regression to the normal component
 gate, review the patch before committing, and update the dependency pin.
 Then continue clone/fetch and resource-limit implementation.
 
-### Pending implementation discussion — atomic init (2026-09-16)
+### Resolved implementation discussion — atomic init (2026-09-16)
 
 Source review of Gitoxide at `087dbd18` found that worktree initialization
 checks whether `.git` exists, then uses `create_dir_all`. Two initializers
@@ -1139,7 +1139,7 @@ can pass that check and write into the same directory. A precheck in the
 application has the same race. M1 clone exclusively creates its destination;
 the issue matters for M2 init in an existing worktree directory.
 
-Proposed fix, awaiting approval: in the external checkout
+Discussed and approved: in the external checkout
 `/home/posk/motor-dev/gitoxide-motor-cli`, change `gix/src/create.rs`
 to create missing worktree parents normally and reserve the final `.git`
 with atomic `std::fs::create_dir`, retaining the existing error type for an
@@ -1150,7 +1150,18 @@ application pin. The application-only alternative would require bare
 initialization followed by custom persistent-config rewriting and reopening;
 the library fix is smaller and avoids that duplicated orchestration.
 
-The proposed patch and source diagnosis are in
-`/tmp/motor-gix-init-atomic-review`. The external checkout and dependency
-pin remain unchanged; the proposal has not yet been compiled or executed.
-**Open question:** approve this narrow external fix before implementing init?
+Applied and reviewed as external commit
+`e121301a7245f354dbb9c5bc48c0d71786701ca3`. The regression fails on the
+original implementation and passes with the repair; all 11 init tests and
+12 focused clone/init tests pass, as do host and Motor checks with the
+application's exact features and the fork's formatting check. Evidence is
+in `/tmp/motor-gix-init-atomic-integration`. The standard component gate
+now includes the existing `init::` test group. The application pin moves
+to this exact commit; local validation imports it from the authoring
+checkout, and publishing the external branch remains a user action.
+Host and Motor application component gates, including HTTPS acquisition,
+pass with this pin; host/Motor Clippy, formatting and shell checks also
+pass. Integration evidence: `/tmp/motor-gix-m2-foundation`.
+
+This repair changes only the two external files above. No Motor OS
+filesystem or standard-library change is needed.
