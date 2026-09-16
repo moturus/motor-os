@@ -1091,6 +1091,15 @@ D16's selected-VMM TUI path is implemented and parent-reviewed:
   full-suite selector propagation remain pending; full-test already reaches
   this script using its default QEMU selection.
 
+The outgoing host harness now clears each owned PID immediately after its
+sole `wait`, before checking the exit status. Review found that an unexpected
+exit previously left ownership set while `set -e` entered EXIT cleanup,
+causing a second wait on an already reaped process. Pre-wait failures retain
+ownership for cleanup; unexpected exits still fail. All fifteen outgoing
+cases and owned teardown passed on QEMU in debug and release, with syntax
+and diff checks: `/tmp/vsock-outgoing-ownership-gate.qeS5wh/`. This is a
+test-only correction, not a VMM or guest-runtime change.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

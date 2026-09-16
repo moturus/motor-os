@@ -105,12 +105,15 @@ case "$VMM" in
 esac
 
 stop_owned() {
-  local pid="$1" name="$2" process_status=0
+  local owner_name="$1" name="$2" pid process_status=0
+  local -n owner_pid="$owner_name"
+  pid="$owner_pid"
   [ -n "$pid" ] || return 0
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || return 1
   fi
   wait "$pid" || process_status=$?
+  owner_pid=""
   case "$process_status" in 0|143) ;; *) echo "test-vsock: $name exited $process_status" >&2; return 1 ;; esac
   ! kill -0 "$pid" 2>/dev/null || { echo "test-vsock: $name pid $pid survived wait" >&2; return 1; }
 }
@@ -140,6 +143,7 @@ stop_vmm_owned() {
     fi
   fi
   wait "$pid" || process_status=$?
+  VMM_PID=""
   case "$VMM:$process_status" in
     *:0|*:143) ;;
     qemu:33)
@@ -159,16 +163,13 @@ cleanup() {
   trap - EXIT
   set +e
   if [ -n "$PEER_PID" ]; then
-    stop_owned "$PEER_PID" "host peer" || status=1
-    PEER_PID=""
+    stop_owned PEER_PID "host peer" || status=1
   fi
   if [ -n "$VMM_PID" ]; then
     stop_vmm_owned "$VMM_PID" || status=1
-    VMM_PID=""
   fi
   if [ -n "$BACKEND_PID" ]; then
-    stop_owned "$BACKEND_PID" "vhost-device-vsock" || status=1
-    BACKEND_PID=""
+    stop_owned BACKEND_PID "vhost-device-vsock" || status=1
   fi
   exit "$status"
 }
@@ -280,7 +281,5 @@ run_outgoing_case cancel-queued-connect
 run_outgoing_case stalled-reader 1048576
 
 stop_vmm_owned "$VMM_PID"
-VMM_PID=""
-stop_owned "$BACKEND_PID" "vhost-device-vsock"
-BACKEND_PID=""
+stop_owned BACKEND_PID "vhost-device-vsock"
 echo "test-vsock: $BUILD $VMM outgoing PASS"
