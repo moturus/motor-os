@@ -3,6 +3,7 @@ use moto_sys_io::api_vsock::{self, VsockAddr};
 
 pub fn run_wire_tests() {
     test_command_values();
+    test_local_cid_codec();
     test_connect_codec();
     test_connect_response_codec();
     test_listener_bind_codec();
@@ -24,8 +25,74 @@ fn test_command_values() {
     assert_eq!(NetCmd::VsockListenerBind as u16, 0x111c);
     assert_eq!(NetCmd::VsockListenerAccept as u16, 0x111d);
     assert_eq!(NetCmd::VsockListenerDrop as u16, 0x111e);
-    assert_eq!(moto_sys_io::api_net::CMD_MAX, 0x111f);
+    assert_eq!(NetCmd::VsockLocalCid as u16, 0x111f);
+    assert_eq!(moto_sys_io::api_net::CMD_MAX, 0x1120);
     assert_eq!(NetCmd::try_from(0x111e), Ok(NetCmd::VsockListenerDrop));
+    assert_eq!(NetCmd::try_from(0x111f), Ok(NetCmd::VsockLocalCid));
+}
+
+fn test_local_cid_codec() {
+    let mut request = api_vsock::local_cid_request();
+    request.id = 0x1234;
+    request.wake_handle = 0x5678;
+    assert_eq!(request.command, NetCmd::VsockLocalCid as u16);
+    assert_eq!(request.handle, 0);
+    assert_eq!(request.flags, 0);
+    assert_eq!(request.payload.args_64(), &[0; 3]);
+    assert_eq!(api_vsock::decode_local_cid_request(&request), Ok(()));
+
+    let mut bad = [request; 4];
+    bad[0].command = NetCmd::VsockAvailability as u16;
+    bad[1].handle = 1;
+    bad[2].flags = 1;
+    bad[3].payload.args_8_mut()[23] = 1;
+    for request in bad {
+        assert_eq!(
+            api_vsock::decode_local_cid_request(&request),
+            Err(moto_rt::Error::InvalidArgument)
+        );
+    }
+
+    let response = api_vsock::encode_local_cid_response(&request, 0xffff_fffe).unwrap();
+    assert_eq!(response.id, request.id);
+    assert_eq!(response.wake_handle, request.wake_handle);
+    assert_eq!(response.command, request.command);
+    assert_eq!(response.status, moto_rt::E_OK);
+    assert_eq!(response.handle, 0);
+    assert_eq!(response.flags, 0);
+    let mut expected = [0_u8; 24];
+    expected[..4].copy_from_slice(&0xffff_fffe_u32.to_le_bytes());
+    assert_eq!(response.payload.args_8(), &expected);
+    assert_eq!(
+        api_vsock::decode_local_cid_response(&response),
+        Ok(0xffff_fffe)
+    );
+
+    let mut error = response;
+    error.status = moto_rt::E_NOT_FOUND;
+    error.payload.args_32_mut()[0] = 0;
+    assert_eq!(
+        api_vsock::decode_local_cid_response(&error),
+        Err(moto_rt::Error::NotFound)
+    );
+    let mut bad = [response; 5];
+    bad[0].handle = 1;
+    bad[1].flags = 1;
+    bad[2].payload.args_8_mut()[4] = 1;
+    bad[3].payload.args_32_mut()[0] = 2;
+    bad[4].command = NetCmd::VsockAvailability as u16;
+    for response in bad {
+        assert_eq!(
+            api_vsock::decode_local_cid_response(&response),
+            Err(moto_rt::Error::InvalidData)
+        );
+    }
+    for cid in [0, 1, 2, u32::MAX] {
+        assert_eq!(
+            api_vsock::encode_local_cid_response(&request, cid).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
 }
 
 fn test_connect_codec() {

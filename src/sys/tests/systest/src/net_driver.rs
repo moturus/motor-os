@@ -237,6 +237,10 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
             moto_io::net::vsock::availability(&client).await,
             Err(moto_rt::Error::NotAllowed)
         );
+        assert_eq!(
+            moto_io::net::vsock::local_cid(&client).await,
+            Err(moto_rt::Error::NotAllowed)
+        );
         assert_eq!(client.reservations(), 0);
 
         if with_ip {
@@ -267,6 +271,13 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
         assert_eq!(response.id, request.id);
         assert_eq!(response.command, request.command);
         assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
+
+        let mut cid = moto_sys_io::api_vsock::local_cid_request();
+        cid.id = request.id + 1;
+        expect_raw_vsock_error(&sender, &mut receiver, cid, moto_rt::Error::NotAllowed).await;
+        cid.id += 1;
+        cid.flags = 1;
+        expect_raw_vsock_error(&sender, &mut receiver, cid, moto_rt::Error::NotAllowed).await;
 
         let mut malformed = moto_sys_io::api_vsock::availability_request();
         malformed.id = request.id + 1;
@@ -327,11 +338,18 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         "absent" => Err(moto_rt::Error::NotFound),
         _ => panic!("unknown vsock discovery mode: {mode}"),
     };
+    let expected_cid = match mode {
+        "present" => Ok(3_u32),
+        "absent" => Err(moto_rt::Error::NotFound),
+        _ => unreachable!(),
+    };
 
     moto_async::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
         assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
         assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
+        assert_eq!(moto_io::net::vsock::local_cid(&client).await, expected_cid);
+        assert_eq!(moto_io::net::vsock::local_cid(&client).await, expected_cid);
         assert_eq!(client.reservations(), 0);
         crate::net_harness::drain_host_channel(client, driver_task).await;
 
@@ -358,6 +376,25 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
             assert_eq!(response.payload.args_64(), request.payload.args_64());
             assert_eq!(response.status(), Err(moto_rt::Error::InvalidArgument));
         }
+
+        let mut malformed_cid = moto_sys_io::api_vsock::local_cid_request();
+        malformed_cid.id = 0x564f_4400;
+        malformed_cid.flags = 1;
+        expect_raw_vsock_error(
+            &sender,
+            &mut receiver,
+            malformed_cid,
+            moto_rt::Error::InvalidArgument,
+        )
+        .await;
+
+        let mut cid = moto_sys_io::api_vsock::local_cid_request();
+        cid.id = malformed_cid.id + 1;
+        let response = raw_vsock_response(&sender, &mut receiver, cid).await;
+        assert_eq!(
+            moto_sys_io::api_vsock::decode_local_cid_response(&response),
+            expected_cid
+        );
 
         let peer = moto_sys_io::api_vsock::VsockAddr {
             cid: 2,
@@ -1515,18 +1552,20 @@ fn test_channel_failure_wakes_every_waiter() {
         let mut udp_read = Box::pin(udp.recv_from_future(&mut udp_byte, false));
         let mut accept = Box::pin(listener.accept());
         let mut ttl = Box::pin(stream.ttl_async());
+        let mut local_cid = Box::pin(moto_io::net::vsock::local_cid(&client));
 
         core::future::poll_fn(|cx| {
             assert!(tcp_read.as_mut().poll(cx).is_pending());
             assert!(udp_read.as_mut().poll(cx).is_pending());
             assert!(accept.as_mut().poll(cx).is_pending());
             assert!(ttl.as_mut().poll(cx).is_pending());
+            assert!(local_cid.as_mut().poll(cx).is_pending());
             Poll::Ready(())
         })
         .await;
         assert_eq!(stream.rx_waiter_count(), 1);
         assert_eq!(udp.rx_waiter_count(), 1);
-        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 2);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 3);
 
         client.fail_for_test();
 
@@ -1547,6 +1586,10 @@ fn test_channel_failure_wakes_every_waiter() {
                 ttl.as_mut().poll(cx),
                 Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
             );
+            assert_eq!(
+                local_cid.as_mut().poll(cx),
+                Poll::Ready(Err(moto_rt::Error::NotConnected))
+            );
             Poll::Ready(())
         })
         .await;
@@ -1555,7 +1598,7 @@ fn test_channel_failure_wakes_every_waiter() {
         assert_eq!(listener.channel_rpc_waiter_count_for_test(), 0);
         assert_eq!(client.try_reserve().err(), Some(ReserveError::ShuttingDown));
 
-        drop((tcp_read, udp_read, accept, ttl));
+        drop((tcp_read, udp_read, accept, ttl, local_cid));
         drop((stream, udp, listener));
         assert_eq!(client.reservations(), 0);
         assert!(

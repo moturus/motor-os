@@ -46,6 +46,7 @@ pub enum NetCmd {
     VsockListenerBind,
     VsockListenerAccept,
     VsockListenerDrop,
+    VsockLocalCid,
     NetCmdMax,
 }
 

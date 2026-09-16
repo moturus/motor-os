@@ -795,6 +795,7 @@ impl NetRuntime {
         if matches!(
             net_cmd,
             NetCmd::VsockStreamConnect
+                | NetCmd::VsockLocalCid
                 | NetCmd::VsockStreamTx
                 | NetCmd::VsockStreamShutdown
                 | NetCmd::VsockStreamClose

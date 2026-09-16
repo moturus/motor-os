@@ -33,6 +33,20 @@ pub async fn availability(client: &super::NetClient) -> Result<(), moto_rt::Erro
     moto_sys_io::api_vsock::availability_response(&response)
 }
 
+/// Return the device's current local CID, lazily activating it if needed.
+///
+/// The caller must drive the client's [`super::NetDriver`]. This takes no
+/// socket reservation. Capability, absence, and cached initialization errors
+/// are returned directly from sys-io.
+pub async fn local_cid(client: &super::NetClient) -> Result<u32, moto_rt::Error> {
+    let response = client
+        .rpc(moto_sys_io::api_vsock::local_cid_request())
+        .await;
+    // Failed channels synthesize only a native status, not a success shape.
+    response.status()?;
+    moto_sys_io::api_vsock::decode_local_cid_response(&response)
+}
+
 /// A native stream on the caller's explicitly driven [`super::NetDriver`].
 /// Share the returned `Arc` for concurrent reads and writes. Writes report
 /// local byte acceptance, not peer receipt; an accepted prefix is returned

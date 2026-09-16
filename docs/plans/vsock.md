@@ -1164,6 +1164,22 @@ M2's incoming REQUEST/backlog slice is implemented and parent-reviewed:
   `/tmp/vsock-incoming-backlog-fixed-gate.PyOX7R/`. Native accept, owner-channel
   loss coverage, and the remaining M2 gates are still pending.
 
+M2's current-CID query is implemented and parent-reviewed:
+
+- `VsockLocalCid` appends a command without changing existing values.
+  `moto_io::net::vsock::local_cid(&NetClient)` needs no reservation and
+  lazily activates only after CAP validation. The reply is a CID snapshot
+  when sys-io handles the query, not a promise against later transport reset.
+- Guest tests cover canonical wire fields, repeated present/absent queries,
+  CAP-first denial, malformed requests, IP-disabled activation, and pending
+  query failure on an existing native channel-failure fixture. Status is
+  checked before success decoding so synthetic channel errors remain
+  `NotConnected` rather than becoming `InvalidData`.
+- Debug/release builds, complete native-net/mio and task/descriptor guest
+  regressions, CHV's full vsock phase, formatting, and targeted Clippy passed.
+  Strict moto-io Clippy passed with and without `netdev`; other baseline
+  warnings were unchanged. Evidence: `/tmp/vsock-local-cid-gate.HCOY3a/`.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

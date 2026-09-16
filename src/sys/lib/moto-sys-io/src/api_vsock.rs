@@ -74,6 +74,57 @@ pub fn availability_response(msg: &io_channel::Msg) -> Result<(), moto_rt::Error
     msg.status()
 }
 
+/// Build a current-CID request with zero handle, flags, and payload.
+pub fn local_cid_request() -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockLocalCid as u16;
+    msg
+}
+
+pub fn decode_local_cid_request(msg: &io_channel::Msg) -> moto_rt::Result<()> {
+    if msg.command != NetCmd::VsockLocalCid as u16
+        || msg.handle != 0
+        || msg.flags != 0
+        || !payload_is_zero(&msg.payload)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Encode the current validated guest CID while preserving request identity.
+pub fn encode_local_cid_response(
+    request: &io_channel::Msg,
+    cid: u32,
+) -> moto_rt::Result<io_channel::Msg> {
+    if request.command != NetCmd::VsockLocalCid as u16 || !valid_guest_cid(cid) {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut response = io_channel::Msg::new();
+    response.id = request.id;
+    response.wake_handle = request.wake_handle;
+    response.command = request.command;
+    response.status = moto_rt::E_OK;
+    response.payload.args_32_mut()[0] = cid;
+    Ok(response)
+}
+
+pub fn decode_local_cid_response(msg: &io_channel::Msg) -> moto_rt::Result<u32> {
+    if msg.command != NetCmd::VsockLocalCid as u16 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    msg.status()?;
+    let cid = msg.payload.args_32()[0];
+    if msg.handle != 0
+        || msg.flags != 0
+        || !msg.payload.args_8()[4..].iter().all(|byte| *byte == 0)
+        || !valid_guest_cid(cid)
+    {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    Ok(cid)
+}
+
 /// Build a connect request. The peer occupies payload bytes 0..8, bytes
 /// 8..23 are reserved as zero, and byte 23 carries the shared-channel index.
 pub fn connect_request(peer: VsockAddr, subchannel_idx: u8) -> moto_rt::Result<io_channel::Msg> {
@@ -481,7 +532,11 @@ fn valid_peer_cid(cid: u32) -> bool {
 }
 
 fn valid_local(addr: VsockAddr) -> bool {
-    addr.cid >= 3 && addr.cid != u32::MAX && valid_port(addr.port)
+    valid_guest_cid(addr.cid) && valid_port(addr.port)
+}
+
+fn valid_guest_cid(cid: u32) -> bool {
+    cid >= 3 && cid != u32::MAX
 }
 
 fn valid_port(port: u32) -> bool {

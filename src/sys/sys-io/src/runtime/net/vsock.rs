@@ -387,6 +387,7 @@ impl NetRuntime {
         let command = NetCmd::try_from(msg.command).unwrap();
         let result = match self.check_vsock_capability(sender.remote_handle()) {
             Ok(()) => match command {
+                NetCmd::VsockLocalCid => self.vsock_local_cid(msg, &sender).await,
                 NetCmd::VsockStreamConnect => self.vsock_connect(msg, &sender).await,
                 NetCmd::VsockStreamTx => self.vsock_tx(msg, &sender),
                 NetCmd::VsockStreamShutdown => self.vsock_shutdown(msg, &sender).await,
@@ -405,6 +406,18 @@ impl NetRuntime {
             response.status = error.into();
             let _ = sender.send(response).await;
         }
+    }
+
+    async fn vsock_local_cid(
+        &self,
+        request: io_channel::Msg,
+        sender: &ClientSender,
+    ) -> Result<(), moto_rt::Error> {
+        api_vsock::decode_local_cid_request(&request)?;
+        let driver = self.activate_vsock()?;
+        let response = api_vsock::encode_local_cid_response(&request, driver.guest_cid())?;
+        let _ = sender.send(response).await;
+        Ok(())
     }
 
     async fn vsock_listener_bind(
