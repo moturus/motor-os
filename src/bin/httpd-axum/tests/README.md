@@ -18,6 +18,9 @@ temporary directory in an isolated VM. Set `HTTPD_AXUM_BIN` to the uploaded
 server's absolute guest path when running the test executable. All tests use
 local resources; none contact Internet services.
 
+Use fresh guest filenames for each build: Motor's SFTP policy rejects overwriting
+an existing executable. Keep the server and its test executable from the same build.
+
 This standalone gate does not build an OS image or invoke the full-system suite.
 
 `--test fs_path` checks the filesystem serving path and reports per-operation
@@ -26,3 +29,10 @@ compares burst traffic with requests spaced 20 ms apart and reports a batched
 filesystem-operation baseline. It uses 64 measured samples after four warm-ups;
 latencies are diagnostic and do not determine pass/fail. Run its cross-compiled
 executable directly in the VM with `TMPDIR` set to a writable guest directory.
+
+`--test http` launches the server on loopback and checks persistent connections,
+GET, HEAD, ranges, conditional requests, traversal rejection, missing files,
+immediate visibility of file edits, and default/debug logging. Run it on Motor
+with `HTTPD_AXUM_BIN` and `TMPDIR` as above. Startup readiness comes from the
+bound-address log, without connection retries. Request timings are available
+with `RUST_LOG=httpd_axum=debug`; `prepare_us` excludes body reads and transmission.

@@ -42,17 +42,21 @@ async fn main() {
         .fallback_service(ServeDir::new(&args.dir))
         .layer(axum::middleware::from_fn(
             |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                if !tracing::enabled!(tracing::Level::DEBUG) {
+                    return next.run(req).await;
+                }
                 let uri = req.uri().clone();
                 let method = req.method().clone();
                 let start = std::time::Instant::now();
                 let res = next.run(req).await;
                 let latency = start.elapsed();
-                tracing::info!(
-                    "{} {} {} ({}us)",
-                    method,
-                    uri,
-                    res.status().as_u16(),
-                    latency.as_micros()
+                // The streaming body has not been read or transmitted yet.
+                tracing::debug!(
+                    %method,
+                    %uri,
+                    status = res.status().as_u16(),
+                    prepare_us = latency.as_micros(),
+                    "response prepared"
                 );
                 res
             },
@@ -69,14 +73,15 @@ async fn main() {
         .await
         .unwrap();
 
-        tracing::debug!("listening on {}", args.addr);
-        axum_server::bind_rustls(args.addr, config)
+        let listener = std::net::TcpListener::bind(args.addr).unwrap();
+        tracing::info!("listening on {}", listener.local_addr().unwrap());
+        axum_server::from_tcp_rustls(listener, config)
             .serve(app.into_make_service())
             .await
             .unwrap();
     } else {
-        tracing::debug!("listening on {}", args.addr);
         let listener = tokio::net::TcpListener::bind(args.addr).await.unwrap();
+        tracing::info!("listening on {}", listener.local_addr().unwrap());
         axum::serve(listener, app).await.unwrap();
     };
 }
