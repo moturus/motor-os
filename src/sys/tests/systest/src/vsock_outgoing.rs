@@ -1,5 +1,7 @@
 use core::future::Future;
 use core::task::{Context, Poll};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
@@ -36,8 +38,18 @@ const NATIVE_ACCEPT_EARLY: &[u8] = b"early";
 const NATIVE_ACCEPT_EARLY_READY: &[u8] = b"native-accept:early-ready";
 const NATIVE_ACCEPT_REPLY: &[u8] = b"accepted";
 const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
+const NATIVE_ACCEPT_CLOSE_READY: &[u8] = b"native-accept:close-ready";
+const NATIVE_ACCEPT_CLOSED: &[u8] = b"closed";
+const NATIVE_ACCEPT_CLOSED_READY: &[u8] = b"native-accept:closed-ready";
 const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
 const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
+const NATIVE_ACCEPT_EXIT_READY: &[u8] = b"native-accept:exit-ready";
+const NATIVE_ACCEPT_ANCHOR_HELD: &[u8] = b"native-accept:anchor-held";
+const NATIVE_ACCEPT_CONNECT_READY: &[u8] = b"native-accept:connect-ready";
+const NATIVE_ACCEPT_BOTH_HELD: &[u8] = b"native-accept:both-held";
+const NATIVE_ACCEPT_EXITED: &[u8] = b"native-accept:exited";
+const NATIVE_ACCEPT_EXIT_CLEANED: &[u8] = b"native-accept:exit-cleaned";
+const NATIVE_ACCEPT_EXIT_REBOUND: &[u8] = b"native-accept:exit-rebound";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -47,6 +59,7 @@ const COEXIST_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
 const NATIVE_ACCEPT_PORT: u32 = 70_002;
+const NATIVE_ACCEPT_EXIT_PORT: u32 = 70_003;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
 const CAPACITY_FULL: &[u8] = b"capacity:full";
 const CAPACITY_PROGRESS: &[u8] = b"capacity:progress";
@@ -265,6 +278,16 @@ fn assert_not_woken(counters: &[Arc<CountWake>]) {
             .all(|counter| counter.0.load(Ordering::Relaxed) == 0),
         "a canceled vsock future retained a waiter"
     );
+}
+
+fn expect_child_marker(reader: &mut impl BufRead, expected: &str) {
+    let mut line = String::new();
+    assert_ne!(
+        reader.read_line(&mut line).unwrap(),
+        0,
+        "child exited early"
+    );
+    assert_eq!(line, format!("{expected}\n"));
 }
 
 fn pattern(start: usize, len: usize) -> Vec<u8> {
@@ -576,6 +599,34 @@ async fn run_native_accept(
     write_all(&accepted, NATIVE_ACCEPT_REPLY).await;
     drop(accepted);
     expect_frame(control, NATIVE_ACCEPT_DROPPED).await;
+    // A later RPC on this channel follows its queued teardown record. Host
+    // EOF alone does not prove the native driver released that record yet.
+    moto_io::net::vsock::availability(&accept_client)
+        .await
+        .unwrap();
+    assert_eq!(accept_client.reservations(), 1);
+
+    // The host completes a full close before acknowledging this barrier and
+    // before the accept future exists. Buffered bytes must remain drainable,
+    // followed by the same terminal result as an ordinary Unix peer close.
+    write_frame(control, NATIVE_ACCEPT_CLOSE_READY).await;
+    expect_frame(control, NATIVE_ACCEPT_CLOSED_READY).await;
+    let closed = listener
+        .accept_reserved(accept_client.try_reserve().unwrap())
+        .await
+        .unwrap();
+    let mut bytes = [0_u8; NATIVE_ACCEPT_CLOSED.len()];
+    read_exact(&closed, &mut bytes).await;
+    assert_eq!(bytes, NATIVE_ACCEPT_CLOSED);
+    read_eof(&closed).await;
+    assert_eq!(
+        closed.try_write(&[b"after peer close"]),
+        Err(moto_rt::E_NOT_CONNECTED)
+    );
+    drop(closed);
+    moto_io::net::vsock::availability(&accept_client)
+        .await
+        .unwrap();
     assert_eq!(accept_client.reservations(), 1);
 
     // Polling once registers and queues an empty-listener accept. Dropping
@@ -586,6 +637,36 @@ async fn run_native_accept(
     assert_eq!(accept_client.reservations(), 1);
     write_frame(control, NATIVE_ACCEPT_CANCEL_READY).await;
     expect_frame(control, NATIVE_ACCEPT_CANCEL_CLOSED).await;
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("vsock-exit-accept-child")
+        .arg(NATIVE_ACCEPT_EXIT_PORT.to_string())
+        .arg(control.peer_addr().unwrap().port.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = BufReader::new(child.stdout.take().unwrap());
+    expect_child_marker(&mut child_stdout, "queued");
+    write_frame(control, NATIVE_ACCEPT_EXIT_READY).await;
+    expect_frame(control, NATIVE_ACCEPT_ANCHOR_HELD).await;
+    expect_child_marker(&mut child_stdout, "accepted");
+    expect_child_marker(&mut child_stdout, "armed");
+    write_frame(control, NATIVE_ACCEPT_CONNECT_READY).await;
+    expect_frame(control, NATIVE_ACCEPT_BOTH_HELD).await;
+    child_stdin.write_all(b"exit\n").unwrap();
+    child_stdin.flush().unwrap();
+    drop(child_stdin);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    write_frame(control, NATIVE_ACCEPT_EXITED).await;
+
+    // Host EOF proves sys-io has processed child-channel teardown. Only that
+    // causal token permits the different process to reclaim the same port.
+    expect_frame(control, NATIVE_ACCEPT_EXIT_CLEANED).await;
+    let rebound = crate::net_driver::RawVsockListener::bind(NATIVE_ACCEPT_EXIT_PORT).await;
+    rebound.close().await;
+    write_frame(control, NATIVE_ACCEPT_EXIT_REBOUND).await;
 
     drop(listener);
     drop(keeper);

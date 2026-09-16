@@ -14,6 +14,8 @@ use moto_io::net::ReserveError;
 use crate::net_harness::{bounded, bounded_output, host_channel};
 
 const VSOCK_DISCOVERY_DENIED_CHILD: &str = "vsock-discovery-denied-child";
+const VSOCK_FOREIGN_ACCEPT_CHILD: &str = "vsock-foreign-accept-child";
+const VSOCK_EXIT_ACCEPT_CHILD: &str = "vsock-exit-accept-child";
 
 async fn expect_raw_vsock_error(
     sender: &moto_ipc::io_channel::Sender,
@@ -149,6 +151,17 @@ impl RawVsockListener {
         assert_eq!(&page.bytes()[..5], b"early");
         drop(page);
 
+        let mut wrong_kind =
+            moto_sys_io::api_vsock::listener_accept_request(accepted.handle, 0).unwrap();
+        wrong_kind.id = request.id + 1;
+        expect_raw_vsock_error(
+            &accept_tx,
+            &mut accept_rx,
+            wrong_kind,
+            moto_rt::Error::NotFound,
+        )
+        .await;
+
         accept_tx
             .send(moto_sys_io::api_vsock::close_request(accepted.handle))
             .await
@@ -217,6 +230,13 @@ pub async fn test_raw_vsock_listener_bind() {
     let response = raw_vsock_response(&owner, &mut owner_rx, bind).await;
     let explicit = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
     assert_eq!(explicit.local.port, EXPLICIT_PORT);
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(VSOCK_FOREIGN_ACCEPT_CHILD)
+        .arg(explicit.handle.to_string())
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
 
     let mut conflict = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
     conflict.id = bind.id + 1;
@@ -315,6 +335,130 @@ pub fn is_vsock_discovery_denied_child(args: &[String]) -> bool {
         && args[1] == VSOCK_DISCOVERY_DENIED_CHILD
 }
 
+pub fn is_vsock_foreign_accept_child(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == VSOCK_FOREIGN_ACCEPT_CHILD
+}
+
+pub fn run_vsock_foreign_accept_child(handle: u64) -> ! {
+    assert_ne!(
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_VSOCK,
+        0,
+        "foreign accept child lacks CAP_VSOCK"
+    );
+    moto_async::LocalRuntime::new().block_on(async {
+        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut accept = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
+        accept.id = 0x564f_7200;
+        expect_raw_vsock_error(&sender, &mut receiver, accept, moto_rt::Error::NotFound).await;
+    });
+    std::process::exit(0)
+}
+
+pub fn is_vsock_exit_accept_child(args: &[String]) -> bool {
+    args.len() == 4 && args[1] == VSOCK_EXIT_ACCEPT_CHILD
+}
+
+pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32) -> ! {
+    const ACCEPT_LIMIT: usize = 8;
+    const FIRST_ID: u64 = 0x564f_8300;
+
+    assert_ne!(
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_VSOCK,
+        0,
+        "exit accept child lacks CAP_VSOCK"
+    );
+    moto_async::LocalRuntime::new().block_on(async move {
+        use std::io::Write;
+
+        let marker = |bytes: &[u8]| {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(bytes).unwrap();
+            stdout.flush().unwrap();
+        };
+        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut bind = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        bind.id = 0x564f_8200;
+        let response = raw_vsock_response(&sender, &mut receiver, bind).await;
+        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        assert_eq!(listener.local.port, port);
+
+        for index in 0..ACCEPT_LIMIT {
+            let mut accept = moto_sys_io::api_vsock::listener_accept_request(
+                listener.handle,
+                index as u8 % moto_sys_io::api_net::IO_SUBCHANNELS,
+            )
+            .unwrap();
+            accept.id = FIRST_ID + index as u64;
+            sender.send(accept).await.unwrap();
+        }
+        let mut overflow =
+            moto_sys_io::api_vsock::listener_accept_request(listener.handle, 0).unwrap();
+        overflow.id = FIRST_ID + ACCEPT_LIMIT as u64;
+        let response = raw_vsock_response(&sender, &mut receiver, overflow).await;
+        assert_eq!(response.status(), Err(moto_rt::Error::OutOfMemory));
+        marker(b"queued\n");
+
+        let response = bounded_output(receiver.recv(), 2)
+            .await
+            .expect("timed out waiting for child accept response")
+            .unwrap();
+        assert_eq!(response.id, FIRST_ID);
+        let accepted = moto_sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
+        assert_eq!(accepted.local.port, port);
+        assert_eq!(accepted.peer.cid, 2);
+        marker(b"accepted\n");
+
+        let rx = bounded_output(receiver.recv(), 2)
+            .await
+            .expect("timed out waiting for child RX page")
+            .unwrap();
+        assert_eq!(
+            rx.command,
+            moto_sys_io::api_net::NetCmd::VsockStreamRx as u16
+        );
+        assert_eq!(rx.handle, accepted.handle);
+        assert_eq!(rx.payload.args_64()[1], 1);
+        let claimed_rx = receiver.get_page(rx.payload.shared_pages()[0]).unwrap();
+        assert_eq!(claimed_rx.bytes()[0], b'r');
+
+        let tx_page = sender
+            .alloc_page(moto_sys_io::api_net::io_subchannel_mask(0))
+            .await
+            .unwrap();
+        tx_page.bytes_mut()[0] = b't';
+        sender
+            .send(moto_sys_io::api_vsock::stream_tx_msg(
+                accepted.handle,
+                tx_page,
+                1,
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut connect = moto_sys_io::api_vsock::connect_request(
+            moto_sys_io::api_vsock::VsockAddr {
+                cid: 2,
+                port: peer_port,
+            },
+            1,
+        )
+        .unwrap();
+        connect.id = FIRST_ID + ACCEPT_LIMIT as u64 + 1;
+        sender.send(connect).await.unwrap();
+        marker(b"armed\n");
+
+        let mut exit = String::new();
+        std::io::stdin().read_line(&mut exit).unwrap();
+        assert_eq!(exit, "exit\n");
+        assert_eq!(claimed_rx.bytes()[0], b'r');
+
+        // Keep the listener, accepted anchor, seven accepts, claimed RX page,
+        // submitted TX, unread connect response, and raw channel live until
+        // process teardown; no explicit/native Drop may close them.
+        std::process::exit(0)
+    })
+}
+
 pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
     assert_eq!(
         0x4c,
@@ -400,14 +544,27 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
             moto_rt::Error::NotAllowed,
         )
         .await;
-        for request in raw_vsock_controls(connect.id + 2) {
+        let mut accept = moto_sys_io::api_vsock::listener_accept_request(0xfeed_cafe, 0).unwrap();
+        accept.id = connect.id + 2;
+        expect_raw_vsock_error(&sender, &mut receiver, accept, moto_rt::Error::NotAllowed).await;
+        let mut malformed_accept = accept;
+        malformed_accept.id += 1;
+        malformed_accept.flags = 1;
+        expect_raw_vsock_error(
+            &sender,
+            &mut receiver,
+            malformed_accept,
+            moto_rt::Error::NotAllowed,
+        )
+        .await;
+        for request in raw_vsock_controls(connect.id + 4) {
             expect_raw_vsock_error(&sender, &mut receiver, request, moto_rt::Error::NotAllowed)
                 .await;
         }
         expect_raw_vsock_error(
             &sender,
             &mut receiver,
-            raw_vsock_bind(connect.id + 5),
+            raw_vsock_bind(connect.id + 7),
             moto_rt::Error::NotAllowed,
         )
         .await;

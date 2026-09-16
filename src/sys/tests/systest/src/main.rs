@@ -1205,6 +1205,12 @@ fn main() {
     if net_driver::is_vsock_discovery_denied_child(&args) {
         net_driver::run_vsock_discovery_denied_child(args.len() == 3);
     }
+    if net_driver::is_vsock_foreign_accept_child(&args) {
+        net_driver::run_vsock_foreign_accept_child(args[2].parse().unwrap());
+    }
+    if net_driver::is_vsock_exit_accept_child(&args) {
+        net_driver::run_vsock_exit_accept_child(args[2].parse().unwrap(), args[3].parse().unwrap());
+    }
     if args.len() == 3 && args[1] == "test-vsock-discovery" {
         net_driver::test_vsock_discovery(&args[2]);
         return;

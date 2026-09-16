@@ -1448,6 +1448,31 @@ The native accept API is implemented and incrementally gated:
   strict Clippy. Evidence: `/tmp/vsock-a28-native-gate.BGGqe2/`. Cross-process
   denial, early full peer close, and process-exit fixtures follow separately.
 
+Accept isolation and process-exit fixtures are implemented and gated:
+
+- Valid and malformed accepts without CAP_VSOCK return `NotAllowed`;
+  wrong-kind handles and another process's listener return `NotFound`.
+  A full host close before accept preserves exact buffered bytes, then EOF
+  and write closure. No Unix SEND-only half-close is implied (D24).
+- A child leaves eight admitted accepts (one matched, seven waiting), a
+  listener, a claimed RX page, submitted TX, and an unread outgoing-connect
+  reply behind at process exit. The host holds both streams before exit,
+  then requires an exact zero-or-one-byte TX prefix and EOF on both. Only
+  that cleanup token permits parent-process listener-port reuse. Submitted
+  TX is not claimed to remain credit-blocked, nor the outgoing connection
+  to remain in its internal pre-response state at exit.
+- The first build failed on a missing test-only `alloc_page().await`.
+  After correction, QEMU exposed an invalid synchronous reservation-count
+  assumption after Drop. Drop intentionally pins the slot in its queued
+  teardown record. A later same-channel availability RPC now proves that
+  record drained before the unchanged exact count assertion; no polling,
+  retries, or production change was needed. Original evidence and diagnoses:
+  `/tmp/vsock-a28-cleanup-gate.zYIk1o/` and `/tmp/test-vsock.mDHKUl/`.
+- Fresh debug/release builds, component/native-network suites, all twenty
+  peer cases, and discovery passed on all three VMMs. Formatting, tested
+  hashes, and Clippy passed with no new warnings. Final evidence:
+  `/tmp/vsock-a28-cleanup-fixed-gate.LkmztB/`.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.

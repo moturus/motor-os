@@ -39,8 +39,18 @@ const NATIVE_ACCEPT_EARLY: &[u8] = b"early";
 const NATIVE_ACCEPT_EARLY_READY: &[u8] = b"native-accept:early-ready";
 const NATIVE_ACCEPT_REPLY: &[u8] = b"accepted";
 const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
+const NATIVE_ACCEPT_CLOSE_READY: &[u8] = b"native-accept:close-ready";
+const NATIVE_ACCEPT_CLOSED: &[u8] = b"closed";
+const NATIVE_ACCEPT_CLOSED_READY: &[u8] = b"native-accept:closed-ready";
 const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
 const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
+const NATIVE_ACCEPT_EXIT_READY: &[u8] = b"native-accept:exit-ready";
+const NATIVE_ACCEPT_ANCHOR_HELD: &[u8] = b"native-accept:anchor-held";
+const NATIVE_ACCEPT_CONNECT_READY: &[u8] = b"native-accept:connect-ready";
+const NATIVE_ACCEPT_BOTH_HELD: &[u8] = b"native-accept:both-held";
+const NATIVE_ACCEPT_EXITED: &[u8] = b"native-accept:exited";
+const NATIVE_ACCEPT_EXIT_CLEANED: &[u8] = b"native-accept:exit-cleaned";
+const NATIVE_ACCEPT_EXIT_REBOUND: &[u8] = b"native-accept:exit-rebound";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -49,6 +59,7 @@ const COEXIST_PHASE_BYTES: usize = 256 * 1024;
 const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
 const NATIVE_ACCEPT_PORT: u32 = 70_002;
+const NATIVE_ACCEPT_EXIT_PORT: u32 = 70_003;
 const LISTENER_BACKLOG: usize = 8;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
 const CAPACITY_FULL: &[u8] = b"capacity:full";
@@ -398,6 +409,22 @@ fn expect_eof(stream: &mut UnixStream) -> io::Result<()> {
     }
 }
 
+fn expect_prefix_then_eof(stream: &mut UnixStream, expected: &[u8]) -> io::Result<()> {
+    let mut received = 0;
+    let mut buf = [0_u8; 16];
+    loop {
+        let len = stream.read(&mut buf)?;
+        if len == 0 {
+            return Ok(());
+        }
+        let end = received + len;
+        if end > expected.len() || buf[..len] != expected[received..end] {
+            return Err(invalid("process-exit TX was not an exact prefix"));
+        }
+        received = end;
+    }
+}
+
 fn expect_guest_refusal(base: &str, port: u32) -> io::Result<()> {
     let mut stream = configure_stream(UnixStream::connect(base)?)?;
     stream.write_all(format!("CONNECT {port}\n").as_bytes())?;
@@ -670,10 +697,30 @@ fn run() -> io::Result<()> {
                 expect_eof(&mut accepted)?;
                 write_frame(&mut stream, NATIVE_ACCEPT_DROPPED)?;
 
+                expect_frame(&mut stream, NATIVE_ACCEPT_CLOSE_READY)?;
+                let mut closed = connect_guest(base, NATIVE_ACCEPT_PORT)?;
+                closed.write_all(NATIVE_ACCEPT_CLOSED)?;
+                closed.shutdown(Shutdown::Both)?;
+                drop(closed);
+                write_frame(&mut stream, NATIVE_ACCEPT_CLOSED_READY)?;
+
                 expect_frame(&mut stream, NATIVE_ACCEPT_CANCEL_READY)?;
                 let mut canceled = connect_guest(base, NATIVE_ACCEPT_PORT)?;
                 expect_eof(&mut canceled)?;
                 write_frame(&mut stream, NATIVE_ACCEPT_CANCEL_CLOSED)?;
+
+                expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_READY)?;
+                let mut anchor = connect_guest(base, NATIVE_ACCEPT_EXIT_PORT)?;
+                anchor.write_all(b"r")?;
+                write_frame(&mut stream, NATIVE_ACCEPT_ANCHOR_HELD)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_CONNECT_READY)?;
+                let mut outgoing = configure_stream(accept_before(&listener, deadline)?)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_BOTH_HELD)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_EXITED)?;
+                expect_prefix_then_eof(&mut anchor, b"t")?;
+                expect_eof(&mut outgoing)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_EXIT_CLEANED)?;
+                expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_REBOUND)?;
                 expect_frame(&mut stream, CASE_DONE)?;
             }
             Action::GlobalStreamCapacity => {
