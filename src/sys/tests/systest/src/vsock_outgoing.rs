@@ -31,11 +31,21 @@ enum Action {
     UnixPeerClose { receive: usize },
     CancelRead { receive: usize },
     CancelWrite { tail: usize },
+    CancelBeforePollDrop,
+    CancelQueuedConnect,
 }
 
 impl Action {
     fn needs_sync(&self) -> bool {
-        !matches!(self, Self::Echo(_) | Self::Duplex { .. })
+        matches!(
+            self,
+            Self::LocalSendShutdown { .. }
+                | Self::LocalReceiveShutdown { .. }
+                | Self::UnixPeerClose { .. }
+                | Self::CancelRead { .. }
+                | Self::CancelWrite { .. }
+                | Self::CancelQueuedConnect
+        )
     }
 }
 
@@ -71,11 +81,14 @@ fn parse_action(args: &[String]) -> Action {
         [action, tail] if action == "cancel-write" => Action::CancelWrite {
             tail: parse_size(tail),
         },
+        [action] if action == "cancel-before-poll-drop" => Action::CancelBeforePollDrop,
+        [action] if action == "cancel-queued-connect" => Action::CancelQueuedConnect,
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
-             cancel-read RECEIVE_N, or cancel-write TAIL_N"
+             cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
+             or cancel-queued-connect"
         ),
     }
 }
@@ -270,6 +283,8 @@ async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<Vsock
 }
 
 async fn run_action(
+    client: &moto_io::net::NetClient,
+    peer: VsockAddr,
     stream: &VsockStream,
     sync: Option<&VsockStream>,
     action: Action,
@@ -381,6 +396,29 @@ async fn run_action(
             write_frame(sync, CASE_DONE).await;
             counters
         }
+        Action::CancelBeforePollDrop => {
+            let accepted = fill_tx_without_yield(stream);
+            assert_eq!(accepted, PAGES_PER_SUBCHANNEL * PAGE_SIZE);
+
+            // Dropping an unpolled async function is deterministically before
+            // RPC registration/publication and releases its reservation.
+            let connect = VsockStream::connect_reserved(client.try_reserve().unwrap(), peer);
+            drop(connect);
+            assert_eq!(client.reservations(), 1);
+            Vec::new()
+        }
+        Action::CancelQueuedConnect => {
+            let sync = sync.unwrap();
+            let connect = VsockStream::connect_reserved(client.try_reserve().unwrap(), peer);
+            let counter = poll_pending(connect);
+
+            // The first poll queued the request locally but cannot run the
+            // same-runtime driver. The host proves later success was closed.
+            expect_frame(sync, TRANSFER_DONE).await;
+            assert_eq!(client.reservations(), 2);
+            write_frame(sync, CASE_DONE).await;
+            vec![counter]
+        }
     }
 }
 
@@ -408,7 +446,7 @@ pub fn run(args: &[String]) {
         } else {
             None
         };
-        let counters = run_action(&stream, sync.as_deref(), action).await;
+        let counters = run_action(&client, peer, &stream, sync.as_deref(), action).await;
         drop(sync);
         drop(stream);
         let completed = bounded(driver_task, 5).await && client.reservations() == 0;

@@ -36,6 +36,8 @@ enum Action {
     UnixPeerClose { receive: usize },
     CancelRead { receive: usize },
     CancelWrite { tail: usize },
+    CancelBeforePollDrop,
+    CancelQueuedConnect,
 }
 
 impl Action {
@@ -53,6 +55,8 @@ impl Action {
             Self::UnixPeerClose { receive } => format!("unix-peer-close {receive}"),
             Self::CancelRead { receive } => format!("cancel-read {receive}"),
             Self::CancelWrite { tail } => format!("cancel-write {tail}"),
+            Self::CancelBeforePollDrop => "cancel-before-poll-drop".into(),
+            Self::CancelQueuedConnect => "cancel-queued-connect".into(),
         }
     }
 
@@ -64,6 +68,7 @@ impl Action {
                 | Self::UnixPeerClose { .. }
                 | Self::CancelRead { .. }
                 | Self::CancelWrite { .. }
+                | Self::CancelQueuedConnect
         )
     }
 }
@@ -127,11 +132,14 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         ("cancel-write", [tail]) => Ok(Action::CancelWrite {
             tail: parse_size(tail)?,
         }),
+        ("cancel-before-poll-drop", []) => Ok(Action::CancelBeforePollDrop),
+        ("cancel-queued-connect", []) => Ok(Action::CancelQueuedConnect),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
-             cancel-read RECEIVE_N | cancel-write TAIL_N",
+             cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
+             cancel-queued-connect",
         )),
     }
 }
@@ -363,6 +371,16 @@ fn run() -> io::Result<()> {
                 write_frame(&mut sync, TRANSFER_DONE)?;
                 expect_frame(&mut sync, CASE_DONE)?;
             }
+            Action::CancelQueuedConnect => {
+                let mut canceled = configure_stream(accept_before(&listener, deadline)?)?;
+                let mut unexpected = [0_u8; 1];
+                // Rollback closes the entire late successful connection.
+                if canceled.read(&mut unexpected)? != 0 {
+                    return Err(invalid("late canceled connection carried data"));
+                }
+                write_frame(&mut sync, TRANSFER_DONE)?;
+                expect_frame(&mut sync, CASE_DONE)?;
+            }
             _ => unreachable!(),
         }
     } else {
@@ -380,6 +398,14 @@ fn run() -> io::Result<()> {
                 send_pattern(&mut stream, send)?;
                 echo_exact(&mut stream, echo)?;
                 stream.shutdown(Shutdown::Write)?;
+            }
+            Action::CancelBeforePollDrop => {
+                receive_raw_pattern(&mut stream, RAW_SUBCHANNEL_BYTES)?;
+                let mut unexpected = [0_u8; 1];
+                // Guest Drop closes the whole stream after queued TX drains.
+                if stream.read(&mut unexpected)? != 0 {
+                    return Err(invalid("dropped stream carried excess data"));
+                }
             }
             _ => unreachable!(),
         }

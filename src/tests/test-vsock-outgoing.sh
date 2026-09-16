@@ -226,11 +226,15 @@ printf 'put %s %s\n' "$ROOT_DIR/build/bin/$BUILD/systest" "$GUEST_BIN" |
 run_outgoing_case() {
   local action="$1"
   shift
-  local case_name="$action-$(printf '%s-' "$@" | sed 's/-$//')"
+  local case_name="$action"
+  local verdict="$action"
+  if [ "$#" -gt 0 ]; then
+    case_name="$action-$(printf '%s-' "$@" | sed 's/-$//')"
+    verdict="$action $*"
+  fi
   local peer_log="$LOG_DIR/peer-$case_name.log"
   local guest_log="$LOG_DIR/guest-$case_name.log"
   local peer_status=0
-  local verdict="$action $*"
 
   "$PEER_BIN" "$VSOCK_BASE" "$action" "$@" > "$peer_log" 2>&1 &
   PEER_PID="$!"
@@ -271,6 +275,8 @@ run_outgoing_case local-receive-shutdown 4096 4096
 run_outgoing_case unix-peer-close 4096
 run_outgoing_case cancel-read 257
 run_outgoing_case cancel-write 16384
+run_outgoing_case cancel-before-poll-drop
+run_outgoing_case cancel-queued-connect
 
 stop_vmm_owned "$VMM_PID"
 VMM_PID=""

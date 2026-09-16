@@ -988,6 +988,21 @@ M2's native read/write waiter-cancellation fixtures are implemented and gated:
   `/tmp/vsock-waiter-cancel-gate.E7I0no/`. These cases are wired transitively
   into full-test; connect cancellation and the remaining M2 cases are pending.
 
+M2's connect-cancellation and queued-TX Drop fixtures are implemented and gated:
+
+- Dropping an unpolled connect releases its reservation immediately. Dropping
+  an established stream after accepting 64 KiB without yielding delivers the
+  exact bytes before whole-stream close. A separately canceled, locally queued
+  connect is allowed to succeed late; the host verifies rollback closes it.
+- Driver exit, zero remaining reservations, and no canceled-waker invocation
+  are checked through public APIs. No production hooks or retries were added;
+  this does not claim cancellation at every response-dispatch boundary.
+- All fourteen outgoing cases, builds, and targeted systest Clippy passed on
+  CHV in debug and release, without new warnings. Evidence:
+  `/tmp/vsock-connect-cancel-gate.UvPKLu/`. The existing full-test phase reaches
+  these cases transitively; listener implementation and the remaining M2
+  integration/coverage are still pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
