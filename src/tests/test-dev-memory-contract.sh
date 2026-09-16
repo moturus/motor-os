@@ -32,10 +32,17 @@ expected=$'full-test.sh 6144 --release\ntest-dev-sources.sh 6144 --release'
 
 # The candidate wrapper has its own 8 GiB default and preserves an override.
 cp "$WD/test-candidate-vm.sh" "$temporary/src/tests/"
+cp "$WD/vm-test-selection.sh" "$temporary/src/tests/"
 cat > "$temporary/src/tests/vm-test-boot.sh" <<'EOF'
 test_vm_configure_ssh() { :; }
 start_test_vm() {
-  printf 'candidate-vm %s %s %s\n' "$MOTO_MEMORY_MIB" "${1##*/}" "$MOTO_IMAGE" >> "$MEMORY_TEST_LOG"
+  local runner_dir="${1%/*}"
+  local runner="${runner_dir##*/}/${1##*/}"
+  local label="$2"
+  shift 3
+  printf 'candidate-vm %s %s %s %s %s\n' \
+    "$MOTO_MEMORY_MIB" "$runner" "$label" "$MOTO_IMAGE" "${*:-no-args}" \
+    >> "$MEMORY_TEST_LOG"
   VMM_PID=""
 }
 EOF
@@ -50,16 +57,18 @@ for script in test-rust-analyzer-native.sh test-rust-analyzer-crates.sh test-unw
 done
 
 : > "$MEMORY_TEST_LOG"
-env -u MOTO_MEMORY_MIB bash "$temporary/src/tests/test-candidate-vm.sh" --release \
+env -u MOTO_MEMORY_MIB -u FULL_TEST_QEMU_ARGS \
+  bash "$temporary/src/tests/test-candidate-vm.sh" --release \
   >> "$temporary/wrapper.log"
-expected=$'candidate-vm 8192 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh\ntest-rustfmt-native.sh'
+expected=$'candidate-vm 8192 release/run-qemu.sh QEMU motor-os-dev.qcow2 no-args\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh\ntest-rustfmt-native.sh'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'candidate VM default changed' >&2; exit 1;
 }
 : > "$MEMORY_TEST_LOG"
-MOTO_MEMORY_MIB=6144 bash "$temporary/src/tests/test-candidate-vm.sh" --release \
+MOTO_MEMORY_MIB=6144 FULL_TEST_QEMU_ARGS='-nodefaults -no-shutdown' \
+  bash "$temporary/src/tests/test-candidate-vm.sh" --release \
   >> "$temporary/wrapper.log"
-expected=$'candidate-vm 6144 release motor-os-dev.qcow2\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh\ntest-rustfmt-native.sh'
+expected=$'candidate-vm 6144 release/run-qemu.sh QEMU motor-os-dev.qcow2 -nodefaults -no-shutdown\ntest-rust-analyzer-native.sh\ntest-rust-analyzer-crates.sh\ntest-unwind.sh\ntest-rustfmt-native.sh'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'candidate VM caller override was not preserved' >&2; exit 1;
 }

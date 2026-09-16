@@ -27,16 +27,15 @@ set -e
 WD="$(dirname "$0")"
 
 # Select the VM image build: debug by default, release with --release.
-# run-qemu.sh lives in vm_images/<build>/, two levels up from src/tests/.
 BUILD="debug"
 if [ "${1:-}" = "--release" ]; then
   BUILD="release"
 fi
 # The repo root is two levels up from src/tests/.
 ROOT_DIR="$WD/../.."
-IMG_DIR="$WD/../../vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
+. "$WD/vm-test-selection.sh"
 
 # Host russhd tests also use this key, before the VM tests below.
 test_vm_configure_ssh
@@ -91,8 +90,11 @@ python3 "$WD/test-dev-path-locks.py"
 
 # The image under test: the main image by default. full-test-dev.sh overrides
 # both to run this same suite against the dev image.
-IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
+# VMM selection is deliberately not exposed until every direct launch site is
+# converted. This preparation keeps the existing QEMU behavior.
+select_test_vm "$ROOT_DIR" "$BUILD" standard qemu
+IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
@@ -391,7 +393,8 @@ echo ""
 echo ""
 
 
-start_test_vm "$IMG_DIR" /tmp/full-test.log
+start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" /tmp/full-test.log \
+  ${FULL_TEST_QEMU_ARGS:-}
 
 ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
 ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"

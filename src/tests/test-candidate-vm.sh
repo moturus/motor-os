@@ -11,13 +11,16 @@ if [ "${1:-}" = --release ]; then
 fi
 [ "$#" = 0 ] || { echo "usage: $0 [--release]" >&2; exit 2; }
 
-IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os-dev.qcow2}"
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-8192}"
 export FULL_TEST_VERIFY_DEV_SOURCES=1
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
 . "$WD/vm-cleanup.sh"
+. "$WD/vm-test-selection.sh"
+
+# Candidate selection remains QEMU-only until the suite-wide selector lands.
+select_test_vm "$ROOT_DIR" "$BUILD" developer qemu
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
 
 fail() {
   echo "test-candidate-vm: $*" >&2
@@ -34,7 +37,8 @@ stop_candidate_vm() {
 trap stop_candidate_vm EXIT
 
 echo "Starting candidate developer VM; console log: /tmp/test-candidate-vm.log"
-start_test_vm "$IMG_DIR" /tmp/test-candidate-vm.log
+start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" /tmp/test-candidate-vm.log \
+  ${FULL_TEST_QEMU_ARGS:-}
 "$WD/test-rust-analyzer-native.sh"
 "$WD/test-rust-analyzer-crates.sh"
 "$WD/test-unwind.sh"

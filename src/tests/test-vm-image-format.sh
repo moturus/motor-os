@@ -20,6 +20,19 @@ fail() {
   exit 1
 }
 
+. "$SCRIPT_DIR/vm-test-selection.sh"
+
+assert_selection() {
+  local build="$1" phase="$2" vmm="$3" target="$4" image="$5" label="$6"
+  select_test_vm "$ROOT_DIR" "$build" "$phase" "$vmm"
+  [ "$TEST_VM_PROFILE" = "$build" ] || fail "wrong profile for $phase/$vmm"
+  [ "$TEST_VM_IMG_TARGET" = "$target" ] || fail "wrong target for $phase/$vmm"
+  [ "$TEST_VM_IMAGE" = "$image" ] || fail "wrong image for $phase/$vmm"
+  [ "$TEST_VM_LABEL" = "$label" ] || fail "wrong label for $phase/$vmm"
+  [ "$TEST_VM_RUNNER" = "$ROOT_DIR/vm_images/$build/run-$vmm.sh" ] ||
+    fail "wrong runner for $phase/$vmm"
+}
+
 assert_arg() {
   local expected="$1"
   grep -Fxq -- "$expected" "$ARG_LOG" ||
@@ -50,6 +63,33 @@ chmod +x "$FAKE_BIN/fake-vmm"
 ln -s fake-vmm "$FAKE_BIN/qemu-system-x86_64"
 ln -s fake-vmm "$FAKE_BIN/cloud-hypervisor-static"
 ln -s fake-vmm "$FAKE_BIN/firecracker"
+
+assert_selection debug standard qemu main.img motor-os.qcow2 QEMU
+assert_selection release standard chv main.img motor-os.qcow2 "Cloud Hypervisor"
+assert_selection debug standard fc raw.img motor-os.img Firecracker
+assert_selection debug boot-check qemu main.img motor-os.qcow2 QEMU
+assert_selection debug boot-check chv main.img motor-os.qcow2 "Cloud Hypervisor"
+assert_selection debug boot-check fc base.img motor-os-base.img Firecracker
+assert_selection debug system-console qemu system-tty.img motor-os-system-tty.img QEMU
+assert_selection debug system-console chv system-tty.img motor-os-system-tty.img "Cloud Hypervisor"
+assert_selection debug system-console fc system-tty.img motor-os-system-tty.img Firecracker
+assert_selection debug developer qemu dev.img motor-os-dev.qcow2 QEMU
+assert_selection debug developer chv dev.img motor-os-dev.qcow2 "Cloud Hypervisor"
+if select_test_vm "$ROOT_DIR" debug developer fc 2> "$ERROR_LOG"; then
+  fail "VM selection accepted a Firecracker developer image"
+fi
+if select_test_vm "$ROOT_DIR" optimized standard qemu 2> "$ERROR_LOG"; then
+  fail "VM selection accepted an invalid build profile"
+fi
+if select_test_vm "$ROOT_DIR" debug unknown qemu 2> "$ERROR_LOG"; then
+  fail "VM selection accepted an invalid test phase"
+fi
+if select_test_vm "$ROOT_DIR" debug standard unknown 2> "$ERROR_LOG"; then
+  fail "VM selection accepted an invalid VMM"
+fi
+if select_test_vm "$ROOT_DIR" debug standard 2> "$ERROR_LOG"; then
+  fail "VM selection accepted an incomplete matrix request"
+fi
 
 # The raw standard image is opt-in. Exercise the inner make graph directly so
 # this remains independent of the top-level logging wrapper.

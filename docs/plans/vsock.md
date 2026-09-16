@@ -850,6 +850,23 @@ M2's outgoing connect IPC codec is implemented and parent-reviewed:
 - These are codecs and executable fixtures, not live connect handlers or
   native streams. Control/page codecs and the functional runtime remain next.
 
+D16's common runner/image selection and SSH-startup preparation is implemented
+and parent-reviewed:
+
+- A small sourced helper resolves the approved image/profile/VMM matrix;
+  `start_test_vm` takes the resolved runner and diagnostic label. Existing
+  full-test/candidate consumers still explicitly select QEMU. Defaults,
+  image overrides, QEMU arguments, CPU/RAM budgets, and owned-process cleanup
+  are unchanged; the suite-wide `--vmm` option is not exposed prematurely.
+- Existing image-format and developer-memory mocks cover the matrix and
+  preserved caller behavior. Shell checks passed. Actual QEMU native-net/mio
+  and CHV/Firecracker no-device discovery/filesystem guests passed through
+  the generalized helper in both profiles, with each VMM stopped and reaped.
+  Evidence: `/tmp/vsock-connect-codec-gate.lhTAqw/` and
+  `/tmp/d16-selection-corrected.Hkg7iZ/`.
+- Serial-console phases, selected-VMM CLI propagation, and permanent boot
+  checks remain required before claiming D16 or M2 completion.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
