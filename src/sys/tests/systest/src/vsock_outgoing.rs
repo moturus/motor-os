@@ -31,6 +31,13 @@ const BACKLOG_READY: &[u8] = b"backlog:ready";
 const LISTENER_DROPPED: &[u8] = b"listener:dropped";
 const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const NATIVE_ACCEPT_READY: &[u8] = b"native-accept:ready";
+const NATIVE_ACCEPT_EARLY: &[u8] = b"early";
+const NATIVE_ACCEPT_EARLY_READY: &[u8] = b"native-accept:early-ready";
+const NATIVE_ACCEPT_REPLY: &[u8] = b"accepted";
+const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
+const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
+const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -39,6 +46,7 @@ const COEXIST_PHASE_BYTES: usize = 256 * 1024;
 const COEXIST_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
+const NATIVE_ACCEPT_PORT: u32 = 70_002;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
 const CAPACITY_FULL: &[u8] = b"capacity:full";
 const CAPACITY_PROGRESS: &[u8] = b"capacity:progress";
@@ -65,6 +73,7 @@ enum Action {
     Coexistence,
     IncomingBacklog,
     IncomingOwnerDrop,
+    NativeAccept,
     GlobalStreamCapacity,
 }
 
@@ -140,6 +149,7 @@ fn parse_action(args: &[String]) -> Action {
         [action] if action == "coexistence" => Action::Coexistence,
         [action] if action == "incoming-backlog" => Action::IncomingBacklog,
         [action] if action == "incoming-owner-drop" => Action::IncomingOwnerDrop,
+        [action] if action == "native-accept" => Action::NativeAccept,
         [action] if action == "global-stream-capacity" => Action::GlobalStreamCapacity,
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
@@ -147,7 +157,7 @@ fn parse_action(args: &[String]) -> Action {
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
              cancel-queued-connect, stalled-reader TOTAL, coexistence, incoming-backlog, \
-             incoming-owner-drop, or global-stream-capacity"
+             incoming-owner-drop, native-accept, or global-stream-capacity"
         ),
     }
 }
@@ -521,6 +531,70 @@ async fn run_global_stream_capacity(stream: &VsockStream) {
     write_frame(stream, CASE_DONE).await;
 }
 
+async fn run_native_accept(
+    client: &moto_io::net::NetClient,
+    control: &VsockStream,
+) -> Vec<Arc<CountWake>> {
+    let listener = VsockListener::bind_reserved(client.try_reserve().unwrap(), NATIVE_ACCEPT_PORT)
+        .await
+        .unwrap();
+    assert_eq!(
+        listener.socket_addr_async().await,
+        Ok(VsockAddr {
+            cid: 3,
+            port: NATIVE_ACCEPT_PORT,
+        })
+    );
+
+    // The listener belongs to the control channel; accepted streams are
+    // deliberately donated by a separately driven channel in this process.
+    let (accept_client, accept_driver) = crate::net_harness::host_channel_on_thread();
+    let keeper = accept_client.try_reserve().unwrap();
+    let unpolled = listener.accept_reserved(accept_client.try_reserve().unwrap());
+    drop(unpolled);
+    assert_eq!(accept_client.reservations(), 1);
+
+    write_frame(control, NATIVE_ACCEPT_READY).await;
+    // The host confirms its bytes were sent before this accept exists. They
+    // must arrive only after the response installs the native stream route.
+    expect_frame(control, NATIVE_ACCEPT_EARLY_READY).await;
+    let accepted = listener
+        .accept_reserved(accept_client.try_reserve().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        accepted.socket_addr(),
+        Some(VsockAddr {
+            cid: 3,
+            port: NATIVE_ACCEPT_PORT,
+        })
+    );
+    assert_eq!(accepted.peer_addr().unwrap().cid, 2);
+    let mut early = [0_u8; NATIVE_ACCEPT_EARLY.len()];
+    read_exact(&accepted, &mut early).await;
+    assert_eq!(early, NATIVE_ACCEPT_EARLY);
+    write_all(&accepted, NATIVE_ACCEPT_REPLY).await;
+    drop(accepted);
+    expect_frame(control, NATIVE_ACCEPT_DROPPED).await;
+    assert_eq!(accept_client.reservations(), 1);
+
+    // Polling once registers and queues an empty-listener accept. Dropping
+    // the future releases its slot; the live keeper lets the weak waiter
+    // close the later successful response on this same channel.
+    let canceled = listener.accept_reserved(accept_client.try_reserve().unwrap());
+    let counter = poll_pending(canceled);
+    assert_eq!(accept_client.reservations(), 1);
+    write_frame(control, NATIVE_ACCEPT_CANCEL_READY).await;
+    expect_frame(control, NATIVE_ACCEPT_CANCEL_CLOSED).await;
+
+    drop(listener);
+    drop(keeper);
+    accept_driver.join().unwrap();
+    assert_eq!(accept_client.reservations(), 0);
+    write_frame(control, CASE_DONE).await;
+    vec![counter]
+}
+
 async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
     const BIND_PORT: u32 = 80_001;
     const CANCEL_PORT: u32 = 80_002;
@@ -835,6 +909,7 @@ async fn run_action(
             run_incoming_backlog(stream, true).await;
             Vec::new()
         }
+        Action::NativeAccept => run_native_accept(client, stream).await,
         Action::GlobalStreamCapacity => {
             run_global_stream_capacity(stream).await;
             Vec::new()

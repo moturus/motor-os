@@ -48,7 +48,7 @@ pub async fn local_cid(client: &super::NetClient) -> Result<u32, moto_rt::Error>
 }
 
 /// A bound native listener on the caller's explicitly driven
-/// [`super::NetDriver`]. Incoming accept support is added separately.
+/// [`super::NetDriver`].
 ///
 /// The bound port is stable, while the device CID may change after a transport
 /// reset. [`Self::socket_addr_async`] therefore queries sys-io each time.
@@ -101,6 +101,28 @@ impl VsockListener {
         })
     }
 
+    /// Accept through a slot reserved on any channel owned by this process.
+    ///
+    /// The future borrows this listener. Canceling a sent accept releases the
+    /// reservation, but may occupy one bounded server waiter until a peer
+    /// arrives or the listener is removed; a successful late reply is closed.
+    pub async fn accept_reserved(
+        &self,
+        reservation: Reservation,
+    ) -> Result<Arc<VsockStream>, ErrorCode> {
+        let mut reservation = reservation.into_channel_reservation();
+        reservation.reserve_subchannel();
+        let request = api_vsock::listener_accept_request(self.handle, reservation.subchannel_idx())
+            .map_err(ErrorCode::from)?;
+        let stream = VsockStream::new_pending(reservation, None);
+        let response = stream
+            .channel()
+            .rpc_vsock_open(request, stream.me.clone())
+            .await;
+        response.status()?;
+        Ok(stream)
+    }
+
     fn channel(&self) -> &NetChannel {
         self.channel_reservation.as_ref().unwrap().channel()
     }
@@ -128,7 +150,7 @@ impl Drop for VsockListener {
 pub struct VsockStream {
     channel_reservation: Option<ChannelReservation>,
     local_addr: Mutex<Option<VsockAddr>>,
-    peer_addr: VsockAddr,
+    peer_addr: Mutex<Option<VsockAddr>>,
     handle: AtomicU64,
     me: Weak<Self>,
     recv_queue: Arc<Mutex<InnerRxStream>>,
@@ -154,11 +176,22 @@ impl VsockStream {
         reservation.reserve_subchannel();
         let request = api_vsock::connect_request(peer, reservation.subchannel_idx())
             .map_err(ErrorCode::from)?;
+        let stream = Self::new_pending(reservation, Some(peer));
+
+        let response = stream
+            .channel()
+            .rpc_vsock_open(request, stream.me.clone())
+            .await;
+        response.status()?;
+        Ok(stream)
+    }
+
+    fn new_pending(reservation: ChannelReservation, peer: Option<VsockAddr>) -> Arc<Self> {
         let subchannel_mask = reservation.subchannel_mask();
-        let stream = Arc::new_cyclic(|me| Self {
+        Arc::new_cyclic(|me| Self {
             channel_reservation: Some(reservation),
             local_addr: Mutex::new(None),
-            peer_addr: peer,
+            peer_addr: Mutex::new(peer),
             handle: AtomicU64::new(0),
             me: me.clone(),
             recv_queue: InnerRxStream::new(),
@@ -168,23 +201,14 @@ impl VsockStream {
             subchannel_mask,
             write_admission: Mutex::new(()),
             pending_tx: PendingStreamTx::new(),
-        });
-
-        let response = stream
-            .channel()
-            .rpc_vsock_connect(request, stream.me.clone())
-            .await;
-        if response.status().is_err() {
-            return Err(response.status);
-        }
-        Ok(stream)
+        })
     }
 
     pub fn peer_addr(&self) -> Result<VsockAddr, ErrorCode> {
         if self.handle.load(Ordering::Acquire) == 0 {
             Err(moto_rt::E_NOT_CONNECTED)
         } else {
-            Ok(self.peer_addr)
+            Ok(self.peer_addr.lock().unwrap())
         }
     }
 
@@ -300,27 +324,45 @@ impl VsockStream {
         self.handle.load(Ordering::Acquire)
     }
 
-    pub(super) fn on_connect_response(
+    pub(super) fn on_open_response(
         &self,
         response: &mut io_channel::Msg,
+        expected_command: u16,
     ) -> Result<(), ErrorCode> {
-        let decoded = match api_vsock::decode_connect_response(response) {
+        if response.status().is_err() {
+            return Err(response.status);
+        }
+        let decoded = match api_net::NetCmd::try_from(expected_command) {
+            Ok(api_net::NetCmd::VsockStreamConnect) if response.command == expected_command => {
+                api_vsock::decode_connect_response(response)
+                    .map(|decoded| (decoded.handle, decoded.local, None))
+            }
+            Ok(api_net::NetCmd::VsockListenerAccept) if response.command == expected_command => {
+                api_vsock::decode_listener_accept_response(response)
+                    .map(|decoded| (decoded.handle, decoded.local, Some(decoded.peer)))
+            }
+            _ => Err(moto_rt::Error::InvalidData),
+        };
+        let (handle, local, peer) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
-                if response.status().is_ok() && response.handle != 0 {
+                if response.handle != 0 {
                     self.channel()
                         .enqueue_control(api_vsock::close_request(response.handle));
                 }
-                if response.status().is_ok() {
-                    response.status = error.into();
-                }
+                response.status = error.into();
                 return Err(response.status);
             }
         };
 
-        self.handle.store(decoded.handle, Ordering::Release);
-        *self.local_addr.lock() = Some(decoded.local);
-        self.channel().vsock_stream_created(self);
+        *self.local_addr.lock() = Some(local);
+        if let Some(peer) = peer {
+            *self.peer_addr.lock() = Some(peer);
+        }
+        debug_assert!(self.peer_addr.lock().is_some());
+        self.channel().vsock_stream_created(self, handle);
+        // Publish the usable handle only after endpoints and routing exist.
+        self.handle.store(handle, Ordering::Release);
         self.channel().wake_tx_wakers();
         Ok(())
     }

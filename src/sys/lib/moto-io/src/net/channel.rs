@@ -352,10 +352,11 @@ pub(super) enum RpcWaiter {
         stream: Weak<TcpStream>,
         tx: Option<moto_async::oneshot::Sender<io_channel::Msg>>,
     },
-    /// Outgoing VsockStream::connect completion. Registration and canceled
+    /// VsockStream connect/accept completion. Registration and canceled
     /// success rollback run inline for the same ordering reason as TCP.
-    VsockConnect {
+    VsockOpen {
         stream: Weak<VsockStream>,
+        expected_command: u16,
         tx: moto_async::oneshot::Sender<io_channel::Msg>,
     },
     /// TcpListener accept completion. The listener owns the dispatch: an
@@ -836,7 +837,7 @@ impl Drop for RpcRegistration<'_> {
                     Some(
                         RpcWaiter::Response(_)
                             | RpcWaiter::Connect { .. }
-                            | RpcWaiter::VsockConnect { .. }
+                            | RpcWaiter::VsockOpen { .. }
                             | RpcWaiter::Bind { .. }
                     )
                 ) || self.channel.is_failed()
@@ -1007,10 +1008,14 @@ impl NetChannel {
                         let _ = tx.send(msg);
                     }
                 }
-                Some(RpcWaiter::VsockConnect { stream, tx }) => {
+                Some(RpcWaiter::VsockOpen {
+                    stream,
+                    expected_command,
+                    tx,
+                }) => {
                     let mut msg = msg;
                     if let Some(stream) = stream.upgrade() {
-                        let _ = stream.on_connect_response(&mut msg);
+                        let _ = stream.on_open_response(&mut msg, expected_command);
                     } else if msg.status().is_ok() && msg.handle != 0 {
                         self.enqueue_control(api_vsock::close_request(msg.handle));
                     }
@@ -1694,9 +1699,13 @@ impl NetChannel {
                     let _ = tx.send(resp);
                 }
             }
-            RpcWaiter::VsockConnect { stream, tx } => {
+            RpcWaiter::VsockOpen {
+                stream,
+                expected_command,
+                tx,
+            } => {
                 if let Some(stream) = stream.upgrade() {
-                    let _ = stream.on_connect_response(&mut resp);
+                    let _ = stream.on_open_response(&mut resp, expected_command);
                 }
                 let _ = tx.send(resp);
             }
@@ -1792,8 +1801,7 @@ impl NetChannel {
         }
     }
 
-    pub(super) fn vsock_stream_created(&self, stream: &VsockStream) {
-        let handle = stream.handle_value();
+    pub(super) fn vsock_stream_created(&self, stream: &VsockStream, handle: u64) {
         assert_ne!(handle, 0);
         assert!(
             self.streams
@@ -2008,11 +2016,16 @@ impl NetChannel {
         rx.await.expect("connect RPC sender dropped")
     }
 
-    pub(super) async fn rpc_vsock_connect(
+    pub(super) async fn rpc_vsock_open(
         &self,
         mut req: io_channel::Msg,
         stream: Weak<VsockStream>,
     ) -> io_channel::Msg {
+        let expected_command = req.command;
+        debug_assert!(matches!(
+            api_net::NetCmd::try_from(expected_command),
+            Ok(api_net::NetCmd::VsockStreamConnect | api_net::NetCmd::VsockListenerAccept)
+        ));
         let (tx, rx) = moto_async::oneshot();
         req.id = self.new_req_id();
         {
@@ -2022,13 +2035,20 @@ impl NetChannel {
                 resp.id = req.id;
                 resp.status = moto_rt::E_NOT_CONNECTED;
                 if let Some(stream) = stream.upgrade() {
-                    let _ = stream.on_connect_response(&mut resp);
+                    let _ = stream.on_open_response(&mut resp, expected_command);
                 }
                 return resp;
             }
             assert!(
                 rpc_map
-                    .insert(req.id, RpcWaiter::VsockConnect { stream, tx })
+                    .insert(
+                        req.id,
+                        RpcWaiter::VsockOpen {
+                            stream,
+                            expected_command,
+                            tx,
+                        },
+                    )
                     .is_none()
             );
         }

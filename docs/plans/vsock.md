@@ -1431,6 +1431,23 @@ D25's bounded accept server is implemented and incrementally gated:
   source hashes, and targeted Clippy passed with no new warnings. Evidence:
   `/tmp/vsock-a28-server-gate.mWXAgT/`. The full M2 gate remains outstanding.
 
+The native accept API is implemented and incrementally gated:
+
+- `VsockListener::accept_reserved` borrows its listener and accepts a reserved
+  slot from any channel in the same process. Connect and accept share the
+  existing weak open waiter. Inline reply processing validates endpoints and
+  installs routing before publishing the usable stream or dispatching RX.
+- The twentieth real-peer case accepts through a separately driven channel,
+  checks endpoint metadata and bytes sent before accept, exchanges a reply,
+  and requires EOF after Drop. It also covers unpolled cancellation, a
+  canceled parked accept's successful late reply, reservation reclamation,
+  driver exit, and removal of the canceled future's waker.
+- Both profiles passed component/native-network tests and all twenty peer
+  cases plus discovery on QEMU, CHV, and FC. Builds, formatting, source-hash
+  checks, and targeted Clippy passed without new warnings; moto-io passed
+  strict Clippy. Evidence: `/tmp/vsock-a28-native-gate.BGGqe2/`. Cross-process
+  denial, early full peer close, and process-exit fixtures follow separately.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.

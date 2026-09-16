@@ -294,6 +294,7 @@ run_outgoing_case stalled-reader 1048576
 run_outgoing_case coexistence
 run_outgoing_case incoming-backlog
 run_outgoing_case incoming-owner-drop
+run_outgoing_case native-accept
 
 stop_vmm_owned "$VMM_PID"
 stop_owned BACKEND_PID "vhost-device-vsock"

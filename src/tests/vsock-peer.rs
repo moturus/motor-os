@@ -34,6 +34,13 @@ const BACKLOG_READY: &[u8] = b"backlog:ready";
 const LISTENER_DROPPED: &[u8] = b"listener:dropped";
 const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const NATIVE_ACCEPT_READY: &[u8] = b"native-accept:ready";
+const NATIVE_ACCEPT_EARLY: &[u8] = b"early";
+const NATIVE_ACCEPT_EARLY_READY: &[u8] = b"native-accept:early-ready";
+const NATIVE_ACCEPT_REPLY: &[u8] = b"accepted";
+const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
+const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
+const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -41,6 +48,7 @@ const COEXIST_CONTINUE: &[u8] = b"coexist:continue";
 const COEXIST_PHASE_BYTES: usize = 256 * 1024;
 const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
+const NATIVE_ACCEPT_PORT: u32 = 70_002;
 const LISTENER_BACKLOG: usize = 8;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
 const CAPACITY_FULL: &[u8] = b"capacity:full";
@@ -70,6 +78,7 @@ enum Action {
     Coexistence,
     IncomingBacklog,
     IncomingOwnerDrop,
+    NativeAccept,
     GlobalStreamCapacity,
 }
 
@@ -94,6 +103,7 @@ impl Action {
             Self::Coexistence => "coexistence".into(),
             Self::IncomingBacklog => "incoming-backlog".into(),
             Self::IncomingOwnerDrop => "incoming-owner-drop".into(),
+            Self::NativeAccept => "native-accept".into(),
             Self::GlobalStreamCapacity => "global-stream-capacity".into(),
         }
     }
@@ -180,6 +190,7 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         ("coexistence", []) => Ok(Action::Coexistence),
         ("incoming-backlog", []) => Ok(Action::IncomingBacklog),
         ("incoming-owner-drop", []) => Ok(Action::IncomingOwnerDrop),
+        ("native-accept", []) => Ok(Action::NativeAccept),
         ("global-stream-capacity", []) => Ok(Action::GlobalStreamCapacity),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
@@ -187,7 +198,7 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
              cancel-queued-connect | stalled-reader TOTAL | coexistence | incoming-backlog | \
-             incoming-owner-drop | global-stream-capacity",
+             incoming-owner-drop | native-accept | global-stream-capacity",
         )),
     }
 }
@@ -645,6 +656,25 @@ fn run() -> io::Result<()> {
                 }
                 write_frame(&mut stream, BACKLOG_CLEARED)?;
                 expect_frame(&mut stream, LISTENER_REBOUND)?;
+            }
+            Action::NativeAccept => {
+                expect_frame(&mut stream, NATIVE_ACCEPT_READY)?;
+                let mut accepted = connect_guest(base, NATIVE_ACCEPT_PORT)?;
+                accepted.write_all(NATIVE_ACCEPT_EARLY)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_EARLY_READY)?;
+                let mut reply = [0_u8; NATIVE_ACCEPT_REPLY.len()];
+                accepted.read_exact(&mut reply)?;
+                if reply != NATIVE_ACCEPT_REPLY {
+                    return Err(invalid("native accepted stream reply mismatch"));
+                }
+                expect_eof(&mut accepted)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_DROPPED)?;
+
+                expect_frame(&mut stream, NATIVE_ACCEPT_CANCEL_READY)?;
+                let mut canceled = connect_guest(base, NATIVE_ACCEPT_PORT)?;
+                expect_eof(&mut canceled)?;
+                write_frame(&mut stream, NATIVE_ACCEPT_CANCEL_CLOSED)?;
+                expect_frame(&mut stream, CASE_DONE)?;
             }
             Action::GlobalStreamCapacity => {
                 expect_frame(&mut stream, CAPACITY_READY)?;
