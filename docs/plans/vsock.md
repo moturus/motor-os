@@ -631,8 +631,62 @@ M2's shared socket backend preparation is implemented and parent-reviewed:
   suite passed in debug and release, as did base-image/test builds, selected
   formatting, and targeted Clippy. No new warning or gate failure occurred.
   Logs: `/tmp/vsock-ip-backend-gate.jGrqSg/`.
-- The next real IPC/API increment is discovery, following D21. Socket
-  integration, activation, and end-to-end vsock coverage remain pending.
+- Discovery follows in the increment below. Socket integration, activation,
+  and end-to-end vsock coverage remain pending.
+
+M2's discovery IPC/API increment is implemented, parent-reviewed, and has
+passed its debug/release incremental gate:
+
+- `moto_io::net::vsock::availability(&NetClient)` uses the existing driven
+  channel/RPC, without a reservation or device activation. The appended
+  command preserves existing wire values. Sys-io caches trusted peer
+  capabilities on the first query, checks authorization before request
+  shape/device presence, and returns native errors directly.
+- Sys-io retains the first dormant vsock device and ignores extras. Its
+  shared endpoint starts with vsock but no usable IP devices, without DNS
+  writes or IP-runtime poll/stats/recovery tasks. With neither IP nor vsock,
+  the endpoint stays disabled. Block-device rejection and the NIC vector
+  remain unchanged.
+- The no-IP test exposed a preexisting NET ownership defect: queue tasks
+  outlived an unconfigured device whose PCI metadata they still referenced.
+  No invalid access was observed; no RX buffers had been posted. The runtime
+  now retains the existing unused-device vector for its permanent lifetime,
+  with no new allocation/task. The stale `RxPacket` Drop explanation and
+  unused global/unsafe `Send` implementation were removed or corrected.
+- Ordinary systest covers absent-device errors, repeated discovery with zero
+  reservations, native/raw capability denial, malformed raw requests, and
+  continued UDP use after denial. `full-test.sh` now also invokes a required
+  `test-vsock.sh` phase: CHV boots an isolated, preinstalled-systest image
+  with IP/loopback disabled, first with vsock and then without it. The
+  explicit `vsock-test.img` target does not join default image builds. CHV
+  uses the existing QEMU lock domain; PTY/CR console input and exact guest
+  verdicts avoid relying on IP. This first phase uses the approved development
+  VMM; D16's selected-VMM generalization remains pending.
+- This increment includes its permanent VM test wiring so present/no-IP
+  coverage is not deferred. No real vsock DMA, peer data transfer, activation,
+  or complete M2 gate is claimed.
+- Base/test builds, selected formatting, targeted Clippy, all 21 existing
+  imager tests, native TCP/UDP/driver tests, and the complete `mio-test` suite
+  passed in both profiles with no new warnings. The permanent CHV phase
+  passed both present/disabled cases in both profiles, including strict child
+  teardown. Additional IP-enabled CHV discovery and scattered filesystem
+  writes passed in both profiles. Final evidence is under
+  `/tmp/vsock-discovery-final.EijLfP/`: `cwd-corrected/` for debug build/native
+  gates, `teardown-corrected/` for release build/native gates,
+  `vsock-{debug,release}-final.log`, and `chv-present-{debug,release}.log`.
+  The final permanent phase took about 4 seconds debug and 27 seconds release,
+  including its explicit image build; full-test's timeout is unchanged.
+- Diagnostic history is preserved: the initial private-RPC compile error in
+  `/tmp/vsock-discovery.zMlDFp/check-1.log`; the temporary overlay's missing
+  `[devices]` table and CHV's refusal of FIFO input in
+  `/tmp/vsock-discovery-gate.xZP35C/`; and an imager test invocation that
+  missed its directory-local Cargo configuration plus wrapper-first PTY
+  teardown's child-reaping race in `/tmp/vsock-discovery-final.EijLfP/`.
+  Release also exposed a Rush size-control prefix on the guest PASS line;
+  the harness now reuses the existing console filter while retaining raw logs
+  and exact verdict text. Teardown now stops the owned CHV child and lets its
+  wrapper reap it. No retry, delay workaround, relaxed assertion, or timeout
+  extension was added; corrected phases were rerun for those specific fixes.
 
 ## Scope and simplicity
 
@@ -2165,6 +2219,8 @@ RPC/driver and no socket reservation. Query/cache the trusted capability
 word at the first vsock request, not at channel admission or boot. Preserve
 native capability-query errors directly, without the TCP error mapper.
 There is no unprivileged boolean-discovery exception.
+Authorized requests must have zero handle, flags, and payload; reject a
+malformed request with `InvalidArgument` before consulting device presence.
 
 ## Open questions
 

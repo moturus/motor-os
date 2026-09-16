@@ -975,6 +975,7 @@ mod tests {
             include_str!("../motor-os.yaml"),
             include_str!("../motor-os-dev.yaml"),
             include_str!("../motor-os-system-tty.yaml"),
+            include_str!("../motor-os-vsock-test.yaml"),
         ] {
             let config: Config = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.permission_policy, "motor-os-permissions.yaml");

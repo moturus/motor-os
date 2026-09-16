@@ -1200,6 +1200,13 @@ fn main() {
     if args.len() == 2 && args[1] == "pool-cold-start-child" {
         net_driver::pool_cold_start_child();
     }
+    if net_driver::is_vsock_discovery_denied_child(&args) {
+        net_driver::run_vsock_discovery_denied_child(args.len() == 3);
+    }
+    if args.len() == 3 && args[1] == "test-vsock-discovery" {
+        net_driver::test_vsock_discovery(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-net-cancellation" {
         tcp::test_native_net_cancellation();
         return;

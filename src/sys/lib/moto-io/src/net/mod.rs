@@ -13,6 +13,7 @@ pub(crate) mod inner_rx_stream;
 pub mod readiness;
 pub mod tcp;
 pub mod udp;
+pub mod vsock;
 mod wait;
 
 pub use channel::{NetClient, NetDriver, Reservation, ReserveError, connect};

@@ -161,6 +161,7 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
 
     let mut block_device = None;
     let mut net_devices = vec![];
+    let mut vsock_device = None;
 
     for device in devices {
         match device.kind() {
@@ -177,6 +178,13 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
                     Err(err) => log::error!("Failed to initialize VirtioNet device: {err:?}."),
                 }
             }
+            virtio_async::VirtioDeviceKind::Vsock => {
+                if vsock_device.is_none() {
+                    vsock_device = Some(device);
+                } else {
+                    log::warn!("Ignoring additional VirtioVsock device.");
+                }
+            }
             _ => log::debug!("Unsupported VirtIO device {:?}", device.kind()),
         }
     }
@@ -189,9 +197,11 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
         panic!("Cannot proceed without a filesystem.");
     };
 
-    if let Err(err) = net::init(net_devices, fs, channel_budget).await {
-        panic!("Cannot proceed without networking: {err:?}.");
-    }
+    // Config may ignore an initialized NIC, whose running queue tasks still
+    // require its device-owned PCI metadata for their lifetime.
+    let _unused_net_devices = net::init(net_devices, vsock_device, fs, channel_budget)
+        .await
+        .unwrap_or_else(|err| panic!("Cannot proceed without networking: {err:?}."));
 
     log::debug!("Runtime initialized.");
     let _ = started.send(());

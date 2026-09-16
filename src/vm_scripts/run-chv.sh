@@ -1,6 +1,16 @@
 #!/bin/sh
 
 WD="$(dirname "$0")"
+
+# Use the same host-wide lock as QEMU: both launchers use moto-tap and the
+# standard guest address, so concurrent runs could observe each other's VM.
+VM_LOCK="${MOTO_QEMU_LOCK:-/tmp/motor-os-qemu.$(id -u).lock}"
+exec 9>"$VM_LOCK"
+if ! flock -n 9; then
+  echo "run-chv: another Motor OS VM owns $VM_LOCK" >&2
+  exit 1
+fi
+
 IMAGE="${MOTO_IMAGE:-motor-os.qcow2}"
 SMP="${MOTO_SMP:-4}"
 MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"

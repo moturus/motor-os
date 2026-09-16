@@ -13,6 +13,134 @@ use moto_io::net::ReserveError;
 
 use crate::net_harness::{bounded, bounded_output, host_channel};
 
+const VSOCK_DISCOVERY_DENIED_CHILD: &str = "vsock-discovery-denied-child";
+
+pub fn is_vsock_discovery_denied_child(args: &[String]) -> bool {
+    (args.len() == 2 || (args.len() == 3 && args[2] == "with-ip"))
+        && args[1] == VSOCK_DISCOVERY_DENIED_CHILD
+}
+
+pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
+    assert_eq!(
+        0x4c,
+        moto_sys::ProcessStaticPage::get().capabilities,
+        "discovery child unexpectedly has CAP_VSOCK"
+    );
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = host_channel().await;
+        assert_eq!(
+            moto_io::net::vsock::availability(&client).await,
+            Err(moto_rt::Error::NotAllowed)
+        );
+        assert_eq!(client.reservations(), 0);
+
+        if with_ip {
+            let socket = moto_io::net::udp::UdpSocket::bind_reserved(
+                client.try_reserve().unwrap(),
+                &"127.0.0.1:0".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            drop(socket);
+            assert!(bounded(driver_task, 5).await);
+        } else {
+            crate::net_harness::drain_host_channel(client, driver_task).await;
+        }
+
+        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut request = moto_sys_io::api_vsock::availability_request();
+        request.id = 0x564f_434b;
+        assert_eq!(request.handle, 0);
+        assert_eq!(request.flags, 0);
+        assert_eq!(request.payload.args_64(), &[0; 3]);
+        sender.send(request).await.unwrap();
+        let response = bounded_output(receiver.recv(), 2)
+            .await
+            .expect("timed out waiting for raw vsock discovery response")
+            .unwrap();
+        assert_eq!(response.id, request.id);
+        assert_eq!(response.command, request.command);
+        assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
+
+        let mut malformed = moto_sys_io::api_vsock::availability_request();
+        malformed.id = request.id + 1;
+        malformed.flags = 1;
+        sender.send(malformed).await.unwrap();
+        let response = bounded_output(receiver.recv(), 2)
+            .await
+            .expect("timed out waiting for denied malformed discovery response")
+            .unwrap();
+        assert_eq!(response.id, malformed.id);
+        assert_eq!(response.command, malformed.command);
+        assert_eq!(response.flags, malformed.flags);
+        assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
+    });
+    std::process::exit(0)
+}
+
+fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
+    if mode == "disabled" {
+        assert_eq!(
+            moto_ipc::io_channel::ClientConnection::connect("sys-io").err(),
+            Some(moto_rt::Error::NotFound)
+        );
+        println!("vsock discovery: disabled PASS");
+        return;
+    }
+    let expected = match mode {
+        "present" => Ok(()),
+        "absent" => Err(moto_rt::Error::NotFound),
+        _ => panic!("unknown vsock discovery mode: {mode}"),
+    };
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = host_channel().await;
+        assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
+        assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
+        assert_eq!(client.reservations(), 0);
+        crate::net_harness::drain_host_channel(client, driver_task).await;
+
+        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut malformed = [
+            moto_sys_io::api_vsock::availability_request(),
+            moto_sys_io::api_vsock::availability_request(),
+            moto_sys_io::api_vsock::availability_request(),
+        ];
+        malformed[0].handle = 1;
+        malformed[1].flags = 1;
+        malformed[2].payload.args_64_mut()[0] = 1;
+        for (idx, mut request) in malformed.into_iter().enumerate() {
+            request.id = 0x564f_4300 + idx as u64;
+            sender.send(request).await.unwrap();
+            let response = bounded_output(receiver.recv(), 2)
+                .await
+                .expect("timed out waiting for malformed discovery response")
+                .unwrap();
+            assert_eq!(response.id, request.id);
+            assert_eq!(response.command, request.command);
+            assert_eq!(response.handle, request.handle);
+            assert_eq!(response.flags, request.flags);
+            assert_eq!(response.payload.args_64(), request.payload.args_64());
+            assert_eq!(response.status(), Err(moto_rt::Error::InvalidArgument));
+        }
+    });
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(VSOCK_DISCOVERY_DENIED_CHILD)
+        .args(with_ip.then_some("with-ip"))
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0x4c")
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
+    println!("vsock discovery: {mode} PASS");
+}
+
+pub fn test_vsock_discovery(mode: &str) {
+    test_vsock_discovery_inner(mode, false);
+}
+
 /// Connect, drive, shut down: a host-owned channel comes up without a
 /// thread, a pool entry, or a vdso object, and `request_shutdown` alone (no
 /// reservation was ever taken) drains its driver to completion. I/O through
@@ -1178,6 +1306,7 @@ fn test_channel_failure_wakes_every_waiter() {
 }
 
 pub fn run_all_tests() {
+    test_vsock_discovery_inner("absent", true);
     test_connect_drive_shutdown();
     test_reservation_lifecycle();
     test_reserved_socket_io();

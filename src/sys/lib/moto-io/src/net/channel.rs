@@ -191,6 +191,10 @@ pub struct NetClient {
 }
 
 impl NetClient {
+    pub(super) async fn rpc(&self, req: io_channel::Msg) -> io_channel::Msg {
+        self.channel.rpc(req).await
+    }
+
     /// Reserve one socket slot, unless the channel is full or shutting
     /// down. The last [`Reservation`] to drop closes the channel, so a
     /// host that wants it back must connect a new one.

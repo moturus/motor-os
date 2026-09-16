@@ -217,14 +217,9 @@ pub struct NetDevice {
 
 impl Drop for NetDevice {
     fn drop(&mut self) {
-        log::error!("VirtIO NetDev must not be dropped: RxPackets reference it statically.");
+        log::error!("VirtIO NetDev must outlive its running queue tasks.");
     }
 }
-
-unsafe impl Send for NetDevice {}
-
-static NET_DEVICES: moto_rt::spinlock::SpinLock<Vec<NetDevice>> =
-    moto_rt::spinlock::SpinLock::new(Vec::new());
 
 impl NetDevice {
     const VIRTQ_RX: usize = 0;

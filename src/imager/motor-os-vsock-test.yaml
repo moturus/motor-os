@@ -1,0 +1,27 @@
+permission_policy: "motor-os-permissions.yaml"
+input_files:
+  - "/system/services/strobe"
+  - "/system/services/sys-init"
+  - "/system/services/sys-tty"
+  - "/system/bin/rush"
+  - "/system/bin/sysbox"
+  - "/user/bin/systest"
+directories:
+  - "/system"
+  - "/system/bin"
+  - "/system/cfg"
+  - "/system/logs"
+  - "/system/services"
+  - "/system/tmp"
+  - "/user"
+  - "/user/bin"
+  - "/user/cfg"
+  - "/user/tmp"
+static_dirs:
+  - "img_files/motor-os-base"
+  - "img_files/test-system-tty"
+  - "img_files/test-vsock"
+filesystem: "motor-fs"
+img_name: "motor-os-vsock-test.img"
+image_format: "raw"
+data_partition_size_mb: 64

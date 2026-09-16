@@ -36,6 +36,7 @@ pub enum NetCmd {
     UdpSocketBindForRemote,
     UdpSocketSetOption,
     UdpSocketGetOption,
+    VsockAvailability,
     NetCmdMax,
 }
 

@@ -114,6 +114,14 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rustfmt-size.sh"
 fi
 
+# Discovery with and without a CHV vsock device uses a separate IP-disabled
+# System-console image. Run it before the longer-lived acceptance VMs.
+if [ "$BUILD" = "release" ]; then
+  "$WD/test-vsock.sh" --release
+else
+  "$WD/test-vsock.sh"
+fi
+
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
 if [ "$BUILD" = "release" ]; then
   cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml" --release

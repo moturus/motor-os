@@ -48,6 +48,7 @@ struct ClientConnection {
     tcp_listeners: HashSet<u64>,
     shutting_down: bool,
     pid: u64,
+    capabilities: Option<core::result::Result<u64, moto_rt::ErrorCode>>,
 }
 
 impl Drop for ClientConnection {
@@ -65,6 +66,7 @@ impl ClientConnection {
             tcp_listeners: HashSet::new(),
             shutting_down: false,
             pid: 0,
+            capabilities: None,
         }
     }
 }
@@ -89,6 +91,9 @@ struct NetRuntimeInner {
     // Resolver servers are kept per device so losing one DHCP lease does not
     // discard another device's static or leased configuration.
     dns_servers: Vec<Vec<IpAddr>>,
+
+    // Discovery owns the raw device until transport activation is added.
+    vsock_device: Option<virtio_async::VirtioDevice>,
 
     clients: HashMap<SysHandle, ClientConnection>,
 }
@@ -159,6 +164,39 @@ impl NetRuntime {
             .clients
             .get(&handle)
             .is_some_and(|client| !client.shutting_down)
+    }
+
+    fn vsock_availability_status(
+        &self,
+        handle: SysHandle,
+        msg: &moto_ipc::io_channel::Msg,
+    ) -> moto_rt::ErrorCode {
+        let mut inner = self.inner.borrow_mut();
+        let client = inner.clients.get_mut(&handle).unwrap();
+        let capabilities = *client
+            .capabilities
+            .get_or_insert_with(|| moto_sys::SysObj::get_capabilities(handle));
+
+        match capabilities {
+            Err(err) => err,
+            Ok(capabilities) if capabilities & moto_sys::caps::CAP_VSOCK == 0 => {
+                moto_rt::E_NOT_ALLOWED
+            }
+            Ok(_) if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] => {
+                moto_rt::E_INVALID_ARGUMENT
+            }
+            Ok(_) if inner.vsock_device.is_none() => moto_rt::E_NOT_FOUND,
+            Ok(_) => moto_rt::E_OK,
+        }
+    }
+
+    async fn vsock_availability(
+        &self,
+        mut msg: moto_ipc::io_channel::Msg,
+        sender: &channel_budget::ClientSender,
+    ) {
+        msg.status = self.vsock_availability_status(sender.remote_handle(), &msg);
+        let _ = sender.send(msg).await;
     }
 
     async fn spawn_net_runtime(&self) {
@@ -788,6 +826,10 @@ impl NetRuntime {
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
             NetCmd::IcmpEcho => icmp::echo(self, msg, &sender).await,
+            NetCmd::VsockAvailability => {
+                self.vsock_availability(msg, &sender).await;
+                return;
+            }
 
             cmd => {
                 log::warn!(
@@ -814,9 +856,10 @@ impl NetRuntime {
 /// Takes filesystem parameter to read net config.
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
+    vsock_device: Option<virtio_async::VirtioDevice>,
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
-) -> Result<()> {
+) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
     let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
@@ -867,11 +910,11 @@ pub(super) async fn init(
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
 
-    if devices.is_empty() {
+    if devices.is_empty() && vsock_device.is_none() {
         log::warn!(
             "NET runtime intentionally disabled: valid configuration produced zero usable devices."
         );
-        return Ok(());
+        return Ok(virtio_devices);
     }
 
     let mut device_idx = 0;
@@ -895,6 +938,7 @@ pub(super) async fn init(
             devices,
             ip_addresses,
             dns_servers,
+            vsock_device,
             clients: HashMap::new(),
         })),
         stats: net_stats.clone(),
@@ -915,27 +959,28 @@ pub(super) async fn init(
         channel_budget,
     };
 
-    let initial_dns_servers = {
-        let inner = runtime.inner.borrow();
-        let mut seen = HashSet::new();
-        inner
-            .dns_servers
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|server| seen.insert(*server))
-            .collect::<Vec<_>>()
-    };
-    config::write_resolv_conf(&fs, &initial_dns_servers).await?;
-
     runtime.stats.num_devices.set(device_idx as u64);
-    stats::spawn_stats_responder(runtime.clone());
-    pressure::spawn_recovery(runtime.clone());
+    if device_idx != 0 {
+        let initial_dns_servers = {
+            let inner = runtime.inner.borrow();
+            let mut seen = HashSet::new();
+            inner
+                .dns_servers
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|server| seen.insert(*server))
+                .collect::<Vec<_>>()
+        };
+        config::write_resolv_conf(&fs, &initial_dns_servers).await?;
+        stats::spawn_stats_responder(runtime.clone());
+        pressure::spawn_recovery(runtime.clone());
+    }
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");
 
-    Ok(())
+    Ok(virtio_devices)
 }
 
 struct EphemeralTcpPort {
