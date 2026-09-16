@@ -712,17 +712,52 @@ reviewed fork commit; committing/publishing it is a separately authorized
 step. No Lorry, curl, SSH, kernel, std, moto-rt, mlibc or toolchain-source
 edits are assumed. If necessary, diagnose and discuss them first.
 
+**Thin-pack lookup defect, diagnosed and repaired on 2026-09-15:**
+in `gix-pack/src/data/input/lookup_ref_delta_objects.rs`,
+the former `try_find(...).ok()?` converted a failed thin-pack base lookup
+into end-of-input. `EntriesToBytesIter` could then complete a shorter pack
+successfully. A
+hermetic diagnostic against `419b494a` verified a complete two-object input
+becoming a successful one-object output, and a real object-store allocation
+limit being swallowed as a successful empty pack. This affects Q6 and
+fetch error handling. Reviewed external commit
+`d3e2dd89b0ea3f30b5cf24d4d7327de944d9824c` now propagates the error
+with base-object context in that iterator and
+`gix-pack/src/data/input/types.rs`, plus one regression in the existing
+bundle tests in `gix-pack/tests/pack/bundle.rs`, reached by
+`src/tests/test-gix.sh`. The normal `Ok(None)` path for in-pack bases
+remains. The original diagnostic now returns errors without leaving pack
+files on both host and Motor; the component fixtures and compiler/Clippy
+checks also pass. The user published the repair, and the declared remote
+was verified at this revision on 2026-09-15.
+
+Planned Q6 native pack-buffer implementation, selected on 2026-09-15: the
+external patch changes `gix-pack/src/lib.rs` and an extracted
+`gix-pack/src/mmap.rs` in the authoring checkout above. On Motor, limit
+each pack/index/multi-index buffer to 128 MiB and all live buffers from
+that reader to 256 MiB. Check the opened regular file's length and reserve
+the aggregate allowance before a fallible exact allocation; reject short
+reads or growth, and release the allowance after the buffer is dropped.
+Keep the existing non-Motor mapping behavior. A plain owned buffer and
+reservation guard suffice because the object store already shares files.
+The representative Motor OS history at `db5ce8e0` has 36,568 objects,
+a roughly 19.5 MiB stored pack, and an 89,401,252-byte transfer without
+deltas. These figures justify the initial buffer limits; decoded objects,
+metadata/counts, other file readers and temporary disk still need bounds,
+followed by native workload validation. Extend the existing host test
+entry point with compact helper-boundary tests and reuse the native
+repository fixture.
+
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
-`PrepareFetch::repository_mut()` accessor in reviewed commit
+`PrepareFetch::repository_mut()` accessor introduced in reviewed commit
 `419b494a869dc976caceb1dee108ce92dee1ae33`. It exposes the contained
 repository before fetch so the application can validate paths, sanitize
 configuration and set `objects.ignore_replacements` without duplicating
 the library's clone/ref/HEAD orchestration, and returns `None` after a
 successful fetch consumes that handle. The application uses reviewed commit
-`419b494a869dc976caceb1dee108ce92dee1ae33`; publication remains pending,
-and the application must not be published as usable until that fork commit
-is available from the declared remote.
+`d3e2dd89b0ea3f30b5cf24d4d7327de944d9824c`, published on
+`gix-moturus-cli` and verified on 2026-09-15.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
 Gitoxide `b4e6aeaa82be4183af466b7a99484c38322dd260`. In the external
@@ -808,3 +843,10 @@ The v05 revision was reviewed, committed and approved for implementation,
 including D13's `reflog`/`ORIG_HEAD` deferral. There are no remaining scope
 questions from that review. Q6's workload and numerical limits remain an
 implementation measurement task.
+
+### Implementation discussion — thin-pack lookup errors (2026-09-15)
+
+Discussed and approved: repair the external iterator to propagate base-lookup
+errors with their cause, add one focused regression to the normal component
+gate, review the patch before committing, and update the dependency pin.
+Then continue clone/fetch and resource-limit implementation.

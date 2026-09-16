@@ -129,7 +129,7 @@ if [ "$mode" = --host ]; then
   metadata="$temporary/metadata.json"
   "$cargo" metadata --manifest-path "$APP_DIR/Cargo.toml" --locked --offline \
     --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$metadata"
-  fork_manifest="$(python3 - "$metadata" <<'PY'
+  fork_info="$(python3 - "$metadata" <<'PY'
 import json
 import pathlib
 import sys
@@ -150,17 +150,24 @@ packages = [
 ]
 if len(packages) != 1:
     raise SystemExit("resolved gix revision does not match the direct pin")
+print(revision)
 print(pathlib.Path(packages[0]["manifest_path"]).parent.parent / "Cargo.toml")
 PY
 )"
+  mapfile -t fork_info_lines <<< "$fork_info"
+  [ "${#fork_info_lines[@]}" -eq 2 ] || fail "invalid pinned fork metadata"
+  fork_revision="${fork_info_lines[0]}"
+  fork_manifest="${fork_info_lines[1]}"
   external=(--manifest-path "$fork_manifest" --release --locked --offline
-    --target-dir "$APP_DIR/target/component-test/external")
+    --target-dir "$APP_DIR/target/component-test/external/$fork_revision")
   "$cargo" test "${external[@]}" -p gix-motor-filetime \
     system_times_are_normalized_and_ordered
   "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
     an_index_shorter_than_its_checksum_is_rejected
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
     iter::new_from_header::
+  "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
+    bundle::write_to_directory::
   "$cargo" test "${external[@]}" -p gix --test gix \
     --features blocking-network-client,worktree-mutation \
     clone::blocking_io::from_shallow_allowed_by_default
