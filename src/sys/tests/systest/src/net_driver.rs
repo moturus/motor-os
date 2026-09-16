@@ -1306,6 +1306,7 @@ fn test_channel_failure_wakes_every_waiter() {
 }
 
 pub fn run_all_tests() {
+    crate::vsock::run_wire_tests();
     test_vsock_discovery_inner("absent", true);
     test_connect_drive_shutdown();
     test_reservation_lifecycle();

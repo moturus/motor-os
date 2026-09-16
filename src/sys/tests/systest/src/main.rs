@@ -50,6 +50,7 @@ mod threads;
 mod tls;
 mod udp;
 mod virtio;
+mod vsock;
 mod wait_set;
 mod wakebench;
 mod xor_server;

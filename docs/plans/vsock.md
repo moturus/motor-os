@@ -835,6 +835,21 @@ The authorized shared NET subchannel fix (D23) is implemented and reviewed:
   precedence warnings is retained in `/tmp/net-subchannel.u84imZ/`; ordinary
   Clippy and the final gates passed with those baseline warnings unchanged.
 
+M2's outgoing connect IPC codec is implemented and parent-reviewed:
+
+- Appends vsock stream command values without changing TCP/UDP values. The
+  address is two `u32` fields, not an IP address; connect carries the peer and
+  existing reservation index, while success returns the common socket ID
+  and local address. Reserved bytes, flags, addresses, and subchannel indices
+  are checked in release. Syntactically valid non-host CIDs remain a runtime
+  support decision; native error replies are decoded before success fields.
+- Literal wire/negative fixtures run through ordinary guest native-net tests.
+  Debug/release base-image/systest/mio builds, the complete native-net and mio
+  guest suites, formatting, and targeted Clippy passed without new warnings.
+  Evidence: `/tmp/vsock-connect-codec-gate.lhTAqw/`.
+- These are codecs and executable fixtures, not live connect handlers or
+  native streams. Control/page codecs and the functional runtime remain next.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

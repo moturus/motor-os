@@ -37,6 +37,12 @@ pub enum NetCmd {
     UdpSocketSetOption,
     UdpSocketGetOption,
     VsockAvailability,
+    VsockStreamConnect,
+    VsockStreamTx,
+    VsockStreamRx,
+    VsockStreamShutdown,
+    VsockStreamClose,
+    EvtVsockStreamStateChanged,
     NetCmdMax,
 }
 
