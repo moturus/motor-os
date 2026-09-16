@@ -57,12 +57,14 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-and inspect it:
+inspect it, and stage local changes:
 
 ```sh
 gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
+gix -r project add src/main.rs
+gix -r project add -A
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream
@@ -72,6 +74,13 @@ gix -r project fetch upstream
 which defaults to the current directory. It refuses to reinitialize a
 repository. The initial branch is
 `init.defaultBranch` when configured and `main` otherwise.
+
+`add PATH…` stages literal paths relative to the selected worktree; use `--`
+for names starting with a dash. `add -A` stages all additions, changes and
+deletions. Tracked ignored files are included; explicitly naming an ignored
+or unmatched path fails. Executable and indexed symlink modes are preserved.
+Gitlinks are left unchanged. Staging refuses external filters and files over
+16 MiB, and publishes the index only after all selected changes are prepared.
 
 `fetch` updates remote-tracking references and tags without changing the current
 branch, index or worktree. HTTPS uses the system CA bundle. A test or private CA
@@ -83,8 +92,9 @@ Clone creates `DIR` exclusively and never adopts an existing directory.
 A failed clone retains its owned directory for inspection; the
 `.git/gix-incomplete-clone` marker identifies unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Repository paths
-must be UTF-8 and valid Motor file names. Because Motor OS has no symbolic links, link entries are
-checked out as regular files containing their target text. This command set does
-not yet include add, commit, push, or SSH remotes.
+must be UTF-8 and valid Motor file names; the current path policy also rejects
+Windows-reserved names and characters. Because Motor OS has no symbolic links,
+link entries are checked out as regular files containing their target text. This command set does
+not yet include commit, push, or SSH remotes.
 
 For more details, see [https://motor-os.org](https://motor-os.org).

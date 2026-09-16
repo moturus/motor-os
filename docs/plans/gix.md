@@ -14,7 +14,9 @@ clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
 limits and measured results. M2 implementation is in progress. Its init review
 found a library directory-creation race; the narrow external fix was
-discussed and approved on 2026-09-16, as recorded at the end of this document.
+discussed, approved and implemented on 2026-09-16. Init and staging progress
+is recorded in section 7. The final section records a newly diagnosed loose-ref
+allocation issue and the proposed external repair awaiting review.
 
 ## 1. Goal and decisions
 
@@ -1082,6 +1084,36 @@ destination behind. Host and Motor component gates cover initialization,
 configured branches, preservation/refusal and the CLI; host/Motor Clippy
 and formatting pass. Evidence: `/tmp/motor-gix-init-integration`.
 
+Literal staging (M2), reviewed on 2026-09-16:
+`gix add PATH…` and `gix add -A` now prepare additions, modifications,
+deletions and regular-file conflict resolutions against one locked index.
+Literal selection preserves overlapping explicit arguments for ignored-path
+diagnostics, includes tracked ignored files, and never descends into gitlinks.
+File/directory replacement removes obsolete index entries; a replacement
+that would change a gitlink is refused. Source paths use the same Motor
+and Gitoxide portability checks as checkout, including the existing
+Windows-reserved-name/character rejection.
+
+Enumeration retains at most 65,536 unique candidates and 8 MiB of path
+bytes. The converter checks source metadata before allocation, bounds its
+read, and limits both source and converted blob data to 16 MiB. It processes
+one file at a time through built-in conversion, preserving executable and
+indexed-symlink modes. Selected external/required filters are rejected before
+blob writes. Only the complete prepared change set reaches the existing
+checksummed, bounded index publisher; an error may leave harmless loose
+objects, but never a partially published index.
+
+Host and Motor component gates, including the leading-dash CLI case and
+Git verification of the copied-back native repository, pass. The shared
+lifecycle covers ignored selections, conflict stages, both file/directory
+directions, gitlinks, filter refusal, executable/symlink modes and oversized
+source rejection. The native fixture explicitly restores write permission
+after copying an executable: Motor intentionally finalizes an RWX copy as
+RX. No OS change was needed. Host/Motor Clippy, formatting and shell checks
+also pass. Evidence and diagnosed failures: `/tmp/motor-gix-add-integration`.
+`full-test-dev.sh --release` remains the M2 milestone gate after its remaining
+commands and recovery workflows are complete.
+
 A milestone is complete when the installed application passes its gates;
 cross-compilation alone is insufficient. Rollback restores the previous
 application/dependency pin and developer image, without rewriting user
@@ -1189,3 +1221,48 @@ pass. Integration evidence: `/tmp/motor-gix-m2-foundation`.
 
 This repair changes only the two external files above. No Motor OS
 filesystem or standard-library change is needed.
+
+### Open implementation discussion — bounded loose references (2026-09-16)
+
+Review of the next branch/tag step found a separate Gitoxide allocation gap
+at external revision `e121301a`. Direct loose-ref lookup in
+`gix-ref/src/store/file/find.rs` and loose/packed overlay iteration in
+`gix-ref/src/store/file/overlay_iter.rs` both use unbounded `read_to_end`.
+Lookup is also used by existing `log`, revision resolution and ref
+transactions. Object allocation settings and the existing 16 MiB packed-ref
+limit do not cover these reads. This affects Q6 on Motor; it is not a
+Motor OS filesystem defect.
+
+A controlled host diagnostic compared a 41-byte loose ref with an 8 MiB
+padded version of the same ref. Both reached the same missing-object error;
+peak RSS increased from 5,184 KiB to 13,056 KiB, and the syscall trace
+confirmed the whole 8 MiB file was read. This is host evidence for the
+target-independent read path, not a claim of a native runtime reproduction.
+Source and evidence: `/tmp/motor-gix-refs-draft/notes/loose-ref-bound-diagnosis.md`
+and `/tmp/motor-gix-refs-draft/evidence`. No external repair has been applied.
+
+Proposed repair, explicitly outside the main Motor OS repository, in
+`/home/posk/motor-dev/gitoxide-motor-cli`: add one private shared loose-ref
+reader in `gix-ref/src/store/file/loose/mod.rs`, then use it from the lookup
+and overlay-iteration files above. On Motor, reuse the existing
+`gix_features::fs::read_to_end_bounded` with a 16 MiB per-file ceiling.
+It checks metadata before allocation, uses a fallible exact allocation,
+and rejects short reads or growth. Preserve non-Motor behavior and existing
+lookup/iteration error propagation. The ceiling matches the native index
+and packed-ref limits and accommodates multi-line pseudo refs such as
+`FETCH_HEAD`, which share the lookup path.
+
+Keep validation small: reuse the existing bounded-reader boundary tests,
+run existing ref lookup/iteration/transaction tests, and extend the shared
+native fixture with an oversized-ref rejection covering lookup and listing.
+Include that coverage in the normal gix component gate. Review the external
+patch before committing it and updating the application pin. Forward
+reflog reading is a separate deferred path; these commands do not use it.
+
+An application precheck would duplicate the backend and race its actual
+read, so it would not enforce the bound. No Motor OS or standard-library
+change is proposed.
+
+**Open question:** approve this narrow external loose-ref repair and pin
+update, then resume M2? Recommended: yes. Work that depends on the ref
+backend is paused under AGENTS.md's preexisting-bug rule.

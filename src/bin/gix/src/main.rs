@@ -8,7 +8,7 @@ use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, cancellation, clone, fetch, init, network, repository, status};
+use motor_gix::{Result, add, cancellation, clone, fetch, init, network, repository, status};
 
 fn main() -> ExitCode {
     match run() {
@@ -59,6 +59,24 @@ fn run() -> Result {
                 .help("Report configuration files used while opening the repository")
                 .action(ArgAction::SetTrue)
                 .global(true),
+        )
+        .subcommand(
+            Command::new("add")
+                .about("Stage worktree changes")
+                .arg(
+                    Arg::new("all")
+                        .short('A')
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("paths"),
+                )
+                .arg(
+                    Arg::new("paths")
+                        .value_name("PATH")
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .required_unless_present("all"),
+                ),
         )
         .subcommand(
             Command::new("clone")
@@ -142,6 +160,16 @@ fn run() -> Result {
     let mut opened = opened?;
 
     let result = match matches.subcommand_name() {
+        Some("add") => {
+            let command = matches.subcommand_matches("add").expect("matched add");
+            let paths = command
+                .get_many::<String>("paths")
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            add::run(&opened, command.get_flag("all"), &paths, &cancellation)
+        }
         Some("fetch") => {
             let policy = network::Policy::new(&overrides, &cancellation)?;
             fetch::run(

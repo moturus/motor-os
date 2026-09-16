@@ -250,6 +250,16 @@ verify_add_repository() {
   clean_git -C "$repository" fsck --strict --no-dangling >/dev/null
 }
 
+verify_add_cli() {
+  local repository="$1" expected actual
+  expected="$(printf 'cli stage\n' | clean_git hash-object --stdin)"
+  actual="$(clean_git -C "$repository" ls-files --stage -- -leading)"
+  [ "$actual" = "$(printf '100644 %s 0\t-leading' "$expected")" ] ||
+    fail "gix add -- did not stage the literal leading-dash filename"
+  [ "$(clean_git -C "$repository" show :-leading)" = 'cli stage' ] ||
+    fail "gix add -- wrote the wrong blob"
+}
+
 verify_pack() {
   local indices=("$1"/*.idx)
   [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
@@ -362,6 +372,9 @@ PY
   grep -Fqx 'ref: refs/heads/main' "$init_repo/.git/HEAD" ||
     fail "gix init did not select the default main branch"
   grep -Fqx preserve "$init_repo/sentinel" || fail "gix init changed an existing file"
+  printf 'cli stage\n' > "$init_repo/-leading"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
+  verify_add_cli "$init_repo"
 
   ca="$APP_DIR/tests/https-test-ca.pem"
   start_https_server 127.0.0.1 localhost
@@ -618,6 +631,13 @@ printf 'get "%s" "%s"\n' "$guest_root/init/.git/HEAD" "$temporary/guest-init-hea
   "${sftp_command[@]}"
 grep -Fqx 'ref: refs/heads/main' "$temporary/guest-init-head" ||
   fail "native gix init did not select the default main branch"
+printf 'cli stage\n' > "$temporary/add-cli-source"
+printf 'put "%s" "%s"\n' "$temporary/add-cli-source" "$guest_root/init/-leading" |
+  "${sftp_command[@]}"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init add -- -leading"
+printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |
+  "${sftp_command[@]}"
+verify_add_cli "$temporary/guest-add-cli"
 
 start_https_server 192.168.4.1 192.168.4.1
 guest_clone="$guest_root/https-clone"

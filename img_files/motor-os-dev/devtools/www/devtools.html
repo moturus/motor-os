@@ -496,10 +496,12 @@ how procedural macros and build scripts run on Motor OS, is on the
 
 <h2>Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
-anonymous smart-HTTPS remotes, and provides read-only status and history.</p>
+anonymous smart-HTTPS remotes, stages local changes, and shows status and history.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
+gix -r project add src/main.rs
+gix -r project add -A
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream</code></pre>
@@ -507,6 +509,12 @@ gix -r project fetch upstream</code></pre>
 files in <code>DIR</code>, which defaults to the current directory, and refuses
 reinitialization. It uses
 <code>init.defaultBranch</code> when configured and <code>main</code> otherwise.</p>
+<p><code>add PATH…</code> stages literal paths relative to the selected worktree; use
+<code>--</code> for names starting with a dash. <code>add -A</code> stages all additions,
+changes and deletions. Tracked ignored files are included; explicitly naming an ignored
+or unmatched path fails. Executable and indexed symlink modes are preserved, and
+gitlinks remain unchanged. Staging refuses external filters and files over 16 MiB,
+and publishes the index only after all selected changes are prepared.</p>
 <p><code>fetch</code> updates remote-tracking references and tags without changing the
 current branch, index or worktree. HTTPS uses the system CA bundle. Select a test or private
 CA explicitly with
@@ -515,8 +523,9 @@ cannot disable verification or replace the trust roots.</p>
 <p>Clone creates <code>DIR</code> exclusively. A failed clone retains its owned directory
 for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
-valid Motor file names. Link entries become regular files containing their target text because Motor OS
-has no symbolic links. Add, commit, push, SSH remotes, and authenticated HTTPS are not
+valid Motor file names; the current path policy also rejects Windows-reserved names and
+characters. Link entries become regular files containing their target text because Motor OS
+has no symbolic links. Commit, push, SSH remotes, and authenticated HTTPS are not
 part of this initial command set.</p>
 
 <h2>Gears</h2>
