@@ -9,7 +9,7 @@ use std::{
 
 use gix::{
     bstr::ByteSlice,
-    index::{File, State, entry::Mode},
+    index::{File, entry::Mode},
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -102,7 +102,12 @@ fn main() -> Result {
         "native probe must observe executable bits"
     );
     let tree = repo.head_tree_id()?.detach();
-    let state = State::from_tree(&tree, &repo.objects, Default::default())?;
+    let state = motor_gix::tree_index::build(
+        &repo,
+        &tree,
+        &worktree,
+        &motor_gix::cancellation::Cancellation::new(),
+    )?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);

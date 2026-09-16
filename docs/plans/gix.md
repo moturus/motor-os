@@ -16,7 +16,8 @@ filters. The shared cancellation flag, Motor handler and HTTPS adapter are
 implemented. Temporary live host and Motor probes passed V2 discovery and
 POST, same-origin redirects, unread malformed-response cleanup and PTY
 Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
-commands, bounded tree/index handling and image integration remain M1 work.
+commands, checked checkout/index publication and image integration remain M1 work.
+The bounded target-tree builder passes the host and Motor fixtures.
 The Q6 reader, pack and traversal limits and duplicate-base repair are
 recorded in section 7.
 
@@ -744,7 +745,7 @@ the owned bytes are dropped. Non-Motor builds retain the existing mmap
 behavior. Compact host tests cover file and aggregate boundaries, release,
 short input and growth; focused host and Motor compiler checks pass. The
 existing native repository fixture also passes with verified sources and a
-clean VM shutdown. Publication of the reviewed fork revision remains pending.
+clean VM shutdown. This patch is included in the published revision below.
 The representative Motor OS history at `db5ce8e0` has 36,568 objects,
 a roughly 19.5 MiB stored pack, and an 89,401,252-byte transfer without
 deltas. These figures justify the initial buffer limits; decoded objects,
@@ -763,7 +764,8 @@ The representative worktree index is 191,524 bytes and packed refs are
 allocation, and reject short reads or growth. No dependency, global
 budget or host mapping change was added. Host boundary/reader tests and
 Motor checks pass. These readers also pass the integrated host/Motor
-fixture at the current application pin; publication remains pending.
+fixture at the current application pin and are included in the published
+revision below.
 
 Q6 pack-metadata patch, reviewed as external commit
 `a75943823b7698c8375ac2887df46e97b5e67a70`: in external
@@ -777,7 +779,7 @@ without a general allocation manager, and keeps valid delta depth within
 the existing 16-bit representation. The representative history has 36,568
 objects. One compact test uses a tiny private limit; non-Motor count policy
 is unchanged. Focused tests, Motor checks, and the integrated host/Motor
-fixture pass; publication is pending.
+fixture pass; this patch is included in the published revision below.
 
 Q6 commit-graph patch, reviewed as external commit
 `80bf4bd9c4d3f55d9d428aedb19ae7a478a0178b`: in external
@@ -791,7 +793,8 @@ feature closure is added. Scope: `gix-commitgraph/Cargo.toml`, the external
 `src/file/init.rs` and `src/init.rs`. Keep the existing host mapping and
 normal graph parsing. One compact helper test covers the limits; the
 existing repository fixture now contains a two-file graph chain. Host tests,
-host/Motor checks and native integration pass; publication is pending.
+host/Motor checks and native integration pass; this patch is included in
+the published revision below.
 
 Q6 traversal allocation patch, reviewed as external commit
 `30706245e9f815348a355cf5429786b8a202dbe3`: in external
@@ -820,7 +823,8 @@ returns the existing size-mismatch error without inflating the whole
 payload. Keep normal hash/trailer parsing and non-Motor behavior. Use one
 tiny host helper test and the existing input/bundle tests. Fetch uses
 verification mode, so a limit error fails the operation. Focused tests and
-host/Motor checks and the integrated component fixtures pass; publication is pending.
+host/Motor checks and the integrated component fixtures pass. This patch
+is included in the published revision below.
 
 Q6 temporary-pack patch, reviewed as external commit
 `861980697e19e259ad40d4700857789ee4512f11`: in external `gix-pack/src/bundle/write/`,
@@ -912,6 +916,20 @@ fixture supplies a conflicting `-c` allocation setting to check that fixed
 policy wins. The native fixture now rewrites a real pack for host Git
 verification as well as checking a two-file graph chain.
 
+Application target-tree validation, reviewed on 2026-09-15:
+`src/bin/gix/src/tree_index.rs` builds an index without writing the
+worktree. It limits all visited entries, including directories, to 65,536;
+cumulative full path bytes to 16 MiB; each source blob to 16 MiB; and
+aggregate source blob bytes to 128 MiB. The last limit is not a bound on
+filtered checkout output. It validates UTF-8 Motor paths (255-byte
+components and absolute paths below 1024 bytes), duplicate names and
+file/directory conflicts, object kinds and Git mode normalization before
+checkout. Gitlinks remain index entries. Tree buffers use the repository's
+fixed object-read bound. One compact boundary test and the existing
+host/Motor mode/index fixture pass, along with both target checks and
+Clippy. Native evidence and source identities are in
+`/tmp/motor-gix-tree-index-integration`.
+
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
 `PrepareFetch::repository_mut()` accessor introduced in reviewed commit
@@ -920,8 +938,10 @@ repository before fetch so the application can validate paths, sanitize
 configuration and set `objects.ignore_replacements` without duplicating
 the library's clone/ref/HEAD orchestration, and returns `None` after a
 successful fetch consumes that handle. The application uses reviewed commit
-`087dbd18e849a4275477572ec36a81385ff1e9b9`; publication of this revision
-on `gix-moturus-cli` remains pending.
+`087dbd18e849a4275477572ec36a81385ff1e9b9`. The user published it on
+`gix-moturus-cli`; the declared remote was verified at this exact revision
+on 2026-09-15. It includes all Q6 library patches and the duplicate-base
+repair recorded above.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
 Gitoxide `b4e6aeaa82be4183af466b7a99484c38322dd260`. In the external

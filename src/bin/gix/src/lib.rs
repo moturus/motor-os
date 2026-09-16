@@ -7,5 +7,6 @@ pub mod http_request;
 pub mod https_url;
 pub mod repository;
 pub mod status;
+pub mod tree_index;
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
