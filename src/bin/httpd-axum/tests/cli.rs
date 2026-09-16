@@ -10,6 +10,7 @@ fn main() {
     assert!(run(&["--help"]).status.success());
     for flag in [
         "--max-active-connections",
+        "--max-header-deadline-sec",
         "--cache-timeout-sec",
         "--cache-size-mb",
     ] {

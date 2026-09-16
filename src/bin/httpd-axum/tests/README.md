@@ -27,6 +27,14 @@ This standalone gate does not build an OS image or invoke the full-system suite.
 keep-alive connections, and TLS handshakes. Excess connections close immediately.
 The HTTP tests exercise admission, rejection, and release with a limit of one.
 
+`--max-header-deadline-sec` defaults to 10. It limits initial HTTP protocol
+detection (after TLS handshaking, if enabled), then each HTTP/1.1 header read.
+Tests cover idle clients, incomplete HTTP/1.1 headers, partial HTTP/2 prefaces,
+subsequent requests on keep-alive connections, and HTTP/1.1 over TLS. The existing
+TLS handshake deadline remains separate. HTTP/2 support is preserved: its
+connections count toward admission, but complete HTTP/2 stream-header deadlines
+are not exposed by the current Hyper API and are not enforced by this flag.
+
 `--test fs_path` checks the filesystem serving path and reports per-operation
 timings, response preparation, and body collection without network I/O. It
 compares burst traffic with requests spaced 20 ms apart and reports a batched

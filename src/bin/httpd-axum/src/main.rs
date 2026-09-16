@@ -41,6 +41,10 @@ struct Args {
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
 
+    /// HTTP/1.1 header and initial protocol-detection deadlines, in seconds.
+    #[arg(long, default_value = "10")]
+    max_header_deadline_sec: std::num::NonZeroU32,
+
     /// Cache small file responses in memory; use --cache=off for immediate freshness.
     #[arg(long, value_enum, default_value = "on")]
     cache: CacheMode,
@@ -100,6 +104,7 @@ async fn main() {
     ));
 
     let admission = connections::ConnectionLimit::new(args.max_active_connections.get());
+    let deadline = std::time::Duration::from_secs(args.max_header_deadline_sec.get().into());
     if let Some(ssl_cert) = args.ssl_cert.as_ref() {
         rustls::crypto::ring::default_provider()
             .install_default()
@@ -113,18 +118,25 @@ async fn main() {
 
         let listener = std::net::TcpListener::bind(args.addr).unwrap();
         tracing::info!("listening on {}", listener.local_addr().unwrap());
-        axum_server::from_tcp_rustls(listener, config)
-            .map(|acceptor| acceptor.acceptor(admission))
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
+        let mut server = axum_server::from_tcp_rustls(listener, config).map(|acceptor| {
+            connections::HeaderDeadline::new(acceptor.acceptor(admission), deadline)
+        });
+        configure_headers(&mut server, deadline);
+        server.serve(app.into_make_service()).await.unwrap();
     } else {
         let listener = std::net::TcpListener::bind(args.addr).unwrap();
         tracing::info!("listening on {}", listener.local_addr().unwrap());
-        axum_server::from_tcp(listener)
-            .acceptor(admission)
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
+        let mut server = axum_server::from_tcp(listener)
+            .acceptor(connections::HeaderDeadline::new(admission, deadline));
+        configure_headers(&mut server, deadline);
+        server.serve(app.into_make_service()).await.unwrap();
     };
+}
+
+fn configure_headers<A>(server: &mut axum_server::Server<A>, deadline: std::time::Duration) {
+    server
+        .http_builder()
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(deadline);
 }

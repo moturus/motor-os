@@ -2,7 +2,7 @@ mod cache;
 mod common;
 
 use common::{request, Server};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::sync::Arc;
 
 #[cfg(target_os = "motor")]
@@ -15,6 +15,24 @@ fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
 getrandom::register_custom_getrandom!(motor_getrandom);
 
 fn main() {
+    let deadlines = Server::start(None, &["--max-header-deadline-sec", "1"]);
+    for prefix in [
+        b"".as_slice(),
+        b"GET / HTTP/1.1\r\nHost:",
+        b"PRI * HTTP/2.0\r\n",
+    ] {
+        let mut stream = deadlines.connect();
+        stream.write_all(prefix).unwrap();
+        assert_header_deadline(&mut stream);
+    }
+    let mut persistent = BufReader::new(deadlines.connect());
+    assert_eq!(request(&mut persistent, "GET", "/", "").status, 200);
+    persistent
+        .get_mut()
+        .write_all(b"GET / HTTP/1.1\r\nHost:")
+        .unwrap();
+    assert_header_deadline(&mut persistent);
+    deadlines.stop();
     let limited = Server::start(None, &["--max-active-connections", "1"]);
     let mut admitted = BufReader::new(limited.connect());
     assert_eq!(request(&mut admitted, "GET", "/", "").status, 200);
@@ -70,7 +88,15 @@ fn main() {
     assert!(logs.contains("response prepared"), "{logs}");
     assert!(logs.contains("prepare_us="), "{logs}");
 
-    let server = Server::start_tls(None, &["--max-active-connections", "1"]);
+    let server = Server::start_tls(
+        None,
+        &[
+            "--max-active-connections",
+            "1",
+            "--max-header-deadline-sec",
+            "1",
+        ],
+    );
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rustls::pki_types::CertificateDer::from(
@@ -95,9 +121,29 @@ fn main() {
     }
     assert_eq!(io.get_ref().conn.alpn_protocol(), Some(&b"http/1.1"[..]));
     assert_closed(&mut server.connect());
+    io.get_mut().write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
+    io.get_mut().flush().unwrap();
+    assert_header_deadline(&mut io);
     drop(io);
     assert!(!server.stop().contains("response prepared"));
     println!("httpd-axum HTTP, TLS, and logging tests passed");
+}
+
+fn assert_header_deadline(io: &mut impl Read) {
+    let mut bytes = Vec::new();
+    if let Err(error) = io.read_to_end(&mut bytes) {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof
+            ),
+            "{error}"
+        );
+    }
+    assert!(
+        bytes.is_empty() || bytes.starts_with(b"HTTP/1.1 408"),
+        "{bytes:?}"
+    );
 }
 
 fn assert_closed(io: &mut impl Read) {
