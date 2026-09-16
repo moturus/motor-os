@@ -969,8 +969,8 @@ claiming that other refs stayed unchanged. The guarded `fetch.rs` helper
 accepts configured remote names and checks mapped destinations before
 receiving objects; only tracking refs and tags may change. The common
 configuration now fixes `clone.rejectShallow=true`. Host library tests and
-host/Motor Clippy pass. CLI and HTTPS fixture wiring remain pending;
-these preparatory checks do not establish end-to-end acquisition.
+host/Motor Clippy pass. The subsequent CLI integration below establishes
+end-to-end acquisition.
 
 Local HTTPS fixture, preparatory implementation on 2026-09-15:
 the host-only `https-server` test target serves a fixed local repository
@@ -979,9 +979,26 @@ loopback or the VM test bridge and uses checked-in test certificates.
 Response cases cover redirect, HTTP/media-type rejection, malformed Git
 data and a stalled response for native cancellation. Host/Motor Clippy
 and formatting pass; its TLS dependencies are absent from the Motor
-production dependency closure. Runtime command validation follows with
-the CLI/test-runner integration. Evidence:
+production dependency closure. The subsequent CLI/test-runner integration
+validates it at runtime. Preparatory evidence:
 `/tmp/motor-gix-https-server-integration`.
+
+Application acquisition, reviewed on 2026-09-15:
+`clone URL DIR` and `fetch [REMOTE]` now use the common repository policy,
+mutation guard and HTTPS adapter. Clone retains its owned partial directory
+and marker on failure; status reports that marker. The component gate
+passes on host and Motor: host Git validates cloned content/index/refs and
+fetch invariance, while a native terminal interruption verifies exit 130,
+connection closure and marker retention. Host refusal cases cover an
+existing destination, external filters, unsafe fetch refspecs and invalid
+HTTP/protocol responses. The copied-worktree oracle uses Git's content/mode
+patch rather than its stat-only quiet result; both real edits and mode
+changes were checked. The HTTP error expectation checks the status contract,
+which includes curl diagnostics but not response-body text.
+Original fixture failures, their diagnoses and final passing logs/source
+identities are in `/tmp/motor-gix-acquisition-integration`.
+The full developer-image gate selects the installed `/devtools/bin/gix`;
+manual guest component runs upload the current component binary.
 
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
