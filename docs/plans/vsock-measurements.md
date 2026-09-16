@@ -66,6 +66,11 @@ streams, eight listeners and their channels. Thus the quotient per 63 streams
 also contains listener/channel cost and allocator growth. Cleanup may retain
 allocator capacity; its nonzero delta is not a count of unreclaimed streams.
 
+These recorded cleanup values follow one full-capacity cycle and its
+child-EOF barrier. The later `87eebf7e` regression repeats that cycle to prove
+immediate reuse before sampling cleanup; new cleanup values therefore have
+different provenance from this table.
+
 | VMM/profile | Before / after activation (KiB) | Activation delta (KiB) | Control / full / cleanup (KiB) | Full delta / 63 (KiB) |
 | --- | --- | --- | --- | --- |
 | QEMU debug | 39904 / 40520 | 616 | 50936 / 63388 / 51132 | 197.7 |

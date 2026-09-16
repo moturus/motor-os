@@ -64,9 +64,10 @@ fn main() {
 Use `VsockStream::connect_reserved(reservation, VsockAddr { cid: 2, port })`
 for an outgoing connection. `try_read`, `read_future`, `readable`,
 `try_write`, `write_future`, and `writable` provide nonblocking and async I/O.
-`shutdown_async(Shutdown::{Read, Write, Both})` is directional. An accepted
-write prefix belongs to sys-io and drains before SEND shutdown or Drop; it is
-not proof that the peer consumed the bytes.
+`shutdown_async` accepts `Shutdown::Read`, `Shutdown::Write`, or
+`Shutdown::Both`. Writes report local acceptance, not peer receipt.
+During ordinary teardown, the driven channel publishes queued TX before
+SEND shutdown or close; Drop itself does not wait.
 
 `availability(&client)` checks authorization and discovery without activating
 the device or reserving a socket. `local_cid(&client)` activates lazily and

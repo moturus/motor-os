@@ -1,6 +1,7 @@
 # Virtio-vsock implementation plan
 
-Status: v2.9. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.9, implemented and fully gated on 2026-09-16.
+The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
@@ -16,15 +17,15 @@ Q21 is deferred in D20: defending against buggy or malicious VMMs is out of
 scope, with the BAR-boundary concern recorded in `future-work.md`.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
-M1 foundations have passed their repeated full gate. M2 integration is
-underway, with progress recorded below. Q23 is settled in D21: discovery
+M1 foundations and M2 integration have passed their complete milestone
+gates, with evidence recorded below. Q23 is settled in D21: discovery
 checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
 (`NotFound` if absent), without activating the device.
 Q24–Q25 are settled in D22: wrong-state packets and payloads exceeding
 advertised credit reset only their identified connection.
 Q26 is settled in D23: fix the preexisting shared NET subchannel validation
 gap with guest regressions, then continue vsock integration.
-The first outgoing vertical is implemented and incrementally gated. Q27 is
+Outgoing and incoming streams are implemented and fully gated. Q27 is
 resolved by diagnosis in D24: the failing test assumed transparent
 Unix-socket half-close, and the
 same test fails against Linux. Correct the Motor test protocol, keep all
@@ -40,10 +41,10 @@ and fix channel ownership without a cancellation protocol or new IPC API.
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
 the existing block and network drivers' structure and reuse their virtqueue
-implementation and networking IPC machinery. Implementation is approved and
-proceeds in small reviewed commits; the full repeated gate belongs at the
-two approved milestones, not every commit (D13).
-The explicitly requested D27 kernel gate is an exception to that grouping.
+implementation and networking IPC machinery. Implementation was completed
+in small reviewed commits, with repeated full gates at the two approved
+milestones (D13). The separate D27 kernel patch passed its explicitly
+requested full gate before commit.
 
 ## Implementation progress
 
@@ -1583,7 +1584,35 @@ The final close/reuse and repeated-capacity fixtures are implemented:
   incremental checks are complete; freeze this tree for M2's repeated full
   gate before claiming completion.
 
-The progress entries above describe behavior at each incremental commit.
+M2's complete-integration gate passed on 2026-09-16 at `87eebf7e`:
+
+| VMM | Debug build/full-test cycles (seconds) | Release build/full-test cycles (seconds) |
+| --- | --- | --- |
+| QEMU | 743, 744, 741 | 549, 517, 522 |
+| Cloud Hypervisor | 892 | 600 |
+| Firecracker | 686 | 506 |
+
+- All ten standard `src/tests/full-test.sh` runs exited successfully,
+  including all twenty vsock peer actions and discovery in each run.
+  The existing OS, queue/component, native-network, and cross-VMM boot
+  checks remained enabled. Firecracker selected the explicit `raw.img`
+  target in both profiles; no developer-image Firecracker run was added.
+- No gate run failed or was retried, and no timeout or assertion changed.
+  All ten also passed the 32-episode kernel exit-race regression; no nonzero
+  active-thread-drop diagnostic recurred. D27's earlier, separate three
+  debug, three release, and one release developer run are not counted here.
+- The tested commit and source hashes are retained in
+  `/tmp/vsock-m2-gate.19DdSC/`, alongside every build/full-test log and
+  `gate.log`. All 696 recorded source hashes matched after the gate;
+  starting and ending worktrees were clean. The completion update after
+  this frozen gate changes documentation only.
+- Reset coverage remains the component/queue fixtures described in D26,
+  not live reset, snapshot, or migration testing. The native API and
+  measurement guides retain their ownership and measurement limitations.
+  All approved implementation stages and both milestones are complete.
+
+The earlier progress entries describe behavior at each incremental commit;
+their pending-work statements are historical, not current blockers.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
 
@@ -2395,8 +2424,8 @@ with two repeated milestones:
   stages 7–15's state machines, shared networking IPC, native API, lazy
   activation, cleanup, and all three VMMs. Full gates include the complete
   new vsock phase by this milestone. Q22 changes only the dependency boundary,
-  not the tests required or the gate counts. M1 is complete as recorded above;
-  M2 remains pending.
+  not the tests required or the gate counts. Both milestones are complete
+  as recorded in the implementation progress above.
 
 Each small implementation commit must build and run its affected guest
 systest cases in debug and release, plus directly affected existing queue,
@@ -2785,8 +2814,8 @@ affected guest tests in both profiles; bring required test plumbing forward.
 No case is dropped or counted as covered by a weaker fixture. Do not skip a
 VMM, weaken assertions, or add retries to save gate time. A failed milestone
 stops progression for diagnosis; preserve the original failure even if a
-later diagnostic run passes. M1 is complete as recorded in the progress
-section; M2 remains pending.
+later diagnostic run passes. Both milestones are complete as recorded in
+the progress section.
 
 ### D14. Error mapping (approved)
 
@@ -3127,7 +3156,7 @@ pre-activation setup, without proving general backend reset completion:
   that arbitrary outstanding DMA can be discarded.
 
 These are source-based expectations, not live one-read measurements. The
-planned vsock transport-reset event path keeps existing queues and DMA
+vsock transport-reset event path keeps existing queues and DMA
 owners solely for safe reclamation/retention; it does not reset/reinitialize
 the PCI device or attempt transport recovery (D26).
 
@@ -3147,9 +3176,9 @@ established stream reports `ConnectionReset` after previously validated RX
 has drained; unrelated streams and the device remain operational. Do not
 answer an incoming RST with another RST. The user approved this policy on
 2026-09-15. The Stage 7 connection helper now returns the reset action and
-retains the terminal cause, with source-included guest coverage. Executing
-that action through the real runtime/driver and notifying native clients
-remain M2 integration work; helper tests do not cover those boundaries.
+retains the terminal cause, with source-included guest coverage. The
+runtime/driver must execute that action and notify native clients; helper
+tests alone do not cover those integration boundaries.
 
 ### D20. VMM defensive hardening (Q21, deferred)
 
@@ -3294,7 +3323,7 @@ Keep D10/D14 unchanged. Correct our guest/host fixtures as follows:
 No VMM/backend source, installed binary, production shutdown flags, deadlines,
 or gate counts change. Linux is a one-off diagnostic reference, not a regular
 test dependency. This diagnosis corrects a false test premise; the separate
-live gates are recorded above. It does not waive the remaining M2 acceptance
+live gates are recorded above. It does not waive the other M2 acceptance
 requirements.
 
 The same rule applies to an absent host UDS port: absence is not proof that
