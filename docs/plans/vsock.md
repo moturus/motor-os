@@ -881,6 +881,21 @@ M2's shutdown/close/state-notification IPC codecs are implemented and reviewed:
   `/tmp/vsock-control-codec-gate.9IyTY2/`. Functional shutdown/drain/close
   behavior still requires the runtime/native stream integration.
 
+M2's shared stream page codecs are implemented and parent-reviewed:
+
+- TCP and vsock use the same single-page TX/RX encoder and multi-page TX
+  encoder/decoder. TCP's public functions, wire layout, limits, and validation
+  behavior remain unchanged. The vsock decoder additionally checks its own
+  command before recovering pages; no second page-ownership implementation
+  or transport-specific allocator was added.
+- Ordinary native-net fixtures allocate real IPC pages and verify single-
+  and multi-page fields, contents, ownership recovery, and invalid commands
+  and lengths. Debug/release base-image/systest/mio builds, complete
+  native-net/mio guest suites, formatting, and targeted Clippy passed with
+  the preexisting warnings unchanged. Evidence:
+  `/tmp/vsock-page-codec-gate.x8XejM/`. Live page delivery still requires the
+  outgoing runtime/native stream integration.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

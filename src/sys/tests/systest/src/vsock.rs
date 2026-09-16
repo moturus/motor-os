@@ -7,6 +7,7 @@ pub fn run_wire_tests() {
     test_connect_response_codec();
     test_control_codec();
     test_state_change_codec();
+    test_page_codec();
     println!("vsock::run_wire_tests PASS");
 }
 
@@ -274,4 +275,77 @@ fn test_state_change_codec() {
         api_vsock::decode_state_changed(&error).err(),
         Some(moto_rt::Error::ConnectionReset)
     );
+}
+
+fn test_page_codec() {
+    use moto_ipc::io_channel::{IoPage, PAGE_SIZE};
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (sender, _receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+
+        let page = sender.alloc_page(u64::MAX).await.unwrap();
+        page.bytes_mut()[..4].copy_from_slice(b"tx-1");
+        let tx = api_vsock::stream_tx_msg(0x22, page, 4, 0x1234);
+        assert_eq!(tx.command, NetCmd::VsockStreamTx as u16);
+        assert_eq!(tx.handle, 0x22);
+        assert_eq!(tx.flags, 0);
+        assert_eq!(tx.payload.args_64()[1], 4);
+        assert_eq!(tx.payload.args_64()[2], 0x1234);
+        let page_id = tx.payload.shared_pages()[0];
+        let page = sender.get_page(page_id).unwrap();
+        assert_eq!(&page.bytes()[..4], b"tx-1");
+        drop(page);
+
+        let page = sender.alloc_page(u64::MAX).await.unwrap();
+        page.bytes_mut()[0] = 0x5a;
+        let rx = api_vsock::stream_rx_msg(0x33, page, 1, 0x5678);
+        assert_eq!(rx.command, NetCmd::VsockStreamRx as u16);
+        assert_eq!(rx.handle, 0x33);
+        assert_eq!(rx.flags, 0);
+        assert_eq!(rx.payload.args_64()[1], 1);
+        assert_eq!(rx.payload.args_64()[2], 0x5678);
+        let page = sender.get_page(rx.payload.shared_pages()[0]).unwrap();
+        assert_eq!(page.bytes()[0], 0x5a);
+        drop(page);
+
+        assert_eq!(api_vsock::STREAM_TX_MAX_PAGES, 8);
+        assert_eq!(api_vsock::STREAM_TX_MAX_BYTES, 8 * PAGE_SIZE);
+        let pages = sender.alloc_pages(2, u64::MAX).await.unwrap();
+        pages[0].bytes_mut()[0] = 0xa1;
+        pages[1].bytes_mut()[0] = 0xb2;
+        let page_ids = pages.into_iter().map(IoPage::into_u16).collect::<Vec<_>>();
+        let total_len = (PAGE_SIZE + 17) as u32;
+        let multi =
+            api_vsock::stream_tx_multi_msg(0x44, &page_ids, total_len, 0x8877_6655_4433_2211);
+        assert_eq!(multi.command, NetCmd::VsockStreamTx as u16);
+        assert_eq!(multi.handle, 0x44);
+        assert_eq!(multi.flags, total_len);
+        assert_eq!(&multi.payload.shared_pages()[..2], page_ids.as_slice());
+        assert!(multi.payload.shared_pages()[2..8].iter().all(|id| *id == 0));
+        assert_eq!(multi.payload.args_64()[2], 0x8877_6655_4433_2211);
+
+        let mut invalid = multi;
+        invalid.command = NetCmd::TcpStreamTx as u16;
+        assert_eq!(
+            api_vsock::stream_tx_multi_decode(&invalid, &sender).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+        invalid.command = NetCmd::VsockStreamTx as u16;
+        invalid.flags = 0;
+        assert_eq!(
+            api_vsock::stream_tx_multi_decode(&invalid, &sender).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+        invalid.flags = api_vsock::STREAM_TX_MAX_BYTES as u32 + 1;
+        assert_eq!(
+            api_vsock::stream_tx_multi_decode(&invalid, &sender).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+
+        let (pages, decoded_len) = api_vsock::stream_tx_multi_decode(&multi, &sender).unwrap();
+        assert_eq!(decoded_len, total_len);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].bytes()[0], 0xa1);
+        assert_eq!(pages[1].bytes()[0], 0xb2);
+    });
 }

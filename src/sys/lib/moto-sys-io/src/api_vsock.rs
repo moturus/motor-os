@@ -4,6 +4,8 @@ use moto_ipc::io_channel;
 
 use crate::api_net::{self, NetCmd};
 
+extern crate alloc;
+
 pub const SHUTDOWN_RECEIVE: u32 = 1;
 pub const SHUTDOWN_SEND: u32 = 2;
 const SHUTDOWN_BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
@@ -12,6 +14,10 @@ pub const STATE_READ_CLOSED: u32 = 1;
 pub const STATE_WRITE_CLOSED: u32 = 2;
 pub const STATE_TERMINAL: u32 = 4;
 const STATE_ALL: u32 = STATE_READ_CLOSED | STATE_WRITE_CLOSED | STATE_TERMINAL;
+
+/// Vsock deliberately reuses the established stream page layout and bounds.
+pub const STREAM_TX_MAX_PAGES: usize = api_net::TCP_TX_MAX_PAGES;
+pub const STREAM_TX_MAX_BYTES: usize = api_net::TCP_TX_MAX_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VsockAddr {
@@ -222,6 +228,43 @@ pub fn decode_state_changed(msg: &io_channel::Msg) -> moto_rt::Result<StreamStat
         flags: msg.flags,
         cause,
     })
+}
+
+pub fn stream_tx_msg(
+    handle: u64,
+    io_page: io_channel::IoPage,
+    sz: usize,
+    timestamp: u64,
+) -> io_channel::Msg {
+    api_net::stream_page_msg(NetCmd::VsockStreamTx, handle, io_page, sz, timestamp)
+}
+
+pub fn stream_tx_multi_msg(
+    handle: u64,
+    pages: &[u16],
+    total_len: u32,
+    timestamp: u64,
+) -> io_channel::Msg {
+    api_net::stream_tx_multi_msg(NetCmd::VsockStreamTx, handle, pages, total_len, timestamp)
+}
+
+pub fn stream_tx_multi_decode(
+    msg: &io_channel::Msg,
+    sender: &io_channel::Sender,
+) -> moto_rt::Result<(alloc::vec::Vec<io_channel::IoPage>, u32)> {
+    if msg.command != NetCmd::VsockStreamTx as u16 {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    api_net::stream_tx_multi_decode(msg, sender)
+}
+
+pub fn stream_rx_msg(
+    handle: u64,
+    io_page: io_channel::IoPage,
+    sz: usize,
+    rx_seq: u64,
+) -> io_channel::Msg {
+    api_net::stream_page_msg(NetCmd::VsockStreamRx, handle, io_page, sz, rx_seq)
 }
 
 // This is syntactic validation only. sys-io decides which non-host CIDs the

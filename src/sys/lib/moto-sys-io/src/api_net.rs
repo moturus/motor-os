@@ -263,12 +263,22 @@ pub fn tcp_stream_tx_msg(
     sz: usize,
     timestamp: u64,
 ) -> io_channel::Msg {
+    stream_page_msg(NetCmd::TcpStreamTx, handle, io_page, sz, timestamp)
+}
+
+pub(crate) fn stream_page_msg(
+    command: NetCmd,
+    handle: u64,
+    io_page: io_channel::IoPage,
+    sz: usize,
+    last_arg: u64,
+) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = NetCmd::TcpStreamTx as u16;
+    msg.command = command as u16;
     msg.handle = handle;
     msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
-    msg.payload.args_64_mut()[2] = timestamp;
+    msg.payload.args_64_mut()[2] = last_arg;
 
     msg
 }
@@ -292,6 +302,16 @@ pub fn tcp_stream_tx_multi_msg(
     total_len: u32,
     timestamp: u64,
 ) -> io_channel::Msg {
+    stream_tx_multi_msg(NetCmd::TcpStreamTx, handle, pages, total_len, timestamp)
+}
+
+pub(crate) fn stream_tx_multi_msg(
+    command: NetCmd,
+    handle: u64,
+    pages: &[u16],
+    total_len: u32,
+    timestamp: u64,
+) -> io_channel::Msg {
     debug_assert!(total_len > 0 && (total_len as usize) <= TCP_TX_MAX_BYTES);
     debug_assert_eq!(
         pages.len(),
@@ -299,7 +319,7 @@ pub fn tcp_stream_tx_multi_msg(
     );
 
     let mut msg = io_channel::Msg::new();
-    msg.command = NetCmd::TcpStreamTx as u16;
+    msg.command = command as u16;
     msg.handle = handle;
     msg.flags = total_len;
     msg.payload.shared_pages_mut()[..pages.len()].copy_from_slice(pages);
@@ -311,6 +331,13 @@ pub fn tcp_stream_tx_multi_msg(
 /// Decode a multi-page TX request (`msg.flags != 0`): the data pages and the
 /// total length. Page i holds bytes `[i * PAGE_SIZE..]` of the payload.
 pub fn tcp_stream_tx_multi_decode(
+    msg: &io_channel::Msg,
+    sender: &io_channel::Sender,
+) -> moto_rt::Result<(alloc::vec::Vec<io_channel::IoPage>, u32)> {
+    stream_tx_multi_decode(msg, sender)
+}
+
+pub(crate) fn stream_tx_multi_decode(
     msg: &io_channel::Msg,
     sender: &io_channel::Sender,
 ) -> moto_rt::Result<(alloc::vec::Vec<io_channel::IoPage>, u32)> {
@@ -339,14 +366,7 @@ pub fn tcp_stream_rx_msg(
     sz: usize,
     rx_seq: u64,
 ) -> io_channel::Msg {
-    let mut msg = io_channel::Msg::new();
-    msg.command = NetCmd::TcpStreamRx as u16;
-    msg.handle = handle;
-    msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
-    msg.payload.args_64_mut()[1] = sz as u64;
-    msg.payload.args_64_mut()[2] = rx_seq;
-
-    msg
+    stream_page_msg(NetCmd::TcpStreamRx, handle, io_page, sz, rx_seq)
 }
 
 // Note: there is deliberately no multi-page RX mirroring the multi-page TX
