@@ -1,10 +1,21 @@
 #!/bin/sh
 
 WD="$(dirname "$0")"
+
+# Firecracker shares moto-tap and the standard guest address with QEMU and
+# Cloud Hypervisor, so all three runners use the same host-wide lock.
+VM_LOCK="${MOTO_QEMU_LOCK:-/tmp/motor-os-qemu.$(id -u).lock}"
+exec 9>"$VM_LOCK"
+if ! flock -n 9; then
+  echo "run-fc: another Motor OS VM owns $VM_LOCK" >&2
+  exit 1
+fi
+
 IMAGE="${MOTO_IMAGE:-motor-os-base.img}"
 SMP="${MOTO_SMP:-2}"
 MEMORY_MIB="${MOTO_MEMORY_MIB:-64}"
 RUNTIME_DIR="${MOTO_FC_RUNTIME_DIR:-/tmp}"
+VSOCK_UDS="${MOTO_FC_VSOCK_UDS:-}"
 case "$IMAGE" in
   "" | *[!A-Za-z0-9._-]*)
     echo "run-fc: invalid image filename '$IMAGE'" >&2
@@ -47,6 +58,21 @@ case "$RUNTIME_DIR" in
     exit 2
     ;;
 esac
+if [ -n "$VSOCK_UDS" ]; then
+  case "$VSOCK_UDS" in
+    /*) ;;
+    *)
+      echo "run-fc: MOTO_FC_VSOCK_UDS must be an absolute path" >&2
+      exit 2
+      ;;
+  esac
+  case "$VSOCK_UDS" in
+    *[!A-Za-z0-9_./-]*)
+      echo "run-fc: invalid MOTO_FC_VSOCK_UDS '$VSOCK_UDS'" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 SOCKET="$RUNTIME_DIR/firecracker.socket"
 LOG="$RUNTIME_DIR/firecracker.log"
@@ -56,6 +82,14 @@ rm -f "$SOCKET" "$LOG"
 touch "$LOG"
 # Firecracker strictly requires absolute paths in its JSON configuration
 ABS_WD="$(cd "$WD" && pwd)"
+VSOCK_CONFIG=""
+if [ -n "$VSOCK_UDS" ]; then
+  VSOCK_CONFIG="  \"vsock\": {
+    \"guest_cid\": 3,
+    \"uds_path\": \"$VSOCK_UDS\"
+  },
+"
+fi
 
 cat <<EOF > "$CONFIG"
 {
@@ -83,7 +117,7 @@ cat <<EOF > "$CONFIG"
     "vcpu_count": ${SMP},
     "mem_size_mib": ${MEMORY_MIB}
   },
-  "logger": {
+${VSOCK_CONFIG}  "logger": {
     "log_path": "${LOG}",
     "level": "Debug",
     "show_level": true,

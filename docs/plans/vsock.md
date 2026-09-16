@@ -768,6 +768,21 @@ M2's per-connection receive transitions are implemented and parent-reviewed:
   API, or peer interoperability tests. The common runtime must execute the
   returned actions; local shutdown/cleanup and M2 integration remain.
 
+Firecracker's opt-in vsock runner configuration is implemented and reviewed:
+
+- `MOTO_FC_VSOCK_UDS` adds guest CID 3 and an absolute UDS path; an unset or
+  empty value preserves the existing no-vsock configuration. Invalid paths
+  fail before launching the VMM. The runner now holds the same host-wide VM
+  lock as QEMU and Cloud Hypervisor across `exec`.
+- The existing full-test-wired image-format regression checks absent/present
+  JSON, invalid paths, conflicting locks, and lock lifetime in the executed
+  VMM. Shell syntax and that regression passed. Actual Firecracker 1.15.1
+  guests passed capability-gated discovery with vsock present and absent,
+  plus scattered filesystem writes, in debug and release with strict
+  owned-process cleanup. Evidence: `/tmp/vsock-fc-runner-gate.VbSdmM/`.
+- This is runner/discovery coverage, not device activation or peer traffic.
+  Selected-VMM full-test wiring and full M2 coverage remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

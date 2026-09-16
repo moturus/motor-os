@@ -30,6 +30,13 @@ mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/fake-vmm" <<'EOF'
 #!/bin/sh
 : "${MOTOR_VM_ARG_LOG:?}"
+if [ -n "${MOTOR_VM_EXPECT_LOCK:-}" ]; then
+  exec 7> "$MOTOR_VM_EXPECT_LOCK"
+  if flock -n 7; then
+    echo "fake-vmm: runner lock was not held across exec" >&2
+    exit 1
+  fi
+fi
 printf '%s\n' "$@" > "$MOTOR_VM_ARG_LOG"
 EOF
 chmod +x "$FAKE_BIN/fake-vmm"
@@ -64,6 +71,13 @@ run_chv() {
     >/dev/null 2>&1
 }
 
+run_fc() {
+  PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="${MOTO_QEMU_LOCK:-$TEST_ROOT/qemu.lock}" \
+    MOTOR_VM_EXPECT_LOCK="${MOTO_QEMU_LOCK:-$TEST_ROOT/qemu.lock}" \
+    MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" "$@"
+}
+
 run_qemu
 assert_arg "file=$VM_DIR/motor-os.qcow2,if=none,id=drive0,format=qcow2"
 
@@ -85,18 +99,51 @@ PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
   >/dev/null 2>&1
 assert_arg "file=$VM_DIR/motor-os-dev.qcow2,if=none,id=drive0,format=qcow2"
 
-PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
-  MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" >/dev/null 2>&1
+MOTO_FC_VSOCK_UDS='' run_fc >/dev/null 2>&1
 grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os-base.img"' \
   "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw base image"
+if grep -Fq '"vsock"' "$TEST_ROOT/fc/fc-config.json"; then
+  fail "Firecracker enabled vsock without MOTO_FC_VSOCK_UDS"
+fi
 
-PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" MOTO_IMAGE=motor-os.img \
-  MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" >/dev/null 2>&1
+MOTO_IMAGE=motor-os.img MOTO_FC_VSOCK_UDS='' run_fc >/dev/null 2>&1
 grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os.img"' \
   "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw standard image"
 
-if MOTO_IMAGE=motor-os.qcow2 MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" \
-  "$VM_DIR/run-fc.sh" > /dev/null 2> "$ERROR_LOG"; then
+MOTO_FC_VSOCK_UDS="$TEST_ROOT/fc/vsock" run_fc >/dev/null 2>&1
+grep -Fq '"guest_cid": 3' "$TEST_ROOT/fc/fc-config.json" ||
+  fail "Firecracker vsock config lacks guest CID 3"
+grep -Fq '"uds_path": "'"$TEST_ROOT"'/fc/vsock"' \
+  "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker vsock config lacks its UDS path"
+
+rm -f "$ARG_LOG"
+if MOTO_FC_VSOCK_UDS=relative/path run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker accepted a relative vsock UDS path"
+fi
+grep -Fq "MOTO_FC_VSOCK_UDS must be an absolute path" "$ERROR_LOG" ||
+  fail "Firecracker did not explain its invalid vsock UDS path"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched with an invalid vsock UDS path"
+
+rm -f "$ARG_LOG"
+if MOTO_FC_VSOCK_UDS="$TEST_ROOT/fc/vsock bad" run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker accepted an unsafe vsock UDS path"
+fi
+grep -Fq "invalid MOTO_FC_VSOCK_UDS" "$ERROR_LOG" ||
+  fail "Firecracker did not explain its unsafe vsock UDS path"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched with an unsafe vsock UDS path"
+
+exec 8> "$TEST_ROOT/common-vm.lock"
+flock -n 8
+rm -f "$ARG_LOG"
+if MOTO_QEMU_LOCK="$TEST_ROOT/common-vm.lock" run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker ignored the common Motor OS VM lock"
+fi
+grep -Fq "another Motor OS VM owns $TEST_ROOT/common-vm.lock" "$ERROR_LOG" ||
+  fail "Firecracker did not explain the common VM lock conflict"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched while the common VM lock was held"
+exec 8>&-
+
+if MOTO_IMAGE=motor-os.qcow2 run_fc > /dev/null 2> "$ERROR_LOG"; then
   fail "Firecracker accepted a qcow2 image"
 fi
 grep -Fq "Firecracker requires a raw image" "$ERROR_LOG" ||
