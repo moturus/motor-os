@@ -1333,6 +1333,27 @@ M2's block/network/vsock coexistence acceptance case is implemented:
   Evidence: `/tmp/vsock-coexistence-gate.f5bPHf/`. Stage 15 measurements and
   the remaining M2 work are not complete.
 
+D16's developer-suite selector and strict teardown are implemented:
+
+- QEMU/CHV selection reaches both developer VM phases and the candidate
+  wrapper. Keep the developer qcow2 image, existing CPU/memory overrides,
+  8 GiB/4 GiB defaults, and QEMU-only arguments isolated. Reject FC before
+  builds or launches; the separate Lorry product gate remains unchanged.
+- Reuse the existing strict owned-VMM teardown helper. Preserve original
+  failures, fail on bad teardown, and print PASS only after reaping. The
+  existing memory-contract regression covers selection, defaults/overrides,
+  early rejection, failure propagation, and teardown ordering.
+- `full-test-dev.sh --release --vmm qemu` and `--vmm chv` both passed,
+  including native source builds and Lorry's complete product gate. Shell,
+  argument-rejection, and memory-contract checks passed. No debug developer
+  run, longer timeout, or VMM change was used. Evidence:
+  `/tmp/vsock-d16-developer-gate.NEOmKO/`. Its temporary QEMU results collector
+  rejected a CR-prefixed PASS line; correcting the exact-line parser verified
+  the original successful run without rerunning tests (`collector-diagnosis.md`).
+- These functional passes do not resolve the preexisting kernel thread
+  rollback leak diagnosed during the runs (Q31). Kernel changes await scope
+  approval. Q28–Q30 and the complete M2 gate also remain outstanding.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
