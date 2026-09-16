@@ -475,6 +475,7 @@ async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
     let listener = crate::net_driver::RawVsockListener::bind(INCOMING_PORT).await;
     write_frame(stream, LISTENER_READY).await;
     expect_frame(stream, BACKLOG_READY).await;
+    listener.accept_early(INCOMING_PORT).await;
 
     if drop_owner_channel {
         // The peer acknowledges only after every queued child observes EOF,
@@ -526,6 +527,8 @@ async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
     const FAILED_PORT: u32 = 80_003;
 
     let baseline = client.reservations();
+
+    crate::net_driver::test_raw_vsock_pending_accepts().await;
 
     let unpolled = VsockListener::bind_reserved(client.try_reserve().unwrap(), CANCEL_PORT);
     drop(unpolled);

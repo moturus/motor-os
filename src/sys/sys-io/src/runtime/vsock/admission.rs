@@ -1,5 +1,5 @@
 const MAX_STREAMS: usize = 64;
-const MAX_LISTENERS: usize = 32;
+pub(crate) const MAX_LISTENERS: usize = 32;
 const EPHEMERAL_START: u32 = 49_152;
 const LAST_PORT: u32 = u32::MAX - 1;
 

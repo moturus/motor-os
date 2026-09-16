@@ -592,6 +592,7 @@ impl NetRuntime {
         // Then remove sockets. Client death cancels any pending linger and
         // makes every active TCP socket take the immediate reclaim path.
         let socket_cnt = {
+            self.discard_vsock_accepts_from(conn_id);
             let mut socket_ids = {
                 let mut inner = self.inner.borrow_mut();
                 let client = inner.clients.get_mut(&conn_id).unwrap();
@@ -625,17 +626,22 @@ impl NetRuntime {
 
                     socket.map(|moto_socket| {
                         if moto_socket.borrow().is_tcp() {
-                            (Some(moto_socket), false)
+                            (Some(moto_socket), false, false)
                         } else if moto_socket.borrow().is_vsock() {
-                            (Some(moto_socket), true)
+                            (Some(moto_socket), true, false)
+                        } else if moto_socket.borrow().is_vsock_listener() {
+                            (Some(moto_socket), false, true)
                         } else {
                             assert!(self.inner.borrow_mut().sockets.remove(socket_id).is_some());
-                            (None, false)
+                            (None, false, false)
                         }
                     })
                 };
-                if let Some((Some(moto_socket), is_vsock)) = socket_kind {
-                    if is_vsock {
+                if let Some((Some(moto_socket), is_vsock, is_vsock_listener)) = socket_kind {
+                    if is_vsock_listener {
+                        drop(moto_socket);
+                        let _ = self.remove_vsock_listener(*socket_id, conn_id);
+                    } else if is_vsock {
                         self.start_vsock_cleanup(&moto_socket);
                     } else {
                         MotoSocket::reclaim_tcp_socket(moto_socket).await;
@@ -800,6 +806,7 @@ impl NetRuntime {
                 | NetCmd::VsockStreamShutdown
                 | NetCmd::VsockStreamClose
                 | NetCmd::VsockListenerBind
+                | NetCmd::VsockListenerAccept
                 | NetCmd::VsockListenerDrop
         ) {
             self.on_vsock_msg(msg, sender).await;

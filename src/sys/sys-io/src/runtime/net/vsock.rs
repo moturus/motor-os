@@ -18,7 +18,9 @@ use virtio_async::vsock::{
 use super::NetRuntime;
 use super::socket::{MotoSocket, SocketBase};
 use crate::runtime::channel_budget::ClientSender;
-use crate::runtime::vsock::admission::{AdmissionError, ConnectionTuple, TupleIndex, VsockAddr};
+use crate::runtime::vsock::admission::{
+    AdmissionError, ConnectionTuple, MAX_LISTENERS, TupleIndex, VsockAddr,
+};
 use crate::runtime::vsock::connection::{Connection, ReceiveOutcome, TerminalCause};
 use crate::runtime::vsock::listener::ListenerState;
 
@@ -26,6 +28,11 @@ const MAX_PENDING_CONTROLS: usize = 64;
 const MAX_PENDING_TX_PAGES: usize = 16;
 const MAX_STREAMS: usize = 64;
 const PUMP_QUANTUM: usize = 32;
+
+pub(super) struct PendingAccept {
+    client: SysHandle,
+    ready: moto_async::oneshot::Sender<Result<u64, moto_rt::Error>>,
+}
 
 // Keep the discovered raw device inline: boxing it would allocate on the
 // dormant boot path solely to shrink the lazily activated variants.
@@ -297,7 +304,7 @@ pub(super) fn on_socket_drop(base: &mut SocketBase, state: &mut VsockSocketState
     assert!(removed_again.is_none());
 }
 
-pub(super) fn on_listener_drop(base: &mut SocketBase, listener: &mut ListenerState) {
+pub(super) fn on_listener_drop(base: &mut SocketBase, listener: &mut ListenerState<PendingAccept>) {
     assert!(
         base.runtime()
             .inner
@@ -307,7 +314,26 @@ pub(super) fn on_listener_drop(base: &mut SocketBase, listener: &mut ListenerSta
             .remove_listener(base.socket_id())
             .is_some()
     );
-    while let Some(socket_id) = listener.pop() {
+    while listener.pop().is_some() {}
+    // A matched child leaves the FIFO, but retains listener_id until its
+    // accept response is published.
+    let children = {
+        let inner = base.runtime().inner.borrow();
+        let mut children: [Option<u64>; MAX_STREAMS] = std::array::from_fn(|_| None);
+        let mut next = 0;
+        for socket_id in inner.vsock.tuples.stream_ids() {
+            let socket = inner
+                .sockets
+                .get(&socket_id)
+                .expect("vsock tuple index has no common socket");
+            if socket.borrow().unwrap_vsock().listener_id == Some(base.socket_id()) {
+                children[next] = Some(socket_id);
+                next += 1;
+            }
+        }
+        children
+    };
+    for socket_id in children.into_iter().flatten() {
         base.runtime().reset_unaccepted(socket_id);
     }
 }
@@ -393,6 +419,7 @@ impl NetRuntime {
                 NetCmd::VsockStreamShutdown => self.vsock_shutdown(msg, &sender).await,
                 NetCmd::VsockStreamClose => self.vsock_close(msg, &sender),
                 NetCmd::VsockListenerBind => self.vsock_listener_bind(msg, &sender).await,
+                NetCmd::VsockListenerAccept => self.vsock_listener_accept(msg, &sender).await,
                 NetCmd::VsockListenerDrop => self.vsock_listener_drop(msg, &sender).await,
                 _ => unreachable!(),
             },
@@ -427,7 +454,7 @@ impl NetRuntime {
     ) -> Result<(), moto_rt::Error> {
         let requested_port = api_vsock::decode_listener_bind_request(&request)?;
         let driver = self.activate_vsock()?;
-        let listener = ListenerState::new().map_err(map_allocation_error)?;
+        let listener = ListenerState::<PendingAccept>::new().map_err(map_allocation_error)?;
         let local_cid = driver.guest_cid();
         let (socket_id, response) = {
             let mut inner = self.inner.borrow_mut();
@@ -460,6 +487,54 @@ impl NetRuntime {
         Ok(())
     }
 
+    async fn vsock_listener_accept(
+        &self,
+        request: io_channel::Msg,
+        sender: &ClientSender,
+    ) -> Result<(), moto_rt::Error> {
+        let decoded = api_vsock::decode_listener_accept_request(&request)?;
+        let listener = self
+            .inner
+            .borrow()
+            .sockets
+            .get(&request.handle)
+            .cloned()
+            .ok_or(moto_rt::Error::NotFound)?;
+        {
+            let listener = listener.borrow();
+            if !listener.is_vsock_listener()
+                || !same_process(listener.sender().remote_handle(), sender.remote_handle())
+            {
+                return Err(moto_rt::Error::NotFound);
+            }
+        }
+        let socket_id = { listener.borrow_mut().unwrap_vsock_listener_mut().pop() };
+        let wait = if socket_id.is_none() {
+            let (ready, wait) = moto_async::oneshot();
+            let enqueue_result = {
+                let mut listener = listener.borrow_mut();
+                listener
+                    .unwrap_vsock_listener_mut()
+                    .enqueue_accept(PendingAccept {
+                        client: sender.remote_handle(),
+                        ready,
+                    })
+            };
+            enqueue_result.map_err(|()| moto_rt::Error::OutOfMemory)?;
+            Some(wait)
+        } else {
+            None
+        };
+        drop(listener);
+        let socket_id = match (socket_id, wait) {
+            (Some(socket_id), None) => socket_id,
+            (None, Some(wait)) => wait.await.map_err(|_| moto_rt::Error::NotConnected)??,
+            _ => unreachable!(),
+        };
+        self.vsock_accept_task(socket_id, request, sender, decoded.subchannel_mask)
+            .await
+    }
+
     async fn vsock_listener_drop(
         &self,
         mut request: io_channel::Msg,
@@ -474,12 +549,12 @@ impl NetRuntime {
         Ok(())
     }
 
-    fn remove_vsock_listener(
+    pub(super) fn remove_vsock_listener(
         &self,
         socket_id: u64,
         client_handle: SysHandle,
     ) -> Result<(), moto_rt::Error> {
-        let socket = {
+        let (socket, mut accepts) = {
             let mut inner = self.inner.borrow_mut();
             let owned = inner.sockets.get(&socket_id).is_some_and(|socket| {
                 let socket = socket.borrow();
@@ -492,10 +567,43 @@ impl NetRuntime {
             if let Some(client) = inner.clients.get_mut(&client_handle) {
                 client.sockets.remove(&socket_id);
             }
-            socket
+            let accepts = socket
+                .borrow_mut()
+                .unwrap_vsock_listener_mut()
+                .take_accepts();
+            (socket, accepts)
         };
         drop(socket);
+        while let Some(accept) = accepts.pop_front() {
+            let _ = accept.ready.send(Err(moto_rt::Error::NotConnected));
+        }
         Ok(())
+    }
+
+    pub(super) fn discard_vsock_accepts_from(&self, client: SysHandle) {
+        let listeners = {
+            let inner = self.inner.borrow();
+            let mut listeners: [Option<Rc<RefCell<MotoSocket>>>; MAX_LISTENERS] =
+                std::array::from_fn(|_| None);
+            for (slot, listener) in listeners.iter_mut().zip(
+                inner
+                    .sockets
+                    .values()
+                    .filter(|socket| socket.borrow().is_vsock_listener()),
+            ) {
+                *slot = Some(listener.clone());
+            }
+            listeners
+        };
+        for listener in listeners.into_iter().flatten() {
+            while let Some(accept) = listener
+                .borrow_mut()
+                .unwrap_vsock_listener_mut()
+                .remove_accept(|accept| accept.client == client)
+            {
+                let _ = accept.ready.send(Err(moto_rt::Error::NotConnected));
+            }
+        }
     }
 
     async fn vsock_connect(
@@ -693,6 +801,16 @@ fn map_allocation_error(error: std::io::Error) -> moto_rt::Error {
         ErrorKind::OutOfMemory => moto_rt::Error::OutOfMemory,
         _ => moto_rt::Error::InternalError,
     }
+}
+
+fn same_process(owner: SysHandle, requester: SysHandle) -> bool {
+    if owner == requester {
+        return true;
+    }
+    matches!(
+        (moto_sys::SysObj::get_pid(owner), moto_sys::SysObj::get_pid(requester)),
+        (Ok(owner), Ok(requester)) if owner == requester
+    )
 }
 
 fn map_admission_error(error: AdmissionError) -> moto_rt::Error {
@@ -1238,10 +1356,6 @@ impl NetRuntime {
         if MotoSocket::new_vsock(base, state).is_err() {
             return false;
         }
-        listener
-            .borrow_mut()
-            .unwrap_vsock_listener_mut()
-            .push(socket_id);
         // The RX pump reserved one control slot before consuming REQUEST, and
         // admission has no await point at which another task could take it.
         self.inner
@@ -1253,7 +1367,21 @@ impl NetRuntime {
                 flags: 0,
             })
             .expect("RX control-space reservation was lost during REQUEST admission");
+        self.match_vsock_accept(&listener, socket_id);
         true
+    }
+
+    fn match_vsock_accept(&self, listener: &Rc<RefCell<MotoSocket>>, socket_id: u64) {
+        let accept = listener
+            .borrow_mut()
+            .unwrap_vsock_listener_mut()
+            .push(socket_id);
+        if let Some(waiter) = accept
+            && let Err(Ok(returned_id)) = waiter.ready.send(Ok(socket_id))
+        {
+            assert_eq!(returned_id, socket_id);
+            self.reset_unaccepted(socket_id);
+        }
     }
 
     fn queue_vsock_reset(&self, socket_id: u64) {
@@ -1477,17 +1605,7 @@ impl NetRuntime {
         };
 
         if connected && sent {
-            let runtime = self.clone();
-            let weak = Rc::downgrade(&socket);
-            moto_async::LocalRuntime::spawn(async move { runtime.vsock_state_task(weak).await });
-            let runtime = self.clone();
-            let weak = Rc::downgrade(&socket);
-            moto_async::LocalRuntime::spawn(
-                async move { runtime.vsock_client_rx_task(weak).await },
-            );
-            let state = socket.borrow();
-            state.unwrap_vsock().state_notify.notify_one();
-            state.unwrap_vsock().rx_notify.notify_one();
+            self.start_vsock_client_tasks(&socket);
             return;
         }
         if connected {
@@ -1508,6 +1626,111 @@ impl NetRuntime {
             }
             notify.notified().await;
         }
+    }
+
+    async fn vsock_accept_task(
+        &self,
+        socket_id: u64,
+        request: io_channel::Msg,
+        sender: &ClientSender,
+        subchannel_mask: u64,
+    ) -> Result<(), moto_rt::Error> {
+        let socket = self.inner.borrow().sockets.get(&socket_id).cloned();
+        let Some(socket) = socket else {
+            return Err(moto_rt::Error::NotConnected);
+        };
+        let (local, peer, output_lock, connect_notify) = {
+            let socket = socket.borrow();
+            let tuple = socket.vsock_tuple();
+            (
+                api_vsock::VsockAddr {
+                    cid: tuple.local.cid,
+                    port: tuple.local.port,
+                },
+                api_vsock::VsockAddr {
+                    cid: tuple.peer.cid,
+                    port: tuple.peer.port,
+                },
+                socket.unwrap_vsock().output_lock.clone(),
+                socket.unwrap_vsock().connect_notify.clone(),
+            )
+        };
+        let response = api_vsock::encode_listener_accept_response(&request, socket_id, local, peer)
+            .expect("reserved vsock tuple produced an invalid accept response");
+        let _guard = output_lock.lock().await;
+        loop {
+            let changed = connect_notify.notified().fuse();
+            let (failure, client_active) = {
+                let inner = self.inner.borrow();
+                let socket_ref = socket.borrow();
+                let state = socket_ref.unwrap_vsock();
+                let terminal = state.connection.terminal_cause();
+                let listener_retained = state
+                    .listener_id
+                    .is_some_and(|id| inner.sockets.contains_key(&id));
+                let retained = inner
+                    .sockets
+                    .get(&socket_id)
+                    .is_some_and(|retained| Rc::ptr_eq(retained, &socket));
+                let failure = if matches!(terminal, Some(TerminalCause::InternalError)) {
+                    Some(moto_rt::Error::InternalError)
+                } else if !retained || !listener_retained {
+                    Some(moto_rt::Error::NotConnected)
+                } else {
+                    inner.vsock.ready_driver().err()
+                };
+                let client_active = inner
+                    .clients
+                    .get(&sender.remote_handle())
+                    .is_some_and(|client| !client.shutting_down);
+                (failure, client_active)
+            };
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            if !client_active {
+                self.reset_unaccepted(socket_id);
+                return Ok(());
+            }
+            let send = sender.send(response).fuse();
+            futures::pin_mut!(changed, send);
+            futures::select_biased! {
+                _ = changed => {}
+                result = send => {
+                    if result.is_err() {
+                        self.reset_unaccepted(socket_id);
+                        return Ok(());
+                    }
+                    break;
+                }
+            }
+        }
+
+        // No await after FIFO publication: install ownership and routing
+        // before this runtime can dispatch another message for the stream.
+        {
+            let mut socket = socket.borrow_mut();
+            assert!(socket.set_client_sender(sender));
+            let state = socket.unwrap_vsock_mut();
+            state.subchannel_mask = subchannel_mask;
+            state.listener_id = None;
+            state.client_ready = true;
+        }
+        drop(_guard);
+        self.start_vsock_client_tasks(&socket);
+        Ok(())
+    }
+
+    fn start_vsock_client_tasks(&self, socket: &Rc<RefCell<MotoSocket>>) {
+        let runtime = self.clone();
+        let weak = Rc::downgrade(socket);
+        moto_async::LocalRuntime::spawn(async move { runtime.vsock_state_task(weak).await });
+        let runtime = self.clone();
+        let weak = Rc::downgrade(socket);
+        moto_async::LocalRuntime::spawn(async move { runtime.vsock_client_rx_task(weak).await });
+        let socket = socket.borrow();
+        socket.unwrap_vsock().state_notify.notify_one();
+        socket.unwrap_vsock().rx_notify.notify_one();
     }
 
     async fn vsock_state_task(&self, weak: Weak<RefCell<MotoSocket>>) {

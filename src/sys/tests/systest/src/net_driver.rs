@@ -112,6 +112,97 @@ impl RawVsockListener {
     pub async fn close(mut self) {
         raw_vsock_listener_drop(&self.owner, &mut self.owner_rx, self.handle, self.next_id).await;
     }
+
+    pub async fn accept_early(&self, local_port: u32) {
+        let (accept_tx, mut accept_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let mut request = moto_sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
+        request.id = 0x564f_7800;
+        accept_tx.send(request).await.unwrap();
+
+        // The RESPONSE must precede data buffered before this accept.
+        let response = bounded_output(accept_rx.recv(), 2)
+            .await
+            .expect("timed out waiting for raw vsock accept response")
+            .unwrap();
+        assert_eq!(response.id, request.id);
+        let accepted = moto_sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
+        assert_eq!(accepted.local.cid, 3);
+        assert_eq!(accepted.local.port, local_port);
+        assert_eq!(accepted.peer.cid, 2);
+        assert_eq!(
+            response.payload.args_32()[..4],
+            [3, local_port, 2, accepted.peer.port]
+        );
+        assert_eq!(response.payload.args_64()[2], 0);
+
+        let rx = bounded_output(accept_rx.recv(), 2)
+            .await
+            .expect("timed out waiting for early accepted bytes")
+            .unwrap();
+        assert_eq!(
+            rx.command,
+            moto_sys_io::api_net::NetCmd::VsockStreamRx as u16
+        );
+        assert_eq!(rx.handle, accepted.handle);
+        assert_eq!(rx.payload.args_64()[1], 5);
+        let page = accept_rx.get_page(rx.payload.shared_pages()[0]).unwrap();
+        assert_eq!(&page.bytes()[..5], b"early");
+        drop(page);
+
+        accept_tx
+            .send(moto_sys_io::api_vsock::close_request(accepted.handle))
+            .await
+            .unwrap();
+    }
+}
+
+pub async fn test_raw_vsock_pending_accepts() {
+    const PORT: u32 = 80_004;
+    const ACCEPT_LIMIT: usize = 8;
+    const FIRST_ID: u64 = 0x564f_8000;
+
+    let listener = RawVsockListener::bind(PORT).await;
+    let handle = listener.handle;
+    // Accepts may ride a different channel owned by the same process.
+    let (accept_tx, mut accept_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    for index in 0..ACCEPT_LIMIT {
+        let mut request =
+            moto_sys_io::api_vsock::listener_accept_request(handle, index as u8 % 4).unwrap();
+        request.id = FIRST_ID + index as u64;
+        accept_tx.send(request).await.unwrap();
+    }
+    let mut overflow = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
+    overflow.id = FIRST_ID + ACCEPT_LIMIT as u64;
+    expect_raw_vsock_error(
+        &accept_tx,
+        &mut accept_rx,
+        overflow,
+        moto_rt::Error::OutOfMemory,
+    )
+    .await;
+
+    listener.close().await;
+    let mut seen = [false; ACCEPT_LIMIT];
+    for _ in 0..ACCEPT_LIMIT {
+        let response = bounded_output(accept_rx.recv(), 2)
+            .await
+            .expect("timed out waiting for dropped-listener accept response")
+            .unwrap();
+        let index = usize::try_from(response.id - FIRST_ID).unwrap();
+        assert!(index < ACCEPT_LIMIT);
+        assert!(!std::mem::replace(&mut seen[index], true));
+        assert_eq!(
+            response.command,
+            moto_sys_io::api_net::NetCmd::VsockListenerAccept as u16
+        );
+        assert_eq!(response.handle, handle);
+        assert_eq!(response.status(), Err(moto_rt::Error::NotConnected));
+    }
+    assert!(seen.into_iter().all(|seen| seen));
+
+    let mut stale = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
+    stale.id = FIRST_ID + ACCEPT_LIMIT as u64 + 1;
+    expect_raw_vsock_error(&accept_tx, &mut accept_rx, stale, moto_rt::Error::NotFound).await;
 }
 
 pub async fn test_raw_vsock_listener_bind() {

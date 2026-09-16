@@ -21,7 +21,7 @@ pub(super) enum SocketState {
     Udp(udp::UdpState),
     Tcp(tcp::TcpState),
     Vsock(super::vsock::VsockSocketState),
-    VsockListener(crate::runtime::vsock::listener::ListenerState),
+    VsockListener(crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept>),
 }
 
 impl SocketState {
@@ -312,7 +312,7 @@ impl MotoSocket {
 
     pub(super) fn new_vsock_listener(
         base: SocketBase,
-        listener: crate::runtime::vsock::listener::ListenerState,
+        listener: crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept>,
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
@@ -343,7 +343,7 @@ impl MotoSocket {
         Ok(this)
     }
 
-    // Listening TCP sockets on accept change their clients.
+    // Accepted TCP/vsock sockets may move to another channel of the owner.
     pub(super) fn set_client_sender(&mut self, client_sender: &ClientSender) -> bool {
         let prev_handle = self.base.client_sender.remote_handle();
         let next_handle = client_sender.remote_handle();
@@ -395,7 +395,9 @@ impl MotoSocket {
         state
     }
 
-    pub(super) fn unwrap_vsock_listener(&self) -> &crate::runtime::vsock::listener::ListenerState {
+    pub(super) fn unwrap_vsock_listener(
+        &self,
+    ) -> &crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept> {
         let SocketState::VsockListener(listener) = &self.state else {
             panic!("not a vsock listener")
         };
@@ -404,7 +406,7 @@ impl MotoSocket {
 
     pub(super) fn unwrap_vsock_listener_mut(
         &mut self,
-    ) -> &mut crate::runtime::vsock::listener::ListenerState {
+    ) -> &mut crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept> {
         let SocketState::VsockListener(listener) = &mut self.state else {
             panic!("not a vsock listener")
         };

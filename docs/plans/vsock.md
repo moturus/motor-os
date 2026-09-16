@@ -1410,6 +1410,27 @@ D28's simplified abandoned-operation teardown is implemented:
   building `all systest` corrected the runner, without changing assertions
   or timeouts. Only the subsequent fresh-binary runs count as validation.
 
+D25's bounded accept server is implemented and incrementally gated:
+
+- Keep eight pending accept RPCs independently of the eight-child backlog;
+  the ninth returns `OutOfMemory`. Match both queues FIFO. Existing NET
+  control tasks own waiters; matched children remain charged to the global
+  stream cap and tied to the listener until response publication.
+- Permit another channel in the same process to accept, while preserving
+  capability checks and hiding foreign listeners. Publish the response
+  before installing client routing and delivering buffered RX. Listener
+  removal fails queued accepts and resets all unaccepted children; channel
+  disconnect removes its pending requests without disturbing FIFO order.
+- Component fixtures cover both limits, FIFO matching and removal. Raw guest
+  IPC covers eight parked calls, overflow, listener-drop errors, stale
+  handles, cross-channel ownership, response ordering, and early bytes.
+  This coherent server/cleanup change is larger than the usual patch target;
+  the native accept API and its live cancellation cases remain separate.
+- Debug/release image builds, component/native-network suites, and all
+  nineteen peer cases plus discovery passed on QEMU, CHV, and FC. Formatting,
+  source hashes, and targeted Clippy passed with no new warnings. Evidence:
+  `/tmp/vsock-a28-server-gate.mWXAgT/`. The full M2 gate remains outstanding.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.

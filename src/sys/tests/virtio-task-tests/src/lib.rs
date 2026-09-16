@@ -1366,21 +1366,39 @@ fn test_vsock_admission() {
 }
 
 fn test_vsock_listener() {
-    let mut listener = listener::ListenerState::new().unwrap();
+    let mut listener = listener::ListenerState::<u64>::new().unwrap();
     for socket_id in 1..=listener::BACKLOG as u64 {
         assert!(listener.has_capacity());
-        listener.push(socket_id);
+        assert_eq!(listener.push(socket_id), None);
     }
     assert!(!listener.has_capacity());
     assert!(listener.remove(4));
     assert!(!listener.remove(4));
     assert!(listener.has_capacity());
-    listener.push(9);
+    assert_eq!(listener.push(9), None);
     assert_eq!(
         std::iter::from_fn(|| listener.pop()).collect::<Vec<_>>(),
         [1, 2, 3, 5, 6, 7, 8, 9]
     );
     assert!(listener.has_capacity());
+
+    for request in 100..100 + listener::MAX_PENDING_ACCEPTS as u64 {
+        assert_eq!(listener.enqueue_accept(request), Ok(()));
+    }
+    assert_eq!(listener.enqueue_accept(200), Err(()));
+    assert_eq!(listener.remove_accept(|request| *request == 103), Some(103));
+    assert_eq!(listener.remove_accept(|request| *request == 103), None);
+    assert_eq!(listener.push(10), Some(100));
+    assert!(listener.has_capacity());
+    assert_eq!(
+        listener.take_accepts().into_iter().collect::<Vec<_>>(),
+        [101, 102, 104, 105, 106, 107]
+    );
+
+    for index in 0..64 {
+        assert_eq!(listener.enqueue_accept(1_000 + index), Ok(()));
+        assert_eq!(listener.push(10_000 + index), Some(1_000 + index));
+    }
 }
 
 fn test_virtio_capacity() {
