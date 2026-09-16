@@ -1,6 +1,6 @@
 # Virtio-vsock implementation plan
 
-Status: v2.6. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.7. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
@@ -17,8 +17,9 @@ scope, with the BAR-boundary concern recorded in `future-work.md`.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
 M1 foundations have passed their repeated full gate. M2 integration is
-underway, with progress recorded below. Q23 asks how the discovery API fits
-the capability and error contract before that API is published.
+underway, with progress recorded below. Q23 is settled in D21: discovery
+checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
+(`NotFound` if absent), without activating the device.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -630,7 +631,7 @@ M2's shared socket backend preparation is implemented and parent-reviewed:
   suite passed in debug and release, as did base-image/test builds, selected
   formatting, and targeted Clippy. No new warning or gate failure occurred.
   Logs: `/tmp/vsock-ip-backend-gate.jGrqSg/`.
-- The next real IPC/API increment is discovery, subject to Q23. Socket
+- The next real IPC/API increment is discovery, following D21. Socket
   integration, activation, and end-to-end vsock coverage remain pending.
 
 ## Scope and simplicity
@@ -827,14 +828,14 @@ netstack participates in the vsock data path.
 Each numbered step is an implementation stage, not necessarily one commit.
 Split implementation and tests into roughly 100–300 changed lines per patch.
 Keep every intermediate patch buildable, and keep partial functionality
-unpublished until its resource ownership and error paths work. D1–D20 are
+unpublished until its resource ownership and error paths work. D1–D21 are
 the authoritative requirements; stages reference them and describe changes,
 tests, and completion checks. Tests arrive with behavior; the validation
 section groups related commits into the two approved gating milestones.
 
 ### 1. Review the contract and record the baseline
 
-Follow D1–D20 without reopening the agreed scope, including Q16's resolution
+Follow D1–D21 without reopening the agreed scope, including Q16's resolution
 in D16 and Q18's resolution in D17: opt-in raw standard image, no
 developer-image Firecracker support, and ordered RX delivery in virtio-async.
 
@@ -864,9 +865,9 @@ a new API. Document explicit denial via `MOTOR_OS_CAPS`.
 When adding the IPC handlers in stages 9–10, use `SysObj::get_capabilities`
 on the admitted peer at its first vsock request and cache the trusted,
 immutable capability word. Do not add a query to every net-channel admission
-at boot. Authoritatively check connect and bind/listen (including accept
-ownership) before device activation or vsock resource reservation. Do not
-reject the entire shared channel:
+at boot. Authoritatively check discovery (D21), connect, and bind/listen
+(including accept ownership) before device activation or vsock resource
+reservation. Do not reject the entire shared channel:
 a process denied vsock must still be able to use its existing TCP/UDP APIs.
 Client-side checks are only convenience, never the security boundary.
 
@@ -1497,6 +1498,7 @@ sorting in sys-io/moto-io.
 D18 and D19 resolve Q19 and Q20, approved on 2026-09-15. The same review
 approved Q22's dependency adjustment in D13. D20 records the subsequent
 decision to defer Q21 and exclude hardening against buggy or malicious VMMs.
+D21 resolves Q23: discovery uses the same capability and missing-device errors.
 
 ### D1. Profile and topology (approved)
 
@@ -1619,9 +1621,9 @@ new adaptive-buffer policy, or unbounded per-request tasks.
 
 ### D8. CAP_VSOCK and addressing (approved)
 
-CAP_VSOCK is bit 7, required for connect and listen. It is included in the
-default child grant for every role when the parent holds it, so normal
-system and user processes start with it. Only parents holding the bit may
+CAP_VSOCK is bit 7, required for discovery (D21), connect, and listen. It is
+included in the default child grant for every role when the parent holds it,
+so normal system and user processes start with it. Only parents holding the bit may
 grant it, including System parents; `CAP_SYS` is not an override. Delegation
 is transitive; explicit denial is by `MOTOR_OS_CAPS`. Stage 2 covers the
 kernel rule and the default helper.
@@ -1664,9 +1666,10 @@ of lazy initialization, not a boot-time host handshake.
 Use absent/dormant/ready/failed state owned by the existing `LocalRuntime`.
 Keep first-use initialization synchronous, as in blk/net, using nonblocking
 queue setup/publication without awaiting the host. Authorization precedes
-activation. An availability query reports discovery without activation;
-querying the actual CID may initialize. With no initialization-time `await`,
-the executor serializes first callers and later callers see the cached
+activation. An authorized availability query reports discovery without
+activation and follows D21's error ordering; querying the actual CID may
+initialize. With no initialization-time `await`, the executor serializes
+first callers and later callers see the cached
 result; no shared initialization future or waiter list is needed.
 Cancellation cannot interrupt setup or own the device's lifetime. Prepare
 allocations before DMA publication where possible and retain any memory
@@ -2149,27 +2152,20 @@ boot-time PCI reads. The concern is recorded briefly in
 This does not remove approved protocol validation or D18's standard reset
 completion check. No existing validation is removed as part of this decision.
 
+### D21. Availability discovery (Q23, approved)
+
+The user confirmed that discovery follows D14: return `NotAllowed` when
+CAP_VSOCK is missing and `NotFound` when the device is absent. Check the
+capability first, so a denied caller receives `NotAllowed` even without a
+device. Return success when an authorized caller's device was discovered.
+Discovery does not initialize queues, read the CID, or start device pumps.
+
+Use `availability(&NetClient) -> Result<(), moto_rt::Error>` with the existing
+RPC/driver and no socket reservation. Query/cache the trusted capability
+word at the first vsock request, not at channel admission or boot. Preserve
+native capability-query errors directly, without the TCP error mapper.
+There is no unprivileged boolean-discovery exception.
+
 ## Open questions
 
-### Q23. Availability discovery: authorization and absent-device result
-
-D8 explicitly requires CAP_VSOCK for connect/listen, while D9 says an
-availability query reports discovery without activating the device. D14's
-error table has no discovery exception: missing CAP_VSOCK is `NotAllowed`
-and an absent device is `NotFound`. Clarify the public discovery contract
-before implementing its first IPC/API path.
-
-Recommendation: follow D14 consistently. A discovery query requires
-CAP_VSOCK and returns success when a device was discovered, `NotFound` when
-absent, and `NotAllowed` for a denied caller. A native
-`availability(&NetClient) -> Result<(), moto_rt::Error>` can use the existing
-RPC/driver without a socket reservation. Cache the trusted capability query
-at the first vsock request and check it before device presence; preserve
-native capability-query errors directly, without the TCP error mapper.
-Do not initialize queues, read the CID, or start device pumps for this query.
-
-The alternative is a discovery-only exception: permit the query without
-CAP_VSOCK and expose `is_available(...) -> Result<bool, moto_rt::Error>`,
-returning `Ok(false)` when absent. Connect, listen, and any operation that
-activates the device would still require CAP_VSOCK. Neither alternative is
-implemented yet; this is separate from the deferred VMM hardening in Q21.
+None currently. Raise new non-obvious decisions before implementing them.
