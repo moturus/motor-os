@@ -70,14 +70,8 @@ fn main() -> Result {
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
 
-    let repo = gix::open::Options::isolated()
-        .config_overrides([
-            "core.symlinks=false",
-            "core.checkStat=minimal",
-            "core.trustctime=false",
-        ])
-        .open(&fixture)?
-        .to_thread_local();
+    let opened = motor_gix::repository::open(&fixture, &[], false)?;
+    let repo = &opened.repo;
     let hash = gix::hash::Kind::Sha1;
     let input = File::at(repo.index_path(), hash, false, Default::default())?;
     assert_eq!(
@@ -100,20 +94,25 @@ fn main() -> Result {
         .verify_integrity(|_| Ok::<_, std::io::Error>(()))
         .map_err(|err| err.into_error())?;
 
-    check_pack_validation(&repo, &output)?;
+    check_pack_validation(repo, &output)?;
 
     let capabilities = gix::fs::Capabilities::probe_dir(&worktree);
     assert!(
         capabilities.executable_bit,
         "native probe must observe executable bits"
     );
-    let tree = repo.head_tree_id()?.detach();
-    let state = motor_gix::tree_index::build(
-        &repo,
-        &tree,
-        &worktree,
-        &motor_gix::cancellation::Cancellation::new(),
-    )?;
+    for path in ["editable", "caf\u{e9}", "link"] {
+        let path = fixture.join(path);
+        if path.try_exists()? {
+            fs::remove_file(path)?;
+        }
+    }
+    let state =
+        motor_gix::checkout::initial(&opened, &motor_gix::cancellation::Cancellation::new())?;
+    assert_eq!(fs::read(fixture.join("editable"))?, b"other\n");
+    assert_eq!(fs::read(fixture.join("caf\u{e9}"))?, b"utf8\n");
+    assert_eq!(fs::read(fixture.join("link"))?, b"editable");
+    assert!(fs::symlink_metadata(fixture.join("link"))?.is_file());
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);

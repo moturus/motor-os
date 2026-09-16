@@ -16,7 +16,7 @@ filters. The shared cancellation flag, Motor handler and HTTPS adapter are
 implemented. Temporary live host and Motor probes passed V2 discovery and
 POST, same-origin redirects, unread malformed-response cleanup and PTY
 Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
-commands, checked checkout and image integration remain M1 work.
+commands and image integration remain M1 work.
 The bounded target-tree builder passes the host and Motor fixtures.
 The Q6 reader, pack and traversal limits and duplicate-base repair are
 recorded in section 7.
@@ -947,6 +947,16 @@ replaced; Motor allows that. The corrected injector uses a nonempty
 directory, which both filesystems reject. The original failure and source
 diagnosis are preserved under `/tmp/motor-gix-mutation-integration`;
 final passing evidence is under `/tmp/motor-gix-mutation-final`.
+
+Application initial checkout, reviewed on 2026-09-15:
+`checkout.rs` uses the bounded tree builder and checks filter attributes
+from the target index before writing files. The existing filter preflight
+is shared with status. Checkout uses one worker, no overwrites and no
+symlink creation, reapplies replacement-object policy to its converted
+object handle, and rejects errors, collisions or interruption before
+returning a fresh index for guarded publication. The existing host/Motor
+fixture passes with this helper; checks and Clippy pass. Evidence:
+`/tmp/motor-gix-checkout-integration`.
 
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
