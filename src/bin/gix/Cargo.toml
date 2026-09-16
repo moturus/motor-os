@@ -13,6 +13,11 @@ name = "native-port"
 path = "tests/native_port.rs"
 harness = false
 
+[[test]]
+name = "https-server"
+path = "tests/https_server.rs"
+harness = false
+
 [dependencies]
 clap = { version = "=4.6.0", default-features = false, features = [
     "error-context",
@@ -43,6 +48,14 @@ gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "087dbd
 
 [target.'cfg(target_os = "motor")'.dependencies]
 moto-rt = "0.17.6"
+
+[target.'cfg(not(target_os = "motor"))'.dev-dependencies]
+rustls = { version = "=0.23.42", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "=2.2.0"
 
 [profile.dev]
 panic = "abort"

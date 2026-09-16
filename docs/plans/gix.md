@@ -972,6 +972,17 @@ configuration now fixes `clone.rejectShallow=true`. Host library tests and
 host/Motor Clippy pass. CLI and HTTPS fixture wiring remain pending;
 these preparatory checks do not establish end-to-end acquisition.
 
+Local HTTPS fixture, preparatory implementation on 2026-09-15:
+the host-only `https-server` test target serves a fixed local repository
+through host Git's upload-pack with isolated configuration. It binds only
+loopback or the VM test bridge and uses checked-in test certificates.
+Response cases cover redirect, HTTP/media-type rejection, malformed Git
+data and a stalled response for native cancellation. Host/Motor Clippy
+and formatting pass; its TLS dependencies are absent from the Motor
+production dependency closure. Runtime command validation follows with
+the CLI/test-runner integration. Evidence:
+`/tmp/motor-gix-https-server-integration`.
+
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
 `PrepareFetch::repository_mut()` accessor introduced in reviewed commit
