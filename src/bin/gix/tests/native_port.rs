@@ -20,6 +20,11 @@ fn main() -> Result {
     if first == OsStr::new("--capture-child") {
         return capture_child(&args.next().ok_or("capture action required")?);
     }
+    if first == OsStr::new("--mutation-child") {
+        let repository = PathBuf::from(args.next().ok_or("mutation repository required")?);
+        let expectation = args.next().ok_or("mutation expectation required")?;
+        return mutation_child(&repository, &expectation);
+    }
     let fixture = PathBuf::from(first);
     let output = PathBuf::from(args.next().ok_or("output path required")?);
 
@@ -61,6 +66,7 @@ fn main() -> Result {
 
     fs::create_dir(&output)?;
     check_capture(&output)?;
+    check_mutation(&output)?;
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
 
@@ -304,6 +310,134 @@ fn main() -> Result {
     );
 
     println!("gix native port fixture PASS");
+    Ok(())
+}
+
+fn check_mutation(output: &Path) -> Result {
+    let repository = output.join("mutation-repository");
+    drop(gix::init(&repository)?);
+    let alternate = output.join("mutation-alternate");
+    fs::create_dir_all(alternate.join("pack"))?;
+    fs::create_dir_all(repository.join(".git/objects/info"))?;
+    fs::write(
+        repository.join(".git/objects/info/alternates"),
+        format!("{}\n", alternate.canonicalize()?.display()),
+    )?;
+    let opened = motor_gix::repository::open(&repository, &[], false)?;
+    let git_dir = opened.repo.git_dir();
+
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    assert!(guard.index().entries().is_empty());
+    run_mutation_child(&repository, "blocked")?;
+    guard.publish_fresh_index(gix::index::State::new(gix::hash::Kind::Sha1))?;
+    run_mutation_child(&repository, "blocked")?;
+    drop(guard);
+    run_mutation_child(&repository, "acquire")?;
+    let lock = fs::metadata(git_dir.join(motor_gix::mutation::OPERATION_LOCK_FILE))?;
+    assert!(lock.is_file() && lock.len() == 0);
+    assert!(!git_dir.join("index.lock").exists());
+
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    let index_backup = git_dir.join("index.backup");
+    fs::rename(opened.repo.index_path(), &index_backup)?;
+    fs::create_dir(opened.repo.index_path())?;
+    let obstruction = opened.repo.index_path().join("keep");
+    fs::write(&obstruction, b"preserved")?;
+    let publication_error = guard
+        .publish_fresh_index(gix::index::State::new(gix::hash::Kind::Sha1))
+        .expect_err("a nonempty directory must obstruct index publication");
+    assert_eq!(fs::read(&obstruction)?, b"preserved");
+    assert!(!git_dir.join("index.lock").exists());
+    run_mutation_child(&repository, "blocked")?;
+    drop(publication_error);
+    fs::remove_file(obstruction)?;
+    fs::remove_dir(opened.repo.index_path())?;
+    fs::rename(index_backup, opened.repo.index_path())?;
+    drop(guard);
+
+    fs::write(git_dir.join("index.lock"), b"foreign")?;
+    assert!(motor_gix::mutation::Guard::acquire(&opened.repo).is_err());
+    assert_eq!(fs::read(git_dir.join("index.lock"))?, b"foreign");
+    fs::remove_file(git_dir.join("index.lock"))?;
+
+    for (name, expected) in [
+        (motor_gix::mutation::OPERATION_FILE, "unfinished gix state"),
+        ("MERGE_HEAD", "unsupported operation state"),
+    ] {
+        let marker = git_dir.join(name);
+        fs::write(&marker, [])?;
+        expect_guard_rejected(&opened.repo, expected)?;
+        fs::remove_file(marker)?;
+    }
+    let promisor = alternate.join("pack/fixture.promisor");
+    fs::write(&promisor, [])?;
+    expect_guard_rejected(&opened.repo, "promisor packs")?;
+    fs::remove_file(promisor)?;
+    fs::write(
+        git_dir.join("shallow"),
+        b"0000000000000000000000000000000000000000\n",
+    )?;
+    expect_guard_rejected(&opened.repo, "shallow repositories")?;
+    fs::remove_file(git_dir.join("shallow"))?;
+
+    let mut state = gix::index::State::new(gix::hash::Kind::Sha1);
+    state.dangerously_push_entry(
+        Default::default(),
+        gix::ObjectId::null(gix::hash::Kind::Sha1),
+        gix::index::entry::Flags::EXTENDED | gix::index::entry::Flags::INTENT_TO_ADD,
+        Mode::FILE,
+        b"intent".as_bstr(),
+    );
+    let mut index = File::from_state(state, opened.repo.index_path());
+    index.write(gix::index::write::Options {
+        extensions: gix::index::write::Extensions::None,
+        skip_hash: false,
+    })?;
+    expect_guard_rejected(&opened.repo, "intent-to-add")
+}
+
+fn run_mutation_child(repository: &Path, expectation: &str) -> Result {
+    let status = Command::new(std::env::current_exe()?)
+        .args([
+            OsStr::new("--mutation-child"),
+            repository.as_os_str(),
+            OsStr::new(expectation),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(format!("mutation child failed for {expectation}: {status}").into());
+    }
+    Ok(())
+}
+
+fn mutation_child(repository: &Path, expectation: &OsStr) -> Result {
+    let opened = motor_gix::repository::open(repository, &[], false)?;
+    let result = motor_gix::mutation::Guard::acquire(&opened.repo);
+    match expectation.to_str() {
+        Some("acquire") if result.is_ok() => Ok(()),
+        Some("blocked")
+            if result.as_ref().is_err_and(|error| {
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+            }) =>
+        {
+            Ok(())
+        }
+        _ => {
+            let result = result
+                .err()
+                .map_or_else(|| "guard acquired".to_owned(), |error| error.to_string());
+            Err(format!("unexpected mutation result for {expectation:?}: {result}").into())
+        }
+    }
+}
+
+fn expect_guard_rejected(repo: &gix::Repository, expected: &str) -> Result {
+    let error = motor_gix::mutation::Guard::acquire(repo)
+        .err()
+        .ok_or_else(|| format!("mutation guard accepted {expected}"))?;
+    assert!(error.to_string().contains(expected), "{error}");
     Ok(())
 }
 

@@ -16,7 +16,7 @@ filters. The shared cancellation flag, Motor handler and HTTPS adapter are
 implemented. Temporary live host and Motor probes passed V2 discovery and
 POST, same-origin redirects, unread malformed-response cleanup and PTY
 Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
-commands, checked checkout/index publication and image integration remain M1 work.
+commands, checked checkout and image integration remain M1 work.
 The bounded target-tree builder passes the host and Motor fixtures.
 The Q6 reader, pack and traversal limits and duplicate-base repair are
 recorded in section 7.
@@ -350,7 +350,7 @@ Check errors, collisions and the interrupt flag before publishing the
 index or changing a ref. Do not treat partially written files, target-only
 untracked files, or an index ahead of HEAD as clean.
 
-The operation record is one small file under `.git`, separate from the
+The operation record is `.git/gix-operation`, separate from the
 persistent lock file. Create it exclusively before the first worktree
 write and rewrite it atomically on state changes while holding the
 operation lock. Fields: state (incomplete, ready or publishing), kind
@@ -929,6 +929,24 @@ fixed object-read bound. One compact boundary test and the existing
 host/Motor mode/index fixture pass, along with both target checks and
 Clippy. Native evidence and source identities are in
 `/tmp/motor-gix-tree-index-integration`.
+
+Application mutation guard, reviewed on 2026-09-15:
+`src/bin/gix/src/mutation.rs` takes the persistent advisory lock before
+`index.lock`, validates the repository and freshly loaded index, and
+publishes reconstructed indexes with a checksum and no extensions through
+a 64 KiB buffer. It holds the advisory lock through index publication and
+owned-lock cleanup, including rename failure. Ref lock timeouts are fixed
+at zero. Unsupported operation markers, shallow/partial/promisor state
+(including alternate object stores), sparse state and unsupported index
+flags refuse mutation. Valid split indexes use gix's existing dissolution.
+The shared host/Motor fixture verifies contention in a child process before
+and after index publication, failed publication without deleting an
+obstruction, foreign-lock preservation and selected policy refusals.
+The first native failure injector assumed an empty directory could not be
+replaced; Motor allows that. The corrected injector uses a nonempty
+directory, which both filesystems reject. The original failure and source
+diagnosis are preserved under `/tmp/motor-gix-mutation-integration`;
+final passing evidence is under `/tmp/motor-gix-mutation-final`.
 
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small

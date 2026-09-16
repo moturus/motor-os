@@ -8,13 +8,15 @@ use gix::bstr::ByteSlice;
 
 use crate::command_config;
 
-const POLICY_OVERRIDES: [&str; 8] = [
+const POLICY_OVERRIDES: [&str; 10] = [
     "core.symlinks=false",
     "core.fileMode=true",
     "core.checkStat=minimal",
     "core.trustCTime=false",
     "gitoxide.core.useNsec=false",
     "gitoxide.objects.allocLimit=16777216",
+    "core.filesRefLockTimeout=0",
+    "core.packedRefsTimeout=0",
     "index.threads=1",
     "pack.threads=1",
 ];

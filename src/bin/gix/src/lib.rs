@@ -5,6 +5,7 @@ pub mod curl_capture;
 pub mod http;
 pub mod http_request;
 pub mod https_url;
+pub mod mutation;
 pub mod repository;
 pub mod status;
 pub mod tree_index;
