@@ -15,6 +15,7 @@ input_files:
   - "/user/bin/kibim"
   - "/user/bin/ssh"
   - "/devtools/bin/gears"
+  - "/devtools/bin/gix"
   - "/devtools/bin/lorry"
   - "/devtools/bin/mdbg"
   - "/devtools/tests/gears/gears-mock-provider"

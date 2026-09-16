@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="What the Motor OS developer image adds: Lorry, Gears, mdbg, the native toolchain, curl, Lua, and the test suites.">
+<meta name="description" content="What the Motor OS developer image adds: gix, Lorry, Gears, mdbg, the native toolchain, curl, Lua, and the test suites.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Developer image | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -443,15 +443,15 @@ a.card h3 { color: var(--accent); }
 <div class="eyebrow">Userspace</div>
 <h1>Developer image</h1>
 <p class="lead"><code>motor-os-dev.qcow2</code> is the standard image plus everything
-needed to build and test programs inside the VM: native C, C++, and Rust compilers, Lorry,
-Gears, curl, Lua, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
+needed to build and test programs inside the VM: native C, C++, and Rust compilers, gix,
+Lorry, Gears, curl, Lua, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
 started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 
 <h2>Layout</h2>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
   <tr><td><code>/devtools/rust</code></td><td>Native rustc with a full <code>x86_64-unknown-motor</code> sysroot. There is no cargo on the image; Lorry is the build driver.</td></tr>
   <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and snapshots of red, lorry, gears, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
@@ -493,6 +493,26 @@ lorry run</code></pre>
 <p>The full description, including the admission policy, the configuration files, and
 how procedural macros and build scripts run on Motor OS, is on the
 <a href="lorry.html">Lorry</a> page.</p>
+
+<h2>Git with gix</h2>
+<p><code>gix</code> provides anonymous smart-HTTPS clone and fetch plus read-only status
+and history for ordinary SHA-1 worktrees.</p>
+<pre><code>gix clone https://example.test/project.git project
+gix -r project status
+gix -r project log
+gix -r project fetch            # fetches origin
+gix -r project fetch upstream</code></pre>
+<p><code>fetch</code> updates remote-tracking references and tags without changing the
+current branch, index or worktree. HTTPS uses the system CA bundle. Select a test or private
+CA explicitly with
+<code>gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR</code>; repository configuration
+cannot disable verification or replace the trust roots.</p>
+<p>Clone creates <code>DIR</code> exclusively. A failed clone retains its owned directory
+for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or checkout.
+Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
+valid Motor file names. Link entries become regular files containing their target text because Motor OS
+has no symbolic links. Add, commit, push, SSH remotes, and authenticated HTTPS are not
+part of this initial command set.</p>
 
 <h2>Gears</h2>
 <p>Gears is a small, extensible agent harness for working with a language model from

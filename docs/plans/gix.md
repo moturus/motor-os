@@ -5,21 +5,16 @@ Q1–Q7 remain resolved. This revision separates the operation lock from
 the record, uses three recovery states, fixes index-cache preservation
 and merge-state cleanup, and simplifies complete pack object selection.
 Overlapping failure tests are consolidated. D8 and D9 retain the policies
-accepted on 2026-09-12. Implementation was subsequently approved. M1's
-native dependency port and host/Motor repository fixture are committed;
-the port baseline `dc2c61b9e8acce852db121eaed5d87548dd755d8` was published
-on `gix-moturus-cli` and verified on 2026-09-15. The subsequent pack-input
-repair is recorded in section 7. Repository opening,
-configuration sanitization, `log` and read-only `status` pass the host and
-Motor component fixtures. Status rejects affected external or required
-filters. The shared cancellation flag, Motor handler and HTTPS adapter are
-implemented. Temporary live host and Motor probes passed V2 discovery and
-POST, same-origin redirects, unread malformed-response cleanup and PTY
-Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
-commands and image integration remain M1 work.
-The bounded target-tree builder passes the host and Motor fixtures.
-The Q6 reader, pack and traversal limits and duplicate-base repair are
-recorded in section 7.
+accepted on 2026-09-12. Implementation was subsequently approved.
+
+M1 is complete as of 2026-09-16: the developer image installs `gix` with
+anonymous HTTPS clone/fetch and read-only status/log. Host/Motor component
+gates, `full-test-dev.sh --release`, and the representative native HTTPS
+clone pass. The published dependency pin is
+`087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
+limits and measured results. M2 has not been integrated. Its init review
+found a library directory-creation race; the proposed external fix awaits
+discussion at the end of this document.
 
 ## 1. Goal and decisions
 
@@ -715,6 +710,36 @@ reviewed fork commit; committing/publishing it is a separately authorized
 step. No Lorry, curl, SSH, kernel, std, moto-rt, mlibc or toolchain-source
 edits are assumed. If necessary, diagnose and discuss them first.
 
+**M1 completion, 2026-09-16.** The Makefile builds gix offline with the
+selected assembly linker and a keyed object directory, validates both ELF
+artifacts with the existing helper, and installs only `/devtools/bin/gix`
+through the developer manifest. Markdown and developer-image HTML document
+the available commands, trust policy and incomplete-clone handling.
+Host/Motor component gates, both target Clippy checks, formatting and
+`src/tests/full-test-dev.sh --release` pass. The full suite exercised the
+installed binary and completed its developer-source and Lorry phases.
+
+The stripped executable is 5,949,888 bytes, SHA-256
+`76fe8edcfb130596d3e94126861319049da51df9eb50b10f638691f78aab5f41`.
+The lockfile SHA-256 is
+`a305f2562ca2127551deb38624c0ea32c71ca1a02191cce55f3bea839ae28f68`.
+The manifest records the exact feature set; release uses aborting panics,
+fat LTO and one codegen unit. The copied installed binary matched the build.
+
+The selected Motor OS history at `db5ce8e0` also passed a full native HTTPS
+clone in a 1 GiB VM, using the same local server and explicit test CA.
+It retained all 36,548 reachable objects; host Git checked refs, strict
+fsck, pack validity, index contents and worktree contents/modes. Native
+status was clean. Host-observed SSH-plus-clone time was 1,859 ms.
+Three HTTP requests sent 412 body bytes and received 18,914,902 body bytes.
+The resulting pack was 18,894,459 bytes, its pack index 1,024,416 bytes,
+and its worktree index 178,976 bytes. Logical clone file contents totaled
+37,779,761 bytes, including 17,667,957 worktree bytes. These are final file
+sizes, not peak temporary-disk allocation; peak RSS was not measured.
+The earlier pack-ingestion measurement below remains separately identified.
+Logs, source identities, build recipe and measurements are under
+`/tmp/motor-gix-m1-integration`.
+
 **Thin-pack lookup defect, diagnosed and repaired on 2026-09-15:**
 in `gix-pack/src/data/input/lookup_ref_delta_objects.rs`,
 the former `try_find(...).ok()?` converted a failed thin-pack base lookup
@@ -906,7 +931,7 @@ The manifest and lockfile differ only in the fork revision.
 Evidence is under `/tmp/motor-gix-duplicate-base-integration`; external
 patch reviews and Git oracles are under `/tmp/motor-gix-duplicate-base-fix`.
 This completes the repair and the representative pack-ingestion check.
-The full developer-image gate remains due at the shippable M1 milestone.
+The later complete M1 gate is recorded at the start of this section.
 
 Application resource policy: `src/bin/gix/src/repository.rs` now supplies
 the fixed 16 MiB object allocation setting and single-worker index/pack
@@ -1105,3 +1130,27 @@ Discussed and approved: repair the external iterator to propagate base-lookup
 errors with their cause, add one focused regression to the normal component
 gate, review the patch before committing, and update the dependency pin.
 Then continue clone/fetch and resource-limit implementation.
+
+### Pending implementation discussion — atomic init (2026-09-16)
+
+Source review of Gitoxide at `087dbd18` found that worktree initialization
+checks whether `.git` exists, then uses `create_dir_all`. Two initializers
+can pass that check and write into the same directory. A precheck in the
+application has the same race. M1 clone exclusively creates its destination;
+the issue matters for M2 init in an existing worktree directory.
+
+Proposed fix, awaiting approval: in the external checkout
+`/home/posk/motor-dev/gitoxide-motor-cli`, change `gix/src/create.rs`
+to create missing worktree parents normally and reserve the final `.git`
+with atomic `std::fs::create_dir`, retaining the existing error type for an
+occupied path. Keep bare initialization unchanged. Extend the existing
+`gix/tests/gix/init.rs` tests with a preexisting-file preservation case,
+then run the existing init and clone/component gates before updating the
+application pin. The application-only alternative would require bare
+initialization followed by custom persistent-config rewriting and reopening;
+the library fix is smaller and avoids that duplicated orchestration.
+
+The proposed patch and source diagnosis are in
+`/tmp/motor-gix-init-atomic-review`. The external checkout and dependency
+pin remain unchanged; the proposal has not yet been compiled or executed.
+**Open question:** approve this narrow external fix before implementing init?

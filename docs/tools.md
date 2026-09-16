@@ -53,4 +53,32 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 ![ps -H](ps.png)
 
+## Git on the developer image
+
+The developer image includes `gix` in `/devtools/bin`. Its initial command set
+can clone an anonymous HTTPS repository, update a configured remote, and inspect
+an ordinary SHA-1 worktree:
+
+```sh
+gix clone https://example.test/project.git project
+gix -r project status
+gix -r project log
+gix -r project fetch            # fetches origin
+gix -r project fetch upstream
+```
+
+`fetch` updates remote-tracking references and tags without changing the current
+branch, index or worktree. HTTPS uses the system CA bundle. A test or private CA
+can be selected explicitly with
+`gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR`; repository configuration
+cannot disable certificate verification or replace the trust roots.
+
+Clone creates `DIR` exclusively and never adopts an existing directory.
+A failed clone retains its owned directory for inspection; the
+`.git/gix-incomplete-clone` marker identifies unfinished fetch or checkout.
+Remove that owned directory explicitly before cloning again. Repository paths
+must be UTF-8 and valid Motor file names. Because Motor OS has no symbolic links, link entries are
+checked out as regular files containing their target text. This command set does
+not yet include add, commit, push, or SSH remotes.
+
 For more details, see [https://motor-os.org](https://motor-os.org).
