@@ -11,6 +11,8 @@ pub const OPERATION_LOCK_FILE: &str = "gix-operation-lock";
 pub const OPERATION_FILE: &str = "gix-operation";
 pub const INCOMPLETE_CLONE_FILE: &str = "gix-incomplete-clone";
 
+const INDEX_BYTES_LIMIT: usize = 16 * 1024 * 1024;
+
 const FOREIGN_OPERATIONS: [&str; 6] = [
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
@@ -23,9 +25,9 @@ const FOREIGN_OPERATIONS: [&str; 6] = [
 /// Locks one ordinary mutation in the required operation-lock/index-lock order.
 ///
 /// The caller must already have applied the common repository policy. The
-/// operation lock remains held after `publish_fresh_index()` consumes the index
-/// lock. The loaded index is read-only because publishing a modified retained
-/// index also requires the separate racy-stat policy.
+/// operation lock remains held after either publication method consumes the
+/// index lock. Retained-index edits are made inside `publish_edited_index()` so
+/// it can compare stat caches to the timestamp captured before the edit.
 pub struct Guard {
     index_lock: Option<gix::lock::File>,
     index: gix::index::File,
@@ -99,25 +101,92 @@ impl Guard {
     ) -> crate::Result<gix::hash::ObjectId> {
         let index = gix::index::File::from_state(state, std::path::PathBuf::new());
         validate_index(&index)?;
-        let lock = self
-            .index_lock
+        let lock = self.take_index_lock()?;
+        publish_index(lock, &index)
+    }
+
+    /// Edit and publish the index loaded after taking `index.lock`.
+    ///
+    /// Racy stat caches are invalidated against the old index timestamp after
+    /// the edit. Entry flags, including conflict stages, are left unchanged;
+    /// the ordinary unsupported-flag validation still applies before writing.
+    pub fn publish_edited_index(
+        &mut self,
+        edit: impl FnOnce(&mut gix::index::State) -> crate::Result,
+    ) -> crate::Result<gix::hash::ObjectId> {
+        let old_timestamp = self.index.timestamp();
+        edit(&mut self.index)?;
+        self.index.sort_entries();
+        validate_index(&self.index)?;
+
+        let stat_options = gix::index::entry::stat::Options {
+            trust_ctime: false,
+            check_stat: false,
+            use_nsec: false,
+            use_stdev: false,
+        };
+        for entry in self.index.entries_mut() {
+            if entry.stat.is_racy(old_timestamp, stat_options) {
+                entry.stat.size = 0;
+            }
+        }
+        let lock = self.take_index_lock()?;
+        publish_index(lock, &self.index)
+    }
+
+    fn take_index_lock(&mut self) -> crate::Result<gix::lock::File> {
+        self.index_lock
             .take()
-            .ok_or_else(|| io::Error::other("the index lock was already consumed"))?;
-        let mut writer = BufWriter::with_capacity(64 * 1024, lock);
-        let (_, checksum) = index.write_to(
-            &mut writer,
-            gix::index::write::Options {
-                extensions: gix::index::write::Extensions::None,
-                skip_hash: false,
-            },
-        )?;
-        writer.flush()?;
-        writer
-            .into_inner()
-            .map_err(|error| error.into_error())?
-            .commit()
-            .map_err(|error| error.error)?;
-        Ok(checksum)
+            .ok_or_else(|| io::Error::other("the index lock was already consumed").into())
+    }
+}
+
+fn publish_index(
+    lock: gix::lock::File,
+    index: &gix::index::File,
+) -> crate::Result<gix::hash::ObjectId> {
+    let limited = LimitedWriter {
+        inner: lock,
+        remaining: INDEX_BYTES_LIMIT,
+    };
+    let mut writer = BufWriter::with_capacity(64 * 1024, limited);
+    let (_, checksum) = index.write_to(
+        &mut writer,
+        gix::index::write::Options {
+            extensions: gix::index::write::Extensions::None,
+            skip_hash: false,
+        },
+    )?;
+    writer.flush()?;
+    writer
+        .into_inner()
+        .map_err(|error| error.into_error())?
+        .inner
+        .commit()
+        .map_err(|error| error.error)?;
+    Ok(checksum)
+}
+
+struct LimitedWriter<W> {
+    inner: W,
+    remaining: usize,
+}
+
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "serialized index exceeds the 16 MiB native reader limit",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 

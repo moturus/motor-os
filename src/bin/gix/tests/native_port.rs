@@ -379,6 +379,8 @@ fn check_mutation(output: &Path) -> Result {
     expect_guard_rejected(&opened.repo, "shallow repositories")?;
     fs::remove_file(git_dir.join("shallow"))?;
 
+    check_edited_index_publication(&opened)?;
+
     let mut state = gix::index::State::new(gix::hash::Kind::Sha1);
     state.dangerously_push_entry(
         Default::default(),
@@ -393,6 +395,131 @@ fn check_mutation(output: &Path) -> Result {
         skip_hash: false,
     })?;
     expect_guard_rejected(&opened.repo, "intent-to-add")
+}
+
+fn check_edited_index_publication(opened: &motor_gix::repository::OpenedRepository) -> Result {
+    let repo = &opened.repo;
+    let worktree = repo.workdir().ok_or("mutation worktree missing")?;
+    let retained_path = worktree.join("portable-retained");
+    #[cfg(not(target_os = "motor"))]
+    let controlled = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    #[cfg(not(target_os = "motor"))]
+    write_at(&retained_path, b"old\n", controlled)?;
+    #[cfg(target_os = "motor")]
+    fs::write(&retained_path, b"old\n")?;
+    let retained_id = repo.write_blob(b"old\n")?.detach();
+
+    let mut state = gix::index::State::new(gix::hash::Kind::Sha1);
+    state.dangerously_push_entry(
+        index_stat(&retained_path)?,
+        retained_id,
+        gix::index::entry::Flags::empty(),
+        Mode::FILE,
+        b"portable-retained".as_bstr(),
+    );
+    let mut index = File::from_state(state, repo.index_path());
+    index.write(gix::index::write::Options {
+        extensions: gix::index::write::Extensions::None,
+        skip_hash: false,
+    })?;
+    #[cfg(not(target_os = "motor"))]
+    {
+        OpenOptions::new()
+            .write(true)
+            .open(repo.index_path())?
+            .set_times(fs::FileTimes::new().set_modified(controlled))?;
+        // Exact same-size, same-second worktree edit with unchanged cached stat.
+        write_at(&retained_path, b"new\n", controlled)?;
+    }
+
+    let added_path = worktree.join("portable-added");
+    fs::write(&added_path, b"added\n")?;
+    let added_id = repo.write_blob(b"added\n")?.detach();
+    let added_stat = index_stat(&added_path)?;
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let original_retained = guard
+        .index()
+        .entry_by_path(b"portable-retained".as_bstr())
+        .ok_or("original retained entry missing")?;
+    let (retained_stage, retained_flags) = (original_retained.stage(), original_retained.flags);
+    #[cfg(not(target_os = "motor"))]
+    assert_eq!(guard.index().timestamp().unix_seconds(), 1_700_000_000);
+    let checksum = guard.publish_edited_index(|index| {
+        index.dangerously_push_entry(
+            added_stat,
+            added_id,
+            gix::index::entry::Flags::empty(),
+            Mode::FILE,
+            b"portable-added".as_bstr(),
+        );
+        Ok(())
+    })?;
+    assert!(!repo.git_dir().join("index.lock").exists());
+    run_mutation_child(worktree, "blocked")?;
+
+    let reopened = File::at(
+        repo.index_path(),
+        repo.object_hash(),
+        false,
+        Default::default(),
+    )?;
+    assert_eq!(reopened.checksum(), Some(checksum));
+    assert_eq!(reopened.entries().len(), 2);
+    assert_eq!(
+        reopened.entries()[0].path(&reopened),
+        b"portable-added".as_bstr()
+    );
+    assert_eq!(
+        reopened.entries()[1].path(&reopened),
+        b"portable-retained".as_bstr()
+    );
+    let retained = reopened
+        .entry_by_path(b"portable-retained".as_bstr())
+        .ok_or("retained entry missing")?;
+    assert_eq!((retained.id, retained.mode), (retained_id, Mode::FILE));
+    assert_eq!(
+        (retained.stage(), retained.flags),
+        (retained_stage, retained_flags)
+    );
+    let added = reopened
+        .entry_by_path(b"portable-added".as_bstr())
+        .ok_or("added entry missing")?;
+    assert_eq!((added.id, added.mode), (added_id, Mode::FILE));
+
+    #[cfg(not(target_os = "motor"))]
+    {
+        assert!(reopened.timestamp().unix_seconds() > 1_700_000_000);
+        assert_eq!(
+            retained.stat.size, 0,
+            "racy retained entry was not invalidated"
+        );
+        let reopened_repo = motor_gix::repository::open(worktree, &[], false)?;
+        let report = motor_gix::status::collect(
+            &reopened_repo,
+            &motor_gix::cancellation::Cancellation::new(),
+        )?;
+        let mut output = Vec::new();
+        report.write_to(&mut output, &motor_gix::cancellation::Cancellation::new())?;
+        assert_eq!(output, b"A  portable-added\nAM portable-retained\n");
+    }
+    drop(guard);
+    run_mutation_child(worktree, "acquire")
+}
+
+#[cfg(not(target_os = "motor"))]
+fn write_at(path: &Path, contents: &[u8], modified: std::time::SystemTime) -> Result {
+    fs::write(path, contents)?;
+    OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_times(fs::FileTimes::new().set_modified(modified))?;
+    Ok(())
+}
+
+fn index_stat(path: &Path) -> Result<gix::index::entry::Stat> {
+    let file = OpenOptions::new().read(true).open(path)?;
+    let metadata = gix::index::fs::Metadata::from_file(&file)?;
+    Ok(gix::index::entry::Stat::from_fs(&metadata)?)
 }
 
 fn run_mutation_child(repository: &Path, expectation: &str) -> Result {

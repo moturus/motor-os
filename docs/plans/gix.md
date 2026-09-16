@@ -10,9 +10,9 @@ accepted on 2026-09-12. Implementation was subsequently approved.
 M1 is complete as of 2026-09-16: the developer image installs `gix` with
 anonymous HTTPS clone/fetch and read-only status/log. Host/Motor component
 gates, `full-test-dev.sh --release`, and the representative native HTTPS
-clone pass. The published dependency pin is
+clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
-limits and measured results. M2 has not been integrated. Its init review
+limits and measured results. M2 implementation is in progress. Its init review
 found a library directory-creation race; the narrow external fix was
 discussed and approved on 2026-09-16, as recorded at the end of this document.
 
@@ -1057,6 +1057,20 @@ adapter. An interruption between those calls can leave an `Rx` output;
 M2 recovery must restore write access or replace that owned output before
 opening it for writing. Validate the OS change with three debug and three release
 `full-test.sh` runs, plus `full-test-dev.sh --release`.
+
+Retained-index publication (M2 foundation), reviewed on 2026-09-16:
+`Guard::publish_edited_index()` edits the locked snapshot, sorts and validates
+it, and invalidates racy stat caches against the original index timestamp
+using D5's options. Fresh and retained publication share the buffered,
+checksummed writer, which refuses output above the native reader's 16 MiB
+limit before publishing it. Existing flags and conflict stages are retained.
+The existing native fixture exercises edited publication, retained entries
+and lock ownership on host and Motor. The deterministic equal-size edit
+regression runs on the host because Motor has no file timestamp setter;
+it confirms status still sees the edit after the index timestamp advances.
+Host and Motor component gates and Clippy pass. Evidence:
+`/tmp/motor-gix-m2-foundation`. The complete developer-image gate remains
+the M2 milestone gate after the authoring workflows are implemented.
 
 A milestone is complete when the installed application passes its gates;
 cross-compilation alone is insufficient. Rollback restores the previous
