@@ -69,6 +69,8 @@ fn main() -> Result {
 
     fs::create_dir(&output)?;
     check_init(&output)?;
+    #[cfg(target_os = "motor")]
+    check_loose_ref_limit(&output)?;
     check_capture(&output)?;
     check_mutation(&output)?;
     let worktree = output.join("worktree");
@@ -332,6 +334,52 @@ fn main() -> Result {
     );
 
     println!("gix native port fixture PASS");
+    Ok(())
+}
+
+#[cfg(target_os = "motor")]
+fn check_loose_ref_limit(output: &Path) -> Result {
+    use gix::refs::file::{find, iter::loose_then_packed};
+
+    let directory = output.join("loose-ref-limit");
+    fs::create_dir_all(directory.join("refs/heads"))?;
+    let store = gix::refs::file::Store::at(directory.clone(), gix::hash::Kind::Sha1);
+    let name = "refs/heads/bounded";
+    let id = gix::hash::ObjectId::null(gix::hash::Kind::Sha1);
+    let mut file = fs::File::create(directory.join(name))?;
+    writeln!(file, "{id}")?;
+    file.set_len(8 * 1024 * 1024)?;
+
+    assert_eq!(store.find(name)?.target.into_id(), id);
+    let platform = store.iter()?;
+    let mut refs = platform.all()?;
+    assert_eq!(
+        refs.next().ok_or("bounded ref missing")??.target.into_id(),
+        id
+    );
+    assert!(refs.next().is_none());
+
+    file.set_len(8 * 1024 * 1024 + 1)?;
+    let lookup = store.try_find(name).expect_err("lookup must enforce 8 MiB");
+    assert!(matches!(
+        lookup,
+        find::Error::ReadFileContents { source, .. }
+            if source.kind() == std::io::ErrorKind::InvalidData
+                && source.to_string() == "bounded input exceeds the byte limit"
+    ));
+    let listing = platform
+        .all()?
+        .next()
+        .ok_or("oversized ref missing from listing")?
+        .expect_err("listing must enforce 8 MiB");
+    assert!(matches!(
+        listing,
+        loose_then_packed::Error::ReadFileContents { source, .. }
+            if source.kind() == std::io::ErrorKind::InvalidData
+                && source.to_string() == "bounded input exceeds the byte limit"
+    ));
+    drop(file);
+    fs::remove_dir_all(directory)?;
     Ok(())
 }
 

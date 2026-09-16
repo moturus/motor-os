@@ -82,6 +82,8 @@ or unmatched path fails. Executable and indexed symlink modes are preserved.
 Gitlinks are left unchanged. Staging refuses external filters and files over
 16 MiB, and publishes the index only after all selected changes are prepared.
 
+Reference reads on Motor reject loose reference files larger than 8 MiB.
+
 `fetch` updates remote-tracking references and tags without changing the current
 branch, index or worktree. HTTPS uses the system CA bundle. A test or private CA
 can be selected explicitly with

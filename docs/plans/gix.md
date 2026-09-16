@@ -1222,7 +1222,7 @@ pass. Integration evidence: `/tmp/motor-gix-m2-foundation`.
 This repair changes only the two external files above. No Motor OS
 filesystem or standard-library change is needed.
 
-### Open implementation discussion — bounded loose references (2026-09-16)
+### Resolved implementation discussion — bounded loose references (2026-09-16)
 
 Review of the next branch/tag step found a separate Gitoxide allocation gap
 at external revision `e121301a`. Direct loose-ref lookup in
@@ -1239,22 +1239,26 @@ peak RSS increased from 5,184 KiB to 13,056 KiB, and the syscall trace
 confirmed the whole 8 MiB file was read. This is host evidence for the
 target-independent read path, not a claim of a native runtime reproduction.
 Source and evidence: `/tmp/motor-gix-refs-draft/notes/loose-ref-bound-diagnosis.md`
-and `/tmp/motor-gix-refs-draft/evidence`. No external repair has been applied.
+and `/tmp/motor-gix-refs-draft/evidence`. This demonstrates an unbounded
+allocation, not an out-of-memory crash or a failure with ordinary refs.
 
-Proposed repair, explicitly outside the main Motor OS repository, in
+Discussed and approved with an **8 MiB** ceiling rather than the initially
+proposed 16 MiB. The repair is explicitly outside the main Motor OS repository, in
 `/home/posk/motor-dev/gitoxide-motor-cli`: add one private shared loose-ref
 reader in `gix-ref/src/store/file/loose/mod.rs`, then use it from the lookup
 and overlay-iteration files above. On Motor, reuse the existing
-`gix_features::fs::read_to_end_bounded` with a 16 MiB per-file ceiling.
+`gix_features::fs::read_to_end_bounded` with an 8 MiB per-file ceiling.
 It checks metadata before allocation, uses a fallible exact allocation,
 and rejects short reads or growth. Preserve non-Motor behavior and existing
-lookup/iteration error propagation. The ceiling matches the native index
-and packed-ref limits and accommodates multi-line pseudo refs such as
-`FETCH_HEAD`, which share the lookup path.
+lookup/iteration error propagation. This per-file policy also applies to
+multi-line pseudo refs such as `FETCH_HEAD`, which share the lookup path;
+it is not a total process-memory limit. Native index and packed-ref
+ceilings remain 16 MiB.
 
 Keep validation small: reuse the existing bounded-reader boundary tests,
 run existing ref lookup/iteration/transaction tests, and extend the shared
-native fixture with an oversized-ref rejection covering lookup and listing.
+native fixture with exact-8-MiB success and one-byte-over rejection
+covering lookup and unfiltered overlay listing.
 Include that coverage in the normal gix component gate. Review the external
 patch before committing it and updating the application pin. Forward
 reflog reading is a separate deferred path; these commands do not use it.
@@ -1263,6 +1267,49 @@ An application precheck would duplicate the backend and race its actual
 read, so it would not enforce the bound. No Motor OS or standard-library
 change is proposed.
 
-**Open question:** approve this narrow external loose-ref repair and pin
-update, then resume M2? Recommended: yes. Work that depends on the ref
-backend is paused under AGENTS.md's preexisting-bug rule.
+Applied and reviewed as external commit
+`86589c55ea4daf62c8fbaf968bb0cdcecbf7b76f` in the three production files
+above. The application pin and lockfile use this exact revision. Local
+validation imports the commit from the authoring checkout; publishing the
+external branch remains a user action.
+
+The final native boundary fixture fails on the previous pin and passes on
+this revision. Both the host and Motor gix component gates pass, including
+32 reference-store tests, 40 transaction tests and the existing bounded-reader
+test on the host, and exact-limit/one-byte-over lookup and listing on Motor.
+Host/Motor Clippy, selected-toolchain formatting and shell checks pass.
+Evidence is in `/tmp/motor-gix-loose-ref-integration`. The M2 completion
+`full-test-dev.sh --release` gate remains due at the milestone boundary.
+
+### Open implementation discussion — native directory-entry paths (2026-09-16)
+
+The new native boundary fixture exposed a separate preexisting defect in
+Rust's Motor port. `DirEntry::path()` in
+`/home/posk/motor-dev/toolchain-src/rust/library/std/src/sys/fs/motor.rs`
+unconditionally appends `/` to the parent string. Reading `refs/heads/`
+therefore returns a child spelled `refs/heads//bounded`. Gitoxide's loose
+iterator rejects that spelling as an invalid reference name. Its
+`local_branches()` and `tags()` use slash-terminated prefixes, so they can
+silently omit loose refs on Motor. Direct lookup and unfiltered iteration
+find the same reference correctly.
+
+A targeted native diagnostic confirmed the duplicated separator in
+`std::fs::read_dir`, correct file types, and the difference between
+unfiltered, full-name-prefixed and slash-terminated-prefix iteration.
+Evidence, original failure and temporary instrumentation are retained in
+`/tmp/motor-gix-loose-ref-integration/listing-diagnosis.md`. The final
+size-limit fixture uses unfiltered overlay iteration to cover the same
+bounded reader; it does not claim to validate or fix prefixed listing.
+
+Proposed external repair: construct the entry path with
+`Path::new(&self.parent_path).join(self.filename())`, add a focused
+slash-terminated `read_dir` regression to the existing native filesystem
+suite, rebuild/select the toolchain assembly through its normal workflow,
+and validate the previously failing prefixed listing and applicable
+platform gates. No standard-library change has been applied. This repair
+requires the explicit std-port discussion specified by AGENTS.md; avoid
+an application workaround that hides the malformed paths.
+
+**Open question:** approve this narrow external standard-library repair
+and toolchain rebuild, then resume branch/tag implementation? Recommended:
+yes. The 8 MiB reader repair is independent; branch/tag work remains paused.

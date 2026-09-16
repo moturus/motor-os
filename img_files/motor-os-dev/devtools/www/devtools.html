@@ -515,6 +515,7 @@ changes and deletions. Tracked ignored files are included; explicitly naming an 
 or unmatched path fails. Executable and indexed symlink modes are preserved, and
 gitlinks remain unchanged. Staging refuses external filters and files over 16 MiB,
 and publishes the index only after all selected changes are prepared.</p>
+<p>Reference reads on Motor reject loose reference files larger than 8 MiB.</p>
 <p><code>fetch</code> updates remote-tracking references and tags without changing the
 current branch, index or worktree. HTTPS uses the system CA bundle. Select a test or private
 CA explicitly with
