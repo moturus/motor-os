@@ -23,6 +23,10 @@ an existing executable. Keep the server and its test executable from the same bu
 
 This standalone gate does not build an OS image or invoke the full-system suite.
 
+`--max-active-connections` defaults to 128 and counts HTTP connections, idle
+keep-alive connections, and TLS handshakes. Excess connections close immediately.
+The HTTP tests exercise admission, rejection, and release with a limit of one.
+
 `--test fs_path` checks the filesystem serving path and reports per-operation
 timings, response preparation, and body collection without network I/O. It
 compares burst traffic with requests spaced 20 ms apart and reports a batched

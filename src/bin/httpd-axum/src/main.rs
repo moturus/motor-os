@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod connections;
+
 #[cfg(target_os = "motor")]
 fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
     moto_rt::fill_random_bytes(dest);
@@ -25,6 +27,10 @@ struct Args {
     ssl_cert: Option<String>,
     #[arg(long, requires = "ssl_cert")]
     ssl_key: Option<String>,
+
+    /// Maximum admitted TCP connections, including TLS handshakes and idle clients.
+    #[arg(long, default_value = "128")]
+    max_active_connections: std::num::NonZeroU32,
 }
 
 #[tokio::main]
@@ -62,6 +68,7 @@ async fn main() {
             },
         ));
 
+    let admission = connections::ConnectionLimit::new(args.max_active_connections.get());
     if let Some(ssl_cert) = args.ssl_cert.as_ref() {
         rustls::crypto::ring::default_provider()
             .install_default()
@@ -76,12 +83,17 @@ async fn main() {
         let listener = std::net::TcpListener::bind(args.addr).unwrap();
         tracing::info!("listening on {}", listener.local_addr().unwrap());
         axum_server::from_tcp_rustls(listener, config)
+            .map(|acceptor| acceptor.acceptor(admission))
             .serve(app.into_make_service())
             .await
             .unwrap();
     } else {
-        let listener = tokio::net::TcpListener::bind(args.addr).await.unwrap();
+        let listener = std::net::TcpListener::bind(args.addr).unwrap();
         tracing::info!("listening on {}", listener.local_addr().unwrap());
-        axum::serve(listener, app).await.unwrap();
+        axum_server::from_tcp(listener)
+            .acceptor(admission)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
     };
 }

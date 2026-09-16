@@ -1,7 +1,7 @@
 mod common;
 
 use common::{request, Server};
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::sync::Arc;
 
 #[cfg(target_os = "motor")]
@@ -14,6 +14,20 @@ fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
 getrandom::register_custom_getrandom!(motor_getrandom);
 
 fn main() {
+    let limited = Server::start(None, &["--max-active-connections", "1"]);
+    let mut admitted = BufReader::new(limited.connect());
+    assert_eq!(request(&mut admitted, "GET", "/", "").status, 200);
+    assert_closed(&mut limited.connect());
+    assert_eq!(
+        request(&mut admitted, "GET", "/", "Connection: close\r\n").status,
+        200
+    );
+    assert_closed(&mut admitted);
+    assert_eq!(
+        request(&mut BufReader::new(limited.connect()), "GET", "/", "").status,
+        200
+    );
+    limited.stop();
     let server = Server::start(None, &[]);
     let mut io = BufReader::new(server.connect());
     let response = request(&mut io, "GET", "/", "");
@@ -54,7 +68,7 @@ fn main() {
     assert!(logs.contains("response prepared"), "{logs}");
     assert!(logs.contains("prepare_us="), "{logs}");
 
-    let server = Server::start_tls(None, &[]);
+    let server = Server::start_tls(None, &["--max-active-connections", "1"]);
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rustls::pki_types::CertificateDer::from(
@@ -78,7 +92,16 @@ fn main() {
         assert_eq!(response.body, b"test content\n");
     }
     assert_eq!(io.get_ref().conn.alpn_protocol(), Some(&b"http/1.1"[..]));
+    assert_closed(&mut server.connect());
     drop(io);
     assert!(!server.stop().contains("response prepared"));
     println!("httpd-axum HTTP, TLS, and logging tests passed");
+}
+
+fn assert_closed(io: &mut impl Read) {
+    match io.read(&mut [0; 1]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        result => panic!("expected closed connection, got {result:?}"),
+    }
 }
