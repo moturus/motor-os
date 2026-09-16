@@ -187,6 +187,7 @@ pub fn test_descriptor_waiters() {
     test_notifications();
     test_queue_task_start();
     test_ordered_completions();
+    test_opportunistic_reclaim_rearms();
     test_ordered_waiter();
     test_used_id_boundary();
     test_header_buffers();
@@ -613,6 +614,73 @@ fn test_ordered_completions() {
         Poll::Ready(reused_head)
     );
     drop(reused);
+}
+
+fn test_opportunistic_reclaim_rearms() {
+    for event_idx in [false, true] {
+        let device = Device::new(crate::VirtioDeviceKind::Net);
+        // Retaining the completion keeps every descriptor unavailable after
+        // VqAlloc opportunistically reclaims it.
+        let mut completion = device.submit(ready_head(&device, 8), 8, 7);
+        if event_idx {
+            device.queue.borrow_mut().set_f_event_idx_negotiated();
+        }
+        device.publish_used(completion.chain_head, 8);
+        assert!(poll_alloc(&mut device.alloc(1), LocalWaker::noop()).is_pending());
+        {
+            let queue = device.queue.borrow();
+            if event_idx {
+                // SAFETY: the fixture owns the simulated device's ring.
+                assert_eq!(
+                    unsafe { queue.available_ring.used_event.read_volatile() },
+                    1,
+                    "allocator reclaim must re-arm EVENT_IDX"
+                );
+            } else {
+                // The batch helper must restore callbacks after draining.
+                assert_eq!(
+                    unsafe { (queue.available_ring.flags as *const u16).read_volatile() },
+                    0
+                );
+            }
+        }
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready((value, used)) = completion.do_poll(&mut cx) else {
+            panic!("allocator did not reclaim the used chain")
+        };
+        assert_eq!((value, used.unwrap()), (7, 8));
+        drop(completion);
+    }
+
+    // Dropping an already-used, unpolled completion is the other production
+    // opportunistic-reclaim path. Exercise the u16 cursor wrap as well.
+    let device = Device::new(crate::VirtioDeviceKind::Net);
+    {
+        let mut queue = device.queue.borrow_mut();
+        queue.next_used_idx = u16::MAX;
+        // SAFETY: the fixture owns the simulated device's rings.
+        unsafe {
+            (queue.used_ring.idx as *mut u16).write_volatile(u16::MAX);
+            queue
+                .available_ring
+                .next_available_idx
+                .write_volatile(u16::MAX);
+            queue.available_ring.used_event.write_volatile(u16::MAX);
+        }
+    }
+    let completion = device.submit(ready_head(&device, 1), 1, 9);
+    device.queue.borrow_mut().set_f_event_idx_negotiated();
+    device.publish_used(completion.chain_head, 1);
+    drop(completion);
+    let queue = device.queue.borrow();
+    assert_eq!(queue.next_used_idx, 0);
+    // SAFETY: the fixture owns the simulated device's ring.
+    assert_eq!(
+        unsafe { queue.available_ring.used_event.read_volatile() },
+        0,
+        "completion drop must re-arm EVENT_IDX across wraparound"
+    );
 }
 
 fn test_ordered_waiter() {

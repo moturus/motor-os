@@ -191,23 +191,21 @@ impl Future for VqAlloc {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        loop {
-            let mut virtq = self.virtqueue.borrow_mut();
-            if let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc) {
-                return std::task::Poll::Ready(chain_head);
-            }
-
-            let mut empty = true;
-            while let Some(_chain_head) = virtq.reclaim_used() {
-                empty = false;
-            }
-            if !empty {
-                continue;
-            }
-
-            virtq.alloc_waiters.push_back(cx.local_waker().clone());
-            return std::task::Poll::Pending;
+        let mut virtq = self.virtqueue.borrow_mut();
+        if let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc) {
+            return std::task::Poll::Ready(chain_head);
         }
+
+        // Opportunistic reclamation must keep interrupts armed while the
+        // main reclaimer is asleep.
+        if virtq.reclaim_used_and_rearm() != 0
+            && let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc)
+        {
+            return std::task::Poll::Ready(chain_head);
+        }
+
+        virtq.alloc_waiters.push_back(cx.local_waker().clone());
+        std::task::Poll::Pending
     }
 }
 
@@ -416,10 +414,7 @@ impl Virtqueue {
                     if errors == 2 {
                         drop(vq);
                         let mut vq = this.borrow_mut();
-                        let mut reclaimed = 0;
-                        while let Some(_chain_head) = vq.reclaim_used() {
-                            reclaimed += 1;
-                        }
+                        let reclaimed = vq.reclaim_used_and_rearm();
 
                         for waiter in vq.completion_waiters.iter() {
                             if let Some(waiter) = waiter {
@@ -445,14 +440,7 @@ impl Virtqueue {
         loop {
             let mut virtq = this.borrow_mut();
 
-            virtq.disable_irq();
-            while let Some(_chain_head) = virtq.reclaim_used() {}
-
-            virtq.enable_irq();
-            if virtq.has_new_used() {
-                continue;
-            }
-
+            virtq.reclaim_used_and_rearm();
             drop(virtq);
             wait_handle.as_future().await.unwrap();
         }
@@ -839,6 +827,23 @@ impl Virtqueue {
         Some(chain_head)
     }
 
+    /// Drain complete chains and leave interrupts armed at the stable cursor.
+    /// Every reclamation path must update EVENT_IDX before returning, including
+    /// opportunistic callers outside the main reclaimer task.
+    fn reclaim_used_and_rearm(&mut self) -> usize {
+        let mut reclaimed = 0;
+        loop {
+            self.disable_irq();
+            while self.reclaim_used().is_some() {
+                reclaimed += 1;
+            }
+            self.enable_irq();
+            if !self.has_new_used() {
+                return reclaimed;
+            }
+        }
+    }
+
     fn get_result(&self, chain_head: u16) -> u32 {
         let consumed = self.header_buffers[chain_head as usize].consumed;
         let _ = self.last_descriptor(chain_head);
@@ -1029,7 +1034,7 @@ impl<T> Drop for VqCompletion<T> {
         };
         if device_owned(&virtqueue) {
             // An unpolled completion may already be on the used ring.
-            while virtqueue.reclaim_used().is_some() {}
+            virtqueue.reclaim_used_and_rearm();
             assert!(
                 !device_owned(&virtqueue),
                 "virtio completion dropped while the device still owns its DMA buffers"

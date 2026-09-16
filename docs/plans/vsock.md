@@ -1268,6 +1268,23 @@ VMM or completion ordering:
   suites passed without queue-stall recovery in
   `/tmp/vsock-shared-fixes-clean-gate.5GQhNV/`; Clippy adds no warnings.
 
+A separate shared-queue defect was found during that investigation and fixed
+for blk, net, and vsock alike:
+
+- Descriptor-allocation pressure and dropping an already-used, unpolled
+  completion could advance the used cursor without updating `used_event`.
+  Those paths now share the main reclaimer's disable/drain/arm/recheck batch
+  helper. Arm once per stable batch, not per descriptor; preserve completion
+  ownership and the fatal early-DMA-drop rule.
+- The existing memory-backed queue fixture exercises the real allocation
+  and completion-drop paths, both notification modes, and `u16` wrap. The
+  EVENT_IDX assertion fails on old code and passes with the fix. This was
+  not the cause of the captured stall above, where the threshold was current.
+- Both regressions remain transitively in full-test. The same clean
+  debug/release gates passed with no queue-stall warning and no new Clippy
+  warning; all temporary queue/kernel/runtime probes are removed. No feature
+  negotiation or VMM-specific behavior was added.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
