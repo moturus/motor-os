@@ -462,6 +462,96 @@ fn test_connect_drive_shutdown() {
     println!("net_driver::test_connect_drive_shutdown PASS");
 }
 
+/// Dropping a driver immediately after connect, before staging any work,
+/// disconnects without allocation and leaves the retained client unusable.
+fn test_drop_driver_immediately_after_connect() {
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        drop(driver);
+        assert_eq!(client.reservations(), 0);
+        assert_eq!(client.try_reserve().err(), Some(ReserveError::ShuttingDown));
+        assert_eq!(
+            moto_io::net::vsock::availability(&client).await,
+            Err(moto_rt::Error::NotConnected)
+        );
+    });
+
+    println!("net_driver::test_drop_driver_immediately_after_connect PASS");
+}
+
+/// Reservation-free RPCs staged before a closing driver starts cannot hold
+/// that driver open or be reused after its RX task has exited.
+fn test_queued_queries_fail_after_driver_exit() {
+    use std::future::Future;
+    use std::task::{Context, Poll};
+
+    struct WakeFlag(std::sync::atomic::AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let (client, driver) = moto_io::net::connect()
+            .await
+            .expect("async connect to sys-io failed");
+        let mut availability = Box::pin(moto_io::net::vsock::availability(&client));
+        let mut local_cid = Box::pin(moto_io::net::vsock::local_cid(&client));
+        let availability_woke = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+        let local_cid_woke = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
+        {
+            let waker = std::task::Waker::from(availability_woke.clone());
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(
+                availability.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+            let waker = std::task::Waker::from(local_cid_woke.clone());
+            let mut context = Context::from_waker(&waker);
+            assert!(matches!(
+                local_cid.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+        }
+
+        // Closing precedes task creation. RX therefore observes an empty
+        // response ring and exits before TX publishes either queued request.
+        client.request_shutdown();
+        driver.run().await;
+        assert_eq!(client.try_reserve().err(), Some(ReserveError::ShuttingDown));
+        assert!(availability_woke.0.load(Ordering::Acquire));
+        assert!(local_cid_woke.0.load(Ordering::Acquire));
+
+        let waker = std::task::Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert_eq!(
+            availability.as_mut().poll(&mut context),
+            Poll::Ready(Err(moto_rt::Error::NotConnected))
+        );
+        assert_eq!(
+            local_cid.as_mut().poll(&mut context),
+            Poll::Ready(Err(moto_rt::Error::NotConnected))
+        );
+        drop((availability, local_cid));
+
+        assert_eq!(client.reservations(), 0);
+        assert_eq!(
+            moto_io::net::vsock::availability(&client).await,
+            Err(moto_rt::Error::NotConnected)
+        );
+    });
+
+    println!("net_driver::test_queued_queries_fail_after_driver_exit PASS");
+}
+
 /// The reservation protocol: `try_reserve` fills exactly `capacity()`
 /// slots, refuses the next with `AtCapacity`, and releasing the last
 /// reservation -- with no `request_shutdown` anywhere -- closes the channel
@@ -1616,6 +1706,8 @@ pub fn run_all_tests() {
     crate::vsock::run_wire_tests();
     test_vsock_discovery_inner("absent", true);
     test_connect_drive_shutdown();
+    test_drop_driver_immediately_after_connect();
+    test_queued_queries_fail_after_driver_exit();
     test_reservation_lifecycle();
     test_reserved_socket_io();
     test_reserved_listener_accept();

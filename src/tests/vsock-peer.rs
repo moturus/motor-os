@@ -21,6 +21,7 @@ const RECEIVE_SHUTDOWN_DONE: &[u8] = b"shutdown:receive";
 const CONTINUE: &[u8] = b"continue";
 const TRANSFER_DONE: &[u8] = b"transfer:done";
 const CASE_DONE: &[u8] = b"case:done";
+const FINAL_SLOT_ADMITTED: &[u8] = b"final-slot:admitted";
 const CANCEL_READY: &[u8] = b"cancel:ready";
 const ROLES_READY: &[u8] = b"roles:ready";
 const RAW_SUBCHANNEL_BYTES: usize = 64 * 1024;
@@ -517,11 +518,18 @@ fn run() -> io::Result<()> {
                 expect_frame(&mut sync, CASE_DONE)?;
             }
             Action::CancelQueuedConnect => {
-                let mut canceled = configure_stream(accept_before(&listener, deadline)?)?;
-                let mut unexpected = [0_u8; 1];
-                // Rollback closes the entire late successful connection.
-                if canceled.read(&mut unexpected)? != 0 {
-                    return Err(invalid("late canceled connection carried data"));
+                let mut canceled = Vec::with_capacity(2);
+                for _ in 0..2 {
+                    canceled.push(configure_stream(accept_before(&listener, deadline)?)?);
+                }
+                write_frame(&mut sync, FINAL_SLOT_ADMITTED)?;
+                for mut canceled in canceled {
+                    let mut unexpected = [0_u8; 1];
+                    // Response rollback or whole-channel disconnect closes
+                    // each entire late successful connection.
+                    if canceled.read(&mut unexpected)? != 0 {
+                        return Err(invalid("late canceled connection carried data"));
+                    }
                 }
                 write_frame(&mut sync, TRANSFER_DONE)?;
                 expect_frame(&mut sync, CASE_DONE)?;

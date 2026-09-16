@@ -139,7 +139,7 @@ pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
     let channel = NetChannel::with_conn(conn)?;
     Ok((
         NetClient {
-            channel: channel.clone(),
+            channel: Arc::downgrade(&channel),
         },
         NetDriver { channel },
     ))
@@ -188,20 +188,27 @@ impl Reservation {
 /// Sockets on a host-owned channel are created against a [`Reservation`]
 /// from `try_reserve` (the explicit-reservation socket constructors are the
 /// next patch); the global pool keeps its own accounting and never uses one.
+/// This handle does not keep a completed driver or its IPC connection alive.
 pub struct NetClient {
-    channel: Arc<NetChannel>,
+    channel: Weak<NetChannel>,
 }
 
 impl NetClient {
     pub(super) async fn rpc(&self, req: io_channel::Msg) -> io_channel::Msg {
-        self.channel.rpc(req).await
+        let Some(channel) = self.channel.upgrade() else {
+            return not_connected_response(req);
+        };
+        channel.rpc(req).await
     }
 
     /// Reserve one socket slot, unless the channel is full or shutting
     /// down. The last [`Reservation`] to drop closes the channel, so a
     /// host that wants it back must connect a new one.
     pub fn try_reserve(&self) -> Result<Reservation, ReserveError> {
-        self.channel.client_try_reserve()
+        self.channel
+            .upgrade()
+            .ok_or(ReserveError::ShuttingDown)?
+            .client_try_reserve()
     }
 
     /// Socket slots per channel.
@@ -211,7 +218,9 @@ impl NetClient {
 
     /// Currently reserved slots; primarily diagnostics.
     pub fn reservations(&self) -> usize {
-        (self.channel.client_state.load(Ordering::Acquire) & CLIENT_COUNT_MASK) as usize
+        self.channel.upgrade().map_or(0, |channel| {
+            (channel.client_state.load(Ordering::Acquire) & CLIENT_COUNT_MASK) as usize
+        })
     }
 
     /// Ask the channel's driver to drain and exit. The host calls this once,
@@ -219,16 +228,20 @@ impl NetClient {
     /// never reserved on, since the last release shuts the channel down by
     /// itself. (The pool path never calls it.)
     pub fn request_shutdown(&self) {
-        self.channel
-            .client_state
-            .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
-        self.channel.begin_exit();
+        if let Some(channel) = self.channel.upgrade() {
+            channel
+                .client_state
+                .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
+            channel.begin_exit();
+        }
     }
 
     #[doc(hidden)]
     #[cfg(feature = "netdev")]
     pub fn fail_for_test(&self) {
-        self.channel.fail();
+        if let Some(channel) = self.channel.upgrade() {
+            channel.fail();
+        }
     }
 }
 
@@ -243,7 +256,9 @@ pub struct NetDriver {
 impl NetDriver {
     /// Drive the channel until teardown completes. Must be polled on a
     /// `moto_async::LocalRuntime`; returns after `request_shutdown` (or the
-    /// last reservation release) once both tasks drain their queues.
+    /// last reservation release) once both tasks drain their queues. A reply
+    /// that loses the closing race with RX exit is failed as `NotConnected`;
+    /// its remote operation may already have happened.
     pub async fn run(self) {
         let rx = {
             let channel = self.channel.clone();
@@ -255,7 +270,28 @@ impl NetDriver {
         };
         rx.await;
         tx.await;
+        // No new work is admitted after closing. Resolve any RPC whose
+        // response lost the race with RX exit, then let normal Arc teardown
+        // disconnect the IPC peer. Edge work may be discarded here.
+        self.channel.fail();
     }
+}
+
+impl Drop for NetDriver {
+    fn drop(&mut self) {
+        // This covers an immediate construction failure before work is
+        // staged. It is not a substitute for driving an active channel.
+        // Do not call fail(): destructors must not take its allocation paths.
+        self.channel
+            .client_state
+            .fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
+        self.channel.begin_exit();
+    }
+}
+
+fn not_connected_response(mut req: io_channel::Msg) -> io_channel::Msg {
+    req.status = moto_rt::E_NOT_CONNECTED;
+    req
 }
 
 // -------------------------------- implementation details ------------------------------ //
@@ -811,12 +847,10 @@ impl Drop for RpcRegistration<'_> {
 
 impl Drop for NetChannel {
     fn drop(&mut self) {
-        // Reached only after the runtime thread has exited: it holds an
-        // Arc<Self> for its whole life (see runtime_thread_init), so this
-        // last drop cannot run while a task still borrows `self`. Teardown
-        // (begin_exit + the tasks draining) already happened; the conn,
-        // maps and queues drop with the struct. The kernel reaps the
-        // exited thread on its own (no join needed).
+        // Active tasks and reservations hold Arc<Self>, so final Drop cannot
+        // run while they borrow the channel. The driver has either drained
+        // its tasks or been dropped before staging work. The connection,
+        // maps, and queues now follow ordinary ownership teardown.
         debug_assert!(self.exiting.load(Ordering::Acquire));
         debug_assert_eq!(0, self.reservations.load(Ordering::Relaxed));
         debug_assert_eq!(
@@ -1855,7 +1889,7 @@ impl NetChannel {
         req.id = self.new_req_id();
         {
             let mut rpc_map = self.rpc_map.lock();
-            if self.is_failed() {
+            if self.is_failed() || self.client_state.load(Ordering::Acquire) & CLIENT_CLOSED != 0 {
                 let mut resp = io_channel::Msg::new();
                 resp.id = req.id;
                 resp.status = moto_rt::E_NOT_CONNECTED;

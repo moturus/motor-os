@@ -19,6 +19,7 @@ const RECEIVE_SHUTDOWN_DONE: &[u8] = b"shutdown:receive";
 const CONTINUE: &[u8] = b"continue";
 const TRANSFER_DONE: &[u8] = b"transfer:done";
 const CASE_DONE: &[u8] = b"case:done";
+const FINAL_SLOT_ADMITTED: &[u8] = b"final-slot:admitted";
 const CANCEL_READY: &[u8] = b"cancel:ready";
 const ROLES_READY: &[u8] = b"roles:ready";
 const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
@@ -713,15 +714,58 @@ async fn run_action(
         }
         Action::CancelQueuedConnect => {
             let sync = sync.unwrap();
+
+            // The in-flight query, not the idle client, owns the second
+            // channel after its final connect reservation is released.
+            let (final_client, final_driver) = moto_io::net::connect()
+                .await
+                .expect("final-slot channel connect failed");
+            let final_connect =
+                VsockStream::connect_reserved(final_client.try_reserve().unwrap(), peer);
+            let final_query_wake = Arc::new(CountWake(AtomicUsize::new(0)));
+            let mut final_query = Box::pin(moto_io::net::vsock::availability(&final_client));
+            {
+                let waker = Waker::from(final_query_wake.clone());
+                let mut context = Context::from_waker(&waker);
+                assert!(matches!(
+                    final_query.as_mut().poll(&mut context),
+                    Poll::Pending
+                ));
+            }
+            let final_counter = poll_pending(final_connect);
+            assert_eq!(final_client.reservations(), 0);
+            let final_driver_thread = std::thread::spawn(move || {
+                moto_async::LocalRuntime::new().block_on(final_driver.run());
+            });
+
             let connect = VsockStream::connect_reserved(client.try_reserve().unwrap(), peer);
             let counter = poll_pending(connect);
 
-            // The first poll queued the request locally but cannot run the
-            // same-runtime driver. The host proves later success was closed.
-            expect_frame(sync, TRANSFER_DONE).await;
+            // Both connects are admitted while the retained query keeps the
+            // final-slot IPC mapping alive after its driver exits.
+            expect_frame(sync, FINAL_SLOT_ADMITTED).await;
             assert_eq!(client.reservations(), 2);
+            final_driver_thread.join().unwrap();
+            assert!(final_query_wake.0.load(Ordering::Acquire) > 0);
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert_eq!(
+                final_query.as_mut().poll(&mut context),
+                Poll::Ready(Err(moto_rt::Error::NotConnected))
+            );
+            drop(final_query);
+            assert_eq!(final_client.reservations(), 0);
+            assert_eq!(
+                moto_io::net::vsock::availability(&final_client).await,
+                Err(moto_rt::Error::NotConnected)
+            );
+            assert_eq!(
+                final_client.try_reserve().err(),
+                Some(moto_io::net::ReserveError::ShuttingDown)
+            );
+            expect_frame(sync, TRANSFER_DONE).await;
             write_frame(sync, CASE_DONE).await;
-            vec![counter]
+            vec![final_counter, counter]
         }
         Action::StalledReader { total } => {
             let sync = sync.unwrap();

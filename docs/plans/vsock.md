@@ -1388,6 +1388,28 @@ D27's separate kernel thread-creation fix is implemented and fully gated:
   hashes, and per-run logs. These gates cover this kernel patch only; they do
   not count as M2 validation of the still-unapplied vsock drafts.
 
+D28's simplified abandoned-operation teardown is implemented:
+
+- `NetClient` is weak; only drivers, reservations, and actual in-flight
+  operations retain the channel. After normal RX/TX drain, the driver's
+  existing failure path resolves residual RPCs and closes admission.
+  Immediate Drop before staging work is nonallocating. Ordinary queued-TX
+  socket Drop keeps its existing drain behavior; no cancellation protocol
+  or explicit IPC disconnect API was added.
+- Guest regressions prove both queued reservation-free queries are woken
+  with `NotConnected`, and a retained idle client cannot keep late canceled
+  connects alive. The host confirms both connects were admitted before the
+  last real owner leaves, then requires EOF. Existing native TCP/UDP and
+  queued-TX teardown tests remain intact.
+- Debug/release builds, native-network suites, and all nineteen peer cases
+  plus discovery passed on QEMU, CHV, and FC. Targeted Clippy and formatting
+  passed with no new warnings. Evidence: `/tmp/vsock-a30-gate.7ebi5S/`.
+  Its first temporary runner uploaded an older systest because default
+  `make` does not build that target; mandatory new-marker checks rejected
+  the run. Original logs are preserved in `stale-fixture-run/`. Explicitly
+  building `all systest` corrected the runner, without changing assertions
+  or timeouts. Only the subsequent fresh-binary runs count as validation.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
@@ -3214,9 +3236,11 @@ Use existing ownership and teardown instead:
    residual waiters as `NotConnected` and leave admission closed. Do not wait
    for a late successful connect/accept or add per-request cancellation state.
 3. Let normal `ClientConnection::Drop` release the mapping and peer handle
-   once real owners leave. Handle an unstarted driver's Drop without a new
-   allocation or stranded channel. Preserve ordinary socket Drop's existing
-   queued-TX drain; this edge-case policy does not weaken TCP/UDP or D10.
+   once real owners leave. Handle a freshly connected driver's Drop before
+   any work is staged, without a new allocation or stranded channel. Once
+   work is staged, retain the existing requirement to drive the channel to
+   completion. Preserve ordinary socket Drop's queued-TX drain; this
+   edge-case policy does not weaken TCP/UDP or D10.
 
 "Drop everything" means logical work, not freeing borrowed memory. A retained
 in-flight future may hold an inert channel until polled after its error wake
@@ -3226,7 +3250,7 @@ remain until completion independently of client teardown. No per-socket
 virtqueue cancellation is needed.
 
 Test retained-client final-slot cancellation, later queries returning errors,
-unstarted-driver Drop, and ordinary queued-TX Drop through existing guest
+immediate unstaged-driver Drop, and ordinary queued-TX Drop through existing guest
 routes. A canceled accept on a still-live channel may retain one of D25's
 eight pending-call slots until a peer arrives or the listener drops; existing
 late-success cleanup then reclaims the child. Bound and document that case
