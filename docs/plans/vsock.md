@@ -1063,6 +1063,21 @@ M2's sys-io listener bind/drop ownership slice is implemented and parent-reviewe
   wired into full-test. Peer REQUEST/backlog/accept handling and native
   `VsockListener` are not yet implemented; Q28 awaits a pending-accept bound.
 
+D16's selected-VMM System-console path is implemented and parent-reviewed:
+
+- `test-system-tty.sh` accepts the shared selector, retains its raw image,
+  and uses one narrow serial-launch helper. CHV gets a PTY with child-first
+  teardown; QEMU/FC retain FIFO input. Each owned process is waited once,
+  ownership clears before post-wait validation, and unexpected exits fail.
+- Existing System-console guest tests and their builds passed on QEMU, CHV,
+  and Firecracker in both debug and release. CLI rejection/shell checks also
+  passed; developer-image FC is rejected before building. No developer-image
+  run is claimed. Logs and saved serial transcripts:
+  `/tmp/vsock-d16-system-tty-gate.zE9Za4/`.
+- Full-test already reaches the default System-console path. TUI, terminal
+  size, discovery selection, other-VMM boot checks, and final full-suite
+  selector propagation remain D16 work; no VMM binary/source was changed.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

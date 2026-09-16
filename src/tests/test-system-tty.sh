@@ -17,11 +17,34 @@ set -e
 WD="$(dirname "$0")"
 ROOT_DIR="$WD/../.."
 BUILD=debug
-if [ "${1:-}" = "--release" ]; then
-  BUILD=release
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "test-system-tty: duplicate --release" >&2; exit 2; }
+      BUILD=release; SEEN_RELEASE=1; shift ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-system-tty: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "test-system-tty: --vmm requires qemu, chv, or fc" >&2; exit 2; }
+      VMM="$2"; SEEN_VMM=1; shift 2 ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-system-tty: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"; SEEN_VMM=1; shift ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2; exit 2 ;;
+  esac
+done
+case "$VMM" in qemu|chv|fc) ;; *) echo "test-system-tty: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
+  echo "test-system-tty: Firecracker does not support developer-image runs" >&2
+  exit 2
 fi
-IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-system-tty.img
+. "$WD/vm-test-selection.sh"
+select_test_vm "$ROOT_DIR" "$BUILD" system-console "$VMM"
+export MOTO_IMAGE="$TEST_VM_IMAGE"
+export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+export MOTO_SMP="${MOTO_SMP:-4}"
 
 if [ "$BUILD" = release ]; then
   make -C "$ROOT_DIR" system-tty.img systest BUILD=release -j"$(nproc)"
@@ -41,6 +64,7 @@ SSH_OPTIONS=(
 )
 
 . "$WD/vm-cleanup.sh"
+. "$WD/vm-test-serial.sh"
 
 fail() {
   echo "test-system-tty: $*" >&2
@@ -49,14 +73,20 @@ fail() {
 
 CONSOLE_LOG=/tmp/test-system-tty.log
 SCRATCH="$(mktemp -d)"
+export MOTO_CHV_RUNTIME_DIR="$SCRATCH/chv"
+export MOTO_FC_RUNTIME_DIR="$SCRATCH/fc"
+export MOTO_FC_VSOCK_UDS=''
 VMM_PID=""
+VM_CHILD_PID=""
 
 cleanup() {
+  local status=$?
+  trap - EXIT
   set +e
-  stop_vm "$VMM_PID"
-  VMM_PID=""
   exec 3>&-
+  stop_serial_test_vm || status=1
   rm -rf "$SCRATCH"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -70,9 +100,9 @@ wait_guest_file() {
     if vm_ssh "[ -e $path ]" >/dev/null 2>&1; then
       return
     fi
-    if ! kill -0 "$VMM_PID" 2>/dev/null; then
+    if ! serial_test_vm_alive; then
       cat "$CONSOLE_LOG" >&2
-      fail "QEMU exited while waiting for '$path'"
+      fail "$TEST_VM_LABEL exited while waiting for '$path'"
     fi
     sleep 0.5
   done
@@ -82,7 +112,7 @@ wait_guest_file() {
 run_console() {
   local marker="$1"
   local command="$2"
-  printf '%s; echo done > %s\n' "$command" "$marker" >&3
+  printf '%s; echo done > %s\r' "$command" "$marker" >&3
   wait_guest_file "$marker"
 }
 
@@ -101,16 +131,15 @@ has_system_process() {
 }
 
 mkfifo "$SCRATCH/console-in"
-echo "test-system-tty: starting a $BUILD VM; console log in $CONSOLE_LOG"
-"$IMG_DIR/run-qemu.sh" < "$SCRATCH/console-in" > "$CONSOLE_LOG" 2>&1 &
-VMM_PID="$!"
-exec 3> "$SCRATCH/console-in"
+exec 3<> "$SCRATCH/console-in"
+start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
+  "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
+  if ! serial_test_vm_alive; then
     cat "$CONSOLE_LOG" >&2
-    fail "QEMU exited before SSH became ready"
+    fail "$TEST_VM_LABEL exited before SSH became ready"
   fi
   sleep 1
 done
@@ -217,7 +246,7 @@ printf '%s\n' "$listing" |
 # The foreground rmux client remains observable while its detached server and
 # pane are alive. Two rmux processes prove the detached spawn succeeded; the
 # starred client proves Rush's pass-listed grant preserved System authority.
-printf '/user/bin/rmux new -s system-role\n' >&3
+printf '/user/bin/rmux new -s system-role\r' >&3
 rmux_ok=0
 for _ in $(seq 1 40); do
   rmux_ps="$(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /system/bin/sysbox ps)"
@@ -242,6 +271,5 @@ done
 [ "$rmux_ok" = 1 ] ||
   fail "pass-listed rmux did not retain System and launch its detached server: '$rmux_ps'"
 
-stop_vm "$VMM_PID"
-VMM_PID=""
+stop_serial_test_vm
 echo "-------- TEST-SYSTEM-TTY PASS ---------"
