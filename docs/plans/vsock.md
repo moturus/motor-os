@@ -1285,6 +1285,23 @@ for blk, net, and vsock alike:
   warning; all temporary queue/kernel/runtime probes are removed. No feature
   negotiation or VMM-specific behavior was added.
 
+D16's standard full-suite selector and non-selected boot checks are implemented:
+
+- `full-test.sh --vmm qemu|chv|fc` propagates selection through the vsock,
+  System-console, TUI, terminal-size, and main-suite VMs. Standard FC selects
+  the opt-in `raw.img`; other standard runs retain qcow2 and use the raw base
+  image only for FC's boot check. Preserve CPU/memory overrides and isolate
+  QEMU-only arguments. Developer FC is rejected before builds or launches.
+- Every standard run checks SSH and owned-process liveness for the two
+  non-selected VMMs. The shared teardown helper reaps each owned VMM once,
+  validates its exit status, and makes teardown failure fail the suite.
+  Main-suite cleanup preserves the original failure; PASS follows teardown.
+- Clean QEMU full suites and all three VMM boot checks passed in both
+  profiles, with the existing 1500/900-second suite budgets unchanged.
+  Evidence: `/tmp/vsock-shared-fixes-clean-gate.5GQhNV/`. The full selected
+  CHV/FC M2 gates and QEMU/CHV developer-wrapper propagation remain pending;
+  these boot checks are not substitutes for those full runs.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
