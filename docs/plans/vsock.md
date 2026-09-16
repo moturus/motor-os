@@ -1003,6 +1003,20 @@ M2's connect-cancellation and queued-TX Drop fixtures are implemented and gated:
   these cases transitively; listener implementation and the remaining M2
   integration/coverage are still pending.
 
+M2's listener bind/drop IPC contract is implemented and parent-reviewed:
+
+- Append listener command numbers without changing existing values. Bind
+  carries only a 32-bit port; sys-io supplies the local CID and fixed backlog.
+  Handle-only drop uses the existing nonzero-ID RPC/zero-ID fire-and-forget
+  convention; a successful RPC acknowledges local removal, not peer cleanup.
+- Literal wire, reserved-field, high-port, identity, and native-error fixtures
+  run through ordinary native-net/full-test. Debug/release base, systest, and
+  mio builds, queue/task fixtures, full native-net/mio guest regressions, and
+  targeted Clippy passed with no new warnings. Logs:
+  `/tmp/vsock-listener-bind-codec-gate.RdOIia/`. The sandbox-rejected launch
+  (no KVM/socket access, before guest boot) is retained under `sandbox-launch/`;
+  the actual guest gates used host access. Runtime listeners are not yet added.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

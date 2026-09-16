@@ -38,6 +38,12 @@ pub struct ConnectResponse {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListenerBindResponse {
+    pub handle: u64,
+    pub local: VsockAddr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamStateChange {
     pub handle: u64,
     pub flags: u32,
@@ -134,6 +140,99 @@ pub fn decode_connect_response(msg: &io_channel::Msg) -> moto_rt::Result<Connect
         handle: msg.handle,
         local,
     })
+}
+
+/// Build a combined bind/listen request. The requested u32 port occupies
+/// payload bytes 0..4; zero asks sys-io for an ephemeral port. The fixed
+/// backlog is server-owned, and the remaining payload bytes are zero.
+pub fn listener_bind_request(port: u32) -> moto_rt::Result<io_channel::Msg> {
+    if port == u32::MAX {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockListenerBind as u16;
+    msg.payload.args_32_mut()[0] = port;
+    Ok(msg)
+}
+
+pub fn decode_listener_bind_request(msg: &io_channel::Msg) -> moto_rt::Result<u32> {
+    let port = msg.payload.args_32()[0];
+    if msg.command != NetCmd::VsockListenerBind as u16
+        || msg.handle != 0
+        || msg.flags != 0
+        || port == u32::MAX
+        || !msg.payload.args_8()[4..].iter().all(|byte| *byte == 0)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(port)
+}
+
+/// Encode a successful bind response while preserving request identity. The
+/// server-selected local CID and nonzero port occupy payload bytes 0..8;
+/// flags and the remaining payload bytes are zero.
+pub fn encode_listener_bind_response(
+    request: &io_channel::Msg,
+    handle: u64,
+    local: VsockAddr,
+) -> moto_rt::Result<io_channel::Msg> {
+    if request.command != NetCmd::VsockListenerBind as u16 || handle == 0 || !valid_local(local) {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut response = io_channel::Msg::new();
+    response.id = request.id;
+    response.wake_handle = request.wake_handle;
+    response.command = request.command;
+    response.handle = handle;
+    response.status = moto_rt::E_OK;
+    response.payload.args_32_mut()[0] = local.cid;
+    response.payload.args_32_mut()[1] = local.port;
+    Ok(response)
+}
+
+pub fn decode_listener_bind_response(
+    msg: &io_channel::Msg,
+) -> moto_rt::Result<ListenerBindResponse> {
+    if msg.command != NetCmd::VsockListenerBind as u16 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    msg.status()?;
+    let local = VsockAddr {
+        cid: msg.payload.args_32()[0],
+        port: msg.payload.args_32()[1],
+    };
+    if msg.handle == 0
+        || msg.flags != 0
+        || !valid_local(local)
+        || !msg.payload.args_8()[8..].iter().all(|byte| *byte == 0)
+    {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    Ok(ListenerBindResponse {
+        handle: msg.handle,
+        local,
+    })
+}
+
+/// Build a handle-only listener drop request. Handle validity is server-owned.
+/// With a nonzero request ID, sys-io echoes E_OK only after authoritative
+/// local removal. ID zero is fire-and-forget. That response is not peer
+/// cleanup acknowledgement and does not free ports retained by child tuples.
+pub fn listener_drop_request(handle: u64) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockListenerDrop as u16;
+    msg.handle = handle;
+    msg
+}
+
+pub fn decode_listener_drop_request(msg: &io_channel::Msg) -> moto_rt::Result<()> {
+    if msg.command != NetCmd::VsockListenerDrop as u16
+        || msg.flags != 0
+        || !payload_is_zero(&msg.payload)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(())
 }
 
 /// Build a shutdown control with a nonzero RECEIVE/SEND subset and zero

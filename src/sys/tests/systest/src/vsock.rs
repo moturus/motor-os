@@ -5,6 +5,7 @@ pub fn run_wire_tests() {
     test_command_values();
     test_connect_codec();
     test_connect_response_codec();
+    test_listener_bind_codec();
     test_control_codec();
     test_state_change_codec();
     test_page_codec();
@@ -19,11 +20,11 @@ fn test_command_values() {
     assert_eq!(NetCmd::VsockStreamShutdown as u16, 0x1119);
     assert_eq!(NetCmd::VsockStreamClose as u16, 0x111a);
     assert_eq!(NetCmd::EvtVsockStreamStateChanged as u16, 0x111b);
-    assert_eq!(moto_sys_io::api_net::CMD_MAX, 0x111c);
-    assert_eq!(
-        NetCmd::try_from(0x111b),
-        Ok(NetCmd::EvtVsockStreamStateChanged)
-    );
+    assert_eq!(NetCmd::VsockListenerBind as u16, 0x111c);
+    assert_eq!(NetCmd::VsockListenerAccept as u16, 0x111d);
+    assert_eq!(NetCmd::VsockListenerDrop as u16, 0x111e);
+    assert_eq!(moto_sys_io::api_net::CMD_MAX, 0x111f);
+    assert_eq!(NetCmd::try_from(0x111e), Ok(NetCmd::VsockListenerDrop));
 }
 
 fn test_connect_codec() {
@@ -157,6 +158,100 @@ fn test_connect_response_codec() {
     ] {
         assert_eq!(
             api_vsock::encode_connect_response(&request, 1, local).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+}
+
+fn test_listener_bind_codec() {
+    let mut bind = api_vsock::listener_bind_request(70_000).unwrap();
+    bind.id = 0x111;
+    bind.wake_handle = 0x222;
+    let mut expected = [0_u8; 24];
+    expected[..4].copy_from_slice(&70_000_u32.to_le_bytes());
+    assert_eq!(bind.command, NetCmd::VsockListenerBind as u16);
+    assert_eq!(bind.handle, 0);
+    assert_eq!(bind.flags, 0);
+    assert_eq!(bind.payload.args_8(), &expected);
+    assert_eq!(api_vsock::decode_listener_bind_request(&bind), Ok(70_000));
+    assert_eq!(
+        api_vsock::decode_listener_bind_request(&api_vsock::listener_bind_request(0).unwrap()),
+        Ok(0)
+    );
+    assert_eq!(
+        api_vsock::listener_bind_request(u32::MAX).err(),
+        Some(moto_rt::Error::InvalidArgument)
+    );
+    let mut bad_bind = [bind; 5];
+    bad_bind[0].command = NetCmd::VsockListenerAccept as u16;
+    bad_bind[1].handle = 1;
+    bad_bind[2].flags = 1;
+    bad_bind[3].payload.args_8_mut()[4] = 1;
+    bad_bind[4].payload.args_32_mut()[0] = u32::MAX;
+    for request in bad_bind {
+        assert_eq!(
+            api_vsock::decode_listener_bind_request(&request).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+
+    let local = VsockAddr {
+        cid: 3,
+        port: 70_000,
+    };
+    let bind_response = api_vsock::encode_listener_bind_response(&bind, 0x51, local).unwrap();
+    assert_eq!(bind_response.id, bind.id);
+    assert_eq!(bind_response.wake_handle, bind.wake_handle);
+    assert_eq!(bind_response.command, bind.command);
+    assert_eq!(bind_response.status, moto_rt::E_OK);
+    assert_eq!(bind_response.flags, 0);
+    expected = [0; 24];
+    expected[..4].copy_from_slice(&local.cid.to_le_bytes());
+    expected[4..8].copy_from_slice(&local.port.to_le_bytes());
+    assert_eq!(bind_response.payload.args_8(), &expected);
+    assert_eq!(
+        api_vsock::decode_listener_bind_response(&bind_response).unwrap(),
+        api_vsock::ListenerBindResponse {
+            handle: 0x51,
+            local,
+        }
+    );
+    let mut error = bind_response;
+    error.status = moto_rt::E_ALREADY_IN_USE;
+    error.handle = 0;
+    error.payload.args_64_mut()[0] = 0;
+    assert_eq!(
+        api_vsock::decode_listener_bind_response(&error).err(),
+        Some(moto_rt::Error::AlreadyInUse)
+    );
+    let mut bad_response = [bind_response; 4];
+    bad_response[0].handle = 0;
+    bad_response[1].flags = 1;
+    bad_response[2].payload.args_32_mut()[0] = 2;
+    bad_response[3].payload.args_8_mut()[8] = 1;
+    for response in bad_response {
+        assert_eq!(
+            api_vsock::decode_listener_bind_response(&response).err(),
+            Some(moto_rt::Error::InvalidData)
+        );
+    }
+
+    let drop_request = api_vsock::listener_drop_request(0x51);
+    assert_eq!(drop_request.command, NetCmd::VsockListenerDrop as u16);
+    assert_eq!(drop_request.handle, 0x51);
+    assert_eq!(drop_request.flags, 0);
+    assert_eq!(drop_request.payload.args_64(), &[0; 3]);
+    assert_eq!(
+        api_vsock::decode_listener_drop_request(&drop_request),
+        Ok(())
+    );
+    let mut bad_drop = [drop_request; 3];
+    bad_drop[0].command = NetCmd::VsockListenerAccept as u16;
+    bad_drop[1].flags = 1;
+    bad_drop[2].payload.args_8_mut()[0] = 1;
+    for request in bad_drop {
+        assert_eq!(
+            api_vsock::decode_listener_drop_request(&request).err(),
             Some(moto_rt::Error::InvalidArgument)
         );
     }

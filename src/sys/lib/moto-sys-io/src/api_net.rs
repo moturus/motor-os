@@ -43,6 +43,9 @@ pub enum NetCmd {
     VsockStreamShutdown,
     VsockStreamClose,
     EvtVsockStreamStateChanged,
+    VsockListenerBind,
+    VsockListenerAccept,
+    VsockListenerDrop,
     NetCmdMax,
 }
 
