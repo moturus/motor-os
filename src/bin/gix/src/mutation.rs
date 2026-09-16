@@ -238,6 +238,18 @@ fn reject_operation_state(git_dir: &Path) -> crate::Result {
     Ok(())
 }
 
+pub(crate) fn owned_operation(git_dir: &Path) -> io::Result<Option<&'static str>> {
+    for (file, name) in [
+        (INCOMPLETE_CLONE_FILE, "incomplete-clone"),
+        (OPERATION_FILE, "interrupted"),
+    ] {
+        if exists(&git_dir.join(file))? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
 fn reject_non_file(path: &Path) -> crate::Result {
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {

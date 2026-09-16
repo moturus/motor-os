@@ -8,7 +8,7 @@ use gix::{
     status::plumbing::index_as_worktree_with_renames::{Recorder, Summary},
 };
 
-use crate::{cancellation::Cancellation, repository::OpenedRepository, tracked_filters};
+use crate::{cancellation::Cancellation, mutation, repository::OpenedRepository, tracked_filters};
 
 struct Change {
     staged: char,
@@ -152,7 +152,8 @@ pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate:
     cancellation.check()?;
 
     Ok(Report {
-        operation: repo.state().map(operation_name),
+        operation: mutation::owned_operation(repo.git_dir())?
+            .or_else(|| repo.state().map(operation_name)),
         changes,
     })
 }

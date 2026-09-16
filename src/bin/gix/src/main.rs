@@ -8,7 +8,7 @@ use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, cancellation, repository, status};
+use motor_gix::{Result, cancellation, clone, fetch, network, repository, status};
 
 fn main() -> ExitCode {
     match run() {
@@ -60,6 +60,26 @@ fn run() -> Result {
                 .action(ArgAction::SetTrue)
                 .global(true),
         )
+        .subcommand(
+            Command::new("clone")
+                .about("Clone an anonymous HTTPS repository into a new directory")
+                .arg(Arg::new("url").required(true).value_name("URL"))
+                .arg(
+                    Arg::new("directory")
+                        .required(true)
+                        .value_name("DIR")
+                        .value_parser(value_parser!(PathBuf)),
+                ),
+        )
+        .subcommand(
+            Command::new("fetch")
+                .about("Fetch a configured remote without changing the worktree")
+                .arg(
+                    Arg::new("remote")
+                        .default_value("origin")
+                        .value_name("REMOTE"),
+                ),
+        )
         .subcommand(Command::new("log").about("Show commit history"))
         .subcommand(Command::new("status").about("Show worktree status"))
         .get_matches();
@@ -75,11 +95,44 @@ fn run() -> Result {
         .flatten()
         .map(String::as_str)
         .collect::<Vec<_>>();
+    if let Some(("clone", command)) = matches.subcommand() {
+        let result = clone::run(
+            command.get_one::<String>("url").expect("required URL"),
+            command
+                .get_one::<PathBuf>("directory")
+                .expect("required destination"),
+            &overrides,
+            matches.get_flag("config-paths"),
+            &cancellation,
+        );
+        // Keep the partial-directory diagnostic when it already carries cancellation.
+        if result
+            .as_ref()
+            .is_err_and(|error| cancellation::was_cancelled(error.as_ref()))
+        {
+            return result;
+        }
+        cancellation.check()?;
+        return result;
+    }
     let opened = repository::open(path, &overrides, matches.get_flag("config-paths"));
     cancellation.check()?;
-    let opened = opened?;
+    let mut opened = opened?;
 
     let result = match matches.subcommand_name() {
+        Some("fetch") => {
+            let policy = network::Policy::new(&overrides, &cancellation)?;
+            fetch::run(
+                &mut opened,
+                matches
+                    .subcommand_matches("fetch")
+                    .expect("matched fetch")
+                    .get_one::<String>("remote")
+                    .expect("default remote"),
+                &policy,
+                &cancellation,
+            )
+        }
         Some("log") => log::show(&opened.repo, &cancellation),
         Some("status") => status::collect(&opened, &cancellation)
             .and_then(|report| report.write_to(io::stdout().lock(), &cancellation)),
