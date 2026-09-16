@@ -350,6 +350,12 @@ pub(super) struct PendingBind {
 }
 
 impl PendingBind {
+    /// Inspect a delivered response while rollback remains armed. Constructors
+    /// validate their protocol-specific success payload before taking ownership.
+    pub(super) fn response(&self) -> &io_channel::Msg {
+        &self.resp
+    }
+
     /// Commit a successful bind: the caller takes over the handle and the
     /// reservation, disarming the rollback. On a failed bind nothing was
     /// created, so dropping the error case is enough.

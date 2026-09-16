@@ -997,6 +997,9 @@ M2's connect-cancellation and queued-TX Drop fixtures are implemented and gated:
 - Driver exit, zero remaining reservations, and no canceled-waker invocation
   are checked through public APIs. No production hooks or retries were added;
   this does not claim cancellation at every response-dispatch boundary.
+  In particular, this case retains two live reservations. A later diagnostic
+  reproduced a final-reservation cleanup gap with a retained `NetClient`;
+  Q30 records the evidence and proposed lifecycle fix.
 - All fourteen outgoing cases, builds, and targeted systest Clippy passed on
   CHV in debug and release, without new warnings. Evidence:
   `/tmp/vsock-connect-cancel-gate.UvPKLu/`. The existing full-test phase reaches
@@ -1179,6 +1182,29 @@ M2's current-CID query is implemented and parent-reviewed:
   regressions, CHV's full vsock phase, formatting, and targeted Clippy passed.
   Strict moto-io Clippy passed with and without `netdev`; other baseline
   warnings were unchanged. Evidence: `/tmp/vsock-local-cid-gate.HCOY3a/`.
+
+M2's native listener bind/drop API and owner-channel cleanup are implemented
+and parent-reviewed:
+
+- `VsockListener::bind_reserved` reuses `PendingBind` and its rollback-owned
+  reservation. Validate status before decoding, and keep rollback armed until
+  the success payload is valid. Drop uses the existing guaranteed teardown
+  queue; no new listener map, cached CID, or background driver is added.
+- `socket_addr_async` combines the immutable bound port with a fresh CID
+  query. Guest coverage includes ordinary bind/drop, invalid/unpolled bind,
+  cancellation after staging, and the existing failed-channel mechanism.
+  The failed-channel fixture uses its own runtime thread, preserving the
+  existing one-driver-per-runtime topology.
+- The new `incoming-owner-drop` peer case fills the eight-child backlog,
+  closes its owning IPC channel without a listener-drop RPC, requires host
+  EOF on all children, then rebinds the same port after that acknowledgment.
+- Both profiles built and passed all seventeen peer cases on QEMU, CHV, and
+  Firecracker. Existing task/descriptor/native-net/mio guest regressions and
+  CHV's present/disabled IP-free discovery passed in both profiles. Strict
+  moto-io Clippy (default and `netdev`) is clean; other targeted warning
+  baselines are unchanged. Evidence: `/tmp/vsock-listener-native-gate.9ewOn3/`.
+  All cases remain transitively included in full-test. Accept and Q30's
+  final-slot cancellation repair remain pending.
 
 ## Scope and simplicity
 
@@ -2907,3 +2933,55 @@ queues per-connection RST packets instead of a transport-reset event.
 Await approval before adding snapshot orchestration beyond stage 13's current
 fixture-only approach. Alternatively, retain the fixtures and explicitly
 accept the remaining integration-coverage gap; do not claim it is tested.
+
+### Q30. Disconnect when the native driver exits
+
+The existing weak connect waiter closes a successful canceled request only
+while the channel's RX task still runs. Releasing the last reservation starts
+driver exit; RX drains currently available replies, not replies to requests
+that TX has yet to publish. `NetDriver::run` can therefore return before a
+late successful connect is closed. A retained `NetClient` keeps the IPC
+connection alive, so sys-io does not see the disconnect assumed by the current
+`rpc_connect` comment. Cross-channel accepts would have the same gap.
+
+This was reproduced by temporarily adapting the existing
+`cancel-queued-connect` guest case: cancel a separate channel's sole connect
+before starting its driver, drive it to completion, retain its `NetClient`,
+and require the existing host peer to observe EOF. The driver exited with
+zero reservations, but the host accepted the connection and its EOF read
+timed out. Evidence is in
+`/tmp/vsock-final-slot-diagnostic.Ibz2gJ/separate-runtime.log` and
+`/tmp/test-vsock.yQWGyr/`. The earlier `run.log` used two drivers on one runtime
+and hit its documented single wake-target assertion; the corrected diagnostic
+uses a separate runtime thread. Both failures are preserved, and all temporary
+diagnostic edits were removed. Neither run is a validation pass.
+
+Recommend fixing channel lifetime rather than adding a vsock cancellation
+protocol. After both native driver tasks finish draining:
+
+1. Fail residual RPC waiters as `NotConnected` and prevent new RPC admission
+   on the closed channel, including reservation-free availability/CID queries.
+2. Explicitly release the IPC peer handle, idempotently. Add a narrow
+   `io_channel::ClientConnection::disconnect(&self)` facility; the current
+   connection only disconnects in `Drop` and cannot be mutably borrowed
+   through the channel's shared `Arc`.
+3. Keep the client mapping alive until normal `Drop`; retained callers and
+   page references make unmapping at driver completion unsafe. Make eventual
+   `Drop` tolerate the already-released handle.
+
+The server's `Receiver::poll_recv` drains queued ring messages before reporting
+disconnect, and sys-io handles vsock TX inline before taking the next message.
+Its existing disconnect cleanup retains accepted TX under D10's deadline.
+This preserves final queued data without waiting indefinitely for an idle
+accept reply. Test retained-client final-slot cancellation, residual queries,
+and queued-TX Drop, plus the affected TCP/UDP/native and IPC regressions.
+
+The alternative is an append-only vsock cancel-open command keyed by request
+ID, with server bookkeeping for cancellation before admission, while pending,
+and after a successful reply. It avoids changing shared channel lifetime but
+adds protocol state that the lifetime fix does not need. Await user choice
+before either implementation; listener bind/drop and D16 do not depend on it.
+Under the recommended lifecycle fix, a canceled accept on a still-live channel
+may retain one Q28 pending-call slot until a peer arrives or the listener drops;
+the existing late-success-close behavior then reclaims the child. Document and
+test that bound rather than claiming prompt server-side request cancellation.

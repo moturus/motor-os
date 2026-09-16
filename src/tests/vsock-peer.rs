@@ -51,6 +51,7 @@ enum Action {
     CancelQueuedConnect,
     StalledReader { total: usize },
     IncomingBacklog,
+    IncomingOwnerDrop,
 }
 
 impl Action {
@@ -72,6 +73,7 @@ impl Action {
             Self::CancelQueuedConnect => "cancel-queued-connect".into(),
             Self::StalledReader { total } => format!("stalled-reader {total}"),
             Self::IncomingBacklog => "incoming-backlog".into(),
+            Self::IncomingOwnerDrop => "incoming-owner-drop".into(),
         }
     }
 
@@ -154,12 +156,13 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
             total: parse_size(total)?,
         }),
         ("incoming-backlog", []) => Ok(Action::IncomingBacklog),
+        ("incoming-owner-drop", []) => Ok(Action::IncomingOwnerDrop),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
-             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog",
+             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog | incoming-owner-drop",
         )),
     }
 }
@@ -504,7 +507,7 @@ fn run() -> io::Result<()> {
                     return Err(invalid("dropped stream carried excess data"));
                 }
             }
-            Action::IncomingBacklog => {
+            Action::IncomingBacklog | Action::IncomingOwnerDrop => {
                 expect_frame(&mut stream, LISTENER_READY)?;
                 let mut connections = Vec::with_capacity(LISTENER_BACKLOG);
                 for _ in 0..LISTENER_BACKLOG {

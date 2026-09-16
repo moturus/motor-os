@@ -47,6 +47,77 @@ pub async fn local_cid(client: &super::NetClient) -> Result<u32, moto_rt::Error>
     moto_sys_io::api_vsock::decode_local_cid_response(&response)
 }
 
+/// A bound native listener on the caller's explicitly driven
+/// [`super::NetDriver`]. Incoming accept support is added separately.
+///
+/// The bound port is stable, while the device CID may change after a transport
+/// reset. [`Self::socket_addr_async`] therefore queries sys-io each time.
+pub struct VsockListener {
+    channel_reservation: Option<ChannelReservation>,
+    port: u32,
+    handle: u64,
+}
+
+impl VsockListener {
+    /// Bind through one explicitly reserved slot. Port zero requests an
+    /// ephemeral port; `u32::MAX` is invalid.
+    pub async fn bind_reserved(
+        reservation: Reservation,
+        port: u32,
+    ) -> Result<Arc<Self>, ErrorCode> {
+        let request = api_vsock::listener_bind_request(port).map_err(ErrorCode::from)?;
+        let channel_reservation = reservation.into_channel_reservation();
+        let channel = channel_reservation.channel().clone();
+        let pending = channel
+            .rpc_bind(
+                request,
+                channel_reservation,
+                api_net::NetCmd::VsockListenerDrop as u16,
+            )
+            .await;
+
+        // Failed-channel responses carry no canonical command or payload.
+        pending.response().status()?;
+        let decoded = api_vsock::decode_listener_bind_response(pending.response())
+            .map_err(ErrorCode::from)?;
+        let (channel_reservation, response) = pending.into_result()?;
+        debug_assert_eq!(decoded.handle, response.handle);
+
+        Ok(Arc::new(Self {
+            channel_reservation: Some(channel_reservation),
+            port: decoded.local.port,
+            handle: decoded.handle,
+        }))
+    }
+
+    /// Return the bound port paired with the device's current local CID.
+    pub async fn socket_addr_async(&self) -> Result<VsockAddr, ErrorCode> {
+        let response = self.channel().rpc(api_vsock::local_cid_request()).await;
+        response.status()?;
+        let cid = api_vsock::decode_local_cid_response(&response).map_err(ErrorCode::from)?;
+        Ok(VsockAddr {
+            cid,
+            port: self.port,
+        })
+    }
+
+    fn channel(&self) -> &NetChannel {
+        self.channel_reservation.as_ref().unwrap().channel()
+    }
+}
+
+impl Drop for VsockListener {
+    fn drop(&mut self) {
+        let reservation = self.channel_reservation.take().unwrap();
+        let channel = reservation.channel().clone();
+        if channel.is_failed() {
+            drop(reservation);
+        } else {
+            channel.enqueue_teardown(reservation, api_vsock::listener_drop_request(self.handle));
+        }
+    }
+}
+
 /// A native stream on the caller's explicitly driven [`super::NetDriver`].
 /// Share the returned `Arc` for concurrent reads and writes. Writes report
 /// local byte acceptance, not peer receipt; an accepted prefix is returned

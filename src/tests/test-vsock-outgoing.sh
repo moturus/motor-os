@@ -280,6 +280,7 @@ run_outgoing_case cancel-before-poll-drop
 run_outgoing_case cancel-queued-connect
 run_outgoing_case stalled-reader 1048576
 run_outgoing_case incoming-backlog
+run_outgoing_case incoming-owner-drop
 
 stop_vmm_owned "$VMM_PID"
 stop_owned BACKEND_PID "vhost-device-vsock"

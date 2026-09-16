@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-use moto_io::net::vsock::{Shutdown, VsockAddr, VsockStream};
+use moto_io::net::vsock::{Shutdown, VsockAddr, VsockListener, VsockStream};
 use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -45,6 +45,7 @@ enum Action {
     CancelQueuedConnect,
     StalledReader { total: usize },
     IncomingBacklog,
+    IncomingOwnerDrop,
 }
 
 impl Action {
@@ -100,12 +101,13 @@ fn parse_action(args: &[String]) -> Action {
             total: parse_size(total),
         },
         [action] if action == "incoming-backlog" => Action::IncomingBacklog,
+        [action] if action == "incoming-owner-drop" => Action::IncomingOwnerDrop,
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
-             cancel-queued-connect, stalled-reader TOTAL, or incoming-backlog"
+             cancel-queued-connect, stalled-reader TOTAL, incoming-backlog, or incoming-owner-drop"
         ),
     }
 }
@@ -299,6 +301,95 @@ async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<Vsock
     stream
 }
 
+async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
+    let listener = crate::net_driver::RawVsockListener::bind(INCOMING_PORT).await;
+    write_frame(stream, LISTENER_READY).await;
+    expect_frame(stream, BACKLOG_READY).await;
+
+    if drop_owner_channel {
+        // The peer acknowledges only after every queued child observes EOF,
+        // ordering sys-io's channel cleanup before the rebind below.
+        drop(listener);
+    } else {
+        listener.close().await;
+    }
+    write_frame(stream, LISTENER_DROPPED).await;
+    expect_frame(stream, BACKLOG_CLEARED).await;
+
+    crate::net_driver::RawVsockListener::bind(INCOMING_PORT)
+        .await
+        .close()
+        .await;
+    write_frame(stream, LISTENER_REBOUND).await;
+}
+
+async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
+    const BIND_PORT: u32 = 80_001;
+    const CANCEL_PORT: u32 = 80_002;
+    const FAILED_PORT: u32 = 80_003;
+
+    let baseline = client.reservations();
+
+    let unpolled = VsockListener::bind_reserved(client.try_reserve().unwrap(), CANCEL_PORT);
+    drop(unpolled);
+    assert_eq!(client.reservations(), baseline);
+    assert_eq!(
+        VsockListener::bind_reserved(client.try_reserve().unwrap(), u32::MAX)
+            .await
+            .err(),
+        Some(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(client.reservations(), baseline);
+
+    let listener = VsockListener::bind_reserved(client.try_reserve().unwrap(), BIND_PORT)
+        .await
+        .unwrap();
+    assert_eq!(client.reservations(), baseline + 1);
+    assert_eq!(
+        listener.socket_addr_async().await,
+        Ok(VsockAddr {
+            cid: 3,
+            port: BIND_PORT,
+        })
+    );
+    drop(listener);
+    crate::net_harness::wait_until("native vsock listener reservation release", || {
+        client.reservations() == baseline
+    })
+    .await;
+
+    // One poll queues the bind and transfers its reservation into PendingBind.
+    // Cancellation keeps rollback armed; eventual response dispatch owns the
+    // listener drop and reservation release.
+    let mut bind = Box::pin(VsockListener::bind_reserved(
+        client.try_reserve().unwrap(),
+        CANCEL_PORT,
+    ));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+    assert_eq!(client.reservations(), baseline + 1);
+    drop(bind);
+    crate::net_harness::wait_until("cancelled vsock listener reservation release", || {
+        client.reservations() == baseline
+    })
+    .await;
+
+    let (failed_client, failed_driver) = crate::net_harness::host_channel_on_thread();
+    let listener = VsockListener::bind_reserved(failed_client.try_reserve().unwrap(), FAILED_PORT)
+        .await
+        .unwrap();
+    failed_client.fail_for_test();
+    assert_eq!(
+        listener.socket_addr_async().await,
+        Err(moto_rt::E_NOT_CONNECTED)
+    );
+    drop(listener);
+    assert_eq!(failed_client.reservations(), 0);
+    failed_driver.join().unwrap();
+    drop(failed_client);
+}
+
 async fn run_action(
     client: &moto_io::net::NetClient,
     peer: VsockAddr,
@@ -453,19 +544,11 @@ async fn run_action(
             Vec::new()
         }
         Action::IncomingBacklog => {
-            let listener = crate::net_driver::RawVsockListener::bind(INCOMING_PORT).await;
-            write_frame(stream, LISTENER_READY).await;
-            expect_frame(stream, BACKLOG_READY).await;
-
-            listener.close().await;
-            write_frame(stream, LISTENER_DROPPED).await;
-            expect_frame(stream, BACKLOG_CLEARED).await;
-
-            crate::net_driver::RawVsockListener::bind(INCOMING_PORT)
-                .await
-                .close()
-                .await;
-            write_frame(stream, LISTENER_REBOUND).await;
+            run_incoming_backlog(stream, false).await;
+            Vec::new()
+        }
+        Action::IncomingOwnerDrop => {
+            run_incoming_backlog(stream, true).await;
             Vec::new()
         }
     }
@@ -497,13 +580,14 @@ pub fn run(args: &[String]) {
             None
         };
         let counters = run_action(&client, peer, &stream, sync.as_deref(), action).await;
+        if test_listener_bind {
+            crate::net_driver::test_raw_vsock_listener_bind().await;
+            test_native_listener_bind_drop(&client).await;
+        }
         drop(sync);
         drop(stream);
         let completed = bounded(driver_task, 5).await && client.reservations() == 0;
         assert_not_woken(&counters);
-        if test_listener_bind {
-            crate::net_driver::test_raw_vsock_listener_bind().await;
-        }
         completed
     });
     assert!(
