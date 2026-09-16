@@ -37,6 +37,21 @@ ln -s fake-vmm "$FAKE_BIN/qemu-system-x86_64"
 ln -s fake-vmm "$FAKE_BIN/cloud-hypervisor-static"
 ln -s fake-vmm "$FAKE_BIN/firecracker"
 
+# The raw standard image is opt-in. Exercise the inner make graph directly so
+# this remains independent of the top-level logging wrapper.
+make -n -C "$ROOT_DIR" MAKELEVEL=1 > "$TEST_ROOT/make-default"
+for target in all images; do
+  make -n -C "$ROOT_DIR" MAKELEVEL=1 "$target" > "$TEST_ROOT/make-$target"
+done
+for graph in default all images; do
+  if grep -Fq -- '--raw-output' "$TEST_ROOT/make-$graph"; then
+    fail "$graph make graph unexpectedly builds the raw standard image"
+  fi
+done
+make -n -C "$ROOT_DIR" MAKELEVEL=1 raw.img > "$TEST_ROOT/make-raw"
+grep -Fq -- 'motor-os.yaml --raw-output motor-os.img' "$TEST_ROOT/make-raw" ||
+  fail "raw.img make graph does not request the raw standard image"
+
 run_qemu() {
   PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
     MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" "$VM_DIR/run-qemu.sh" "$@" \
@@ -74,6 +89,11 @@ PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
   MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" >/dev/null 2>&1
 grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os-base.img"' \
   "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw base image"
+
+PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" MOTO_IMAGE=motor-os.img \
+  MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" >/dev/null 2>&1
+grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os.img"' \
+  "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw standard image"
 
 if MOTO_IMAGE=motor-os.qcow2 MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" \
   "$VM_DIR/run-fc.sh" > /dev/null 2> "$ERROR_LOG"; then

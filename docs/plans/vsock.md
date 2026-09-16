@@ -709,6 +709,27 @@ M2's bounded tuple/port admission helper is implemented and parent-reviewed:
   `/tmp/vsock-admission.DPF8YH/`. Production connection admission, wire/IPC
   dispatch, real-peer traffic, and the complete M2 gate remain pending.
 
+The explicit standard raw-image prerequisite from D16 is implemented and
+parent-reviewed:
+
+- `make raw.img [BUILD=release]` produces `motor-os.img` from the same
+  `motor-os.yaml` and assembly inputs as `main.img`, using a small imager
+  `--raw-output` override. It is not a dependency of default `make`, `all`,
+  or `images`. Main/raw recipes no longer delete one another's outputs.
+- Existing full-test-wired imager and image-format tests cover content
+  configuration parity, invalid output names without partial mutation,
+  explicit-only make selection, and Firecracker's raw-standard filename.
+  All 22 imager tests, formatting, shell checks, and targeted imager Clippy
+  passed in debug/release with no new warnings.
+- Explicit raw/main builds passed in both profiles; checksum checks proved
+  each build preserved the other's artifact, and `qemu-img info` confirmed
+  the formats. Firecracker booted each raw standard image and passed native
+  driver/TCP/UDP, complete `mio-test`, and scattered filesystem writes, with
+  strict owned-process teardown. Logs: `/tmp/vsock-raw-image-gate.s6O9tf/`.
+- `full-test.sh --vmm fc` selection, cross-VMM boot checks, and peer-vsock
+  coverage remain later D16/M2 integration; no developer-image FC support is
+  added or claimed.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

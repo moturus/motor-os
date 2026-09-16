@@ -610,6 +610,7 @@ fn print_usage_and_exit() -> ! {
         "
 Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml>
+    imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
 "
     );
@@ -658,9 +659,11 @@ fn main() {
         }
         return;
     }
-    if args.len() != 4 {
-        print_usage_and_exit();
-    }
+    let raw_output = match args.as_slice() {
+        [_, _, _, _] => None,
+        [_, _, _, _, flag, output] if flag == "--raw-output" => Some(output.as_str()),
+        _ => print_usage_and_exit(),
+    };
 
     let motorh = Path::new(args[1].as_str());
     if !motorh.is_dir() {
@@ -678,6 +681,12 @@ fn main() {
     let config_file = File::open(config_path).expect("Failed to open config file");
     let mut config: Config =
         serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+    if let Some(output) = raw_output {
+        set_raw_output(&mut config, output).unwrap_or_else(|err| {
+            eprintln!("imager: {err}");
+            std::process::exit(1);
+        });
+    }
     let assembly_root = std::env::var_os("MOTOR_ASSEMBLY_IMAGE_ROOT");
     use_assembly_image_root(&mut config, assembly_root.as_deref().map(Path::new))
         .unwrap_or_else(|err| panic!("MOTOR_ASSEMBLY_IMAGE_ROOT: {err}"));
@@ -782,6 +791,24 @@ fn main() {
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
 }
 
+fn set_raw_output(config: &mut Config, output: &str) -> Result<(), String> {
+    let path = Path::new(output);
+    if output.is_empty() || path.file_name() != Some(path.as_os_str()) {
+        return Err(format!("raw output '{output}' must be a filename"));
+    }
+    if !matches!(
+        path.extension().and_then(OsStr::to_str),
+        Some("img" | "raw")
+    ) {
+        return Err(format!(
+            "raw output '{output}' must have an .img or .raw suffix"
+        ));
+    }
+    config.img_name = output.to_owned();
+    config.image_format = ImageFormat::Raw;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +859,29 @@ mod tests {
             let metadata = fs::metadata(&path).unwrap();
             assert!(metadata.is_file());
             assert_ne!(metadata.permissions().mode() & 0o111, 0, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn production_image_supports_an_isolated_raw_output() {
+        let mut config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+        let input_files = config.input_files.clone();
+        let static_dirs = config.static_dirs.clone();
+        let assembly_dirs = config.assembly_dirs.clone();
+
+        set_raw_output(&mut config, "motor-os.img").unwrap();
+
+        assert_eq!(config.img_name, "motor-os.img");
+        assert_eq!(config.image_format, ImageFormat::Raw);
+        assert_eq!(config.input_files, input_files);
+        assert_eq!(config.static_dirs, static_dirs);
+        assert_eq!(config.assembly_dirs, assembly_dirs);
+
+        let mut invalid: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
+        for output in ["", "/tmp/motor-os.img", "../motor-os.img", "motor-os.qcow2"] {
+            assert!(set_raw_output(&mut invalid, output).is_err());
+            assert_eq!(invalid.img_name, "motor-os.qcow2");
+            assert_eq!(invalid.image_format, ImageFormat::Qcow2);
         }
     }
 
