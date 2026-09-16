@@ -1,3 +1,4 @@
+pub mod add;
 pub mod cancellation;
 pub mod checkout;
 pub mod clone;
