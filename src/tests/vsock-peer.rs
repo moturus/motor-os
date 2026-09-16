@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::{self, ErrorKind, Read, Write},
-    net::Shutdown,
+    net::{Shutdown, TcpListener, UdpSocket},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     process::ExitCode,
@@ -33,6 +33,12 @@ const BACKLOG_READY: &[u8] = b"backlog:ready";
 const LISTENER_DROPPED: &[u8] = b"listener:dropped";
 const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const COEXIST_READY: &[u8] = b"coexist:ready";
+const COEXIST_START: &[u8] = b"coexist:start";
+const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
+const COEXIST_CONTINUE: &[u8] = b"coexist:continue";
+const COEXIST_PHASE_BYTES: usize = 256 * 1024;
+const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
 const LISTENER_BACKLOG: usize = 8;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
@@ -60,6 +66,7 @@ enum Action {
     CancelBeforePollDrop,
     CancelQueuedConnect,
     StalledReader { total: usize },
+    Coexistence,
     IncomingBacklog,
     IncomingOwnerDrop,
     GlobalStreamCapacity,
@@ -83,6 +90,7 @@ impl Action {
             Self::CancelBeforePollDrop => "cancel-before-poll-drop".into(),
             Self::CancelQueuedConnect => "cancel-queued-connect".into(),
             Self::StalledReader { total } => format!("stalled-reader {total}"),
+            Self::Coexistence => "coexistence".into(),
             Self::IncomingBacklog => "incoming-backlog".into(),
             Self::IncomingOwnerDrop => "incoming-owner-drop".into(),
             Self::GlobalStreamCapacity => "global-stream-capacity".into(),
@@ -99,6 +107,7 @@ impl Action {
                 | Self::CancelWrite { .. }
                 | Self::CancelQueuedConnect
                 | Self::StalledReader { .. }
+                | Self::Coexistence
         )
     }
 }
@@ -167,6 +176,7 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         ("stalled-reader", [total]) => Ok(Action::StalledReader {
             total: parse_size(total)?,
         }),
+        ("coexistence", []) => Ok(Action::Coexistence),
         ("incoming-backlog", []) => Ok(Action::IncomingBacklog),
         ("incoming-owner-drop", []) => Ok(Action::IncomingOwnerDrop),
         ("global-stream-capacity", []) => Ok(Action::GlobalStreamCapacity),
@@ -175,8 +185,8 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
-             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog | incoming-owner-drop | \
-             global-stream-capacity",
+             cancel-queued-connect | stalled-reader TOTAL | coexistence | incoming-backlog | \
+             incoming-owner-drop | global-stream-capacity",
         )),
     }
 }
@@ -405,6 +415,49 @@ fn accept_pair(listener: &UnixListener, deadline: Instant) -> io::Result<(UnixSt
     }
 }
 
+fn coexistence_network(
+    listener: TcpListener,
+    udp: UdpSocket,
+    ready: std::sync::mpsc::Sender<()>,
+    progress: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+) -> io::Result<()> {
+    const TCP_BYTES: usize = 16 * 1024;
+    const UDP_BYTES: usize = 256;
+
+    let (mut tcp, _) = listener.accept()?;
+    tcp.set_read_timeout(Some(IO_TIMEOUT))?;
+    tcp.set_write_timeout(Some(IO_TIMEOUT))?;
+    udp.set_read_timeout(Some(IO_TIMEOUT))?;
+    udp.set_write_timeout(Some(IO_TIMEOUT))?;
+    ready
+        .send(())
+        .map_err(|_| invalid("coexistence owner dropped before network readiness"))?;
+
+    let mut tcp_payload = vec![0; TCP_BYTES];
+    tcp.read_exact(&mut tcp_payload)?;
+    if tcp_payload != vec![0x52; TCP_BYTES] {
+        return Err(invalid("corrupt coexistence TCP payload"));
+    }
+    let mut udp_payload = [0; UDP_BYTES];
+    let (len, source) = udp.recv_from(&mut udp_payload)?;
+    if len != UDP_BYTES || udp_payload != [0x73; UDP_BYTES] {
+        return Err(invalid("corrupt coexistence UDP payload"));
+    }
+    progress
+        .send(())
+        .map_err(|_| invalid("coexistence owner dropped before network progress"))?;
+
+    resume
+        .recv_timeout(IO_TIMEOUT)
+        .map_err(|_| invalid("coexistence network resume timed out"))?;
+    tcp.write_all(&tcp_payload)?;
+    if udp.send_to(&udp_payload, source)? != UDP_BYTES {
+        return Err(invalid("short coexistence UDP echo"));
+    }
+    Ok(())
+}
+
 fn run() -> io::Result<()> {
     let args: Vec<_> = env::args().collect();
     let (base, action_name) = match args.as_slice() {
@@ -494,6 +547,51 @@ fn run() -> io::Result<()> {
                 write_frame(&mut sync, TRANSFER_DONE)?;
                 expect_frame(&mut sync, CASE_DONE)?;
                 drop(data);
+            }
+            Action::Coexistence => {
+                let tcp = TcpListener::bind((TAP_HOST, 0))?;
+                let udp = UdpSocket::bind((TAP_HOST, 0))?;
+                let tcp_port = tcp.local_addr()?.port().to_be_bytes();
+                let udp_port = udp.local_addr()?.port().to_be_bytes();
+                write_frame(
+                    &mut sync,
+                    &[tcp_port[0], tcp_port[1], udp_port[0], udp_port[1]],
+                )?;
+
+                let (network_ready_tx, network_ready_rx) = std::sync::mpsc::channel();
+                let (network_progress_tx, network_progress_rx) = std::sync::mpsc::channel();
+                let (network_resume_tx, network_resume_rx) = std::sync::mpsc::channel();
+                let network = thread::spawn(move || {
+                    coexistence_network(
+                        tcp,
+                        udp,
+                        network_ready_tx,
+                        network_progress_tx,
+                        network_resume_rx,
+                    )
+                });
+                network_ready_rx
+                    .recv_timeout(IO_TIMEOUT)
+                    .map_err(|_| invalid("coexistence network accept timed out"))?;
+                write_frame(&mut sync, COEXIST_READY)?;
+                expect_frame(&mut sync, COEXIST_START)?;
+                send_pattern(&mut data, COEXIST_PHASE_BYTES)?;
+                receive_pattern(&mut data, COEXIST_PHASE_BYTES)?;
+                network_progress_rx
+                    .recv_timeout(IO_TIMEOUT)
+                    .map_err(|_| invalid("coexistence network progress timed out"))?;
+                write_frame(&mut sync, COEXIST_PROGRESS)?;
+
+                expect_frame(&mut sync, COEXIST_CONTINUE)?;
+                network_resume_tx
+                    .send(())
+                    .map_err(|_| invalid("coexistence network worker exited before resume"))?;
+                send_pattern(&mut data, COEXIST_PHASE_BYTES)?;
+                receive_pattern(&mut data, COEXIST_PHASE_BYTES)?;
+                network
+                    .join()
+                    .map_err(|_| invalid("coexistence network worker panicked"))??;
+                write_frame(&mut sync, TRANSFER_DONE)?;
             }
             _ => unreachable!(),
         }

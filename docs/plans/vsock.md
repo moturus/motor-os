@@ -1318,6 +1318,21 @@ M2's live global stream bound and connect-error coverage are implemented:
   `/tmp/vsock-capacity-errors-clean.wuGNc9/`. These are incremental gates;
   accept, reset integration, final-slot cancellation, and M2 remain pending.
 
+M2's block/network/vsock coexistence acceptance case is implemented:
+
+- A framed barrier interleaves two 256 KiB transfers per direction with a
+  64 KiB file write/flush/readback, 16 KiB TCP echo, and 256-byte UDP echo.
+  TCP/UDP traverse the actual virtual NIC to the local tap host, not loopback.
+  Both workloads must make progress before continuing; exact payloads and
+  owned worker completion are required. This is functional coexistence, not
+  a timing or throughput benchmark.
+- The existing peer phase supplies a fresh guest temporary directory and
+  retains its deadlines, cleanup, and offline-only traffic. Debug/release
+  builds, targeted Clippy, and all nineteen peer cases plus discovery passed
+  on QEMU, CHV, and FC, with no new warnings. Formatting/shell checks passed.
+  Evidence: `/tmp/vsock-coexistence-gate.f5bPHf/`. Stage 15 measurements and
+  the remaining M2 work are not complete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

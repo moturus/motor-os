@@ -30,6 +30,13 @@ const BACKLOG_READY: &[u8] = b"backlog:ready";
 const LISTENER_DROPPED: &[u8] = b"listener:dropped";
 const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+const COEXIST_READY: &[u8] = b"coexist:ready";
+const COEXIST_START: &[u8] = b"coexist:start";
+const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
+const COEXIST_CONTINUE: &[u8] = b"coexist:continue";
+const COEXIST_PHASE_BYTES: usize = 256 * 1024;
+const COEXIST_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const TAP_HOST: &str = "192.168.4.1";
 const INCOMING_PORT: u32 = 70_001;
 const CAPACITY_READY: &[u8] = b"capacity:ready";
 const CAPACITY_FULL: &[u8] = b"capacity:full";
@@ -54,6 +61,7 @@ enum Action {
     CancelBeforePollDrop,
     CancelQueuedConnect,
     StalledReader { total: usize },
+    Coexistence,
     IncomingBacklog,
     IncomingOwnerDrop,
     GlobalStreamCapacity,
@@ -86,6 +94,7 @@ impl Action {
                 | Self::CancelWrite { .. }
                 | Self::CancelQueuedConnect
                 | Self::StalledReader { .. }
+                | Self::Coexistence
         )
     }
 }
@@ -127,6 +136,7 @@ fn parse_action(args: &[String]) -> Action {
         [action, total] if action == "stalled-reader" => Action::StalledReader {
             total: parse_size(total),
         },
+        [action] if action == "coexistence" => Action::Coexistence,
         [action] if action == "incoming-backlog" => Action::IncomingBacklog,
         [action] if action == "incoming-owner-drop" => Action::IncomingOwnerDrop,
         [action] if action == "global-stream-capacity" => Action::GlobalStreamCapacity,
@@ -135,8 +145,8 @@ fn parse_action(args: &[String]) -> Action {
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
-             cancel-queued-connect, stalled-reader TOTAL, incoming-backlog, incoming-owner-drop, \
-             or global-stream-capacity"
+             cancel-queued-connect, stalled-reader TOTAL, coexistence, incoming-backlog, \
+             incoming-owner-drop, or global-stream-capacity"
         ),
     }
 }
@@ -301,6 +311,91 @@ async fn read_pattern(stream: &VsockStream, total: usize) {
         }
         offset += payload.len();
     }
+}
+
+async fn coexistence_vsock_phase(stream: &VsockStream, sync: &VsockStream, done: &[u8]) {
+    futures::join!(
+        write_pattern(stream, COEXIST_PHASE_BYTES),
+        read_pattern(stream, COEXIST_PHASE_BYTES)
+    );
+    expect_frame(sync, done).await;
+}
+
+async fn coexistence_ports(sync: &VsockStream) -> (u16, u16) {
+    let ports = read_frame(sync).await;
+    assert_eq!(ports.len(), 4, "invalid coexistence endpoint frame");
+    let tcp = u16::from_be_bytes([ports[0], ports[1]]);
+    let udp = u16::from_be_bytes([ports[2], ports[3]]);
+    assert_ne!(tcp, 0);
+    assert_ne!(udp, 0);
+    (tcp, udp)
+}
+
+fn coexistence_io(
+    path: std::path::PathBuf,
+    ports: (u16, u16),
+    ready: moto_async::oneshot::Sender<()>,
+    start: std::sync::mpsc::Receiver<()>,
+    progress: moto_async::oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+    done: moto_async::oneshot::Sender<()>,
+) {
+    use std::io::{Read, Seek, Write};
+    use std::net::{TcpStream, UdpSocket};
+    use std::os::fd::AsRawFd;
+
+    const BLOCK_BYTES: usize = 64 * 1024;
+    const TCP_BYTES: usize = 16 * 1024;
+    const UDP_BYTES: usize = 256;
+    let (tcp_port, udp_port) = ports;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mut tcp = TcpStream::connect((TAP_HOST, tcp_port)).unwrap();
+    tcp.set_read_timeout(Some(COEXIST_IO_TIMEOUT)).unwrap();
+    tcp.set_write_timeout(Some(COEXIST_IO_TIMEOUT)).unwrap();
+    let udp = UdpSocket::bind("0.0.0.0:0").unwrap();
+    udp.set_read_timeout(Some(COEXIST_IO_TIMEOUT)).unwrap();
+    udp.set_write_timeout(Some(COEXIST_IO_TIMEOUT)).unwrap();
+
+    ready.send(()).unwrap();
+    start.recv().unwrap();
+
+    let block = vec![0x31; BLOCK_BYTES];
+    let tcp_payload = vec![0x52; TCP_BYTES];
+    let udp_payload = [0x73; UDP_BYTES];
+    file.write_all(&block).unwrap();
+    tcp.write_all(&tcp_payload).unwrap();
+    assert_eq!(
+        udp.send_to(&udp_payload, (TAP_HOST, udp_port)).unwrap(),
+        UDP_BYTES
+    );
+    progress.send(()).unwrap();
+
+    // The vsock phase must make progress before these pending operations are
+    // completed, then both workloads resume from one causal barrier.
+    resume.recv().unwrap();
+    moto_rt::fs::flush(file.as_raw_fd()).unwrap();
+    file.seek(std::io::SeekFrom::Start(0)).unwrap();
+    let mut block_back = vec![0; BLOCK_BYTES];
+    file.read_exact(&mut block_back).unwrap();
+    assert_eq!(block_back, block);
+
+    let mut tcp_back = vec![0; TCP_BYTES];
+    tcp.read_exact(&mut tcp_back).unwrap();
+    assert_eq!(tcp_back, tcp_payload);
+
+    let mut udp_back = [0; UDP_BYTES];
+    let (len, _) = udp.recv_from(&mut udp_back).unwrap();
+    assert_eq!(&udp_back[..len], &udp_payload);
+
+    drop(file);
+    std::fs::remove_file(path).unwrap();
+    done.send(()).unwrap();
 }
 
 async fn read_eof(stream: &VsockStream) {
@@ -642,6 +737,47 @@ async fn run_action(
             read_pattern(stream, total).await;
             expect_frame(sync, TRANSFER_DONE).await;
             write_frame(sync, CASE_DONE).await;
+            Vec::new()
+        }
+        Action::Coexistence => {
+            let sync = sync.unwrap();
+            let path = crate::temp_path("systest-vsock-coexistence");
+            let (tcp_port, udp_port) = coexistence_ports(sync).await;
+            let (ready_tx, ready_rx) = moto_async::oneshot();
+            let (progress_tx, progress_rx) = moto_async::oneshot();
+            let (done_tx, done_rx) = moto_async::oneshot();
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let io_thread = std::thread::spawn(move || {
+                coexistence_io(
+                    path,
+                    (tcp_port, udp_port),
+                    ready_tx,
+                    start_rx,
+                    progress_tx,
+                    resume_rx,
+                    done_tx,
+                )
+            });
+
+            expect_frame(sync, COEXIST_READY).await;
+            ready_rx.await.unwrap();
+            start_tx.send(()).unwrap();
+            write_frame(sync, COEXIST_START).await;
+            let ((), io_progress) = futures::join!(
+                coexistence_vsock_phase(stream, sync, COEXIST_PROGRESS),
+                progress_rx
+            );
+            io_progress.unwrap();
+
+            resume_tx.send(()).unwrap();
+            write_frame(sync, COEXIST_CONTINUE).await;
+            let ((), io_done) = futures::join!(
+                coexistence_vsock_phase(stream, sync, TRANSFER_DONE),
+                done_rx
+            );
+            io_done.unwrap();
+            io_thread.join().unwrap();
             Vec::new()
         }
         Action::IncomingBacklog => {

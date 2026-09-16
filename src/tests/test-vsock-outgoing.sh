@@ -70,6 +70,7 @@ RUNTIME_DIR="$(mktemp -d "$LOG_DIR/runtime.XXXXXX")"
 CONSOLE_LOG="$LOG_DIR/console.log"
 PEER_BIN="$LOG_DIR/vsock-peer"
 GUEST_BIN="/user/tmp/$(basename "$LOG_DIR")-systest"
+GUEST_TMP="/user/tmp/$(basename "$LOG_DIR")-tmp"
 VSOCK_BASE="$RUNTIME_DIR/vsock"
 VMM_PID=""
 BACKEND_PID=""
@@ -223,7 +224,7 @@ esac
 test_vm_configure_ssh
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" "${runner_args[@]}"
 
-printf 'put %s %s\n' "$ROOT_DIR/build/bin/$BUILD/systest" "$GUEST_BIN" |
+printf 'mkdir %s\nput %s %s\n' "$GUEST_TMP" "$ROOT_DIR/build/bin/$BUILD/systest" "$GUEST_BIN" |
   sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
@@ -251,7 +252,7 @@ run_outgoing_case() {
   rg -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null ||
     fail "host peer did not become ready"
 
-  vm_ssh "MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
+  vm_ssh "TMPDIR=$GUEST_TMP MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
     tee "$guest_log"
   rg -Fx "vsock outgoing: $verdict PASS" "$guest_log" >/dev/null ||
     fail "guest PASS marker missing for $verdict"
@@ -290,6 +291,7 @@ run_outgoing_case cancel-write 16384
 run_outgoing_case cancel-before-poll-drop
 run_outgoing_case cancel-queued-connect
 run_outgoing_case stalled-reader 1048576
+run_outgoing_case coexistence
 run_outgoing_case incoming-backlog
 run_outgoing_case incoming-owner-drop
 
