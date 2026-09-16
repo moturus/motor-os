@@ -543,9 +543,31 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     let unlock_result = lock_held.unlock();
     let waiter_unlock_result = waiter_holder.unlock();
 
+    // Wait for the grant and the waiter's userspace teardown before
+    // reserving a fresh channel mapping. `is_finished` can become true just
+    // before the thread's TLS destructors run; `join` is the actual teardown
+    // barrier. Running those destructors under the mapping's large temporary
+    // admission reservation would violate this test's no-growth discipline.
+    let mut waiter_finished = false;
+    for _ in 0..10 * 10 {
+        if waiter.is_finished() {
+            waiter_finished = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let waiter_result = if waiter_finished {
+        Some(waiter.join())
+    } else {
+        None
+    };
+
     // A fresh FS client dies at one of the same two hands as a net client;
-    // judged after recovery.
-    let fs_client_probe = probe_fresh_client("sys-io-fs", &mut dips);
+    // judged after recovery. Skip it if the waiter missed its bounded grant
+    // deadline so the squeeze can still be released before reporting failure.
+    let fs_client_probe = waiter_result
+        .as_ref()
+        .map(|_| probe_fresh_client("sys-io-fs", &mut dips));
 
     release_squeeze(child);
 
@@ -569,14 +591,13 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     waiter_unlock_result.expect("waiter-file UNLOCK refused under pressure");
 
     // The queued waiter's grant was sent by the mid-episode unlock; on a
-    // build that drops grants the thread never wakes, and this reports that
-    // instead of hanging in join.
-    eventually(10, "the queued lock waiter was granted", || {
-        waiter.is_finished()
-    });
-    waiter.join().unwrap();
+    // build that drops grants the bounded pre-probe wait expires. Report that
+    // only after releasing the squeeze rather than hanging in join.
+    waiter_result
+        .expect("not within 10s: the queued lock waiter was granted")
+        .unwrap();
 
-    let client_hand = match fs_client_probe {
+    let client_hand = match fs_client_probe.expect("fresh FS client probe skipped") {
         Ok(hand) => hand,
         Err(err) => {
             assert_eq!(err, moto_rt::Error::OutOfMemory);

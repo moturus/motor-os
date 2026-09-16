@@ -1224,6 +1224,27 @@ D16's IP-disabled discovery phase now uses the selected VMM:
   suite images and formats are unchanged. Full-test selector exposure,
   non-selected boot checks, and developer selector propagation remain pending.
 
+The first D16 full-suite run exposed an unrelated pressure-test race, now
+corrected without changing production memory admission:
+
+- The queued file-lock waiter's TLS destructors could run concurrently with
+  the fresh FS client's large, conservative mapping reservation. A captured
+  stack showed a 192-byte TLS-map allocation correctly refused at the user
+  memory floor. `is_finished()` alone does not wait for TLS destruction.
+- Join the waiter before starting the independent fresh-client probe, using
+  the existing ten-second grant budget. Both the under-pressure grant and
+  fresh-client refusal checks remain; release the squeeze before reporting
+  any failure. No retries, larger timeout, stdlib, or moto-rt changes.
+- Original failure: `/tmp/vsock-d16-full-test-gate.vDIsxi/`. The allocation
+  stack and admission arithmetic are retained in
+  `/tmp/vsock-bounded-stack-diagnostic.kShuWf/diagnosis.md`. The corrected
+  diagnostic passed 33 pressure episodes in the ordinary systest sequence
+  (`/tmp/vsock-shared-progress-regression.BCjdkB/green.log`). Temporary
+  diagnostics are removed. The reviewed shared-fix stack passed clean
+  debug/release builds and full suites (738/606 seconds), including both
+  ordinary pressure episodes, in `/tmp/vsock-shared-fixes-clean-gate.5GQhNV/`.
+  This is the incremental D13 gate, not the outstanding M2 repeated gate.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
