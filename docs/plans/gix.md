@@ -1072,6 +1072,16 @@ Host and Motor component gates and Clippy pass. Evidence:
 `/tmp/motor-gix-m2-foundation`. The complete developer-image gate remains
 the M2 milestone gate after the authoring workflows are implemented.
 
+Local initialization (M2), reviewed on 2026-09-16:
+`gix init [DIR]` now creates an ordinary SHA-1 repository in the specified
+directory, or the current directory when omitted. It preserves existing
+files and refuses an existing `.git`. The shared configuration policy
+selects `init.defaultBranch` or `main`; validate and freeze that name
+before creating files. Invalid names and prior cancellation leave no
+destination behind. Host and Motor component gates cover initialization,
+configured branches, preservation/refusal and the CLI; host/Motor Clippy
+and formatting pass. Evidence: `/tmp/motor-gix-init-integration`.
+
 A milestone is complete when the installed application passes its gates;
 cross-compilation alone is insufficient. Rollback restores the previous
 application/dependency pin and developer image, without rewriting user

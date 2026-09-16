@@ -319,6 +319,17 @@ PY
     "GIX_FAKE_GIT_SENTINEL=$temporary/git-invoked"
     "GIX_FILTER_SENTINEL=$temporary/filter-invoked"
   )
+  init_repo="$temporary/init"
+  mkdir "$init_repo"
+  printf 'preserve\n' > "$init_repo/sentinel"
+  (
+    cd "$init_repo"
+    "${app_env[@]}" "$gix_binary" init
+  )
+  grep -Fqx 'ref: refs/heads/main' "$init_repo/.git/HEAD" ||
+    fail "gix init did not select the default main branch"
+  grep -Fqx preserve "$init_repo/sentinel" || fail "gix init changed an existing file"
+
   ca="$APP_DIR/tests/https-test-ca.pem"
   start_https_server 127.0.0.1 localhost
   clone="$temporary/https-clone"
@@ -564,6 +575,12 @@ verify_pack "$temporary/guest-pack"
 printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-thin" "$temporary/guest-thin-pack" |
   "${sftp_command[@]}"
 verify_pack "$temporary/guest-thin-pack"
+
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix init $guest_root/init"
+printf 'get "%s" "%s"\n' "$guest_root/init/.git/HEAD" "$temporary/guest-init-head" |
+  "${sftp_command[@]}"
+grep -Fqx 'ref: refs/heads/main' "$temporary/guest-init-head" ||
+  fail "native gix init did not select the default main branch"
 
 start_https_server 192.168.4.1 192.168.4.1
 guest_clone="$guest_root/https-clone"

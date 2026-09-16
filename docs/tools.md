@@ -56,16 +56,22 @@ The shell is somewhat barebones now (contributions are welcome!).
 ## Git on the developer image
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
-can clone an anonymous HTTPS repository, update a configured remote, and inspect
-an ordinary SHA-1 worktree:
+can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
+and inspect it:
 
 ```sh
+gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream
 ```
+
+`init` creates `.git` exclusively while preserving existing files in `DIR`,
+which defaults to the current directory. It refuses to reinitialize a
+repository. The initial branch is
+`init.defaultBranch` when configured and `main` otherwise.
 
 `fetch` updates remote-tracking references and tags without changing the current
 branch, index or worktree. HTTPS uses the system CA bundle. A test or private CA

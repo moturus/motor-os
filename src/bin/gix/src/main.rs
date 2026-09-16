@@ -8,7 +8,7 @@ use clap::{Arg, ArgAction, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, cancellation, clone, fetch, network, repository, status};
+use motor_gix::{Result, cancellation, clone, fetch, init, network, repository, status};
 
 fn main() -> ExitCode {
     match run() {
@@ -72,6 +72,16 @@ fn run() -> Result {
                 ),
         )
         .subcommand(
+            Command::new("init")
+                .about("Initialize an ordinary SHA-1 worktree repository")
+                .arg(
+                    Arg::new("directory")
+                        .default_value(".")
+                        .value_name("DIR")
+                        .value_parser(value_parser!(PathBuf)),
+                ),
+        )
+        .subcommand(
             Command::new("fetch")
                 .about("Fetch a configured remote without changing the worktree")
                 .arg(
@@ -95,6 +105,18 @@ fn run() -> Result {
         .flatten()
         .map(String::as_str)
         .collect::<Vec<_>>();
+    if let Some(("init", command)) = matches.subcommand() {
+        let result = init::run(
+            command
+                .get_one::<PathBuf>("directory")
+                .expect("the init directory has a default"),
+            &overrides,
+            matches.get_flag("config-paths"),
+            &cancellation,
+        );
+        cancellation.check()?;
+        return result;
+    }
     if let Some(("clone", command)) = matches.subcommand() {
         let result = clone::run(
             command.get_one::<String>("url").expect("required URL"),

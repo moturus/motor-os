@@ -488,7 +488,7 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
   <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
   <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
   <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
-  <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: anonymous HTTPS Git with <code>gix clone URL DIR</code>, <code>gix [-r REPOSITORY] fetch [REMOTE]</code>, <code>status</code>, and <code>log</code>. Use <code>-c http.sslCAInfo=PATH</code> for an explicit CA bundle.</td></tr>
+  <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: SHA-1 worktrees with <code>gix init [DIR]</code>, anonymous HTTPS <code>clone URL DIR</code>, <code>[-r REPOSITORY] fetch [REMOTE]</code>, <code>status</code>, and <code>log</code>. Use <code>-c http.sslCAInfo=PATH</code> for an explicit CA bundle.</td></tr>
   <tr><td>lua</td><td><code>/devtools/bin</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
 </table>
 </div>

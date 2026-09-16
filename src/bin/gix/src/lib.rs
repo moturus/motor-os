@@ -8,6 +8,7 @@ pub mod fetch;
 pub mod http;
 pub mod http_request;
 pub mod https_url;
+pub mod init;
 pub mod mutation;
 pub mod network;
 pub mod repository;

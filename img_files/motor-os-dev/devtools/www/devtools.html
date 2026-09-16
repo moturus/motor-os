@@ -495,13 +495,18 @@ how procedural macros and build scripts run on Motor OS, is on the
 <a href="lorry.html">Lorry</a> page.</p>
 
 <h2>Git with gix</h2>
-<p><code>gix</code> provides anonymous smart-HTTPS clone and fetch plus read-only status
-and history for ordinary SHA-1 worktrees.</p>
-<pre><code>gix clone https://example.test/project.git project
+<p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
+anonymous smart-HTTPS remotes, and provides read-only status and history.</p>
+<pre><code>gix init scratch
+gix clone https://example.test/project.git project
 gix -r project status
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream</code></pre>
+<p><code>init</code> creates <code>.git</code> exclusively while preserving existing
+files in <code>DIR</code>, which defaults to the current directory, and refuses
+reinitialization. It uses
+<code>init.defaultBranch</code> when configured and <code>main</code> otherwise.</p>
 <p><code>fetch</code> updates remote-tracking references and tags without changing the
 current branch, index or worktree. HTTPS uses the system CA bundle. Select a test or private
 CA explicitly with

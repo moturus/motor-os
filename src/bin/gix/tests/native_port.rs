@@ -65,6 +65,7 @@ fn main() -> Result {
     }
 
     fs::create_dir(&output)?;
+    check_init(&output)?;
     check_capture(&output)?;
     check_mutation(&output)?;
     let worktree = output.join("worktree");
@@ -309,6 +310,62 @@ fn main() -> Result {
     );
 
     println!("gix native port fixture PASS");
+    Ok(())
+}
+
+fn check_init(output: &Path) -> Result {
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+
+    let default = output.join("init-default");
+    motor_gix::init::run(&default, &["init.defaultBranch=main"], false, &cancellation)?;
+    assert_eq!(
+        fs::read(default.join(".git/HEAD"))?,
+        b"ref: refs/heads/main\n"
+    );
+    let repo = gix::open(&default)?;
+    assert_eq!(repo.object_hash(), gix::hash::Kind::Sha1);
+    assert_eq!(repo.workdir(), Some(default.as_path()));
+
+    let existing = output.join("init-existing");
+    fs::create_dir(&existing)?;
+    fs::write(existing.join("sentinel"), b"preserve\n")?;
+    motor_gix::init::run(
+        &existing,
+        &["init.defaultBranch=topic"],
+        false,
+        &cancellation,
+    )?;
+    assert_eq!(fs::read(existing.join("sentinel"))?, b"preserve\n");
+    assert_eq!(
+        fs::read(existing.join(".git/HEAD"))?,
+        b"ref: refs/heads/topic\n"
+    );
+
+    let head_before = fs::read(existing.join(".git/HEAD"))?;
+    let config_before = fs::read(existing.join(".git/config"))?;
+    assert!(
+        motor_gix::init::run(&existing, &[], false, &cancellation).is_err(),
+        "reinitialization must be refused"
+    );
+    assert_eq!(fs::read(existing.join(".git/HEAD"))?, head_before);
+    assert_eq!(fs::read(existing.join(".git/config"))?, config_before);
+    assert_eq!(fs::read(existing.join("sentinel"))?, b"preserve\n");
+
+    let invalid = output.join("init-invalid");
+    let error = motor_gix::init::run(&invalid, &["init.defaultBranch=HEAD"], false, &cancellation)
+        .err()
+        .ok_or("an invalid default branch was accepted")?;
+    assert!(error.to_string().contains("invalid init.defaultBranch"));
+    assert!(!invalid.try_exists()?);
+
+    let cancelled = output.join("init-cancelled");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    cancellation.cancel();
+    let error = motor_gix::init::run(&cancelled, &[], false, &cancellation)
+        .err()
+        .ok_or("cancelled init succeeded")?;
+    assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
+    assert!(!cancelled.try_exists()?);
     Ok(())
 }
 
