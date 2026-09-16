@@ -1550,6 +1550,88 @@ fn test_failed_tcp_setup_rolls_back_socket() {
     println!("test_failed_tcp_setup_rolls_back_socket() PASS");
 }
 
+fn test_invalid_socket_subchannels_are_rejected() {
+    use moto_sys_io::api_net;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let bind_addr = "127.0.0.1:0".parse().unwrap();
+    let remote_addr = "127.0.0.1:9".parse().unwrap();
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
+
+    let tcp_before = read_sys_io_metric("net.tcp_sockets");
+    let total_tcp_before = read_sys_io_metric("net.total_tcp_sockets");
+    let udp_before = read_sys_io_metric("net.udp_sockets");
+    let total_udp_before = read_sys_io_metric("net.total_udp_sockets");
+    let total_clients = read_sys_io_metric("net.total_clients");
+    let reject = |mut request: moto_ipc::io_channel::Msg, subchannel_idx| {
+        request.payload.args_8_mut()[23] = subchannel_idx;
+        let command = request.command;
+        connection.send(request).unwrap();
+        let response = recv_raw_net_response(&connection);
+        assert_eq!(response.command, command);
+        assert_eq!(response.status(), Err(moto_rt::Error::InvalidArgument));
+    };
+
+    for subchannel_idx in [api_net::IO_SUBCHANNELS, u8::MAX] {
+        reject(
+            api_net::tcp_stream_connect_request(&listener_addr, 0),
+            subchannel_idx,
+        );
+        reject(
+            api_net::bind_udp_socket_request(&bind_addr, 0),
+            subchannel_idx,
+        );
+        reject(
+            api_net::bind_udp_socket_for_remote_request(&remote_addr, 0),
+            subchannel_idx,
+        );
+    }
+
+    assert_eq!(read_sys_io_metric("net.active_clients"), clients_before + 1);
+    assert_eq!(read_sys_io_metric("net.total_clients"), total_clients);
+    assert_eq!(read_sys_io_metric("net.tcp_sockets"), tcp_before);
+    assert_eq!(
+        read_sys_io_metric("net.total_tcp_sockets"),
+        total_tcp_before
+    );
+    assert_eq!(read_sys_io_metric("net.udp_sockets"), udp_before);
+    assert_eq!(
+        read_sys_io_metric("net.total_udp_sockets"),
+        total_udp_before
+    );
+
+    connection
+        .send(api_net::bind_udp_socket_request(&bind_addr, 3))
+        .unwrap();
+    let udp_response = recv_raw_net_response(&connection);
+    assert_eq!(udp_response.command, api_net::NetCmd::UdpSocketBind as u16);
+    udp_response.status().unwrap();
+
+    connection
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 2))
+        .unwrap();
+    let tcp_response = recv_raw_net_response(&connection);
+    assert_eq!(
+        tcp_response.command,
+        api_net::NetCmd::TcpStreamConnect as u16
+    );
+    tcp_response.status().unwrap();
+    let client_addr = api_net::get_socket_addr(&tcp_response.payload);
+    let (peer, _) = listener.accept().unwrap();
+
+    drop(peer);
+    drop(connection);
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.udp_sockets", |value| value == udp_before);
+    wait_for_sockets_released(client_addr);
+    wait_for_sys_io_metric("net.tcp_sockets", |value| value == tcp_before);
+    drop(listener);
+    println!("test_invalid_socket_subchannels_are_rejected() PASS");
+}
+
 fn test_total_clients_is_monotonic() {
     let clients_before = read_sys_io_metric("net.active_clients");
     let mut expected_total = read_sys_io_metric("net.total_clients");
@@ -1760,6 +1842,7 @@ pub fn test_native_net_cancellation() {
     test_stale_cross_connection_accept_is_requeued();
     test_pending_accept_queue_is_bounded_and_canceled();
     test_failed_tcp_setup_rolls_back_socket();
+    test_invalid_socket_subchannels_are_rejected();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_parked_native_writer_reports_close_error();

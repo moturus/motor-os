@@ -292,6 +292,12 @@ impl MotoSocket {
         device_idx: usize,
     ) -> std::io::Result<()> {
         // The single socket-creating UDP path, covering both bind entry points.
+        let subchannel_idx = msg.payload.args_8()[23];
+        if subchannel_idx >= api_net::IO_SUBCHANNELS {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
+
         runtime.pressure.admit()?;
         let mut runtime_mut = runtime.inner.borrow_mut();
         let mut resp = msg;
@@ -321,8 +327,6 @@ impl MotoSocket {
             return Err(err);
         }
         drop(runtime_mut);
-
-        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
 
         let udp_socket = match Self::create_udp_socket(
             runtime,

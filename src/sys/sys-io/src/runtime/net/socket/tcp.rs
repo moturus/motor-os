@@ -1975,6 +1975,12 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
+        let subchannel_idx = msg.payload.args_8()[23];
+        if subchannel_idx >= api_net::IO_SUBCHANNELS {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
+
         runtime.pressure.admit()?;
         let remote_addr = api_net::get_socket_addr(&msg.payload);
 
@@ -2002,7 +2008,6 @@ impl MotoSocket {
             })?;
 
         let local_addr = SocketAddr::new(local_ip_addr, local_port.port);
-        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
 
         // Create the socket.
         let weak_socket = {

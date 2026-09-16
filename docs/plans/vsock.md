@@ -22,9 +22,8 @@ checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
 (`NotFound` if absent), without activating the device.
 Q24–Q25 are settled in D22: wrong-state packets and payloads exceeding
 advertised credit reset only their identified connection.
-Q26 asks whether to include a preexisting shared NET IPC validation fix
-found while preparing the next integration slice; source work is paused
-pending that scope decision, as required by `AGENTS.md`.
+Q26 is settled in D23: fix the preexisting shared NET subchannel validation
+gap with guest regressions, then continue vsock integration.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -819,6 +818,23 @@ QEMU's shared-memory opt-in (D15) is implemented and parent-reviewed:
   pool. No device activation, application peer traffic, or throughput result
   is claimed by this runner/discovery gate.
 
+The authorized shared NET subchannel fix (D23) is implemented and reviewed:
+
+- TCP connect rejects an invalid index before route/port work; the single
+  socket-creating UDP path rejects it before port/accounting mutation for
+  both bind forms. Valid indices and existing TCP/UDP wire formats are
+  unchanged; no shared helper or broad validation framework was added.
+- The existing guest native-net route sends raw requests with indices 4 and
+  255 through all three operations, checks `InvalidArgument` and unchanged
+  live/total socket/client counts, then proves valid TCP and UDP use and
+  cleanup on that same channel.
+- Debug/release base-image/systest/mio builds, native-net and complete mio
+  guest suites, formatting, and targeted Clippy passed without new warnings.
+  Evidence: `/tmp/vsock-subchannel-gate.tJ4eM0/`. The agent's initial strict
+  systest Clippy rejection of the two preexisting allocation-benchmark
+  precedence warnings is retained in `/tmp/net-subchannel.u84imZ/`; ordinary
+  Clippy and the final gates passed with those baseline warnings unchanged.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1013,14 +1029,14 @@ netstack participates in the vsock data path.
 Each numbered step is an implementation stage, not necessarily one commit.
 Split implementation and tests into roughly 100–300 changed lines per patch.
 Keep every intermediate patch buildable, and keep partial functionality
-unpublished until its resource ownership and error paths work. D1–D22 are
+unpublished until its resource ownership and error paths work. D1–D23 are
 the authoritative requirements; stages reference them and describe changes,
 tests, and completion checks. Tests arrive with behavior; the validation
 section groups related commits into the two approved gating milestones.
 
 ### 1. Review the contract and record the baseline
 
-Follow D1–D22 without reopening the agreed scope, including Q16's resolution
+Follow D1–D23 without reopening the agreed scope, including Q16's resolution
 in D16 and Q18's resolution in D17: opt-in raw standard image, no
 developer-image Firecracker support, and ordered RX delivery in virtio-async.
 
@@ -1688,6 +1704,8 @@ decision to defer Q21 and exclude hardening against buggy or malicious VMMs.
 D21 resolves Q23: discovery uses the same capability and missing-device errors.
 D22 resolves Q24–Q25: wrong-state packets and receive-credit overruns reset
 only their identified connection.
+D23 resolves Q26: include the shared NET subchannel validation fix and its
+guest regression before continuing vsock integration.
 
 ### D1. Profile and topology (approved)
 
@@ -2391,13 +2409,11 @@ no extra receive storage or retry policy. Do not classify the rejected packet
 as ordinary backpressure or broaden D20 into a blanket exemption from approved
 protocol validation. Unrelated connections and the device remain operational.
 
-## Open questions
+### D23. Shared NET subchannel validation (Q26, approved)
 
-### Q26. Include the preexisting shared NET subchannel validation fix?
-
-Source review found that `runtime/net/socket/tcp.rs::tcp_connect` passes
+Source review found that `runtime/net/socket/tcp.rs::tcp_connect` passed
 client-controlled payload byte 23 directly to
-`moto_sys_io::api_net::io_subchannel_mask`. NET ingress does not validate
+`moto_sys_io::api_net::io_subchannel_mask`. NET ingress did not validate
 that field. The helper only has `debug_assert!(idx < IO_SUBCHANNELS)` before
 shifting its 16-page mask; there are four valid indices, 0–3. Normal moto-io
 constructs valid indices, but raw IPC clients are not constrained by it.
@@ -2409,9 +2425,17 @@ rejecting the request. The unchecked call predates vsock (present at baseline
 must be examined if a shared fix is authorized. This is source-level
 diagnosis; no malformed-request VM test has been run yet.
 
-This is guest NET IPC validation, not a virtio device/queue bug or the
-deferred malicious-VMM hardening. May this work include a small release-mode
-bounds check and guest regression, or should it be recorded separately while
-vsock alone gets validated decoding? The existing raw TCP setup tests in
-`systest/src/tcp.rs` provide a full-test-wired regression route; no new test
-framework or production injection hook is needed.
+The user approved this fix before continuing vsock integration. Reject
+out-of-range indices in release as well as debug before reserving a port or
+creating a socket, using the existing `InvalidArgument` response. Cover TCP
+connect and both UDP bind entry points; valid indices and wire layouts stay
+unchanged. Extend the existing raw guest IPC tests, reached through ordinary
+native-net/full-test, and verify resource accounting and subsequent valid
+operations. No new test framework or production injection hook is needed.
+
+This is a specifically authorized shared NET IPC fix, not a general expansion
+into unrelated preexisting bugs or the deferred malicious-VMM hardening.
+
+## Open questions
+
+None currently. Raise new non-obvious decisions before implementing them.
