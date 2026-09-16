@@ -688,6 +688,25 @@ passed its debug/release incremental gate:
   wrapper reap it. No retry, delay workaround, relaxed assertion, or timeout
   extension was added; corrected phases were rerun for those specific fixes.
 
+M2's bounded tuple/port admission helper is implemented and parent-reviewed:
+
+- The secondary index maps full local/peer CID-and-port tuples to opaque
+  socket IDs; it owns no connection state or client authority. Separate
+  listener entries and the 64-stream/32-listener limits use fallible,
+  on-demand storage. Entries remain charged until explicit removal, including
+  accepted children retaining their local port after their listener drops.
+- Source-included guest fixtures cover 32-bit ports, invalid/reserved ports,
+  full-tuple lookup, automatic-allocation collisions and wrap, unchanged
+  counts/cursor on logical admission failure, both limits, and removal/reuse.
+  Allocator-failure injection is not claimed. No activation or task is added.
+- Debug/release base/test builds, targeted Clippy, and guest descriptor,
+  I/O-task, and scattered-write regressions passed with no new warnings:
+  `/tmp/vsock-admission-gate.1VLkuM/`. Selected formatting and strict fixture
+  Clippy passed. Initial strict Clippy attempts also rejected unchanged
+  dependency/sys-io baseline lints; their logs remain under
+  `/tmp/vsock-admission.DPF8YH/`. Production connection admission, wire/IPC
+  dispatch, real-peer traffic, and the complete M2 gate remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

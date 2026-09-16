@@ -9,6 +9,8 @@ mod rx_buffer;
 mod stats;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
+#[path = "../../../sys-io/src/runtime/vsock/admission.rs"]
+mod vsock_admission;
 #[path = "../../../sys-io/src/runtime/vsock/stream.rs"]
 mod vsock_stream;
 pub(crate) use device::{BlockDevice, RawCompletion};
@@ -356,6 +358,7 @@ pub fn run_tests() {
     test_vsock_credit();
     test_vsock_stream_buffer();
     test_vsock_established_stream();
+    test_vsock_admission();
     concurrent_requests();
     runtime_wakeups();
     for operation in [0, 1] {
@@ -798,6 +801,116 @@ fn test_vsock_established_stream() {
         ReadOutcome::Copied(CAPACITY)
     );
     assert_eq!(copied, full);
+}
+
+fn test_vsock_admission() {
+    use vsock_admission::{AdmissionError, ConnectionTuple, TupleIndex, VsockAddr, find_ephemeral};
+
+    let addr = |cid, port| VsockAddr { cid, port };
+    let mut index = TupleIndex::new();
+    assert_eq!(index.reserve_listener(1, 3, 70_000), Ok(70_000));
+    assert_eq!(index.listener_socket(addr(3, 70_000)), Some(1));
+    let unchanged = index.counts();
+    assert_eq!(
+        index.reserve_listener(2, 3, 70_000),
+        Err(AdmissionError::PortInUse)
+    );
+    assert_eq!(
+        index.reserve_listener(1, 3, 70_001),
+        Err(AdmissionError::SocketIdInUse)
+    );
+    assert_eq!(
+        index.reserve_listener(2, 3, u32::MAX),
+        Err(AdmissionError::InvalidPort)
+    );
+    assert_eq!(index.counts(), unchanged);
+
+    assert_eq!(index.reserve_listener(2, 3, 49_152), Ok(49_152));
+    assert_eq!(
+        index.reserve_listener(1, 3, 0),
+        Err(AdmissionError::SocketIdInUse)
+    );
+    assert_eq!(index.reserve_listener(7, 3, 0), Ok(49_153));
+    let peer = addr(5, 80_000);
+    let outgoing = index.reserve_outgoing(3, 3, peer).unwrap();
+    assert_eq!(outgoing.local, addr(3, 49_154));
+    assert_eq!(index.stream_socket(outgoing), Some(3));
+    let tuple = |local_cid, local_port, peer_cid, peer_port| ConnectionTuple {
+        local: addr(local_cid, local_port),
+        peer: addr(peer_cid, peer_port),
+    };
+    for different in [
+        tuple(4, outgoing.local.port, peer.cid, peer.port),
+        tuple(3, outgoing.local.port, 6, peer.port),
+        tuple(3, outgoing.local.port, peer.cid, peer.port + 1),
+    ] {
+        assert_eq!(index.stream_socket(different), None);
+    }
+    let unchanged = index.counts();
+    assert_eq!(
+        index.reserve_outgoing(4, 3, addr(5, 0)),
+        Err(AdmissionError::InvalidPort)
+    );
+    assert_eq!(
+        index.reserve_outgoing(4, 3, addr(5, u32::MAX)),
+        Err(AdmissionError::InvalidPort)
+    );
+    assert_eq!(index.counts(), unchanged);
+
+    let child = index.reserve_accepted(1, 4, addr(8, 90_000)).unwrap();
+    let sibling = index.reserve_accepted(1, 5, addr(9, 90_000)).unwrap();
+    assert_eq!(child.local, addr(3, 70_000));
+    let unchanged = index.counts();
+    assert_eq!(
+        index.reserve_accepted(1, 6, child.peer),
+        Err(AdmissionError::TupleInUse)
+    );
+    assert_eq!(index.counts(), unchanged);
+    assert_eq!(index.remove_listener(1), Some(addr(3, 70_000)));
+    assert_eq!(
+        index.reserve_listener(6, 3, 70_000),
+        Err(AdmissionError::PortInUse)
+    );
+    assert_eq!(index.remove_stream(4), Some(child));
+    assert_eq!(index.remove_stream(5), Some(sibling));
+    assert_eq!(index.reserve_listener(6, 3, 70_000), Ok(70_000));
+
+    assert_eq!(
+        find_ephemeral(u32::MAX - 1, |port| {
+            port == u32::MAX - 1 || port == 49_152
+        }),
+        Some((49_153, 49_154))
+    );
+
+    let mut listeners = TupleIndex::new();
+    for id in 0..32 {
+        listeners
+            .reserve_listener(id, 3, 100_000 + id as u32)
+            .unwrap();
+    }
+    assert_eq!(
+        listeners.reserve_listener(32, 3, 200_000),
+        Err(AdmissionError::ListenerLimit)
+    );
+    assert_eq!(listeners.counts(), (0, 32));
+    listeners.remove_listener(0).unwrap();
+    assert_eq!(listeners.reserve_listener(32, 3, 200_000), Ok(200_000));
+
+    let mut streams = TupleIndex::new();
+    streams.reserve_listener(1, 3, 70_000).unwrap();
+    for id in 0..64 {
+        streams
+            .reserve_accepted(1, id + 2, addr(id as u32 + 4, 100_000))
+            .unwrap();
+    }
+    assert_eq!(
+        streams.reserve_accepted(1, 66, addr(100, 100_000)),
+        Err(AdmissionError::StreamLimit)
+    );
+    assert_eq!(streams.counts(), (64, 1));
+    streams.remove_stream(2).unwrap();
+    streams.reserve_accepted(1, 66, addr(4, 100_000)).unwrap();
+    assert_eq!(streams.counts(), (64, 1));
 }
 
 fn test_virtio_capacity() {
