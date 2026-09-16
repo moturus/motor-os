@@ -26,9 +26,16 @@ name = "cache_store"
 path = "tests/cache_store.rs"
 harness = false
 
+[[test]]
+name = "cache_response"
+path = "tests/cache_response.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"
+httpdate = "1.0"
+http-range-header = "0.4"
 axum-server = { version = "0.7.1", features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.6.1", features = ["fs", "trace"] }
 clap = { version = "=4.5.6", features = ["derive"] }
