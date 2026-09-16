@@ -188,6 +188,7 @@ PY
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
   verify_pack "$temporary/host-output/pack-roundtrip"
+  verify_pack "$temporary/host-output/pack-thin"
 
   "$cargo" build "${common[@]}" --bin gix
   gix_binary="$APP_DIR/target/component-test/release/gix"
@@ -358,6 +359,9 @@ verify_index "$temporary/guest.index"
 printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-roundtrip" "$temporary/guest-pack" |
   "${sftp_command[@]}"
 verify_pack "$temporary/guest-pack"
+printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-thin" "$temporary/guest-thin-pack" |
+  "${sftp_command[@]}"
+verify_pack "$temporary/guest-thin-pack"
 
 prepare_policy_fixture
 vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"

@@ -371,6 +371,74 @@ fn check_pack_validation(repo: &gix::Repository, output: &std::path::Path) -> Re
             "pack writer left temporary files"
         );
     }
+    check_thin_pack(repo, output)?;
+    Ok(())
+}
+
+fn check_thin_pack(repo: &gix::Repository, output: &Path) -> Result {
+    use gix::odb::pack;
+
+    let hash = gix::hash::Kind::Sha1;
+    let a = repo.write_blob(b"A")?.detach();
+    let b = repo.write_blob(b"B")?.detach();
+    let mut data = pack::data::header::encode(pack::data::Version::V2, 2).to_vec();
+    // C refers to B, which arrives as a delta from A. Both A and B are also local.
+    for (base_id, result) in [(b, b'C'), (a, b'B')] {
+        let delta = [1, 1, 1, result];
+        pack::data::entry::Header::RefDelta { base_id }.write_to(delta.len() as u64, &mut data)?;
+        let mut compressed = gix::zlib::stream::deflate::Write::new(Vec::new(), Default::default());
+        compressed.write_all(&delta)?;
+        compressed.flush()?;
+        data.extend(compressed.into_inner());
+    }
+    let entries_end = data.len();
+    let mut hasher = gix::hash::hasher(hash);
+    hasher.update(&data);
+    data.extend_from_slice(hasher.try_finalize()?.as_slice());
+
+    let directory = output.join("pack-thin");
+    fs::create_dir(&directory)?;
+    let outcome = pack::Bundle::write_to_directory(
+        &mut data.as_slice(),
+        Some(&directory),
+        &mut gix::progress::Discard,
+        &AtomicBool::new(false),
+        Some(repo.objects.clone()),
+        pack::bundle::write::Options {
+            thread_limit: Some(1),
+            alloc_limit_bytes: Some(16 * 1024 * 1024),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        outcome.index.num_objects, 3,
+        "append A once; B is already incoming"
+    );
+    let completed = fs::read(
+        outcome
+            .data_path
+            .as_ref()
+            .ok_or("thin pack was not written")?,
+    )?;
+    assert_eq!(&completed[12..entries_end], &data[12..entries_end]);
+    let bundle = outcome
+        .to_bundle()
+        .ok_or("thin pack index was not written")??;
+    let mut buffer = Vec::new();
+    for expected in [b"A", b"B", b"C"] {
+        let id = gix::objs::compute_hash(hash, gix::objs::Kind::Blob, expected)?;
+        let object = bundle
+            .find(
+                &id,
+                &mut buffer,
+                &mut gix::zlib::Inflate::default(),
+                &mut pack::cache::Never,
+            )?
+            .ok_or("completed thin pack is missing an object")?
+            .0;
+        assert_eq!(object.kind, gix::objs::Kind::Blob);
+        assert_eq!(object.data, expected);
+    }
     Ok(())
 }
 

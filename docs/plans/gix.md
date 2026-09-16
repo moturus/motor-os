@@ -16,7 +16,9 @@ filters. The shared cancellation flag, Motor handler and HTTPS adapter are
 implemented. Temporary live host and Motor probes passed V2 discovery and
 POST, same-origin redirects, unread malformed-response cleanup and PTY
 Ctrl+C child cleanup. A committed hermetic HTTPS fixture, the clone and fetch
-commands, resource limits and image integration remain M1 work.
+commands, bounded tree/index handling and image integration remain M1 work.
+The Q6 reader, pack and traversal limits and duplicate-base repair are
+recorded in section 7.
 
 ## 1. Goal and decisions
 
@@ -805,8 +807,9 @@ options remain unchanged. Use one small boundary test
 plus existing traversal tests. The allowance is an initial value to check
 against the representative native history, not a process-memory ceiling.
 Pack buffers, metadata, graph/index/ref storage, and temporary disk have
-separate limits. Host boundary/serial/parallel tests, Motor checks and the native pack
-rewrite fixture pass; representative native history validation remains due.
+separate limits. Host boundary/serial/parallel tests, Motor checks and the
+native pack rewrite fixture pass. The representative native history also
+passes after the duplicate-base repair below.
 
 Q6 stream-inflation patch, reviewed as external commit
 `063015ceca3a46f7ffb9d375076058683f40c61a`: in the external checkout's
@@ -817,9 +820,10 @@ returns the existing size-mismatch error without inflating the whole
 payload. Keep normal hash/trailer parsing and non-Motor behavior. Use one
 tiny host helper test and the existing input/bundle tests. Fetch uses
 verification mode, so a limit error fails the operation. Focused tests and
-host/Motor checks pass; application pin integration and publication are pending.
+host/Motor checks and the integrated component fixtures pass; publication is pending.
 
-Next Q6 temporary-pack patch: in external `gix-pack/src/bundle/write/`,
+Q6 temporary-pack patch, reviewed as external commit
+`861980697e19e259ad40d4700857789ee4512f11`: in external `gix-pack/src/bundle/write/`,
 change `mod.rs`, `types.rs` and add a private `limited_file.rs` helper.
 Bound native temporary pack extent to 128 MiB, including inserted thin-pack
 bases and the final trailer. Wrap the file inside the existing buffered
@@ -828,7 +832,77 @@ before they reach disk. Header rewrites do not consume extra allowance.
 Retain existing buffering, flush-before-publication and owned-tempfile
 cleanup; do not query file position or metadata on every write. Use tiny
 boundary checks and one ordinary limit-failure cleanup check with existing
-writer types. Non-Motor files keep their unbounded policy.
+writer types. Non-Motor files keep their unbounded policy. Host tests, host/Motor
+compiler and Clippy checks, and the native component fixture pass.
+
+**Duplicate-base defect, discussed and complete repair approved on 2026-09-15:**
+the representative native history probe at `86198069` read a valid
+36,548-entry, 19,376,138-byte pack but returned 48,969 entries, failing its
+unchanged count assertion. A separate host diagnostic found 12,421 duplicate
+object IDs; Git rejected the output with “The same object … appears twice
+in the pack.” A 75-byte, two-entry reduction reproduces the problem: a
+REF delta references a base that is both in the incoming pack and already
+in the destination object store; gix inserts another copy and reports
+success with three entries. Host Git accepts the input and rejects the output.
+
+The defect originated in external
+`gix-pack/src/data/input/lookup_ref_delta_objects.rs`, whose eager base
+insertion predates the Motor port. Production fetch reaches Bundle from
+`gix/src/remote/connection/fetch/receive_pack.rs`, so it affects M1.
+The user approved full repair after discussing a safeguard that would only
+reject the invalid output. The original failing logs and binaries remain
+under `/tmp/motor-gix-pack-limits-integration` and
+`/tmp/motor-gix-history-count-diagnosis`.
+
+The repair was reviewed and committed in four patches:
+`f89c4266` (external-base traversal), `e5aed20e` (index preparation),
+`4d288a75` (shared Bundle completion), and `087dbd18` (failure regressions
+and API documentation). Resolve incoming objects first, using local bases
+provisionally where needed; an unresolved intermediate may itself arrive as
+a delta. Subtract incoming object IDs before appending missing bases.
+Keep incoming entry bytes and offsets, then update the count, checksum and
+index together. Complete input packs remain byte-identical. Restore mode
+truncates to surviving entries before appending bases and rebuilding the
+header and trailer.
+
+A bounded iterative dependency walk with shared visitation state rejects
+cycles that provisional local bases could otherwise hide. Append-time
+lookups must still return the expected object ID; disappearance, changed
+content and read failures leave no published output. The existing limits,
+lookup error causes, cancellation and owned-file cleanup remain enforced.
+Duplicate IDs are rejected before index publication.
+
+All library changes are in the external authoring checkout
+`/home/posk/motor-dev/gitoxide-motor-cli`. The exact paths, relative to
+`gix-pack/src/`, are `cache/delta/traverse/{mod.rs,resolve.rs}`,
+`cache/delta/tree.rs`, `index/mod.rs`,
+`index/write/{mod.rs,error.rs,thin.rs}`,
+`bundle/write/{mod.rs,types.rs,error.rs,limited_file.rs}`, and
+`data/input/lookup_ref_delta_objects.rs`; tests are in
+`gix-pack/tests/pack/bundle.rs`. The legacy public iterator remains for
+source compatibility with its absent-base precondition documented.
+Both synchronous and eager Bundle paths use the shared repair.
+
+The main-repo `src/bin/gix/tests/native_port.rs` fixture adds one thin
+chain with a local intermediate; `src/tests/test-gix.sh` checks its host
+and copied-back native pack with Git. The first host run at `86198069`
+failed on four objects instead of three, as expected for the defect.
+At `087dbd18`, both release component gates pass, including this unchanged
+regression. Six valid diagnostic cases produce the exact unique object
+sets and pass host Git verification; self and two-object cycles fail with
+empty output directories. The external Bundle group covers both entrypoints,
+Restore truncation and append-time lookup failures.
+
+The original native history probe now retains all 36,548 entries and the
+exact 19,376,138 input bytes. Its 1,024,416-byte index passes host Git
+verification. In one 1 GiB VM run, ingestion took 1,665 ms; post-ingestion
+virtual memory was 12,365,824 bytes, which is not peak RSS. Host/Motor
+all-target compiler and Clippy checks, formatting and shell checks pass.
+The manifest and lockfile differ only in the fork revision.
+Evidence is under `/tmp/motor-gix-duplicate-base-integration`; external
+patch reviews and Git oracles are under `/tmp/motor-gix-duplicate-base-fix`.
+This completes the repair and the representative pack-ingestion check.
+The full developer-image gate remains due at the shippable M1 milestone.
 
 Application resource policy: `src/bin/gix/src/repository.rs` now supplies
 the fixed 16 MiB object allocation setting and single-worker index/pack
@@ -846,7 +920,7 @@ repository before fetch so the application can validate paths, sanitize
 configuration and set `objects.ignore_replacements` without duplicating
 the library's clone/ref/HEAD orchestration, and returns `None` after a
 successful fetch consumes that handle. The application uses reviewed commit
-`30706245e9f815348a355cf5429786b8a202dbe3`; publication of this revision
+`087dbd18e849a4275477572ec36a81385ff1e9b9`; publication of this revision
 on `gix-moturus-cli` remains pending.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
@@ -931,8 +1005,9 @@ guarantee is assumed. [Git reflog](https://git-scm.com/docs/git-reflog),
 
 The v05 revision was reviewed, committed and approved for implementation,
 including D13's `reflog`/`ORIG_HEAD` deferral. There are no remaining scope
-questions from that review. Q6's workload and numerical limits remain an
-implementation measurement task.
+questions from that review. Section 7 records Q6's selected workload,
+implemented limits and pack-ingestion measurement; remaining command paths
+still need their limits and workload validation during implementation.
 
 ### Implementation discussion — thin-pack lookup errors (2026-09-15)
 
