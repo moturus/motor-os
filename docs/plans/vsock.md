@@ -1302,6 +1302,22 @@ D16's standard full-suite selector and non-selected boot checks are implemented:
   CHV/FC M2 gates and QEMU/CHV developer-wrapper propagation remain pending;
   these boot checks are not substitutes for those full runs.
 
+M2's live global stream bound and connect-error coverage are implemented:
+
+- A fresh VM admits one control stream plus 63 incoming streams across eight
+  listeners. The next connection is refused while its listener still has a
+  backlog slot; the existing control stream continues working. Listener
+  cleanup must produce EOF on all children before rebind/new admission.
+- Native connect tests require `NotImplemented` for a valid non-host CID and
+  the exact refusal/timeout result declared by the host fixture, with all
+  failed reservations reclaimed. D24 records the failed initial assumption,
+  backend trace, and matching Linux timeout; no VMM or production change.
+- Debug/release builds, targeted Clippy, and all eighteen peer cases plus
+  IP-disabled discovery passed on QEMU, CHV, and FC. Formatting and shell
+  checks passed, with no new warnings. Evidence:
+  `/tmp/vsock-capacity-errors-clean.wuGNc9/`. These are incremental gates;
+  accept, reset integration, final-slot cancellation, and M2 remain pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2987,6 +3003,23 @@ or gate counts change. Linux is a one-off diagnostic reference, not a regular
 test dependency. This diagnosis corrects a false test premise; the separate
 live gates are recorded above. It does not waive the remaining M2 acceptance
 requirements.
+
+The same rule applies to an absent host UDS port: absence is not proof that
+the backend sent a refusal. The initial connect-error test expected
+`NotConnected` on every VMM, but QEMU's pinned `vhost-device-vsock 0.3.0`
+logged the failed Unix connect without queuing RST (`enq_rst()` is a no-op).
+Motor correctly returned `TimedOut`; unchanged Linux on the same backend
+also returned timeout (`ETIMEDOUT`, 2,036 ms). CHV and FC passed the original
+exact refusal assertion. The original failure is preserved in
+`/tmp/vsock-capacity-errors-gate.T9Ljpm/`; backend traces, the two other VMM
+runs, and the Linux comparison are in `/tmp/vsock-refusal-diagnostic.B2qBMI/`.
+
+The host harness therefore declares the fixture's expected behavior:
+`silent` for this pinned QEMU backend, `refused` for CHV/FC. Guest tests
+require exactly `TimedOut` or `NotConnected`, respectively, verify a silent
+peer cannot complete before the existing two-second connect deadline, and
+check reservation reclamation. Do not accept either error interchangeably
+or add VMM-specific production logic. D14's error mapping is unchanged.
 
 ## Open questions
 

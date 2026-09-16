@@ -3,6 +3,7 @@ use core::task::{Context, Poll};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
+use std::time::{Duration, Instant};
 
 use moto_io::net::vsock::{Shutdown, VsockAddr, VsockListener, VsockStream};
 use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
@@ -30,6 +31,15 @@ const LISTENER_DROPPED: &[u8] = b"listener:dropped";
 const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
 const INCOMING_PORT: u32 = 70_001;
+const CAPACITY_READY: &[u8] = b"capacity:ready";
+const CAPACITY_FULL: &[u8] = b"capacity:full";
+const CAPACITY_PROGRESS: &[u8] = b"capacity:progress";
+const CAPACITY_DROPPED: &[u8] = b"capacity:dropped";
+const CAPACITY_CLEARED: &[u8] = b"capacity:cleared";
+const CAPACITY_REBOUND: &[u8] = b"capacity:rebound";
+const CAPACITY_REUSED: &[u8] = b"capacity:reused";
+const CAPACITY_PORT_START: u32 = 70_010;
+const CAPACITY_LISTENERS: usize = 8;
 const CANCEL_POLLS: usize = 4;
 const PAGES_PER_SUBCHANNEL: usize = CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize;
 
@@ -46,6 +56,23 @@ enum Action {
     StalledReader { total: usize },
     IncomingBacklog,
     IncomingOwnerDrop,
+    GlobalStreamCapacity,
+}
+
+#[derive(Clone, Copy)]
+enum AbsentPeerBehavior {
+    Refused,
+    Silent,
+}
+
+impl AbsentPeerBehavior {
+    fn parse(value: &str) -> Self {
+        match value {
+            "refused" => Self::Refused,
+            "silent" => Self::Silent,
+            _ => panic!("invalid absent-peer behavior '{value}'"),
+        }
+    }
 }
 
 impl Action {
@@ -102,12 +129,14 @@ fn parse_action(args: &[String]) -> Action {
         },
         [action] if action == "incoming-backlog" => Action::IncomingBacklog,
         [action] if action == "incoming-owner-drop" => Action::IncomingOwnerDrop,
+        [action] if action == "global-stream-capacity" => Action::GlobalStreamCapacity,
         _ => panic!(
             "expected echo N, duplex SEND_N ECHO_N, \
              local-send-shutdown SEND_N RECEIVE_N, \
              local-receive-shutdown RECEIVE_N SEND_N, unix-peer-close RECEIVE_N, \
              cancel-read RECEIVE_N, cancel-write TAIL_N, cancel-before-poll-drop, \
-             cancel-queued-connect, stalled-reader TOTAL, incoming-backlog, or incoming-owner-drop"
+             cancel-queued-connect, stalled-reader TOTAL, incoming-backlog, incoming-owner-drop, \
+             or global-stream-capacity"
         ),
     }
 }
@@ -301,6 +330,51 @@ async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<Vsock
     stream
 }
 
+async fn test_connect_errors(
+    client: &moto_io::net::NetClient,
+    peer: VsockAddr,
+    absent_peer: AbsentPeerBehavior,
+) {
+    let baseline = client.reservations();
+    let unsupported = VsockAddr {
+        cid: 4,
+        port: peer.port,
+    };
+    let result = VsockStream::connect_reserved(client.try_reserve().unwrap(), unsupported).await;
+    assert_eq!(result.err(), Some(moto_rt::E_NOT_IMPLEMENTED));
+    assert_eq!(client.reservations(), baseline);
+
+    let absent = VsockAddr {
+        cid: 2,
+        // The peer fixture listens only on `peer.port` in a fresh per-run
+        // socket directory.
+        port: peer.port.checked_add(2).unwrap(),
+    };
+    let expected = match absent_peer {
+        AbsentPeerBehavior::Refused => moto_rt::E_NOT_CONNECTED,
+        AbsentPeerBehavior::Silent => moto_rt::E_TIMED_OUT,
+    };
+    let started = Instant::now();
+    let result = VsockStream::connect_reserved(client.try_reserve().unwrap(), absent).await;
+    assert_eq!(
+        result.err(),
+        Some(expected),
+        "unexpected error for {absent:?}"
+    );
+    if matches!(absent_peer, AbsentPeerBehavior::Silent) {
+        assert!(
+            started.elapsed() >= Duration::from_secs(2),
+            "silent peer completed before the connect deadline"
+        );
+    }
+    assert_eq!(
+        client.reservations(),
+        baseline,
+        "failed connect retained its reservation"
+    );
+    println!("vsock connect errors: PASS");
+}
+
 async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
     let listener = crate::net_driver::RawVsockListener::bind(INCOMING_PORT).await;
     write_frame(stream, LISTENER_READY).await;
@@ -321,6 +395,33 @@ async fn run_incoming_backlog(stream: &VsockStream, drop_owner_channel: bool) {
         .close()
         .await;
     write_frame(stream, LISTENER_REBOUND).await;
+}
+
+async fn run_global_stream_capacity(stream: &VsockStream) {
+    let mut listeners = Vec::with_capacity(CAPACITY_LISTENERS);
+    for offset in 0..CAPACITY_LISTENERS {
+        listeners.push(
+            crate::net_driver::RawVsockListener::bind(CAPACITY_PORT_START + offset as u32).await,
+        );
+    }
+    write_frame(stream, CAPACITY_READY).await;
+
+    // The host has now admitted 63 incoming streams and observed strict
+    // refusal of the next. This control stream is the 64th live stream.
+    expect_frame(stream, CAPACITY_FULL).await;
+    write_frame(stream, CAPACITY_PROGRESS).await;
+
+    for listener in listeners {
+        listener.close().await;
+    }
+    write_frame(stream, CAPACITY_DROPPED).await;
+    expect_frame(stream, CAPACITY_CLEARED).await;
+
+    let rebound = crate::net_driver::RawVsockListener::bind(CAPACITY_PORT_START).await;
+    write_frame(stream, CAPACITY_REBOUND).await;
+    expect_frame(stream, CAPACITY_REUSED).await;
+    rebound.close().await;
+    write_frame(stream, CASE_DONE).await;
 }
 
 async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
@@ -551,18 +652,26 @@ async fn run_action(
             run_incoming_backlog(stream, true).await;
             Vec::new()
         }
+        Action::GlobalStreamCapacity => {
+            run_global_stream_capacity(stream).await;
+            Vec::new()
+        }
     }
 }
 
 pub fn run(args: &[String]) {
-    assert!(args.len() >= 3, "expected CID PORT ACTION...");
+    assert!(
+        args.len() >= 4,
+        "expected CID PORT ABSENT_PEER_BEHAVIOR ACTION..."
+    );
     let peer = VsockAddr {
         cid: args[0].parse().expect("invalid peer CID"),
         port: args[1].parse().expect("invalid peer port"),
     };
-    let action = parse_action(&args[2..]);
+    let absent_peer = AbsentPeerBehavior::parse(&args[2]);
+    let action = parse_action(&args[3..]);
     let test_listener_bind = matches!(&action, Action::Echo(0));
-    let verdict = args[2..].join(" ");
+    let verdict = args[3..].join(" ");
 
     let completed = moto_async::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
@@ -581,6 +690,7 @@ pub fn run(args: &[String]) {
         };
         let counters = run_action(&client, peer, &stream, sync.as_deref(), action).await;
         if test_listener_bind {
+            test_connect_errors(&client, peer, absent_peer).await;
             crate::net_driver::test_raw_vsock_listener_bind().await;
             test_native_listener_bind_drop(&client).await;
         }

@@ -188,6 +188,9 @@ export MOTO_FC_RUNTIME_DIR="$RUNTIME_DIR/fc"
 runner_args=()
 case "$VMM" in
   qemu)
+    # Pinned vhost-device-vsock 0.3.0 logs a failed UDS connect but its
+    # enq_rst() is a no-op, so the guest observes its deadline.
+    absent_peer_behavior=silent
     export MOTO_SHARED_MEM=1
     "$VHOST_DEVICE_VSOCK" \
       --guest-cid 3 --socket "$RUNTIME_DIR/vhost" --uds-path "$VSOCK_BASE" \
@@ -208,9 +211,11 @@ case "$VMM" in
       -device vhost-user-vsock-pci,chardev=vsock)
     ;;
   chv)
+    absent_peer_behavior=refused
     runner_args=(--vsock "cid=3,socket=$VSOCK_BASE")
     ;;
   fc)
+    absent_peer_behavior=refused
     export MOTO_FC_VSOCK_UDS="$VSOCK_BASE"
     ;;
 esac
@@ -246,10 +251,14 @@ run_outgoing_case() {
   rg -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null ||
     fail "host peer did not become ready"
 
-  vm_ssh "MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $action $*" |
+  vm_ssh "MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
     tee "$guest_log"
   rg -Fx "vsock outgoing: $verdict PASS" "$guest_log" >/dev/null ||
     fail "guest PASS marker missing for $verdict"
+  if [ "$verdict" = "echo 0" ]; then
+    rg -Fx "vsock connect errors: PASS" "$guest_log" >/dev/null ||
+      fail "guest connect-error PASS marker missing"
+  fi
 
   wait "$PEER_PID" || peer_status=$?
   PEER_PID=""
@@ -263,6 +272,9 @@ run_outgoing_case() {
 
 # Validate the functional first vertical on CHV before the other VMMs:
 #   src/tests/test-vsock.sh --vmm chv
+# Run the global-capacity case first: its exact 64-stream count assumes no
+# stream from an earlier case is still in its close budget.
+run_outgoing_case global-stream-capacity
 run_outgoing_case echo 0
 run_outgoing_case echo 1
 run_outgoing_case echo 4095

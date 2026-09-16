@@ -35,6 +35,16 @@ const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
 const LISTENER_REBOUND: &[u8] = b"listener:rebound";
 const INCOMING_PORT: u32 = 70_001;
 const LISTENER_BACKLOG: usize = 8;
+const CAPACITY_READY: &[u8] = b"capacity:ready";
+const CAPACITY_FULL: &[u8] = b"capacity:full";
+const CAPACITY_PROGRESS: &[u8] = b"capacity:progress";
+const CAPACITY_DROPPED: &[u8] = b"capacity:dropped";
+const CAPACITY_CLEARED: &[u8] = b"capacity:cleared";
+const CAPACITY_REBOUND: &[u8] = b"capacity:rebound";
+const CAPACITY_REUSED: &[u8] = b"capacity:reused";
+const CAPACITY_PORT_START: u32 = 70_010;
+const CAPACITY_LISTENERS: usize = 8;
+const GLOBAL_STREAM_LIMIT: usize = 64;
 
 struct SocketPath(PathBuf);
 
@@ -52,6 +62,7 @@ enum Action {
     StalledReader { total: usize },
     IncomingBacklog,
     IncomingOwnerDrop,
+    GlobalStreamCapacity,
 }
 
 impl Action {
@@ -74,6 +85,7 @@ impl Action {
             Self::StalledReader { total } => format!("stalled-reader {total}"),
             Self::IncomingBacklog => "incoming-backlog".into(),
             Self::IncomingOwnerDrop => "incoming-owner-drop".into(),
+            Self::GlobalStreamCapacity => "global-stream-capacity".into(),
         }
     }
 
@@ -157,12 +169,14 @@ fn parse_action(name: &str, args: &[String]) -> io::Result<Action> {
         }),
         ("incoming-backlog", []) => Ok(Action::IncomingBacklog),
         ("incoming-owner-drop", []) => Ok(Action::IncomingOwnerDrop),
+        ("global-stream-capacity", []) => Ok(Action::GlobalStreamCapacity),
         _ => Err(invalid(
             "actions: echo N | send N | duplex SEND_N ECHO_N | \
              local-send-shutdown SEND_N RECEIVE_N | \
              local-receive-shutdown RECEIVE_N SEND_N | unix-peer-close RECEIVE_N | \
              cancel-read RECEIVE_N | cancel-write TAIL_N | cancel-before-poll-drop | \
-             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog | incoming-owner-drop",
+             cancel-queued-connect | stalled-reader TOTAL | incoming-backlog | incoming-owner-drop | \
+             global-stream-capacity",
         )),
     }
 }
@@ -327,9 +341,9 @@ fn configure_stream(stream: UnixStream) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
-fn connect_guest(base: &str) -> io::Result<UnixStream> {
+fn connect_guest(base: &str, port: u32) -> io::Result<UnixStream> {
     let mut stream = configure_stream(UnixStream::connect(base)?)?;
-    stream.write_all(format!("CONNECT {INCOMING_PORT}\n").as_bytes())?;
+    stream.write_all(format!("CONNECT {port}\n").as_bytes())?;
     let mut ack = [0_u8; 32];
     let mut len = 0;
     loop {
@@ -362,9 +376,9 @@ fn expect_eof(stream: &mut UnixStream) -> io::Result<()> {
     }
 }
 
-fn expect_guest_refusal(base: &str) -> io::Result<()> {
+fn expect_guest_refusal(base: &str, port: u32) -> io::Result<()> {
     let mut stream = configure_stream(UnixStream::connect(base)?)?;
-    stream.write_all(format!("CONNECT {INCOMING_PORT}\n").as_bytes())?;
+    stream.write_all(format!("CONNECT {port}\n").as_bytes())?;
     let mut byte = [0_u8; 1];
     match stream.read(&mut byte) {
         Ok(0) => Ok(()),
@@ -511,9 +525,9 @@ fn run() -> io::Result<()> {
                 expect_frame(&mut stream, LISTENER_READY)?;
                 let mut connections = Vec::with_capacity(LISTENER_BACKLOG);
                 for _ in 0..LISTENER_BACKLOG {
-                    connections.push(connect_guest(base)?);
+                    connections.push(connect_guest(base, INCOMING_PORT)?);
                 }
-                expect_guest_refusal(base)?;
+                expect_guest_refusal(base, INCOMING_PORT)?;
                 for connection in &mut connections {
                     connection.write_all(b"early")?;
                 }
@@ -525,6 +539,37 @@ fn run() -> io::Result<()> {
                 }
                 write_frame(&mut stream, BACKLOG_CLEARED)?;
                 expect_frame(&mut stream, LISTENER_REBOUND)?;
+            }
+            Action::GlobalStreamCapacity => {
+                expect_frame(&mut stream, CAPACITY_READY)?;
+                let mut connections = Vec::with_capacity(GLOBAL_STREAM_LIMIT - 1);
+                for listener in 0..CAPACITY_LISTENERS {
+                    let count = if listener + 1 == CAPACITY_LISTENERS {
+                        LISTENER_BACKLOG - 1
+                    } else {
+                        LISTENER_BACKLOG
+                    };
+                    let port = CAPACITY_PORT_START + listener as u32;
+                    for _ in 0..count {
+                        connections.push(connect_guest(base, port)?);
+                    }
+                }
+                assert_eq!(connections.len(), GLOBAL_STREAM_LIMIT - 1);
+                expect_guest_refusal(base, CAPACITY_PORT_START + CAPACITY_LISTENERS as u32 - 1)?;
+
+                write_frame(&mut stream, CAPACITY_FULL)?;
+                expect_frame(&mut stream, CAPACITY_PROGRESS)?;
+                expect_frame(&mut stream, CAPACITY_DROPPED)?;
+                for connection in &mut connections {
+                    expect_eof(connection)?;
+                }
+                write_frame(&mut stream, CAPACITY_CLEARED)?;
+
+                expect_frame(&mut stream, CAPACITY_REBOUND)?;
+                let mut rebound = connect_guest(base, CAPACITY_PORT_START)?;
+                write_frame(&mut stream, CAPACITY_REUSED)?;
+                expect_frame(&mut stream, CASE_DONE)?;
+                expect_eof(&mut rebound)?;
             }
             _ => unreachable!(),
         }
