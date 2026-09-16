@@ -22,6 +22,10 @@ impl StreamBuffer {
         &self.credit
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     pub(crate) fn update_peer(&mut self, peer: CreditAdvertisement) -> Result<(), CreditError> {
         self.credit.update_peer(peer)
     }

@@ -4,10 +4,14 @@ use super::credit::{CreditAdvertisement, CreditError, CreditState};
 use super::stream::{EstablishedStream, ReadOutcome};
 use super::vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND};
 
+const SHUTDOWN_BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalCause {
     Refused,
     ConnectionReset,
+    TimedOut,
+    OrderlyClosed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +34,10 @@ pub(crate) enum ReceiveOutcome {
 pub(crate) struct Connection {
     phase: ConnectionPhase,
     stream: EstablishedStream,
+    shutdown_requested: u32,
+    shutdown_queued: u32,
+    shutdown_published: u32,
+    cleanup_started: bool,
 }
 
 impl Connection {
@@ -38,6 +46,10 @@ impl Connection {
         Ok(Self {
             phase: ConnectionPhase::Connecting,
             stream: EstablishedStream::new()?,
+            shutdown_requested: 0,
+            shutdown_queued: 0,
+            shutdown_published: 0,
+            cleanup_started: false,
         })
     }
 
@@ -54,6 +66,10 @@ impl Connection {
         Ok(Self {
             phase: ConnectionPhase::Established,
             stream,
+            shutdown_requested: 0,
+            shutdown_queued: 0,
+            shutdown_published: 0,
+            cleanup_started: false,
         })
     }
 
@@ -70,11 +86,92 @@ impl Connection {
     }
 
     pub(crate) fn accepts_new_writes(&self) -> bool {
-        self.phase == ConnectionPhase::Established && self.stream.accepts_new_writes()
+        self.phase == ConnectionPhase::Established
+            && self.shutdown_requested & SHUTDOWN_SEND == 0
+            && self.stream.accepts_new_writes()
     }
 
     pub(crate) fn read_into_reserved(&mut self, dst: &mut [u8]) -> ReadOutcome {
-        self.stream.read_into_reserved(dst)
+        let result = self.stream.read_into_reserved(dst);
+        if result == ReadOutcome::Pending
+            && self.phase == ConnectionPhase::Terminal(TerminalCause::OrderlyClosed)
+        {
+            ReadOutcome::Eof
+        } else {
+            result
+        }
+    }
+
+    /// Request permanent local shutdown flags. SEND immediately closes new
+    /// application-write admission, but is not ready until accepted TX drains.
+    pub(crate) fn request_shutdown(&mut self, flags: u32) {
+        assert_eq!(flags & !SHUTDOWN_BOTH, 0);
+        self.shutdown_requested |= flags;
+    }
+
+    pub(crate) fn shutdown_ready(&self, tx_drained: bool) -> u32 {
+        if self.phase != ConnectionPhase::Established || !tx_drained {
+            return 0;
+        }
+        self.shutdown_requested & !self.shutdown_queued
+    }
+
+    /// Record flags only after their control record has been retained by the
+    /// owner. The caller must have obtained them from `shutdown_ready`.
+    pub(crate) fn record_shutdown_queued(&mut self, flags: u32) {
+        assert_ne!(flags, 0);
+        assert_eq!(flags & !self.shutdown_ready(true), 0);
+        self.shutdown_queued |= flags;
+    }
+
+    /// Record flags only after successful virtqueue publication.
+    pub(crate) fn record_shutdown_published(&mut self, flags: u32) {
+        assert_ne!(flags, 0);
+        assert_eq!(flags & !self.shutdown_queued, 0);
+        assert_eq!(flags & self.shutdown_published, 0);
+        self.shutdown_published |= flags;
+    }
+
+    /// Return true once when peer BOTH is observed and all validated RX has
+    /// drained. The owner then sends the one orderly RST response.
+    pub(crate) fn take_orderly_reset_if_ready(&mut self) -> bool {
+        if matches!(self.phase, ConnectionPhase::Terminal(_))
+            || !self.stream.peer_fully_shutdown()
+            || !self.stream.rx_is_empty()
+        {
+            return false;
+        }
+        self.phase = ConnectionPhase::Terminal(TerminalCause::OrderlyClosed);
+        true
+    }
+
+    /// First call starts the owner's single eight-second cleanup budget.
+    pub(crate) fn begin_cleanup(&mut self) -> bool {
+        if self.cleanup_started || matches!(self.phase, ConnectionPhase::Terminal(_)) {
+            return false;
+        }
+        self.cleanup_started = true;
+        true
+    }
+
+    /// Expiry requests one forced RST. Tuple release remains owner-side.
+    pub(crate) fn expire_cleanup(&mut self) -> bool {
+        if !self.cleanup_started || matches!(self.phase, ConnectionPhase::Terminal(_)) {
+            return false;
+        }
+        self.enter_terminal(TerminalCause::ConnectionReset, true);
+        true
+    }
+
+    pub(crate) fn connect_timed_out(&mut self) -> bool {
+        if self.phase != ConnectionPhase::Connecting {
+            return false;
+        }
+        self.enter_terminal(TerminalCause::TimedOut, true)
+    }
+
+    pub(crate) fn transport_reset(&mut self) -> bool {
+        self.enter_terminal(TerminalCause::ConnectionReset, true)
     }
 
     /// Apply one decoded packet for this connection. A rejected packet never
@@ -153,21 +250,35 @@ impl Connection {
     }
 
     fn receive_reset(&mut self) {
-        if matches!(self.phase, ConnectionPhase::Terminal(_)) {
-            return;
-        }
+        let cause = if self.phase == ConnectionPhase::Connecting {
+            TerminalCause::Refused
+        } else if self.shutdown_published == SHUTDOWN_BOTH || self.stream.peer_fully_shutdown() {
+            TerminalCause::OrderlyClosed
+        } else {
+            TerminalCause::ConnectionReset
+        };
+        self.enter_terminal(cause, cause != TerminalCause::OrderlyClosed);
+    }
+
+    fn reject(&mut self) -> ReceiveOutcome {
         let cause = if self.phase == ConnectionPhase::Connecting {
             TerminalCause::Refused
         } else {
             TerminalCause::ConnectionReset
         };
-        self.stream.peer_reset();
-        self.phase = ConnectionPhase::Terminal(cause);
+        self.enter_terminal(cause, true);
+        ReceiveOutcome::SendReset
     }
 
-    fn reject(&mut self) -> ReceiveOutcome {
-        self.receive_reset();
-        ReceiveOutcome::SendReset
+    fn enter_terminal(&mut self, cause: TerminalCause, reset_stream: bool) -> bool {
+        if matches!(self.phase, ConnectionPhase::Terminal(_)) {
+            return false;
+        }
+        if reset_stream {
+            self.stream.peer_reset();
+        }
+        self.phase = ConnectionPhase::Terminal(cause);
+        true
     }
 }
 

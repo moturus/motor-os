@@ -89,6 +89,14 @@ impl EstablishedStream {
         !self.peer_send_shutdown && !self.reset
     }
 
+    pub(crate) fn peer_fully_shutdown(&self) -> bool {
+        self.peer_receive_shutdown && self.peer_send_shutdown
+    }
+
+    pub(crate) fn rx_is_empty(&self) -> bool {
+        self.receive.is_empty()
+    }
+
     /// Copy into storage already reserved by IPC. Validated bytes are delivered
     /// before the retained reset cause or orderly EOF becomes visible.
     pub(crate) fn read_into_reserved(&mut self, dst: &mut [u8]) -> ReadOutcome {

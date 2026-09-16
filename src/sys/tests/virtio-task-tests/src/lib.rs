@@ -362,6 +362,7 @@ pub fn run_tests() {
     test_vsock_stream_buffer();
     test_vsock_established_stream();
     test_vsock_connection();
+    test_vsock_shutdown_state();
     test_vsock_admission();
     concurrent_requests();
     runtime_wakeups();
@@ -977,6 +978,148 @@ fn test_vsock_connection() {
         independent.read_into_reserved(&mut bytes),
         ReadOutcome::ConnectionReset
     );
+}
+
+fn test_vsock_shutdown_state() {
+    use connection::{Connection, ConnectionPhase as Phase, ReceiveOutcome as Rx, TerminalCause};
+    use stream::ReadOutcome;
+    use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
+
+    const BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
+    let packet = |operation, len, flags| PacketHeader {
+        src_cid: 2,
+        dst_cid: 3,
+        src_port: 70_000,
+        dst_port: 80_000,
+        len,
+        socket_type: SocketType::Stream,
+        operation,
+        flags,
+        buf_alloc: 32,
+        fwd_cnt: 0,
+    };
+    let request = packet(Operation::Request, 0, 0);
+    let reset = packet(Operation::Reset, 0, 0);
+
+    let mut queued = Connection::new_incoming(&request).unwrap();
+    queued.request_shutdown(SHUTDOWN_SEND);
+    queued.request_shutdown(0);
+    queued.request_shutdown(SHUTDOWN_SEND);
+    assert!(!queued.accepts_new_writes());
+    assert_eq!(queued.shutdown_ready(false), 0);
+    assert_eq!(queued.shutdown_ready(true), SHUTDOWN_SEND);
+    queued.record_shutdown_queued(SHUTDOWN_SEND);
+    assert_eq!(queued.shutdown_ready(true), 0);
+    assert_eq!(queued.receive(&reset, b""), Rx::None);
+    assert_eq!(
+        queued.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    assert_eq!(queued.shutdown_ready(true), 0);
+
+    let mut one_direction = Connection::new_incoming(&request).unwrap();
+    one_direction.request_shutdown(BOTH);
+    assert_eq!(one_direction.shutdown_ready(false), 0);
+    let ready = one_direction.shutdown_ready(true);
+    one_direction.record_shutdown_queued(ready);
+    one_direction.record_shutdown_published(SHUTDOWN_RECEIVE);
+    assert_eq!(one_direction.receive(&reset, b""), Rx::None);
+    assert_eq!(
+        one_direction.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+
+    let mut published = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        published.receive(&packet(Operation::ReadWrite, 4, 0), b"kept"),
+        Rx::None
+    );
+    published.request_shutdown(BOTH);
+    let ready = published.shutdown_ready(true);
+    published.record_shutdown_queued(ready);
+    published.record_shutdown_published(BOTH);
+    assert_eq!(published.receive(&reset, b""), Rx::None);
+    assert_eq!(
+        published.phase(),
+        Phase::Terminal(TerminalCause::OrderlyClosed)
+    );
+    let mut bytes = [0; 8];
+    assert_eq!(
+        published.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes[..4], b"kept");
+    assert_eq!(published.read_into_reserved(&mut bytes), ReadOutcome::Eof);
+
+    let mut peer = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        peer.receive(&packet(Operation::ReadWrite, 4, 0), b"peer"),
+        Rx::None
+    );
+    assert_eq!(
+        peer.receive(&packet(Operation::Shutdown, 0, SHUTDOWN_RECEIVE), b""),
+        Rx::None
+    );
+    assert_eq!(
+        peer.receive(&packet(Operation::Shutdown, 0, 0), b""),
+        Rx::None
+    );
+    assert_eq!(
+        peer.receive(&packet(Operation::Shutdown, 0, SHUTDOWN_SEND), b""),
+        Rx::None
+    );
+    assert!(!peer.take_orderly_reset_if_ready());
+    assert_eq!(peer.read_into_reserved(&mut bytes), ReadOutcome::Copied(4));
+    assert_eq!(&bytes[..4], b"peer");
+    assert!(peer.take_orderly_reset_if_ready());
+    assert!(!peer.take_orderly_reset_if_ready());
+    assert_eq!(peer.read_into_reserved(&mut bytes), ReadOutcome::Eof);
+    assert_eq!(peer.receive(&reset, b""), Rx::None);
+    assert_eq!(peer.phase(), Phase::Terminal(TerminalCause::OrderlyClosed));
+
+    let mut violation = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        violation.receive(&packet(Operation::Shutdown, 0, BOTH), b""),
+        Rx::None
+    );
+    assert_eq!(
+        violation.receive(&packet(Operation::ReadWrite, 4, 0), b"late"),
+        Rx::SendReset
+    );
+    assert_eq!(
+        violation.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    assert!(!violation.take_orderly_reset_if_ready());
+
+    let mut cleanup = Connection::new_incoming(&request).unwrap();
+    assert!(cleanup.begin_cleanup());
+    assert!(!cleanup.begin_cleanup());
+    assert!(cleanup.expire_cleanup());
+    assert!(!cleanup.expire_cleanup());
+    assert_eq!(
+        cleanup.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    assert!(!cleanup.transport_reset());
+    assert_eq!(cleanup.receive(&reset, b""), Rx::None);
+    assert_eq!(
+        cleanup.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+
+    let mut transport = Connection::new_incoming(&request).unwrap();
+    assert!(transport.transport_reset());
+    assert!(!transport.connect_timed_out());
+    assert_eq!(
+        transport.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    let mut timed_out = Connection::new_outgoing().unwrap();
+    assert!(timed_out.connect_timed_out());
+    assert!(!timed_out.connect_timed_out());
+    assert_eq!(timed_out.phase(), Phase::Terminal(TerminalCause::TimedOut));
+    assert!(!timed_out.transport_reset());
 }
 
 fn test_vsock_admission() {

@@ -783,6 +783,24 @@ Firecracker's opt-in vsock runner configuration is implemented and reviewed:
 - This is runner/discovery coverage, not device activation or peer traffic.
   Selected-VMM full-test wiring and full M2 coverage remain pending.
 
+M2's local shutdown/terminal-state helper is implemented and reviewed:
+
+- Requested, queued, and published shutdown flags are distinct and permanent.
+  SEND stops new writes immediately; all shutdown publication waits for the
+  owner's accepted-TX drain boundary. An incoming RST is orderly only after
+  published local BOTH or observed peer BOTH, not merely queued shutdown.
+- Peer BOTH retains buffered RX until it drains, then produces one orderly
+  RST action. Clean close yields EOF after data; protocol rejection remains
+  an error even after shutdown flags. Connect timeout, transport reset, and
+  cleanup expiry preserve the first terminal cause. Cleanup starts once and
+  expiry requests one forced reset; actual timers and tuple release stay with
+  the future runtime owner.
+- Source-included guest transition fixtures, descriptor ownership, and
+  scattered filesystem writes passed in debug/release, along with both
+  base-image/systest builds, formatting, and targeted Clippy without new
+  warnings. Evidence: `/tmp/vsock-shutdown-gate.WPTEcN/`. These are helper
+  transitions, not proof of actual TX drain, timers, IPC, or peer close.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
