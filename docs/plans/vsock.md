@@ -20,8 +20,8 @@ M1 foundations have passed their repeated full gate. M2 integration is
 underway, with progress recorded below. Q23 is settled in D21: discovery
 checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
 (`NotFound` if absent), without activating the device.
-Q24–Q25 below await review before the corresponding packet-rejection
-transitions are implemented; independent, settled work can continue.
+Q24–Q25 are settled in D22: wrong-state packets and payloads exceeding
+advertised credit reset only their identified connection.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -745,8 +745,8 @@ The native stream TX-page reuse seam is implemented and parent-reviewed:
   These cover existing backpressure, partial writes, cancellation, concurrent
   writers, and teardown through ordinary full-test-wired tests.
 - The helper is ready for the native vsock consumer. Connection transitions,
-  vsock IPC/pumps and real-peer traffic remain unimplemented; Q24–Q25 require
-  review before the corresponding rejection branches are added.
+  vsock IPC/pumps and real-peer traffic remain unimplemented. Q24–Q25 were
+  subsequently approved in D22; their rejection branches remain to be added.
 
 ## Scope and simplicity
 
@@ -942,14 +942,14 @@ netstack participates in the vsock data path.
 Each numbered step is an implementation stage, not necessarily one commit.
 Split implementation and tests into roughly 100–300 changed lines per patch.
 Keep every intermediate patch buildable, and keep partial functionality
-unpublished until its resource ownership and error paths work. D1–D21 are
+unpublished until its resource ownership and error paths work. D1–D22 are
 the authoritative requirements; stages reference them and describe changes,
 tests, and completion checks. Tests arrive with behavior; the validation
 section groups related commits into the two approved gating milestones.
 
 ### 1. Review the contract and record the baseline
 
-Follow D1–D21 without reopening the agreed scope, including Q16's resolution
+Follow D1–D22 without reopening the agreed scope, including Q16's resolution
 in D16 and Q18's resolution in D17: opt-in raw standard image, no
 developer-image Firecracker support, and ordered RX delivery in virtio-async.
 
@@ -1213,15 +1213,17 @@ response handling verifies the expected peer and state. Reserve receive and
 control resources before accepting a connection. Check unknown tuples and
 unsupported socket types before delivering data, including protocol-required
 RST replies. Do not generate a reset-response loop for an incoming RST.
-Apply D19's connection-local reset on impossible peer credit without admitting
-the offending packet's payload or changing the stored peer credit fields.
+Apply D19/D22's connection-local reset on impossible peer credit, wrong-state
+operations, or payload exceeding advertised credit, without admitting the
+offending payload or changing stored peer credit fields on rejection.
 
 Record state transitions in tests as inputs and expected outputs: emitted
 control packets, byte/accounting changes, state, and waiter notifications.
 Cover refusal, unexpected responses, duplicate requests, wrong destinations,
-data before establishment, and stale packets after closure. Test D19's
-invalid-credit reaction, validated-RX drain before `ConnectionReset`, no
-RST-response loop, and continued operation of unrelated streams. Implement
+data before establishment, and stale packets after closure. Test D19/D22's
+invalid-credit, wrong-state, and receive-overrun reactions, validated-RX drain
+before `ConnectionReset`, no RST-response loop, and continued operation of
+unrelated streams. Implement
 only the approved scope; unsupported operations need explicit errors (D14).
 
 ### 8. Implement bind, listen, and accept
@@ -1613,6 +1615,8 @@ D18 and D19 resolve Q19 and Q20, approved on 2026-09-15. The same review
 approved Q22's dependency adjustment in D13. D20 records the subsequent
 decision to defer Q21 and exclude hardening against buggy or malicious VMMs.
 D21 resolves Q23: discovery uses the same capability and missing-device errors.
+D22 resolves Q24–Q25: wrong-state packets and receive-credit overruns reset
+only their identified connection.
 
 ### D1. Profile and topology (approved)
 
@@ -1919,7 +1923,7 @@ the TCP mappings are unchanged, and moto-rt is not expanded.
 | Invalid CID or port, including port 0 or `0xffffffff` on connect | `InvalidArgument` |
 | Bind conflict | `AlreadyInUse` |
 | Connect refused by the peer, including no listener or exhausted peer admission/backlog capacity | `NotConnected` |
-| Established stream reset by the peer, by transport reset, or for impossible peer credit (D19) | `ConnectionReset` |
+| Established stream reset by the peer, by transport reset, or for a protocol violation covered by D19/D22 | `ConnectionReset` |
 | Write after local SEND or peer RECEIVE shutdown, or on an orderly closed stream | `NotConnected` |
 | Connect deadline expired | `TimedOut` |
 | Local stream/listener admission limit, or allocation failure for a new socket's required buffer/reservation | `OutOfMemory` |
@@ -2282,40 +2286,38 @@ There is no unprivileged boolean-discovery exception.
 Authorized requests must have zero handle, flags, and payload; reject a
 malformed request with `InvalidArgument` before consulting device presence.
 
-## Open questions
+### D22. Connection-local protocol rejection (Q24–Q25, approved)
 
-### Q24. Unexpected operations on an established connection
-
-For a decoded packet with the correct tuple but an operation invalid in the
-current connection state (for example, a second RESPONSE after establishment),
-should sys-io reset that connection or discard the packet and leave it open?
+The user approved both rejection rules on 2026-09-15. A decoded packet with
+the correct tuple but an operation invalid in the connection state (for
+example, a second RESPONSE after establishment) resets that connection.
 
 Virtio 1.1 [section 5.10.6.5](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
 defines establishment and shutdown, but does not prescribe every wrong-state
 transition. [Linux v6.18's `virtio_transport_recv_connected`](https://github.com/torvalds/linux/blob/v6.18/net/vmw_vsock/virtio_transport_common.c)
 discards unexpected operations without resetting the established connection;
-its connecting-state handler instead aborts invalid transitions. Stage 7 calls
-for testing these cases but has not selected the established-state policy.
+its connecting-state handler instead aborts invalid transitions. Motor uses
+the approved explicit reset rule for wrong-state operations.
 
-Recommendation: send RST and terminalize only the offending connection,
+Send RST and terminalize only the offending connection,
 retaining validated RX before its reset error. Never answer RST with RST or
 overwrite an already retained terminal cause. This adds no recovery framework
 and leaves compliant traffic unchanged. This is a peer-protocol policy, not
 the deferred PCI/VMM-metadata hardening.
 
-### Q25. Received payload exceeding advertised credit
-
 The receive helper atomically rejects an RW payload larger than its remaining
-receive allowance. What should the connection owner do with that error?
-D19 explicitly settles impossible peer forwarding, not this separate overrun.
+receive allowance. Reset only that connection for this separate violation;
+D19's impossible-peer-forwarding rule remains unchanged.
 Ordinary full buffers remain backpressure under D14; a peer sending beyond
 advertised credit instead violates Virtio 1.1's
 [buffer-space rule in section 5.10.6.3](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html).
 
-Recommendation: reject the excess packet and reset only that connection,
+Reject the excess packet and reset only that connection,
 preserving previous credit fields and validated RX, as for D19. This requires
-no extra receive storage or retry policy. The alternative is to explicitly
-leave over-credit traffic outside the supported contract; its owner-side
-handling must still be agreed before activating the RX pump. Do not silently
-classify the rejected packet as ordinary backpressure or broaden D20 into a
-blanket exemption from approved protocol validation.
+no extra receive storage or retry policy. Do not classify the rejected packet
+as ordinary backpressure or broaden D20 into a blanket exemption from approved
+protocol validation. Unrelated connections and the device remain operational.
+
+## Open questions
+
+None currently. Raise new non-obvious decisions before implementing them.
