@@ -21,9 +21,9 @@ struct Args {
     #[arg(short, long)]
     dir: String, // The directory to serve content from.
 
-    #[arg(long)]
+    #[arg(long, requires = "ssl_key")]
     ssl_cert: Option<String>,
-    #[arg(long)]
+    #[arg(long, requires = "ssl_cert")]
     ssl_key: Option<String>,
 }
 

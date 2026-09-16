@@ -6,6 +6,11 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"
