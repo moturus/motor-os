@@ -11,6 +11,11 @@ name = "cli"
 path = "tests/cli.rs"
 harness = false
 
+[[test]]
+name = "fs_path"
+path = "tests/fs_path.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"
@@ -25,6 +30,10 @@ tokio = { version = "1.47.1", features = ["net", "rt", "rt-multi-thread", "macro
 [target.'cfg(target_os = "motor")'.dependencies]
 getrandom = { version = "=0.2.17", features = ["custom"] }
 moto-rt = "0.17.6"
+
+[dev-dependencies]
+tokio = { version = "1.47.1", features = ["fs", "io-util", "time"] }
+tower = { version = "0.5", features = ["util"] }
 
 [patch.crates-io]
 ring  = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
