@@ -20,6 +20,8 @@ M1 foundations have passed their repeated full gate. M2 integration is
 underway, with progress recorded below. Q23 is settled in D21: discovery
 checks CAP_VSOCK first (`NotAllowed` if missing), then device presence
 (`NotFound` if absent), without activating the device.
+Q24–Q25 below await review before the corresponding packet-rejection
+transitions are implemented; independent, settled work can continue.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -2243,4 +2245,38 @@ malformed request with `InvalidArgument` before consulting device presence.
 
 ## Open questions
 
-None currently. Raise new non-obvious decisions before implementing them.
+### Q24. Unexpected operations on an established connection
+
+For a decoded packet with the correct tuple but an operation invalid in the
+current connection state (for example, a second RESPONSE after establishment),
+should sys-io reset that connection or discard the packet and leave it open?
+
+Virtio 1.1 [section 5.10.6.5](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html)
+defines establishment and shutdown, but does not prescribe every wrong-state
+transition. [Linux v6.18's `virtio_transport_recv_connected`](https://github.com/torvalds/linux/blob/v6.18/net/vmw_vsock/virtio_transport_common.c)
+discards unexpected operations without resetting the established connection;
+its connecting-state handler instead aborts invalid transitions. Stage 7 calls
+for testing these cases but has not selected the established-state policy.
+
+Recommendation: send RST and terminalize only the offending connection,
+retaining validated RX before its reset error. Never answer RST with RST or
+overwrite an already retained terminal cause. This adds no recovery framework
+and leaves compliant traffic unchanged. This is a peer-protocol policy, not
+the deferred PCI/VMM-metadata hardening.
+
+### Q25. Received payload exceeding advertised credit
+
+The receive helper atomically rejects an RW payload larger than its remaining
+receive allowance. What should the connection owner do with that error?
+D19 explicitly settles impossible peer forwarding, not this separate overrun.
+Ordinary full buffers remain backpressure under D14; a peer sending beyond
+advertised credit instead violates Virtio 1.1's
+[buffer-space rule in section 5.10.6.3](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html).
+
+Recommendation: reject the excess packet and reset only that connection,
+preserving previous credit fields and validated RX, as for D19. This requires
+no extra receive storage or retry policy. The alternative is to explicitly
+leave over-credit traffic outside the supported contract; its owner-side
+handling must still be agreed before activating the RX pump. Do not silently
+classify the rejected packet as ordinary backpressure or broaden D20 into a
+blanket exemption from approved protocol validation.
