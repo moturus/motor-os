@@ -1305,6 +1305,10 @@ fn main() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if args.len() == 2 && args[1] == "test-thread-creation-exit-rollback" {
+        spawn_wait_kill::test_thread_creation_exit_rollback();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-kill-after-wait" {
         spawn_wait_kill::test_kill_after_wait();
         return;
@@ -1332,6 +1336,9 @@ fn main() {
     }
     if spawn_wait_kill::is_empty_args_child(&args) {
         spawn_wait_kill::run_empty_args_child(&args);
+    }
+    if spawn_wait_kill::is_thread_exit_race_child(&args) {
+        spawn_wait_kill::run_thread_exit_race_child();
     }
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
@@ -1504,6 +1511,7 @@ fn main() {
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
+    spawn_wait_kill::test_thread_creation_exit_rollback();
     ctrl_c::run_tests();
     command_output::run_test();
     sysbox_find::run_test();

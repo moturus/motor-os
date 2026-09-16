@@ -9,6 +9,75 @@ const CAPS_POLICY_CHILD: &str = "caps-policy-child";
 const DENIED_VSOCK_CHILD: &str = "denied-vsock-child";
 const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
 const EMPTY_ARGS_CHILD: &str = "empty-args-child";
+const THREAD_EXIT_RACE_CHILD: &str = "thread-exit-race-child";
+
+pub fn is_thread_exit_race_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == THREAD_EXIT_RACE_CHILD
+}
+
+pub fn run_thread_exit_race_child() -> ! {
+    use moto_sys::{SysCpu, SysHandle, SysObj};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    extern "C" fn raw_thread(_: u64) {
+        let _ = SysObj::put(SysHandle::SELF);
+        unreachable!();
+    }
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let creator_attempts = attempts.clone();
+    std::thread::spawn(move || {
+        for _ in 0..64 {
+            // Put the exit barrier next to the syscall, without std thread
+            // setup letting process exit win before kernel admission begins.
+            creator_attempts.fetch_add(1, Ordering::Release);
+            let _ = SysCpu::spawn(
+                SysHandle::SELF,
+                64 * 1024,
+                raw_thread as *const () as usize as u64,
+                0,
+            );
+        }
+        loop {
+            core::hint::spin_loop();
+        }
+    });
+    while attempts.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    moto_sys::SysCpu::exit_process(0)
+}
+
+pub fn test_thread_creation_exit_rollback() {
+    const EPISODES: usize = 32;
+
+    for episode in 0..EPISODES {
+        let child = moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            args: vec![THREAD_EXIT_RACE_CHILD.to_owned()],
+            env: std::env::vars().collect(),
+            cwd: None,
+            stdin: moto_rt::process::STDIO_NULL,
+            stdout: moto_rt::process::STDIO_NULL,
+            stderr: moto_rt::process::STDIO_NULL,
+        })
+        .unwrap();
+        assert_eq!(moto_rt::process::wait(child.handle), Ok(0));
+        // Retain the process handle while querying its post-exit accounting.
+        assert_eq!(
+            crate::kernel_metric("active_threads", child.pid as u64),
+            0,
+            "thread leaked in exit-race episode {episode}"
+        );
+        moto_rt::alloc::release_handle(child.handle).unwrap();
+    }
+    println!("test_thread_creation_exit_rollback PASS");
+}
 
 pub fn is_empty_args_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| arg == EMPTY_ARGS_CHILD)

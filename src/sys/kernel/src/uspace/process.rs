@@ -550,27 +550,27 @@ impl Process {
             }
         };
 
+        let process_status = self.status.lock(line!());
+        if *process_status != ProcessStatus::Running {
+            log::debug!("bad process status: {:?}", *process_status);
+            drop(process_status);
+            self.address_space.drop_stacks(&stack, &Some(kernel_stack));
+            return Err(moto_rt::E_INTERNAL_ERROR);
+        }
+
+        // add_object uses the separate wait_objects lock. Keep status locked
+        // until Thread::new and the thread-map insertion are both published.
         let thread = Thread::new(
             self.this.clone().upgrade().unwrap(),
             stack,
             kernel_stack,
             thread_entry_point,
         );
-        let mut error = None;
-        'proc_lock: {
-            let (self_mut, process_status) = unsafe { self.get_mut() };
-            if *process_status != ProcessStatus::Running {
-                error = Some(moto_rt::E_INTERNAL_ERROR);
-                log::debug!("bad process status: {:?}", *process_status);
-                break 'proc_lock;
-            }
-
-            self_mut.threads.insert(thread.tid, thread.clone());
-        }
-
-        if let Some(err) = error {
-            return Err(err);
-        }
+        // Safe under process_status; create the mutable reference only after
+        // Thread::new has finished using its Arc<Process>.
+        let self_mut = unsafe { (self as *const Process as *mut Process).as_mut().unwrap() };
+        self_mut.threads.insert(thread.tid, thread.clone());
+        drop(process_status);
 
         let thread_handle = thread.join_handle;
         log::debug!(

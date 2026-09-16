@@ -1364,6 +1364,30 @@ D16's developer-suite selector and strict teardown are implemented:
   permanent reset failure are now specified by D25/D26, but not implemented;
   D28's cleanup simplification and the complete M2 gate remain outstanding.
 
+D27's separate kernel thread-creation fix is implemented and fully gated:
+
+- Allocate stacks before taking the process status lock, then hold that lock
+  from the Running check through thread construction and map insertion. If
+  exit already won, release the lock and return the unused stacks without
+  publishing a thread or its self/join objects. Normal exit cleanup owns any
+  thread admitted before exit. No counter semantics or external code changed.
+- The existing guest systest now exercises 32 process-exit/spawn races and
+  checks each child's active-thread count after wait, while retaining its
+  process handle. The direct-syscall fixture failed on the unchanged kernel
+  in its first episode (one leaked thread), then passed with the fix. An
+  earlier std-thread fixture passed the old kernel and was not counted as
+  evidence; its userspace setup left the exit signal too far from the syscall.
+- Fresh `full-test.sh` gates passed three times in debug (734/739/741 seconds)
+  and three times in release (556/511/512 seconds). The requested
+  `full-test-dev.sh --release` also passed (1,445 seconds), including native
+  source builds and Lorry's complete product suite. All seven ran the new
+  regression; no nonzero active-thread-drop diagnostic recurred. Formatting
+  and targeted Clippy passed with no new warnings.
+- Evidence: `/tmp/thread-spawn-rollback-gate.sxnICK/`, including original
+  diagnostic attempts, red/green fixture results, immutable tested-source
+  hashes, and per-run logs. These gates cover this kernel patch only; they do
+  not count as M2 validation of the still-unapplied vsock drafts.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
