@@ -958,6 +958,17 @@ returning a fresh index for guarded publication. The existing host/Motor
 fixture passes with this helper; checks and Clippy pass. Evidence:
 `/tmp/motor-gix-checkout-integration`.
 
+Application HTTPS command policy, preparatory implementation on 2026-09-15:
+`network.rs` selects system trust or the last explicit
+`-c http.sslCAInfo=PATH`, fixes V2 and the 128 MiB response ceiling,
+validates anonymous HTTPS URLs, and diagnoses rejected ref updates without
+claiming that other refs stayed unchanged. The guarded `fetch.rs` helper
+accepts configured remote names and checks mapped destinations before
+receiving objects; only tracking refs and tags may change. The common
+configuration now fixes `clone.rejectShallow=true`. Host library tests and
+host/Motor Clippy pass. CLI and HTTPS fixture wiring remain pending;
+these preparatory checks do not establish end-to-end acquisition.
+
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
 `PrepareFetch::repository_mut()` accessor introduced in reviewed commit

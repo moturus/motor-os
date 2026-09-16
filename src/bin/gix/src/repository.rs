@@ -8,8 +8,9 @@ use gix::bstr::ByteSlice;
 
 use crate::command_config;
 
-const POLICY_OVERRIDES: [&str; 10] = [
+const POLICY_OVERRIDES: [&str; 11] = [
     "core.symlinks=false",
+    "clone.rejectShallow=true",
     "core.fileMode=true",
     "core.checkStat=minimal",
     "core.trustCTime=false",
