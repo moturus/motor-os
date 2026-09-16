@@ -16,12 +16,16 @@ use crate::cancellation::Cancellation;
 // Motor caps components at 255 bytes and absolute paths below 1024 bytes.
 const LIMITS: Limits = Limits {
     max_entries: 65_536,
-    max_path_bytes: 16 * 1024 * 1024,
+    max_path_bytes: 8 * 1024 * 1024,
     max_blob_bytes: 16 * 1024 * 1024,
     max_source_blob_bytes: 128 * 1024 * 1024,
     max_component_bytes: 255,
     max_absolute_path_bytes: 1024,
 };
+
+// Fresh SHA-1 v2 indexes add at most 70 bytes per entry and 32 bytes per file.
+// Keep every index we publish below the Motor reader's 16 MiB ceiling.
+const _: () = assert!(LIMITS.max_path_bytes + LIMITS.max_entries * 70 + 32 <= 16 * 1024 * 1024);
 
 #[derive(Clone, Copy)]
 struct Limits {

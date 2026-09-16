@@ -919,13 +919,16 @@ verification as well as checking a two-file graph chain.
 Application target-tree validation, reviewed on 2026-09-15:
 `src/bin/gix/src/tree_index.rs` builds an index without writing the
 worktree. It limits all visited entries, including directories, to 65,536;
-cumulative full path bytes to 16 MiB; each source blob to 16 MiB; and
+cumulative full path bytes to 8 MiB; each source blob to 16 MiB; and
 aggregate source blob bytes to 128 MiB. The last limit is not a bound on
 filtered checkout output. It validates UTF-8 Motor paths (255-byte
 components and absolute paths below 1024 bytes), duplicate names and
 file/directory conflicts, object kinds and Git mode normalization before
-checkout. Gitlinks remain index entries. Tree buffers use the repository's
-fixed object-read bound. One compact boundary test and the existing
+checkout. Including SHA-1 v2 entry overhead, the maximum serialized index
+is 12,976,160 bytes, below the Motor reader's 16 MiB ceiling; a compile-time
+assertion preserves that relationship. Gitlinks remain index entries. Tree
+buffers use the repository's fixed object-read bound. One compact boundary
+test and the existing
 host/Motor mode/index fixture pass, along with both target checks and
 Clippy. Native evidence and source identities are in
 `/tmp/motor-gix-tree-index-integration`.
