@@ -50,9 +50,7 @@ impl SocketState {
 pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
-    device_idx: usize,
-    device_notify: Rc<moto_async::LocalNotify>,
-    local_addr: SocketAddr,
+    backend: IpSocketBackend,
 
     // Denormalized for quick validation.
     client_sender: ClientSender,
@@ -63,8 +61,14 @@ pub(super) struct SocketBase {
     lingering: bool,
 }
 
+pub(super) struct IpSocketBackend {
+    device_idx: usize,
+    device_notify: Rc<moto_async::LocalNotify>,
+    local_addr: SocketAddr,
+}
+
 impl SocketBase {
-    pub(super) fn new(
+    pub(super) fn new_ip(
         socket_id: u64,
         runtime: super::NetRuntime,
         device_idx: usize,
@@ -78,9 +82,11 @@ impl SocketBase {
         Self {
             socket_id,
             runtime,
-            device_idx,
-            device_notify,
-            local_addr: socket_addr,
+            backend: IpSocketBackend {
+                device_idx,
+                device_notify,
+                local_addr: socket_addr,
+            },
             client_sender,
             lingering: false,
         }
@@ -90,14 +96,20 @@ impl SocketBase {
         self.socket_id
     }
 
-    /// The same id as `socket_id`, in the netstack's handle type: since the
-    /// id collapse there is one identity, allocated by `next_socket_id`.
-    pub(super) fn handle(&self) -> moto_netstack::iface::SocketHandle {
-        self.socket_id.into()
+    pub(super) fn ip_backend(&self) -> &IpSocketBackend {
+        &self.backend
     }
 
     pub(super) fn sender(&self) -> &ClientSender {
         &self.client_sender
+    }
+}
+
+impl IpSocketBackend {
+    /// The socket id in the netstack's handle type. There is one identity,
+    /// allocated by `next_socket_id`.
+    pub(super) fn handle(&self, socket_id: u64) -> moto_netstack::iface::SocketHandle {
+        socket_id.into()
     }
 
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
@@ -127,8 +139,8 @@ impl Drop for MotoSocket {
 
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
-        let device_idx = base.device_idx;
-        let netstack_handle = base.handle();
+        let device_idx = base.backend.device_idx;
+        let netstack_handle = base.backend.handle(socket_id);
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         #[cfg(debug_assertions)]
@@ -152,11 +164,14 @@ impl MotoSocket {
         matches!(self.state, SocketState::Tcp(_))
     }
 
-    pub(super) fn new(base: SocketBase, kind: SocketState) -> std::io::Result<Rc<RefCell<Self>>> {
+    pub(super) fn new_ip(
+        base: SocketBase,
+        kind: SocketState,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let device_idx = base.device_idx;
-        let netstack_handle = base.handle();
+        let device_idx = base.backend.device_idx;
+        let netstack_handle = base.backend.handle(socket_id);
         let client_handle = base.client_sender.remote_handle();
         let mut inner = runtime.inner.borrow_mut();
         if !inner

@@ -333,17 +333,19 @@ impl MotoSocket {
         remote_addr: SocketAddr,
     ) -> bool {
         let socket = moto_socket.borrow();
-        if socket.base.device_idx != device_idx {
-            return false;
-        }
         let super::SocketState::Tcp(state) = &socket.state else {
             return false;
         };
+        if socket.base.ip_backend().device_idx != device_idx {
+            return false;
+        }
         // A local peer can retain the reverse tuple in TIME-WAIT after the
         // client releases its port. Reusing it sends the SYN to that retired
         // connection instead of the listener, so reserve both orientations.
-        (socket.base.local_addr == local_addr && state.remote_addr == Some(remote_addr))
-            || (socket.base.local_addr == remote_addr && state.remote_addr == Some(local_addr))
+        (socket.base.ip_backend().local_addr == local_addr
+            && state.remote_addr == Some(remote_addr))
+            || (socket.base.ip_backend().local_addr == remote_addr
+                && state.remote_addr == Some(local_addr))
     }
 
     fn close_handshake_complete(netstack_socket: &moto_netstack::socket::tcp::Socket<'_>) -> bool {
@@ -373,7 +375,7 @@ impl MotoSocket {
     pub fn abort_if_listening(moto_socket: &Rc<RefCell<Self>>, addr: SocketAddr) -> bool {
         {
             let socket_ref = moto_socket.borrow();
-            if !socket_ref.is_tcp() || socket_ref.base.local_addr != addr {
+            if !socket_ref.is_tcp() || socket_ref.base.ip_backend().local_addr != addr {
                 return false;
             }
         }
@@ -401,10 +403,12 @@ impl MotoSocket {
         let tcp_state = state.unwrap_tcp_mut();
 
         let mut inner = base.runtime.inner.borrow_mut();
-        let device = &mut inner.devices[base.device_idx];
+        let device = &mut inner.devices[base.ip_backend().device_idx];
         let netstack_socket = device
             .sockets
-            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(base.handle());
+            .get_mut::<moto_netstack::socket::tcp::Socket<'static>>(
+                base.ip_backend().handle(base.socket_id),
+            );
         f(base.socket_id, netstack_socket, tcp_state)
     }
 
@@ -430,11 +434,11 @@ impl MotoSocket {
         let tcp_state = state.unwrap_tcp_mut();
 
         let mut inner = base.runtime.inner.borrow_mut();
-        let device = &mut inner.devices[base.device_idx];
+        let device = &mut inner.devices[base.ip_backend().device_idx];
         f(
             base.socket_id,
             &mut device.sockets,
-            base.handle(),
+            base.ip_backend().handle(base.socket_id),
             tcp_state,
         )
     }
@@ -461,7 +465,7 @@ impl MotoSocket {
             .runtime
             .connection_pid(base.client_sender.remote_handle());
 
-        let (local_addr, local_port) = addr_to_octets(&base.local_addr);
+        let (local_addr, local_port) = addr_to_octets(&base.ip_backend().local_addr);
         let (remote_addr, remote_port) = match tcp_state.remote_addr {
             Some(addr) => addr_to_octets(&addr),
             None => ([0u8; 16], 0),
@@ -469,7 +473,7 @@ impl MotoSocket {
 
         TcpSocketStatsV1 {
             id: base.socket_id(),
-            device_id: base.device_idx as u64,
+            device_id: base.ip_backend().device_idx as u64,
             pid,
             local_addr,
             local_port,
@@ -554,7 +558,7 @@ impl MotoSocket {
             socket_id
         };
 
-        let base = SocketBase::new(
+        let base = SocketBase::new_ip(
             socket_id,
             runtime.clone(),
             device_idx,
@@ -562,7 +566,7 @@ impl MotoSocket {
             client_sender,
         );
 
-        let socket = MotoSocket::new(
+        let socket = MotoSocket::new_ip(
             base,
             SocketState::Tcp(TcpState {
                 ephemeral_port: None,
@@ -757,7 +761,10 @@ impl MotoSocket {
             (moto_socket, sizes)
         };
 
-        let handle = moto_socket.borrow().base.handle();
+        let handle = {
+            let socket = moto_socket.borrow();
+            socket.base.ip_backend().handle(socket.base.socket_id)
+        };
         let restored = runtime.inner.borrow_mut().devices[device_idx]
             .tcp_restore(handle, &restore, sizes)
             .is_ok();
@@ -1108,7 +1115,7 @@ impl MotoSocket {
             let tcp_state = state.unwrap_tcp_mut();
             let mut msg = tcp_state.connect_req.take().unwrap();
             msg.handle = base.socket_id;
-            api_net::put_socket_addr(&mut msg.payload, &base.local_addr);
+            api_net::put_socket_addr(&mut msg.payload, &base.ip_backend().local_addr);
             msg.status = moto_rt::E_OK;
 
             (base.client_sender.clone(), msg)
@@ -1136,7 +1143,7 @@ impl MotoSocket {
                 socket_ref.unwrap_tcp().subchannel_mask,
                 socket_ref.unwrap_tcp().rx_ready.clone(),
                 socket_ref.base.runtime.stats.clone(),
-                socket_ref.base.device_notify(),
+                socket_ref.base.ip_backend().device_notify(),
             )
         };
         rx_ready.notified().await;
@@ -1414,7 +1421,12 @@ impl MotoSocket {
                     },
                 );
 
-                moto_socket.borrow().base.device_notify.notify_one();
+                moto_socket
+                    .borrow()
+                    .base
+                    .ip_backend()
+                    .device_notify
+                    .notify_one();
                 if tx_broken {
                     break 'outer;
                 }
@@ -1446,7 +1458,12 @@ impl MotoSocket {
                     },
                 );
                 if device_notify {
-                    moto_socket.borrow().base.device_notify.notify_one();
+                    moto_socket
+                        .borrow()
+                        .base
+                        .ip_backend()
+                        .device_notify
+                        .notify_one();
                 }
             }
         }
@@ -1547,7 +1564,7 @@ impl MotoSocket {
             let completion = {
                 let socket_ref = moto_socket.borrow();
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                runtime_ref.devices[socket_ref.base.device_idx].poll_completion()
+                runtime_ref.devices[socket_ref.base.ip_backend().device_idx].poll_completion()
             };
             let _ = completion.await;
 
@@ -1664,7 +1681,12 @@ impl MotoSocket {
         // A state change is not a packet: the FIN above only reaches the wire
         // when the device polls. (The TX task notifies for itself.)
         if action == CloseAction::Finish {
-            moto_socket.borrow().base.device_notify().notify_one();
+            moto_socket
+                .borrow()
+                .base
+                .ip_backend()
+                .device_notify()
+                .notify_one();
         }
 
         let (linger_secs, delayed_notify) = {
@@ -2027,8 +2049,8 @@ impl MotoSocket {
                     "TCP connect: socket 0x{:x} {local_addr:?} => {remote_addr:?}.",
                     base.socket_id
                 );
-                base.runtime.inner.borrow_mut().devices[base.device_idx].tcp_connect(
-                    base.handle(),
+                base.runtime.inner.borrow_mut().devices[base.ip_backend().device_idx].tcp_connect(
+                    base.ip_backend().handle(base.socket_id),
                     local_addr,
                     remote_addr,
                 )

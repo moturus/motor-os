@@ -16,8 +16,9 @@ Q21 is deferred in D20: defending against buggy or malicious VMMs is out of
 scope, with the BAR-boundary concern recorded in `future-work.md`.
 Repository and references inspected on 2026-09-14, with the CID and VMM
 ordering review updated on 2026-09-15;
-M1 foundations have passed their repeated full gate. M2 integration is next,
-with progress recorded below.
+M1 foundations have passed their repeated full gate. M2 integration is
+underway, with progress recorded below. Q23 asks how the discovery API fits
+the capability and error contract before that API is published.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -614,6 +615,23 @@ M2 established-stream state is implemented and parent-reviewed:
   in `/tmp/vsock-stream-state.a7xXxC/cargo-check-final.log`.
 - No attached-vsock, real IPC, wire RST exchange, or D19 end-to-end coverage
   is claimed by these helper tests. M2 remains pending.
+
+M2's shared socket backend preparation is implemented and parent-reviewed:
+
+- `IpSocketBackend` now groups the NIC index, device notification, local IP
+  address, and netstack-handle conversion. Common socket IDs, client
+  ownership, rollback, and cleanup ordering are unchanged. Construction is
+  explicitly IP-only; no unused vsock socket variant, fake IP address, new
+  allocation, or task was added. TCP tuple scans reject non-TCP state before
+  accessing the IP backend.
+- A `test-native-net` systest selector runs the existing native-driver,
+  TCP, and UDP suites in their ordinary-suite order. Their default full-test
+  calls remain unchanged. These suites and the complete existing `mio-test`
+  suite passed in debug and release, as did base-image/test builds, selected
+  formatting, and targeted Clippy. No new warning or gate failure occurred.
+  Logs: `/tmp/vsock-ip-backend-gate.jGrqSg/`.
+- The next real IPC/API increment is discovery, subject to Q23. Socket
+  integration, activation, and end-to-end vsock coverage remain pending.
 
 ## Scope and simplicity
 
@@ -2133,4 +2151,25 @@ completion check. No existing validation is removed as part of this decision.
 
 ## Open questions
 
-None currently. Raise new non-obvious decisions before implementing them.
+### Q23. Availability discovery: authorization and absent-device result
+
+D8 explicitly requires CAP_VSOCK for connect/listen, while D9 says an
+availability query reports discovery without activating the device. D14's
+error table has no discovery exception: missing CAP_VSOCK is `NotAllowed`
+and an absent device is `NotFound`. Clarify the public discovery contract
+before implementing its first IPC/API path.
+
+Recommendation: follow D14 consistently. A discovery query requires
+CAP_VSOCK and returns success when a device was discovered, `NotFound` when
+absent, and `NotAllowed` for a denied caller. A native
+`availability(&NetClient) -> Result<(), moto_rt::Error>` can use the existing
+RPC/driver without a socket reservation. Cache the trusted capability query
+at the first vsock request and check it before device presence; preserve
+native capability-query errors directly, without the TCP error mapper.
+Do not initialize queues, read the CID, or start device pumps for this query.
+
+The alternative is a discovery-only exception: permit the query without
+CAP_VSOCK and expose `is_available(...) -> Result<bool, moto_rt::Error>`,
+returning `Ok(false)` when absent. Connect, listen, and any operation that
+activates the device would still require CAP_VSOCK. Neither alternative is
+implemented yet; this is separate from the deferred VMM hardening in Q21.

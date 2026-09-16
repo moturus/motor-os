@@ -1204,6 +1204,13 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if args.len() == 2 && args[1] == "test-native-net" {
+        net_driver::run_all_tests();
+        tcp::run_all_tests();
+        udp::run_all_tests();
+        println!("systest: test-native-net PASS");
+        return;
+    }
     if args.len() == 2 && args[1] == "test-tcp-teardown" {
         tcp::test_channel_teardown_drains_staged_tcp();
         return;
