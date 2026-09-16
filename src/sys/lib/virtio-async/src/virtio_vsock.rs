@@ -105,6 +105,20 @@ pub enum Operation {
     CreditRequest,
 }
 
+impl Operation {
+    fn wire_value(self) -> u16 {
+        match self {
+            Self::Request => 1,
+            Self::Response => 2,
+            Self::Reset => 3,
+            Self::Shutdown => 4,
+            Self::ReadWrite => 5,
+            Self::CreditUpdate => 6,
+            Self::CreditRequest => 7,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PacketHeader {
     pub src_cid: u32,
@@ -131,6 +145,49 @@ pub struct RawHeader {
     pub flags: u32,
     pub buf_alloc: u32,
     pub fwd_cnt: u32,
+}
+
+impl RawHeader {
+    /// Build the required RST for a complete unsupported header while
+    /// preserving its raw socket type. An over-wide source cannot be addressed
+    /// by this Virtio 1.1 profile.
+    pub fn refusal(local_cid: u32, received: Self) -> Option<Self> {
+        if received.operation == Operation::Reset.wire_value() {
+            return None;
+        }
+        let dst_cid = u32::try_from(received.src_cid).ok()?;
+        Some(Self {
+            src_cid: local_cid.into(),
+            dst_cid: dst_cid.into(),
+            src_port: received.dst_port,
+            dst_port: received.src_port,
+            len: 0,
+            socket_type: received.socket_type,
+            operation: Operation::Reset.wire_value(),
+            flags: 0,
+            buf_alloc: 0,
+            fwd_cnt: 0,
+        })
+    }
+}
+
+impl From<PacketHeader> for RawHeader {
+    fn from(header: PacketHeader) -> Self {
+        Self {
+            src_cid: header.src_cid.into(),
+            dst_cid: header.dst_cid.into(),
+            src_port: header.src_port,
+            dst_port: header.dst_port,
+            len: header.len,
+            socket_type: match header.socket_type {
+                SocketType::Stream => 1,
+            },
+            operation: header.operation.wire_value(),
+            flags: header.flags,
+            buf_alloc: header.buf_alloc,
+            fwd_cnt: header.fwd_cnt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -755,7 +812,7 @@ pub(crate) fn prepare_pools(queues: &[Rc<RefCell<Virtqueue>>]) -> IoResult<Prepa
 
 /// Device-lifetime vsock I/O ownership. Keep this facade alive after
 /// activation, including while sys-io caches a later transport failure.
-pub(crate) struct VsockDevice {
+pub struct VsockDevice {
     guest_cid: Cell<u32>,
     tx: RefCell<TxPool>,
     rx: RefCell<Option<RxPool>>,
@@ -765,7 +822,7 @@ pub(crate) struct VsockDevice {
 }
 
 impl VsockDevice {
-    pub(crate) fn from(device: VirtioDevice) -> IoResult<Rc<Self>> {
+    pub fn from(device: VirtioDevice) -> IoResult<Rc<Self>> {
         if !matches!(device.kind(), VirtioDeviceKind::Vsock) {
             return Err(ErrorKind::InvalidInput.into());
         }
@@ -811,31 +868,31 @@ impl VsockDevice {
         Ok(this)
     }
 
-    pub(crate) fn guest_cid(&self) -> u32 {
+    pub fn guest_cid(&self) -> u32 {
         self.guest_cid.get()
     }
 
-    pub(crate) fn refresh_guest_cid(&self) -> IoResult<u32> {
+    pub fn refresh_guest_cid(&self) -> IoResult<u32> {
         let cid = read_guest_cid(&self.device.borrow())?;
         self.guest_cid.set(cid);
         Ok(cid)
     }
 
-    pub(crate) fn try_send(&self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
+    pub fn try_send(&self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
         if raw.src_cid != u64::from(self.guest_cid.get()) {
             return Err(ErrorKind::InvalidInput.into());
         }
         self.tx.borrow_mut().try_submit(raw, bytes)
     }
 
-    pub(crate) fn poll_reclaim_tx(
+    pub fn poll_reclaim_tx(
         &self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<IoResult<()>> {
         self.tx.borrow_mut().poll_reclaim_one(cx)
     }
 
-    pub(crate) fn poll_receive<R>(
+    pub fn poll_receive<R>(
         &self,
         cx: &mut std::task::Context<'_>,
         consume: impl FnOnce(Result<PacketHeader, DecodeError>, &[u8]) -> R,
@@ -847,7 +904,7 @@ impl VsockDevice {
             .poll_consume(cx, consume)
     }
 
-    pub(crate) fn poll_event<R>(
+    pub fn poll_event<R>(
         &self,
         cx: &mut std::task::Context<'_>,
         consume: impl FnOnce(Result<Event, EventError>) -> R,

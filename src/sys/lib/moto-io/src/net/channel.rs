@@ -22,10 +22,12 @@ use moto_rt::mutex::Mutex;
 use moto_sys::ErrorCode;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
+use moto_sys_io::api_vsock;
 
 use super::tcp::TcpListener;
 use super::tcp::TcpStream;
 use super::udp::UdpSocket;
+use super::vsock::VsockStream;
 use super::wait::{WaitSet, WaiterId};
 
 /// The stage-E leak check (design 5.5): a quiescent runtime holds no
@@ -279,12 +281,27 @@ impl NetDriver {
 //       audit runs, the fences stay so a hang cannot be blamed on two
 //       changes at once.
 
+#[derive(Clone)]
+enum WeakStream {
+    Tcp(Weak<TcpStream>),
+    Vsock(Weak<VsockStream>),
+}
+
+impl WeakStream {
+    fn strong_count(&self) -> usize {
+        match self {
+            Self::Tcp(stream) => stream.strong_count(),
+            Self::Vsock(stream) => stream.strong_count(),
+        }
+    }
+}
+
 /// How the rx task completes an in-flight RPC (`msg.id != 0`).
 ///
 /// Plain responses resolve a oneshot whose receiver a blocked caller
 /// thread polls. Connect and accept completions run inline in rx
 /// dispatch — not in a control task as design 5.3 sketches — because
-/// they create message-routing state (the stream's `tcp_streams` entry,
+/// they create message-routing state (the stream's `streams` entry,
 /// the listener's pending-accept queue) that must exist before the next
 /// message for the same stream handle is dispatched; a task hop would
 /// race that and lose early state changes.
@@ -298,6 +315,12 @@ pub(super) enum RpcWaiter {
     Connect {
         stream: Weak<TcpStream>,
         tx: Option<moto_async::oneshot::Sender<io_channel::Msg>>,
+    },
+    /// Outgoing VsockStream::connect completion. Registration and canceled
+    /// success rollback run inline for the same ordering reason as TCP.
+    VsockConnect {
+        stream: Weak<VsockStream>,
+        tx: moto_async::oneshot::Sender<io_channel::Msg>,
     },
     /// TcpListener accept completion. The listener owns the dispatch: an
     /// awaiting `accept()` caller is served from its waiter queue, because
@@ -582,10 +605,10 @@ pub(crate) fn stats_udp_socket_dropped() {
     NUM_UDP_SOCKETS.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// The `Msg::flags` value marking a client-internal TcpStreamTx marker: it
+/// The `Msg::flags` value marking a client-internal stream TX marker: it
 /// tells the IO thread to claim and send the stream's pending TX pages (see
-/// `tcp::PendingTxPage`), and never reaches sys-io. The value cannot occur
-/// in a real Tx message: the classic format keeps `flags` zero and the
+/// `PendingStreamTx`), and never reaches sys-io. The value cannot occur
+/// in a real stream TX message: the classic format keeps `flags` zero and the
 /// multi-page format stores `total_len <= TCP_TX_MAX_BYTES` there.
 pub(super) const TCP_TX_MARKER_FLAGS: u32 = u32::MAX;
 
@@ -601,6 +624,14 @@ pub(super) fn tcp_stream_close_msg(handle: u64) -> io_channel::Msg {
 pub(super) fn tcp_tx_marker_msg(handle: u64) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = api_net::NetCmd::TcpStreamTx as u16;
+    msg.handle = handle;
+    msg.flags = TCP_TX_MARKER_FLAGS;
+    msg
+}
+
+pub(super) fn vsock_tx_marker_msg(handle: u64) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = api_net::NetCmd::VsockStreamTx as u16;
     msg.handle = handle;
     msg.flags = TCP_TX_MARKER_FLAGS;
     msg
@@ -663,9 +694,8 @@ pub(crate) struct NetChannel {
     // TODO: we will only have at most IO_SUBCHANNELS streams per connection. Maybe
     //       we should get rid of spinlocks below and have simple vectors?
     //
-    // We use weak references to TcpStream below because ultimately the user
-    // owns tcp streams, and we want to clear things away when the user drops them.
-    tcp_streams: Mutex<BTreeMap<u64, Weak<TcpStream>>>,
+    // Users own streams; the common sys-io handle is the sole routing key.
+    streams: Mutex<BTreeMap<u64, WeakStream>>,
     tcp_listeners: Mutex<BTreeMap<u64, Weak<TcpListener>>>,
     udp_sockets: Mutex<BTreeMap<u64, Weak<UdpSocket>>>,
 
@@ -762,7 +792,10 @@ impl Drop for RpcRegistration<'_> {
                 matches!(
                     removed,
                     Some(
-                        RpcWaiter::Response(_) | RpcWaiter::Connect { .. } | RpcWaiter::Bind { .. }
+                        RpcWaiter::Response(_)
+                            | RpcWaiter::Connect { .. }
+                            | RpcWaiter::VsockConnect { .. }
+                            | RpcWaiter::Bind { .. }
                     )
                 ) || self.channel.is_failed()
             );
@@ -824,11 +857,28 @@ impl NetChannel {
                 self.on_udp_msg(msg);
                 return;
             }
+            if matches!(
+                cmd,
+                api_net::NetCmd::VsockStreamTx
+                    | api_net::NetCmd::VsockStreamRx
+                    | api_net::NetCmd::EvtVsockStreamStateChanged
+            ) {
+                let stream = match self.streams.lock().get(&msg.handle) {
+                    Some(WeakStream::Vsock(stream)) => stream.upgrade(),
+                    _ => None,
+                };
+                if let Some(stream) = stream {
+                    stream.process_incoming_msg(msg);
+                } else {
+                    self.on_orphan_message(msg);
+                }
+                return;
+            }
 
             // This is an incoming packet, or similar, without a dedicated waiter.
             let stream_handle = msg.handle;
             // Upgraded listener Arcs are held here and dropped only after the
-            // tcp_streams/tcp_listeners locks below are released: if such a
+            // streams/tcp_listeners locks below are released: if such a
             // temporary is a listener's last strong ref (the owner dropped it
             // concurrently), its Drop runs tcp_listener_dropped(), which
             // re-locks tcp_listeners -- self-deadlocking this rx task if the
@@ -837,14 +887,14 @@ impl NetChannel {
             let mut queued_to_listener = false;
             let mut upgraded_listeners: Vec<Arc<TcpListener>> = Vec::new();
             let stream = {
-                let mut tcp_streams = self.tcp_streams.lock();
-                if let Some(stream) = tcp_streams.get_mut(&stream_handle) {
+                let streams = self.streams.lock();
+                if let Some(WeakStream::Tcp(stream)) = streams.get(&stream_handle) {
                     stream.upgrade()
                 } else {
                     // No stream for the packet. But it is possible that there is a pending
                     // accept for the stream, so we must not just drop the packet in
                     // on_orphan_message() below. And we should check the pending accept queues
-                    // while holding the tcp streams lock, otherwise we could race with
+                    // while holding the streams lock, otherwise we could race with
                     // the accept converting into a stream...
                     let tcp_listeners = self.tcp_listeners.lock();
                     for listener in tcp_listeners.values() {
@@ -916,6 +966,15 @@ impl NetChannel {
                     if let Some(tx) = tx {
                         let _ = tx.send(msg);
                     }
+                }
+                Some(RpcWaiter::VsockConnect { stream, tx }) => {
+                    let mut msg = msg;
+                    if let Some(stream) = stream.upgrade() {
+                        let _ = stream.on_connect_response(&mut msg);
+                    } else if msg.status().is_ok() && msg.handle != 0 {
+                        self.enqueue_control(api_vsock::close_request(msg.handle));
+                    }
+                    let _ = tx.send(msg);
                 }
                 Some(RpcWaiter::Accept { listener }) => {
                     if let Some(listener) = listener.upgrade() {
@@ -1076,15 +1135,17 @@ impl NetChannel {
             .or_else(|| self.next_driver_msg(driver_record))
             .or_else(|| self.unstage_msg())
         {
-            let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
-                && msg.flags == TCP_TX_MARKER_FLAGS
+            let msg = if matches!(
+                api_net::NetCmd::try_from(msg.command),
+                Ok(api_net::NetCmd::TcpStreamTx | api_net::NetCmd::VsockStreamTx)
+            ) && msg.flags == TCP_TX_MARKER_FLAGS
             {
                 // A TX marker: claim the stream's pending pages and send
                 // them as one message, binding their lengths now (see
                 // tcp::PendingTxPage). An empty pending queue — an
                 // earlier marker or the stream's drop claimed the pages
                 // already — is a no-op.
-                match self.claim_tcp_tx(msg.handle) {
+                match self.claim_stream_tx(msg.command, msg.handle) {
                     Some(msg) => msg,
                     None => continue,
                 }
@@ -1151,9 +1212,20 @@ impl NetChannel {
     /// Claim stream `handle`'s pending TX pages in response to a marker.
     /// None if the stream is gone (its drop flushed the pages) or the
     /// pending queue is empty.
-    fn claim_tcp_tx(&self, handle: u64) -> Option<io_channel::Msg> {
-        let stream = self.tcp_streams.lock().get(&handle)?.upgrade()?;
-        stream.claim_pending_tx()
+    fn claim_stream_tx(&self, command: u16, handle: u64) -> Option<io_channel::Msg> {
+        // Release the map before taking a stream's pending-page lock. Stream
+        // Drop takes those in the opposite lifetime phase and then removes
+        // its map entry.
+        let stream = self.streams.lock().get(&handle).cloned()?;
+        match (api_net::NetCmd::try_from(command).ok()?, stream) {
+            (api_net::NetCmd::TcpStreamTx, WeakStream::Tcp(stream)) => {
+                stream.upgrade()?.claim_pending_tx()
+            }
+            (api_net::NetCmd::VsockStreamTx, WeakStream::Vsock(stream)) => {
+                stream.upgrade()?.claim_pending_tx()
+            }
+            _ => None,
+        }
     }
 
     fn progress_udp_tx(&self) {
@@ -1521,12 +1593,7 @@ impl NetChannel {
 
         self.client_state.fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
 
-        let streams: Vec<_> = self
-            .tcp_streams
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
+        let streams: Vec<_> = self.streams.lock().values().cloned().collect();
         let listeners: Vec<_> = self
             .tcp_listeners
             .lock()
@@ -1541,7 +1608,18 @@ impl NetChannel {
             .collect();
 
         for stream in streams {
-            stream.on_channel_failed();
+            match stream {
+                WeakStream::Tcp(stream) => {
+                    if let Some(stream) = stream.upgrade() {
+                        stream.on_channel_failed();
+                    }
+                }
+                WeakStream::Vsock(stream) => {
+                    if let Some(stream) = stream.upgrade() {
+                        stream.on_channel_failed();
+                    }
+                }
+            }
         }
         for listener in listeners {
             listener.on_channel_failed();
@@ -1575,6 +1653,12 @@ impl NetChannel {
                 if let Some(tx) = tx {
                     let _ = tx.send(resp);
                 }
+            }
+            RpcWaiter::VsockConnect { stream, tx } => {
+                if let Some(stream) = stream.upgrade() {
+                    let _ = stream.on_connect_response(&mut resp);
+                }
+                let _ = tx.send(resp);
             }
             RpcWaiter::Accept { listener } => {
                 if let Some(listener) = listener.upgrade() {
@@ -1620,7 +1704,7 @@ impl NetChannel {
             conn,
             client_state: AtomicU32::new(0),
             subchannels_in_use: [const { AtomicBool::new(false) }; IO_SUBCHANNELS as usize],
-            tcp_streams: Mutex::new(BTreeMap::new()),
+            streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
             udp_sockets: Mutex::new(BTreeMap::new()),
             reservations: AtomicU8::new(0),
@@ -1658,9 +1742,23 @@ impl NetChannel {
 
     pub fn tcp_stream_created(&self, stream: &TcpStream) {
         assert!(
-            self.tcp_streams
+            self.streams
                 .lock()
-                .insert(stream.handle(), stream.weak())
+                .insert(stream.handle(), WeakStream::Tcp(stream.weak()))
+                .is_none()
+        );
+        if self.is_failed() {
+            stream.on_channel_failed();
+        }
+    }
+
+    pub(super) fn vsock_stream_created(&self, stream: &VsockStream) {
+        let handle = stream.handle_value();
+        assert_ne!(handle, 0);
+        assert!(
+            self.streams
+                .lock()
+                .insert(handle, WeakStream::Vsock(stream.weak()))
                 .is_none()
         );
         if self.is_failed() {
@@ -1688,7 +1786,14 @@ impl NetChannel {
     }
 
     pub fn tcp_stream_dropped(&self, handle: u64) {
-        let stream = self.tcp_streams.lock().remove(&handle).unwrap();
+        let stream = self.streams.lock().remove(&handle).unwrap();
+        assert!(matches!(&stream, WeakStream::Tcp(_)));
+        assert_eq!(0, stream.strong_count());
+    }
+
+    pub(super) fn vsock_stream_dropped(&self, handle: u64) {
+        let stream = self.streams.lock().remove(&handle).unwrap();
+        assert!(matches!(&stream, WeakStream::Vsock(_)));
         assert_eq!(0, stream.strong_count());
     }
 
@@ -1863,6 +1968,42 @@ impl NetChannel {
         rx.await.expect("connect RPC sender dropped")
     }
 
+    pub(super) async fn rpc_vsock_connect(
+        &self,
+        mut req: io_channel::Msg,
+        stream: Weak<VsockStream>,
+    ) -> io_channel::Msg {
+        let (tx, rx) = moto_async::oneshot();
+        req.id = self.new_req_id();
+        {
+            let mut rpc_map = self.rpc_map.lock();
+            if self.is_failed() {
+                let mut resp = io_channel::Msg::new();
+                resp.id = req.id;
+                resp.status = moto_rt::E_NOT_CONNECTED;
+                if let Some(stream) = stream.upgrade() {
+                    let _ = stream.on_connect_response(&mut resp);
+                }
+                return resp;
+            }
+            assert!(
+                rpc_map
+                    .insert(req.id, RpcWaiter::VsockConnect { stream, tx })
+                    .is_none()
+            );
+        }
+
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: req.id,
+            sent: false,
+        };
+        self.send(req).await;
+        registration.sent = true;
+
+        rx.await.expect("vsock connect RPC sender dropped")
+    }
+
     /// Queue an RPC from inline driver dispatch. The waiter is installed
     /// first, then the request moves to the driver's guaranteed FIFO.
     pub(super) fn enqueue_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
@@ -2003,6 +2144,13 @@ impl NetChannel {
             }
             api_net::NetCmd::EvtTcpStreamStateChanged => {}
             api_net::NetCmd::TcpStreamClose => {}
+            api_net::NetCmd::VsockStreamTx => {
+                // sys-io recovered the client-owned page(s) before replying.
+            }
+            api_net::NetCmd::VsockStreamRx => {
+                claim_vsock_rx_page(self, &msg, &mut |_page, _len| {});
+            }
+            api_net::NetCmd::EvtVsockStreamStateChanged | api_net::NetCmd::VsockStreamClose => {}
             api_net::NetCmd::UdpSocketTxRx => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
                 // Get the page so that it is properly dropped.
@@ -2086,8 +2234,24 @@ pub(crate) fn claim_rx_page(
     msg: &io_channel::Msg,
     f: &mut dyn FnMut(io_channel::IoPage, usize),
 ) {
-    debug_assert_eq!(msg.command, api_net::NetCmd::TcpStreamRx as u16);
+    claim_stream_rx_page(channel, msg, api_net::NetCmd::TcpStreamRx as u16, f)
+}
 
+pub(crate) fn claim_vsock_rx_page(
+    channel: &NetChannel,
+    msg: &io_channel::Msg,
+    f: &mut dyn FnMut(io_channel::IoPage, usize),
+) {
+    claim_stream_rx_page(channel, msg, api_net::NetCmd::VsockStreamRx as u16, f)
+}
+
+fn claim_stream_rx_page(
+    channel: &NetChannel,
+    msg: &io_channel::Msg,
+    command: u16,
+    f: &mut dyn FnMut(io_channel::IoPage, usize),
+) {
+    debug_assert_eq!(msg.command, command);
     let sz = msg.payload.args_64()[1] as usize;
     assert!(sz <= io_channel::PAGE_SIZE);
     if sz > 0 {
@@ -2100,14 +2264,60 @@ pub(crate) fn clear_rx_queue(
     rx_queue: &Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
     channel: &NetChannel,
 ) {
-    // Clear RX queue: basically, free up server-allocated pages.
+    clear_stream_rx_queue(
+        rx_queue,
+        channel,
+        api_net::NetCmd::TcpStreamRx as u16,
+        api_net::NetCmd::EvtTcpStreamStateChanged as u16,
+    )
+}
+
+pub(crate) fn clear_vsock_rx_queue(
+    rx_queue: &Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
+    channel: &NetChannel,
+) {
+    clear_stream_rx_queue(
+        rx_queue,
+        channel,
+        api_net::NetCmd::VsockStreamRx as u16,
+        api_net::NetCmd::EvtVsockStreamStateChanged as u16,
+    )
+}
+
+pub(crate) fn clear_vsock_rx_queue_locked(
+    rx_queue: &mut crate::net::inner_rx_stream::InnerRxStream,
+    channel: &NetChannel,
+) {
+    clear_stream_rx_queue_locked(
+        rx_queue,
+        channel,
+        api_net::NetCmd::VsockStreamRx as u16,
+        api_net::NetCmd::EvtVsockStreamStateChanged as u16,
+    )
+}
+
+fn clear_stream_rx_queue(
+    rx_queue: &Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
+    channel: &NetChannel,
+    rx_command: u16,
+    state_command: u16,
+) {
     let mut rxq = rx_queue.lock();
+    clear_stream_rx_queue_locked(&mut rxq, channel, rx_command, state_command);
+}
+
+fn clear_stream_rx_queue_locked(
+    rxq: &mut crate::net::inner_rx_stream::InnerRxStream,
+    channel: &NetChannel,
+    rx_command: u16,
+    state_command: u16,
+) {
     while let Some(msg) = rxq.pop_front() {
-        if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+        if msg.command == state_command {
             continue;
         }
-        assert_eq!(msg.command, api_net::NetCmd::TcpStreamRx as u16);
-        claim_rx_page(channel, &msg, &mut |_page, _len| {});
+        assert_eq!(msg.command, rx_command);
+        claim_stream_rx_page(channel, &msg, rx_command, &mut |_page, _len| {});
     }
 
     rxq.clear_rx_bufs();

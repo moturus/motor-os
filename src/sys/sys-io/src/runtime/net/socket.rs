@@ -20,6 +20,7 @@ mod udp;
 pub(super) enum SocketState {
     Udp(udp::UdpState),
     Tcp(tcp::TcpState),
+    Vsock(super::vsock::VsockSocketState),
 }
 
 impl SocketState {
@@ -50,7 +51,7 @@ impl SocketState {
 pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
-    backend: IpSocketBackend,
+    backend: SocketBackend,
 
     // Denormalized for quick validation.
     client_sender: ClientSender,
@@ -65,6 +66,11 @@ pub(super) struct IpSocketBackend {
     device_idx: usize,
     device_notify: Rc<moto_async::LocalNotify>,
     local_addr: SocketAddr,
+}
+
+pub(super) enum SocketBackend {
+    Ip(IpSocketBackend),
+    Vsock(crate::runtime::vsock::admission::ConnectionTuple),
 }
 
 impl SocketBase {
@@ -82,11 +88,11 @@ impl SocketBase {
         Self {
             socket_id,
             runtime,
-            backend: IpSocketBackend {
+            backend: SocketBackend::Ip(IpSocketBackend {
                 device_idx,
                 device_notify,
                 local_addr: socket_addr,
-            },
+            }),
             client_sender,
             lingering: false,
         }
@@ -96,12 +102,41 @@ impl SocketBase {
         self.socket_id
     }
 
+    pub(super) fn new_vsock(
+        socket_id: u64,
+        runtime: super::NetRuntime,
+        tuple: crate::runtime::vsock::admission::ConnectionTuple,
+        client_sender: ClientSender,
+    ) -> Self {
+        Self {
+            socket_id,
+            runtime,
+            backend: SocketBackend::Vsock(tuple),
+            client_sender,
+            lingering: false,
+        }
+    }
+
     pub(super) fn ip_backend(&self) -> &IpSocketBackend {
-        &self.backend
+        let SocketBackend::Ip(backend) = &self.backend else {
+            panic!("vsock has no IP backend")
+        };
+        backend
+    }
+
+    pub(super) fn vsock_tuple(&self) -> crate::runtime::vsock::admission::ConnectionTuple {
+        let SocketBackend::Vsock(tuple) = self.backend else {
+            panic!("IP socket has no vsock tuple")
+        };
+        tuple
     }
 
     pub(super) fn sender(&self) -> &ClientSender {
         &self.client_sender
+    }
+
+    pub(super) fn runtime(&self) -> &super::NetRuntime {
+        &self.runtime
     }
 }
 
@@ -132,15 +167,25 @@ impl Drop for MotoSocket {
 
         let Self { base, state } = self;
 
-        match state {
-            SocketState::Udp(udp_state) => Self::on_udp_socket_drop(base, udp_state),
-            SocketState::Tcp(tcp_state) => Self::on_tcp_socket_drop(base, tcp_state),
+        match (&base.backend, state) {
+            (SocketBackend::Ip(_), SocketState::Udp(udp_state)) => {
+                Self::on_udp_socket_drop(base, udp_state)
+            }
+            (SocketBackend::Ip(_), SocketState::Tcp(tcp_state)) => {
+                Self::on_tcp_socket_drop(base, tcp_state)
+            }
+            (SocketBackend::Vsock(_), SocketState::Vsock(vsock_state)) => {
+                super::vsock::on_socket_drop(base, vsock_state);
+                return;
+            }
+            _ => panic!("socket state/backend mismatch"),
         }
 
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
-        let device_idx = base.backend.device_idx;
-        let netstack_handle = base.backend.handle(socket_id);
+        let ip = base.ip_backend();
+        let device_idx = ip.device_idx;
+        let netstack_handle = ip.handle(socket_id);
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         #[cfg(debug_assertions)]
@@ -160,8 +205,20 @@ impl MotoSocket {
         self.base.socket_id
     }
 
+    pub(super) fn sender(&self) -> &ClientSender {
+        self.base.sender()
+    }
+
+    pub(super) fn vsock_tuple(&self) -> crate::runtime::vsock::admission::ConnectionTuple {
+        self.base.vsock_tuple()
+    }
+
     pub(super) fn is_tcp(&self) -> bool {
         matches!(self.state, SocketState::Tcp(_))
+    }
+
+    pub(super) fn is_vsock(&self) -> bool {
+        matches!(self.state, SocketState::Vsock(_))
     }
 
     pub(super) fn new_ip(
@@ -170,8 +227,8 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let device_idx = base.backend.device_idx;
-        let netstack_handle = base.backend.handle(socket_id);
+        let device_idx = base.ip_backend().device_idx;
+        let netstack_handle = base.ip_backend().handle(socket_id);
         let client_handle = base.client_sender.remote_handle();
         let mut inner = runtime.inner.borrow_mut();
         if !inner
@@ -184,6 +241,39 @@ impl MotoSocket {
         }
 
         let this = Rc::new(RefCell::new(Self { base, state: kind }));
+        assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
+        assert!(
+            inner
+                .clients
+                .get_mut(&client_handle)
+                .unwrap()
+                .sockets
+                .insert(socket_id)
+        );
+        Ok(this)
+    }
+
+    pub(super) fn new_vsock(
+        base: SocketBase,
+        state: super::vsock::VsockSocketState,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
+        let runtime = base.runtime.clone();
+        let socket_id = base.socket_id;
+        let client_handle = base.client_sender.remote_handle();
+        let mut inner = runtime.inner.borrow_mut();
+        if !inner
+            .clients
+            .get(&client_handle)
+            .is_some_and(|client| !client.shutting_down)
+        {
+            inner.vsock.tuples.remove_stream(socket_id);
+            return Err(ErrorKind::NotConnected.into());
+        }
+
+        let this = Rc::new(RefCell::new(Self {
+            base,
+            state: SocketState::Vsock(state),
+        }));
         assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
         assert!(
             inner
@@ -232,5 +322,19 @@ impl MotoSocket {
     }
     pub(super) fn unwrap_tcp_mut(&mut self) -> &mut tcp::TcpState {
         self.state.unwrap_tcp_mut()
+    }
+
+    pub(super) fn unwrap_vsock(&self) -> &super::vsock::VsockSocketState {
+        let SocketState::Vsock(state) = &self.state else {
+            panic!("not a vsock stream")
+        };
+        state
+    }
+
+    pub(super) fn unwrap_vsock_mut(&mut self) -> &mut super::vsock::VsockSocketState {
+        let SocketState::Vsock(state) = &mut self.state else {
+            panic!("not a vsock stream")
+        };
+        state
     }
 }

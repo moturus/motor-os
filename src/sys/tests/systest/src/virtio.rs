@@ -381,8 +381,43 @@ fn test_vsock_wire() {
         (7, Operation::CreditRequest),
     ] {
         invalid[30..32].copy_from_slice(&tag.to_le_bytes());
-        assert_eq!(decode_packet(&invalid, 44, 0).unwrap().operation, operation);
+        let header = decode_packet(&invalid, 44, 0).unwrap();
+        assert_eq!(header.operation, operation);
+        let raw = RawHeader::from(header);
+        assert_eq!(raw.src_cid, u64::from(header.src_cid));
+        assert_eq!(raw.dst_cid, u64::from(header.dst_cid));
+        assert_eq!(raw.src_port, header.src_port);
+        assert_eq!(raw.dst_port, header.dst_port);
+        assert_eq!(raw.len, header.len);
+        assert_eq!(raw.socket_type, 1);
+        assert_eq!(raw.operation, tag);
+        assert_eq!(raw.flags, header.flags);
+        assert_eq!(raw.buf_alloc, header.buf_alloc);
+        assert_eq!(raw.fwd_cnt, header.fwd_cnt);
     }
+    let mut raw = RawHeader::from(decode_packet(&packet, 47, 3).unwrap());
+    raw.socket_type = 99;
+    let refusal = RawHeader::refusal(3, raw).unwrap();
+    assert_eq!(refusal.src_cid, 3);
+    assert_eq!(refusal.dst_cid, raw.src_cid);
+    assert_eq!(refusal.src_port, raw.dst_port);
+    assert_eq!(refusal.dst_port, raw.src_port);
+    assert_eq!(refusal.socket_type, 99);
+    assert_eq!(refusal.operation, 3);
+    assert_eq!(
+        (
+            refusal.len,
+            refusal.flags,
+            refusal.buf_alloc,
+            refusal.fwd_cnt
+        ),
+        (0, 0, 0, 0)
+    );
+    raw.operation = 3;
+    assert_eq!(RawHeader::refusal(3, raw), None);
+    raw.operation = 5;
+    raw.src_cid = 1_u64 << 32;
+    assert_eq!(RawHeader::refusal(3, raw), None);
     invalid[30..32].copy_from_slice(&4_u16.to_le_bytes());
     for flags in 0_u32..=3 {
         invalid[32..36].copy_from_slice(&flags.to_le_bytes());

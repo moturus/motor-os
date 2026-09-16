@@ -13,14 +13,37 @@ fi
 set -euo pipefail
 
 BUILD=debug
-case "$#:${1:-}" in
-  0:) ;;
-  1:--release) BUILD=release ;;
-  *)
-    echo "usage: $0 [--release]" >&2
-    exit 2
-    ;;
-esac
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "test-vsock: duplicate --release" >&2; exit 2; }
+      BUILD=release
+      SEEN_RELEASE=1
+      shift
+      ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-vsock: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "test-vsock: --vmm requires qemu, chv, or fc" >&2; exit 2; }
+      VMM="$2"
+      SEEN_VMM=1
+      shift 2
+      ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-vsock: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"
+      SEEN_VMM=1
+      shift
+      ;;
+    *)
+      echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2
+      exit 2
+      ;;
+  esac
+done
+case "$VMM" in qemu|chv|fc) ;; *) echo "test-vsock: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
 
 WD="$(dirname "$0")"
 ROOT_DIR="$WD/../.."
@@ -35,6 +58,13 @@ for tool in cloud-hypervisor-static flock pgrep rg script; do
     exit 1
   }
 done
+
+# The selected-VMM peer phase performs its own prerequisite checks before it
+# builds or launches. The existing serial discovery cases remain CHV-only
+# until their D16 conversion.
+outgoing_args=(--vmm "$VMM")
+[ "$BUILD" = release ] && outgoing_args=(--release "${outgoing_args[@]}")
+"$WD/test-vsock-outgoing.sh" "${outgoing_args[@]}"
 
 make -C "$ROOT_DIR" vsock-test.img BUILD="$BUILD" -j"$(nproc)"
 

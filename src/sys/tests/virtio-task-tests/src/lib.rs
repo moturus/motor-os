@@ -363,6 +363,7 @@ pub fn run_tests() {
     test_vsock_established_stream();
     test_vsock_connection();
     test_vsock_shutdown_state();
+    test_vsock_output_state();
     test_vsock_admission();
     concurrent_requests();
     runtime_wakeups();
@@ -1006,11 +1007,14 @@ fn test_vsock_shutdown_state() {
     queued.request_shutdown(0);
     queued.request_shutdown(SHUTDOWN_SEND);
     assert!(!queued.accepts_new_writes());
+    assert!(queued.can_publish_accepted_tx());
     assert_eq!(queued.shutdown_ready(false), 0);
     assert_eq!(queued.shutdown_ready(true), SHUTDOWN_SEND);
     queued.record_shutdown_queued(SHUTDOWN_SEND);
     assert_eq!(queued.shutdown_ready(true), 0);
+    assert!(!queued.shutdown_published(SHUTDOWN_SEND));
     assert_eq!(queued.receive(&reset, b""), Rx::None);
+    assert!(!queued.can_publish_accepted_tx());
     assert_eq!(
         queued.phase(),
         Phase::Terminal(TerminalCause::ConnectionReset)
@@ -1023,6 +1027,9 @@ fn test_vsock_shutdown_state() {
     let ready = one_direction.shutdown_ready(true);
     one_direction.record_shutdown_queued(ready);
     one_direction.record_shutdown_published(SHUTDOWN_RECEIVE);
+    assert!(one_direction.shutdown_published(SHUTDOWN_RECEIVE));
+    assert!(!one_direction.shutdown_published(SHUTDOWN_SEND));
+    assert!(!one_direction.shutdown_published(BOTH));
     assert_eq!(one_direction.receive(&reset, b""), Rx::None);
     assert_eq!(
         one_direction.phase(),
@@ -1038,6 +1045,7 @@ fn test_vsock_shutdown_state() {
     let ready = published.shutdown_ready(true);
     published.record_shutdown_queued(ready);
     published.record_shutdown_published(BOTH);
+    assert!(published.shutdown_published(BOTH));
     assert_eq!(published.receive(&reset, b""), Rx::None);
     assert_eq!(
         published.phase(),
@@ -1122,6 +1130,88 @@ fn test_vsock_shutdown_state() {
     assert!(!timed_out.transport_reset());
 }
 
+fn test_vsock_output_state() {
+    use connection::{Connection, ReceiveOutcome as Rx, TerminalCause};
+    use stream::ReadOutcome;
+    use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
+
+    let mut packet = PacketHeader {
+        src_cid: 2,
+        dst_cid: 3,
+        src_port: 70_000,
+        dst_port: 80_000,
+        len: 0,
+        socket_type: SocketType::Stream,
+        operation: Operation::Request,
+        flags: 0,
+        buf_alloc: 32,
+        fwd_cnt: 0,
+    };
+    let request = packet;
+    let mut reset = Connection::new_incoming(&request).unwrap();
+    assert!(!reset.local_read_closed());
+    assert!(!reset.local_write_closed());
+    assert!(!reset.has_buffered_rx());
+    assert_eq!(reset.terminal_cause(), None);
+
+    packet.operation = Operation::ReadWrite;
+    packet.len = 4;
+    assert_eq!(reset.receive(&packet, b"kept"), Rx::None);
+    assert!(reset.transport_reset());
+    assert_eq!(reset.terminal_cause(), Some(TerminalCause::ConnectionReset));
+    assert!(reset.local_write_closed());
+    assert!(!reset.local_read_closed());
+    assert!(reset.has_buffered_rx());
+    assert!(!reset.device_failed());
+    assert_eq!(reset.terminal_cause(), Some(TerminalCause::ConnectionReset));
+    let mut bytes = [0; 4];
+    assert_eq!(reset.read_into_reserved(&mut bytes), ReadOutcome::Copied(4));
+    assert_eq!(&bytes, b"kept");
+    assert!(reset.local_read_closed());
+    assert!(!reset.has_buffered_rx());
+
+    let mut failed = Connection::new_incoming(&request).unwrap();
+    assert_eq!(failed.receive(&packet, b"last"), Rx::None);
+    assert!(failed.device_failed());
+    assert_eq!(failed.terminal_cause(), Some(TerminalCause::InternalError));
+    assert!(!failed.transport_reset());
+    assert!(failed.local_write_closed());
+    assert!(!failed.local_read_closed());
+    assert_eq!(
+        failed.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes, b"last");
+    assert!(failed.local_read_closed());
+    assert_eq!(failed.terminal_cause(), Some(TerminalCause::InternalError));
+
+    let mut peer_send = Connection::new_incoming(&request).unwrap();
+    packet.operation = Operation::Shutdown;
+    packet.len = 0;
+    packet.flags = SHUTDOWN_SEND;
+    assert_eq!(peer_send.receive(&packet, b""), Rx::None);
+    assert!(peer_send.local_read_closed());
+    assert!(!peer_send.local_write_closed());
+    assert!(peer_send.can_publish_accepted_tx());
+    assert_eq!(peer_send.terminal_cause(), None);
+
+    let mut peer_receive = Connection::new_incoming(&request).unwrap();
+    packet.flags = SHUTDOWN_RECEIVE;
+    assert_eq!(peer_receive.receive(&packet, b""), Rx::None);
+    assert!(!peer_receive.local_read_closed());
+    assert!(peer_receive.local_write_closed());
+    assert!(!peer_receive.can_publish_accepted_tx());
+
+    let mut local = Connection::new_incoming(&request).unwrap();
+    local.request_shutdown(SHUTDOWN_RECEIVE);
+    assert!(local.local_receive_shutdown());
+    assert!(local.local_read_closed());
+    assert!(!local.local_write_closed());
+    local.request_shutdown(SHUTDOWN_SEND);
+    assert!(local.local_write_closed());
+    assert_eq!(local.terminal_cause(), None);
+}
+
 fn test_vsock_admission() {
     use vsock_admission::{AdmissionError, ConnectionTuple, TupleIndex, VsockAddr, find_ephemeral};
 
@@ -1152,6 +1242,7 @@ fn test_vsock_admission() {
     assert_eq!(index.reserve_listener(7, 3, 0), Ok(49_153));
     let peer = addr(5, 80_000);
     let outgoing = index.reserve_outgoing(3, 3, peer).unwrap();
+    assert!(index.stream_ids().eq([3]));
     assert_eq!(outgoing.local, addr(3, 49_154));
     assert_eq!(index.stream_socket(outgoing), Some(3));
     let tuple = |local_cid, local_port, peer_cid, peer_port| ConnectionTuple {

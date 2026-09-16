@@ -93,6 +93,10 @@ impl EstablishedStream {
         self.peer_receive_shutdown && self.peer_send_shutdown
     }
 
+    pub(crate) fn peer_send_shutdown(&self) -> bool {
+        self.peer_send_shutdown
+    }
+
     pub(crate) fn rx_is_empty(&self) -> bool {
         self.receive.is_empty()
     }

@@ -116,12 +116,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rustfmt-size.sh"
 fi
 
-# Discovery with and without a CHV vsock device uses a separate IP-disabled
-# System-console image. Run it before the longer-lived acceptance VMs.
+# Run selected-VMM outgoing acceptance plus CHV discovery with and without a
+# device before the longer-lived acceptance VMs.
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-vsock.sh" --release
+  "$WD/test-vsock.sh" --release --vmm qemu
 else
-  "$WD/test-vsock.sh"
+  "$WD/test-vsock.sh" --vmm qemu
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.

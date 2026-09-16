@@ -181,6 +181,9 @@ pub fn decode_close_request(msg: &io_channel::Msg) -> moto_rt::Result<()> {
 /// Build an E_OK notification with cumulative local state in `flags`, a native
 /// terminal cause in `args_32[0]`, and zero remaining payload. A zero cause
 /// denotes either a nonterminal update or an orderly terminal state.
+/// TERMINAL stops writes but is not an RX barrier: validated data may follow.
+/// READ_CLOSED is ordered after the last RX page in the client's FIFO; readers
+/// drain preceding data before reporting the retained terminal cause or EOF.
 pub fn state_changed(
     handle: u64,
     flags: u32,

@@ -12,6 +12,7 @@ pub(crate) enum TerminalCause {
     ConnectionReset,
     TimedOut,
     OrderlyClosed,
+    InternalError,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +92,40 @@ impl Connection {
             && self.stream.accepts_new_writes()
     }
 
+    /// Previously accepted bytes may drain after local SEND shutdown, but not
+    /// after peer RECEIVE shutdown or terminalization.
+    pub(crate) fn can_publish_accepted_tx(&self) -> bool {
+        self.phase == ConnectionPhase::Established && self.stream.accepts_new_writes()
+    }
+
+    pub(crate) fn has_buffered_rx(&self) -> bool {
+        !self.stream.rx_is_empty()
+    }
+
+    pub(crate) fn local_write_closed(&self) -> bool {
+        self.shutdown_requested & SHUTDOWN_SEND != 0
+            || !self.stream.accepts_new_writes()
+            || matches!(self.phase, ConnectionPhase::Terminal(_))
+    }
+
+    pub(crate) fn local_read_closed(&self) -> bool {
+        self.shutdown_requested & SHUTDOWN_RECEIVE != 0
+            || self.stream.rx_is_empty()
+                && (self.stream.peer_send_shutdown()
+                    || matches!(self.phase, ConnectionPhase::Terminal(_)))
+    }
+
+    pub(crate) fn local_receive_shutdown(&self) -> bool {
+        self.shutdown_requested & SHUTDOWN_RECEIVE != 0
+    }
+
+    pub(crate) fn terminal_cause(&self) -> Option<TerminalCause> {
+        let ConnectionPhase::Terminal(cause) = self.phase else {
+            return None;
+        };
+        Some(cause)
+    }
+
     pub(crate) fn read_into_reserved(&mut self, dst: &mut [u8]) -> ReadOutcome {
         let result = self.stream.read_into_reserved(dst);
         if result == ReadOutcome::Pending
@@ -130,6 +165,10 @@ impl Connection {
         assert_eq!(flags & !self.shutdown_queued, 0);
         assert_eq!(flags & self.shutdown_published, 0);
         self.shutdown_published |= flags;
+    }
+
+    pub(crate) fn shutdown_published(&self, flags: u32) -> bool {
+        self.shutdown_published & flags == flags
     }
 
     /// Return true once when peer BOTH is observed and all validated RX has
@@ -172,6 +211,10 @@ impl Connection {
 
     pub(crate) fn transport_reset(&mut self) -> bool {
         self.enter_terminal(TerminalCause::ConnectionReset, true)
+    }
+
+    pub(crate) fn device_failed(&mut self) -> bool {
+        self.enter_terminal(TerminalCause::InternalError, true)
     }
 
     /// Apply one decoded packet for this connection. A rejected packet never

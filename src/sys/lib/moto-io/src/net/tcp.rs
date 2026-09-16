@@ -27,6 +27,7 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::TcpState;
 
+pub use super::Shutdown;
 use super::channel::ChannelReservation;
 use super::channel::NetChannel;
 use super::channel::RpcWaiter;
@@ -828,14 +829,6 @@ pub struct TcpStream {
     pending_tx: PendingStreamTx,
 }
 
-/// Which half of a TCP stream to shut down.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Shutdown {
-    Read,
-    Write,
-    Both,
-}
-
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
@@ -1226,7 +1219,7 @@ impl TcpStream {
             options,
         );
 
-        // The completion (tcp_streams registration, state, events) runs
+        // The completion (stream-map registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
         // ran here, a state change dispatched right behind the connect
         // response could miss the not-yet-registered stream and be lost.
@@ -1242,7 +1235,7 @@ impl TcpStream {
         Ok(new_stream)
     }
 
-    // Called inline from rx dispatch: the tcp_streams registration must
+    // Called inline from rx dispatch: the stream-map registration must
     // exist before the next message for the stream is dispatched.
     pub(super) fn on_connect_response(&self, resp: io_channel::Msg) -> Result<(), ErrorCode> {
         if resp.status().is_err() {

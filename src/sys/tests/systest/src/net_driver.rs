@@ -15,6 +15,38 @@ use crate::net_harness::{bounded, bounded_output, host_channel};
 
 const VSOCK_DISCOVERY_DENIED_CHILD: &str = "vsock-discovery-denied-child";
 
+async fn expect_raw_vsock_error(
+    sender: &moto_ipc::io_channel::Sender,
+    receiver: &mut moto_ipc::io_channel::Receiver,
+    request: moto_ipc::io_channel::Msg,
+    expected: moto_rt::Error,
+) {
+    sender.send(request).await.unwrap();
+    let response = bounded_output(receiver.recv(), 2)
+        .await
+        .unwrap_or_else(|| panic!("timed out waiting for raw vsock response {:#x}", request.id))
+        .unwrap();
+    assert_eq!(response.id, request.id);
+    assert_eq!(response.command, request.command);
+    assert_eq!(response.handle, request.handle);
+    assert_eq!(response.wake_handle, request.wake_handle);
+    assert_eq!(response.flags, request.flags);
+    assert_eq!(response.payload.args_64(), request.payload.args_64());
+    assert_eq!(response.status(), Err(expected));
+}
+
+fn raw_vsock_controls(first_id: u64) -> [moto_ipc::io_channel::Msg; 2] {
+    let mut shutdown = moto_sys_io::api_vsock::shutdown_request(
+        0xfeed_cafe,
+        moto_sys_io::api_vsock::SHUTDOWN_SEND,
+    )
+    .unwrap();
+    shutdown.id = first_id;
+    let mut close = moto_sys_io::api_vsock::close_request(0xfeed_cafe);
+    close.id = first_id + 1;
+    [shutdown, close]
+}
+
 pub fn is_vsock_discovery_denied_child(args: &[String]) -> bool {
     (args.len() == 2 || (args.len() == 3 && args[2] == "with-ip"))
         && args[1] == VSOCK_DISCOVERY_DENIED_CHILD
@@ -76,6 +108,28 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
         assert_eq!(response.command, malformed.command);
         assert_eq!(response.flags, malformed.flags);
         assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
+
+        let peer = moto_sys_io::api_vsock::VsockAddr {
+            cid: 2,
+            port: 70_000,
+        };
+        let mut connect = moto_sys_io::api_vsock::connect_request(peer, 0).unwrap();
+        connect.id = 0x564f_5000;
+        expect_raw_vsock_error(&sender, &mut receiver, connect, moto_rt::Error::NotAllowed).await;
+        let mut malformed_connect = connect;
+        malformed_connect.id += 1;
+        malformed_connect.flags = 1;
+        expect_raw_vsock_error(
+            &sender,
+            &mut receiver,
+            malformed_connect,
+            moto_rt::Error::NotAllowed,
+        )
+        .await;
+        for request in raw_vsock_controls(connect.id + 2) {
+            expect_raw_vsock_error(&sender, &mut receiver, request, moto_rt::Error::NotAllowed)
+                .await;
+        }
     });
     std::process::exit(0)
 }
@@ -124,6 +178,30 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
             assert_eq!(response.flags, request.flags);
             assert_eq!(response.payload.args_64(), request.payload.args_64());
             assert_eq!(response.status(), Err(moto_rt::Error::InvalidArgument));
+        }
+
+        let peer = moto_sys_io::api_vsock::VsockAddr {
+            cid: 2,
+            port: 70_000,
+        };
+        let mut connect = moto_sys_io::api_vsock::connect_request(peer, 0).unwrap();
+        connect.id = 0x564f_5000;
+        let mut malformed_connect = connect;
+        malformed_connect.id += 1;
+        malformed_connect.flags = 1;
+        expect_raw_vsock_error(
+            &sender,
+            &mut receiver,
+            malformed_connect,
+            moto_rt::Error::InvalidArgument,
+        )
+        .await;
+
+        if mode == "absent" {
+            expect_raw_vsock_error(&sender, &mut receiver, connect, moto_rt::Error::NotFound).await;
+        }
+        for request in raw_vsock_controls(connect.id + 2) {
+            expect_raw_vsock_error(&sender, &mut receiver, request, moto_rt::Error::NotFound).await;
         }
     });
 

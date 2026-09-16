@@ -51,6 +51,7 @@ mod tls;
 mod udp;
 mod virtio;
 mod vsock;
+mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
 mod xor_server;
@@ -1206,6 +1207,10 @@ fn main() {
     }
     if args.len() == 3 && args[1] == "test-vsock-discovery" {
         net_driver::test_vsock_discovery(&args[2]);
+        return;
+    }
+    if args.len() >= 5 && args[1] == "test-vsock-outgoing" {
+        vsock_outgoing::run(&args[2..]);
         return;
     }
     if args.len() == 2 && args[1] == "test-native-net-cancellation" {

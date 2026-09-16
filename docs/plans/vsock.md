@@ -1,6 +1,6 @@
 # Virtio-vsock implementation plan
 
-Status: v2.7. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
+Status: v2.8. The v1 open questions Q1–Q13 were approved on 2026-09-14 as
 recorded in the Decisions section, adopting the second review's
 recommendations. The launch-infrastructure questions raised afterwards
 (Q14, Q15) were approved the same day with the `--vmm` caveat recorded in
@@ -24,6 +24,11 @@ Q24–Q25 are settled in D22: wrong-state packets and payloads exceeding
 advertised credit reset only their identified connection.
 Q26 is settled in D23: fix the preexisting shared NET subchannel validation
 gap with guest regressions, then continue vsock integration.
+The first outgoing vertical is implemented and incrementally gated. Q27 is
+resolved by diagnosis in D24: the failing test assumed transparent
+Unix-socket half-close, and the
+same test fails against Linux. Correct the Motor test protocol, keep all
+VMMs unchanged, and retain the directional stream API/protocol requirements.
 
 Implement a modern virtio-vsock driver in `src/sys/lib/virtio-async`, serve
 vsock streams through sys-io, and expose moto-io's native Rust API. Follow
@@ -896,6 +901,78 @@ M2's shared stream page codecs are implemented and parent-reviewed:
   `/tmp/vsock-page-codec-gate.x8XejM/`. Live page delivery still requires the
   outgoing runtime/native stream integration.
 
+M2's first outgoing vertical is implemented, parent-reviewed, and passes its
+incremental gates; the complete M2 milestone remains pending:
+
+- Connect, native stream I/O, directional shutdown, lazy device activation,
+  independent device pumps, common socket ownership, and client teardown are
+  wired together. Bind/listen/accept and the remaining M2 coverage are pending.
+- This is a larger coherent integration patch: the live queue pumps, server
+  socket/page ownership, native routing, and real-peer fixture must work
+  together to exercise the first functional stream. The preceding wire,
+  queue, and pure-state foundations were separate small patches; subsequent
+  cancellation, listener, and launch work remains incremental.
+- Debug base/systest/mio and standard-image builds passed. Release standard
+  image/systest builds passed during diagnosis. Debug/release sys-io Clippy
+  retains its baseline 31/29 warnings; native moto-io's strict checks pass.
+  Systest retains its existing two allocation-benchmark warnings.
+- The first CHV debug run passed echo sizes 0, 1, 4095, 4096, 4097, and 65536,
+  plus 1 MiB simultaneous traffic in each direction. Guest-initiated SEND-only
+  shutdown then failed: the host timed out waiting for Unix-socket EOF before
+  sending its reply. The peer-initiated half-close case was not reached.
+- Targeted diagnostics preserved that failure in debug and release. CHV's
+  own packet log proves it received 4096-byte and 4-byte RW packets followed
+  by SHUTDOWN with flags 2 on the same tuple. At the host's 30-second read
+  timeout, its close caused CHV to send SHUTDOWN flags 3 with `fwd_cnt=4100`.
+  This isolates the test's incorrect EOF dependency, not missing publication
+  of Motor's shutdown or a passing acceptance run (D24).
+- Evidence: `/tmp/vsock-outgoing-gate.P6UYYi/`, initial run
+  `/tmp/test-vsock.9u3REW/`, and decisive VMM packet trace
+  `/tmp/test-vsock.bBrj6i/runtime.*/chv/cloud-hypervisor.log`. Earlier diagnostic
+  guest traces were incomplete because the console dropped burst records;
+  the final diagnostic used CHV's existing debug logging without Motor
+  instrumentation. All temporary Motor tracing and case filtering were
+  removed. Preserve this original failure alongside the corrected fixture's
+  subsequent results; a later pass alone is not the diagnosis.
+- A temporary Linux 7.0.0-31 guest reproduced both original shutdown tests
+  on unchanged CHV, QEMU, and Firecracker: guest `SHUT_WR` succeeds but the
+  host times out waiting for EOF, and host Unix `SHUT_WR` gives Linux EOF
+  followed by `BrokenPipe` on write. Baseline echoes succeed on CHV and
+  Firecracker. Evidence is under
+  `/tmp/vsock-linux-reference.ojIL7v/`; the reference probe is diagnostic-only,
+  not a new test prerequisite or regular host test suite. The corrective
+  two-stream fixtures in D24 now pass the live incremental gate below.
+- Review also identified that a cleanup timer must cancel when its connection
+  terminalizes, rather than leaving a weak-reference task asleep for the rest
+  of its eight-second budget. The correction now waits on the existing
+  notifier and one fixed deadline without retaining the socket. Debug Clippy
+  and release Clippy pass with the baseline warnings; the live gates below
+  include normal connection teardown. No M2 milestone run is claimed.
+- The corrected QEMU debug run passed all guest cases, then exposed a second
+  test-harness error: it rejected status 33 after requesting guest shutdown.
+  Motor writes `0x10` to the configured `isa-debug-exit` device; QEMU encodes
+  this as `(0x10 << 1) | 1`. Accept that result only for QEMU after an owned
+  shutdown request, continue rejecting other unexpected exits, and print the
+  overall PASS only after owned teardown. Evidence: the original
+  `corrected-qemu-debug.log` and the successful verification
+  `corrected-qemu-debug-exit-status.log` in the outgoing gate directory.
+  See [QEMU's debug-exit implementation](https://github.com/qemu/qemu/blob/master/hw/misc/debugexit.c).
+- Final incremental validation passed in debug and release: base, standard,
+  explicit raw, systest, and mio builds; ten real-peer cases on each of QEMU,
+  CHV, and Firecracker; queue/task/descriptor fixtures; the complete native-net
+  and mio guest suites; and the complete currently wired `test-vsock.sh`
+  phase. The latter runs QEMU outgoing tests followed by CHV's IP-disabled
+  attached/disabled serial cases; D16's all-selected-VMM propagation is still
+  pending. All owned VMMs and peers were reaped.
+- The raw guest regressions now check CAP-first denial for valid and
+  malformed connects and stream controls, malformed authorized requests,
+  absent-device connect, and stale handles. Attached discovery remains idle:
+  it never issues a valid connect. Tests use the existing discovery/native-net
+  routes, transitively reached by full-test. Formatter, shell syntax, strict
+  native moto-io Clippy (default and `netdev`), and targeted sys-io/systest
+  Clippy pass without new warnings. Final evidence is the `corrected-*` and
+  `admission-*` logs in `/tmp/vsock-outgoing-gate.P6UYYi/`.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -1449,6 +1526,13 @@ On refusal or error, return every recovered page exactly once. Coalesce
 small wire payloads in byte storage so a peer cannot exhaust metadata by
 sending many one-byte packets within its advertised receive credit.
 
+On reset, send cumulative `TERMINAL | WRITE_CLOSED` promptly so writers
+wake even if client-held RX pages prevent further delivery. This is not a
+read barrier: previously validated bytes may still follow. Send `READ_CLOSED`
+only after the last RX page enters the client's FIFO. Native readers drain
+those bytes before returning the retained cause or orderly EOF. Do not hold
+the output-serialization lock while waiting to allocate an RX page.
+
 Exercise a stalled reader/writer, IPC page exhaustion, slow response queues,
 and client death during transfer. Check D14's distinction between admission
 failure and ordinary backpressure: partial progress, try-I/O `NotReady`,
@@ -1615,6 +1699,8 @@ The acceptance cases are:
 - No listener, duplicate bind, unsupported address/type, connection timeout,
   backlog exhaustion, peer reset, half-close, clean close, and port reuse,
   each reporting the D14 error.
+  For directional shutdown, use D24's explicit cross-stream synchronization;
+  Unix EOF is not an indication of SEND-only virtio shutdown.
 - Cancellation and client process exit during connect, accept, RX, and TX;
   repeated cycles must return observable resource counts to baseline.
 - Capability inheritance and denial, including raw IPC attempts; no-device
@@ -1767,6 +1853,8 @@ D22 resolves Q24–Q25: wrong-state packets and receive-credit overruns reset
 only their identified connection.
 D23 resolves Q26: include the shared NET subchannel validation fix and its
 guest regression before continuing vsock integration.
+D24 resolves Q27 by comparing the failed fixture against Linux and correcting
+its test protocol, without changing VMMs or the Motor shutdown contract.
 
 ### D1. Profile and topology (approved)
 
@@ -2497,6 +2585,67 @@ operations. No new test framework or production injection hook is needed.
 This is a specifically authorized shared NET IPC fix, not a general expansion
 into unrelated preexisting bugs or the deferred malicious-VMM hardening.
 
+### D24. Correct the UDS test protocol, not the VMMs (Q27 resolved)
+
+The user directed that all VMMs stay as installed and that failures be
+investigated and fixed on Motor's side. Comparing the original failing test
+with Linux establishes that its half-close assumptions were incorrect:
+
+- Linux's guest `shutdown(SHUT_WR)` succeeds and publishes SEND-only shutdown,
+  just as Motor does. The original host fixture nevertheless times out while
+  waiting for Unix EOF before sending its response.
+- Host Unix `shutdown(Write)` produces guest EOF and rejects subsequent Linux
+  writes with `BrokenPipe`. It is not a way to generate SEND-only virtio
+  shutdown; Motor must also reject writes after the BOTH-flags packet.
+
+Live Linux comparisons reproduced both failures on CHV v52.0, Firecracker
+v1.15.1, and QEMU with `vhost-device-vsock 0.3.0`. Baseline echo exchanges pass
+on CHV and Firecracker. The original Motor failure and the Linux reference
+logs are retained in the progress section.
+These results explain the failure; no passing rerun, longer timeout, retry,
+or VMM modification is needed to infer it.
+
+The corresponding proxy behavior is explicit in
+[CHV v52.0's connection state machine](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v52.0/virtio-devices/src/vsock/csm/connection.rs#L217)
+(guest shutdown handling starts at line 335) and
+[Firecracker v1.15.1's corresponding implementation](https://github.com/firecracker-microvm/firecracker/blob/v1.15.1/src/vmm/src/devices/virtio/vsock/csm/connection.rs#L222)
+(guest shutdown handling starts at line 348). The pinned QEMU UDS backend,
+[vhost-device-vsock 0.3.0](https://github.com/rust-vmm/vhost-device/blob/4fe41e353a005b1b7163f3f38efde3523f3b160c/vhost-device-vsock/src/vsock_conn.rs#L166),
+also emits both flags for host EOF and does not propagate SEND-only shutdown
+to the Unix socket (its guest-shutdown branch starts at line 286). This
+concerns these specific UDS backends, not every possible QEMU backend.
+
+Keep D10/D14 unchanged. Correct our guest/host fixtures as follows:
+
+1. Connect a data stream and a separate synchronization stream, identify
+   their roles, and exchange exact framed control tokens. Do not synchronize
+   by sleeping or by assuming how the UDS proxy maps half-close.
+2. Local SEND: send and validate all pre-shutdown bytes; await write-shutdown
+   completion; verify a nonempty write returns `NotConnected`; then signal
+   completion on the synchronization stream. Only then may the host send its
+   response on the data stream. Receiving the exact response proves receive
+   still works after write-shutdown completed.
+3. Local RECEIVE: receive the exact initial payload; await read-shutdown;
+   verify nonempty reads return EOF; synchronize with the host; verify EOF
+   again and send the exact post-shutdown payload on the data stream. The
+   host acknowledges receipt on the synchronization stream. This proves
+   receive-shutdown leaves writes usable, not that a backend must send new
+   data after a RECEIVE flag forbids it.
+4. Name the host Unix-close case for what it tests: drain the exact buffered
+   payload, observe EOF, and reject nonempty writes. Do not call it a
+   SEND-only peer half-close or expect the opposite direction to stay open.
+5. Retain guest fixtures exercising the actual connection implementation for
+   peer SEND-only and RECEIVE-only wire packets. Those are protocol fixtures,
+   not claims that the UDS peer can generate those packets. Keep live native
+   API, data/credit, shutdown, and teardown assertions on every selected VMM.
+
+No VMM/backend source, installed binary, production shutdown flags, deadlines,
+or gate counts change. Linux is a one-off diagnostic reference, not a regular
+test dependency. This diagnosis corrects a false test premise; the separate
+live gates are recorded above. It does not waive the remaining M2 acceptance
+requirements.
+
 ## Open questions
 
-None currently. Raise new non-obvious decisions before implementing them.
+None currently. Stop for review if implementation requires a new non-obvious
+decision beyond the approved scope.

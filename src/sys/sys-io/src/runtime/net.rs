@@ -25,6 +25,7 @@ mod pressure;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
+mod vsock;
 
 /// The net runtime's self-tests, gathered here because the modules holding them
 /// are private to this one. See [`crate::self_test`].
@@ -92,8 +93,7 @@ struct NetRuntimeInner {
     // discard another device's static or leased configuration.
     dns_servers: Vec<Vec<IpAddr>>,
 
-    // Discovery owns the raw device until transport activation is added.
-    vsock_device: Option<virtio_async::VirtioDevice>,
+    vsock: vsock::VsockRuntime,
 
     clients: HashMap<SysHandle, ClientConnection>,
 }
@@ -185,7 +185,7 @@ impl NetRuntime {
             Ok(_) if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] => {
                 moto_rt::E_INVALID_ARGUMENT
             }
-            Ok(_) if inner.vsock_device.is_none() => moto_rt::E_NOT_FOUND,
+            Ok(_) if !inner.vsock.discovered() => moto_rt::E_NOT_FOUND,
             Ok(_) => moto_rt::E_OK,
         }
     }
@@ -500,6 +500,7 @@ impl NetRuntime {
                     // are multi-page: fewer messages to spawn for).
                     if msg.command == (NetCmd::TcpStreamTx as u16)
                         || msg.command == (NetCmd::TcpStreamRxAck as u16)
+                        || msg.command == (NetCmd::VsockStreamTx as u16)
                     {
                         self.on_msg(msg, sender.clone()).await;
                         inline_data_messages += 1;
@@ -619,20 +620,26 @@ impl NetRuntime {
             for socket_id in &socket_ids {
                 // Because the loop below is asynchronous, removing one socket may trigger
                 // another terminating/quitting, so not every client socket may be present.
-                let maybe_tcp_socket = {
+                let socket_kind = {
                     let socket = self.inner.borrow().sockets.get(socket_id).cloned();
 
-                    socket.and_then(|moto_socket| {
+                    socket.map(|moto_socket| {
                         if moto_socket.borrow().is_tcp() {
-                            Some(moto_socket)
+                            (Some(moto_socket), false)
+                        } else if moto_socket.borrow().is_vsock() {
+                            (Some(moto_socket), true)
                         } else {
                             assert!(self.inner.borrow_mut().sockets.remove(socket_id).is_some());
-                            None
+                            (None, false)
                         }
                     })
                 };
-                if let Some(moto_socket) = maybe_tcp_socket {
-                    MotoSocket::reclaim_tcp_socket(moto_socket).await;
+                if let Some((Some(moto_socket), is_vsock)) = socket_kind {
+                    if is_vsock {
+                        self.start_vsock_cleanup(&moto_socket);
+                    } else {
+                        MotoSocket::reclaim_tcp_socket(moto_socket).await;
+                    }
                 }
             }
 
@@ -784,6 +791,17 @@ impl NetRuntime {
         };
 
         log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
+
+        if matches!(
+            net_cmd,
+            NetCmd::VsockStreamConnect
+                | NetCmd::VsockStreamTx
+                | NetCmd::VsockStreamShutdown
+                | NetCmd::VsockStreamClose
+        ) {
+            self.on_vsock_msg(msg, sender).await;
+            return;
+        }
 
         if let Err(err) = match net_cmd {
             NetCmd::TcpListenerBind => tcp_listener::TcpListener::bind(self, msg, &sender).await,
@@ -938,7 +956,7 @@ pub(super) async fn init(
             devices,
             ip_addresses,
             dns_servers,
-            vsock_device,
+            vsock: vsock::VsockRuntime::new(vsock_device),
             clients: HashMap::new(),
         })),
         stats: net_stats.clone(),

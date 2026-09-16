@@ -14,7 +14,8 @@ mod virtio_queue;
 mod virtio_vsock;
 pub mod vsock {
     pub use crate::virtio_vsock::{
-        Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType,
+        DecodeError, DecodeErrorKind, Event, EventError, Operation, PacketHeader, RawHeader,
+        SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType, VsockDevice,
     };
 }
 #[cfg(feature = "test-support")]

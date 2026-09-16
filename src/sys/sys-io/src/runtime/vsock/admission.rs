@@ -162,6 +162,10 @@ impl TupleIndex {
         (self.streams.len(), self.listeners.len())
     }
 
+    pub(crate) fn stream_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.streams.iter().map(|(_, socket_id)| *socket_id)
+    }
+
     fn choose_ephemeral(&self, local_cid: u32) -> (u32, u32) {
         find_ephemeral(self.next_ephemeral, |port| {
             self.local_port_in_use(local_cid, port)
