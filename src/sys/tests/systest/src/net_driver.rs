@@ -88,6 +88,8 @@ async fn raw_vsock_listener_drop(
 
 pub async fn test_raw_vsock_listener_bind() {
     const EXPLICIT_PORT: u32 = 0xf123_4567;
+    const QUOTA_PORT_START: u32 = 0xf200_0000;
+    const LISTENER_LIMIT: usize = 32;
 
     let (owner, mut owner_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
     let mut bind = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
@@ -141,6 +143,51 @@ pub async fn test_raw_vsock_listener_bind() {
 
     raw_vsock_listener_drop(&owner, &mut owner_rx, auto.handle, bind.id + 7).await;
     raw_vsock_listener_drop(&owner, &mut owner_rx, rebound.handle, bind.id + 8).await;
+
+    let first_quota_id = bind.id + 9;
+    let mut listeners: Vec<moto_sys_io::api_vsock::ListenerBindResponse> =
+        Vec::with_capacity(LISTENER_LIMIT);
+    for index in 0..LISTENER_LIMIT {
+        let port = QUOTA_PORT_START + index as u32;
+        let mut request = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        request.id = first_quota_id + index as u64;
+        let response = raw_vsock_response(&owner, &mut owner_rx, request).await;
+        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        assert_eq!(listener.local.cid, explicit.local.cid);
+        assert_eq!(listener.local.port, port);
+        assert!(listeners.iter().all(|existing| {
+            existing.handle != listener.handle && existing.local != listener.local
+        }));
+        listeners.push(listener);
+    }
+
+    let mut overflow =
+        moto_sys_io::api_vsock::listener_bind_request(QUOTA_PORT_START + LISTENER_LIMIT as u32)
+            .unwrap();
+    overflow.id = first_quota_id + LISTENER_LIMIT as u64;
+    expect_raw_vsock_error(&owner, &mut owner_rx, overflow, moto_rt::Error::OutOfMemory).await;
+
+    let released = listeners.pop().unwrap();
+    let release_id = overflow.id + 1;
+    raw_vsock_listener_drop(&owner, &mut owner_rx, released.handle, release_id).await;
+    let mut replacement =
+        moto_sys_io::api_vsock::listener_bind_request(released.local.port).unwrap();
+    replacement.id = release_id + 1;
+    let response = raw_vsock_response(&owner, &mut owner_rx, replacement).await;
+    let replacement = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    assert_eq!(replacement.local, released.local);
+    assert_ne!(replacement.handle, released.handle);
+    listeners.push(replacement);
+
+    for (index, listener) in listeners.into_iter().enumerate() {
+        raw_vsock_listener_drop(
+            &owner,
+            &mut owner_rx,
+            listener.handle,
+            release_id + 2 + index as u64,
+        )
+        .await;
+    }
     println!("net_driver::test_raw_vsock_listener_bind PASS");
 }
 

@@ -92,6 +92,10 @@ impl VsockRuntime {
         }
     }
 
+    fn accepts_protocol_effects(&self) -> bool {
+        matches!(self.device, DeviceState::Ready(_))
+    }
+
     fn has_control_space(&self) -> bool {
         self.controls.len() < MAX_PENDING_CONTROLS
     }
@@ -1036,6 +1040,11 @@ impl NetRuntime {
         decoded: Result<PacketHeader, DecodeError>,
         payload: &[u8],
     ) -> Result<(), DecodeError> {
+        // A failed device remains retained so published DMA owners can be
+        // reclaimed and reposted, but it must not create new protocol work.
+        if !self.inner.borrow().vsock.accepts_protocol_effects() {
+            return Ok(());
+        }
         let header = match decoded {
             Ok(header) => header,
             Err(err) => {
@@ -1151,9 +1160,11 @@ impl NetRuntime {
                 return;
             };
             let event = std::future::poll_fn(|cx| driver.poll_event(cx, |event| event)).await;
-            match event {
-                Ok(Event::TransportReset) => self.handle_vsock_transport_reset(&driver),
-                Err(err) => log::debug!("discarding invalid virtio-vsock event: {err:?}"),
+            if self.inner.borrow().vsock.accepts_protocol_effects() {
+                match event {
+                    Ok(Event::TransportReset) => self.handle_vsock_transport_reset(&driver),
+                    Err(err) => log::debug!("discarding invalid virtio-vsock event: {err:?}"),
+                }
             }
             progressed += 1;
             if progressed == PUMP_QUANTUM {

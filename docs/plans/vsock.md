@@ -1118,6 +1118,23 @@ D16's selected-VMM terminal-size path is implemented and parent-reviewed:
   the default path; developer-image validation and suite selector propagation
   remain pending.
 
+M2 cleanup review and listener-capacity coverage are complete for this slice:
+
+- After a fatal device failure, retained RX/event DMA buffers still get
+  reclaimed/reposted, but their contents no longer create protocol work.
+  Previously a late packet could set `pending_reset` on a terminal stream
+  although the failed submit pump could never publish that reset, pinning
+  the stream; malformed refusals could also refill the control queue.
+  This failure branch was source-reviewed, not exercised by a new injection
+  hook. Normal DMA handling and pump fairness are unchanged.
+- The existing raw listener test now fills all 32 slots, checks that the
+  next bind returns `OutOfMemory`, and proves acknowledged drop permits a
+  same-port replacement with a new handle, followed by complete cleanup.
+- Debug/release builds, task/descriptor and complete native-net/mio guest
+  regressions, and the full CHV vsock phase passed. Formatting, diff, and
+  targeted Clippy checks passed with unchanged baseline warnings. Evidence:
+  `/tmp/vsock-failure-quota-gate.A3pv6o/`. M2 remains incomplete.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
