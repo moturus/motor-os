@@ -50,6 +50,8 @@ getrandom = { version = "=0.2.17", features = ["custom"] }
 moto-rt = "0.17.6"
 
 [dev-dependencies]
+h2 = "0.4"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tokio = { version = "1.47.1", features = ["fs", "io-util", "time"] }
 tower = { version = "0.5", features = ["util"] }
 

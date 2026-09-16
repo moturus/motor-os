@@ -1,5 +1,6 @@
 mod cache;
 mod common;
+mod http2;
 
 use common::{request, Server};
 use std::io::{BufReader, Read, Write};
@@ -97,22 +98,9 @@ fn main() {
             "1",
         ],
     );
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from(
-            include_bytes!("fixtures/cert.der").to_vec(),
-        ))
-        .unwrap();
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let connection =
-        rustls::ClientConnection::new(Arc::new(config), "localhost".try_into().unwrap()).unwrap();
+        rustls::ClientConnection::new(tls_config(b"http/1.1"), "localhost".try_into().unwrap())
+            .unwrap();
     let mut io = BufReader::new(rustls::StreamOwned::new(connection, server.connect()));
     for _ in 0..2 {
         let response = request(&mut io, "GET", "/index.html", "");
@@ -126,7 +114,26 @@ fn main() {
     assert_header_deadline(&mut io);
     drop(io);
     assert!(!server.stop().contains("response prepared"));
-    println!("httpd-axum HTTP, TLS, and logging tests passed");
+    http2::check();
+    println!("httpd-axum HTTP/1, HTTP/2, TLS, and logging tests passed");
+}
+
+fn tls_config(protocol: &[u8]) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            include_bytes!("fixtures/cert.der").to_vec(),
+        ))
+        .unwrap();
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = vec![protocol.to_vec()];
+    Arc::new(config)
 }
 
 fn assert_header_deadline(io: &mut impl Read) {

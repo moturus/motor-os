@@ -34,6 +34,8 @@ subsequent requests on keep-alive connections, and HTTP/1.1 over TLS. The existi
 TLS handshake deadline remains separate. HTTP/2 support is preserved: its
 connections count toward admission, but complete HTTP/2 stream-header deadlines
 are not exposed by the current Hyper API and are not enforced by this flag.
+The HTTP/2 tests check both cleartext and certificate-validated TLS, repeat
+requests on one connection (including a cache hit), and verify admission limits.
 
 `--test fs_path` checks the filesystem serving path and reports per-operation
 timings, response preparation, and body collection without network I/O. It
