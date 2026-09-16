@@ -801,6 +801,21 @@ M2's local shutdown/terminal-state helper is implemented and reviewed:
   warnings. Evidence: `/tmp/vsock-shutdown-gate.WPTEcN/`. These are helper
   transitions, not proof of actual TX drain, timers, IPC, or peer close.
 
+QEMU's shared-memory opt-in (D15) is implemented and parent-reviewed:
+
+- `MOTO_SHARED_MEM=1` selects shared memfd RAM, using hugetlb pages only when
+  the existing pool check succeeds, and never combines it with `-mem-path`.
+  Default RAM arguments, CPU/memory budgets, and ordinary boots are unchanged.
+- The existing image-format regression covers default/opt-in arguments and
+  the incompatible-argument exclusion. Shell checks passed. Actual QEMU
+  10.2.1 guests with the installed `vhost-device-vsock` 0.3.0 backend passed
+  device-present discovery and scattered filesystem writes in both profiles;
+  both owned processes were stopped and reaped after each run. Evidence:
+  `/tmp/vsock-qemu-shared-gate.8fvewn/`.
+- Actual shared-memory validation used ordinary memfd pages, not a hugetlb
+  pool. No device activation, application peer traffic, or throughput result
+  is claimed by this runner/discovery gate.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

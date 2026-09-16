@@ -26,6 +26,13 @@ assert_arg() {
     fail "missing VMM argument '$expected'"
 }
 
+assert_no_arg() {
+  local unexpected="$1"
+  if grep -Fxq -- "$unexpected" "$ARG_LOG"; then
+    fail "unexpected VMM argument '$unexpected'"
+  fi
+}
+
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/fake-vmm" <<'EOF'
 #!/bin/sh
@@ -78,8 +85,17 @@ run_fc() {
     MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" "$@"
 }
 
-run_qemu
+MOTO_SHARED_MEM='' run_qemu
 assert_arg "file=$VM_DIR/motor-os.qcow2,if=none,id=drive0,format=qcow2"
+assert_no_arg "memory-backend-memfd,id=mem0,size=1024M,share=on"
+assert_no_arg "memory-backend=mem0"
+
+MOTO_MEMORY_MIB=1024 MOTO_HUGEPAGES=0 MOTO_SHARED_MEM=1 run_qemu
+assert_arg "-object"
+assert_arg "memory-backend-memfd,id=mem0,size=1024M,share=on"
+assert_arg "-machine"
+assert_arg "memory-backend=mem0"
+assert_no_arg "-mem-path"
 
 MOTO_IMAGE=motor-os-base.img run_qemu
 assert_arg "file=$VM_DIR/motor-os-base.img,if=none,id=drive0,format=raw"
