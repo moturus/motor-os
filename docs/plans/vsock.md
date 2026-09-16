@@ -594,6 +594,27 @@ M1 foundation milestone is complete at `d77b038e`:
   integrated reaction. Those remain M2 work under D13. Earlier pending
   milestone statements describe the state at their respective increments.
 
+M2 established-stream state is implemented and parent-reviewed:
+
+- A private helper owns the existing fixed 128 KiB receive buffer and credit
+  state. Impossible peer credit marks only that stream reset without changing
+  its credit fields or admitting the bad payload. Validated RX drains before
+  the retained reset error; permanent peer SEND/RECEIVE flags preserve the
+  approved half-close behavior. Wire dispatch, orderly-close phases, local
+  shutdown sequencing, IPC ownership, and pumps remain integration work.
+- Source-included guest tests cover credit advancement/rejection, reset after
+  buffered data, independent streams, both peer half-closes, zero-length
+  reads, and exact receive capacity with atomic overflow rejection. These
+  run through ordinary systest/full-test, not new boot self-tests or hooks.
+- `make base.img systest`, targeted Clippy, and guest descriptor/I/O-task/
+  scattered-write tests passed in debug and release with no new warnings.
+  Logs: `/tmp/vsock-stream-state-gate.y0JM1x/`. Selected-toolchain formatting
+  and strict fixture Clippy also passed. An initial fixture-only literal/
+  destination length mismatch was corrected; its failed compilation remains
+  in `/tmp/vsock-stream-state.a7xXxC/cargo-check-final.log`.
+- No attached-vsock, real IPC, wire RST exchange, or D19 end-to-end coverage
+  is claimed by these helper tests. M2 remains pending.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

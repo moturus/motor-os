@@ -4,11 +4,13 @@ mod block_io;
 #[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
 mod credit;
 mod device;
+#[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
+mod rx_buffer;
 mod stats;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
-#[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
-mod vsock_rx_buffer;
+#[path = "../../../sys-io/src/runtime/vsock/stream.rs"]
+mod vsock_stream;
 pub(crate) use device::{BlockDevice, RawCompletion};
 
 use std::cell::Cell;
@@ -353,6 +355,7 @@ pub fn run_tests() {
     test_virtio_capacity();
     test_vsock_credit();
     test_vsock_stream_buffer();
+    test_vsock_established_stream();
     concurrent_requests();
     runtime_wakeups();
     for operation in [0, 1] {
@@ -559,7 +562,7 @@ fn test_vsock_credit() {
 
 fn test_vsock_stream_buffer() {
     use credit::{CreditAdvertisement as Ad, CreditError};
-    use vsock_rx_buffer::StreamBuffer;
+    use rx_buffer::StreamBuffer;
 
     let mut stream = StreamBuffer::new(8).unwrap();
     assert_eq!(
@@ -654,6 +657,147 @@ fn test_vsock_stream_buffer() {
         };
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
+}
+
+fn test_vsock_established_stream() {
+    use credit::{CreditAdvertisement as Ad, CreditError};
+    use vsock_stream::{EstablishedStream, ReadOutcome};
+
+    let mut stream = EstablishedStream::new().unwrap();
+    let peer = Ad {
+        buf_alloc: 16,
+        fwd_cnt: 0,
+    };
+    stream.try_receive_packet(peer, b"accepted").unwrap();
+    stream.charge_tx_after_publish(6).unwrap();
+    assert_eq!(stream.credit().tx_allowance(), 10);
+    assert!(stream.accepts_new_writes());
+    stream
+        .update_peer_credit(Ad {
+            buf_alloc: 20,
+            fwd_cnt: 2,
+        })
+        .unwrap();
+    assert_eq!(stream.credit().tx_allowance(), 16);
+
+    let invalid = Ad {
+        buf_alloc: 64,
+        fwd_cnt: 7,
+    };
+    assert_eq!(
+        stream.try_receive_packet(invalid, b"rejected"),
+        Err(CreditError::PeerForwardedBeyondSent)
+    );
+    assert_eq!(stream.credit().tx_allowance(), 16);
+    assert!(!stream.accepts_new_writes());
+
+    let mut bytes = [0; 16];
+    assert_eq!(
+        stream.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(8)
+    );
+    assert_eq!(&bytes[..8], b"accepted");
+    assert_eq!(
+        stream.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+
+    let mut independent = EstablishedStream::new().unwrap();
+    assert!(independent.accepts_new_writes());
+    assert_eq!(
+        independent.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
+    independent.try_receive_packet(peer, b"still live").unwrap();
+    assert_eq!(
+        independent.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(10)
+    );
+    assert_eq!(&bytes[..10], b"still live");
+
+    let mut receive_only = EstablishedStream::new().unwrap();
+    receive_only.peer_shutdown(true, false);
+    assert!(!receive_only.accepts_new_writes());
+    assert_eq!(
+        receive_only.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
+    receive_only.try_receive_packet(peer, b"readable").unwrap();
+    assert_eq!(
+        receive_only.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(8)
+    );
+    assert_eq!(&bytes[..8], b"readable");
+    assert_eq!(
+        receive_only.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
+
+    let mut shutdown = EstablishedStream::new().unwrap();
+    shutdown.try_receive_packet(peer, b"drain").unwrap();
+    shutdown.peer_shutdown(false, false);
+    assert!(shutdown.accepts_new_writes());
+    shutdown.peer_shutdown(false, true);
+    assert!(shutdown.accepts_new_writes());
+    assert_eq!(
+        shutdown.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(5)
+    );
+    assert_eq!(&bytes[..5], b"drain");
+    assert_eq!(shutdown.read_into_reserved(&mut bytes), ReadOutcome::Eof);
+    shutdown.peer_shutdown(true, false);
+    assert!(!shutdown.accepts_new_writes());
+    shutdown.peer_shutdown(false, false);
+    assert!(!shutdown.accepts_new_writes());
+    assert_eq!(shutdown.read_into_reserved(&mut bytes), ReadOutcome::Eof);
+
+    let mut reset = EstablishedStream::new().unwrap();
+    reset.try_receive_packet(peer, b"before reset").unwrap();
+    reset.peer_reset();
+    assert_eq!(
+        reset.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(12)
+    );
+    assert_eq!(&bytes[..12], b"before reset");
+    assert_eq!(
+        reset.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+    let mut empty = [];
+    assert_eq!(reset.read_into_reserved(&mut empty), ReadOutcome::Copied(0));
+
+    const CAPACITY: usize = 128 * 1024;
+    let mut capacity = EstablishedStream::new().unwrap();
+    let full = vec![0x5a; CAPACITY];
+    capacity
+        .try_receive_packet(
+            Ad {
+                buf_alloc: 23,
+                fwd_cnt: 0,
+            },
+            &full,
+        )
+        .unwrap();
+    assert_eq!(capacity.credit().rx_allowance(), 0);
+    assert_eq!(capacity.credit().tx_allowance(), 23);
+    assert_eq!(
+        capacity.try_receive_packet(
+            Ad {
+                buf_alloc: 99,
+                fwd_cnt: 0,
+            },
+            b"x"
+        ),
+        Err(CreditError::ReceiveCapacityExceeded)
+    );
+    assert_eq!(capacity.credit().rx_allowance(), 0);
+    assert_eq!(capacity.credit().tx_allowance(), 23);
+    let mut copied = vec![0; CAPACITY];
+    assert_eq!(
+        capacity.read_into_reserved(&mut copied),
+        ReadOutcome::Copied(CAPACITY)
+    );
+    assert_eq!(copied, full);
 }
 
 fn test_virtio_capacity() {
