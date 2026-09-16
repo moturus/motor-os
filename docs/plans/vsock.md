@@ -1017,6 +1017,19 @@ M2's listener bind/drop IPC contract is implemented and parent-reviewed:
   (no KVM/socket access, before guest boot) is retained under `sandbox-launch/`;
   the actual guest gates used host access. Runtime listeners are not yet added.
 
+M2's listener accept IPC contract is implemented and parent-reviewed:
+
+- Accept supplies the existing bounded subchannel index and listener handle;
+  success returns a new stream handle and full-width local/peer addresses.
+  Native errors precede success-field decoding, with zero reserved bytes.
+- Literal layout, identity, invalid subchannel/flags/address/reserved-field,
+  and error fixtures execute through native-net/full-test. Debug/release
+  base/systest/mio builds, queue/task/descriptor fixtures, complete native-net
+  and mio guest regressions, formatting, and targeted Clippy passed without
+  new warnings. Logs: `/tmp/vsock-listener-accept-codec-gate.uXMpfv/`.
+  This defines the wire contract only; incoming admission and accept delivery
+  remain integration work.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

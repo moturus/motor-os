@@ -44,6 +44,18 @@ pub struct ListenerBindResponse {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptRequest {
+    pub subchannel_mask: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptResponse {
+    pub handle: u64,
+    pub local: VsockAddr,
+    pub peer: VsockAddr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamStateChange {
     pub handle: u64,
     pub flags: u32,
@@ -211,6 +223,94 @@ pub fn decode_listener_bind_response(
     Ok(ListenerBindResponse {
         handle: msg.handle,
         local,
+    })
+}
+
+/// Build one accept request for a listener handle. Payload byte 23 carries
+/// the shared-channel index; every other payload byte and flags are zero.
+/// Unknown or stale listener handles are resolved by the server.
+pub fn listener_accept_request(
+    handle: u64,
+    subchannel_idx: u8,
+) -> moto_rt::Result<io_channel::Msg> {
+    if subchannel_idx >= api_net::IO_SUBCHANNELS {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::VsockListenerAccept as u16;
+    msg.handle = handle;
+    msg.payload.args_8_mut()[23] = subchannel_idx;
+    Ok(msg)
+}
+
+pub fn decode_listener_accept_request(msg: &io_channel::Msg) -> moto_rt::Result<AcceptRequest> {
+    let subchannel_idx = msg.payload.args_8()[23];
+    if msg.command != NetCmd::VsockListenerAccept as u16
+        || msg.flags != 0
+        || !msg.payload.args_8()[..23].iter().all(|byte| *byte == 0)
+        || subchannel_idx >= api_net::IO_SUBCHANNELS
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    Ok(AcceptRequest {
+        subchannel_mask: api_net::io_subchannel_mask(subchannel_idx),
+    })
+}
+
+/// Encode a successful accept response while preserving request identity.
+/// The new stream handle is in `handle`; payload bytes 0..16 contain fixed-
+/// width local CID/port followed by peer CID/port, and bytes 16..24 are zero.
+pub fn encode_listener_accept_response(
+    request: &io_channel::Msg,
+    handle: u64,
+    local: VsockAddr,
+    peer: VsockAddr,
+) -> moto_rt::Result<io_channel::Msg> {
+    if request.command != NetCmd::VsockListenerAccept as u16
+        || handle == 0
+        || !valid_local(local)
+        || !valid_peer(peer)
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let mut response = io_channel::Msg::new();
+    response.id = request.id;
+    response.wake_handle = request.wake_handle;
+    response.command = request.command;
+    response.handle = handle;
+    response.status = moto_rt::E_OK;
+    response.payload.args_32_mut()[0] = local.cid;
+    response.payload.args_32_mut()[1] = local.port;
+    response.payload.args_32_mut()[2] = peer.cid;
+    response.payload.args_32_mut()[3] = peer.port;
+    Ok(response)
+}
+
+pub fn decode_listener_accept_response(msg: &io_channel::Msg) -> moto_rt::Result<AcceptResponse> {
+    if msg.command != NetCmd::VsockListenerAccept as u16 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    msg.status()?;
+    let local = VsockAddr {
+        cid: msg.payload.args_32()[0],
+        port: msg.payload.args_32()[1],
+    };
+    let peer = VsockAddr {
+        cid: msg.payload.args_32()[2],
+        port: msg.payload.args_32()[3],
+    };
+    if msg.handle == 0
+        || msg.flags != 0
+        || !valid_local(local)
+        || !valid_peer(peer)
+        || !msg.payload.args_8()[16..].iter().all(|byte| *byte == 0)
+    {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    Ok(AcceptResponse {
+        handle: msg.handle,
+        local,
+        peer,
     })
 }
 

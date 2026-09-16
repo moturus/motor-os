@@ -6,6 +6,7 @@ pub fn run_wire_tests() {
     test_connect_codec();
     test_connect_response_codec();
     test_listener_bind_codec();
+    test_listener_accept_codec();
     test_control_codec();
     test_state_change_codec();
     test_page_codec();
@@ -253,6 +254,86 @@ fn test_listener_bind_codec() {
         assert_eq!(
             api_vsock::decode_listener_drop_request(&request).err(),
             Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+}
+
+fn test_listener_accept_codec() {
+    let local = VsockAddr {
+        cid: 3,
+        port: 70_000,
+    };
+    let mut accept = api_vsock::listener_accept_request(0x51, 3).unwrap();
+    accept.id = 0x333;
+    accept.wake_handle = 0x444;
+    let mut expected = [0; 24];
+    expected[23] = 3;
+    assert_eq!(accept.command, NetCmd::VsockListenerAccept as u16);
+    assert_eq!(accept.handle, 0x51);
+    assert_eq!(accept.flags, 0);
+    assert_eq!(accept.payload.args_8(), &expected);
+    assert_eq!(
+        api_vsock::decode_listener_accept_request(&accept).unwrap(),
+        api_vsock::AcceptRequest {
+            subchannel_mask: 0xffff_0000_0000_0000,
+        }
+    );
+    assert_eq!(
+        api_vsock::listener_accept_request(1, api_net::IO_SUBCHANNELS).err(),
+        Some(moto_rt::Error::InvalidArgument)
+    );
+    let mut bad_accept = [accept; 5];
+    bad_accept[0].command = NetCmd::VsockListenerBind as u16;
+    bad_accept[1].flags = 1;
+    bad_accept[2].payload.args_8_mut()[0] = 1;
+    bad_accept[3].payload.args_8_mut()[23] = api_net::IO_SUBCHANNELS;
+    bad_accept[4].payload.args_8_mut()[23] = u8::MAX;
+    for request in bad_accept {
+        assert_eq!(
+            api_vsock::decode_listener_accept_request(&request).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+    }
+
+    let peer = VsockAddr {
+        cid: 2,
+        port: 80_000,
+    };
+    let response = api_vsock::encode_listener_accept_response(&accept, 0x52, local, peer).unwrap();
+    expected = [0; 24];
+    expected[..4].copy_from_slice(&local.cid.to_le_bytes());
+    expected[4..8].copy_from_slice(&local.port.to_le_bytes());
+    expected[8..12].copy_from_slice(&peer.cid.to_le_bytes());
+    expected[12..16].copy_from_slice(&peer.port.to_le_bytes());
+    assert_eq!(response.id, accept.id);
+    assert_eq!(response.wake_handle, accept.wake_handle);
+    assert_eq!(response.command, accept.command);
+    assert_eq!(response.payload.args_8(), &expected);
+    assert_eq!(
+        api_vsock::decode_listener_accept_response(&response).unwrap(),
+        api_vsock::AcceptResponse {
+            handle: 0x52,
+            local,
+            peer,
+        }
+    );
+    let mut error = response;
+    error.status = moto_rt::E_NOT_CONNECTED;
+    error.handle = 0;
+    error.payload.args_64_mut()[0] = 0;
+    assert_eq!(
+        api_vsock::decode_listener_accept_response(&error).err(),
+        Some(moto_rt::Error::NotConnected)
+    );
+    let mut bad_response = [response; 4];
+    bad_response[0].handle = 0;
+    bad_response[1].flags = 1;
+    bad_response[2].payload.args_32_mut()[2] = 1;
+    bad_response[3].payload.args_8_mut()[16] = 1;
+    for response in bad_response {
+        assert_eq!(
+            api_vsock::decode_listener_accept_response(&response).err(),
+            Some(moto_rt::Error::InvalidData)
         );
     }
 }
