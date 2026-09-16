@@ -8,17 +8,22 @@ fn run(args: &[&str]) -> Output {
 
 fn main() {
     assert!(run(&["--help"]).status.success());
-    for value in ["0", "-1", "4294967296", "invalid"] {
-        let output = run(&[
-            "-a",
-            "192.0.2.1:1",
-            "-d",
-            "/",
-            "--max-active-connections",
-            value,
-        ]);
-        assert_eq!(output.status.code(), Some(2), "{value}: {output:?}");
+    for flag in [
+        "--max-active-connections",
+        "--cache-timeout-sec",
+        "--cache-size-mb",
+    ] {
+        for value in ["0", "-1", "4294967296", "invalid"] {
+            let output = run(&["-a", "192.0.2.1:1", "-d", "/", flag, value]);
+            assert_eq!(output.status.code(), Some(2), "{value}: {output:?}");
+        }
     }
+    assert_eq!(
+        run(&["-a", "192.0.2.1:1", "-d", "/", "--cache=invalid"])
+            .status
+            .code(),
+        Some(2)
+    );
     for (present, missing) in [("--ssl-cert", "--ssl-key"), ("--ssl-key", "--ssl-cert")] {
         // Use an unavailable address too: paired TLS options must fail before bind
         // or filesystem access, without attempting to start a plaintext server.

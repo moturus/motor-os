@@ -1,3 +1,4 @@
+mod cache;
 mod common;
 
 use common::{request, Server};
@@ -28,7 +29,7 @@ fn main() {
         200
     );
     limited.stop();
-    let server = Server::start(None, &[]);
+    let server = Server::start(None, &["--cache=off"]);
     let mut io = BufReader::new(server.connect());
     let response = request(&mut io, "GET", "/", "");
     assert_eq!(response.status, 200);
@@ -57,9 +58,10 @@ fn main() {
         assert_eq!(request(&mut io, "GET", path, "").status, 404);
     }
     std::fs::write(server.directory.join("index.html"), b"edited\n").unwrap();
-    assert_eq!(request(&mut io, "GET", "/index.html", "").body, b"edited\n");
+    assert_eq!(request(&mut io, "GET", "/", "").body, b"edited\n");
     drop(io);
     assert!(!server.stop().contains("response prepared"));
+    cache::check();
 
     let server = Server::start(Some("httpd_axum=debug"), &[]);
     let response = request(&mut BufReader::new(server.connect()), "GET", "/", "");

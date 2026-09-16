@@ -1,11 +1,20 @@
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod cache;
+mod cache_response;
+mod cache_store;
 mod connections;
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CacheMode {
+    On,
+    Off,
+}
 
 #[cfg(target_os = "motor")]
 fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -31,6 +40,16 @@ struct Args {
     /// Maximum admitted TCP connections, including TLS handshakes and idle clients.
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
+
+    /// Cache small file responses in memory; use --cache=off for immediate freshness.
+    #[arg(long, value_enum, default_value = "on")]
+    cache: CacheMode,
+    /// Maximum age of a cached representation, measured from the start of its load.
+    #[arg(long, default_value = "10")]
+    cache_timeout_sec: std::num::NonZeroU32,
+    /// Cache budget in MiB, including keys and response metadata.
+    #[arg(long, default_value = "4")]
+    cache_size_mb: std::num::NonZeroU32,
 }
 
 #[tokio::main]
@@ -44,29 +63,41 @@ async fn main() {
         )
         .init();
 
-    let app = Router::new()
-        .fallback_service(ServeDir::new(&args.dir))
-        .layer(axum::middleware::from_fn(
-            |req: axum::extract::Request, next: axum::middleware::Next| async move {
-                if !tracing::enabled!(tracing::Level::DEBUG) {
-                    return next.run(req).await;
-                }
-                let uri = req.uri().clone();
-                let method = req.method().clone();
-                let start = std::time::Instant::now();
-                let res = next.run(req).await;
-                let latency = start.elapsed();
-                // The streaming body has not been read or transmitted yet.
-                tracing::debug!(
-                    %method,
-                    %uri,
-                    status = res.status().as_u16(),
-                    prepare_us = latency.as_micros(),
-                    "response prepared"
-                );
-                res
-            },
+    let mut app = Router::new().fallback_service(ServeDir::new(&args.dir));
+    if args.cache == CacheMode::On {
+        let budget = usize::try_from(u64::from(args.cache_size_mb.get()) * 1024 * 1024)
+            .expect("cache budget exceeds address space");
+        let cache = std::sync::Arc::new(cache::Cache::new(
+            budget,
+            std::time::Duration::from_secs(args.cache_timeout_sec.get().into()),
         ));
+        app = app.layer(axum::middleware::from_fn_with_state(
+            cache,
+            cache::Cache::serve,
+        ));
+    }
+    let app = app.layer(axum::middleware::from_fn(
+        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            if !tracing::enabled!(tracing::Level::DEBUG) {
+                return next.run(req).await;
+            }
+            let uri = req.uri().clone();
+            let method = req.method().clone();
+            let start = std::time::Instant::now();
+            let res = next.run(req).await;
+            let latency = start.elapsed();
+            // Cache fills include body reads; streamed bodies and transmission
+            // happen after response preparation.
+            tracing::debug!(
+                %method,
+                %uri,
+                status = res.status().as_u16(),
+                prepare_us = latency.as_micros(),
+                "response prepared"
+            );
+            res
+        },
+    ));
 
     let admission = connections::ConnectionLimit::new(args.max_active_connections.get());
     if let Some(ssl_cert) = args.ssl_cert.as_ref() {

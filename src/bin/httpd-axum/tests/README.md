@@ -39,7 +39,22 @@ GET, HEAD, ranges, conditional requests, traversal rejection, missing files,
 immediate visibility of file edits, and default/debug logging. Run it on Motor
 with `HTTPD_AXUM_BIN` and `TMPDIR` as above. Startup readiness comes from the
 bound-address log, without connection retries. Request timings are available
-with `RUST_LOG=httpd_axum=debug`; `prepare_us` excludes body reads and transmission.
+with `RUST_LOG=httpd_axum=debug`; `prepare_us` includes cache-fill reads but excludes
+streamed body reads and transmission.
+
+The cache is enabled by default: `--cache-timeout-sec=10`, `--cache-size-mb=4`
+(MiB). `--cache=off` restores immediate freshness. Files up to 256 KiB are loaded
+on demand; larger files stream. Hits retain a snapshot until its load-start-based
+deadline, including after file deletion or permission changes. Queries share the
+same path entry. HEAD, conditional requests, and ranges use that snapshot.
+
+The budget charges bytes, keys, headers, and an entry allowance; the cache also
+caps entry count at 1,024 and concurrent fills at eight (fewer for small budgets).
+Oldest inserted entries are evicted first. This bounds retained cache storage,
+not total process RSS: active responses can still reference evicted bytes.
+`cache_store` and `cache_response` are standalone host/Motor tests. The HTTP test
+also checks default caching, disabled caching, expiry, deletion, and large-file
+streaming. No cache is populated at server startup.
 
 The HTTP test also checks two requests on a TLS connection, validating the server
 certificate against the bundled localhost test certificate and checking ALPN.
