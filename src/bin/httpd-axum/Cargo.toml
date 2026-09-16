@@ -21,6 +21,11 @@ name = "http"
 path = "tests/http.rs"
 harness = false
 
+[[test]]
+name = "cache_store"
+path = "tests/cache_store.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"
