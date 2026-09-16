@@ -1078,6 +1078,19 @@ D16's selected-VMM System-console path is implemented and parent-reviewed:
   size, discovery selection, other-VMM boot checks, and final full-suite
   selector propagation remain D16 work; no VMM binary/source was changed.
 
+D16's selected-VMM TUI path is implemented and parent-reviewed:
+
+- `test-tui.sh` uses the same serial helper and selected standard image,
+  including the explicit raw-image target for FC. Console input uses carriage
+  return consistently; existing TUI, stdio, Ctrl+C, rmux, and SSH assertions
+  are unchanged. Developer-image FC fails before any build or launch.
+- All existing standard-image cases and their builds passed on QEMU, CHV,
+  and FC in debug and release, including owned-process teardown. CLI
+  rejection, syntax, and diff checks passed. Evidence and saved consoles:
+  `/tmp/vsock-d16-tui-gate.htNovh/`. Developer-image validation and final
+  full-suite selector propagation remain pending; full-test already reaches
+  this script using its default QEMU selection.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
