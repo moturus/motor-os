@@ -730,6 +730,24 @@ parent-reviewed:
   coverage remain later D16/M2 integration; no developer-image FC support is
   added or claimed.
 
+The native stream TX-page reuse seam is implemented and parent-reviewed:
+
+- `PendingStreamTx` now holds the existing pending IPC pages, byte copying,
+  partial-page append, marker publication/rollback under the same lock, and
+  bounded multi-page claims. TCP uses it immediately; TCP wire messages,
+  readiness, cancellation, Drop ordering, and its allocation/copy behavior
+  are unchanged. No new framework, public API, or test hook is introduced.
+- Selected formatting, Motor-target checks, and Clippy passed in both
+  profiles with no new warnings. Debug/release base/test builds and the
+  existing native-driver/TCP/UDP and complete `mio-test` suites passed on
+  QEMU: `/tmp/vsock-pending-tx-gate.mPAeWb/`. The same frozen sources also
+  passed those guest suites on Firecracker during the raw-image gate above.
+  These cover existing backpressure, partial writes, cancellation, concurrent
+  writers, and teardown through ordinary full-test-wired tests.
+- The helper is ready for the native vsock consumer. Connection transitions,
+  vsock IPC/pumps and real-peer traffic remain unimplemented; Q24–Q25 require
+  review before the corresponding rejection branches are added.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with

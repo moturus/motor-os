@@ -10,6 +10,7 @@
 
 pub mod channel;
 pub(crate) mod inner_rx_stream;
+mod pending_stream_tx;
 pub mod readiness;
 pub mod tcp;
 pub mod udp;
