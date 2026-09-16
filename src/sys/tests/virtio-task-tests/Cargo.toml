@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 moto-async = { path = "../../lib/moto-async" }
 futures = "0.3"
+real-virtio-async = { package = "virtio-async", path = "../../lib/virtio-async" }

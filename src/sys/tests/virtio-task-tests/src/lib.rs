@@ -1,19 +1,22 @@
 extern crate self as virtio_async;
 #[path = "../../../sys-io/src/runtime/fs/block_io.rs"]
 mod block_io;
+#[path = "../../../sys-io/src/runtime/vsock/connection.rs"]
+mod connection;
 #[path = "../../../sys-io/src/runtime/vsock/credit.rs"]
 mod credit;
 mod device;
 #[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
 mod rx_buffer;
 mod stats;
+#[path = "../../../sys-io/src/runtime/vsock/stream.rs"]
+mod stream;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
 #[path = "../../../sys-io/src/runtime/vsock/admission.rs"]
 mod vsock_admission;
-#[path = "../../../sys-io/src/runtime/vsock/stream.rs"]
-mod vsock_stream;
 pub(crate) use device::{BlockDevice, RawCompletion};
+pub(crate) use real_virtio_async::vsock as vsock_wire;
 
 use std::cell::Cell;
 use std::io::ErrorKind;
@@ -358,6 +361,7 @@ pub fn run_tests() {
     test_vsock_credit();
     test_vsock_stream_buffer();
     test_vsock_established_stream();
+    test_vsock_connection();
     test_vsock_admission();
     concurrent_requests();
     runtime_wakeups();
@@ -664,7 +668,7 @@ fn test_vsock_stream_buffer() {
 
 fn test_vsock_established_stream() {
     use credit::{CreditAdvertisement as Ad, CreditError};
-    use vsock_stream::{EstablishedStream, ReadOutcome};
+    use stream::{EstablishedStream, ReadOutcome};
 
     let mut stream = EstablishedStream::new().unwrap();
     let peer = Ad {
@@ -801,6 +805,178 @@ fn test_vsock_established_stream() {
         ReadOutcome::Copied(CAPACITY)
     );
     assert_eq!(copied, full);
+}
+
+fn test_vsock_connection() {
+    use connection::{Connection, ConnectionPhase as Phase, ReceiveOutcome as Rx, TerminalCause};
+    use stream::ReadOutcome;
+    use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
+
+    let packet = |operation, len, flags, buf_alloc, fwd_cnt| PacketHeader {
+        src_cid: 2,
+        dst_cid: 3,
+        src_port: 70_000,
+        dst_port: 80_000,
+        len,
+        socket_type: SocketType::Stream,
+        operation,
+        flags,
+        buf_alloc,
+        fwd_cnt,
+    };
+    let request = packet(Operation::Request, 0, 0, 32, 0);
+    let reset = packet(Operation::Reset, 0, 0, 0, 0);
+
+    let mut outgoing = Connection::new_outgoing().unwrap();
+    assert_eq!(outgoing.phase(), Phase::Connecting);
+    let response = packet(Operation::Response, 0, 0, 64, 0);
+    assert_eq!(outgoing.receive(&response, b""), Rx::Connected);
+    assert_eq!(outgoing.phase(), Phase::Established);
+    assert_eq!(outgoing.credit().tx_allowance(), 64);
+    assert_eq!(outgoing.receive(&response, b""), Rx::SendReset);
+    assert_eq!(
+        outgoing.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    assert_eq!(outgoing.receive(&reset, b""), Rx::None);
+    assert_eq!(
+        outgoing.phase(),
+        Phase::Terminal(TerminalCause::ConnectionReset)
+    );
+    assert_eq!(
+        outgoing.receive(&packet(Operation::CreditUpdate, 0, 0, 64, 0), b""),
+        Rx::SendReset
+    );
+
+    let mut refused = Connection::new_outgoing().unwrap();
+    assert_eq!(refused.receive(&reset, b""), Rx::None);
+    assert_eq!(refused.phase(), Phase::Terminal(TerminalCause::Refused));
+    let mut premature = Connection::new_outgoing().unwrap();
+    assert_eq!(
+        premature.receive(&packet(Operation::ReadWrite, 1, 0, 32, 0), b"x"),
+        Rx::SendReset
+    );
+    assert_eq!(premature.phase(), Phase::Terminal(TerminalCause::Refused));
+
+    let mut incoming = Connection::new_incoming(&request).unwrap();
+    assert_eq!(incoming.phase(), Phase::Established);
+    assert_eq!(
+        incoming.receive(&packet(Operation::ReadWrite, 5, 0, 32, 0), b"early"),
+        Rx::None
+    );
+    incoming.charge_tx_after_publish(4).unwrap();
+    assert_eq!(
+        incoming.receive(&packet(Operation::CreditUpdate, 0, 0, 40, 2), b""),
+        Rx::None
+    );
+    assert_eq!(incoming.credit().tx_allowance(), 38);
+    assert_eq!(
+        incoming.receive(&packet(Operation::CreditRequest, 0, 0, 40, 2), b""),
+        Rx::SendCreditUpdate
+    );
+    assert_eq!(
+        incoming.receive(
+            &packet(Operation::Shutdown, 0, SHUTDOWN_RECEIVE, 40, 2),
+            b""
+        ),
+        Rx::None
+    );
+    assert!(!incoming.accepts_new_writes());
+    assert_eq!(
+        incoming.receive(&packet(Operation::Shutdown, 0, 0, 40, 2), b""),
+        Rx::None
+    );
+    assert!(!incoming.accepts_new_writes());
+    assert_eq!(
+        incoming.receive(&packet(Operation::Shutdown, 0, SHUTDOWN_SEND, 40, 2), b""),
+        Rx::None
+    );
+    assert_eq!(
+        incoming.receive(&packet(Operation::ReadWrite, 0, 0, 40, 2), b""),
+        Rx::None
+    );
+    let mut bytes = [0; 16];
+    assert_eq!(
+        incoming.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(5)
+    );
+    assert_eq!(&bytes[..5], b"early");
+    assert_eq!(incoming.read_into_reserved(&mut bytes), ReadOutcome::Eof);
+    assert_eq!(
+        incoming.receive(&packet(Operation::ReadWrite, 4, 0, 40, 2), b"late"),
+        Rx::SendReset
+    );
+    assert_eq!(
+        incoming.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+
+    let mut invalid = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        invalid.receive(&packet(Operation::ReadWrite, 5, 0, 32, 0), b"prior"),
+        Rx::None
+    );
+    invalid.charge_tx_after_publish(2).unwrap();
+    let local_before = invalid.credit().local_advertisement();
+    assert_eq!(invalid.credit().tx_allowance(), 30);
+    assert_eq!(
+        invalid.receive(&packet(Operation::ReadWrite, 3, 0, 99, 3), b"bad"),
+        Rx::SendReset
+    );
+    assert_eq!(invalid.credit().local_advertisement(), local_before);
+    assert_eq!(invalid.credit().tx_allowance(), 30);
+    assert_eq!(
+        invalid.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(5)
+    );
+    assert_eq!(&bytes[..5], b"prior");
+    assert_eq!(
+        invalid.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+
+    let mut over_credit = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        over_credit.receive(&packet(Operation::ReadWrite, 2, 0, 32, 0), b"ok"),
+        Rx::None
+    );
+    let local_before = over_credit.credit().local_advertisement();
+    let oversized = vec![0xa5; 128 * 1024];
+    assert_eq!(
+        over_credit.receive(
+            &packet(Operation::ReadWrite, oversized.len() as u32, 0, 77, 0),
+            &oversized
+        ),
+        Rx::SendReset
+    );
+    assert_eq!(over_credit.credit().local_advertisement(), local_before);
+    assert_eq!(over_credit.credit().tx_allowance(), 32);
+    assert_eq!(
+        over_credit.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(2)
+    );
+    assert_eq!(&bytes[..2], b"ok");
+    assert_eq!(
+        over_credit.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+
+    let mut independent = Connection::new_incoming(&request).unwrap();
+    assert_eq!(
+        independent.receive(&packet(Operation::ReadWrite, 4, 0, 32, 0), b"live"),
+        Rx::None
+    );
+    assert_eq!(independent.phase(), Phase::Established);
+    assert_eq!(independent.receive(&request, b""), Rx::SendReset);
+    assert_eq!(
+        independent.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes[..4], b"live");
+    assert_eq!(
+        independent.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
 }
 
 fn test_vsock_admission() {

@@ -55,7 +55,7 @@ impl EstablishedStream {
     }
 
     /// Apply credit and append one RW payload atomically. Capacity rejection
-    /// remains a fallible boundary; its eventual wire reaction is not chosen here.
+    /// remains a fallible boundary; the connection owner applies D22's reset.
     pub(crate) fn try_receive_packet(
         &mut self,
         peer: CreditAdvertisement,
@@ -83,6 +83,10 @@ impl EstablishedStream {
     /// Peer SEND shutdown leaves local writes open; peer RECEIVE and reset do not.
     pub(crate) fn accepts_new_writes(&self) -> bool {
         !self.peer_receive_shutdown && !self.reset
+    }
+
+    pub(crate) fn accepts_peer_data(&self) -> bool {
+        !self.peer_send_shutdown && !self.reset
     }
 
     /// Copy into storage already reserved by IPC. Validated bytes are delivered

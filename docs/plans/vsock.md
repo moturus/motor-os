@@ -748,6 +748,26 @@ The native stream TX-page reuse seam is implemented and parent-reviewed:
   vsock IPC/pumps and real-peer traffic remain unimplemented. Q24–Q25 were
   subsequently approved in D22; their rejection branches remain to be added.
 
+M2's per-connection receive transitions are implemented and parent-reviewed:
+
+- A concrete connection owns one established-stream buffer and tracks
+  connecting, established, or a retained terminal cause. It handles outgoing
+  RESPONSE/refusal, incoming early data, credit messages, permanent peer
+  shutdown, and RST without adding another socket registry or owner.
+- D19/D22 rejection returns a connection-local RST action, preserves old
+  credit/data atomically, and drains previously validated RX before error.
+  Late packets cannot replace the first terminal cause; RST never elicits
+  RST. Payload after peer SEND shutdown cannot appear after EOF.
+- The existing guest I/O-task fixture source-includes the actual helper and
+  uses the driver's wire types. Transition, invalid-credit, over-credit,
+  buffered-drain, and independent-connection cases passed in both profiles,
+  alongside descriptor and scattered-write filesystem regressions. Both
+  base-image/systest builds, targeted Clippy, and formatting passed with no
+  new warnings. Evidence: `/tmp/vsock-connection-gate.JpUrp1/`.
+- These are state-helper tests, not actual packet publication, IPC, native
+  API, or peer interoperability tests. The common runtime must execute the
+  returned actions; local shutdown/cleanup and M2 integration remain.
+
 ## Scope and simplicity
 
 - One Virtio 1.1 modern PCI implementation requiring `VIRTIO_F_VERSION_1`, with
@@ -2258,8 +2278,10 @@ the existing reset semantics for its current state. An
 established stream reports `ConnectionReset` after previously validated RX
 has drained; unrelated streams and the device remain operational. Do not
 answer an incoming RST with another RST. The user approved this policy on
-2026-09-15; the Stage 7 connection reaction and its tests remain to be
-implemented in M2. Pure-helper tests do not cover that reaction.
+2026-09-15. The Stage 7 connection helper now returns the reset action and
+retains the terminal cause, with source-included guest coverage. Executing
+that action through the real runtime/driver and notifying native clients
+remain M2 integration work; helper tests do not cover those boundaries.
 
 ### D20. VMM defensive hardening (Q21, deferred)
 

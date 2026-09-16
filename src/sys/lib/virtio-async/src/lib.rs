@@ -12,6 +12,11 @@ mod virtio_device;
 pub mod virtio_net;
 mod virtio_queue;
 mod virtio_vsock;
+pub mod vsock {
+    pub use crate::virtio_vsock::{
+        Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType,
+    };
+}
 #[cfg(feature = "test-support")]
 pub use virtio_queue::tests::{
     test_descriptor_waiters, test_header_layout_rejection, test_ordered_completion_rejection,
