@@ -1555,8 +1555,10 @@ Stage 15's measurement fixtures are implemented and gated:
   plus discovery on all VMMs; builds, formatting, hashes, and Clippy passed
   without new warnings. Evidence: `/tmp/vsock-stage15-gate.b3pd2N/`. QEMU's
   System/IP-disabled boot pair used matching shared memory; its standard
-  no-device boot kept default backing. Detailed observations and caveats
-  accompany the API documentation. Final repeated-capacity/close fixtures
+  no-device boot kept default backing. See the
+  [measurement report](vsock-measurements.md) for observations and caveats,
+  and the [native API guide](../vsock.md) for driver lifetime, examples,
+  limits, and error/drop semantics. Final repeated-capacity/close fixtures
   and M2's full gate remain outstanding.
 
 The progress entries above describe behavior at each incremental commit.
