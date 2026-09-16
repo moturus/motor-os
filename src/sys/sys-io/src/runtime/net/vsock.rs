@@ -79,8 +79,12 @@ impl VsockRuntime {
         }
     }
 
-    pub(super) fn discovered(&self) -> bool {
-        !matches!(self.device, DeviceState::Dormant(None))
+    pub(super) fn availability(&self) -> Result<(), moto_rt::Error> {
+        match &self.device {
+            DeviceState::Dormant(None) => Err(moto_rt::Error::NotFound),
+            DeviceState::Failed { error, .. } => Err(*error),
+            DeviceState::Dormant(Some(_)) | DeviceState::Ready(_) => Ok(()),
+        }
     }
 
     fn ready_driver(&self) -> Result<Rc<VsockDevice>, moto_rt::Error> {
@@ -493,6 +497,7 @@ impl NetRuntime {
         sender: &ClientSender,
     ) -> Result<(), moto_rt::Error> {
         let decoded = api_vsock::decode_listener_accept_request(&request)?;
+        self.inner.borrow().vsock.availability()?;
         let listener = self
             .inner
             .borrow()
@@ -541,6 +546,7 @@ impl NetRuntime {
         sender: &ClientSender,
     ) -> Result<(), moto_rt::Error> {
         api_vsock::decode_listener_drop_request(&request)?;
+        self.inner.borrow().vsock.availability()?;
         self.remove_vsock_listener(request.handle, sender.remote_handle())?;
         if request.id != 0 {
             request.status = moto_rt::E_OK;
@@ -780,6 +786,7 @@ impl NetRuntime {
         socket_id: u64,
         client: SysHandle,
     ) -> Result<Rc<RefCell<MotoSocket>>, moto_rt::Error> {
+        self.inner.borrow().vsock.availability()?;
         let socket = self
             .inner
             .borrow()
@@ -860,6 +867,9 @@ impl NetRuntime {
 
     async fn vsock_tx_submit_pump(&self) {
         loop {
+            if matches!(self.inner.borrow().vsock.device, DeviceState::Failed { .. }) {
+                return;
+            }
             let notify = self.inner.borrow().vsock.submit_notify();
             let wake = notify.notified();
             let mut progressed = 0;
@@ -1195,8 +1205,8 @@ impl NetRuntime {
         decoded: Result<PacketHeader, DecodeError>,
         payload: &[u8],
     ) -> Result<(), DecodeError> {
-        // A failed device remains retained so published DMA owners can be
-        // reclaimed and reposted, but it must not create new protocol work.
+        // A failed device remains retained so returned DMA owners can be
+        // reclaimed, but it must not create new protocol work.
         if !self.inner.borrow().vsock.accepts_protocol_effects() {
             return Ok(());
         }
@@ -1429,10 +1439,18 @@ impl NetRuntime {
             let Some(driver) = self.inner.borrow().vsock.retained_driver() else {
                 return;
             };
-            let event = std::future::poll_fn(|cx| driver.poll_event(cx, |event| event)).await;
+            let event = std::future::poll_fn(|cx| {
+                driver.poll_event(cx, |event| {
+                    if event == Ok(Event::TransportReset) {
+                        driver.stop_reposting();
+                    }
+                    event
+                })
+            })
+            .await;
             if self.inner.borrow().vsock.accepts_protocol_effects() {
                 match event {
-                    Ok(Event::TransportReset) => self.handle_vsock_transport_reset(&driver),
+                    Ok(Event::TransportReset) => self.fail_vsock_device(),
                     Err(err) => log::debug!("discarding invalid virtio-vsock event: {err:?}"),
                 }
             }
@@ -1444,48 +1462,13 @@ impl NetRuntime {
         }
     }
 
-    fn handle_vsock_transport_reset(&self, driver: &Rc<VsockDevice>) {
-        if let Err(err) = driver.refresh_guest_cid() {
-            log::error!("virtio-vsock CID refresh failed: {err}");
-            self.fail_vsock_device();
-            return;
-        }
-        let sockets = {
-            let mut inner = self.inner.borrow_mut();
-            inner.vsock.controls.clear();
-            inner.vsock.tuples.refresh_listener_cid(driver.guest_cid());
-            let mut sockets: [Option<Rc<RefCell<MotoSocket>>>; MAX_STREAMS] =
-                std::array::from_fn(|_| None);
-            for (slot, socket_id) in sockets.iter_mut().zip(inner.vsock.tuples.stream_ids()) {
-                *slot = inner.sockets.get(&socket_id).cloned();
-            }
-            sockets
-        };
-        for socket in sockets.into_iter().flatten() {
-            let (socket_id, unaccepted) = {
-                let mut socket = socket.borrow_mut();
-                let socket_id = socket.socket_id();
-                let state = socket.unwrap_vsock_mut();
-                state.tx_pages.clear();
-                state.pending_reset = false;
-                state.reset_queued = false;
-                state.connection.transport_reset();
-                state.connect_notify.notify_all();
-                state.rx_notify.notify_one();
-                state.state_notify.notify_one();
-                (socket_id, state.listener_id.is_some())
-            };
-            if unaccepted {
-                self.remove_vsock_socket(socket_id);
-            }
-        }
-        self.vsock_control_released();
-    }
-
     fn fail_vsock_device(&self) {
-        let sockets = {
+        let (sockets, listeners) = {
             let mut inner = self.inner.borrow_mut();
             let driver = inner.vsock.retained_driver();
+            if let Some(driver) = &driver {
+                driver.stop_reposting();
+            }
             inner.vsock.device = DeviceState::Failed {
                 driver,
                 error: moto_rt::Error::InternalError,
@@ -1496,7 +1479,17 @@ impl NetRuntime {
             for (slot, socket_id) in sockets.iter_mut().zip(inner.vsock.tuples.stream_ids()) {
                 *slot = inner.sockets.get(&socket_id).cloned();
             }
-            sockets
+            let mut listeners: [Option<(u64, SysHandle)>; MAX_LISTENERS] =
+                std::array::from_fn(|_| None);
+            for (slot, socket_id) in listeners.iter_mut().zip(inner.vsock.tuples.listener_ids()) {
+                let socket = inner
+                    .sockets
+                    .get(&socket_id)
+                    .expect("vsock listener index has no common socket")
+                    .borrow();
+                *slot = Some((socket_id, socket.sender().remote_handle()));
+            }
+            (sockets, listeners)
         };
         for socket in sockets.into_iter().flatten() {
             let (socket_id, unaccepted) = {
@@ -1516,6 +1509,24 @@ impl NetRuntime {
                 self.remove_vsock_socket(socket_id);
             }
         }
+        for (socket_id, client) in listeners.into_iter().flatten() {
+            let listener = self
+                .inner
+                .borrow()
+                .sockets
+                .get(&socket_id)
+                .cloned()
+                .expect("indexed vsock listener disappeared during device failure");
+            let mut accepts = listener
+                .borrow_mut()
+                .unwrap_vsock_listener_mut()
+                .take_accepts();
+            while let Some(accept) = accepts.pop_front() {
+                let _ = accept.ready.send(Err(moto_rt::Error::InternalError));
+            }
+            self.remove_vsock_listener(socket_id, client)
+                .expect("indexed vsock listener disappeared during device failure");
+        }
         self.vsock_control_released();
     }
 
@@ -1525,7 +1536,7 @@ impl NetRuntime {
         };
         let notify = socket.borrow().unwrap_vsock().connect_notify.clone();
         let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(2)).fuse());
-        let connected = loop {
+        let was_connected = loop {
             let (connected, terminal) = {
                 let socket = socket.borrow();
                 let state = socket.unwrap_vsock();
@@ -1560,55 +1571,66 @@ impl NetRuntime {
             }
         };
 
-        let (sender, output_lock, local, error) = {
+        let (sender, output_lock, local) = {
             let socket = socket.borrow();
             let state = socket.unwrap_vsock();
-            let error = if connected {
-                None
-            } else {
-                Some(match state.connection.terminal_cause() {
-                    Some(TerminalCause::TimedOut) => moto_rt::Error::TimedOut,
-                    Some(TerminalCause::InternalError) => moto_rt::Error::InternalError,
-                    Some(TerminalCause::ConnectionReset) => moto_rt::Error::ConnectionReset,
-                    _ => moto_rt::Error::NotConnected,
-                })
-            };
             (
                 socket.sender().clone(),
                 state.output_lock.clone(),
                 socket.vsock_tuple().local,
-                error,
             )
         };
-        let sent = {
+        let (sent, response_connected) = {
             let _guard = output_lock.lock().await;
-            let response = if let Some(error) = error {
-                let mut response = request;
-                response.status = error.into();
-                response
-            } else {
-                api_vsock::encode_connect_response(
-                    &request,
-                    socket.borrow().socket_id(),
-                    api_vsock::VsockAddr {
-                        cid: local.cid,
-                        port: local.port,
-                    },
-                )
-                .expect("reserved vsock tuple produced an invalid response")
-            };
-            let sent = sender.send(response).await.is_ok();
-            if sent && connected {
-                socket.borrow_mut().unwrap_vsock_mut().client_ready = true;
+            loop {
+                let mut changed = core::pin::pin!(notify.notified().fuse());
+                let error = match socket.borrow().unwrap_vsock().connection.terminal_cause() {
+                    Some(TerminalCause::InternalError) => Some(moto_rt::Error::InternalError),
+                    _ if was_connected => None,
+                    None => None,
+                    Some(TerminalCause::TimedOut) => Some(moto_rt::Error::TimedOut),
+                    Some(TerminalCause::ConnectionReset) => Some(moto_rt::Error::ConnectionReset),
+                    Some(TerminalCause::Refused | TerminalCause::OrderlyClosed) => {
+                        Some(moto_rt::Error::NotConnected)
+                    }
+                };
+                let response_connected = error.is_none();
+                let response = if let Some(error) = error {
+                    let mut response = request;
+                    response.status = error.into();
+                    response
+                } else {
+                    api_vsock::encode_connect_response(
+                        &request,
+                        socket.borrow().socket_id(),
+                        api_vsock::VsockAddr {
+                            cid: local.cid,
+                            port: local.port,
+                        },
+                    )
+                    .expect("reserved vsock tuple produced an invalid response")
+                };
+                let mut send = core::pin::pin!(sender.send(response).fuse());
+                let send_result = futures::select_biased! {
+                    _ = changed => None,
+                    result = send => Some(result),
+                };
+                let Some(send_result) = send_result else {
+                    continue;
+                };
+                let sent = send_result.is_ok();
+                if sent && response_connected {
+                    socket.borrow_mut().unwrap_vsock_mut().client_ready = true;
+                }
+                break (sent, response_connected);
             }
-            sent
         };
 
-        if connected && sent {
+        if response_connected && sent {
             self.start_vsock_client_tasks(&socket);
             return;
         }
-        if connected {
+        if was_connected {
             self.start_vsock_cleanup(&socket);
         }
 

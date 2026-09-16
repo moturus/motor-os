@@ -209,10 +209,6 @@ impl Connection {
         self.enter_terminal(TerminalCause::TimedOut, true)
     }
 
-    pub(crate) fn transport_reset(&mut self) -> bool {
-        self.enter_terminal(TerminalCause::ConnectionReset, true)
-    }
-
     /// Locally abandon a connection whose unread bytes have no remaining
     /// consumer. The owner still retains it until the required RST publishes.
     pub(crate) fn abandon_unread_rx(&mut self) -> bool {
@@ -221,7 +217,11 @@ impl Connection {
     }
 
     pub(crate) fn device_failed(&mut self) -> bool {
-        self.enter_terminal(TerminalCause::InternalError, true)
+        let changed = self.phase != ConnectionPhase::Terminal(TerminalCause::InternalError)
+            || self.has_buffered_rx();
+        self.stream.device_failed();
+        self.phase = ConnectionPhase::Terminal(TerminalCause::InternalError);
+        changed
     }
 
     /// Apply one decoded packet for this connection. A rejected packet never

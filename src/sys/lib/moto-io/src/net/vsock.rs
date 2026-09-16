@@ -50,8 +50,8 @@ pub async fn local_cid(client: &super::NetClient) -> Result<u32, moto_rt::Error>
 /// A bound native listener on the caller's explicitly driven
 /// [`super::NetDriver`].
 ///
-/// The bound port is stable, while the device CID may change after a transport
-/// reset. [`Self::socket_addr_async`] therefore queries sys-io each time.
+/// The bound port is stable. [`Self::socket_addr_async`] queries sys-io so a
+/// permanent device failure is reported instead of returning stale metadata.
 pub struct VsockListener {
     channel_reservation: Option<ChannelReservation>,
     port: u32,
@@ -218,7 +218,7 @@ impl VsockStream {
 
     pub fn try_read(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
         if bufs.iter().all(|buf| buf.is_empty()) {
-            return Ok(0);
+            return self.zero_io_result();
         }
         self.poll_rx(bufs)
     }
@@ -244,7 +244,7 @@ impl VsockStream {
     pub fn try_write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         let total = bufs.iter().map(|buf| buf.len()).sum::<usize>();
         if total == 0 {
-            return Ok(0);
+            return self.zero_io_result();
         }
         let _admission = self.write_admission.lock();
         if !self.can_write() {
@@ -275,6 +275,9 @@ impl VsockStream {
     /// Cancellation before queue ownership changes nothing; cancellation
     /// afterwards leaves sys-io responsible for completing the operation.
     pub async fn shutdown_async(&self, shutdown: Shutdown) -> Result<(), ErrorCode> {
+        if self.device_failed() {
+            return Err(moto_rt::E_INTERNAL_ERROR);
+        }
         let flags = match shutdown {
             Shutdown::Read => api_vsock::SHUTDOWN_RECEIVE,
             Shutdown::Write => api_vsock::SHUTDOWN_SEND,
@@ -300,7 +303,11 @@ impl VsockStream {
         let response = core::future::poll_fn(|cx| {
             let result = {
                 let _admission = self.write_admission.lock();
-                rpc.as_mut().poll(cx)
+                if self.device_failed() {
+                    Poll::Ready(Err(moto_rt::E_INTERNAL_ERROR))
+                } else {
+                    rpc.as_mut().poll(cx).map(Ok)
+                }
             };
             if committed.swap(false, Ordering::AcqRel) {
                 if flags & api_vsock::SHUTDOWN_RECEIVE != 0 {
@@ -312,7 +319,7 @@ impl VsockStream {
             }
             result
         })
-        .await;
+        .await?;
         response.status().map_err(ErrorCode::from)
     }
 
@@ -391,7 +398,7 @@ impl VsockStream {
                 // Shutdown commits its flag and clears under this same lock,
                 // so an in-flight page is rejected here or included in clear.
                 let mut queue = self.recv_queue.lock();
-                if self.local_receive_shutdown.load(Ordering::Acquire) {
+                if self.local_receive_shutdown.load(Ordering::Acquire) || self.device_failed() {
                     drop(queue);
                     super::channel::claim_vsock_rx_page(
                         self.channel(),
@@ -406,6 +413,12 @@ impl VsockStream {
             }
             Some(api_net::NetCmd::EvtVsockStreamStateChanged) => {
                 match api_vsock::decode_state_changed(&msg) {
+                    Ok(change)
+                        if change.flags & api_vsock::STATE_TERMINAL != 0
+                            && change.cause == Some(moto_rt::Error::InternalError) =>
+                    {
+                        self.record_device_failure();
+                    }
                     Ok(change) if change.flags & api_vsock::STATE_READ_CLOSED != 0 => {
                         // Keep final read closure behind every preceding RX
                         // page. Early terminal/write closure is deliberately
@@ -469,6 +482,24 @@ impl VsockStream {
         self.channel().wake_tx_wakers();
     }
 
+    fn record_device_failure(&self) {
+        let admission = self.write_admission.lock();
+        self.pending_tx.clear();
+        let mut queue = self.recv_queue.lock();
+        super::channel::clear_vsock_rx_queue_locked(&mut queue, self.channel());
+        let flags = api_vsock::STATE_READ_CLOSED
+            | api_vsock::STATE_WRITE_CLOSED
+            | api_vsock::STATE_TERMINAL;
+        self.state.store(
+            flags as u64 | (moto_rt::E_INTERNAL_ERROR as u64) << 32,
+            Ordering::Release,
+        );
+        drop(queue);
+        drop(admission);
+        self.wake_rx_waiters();
+        self.channel().wake_tx_wakers();
+    }
+
     fn store_terminal(&self, cause: ErrorCode) {
         let flags = api_vsock::STATE_READ_CLOSED
             | api_vsock::STATE_WRITE_CLOSED
@@ -502,6 +533,19 @@ impl VsockStream {
         (self.state.load(Ordering::Acquire) >> 32) as ErrorCode
     }
 
+    fn device_failed(&self) -> bool {
+        self.state() & api_vsock::STATE_TERMINAL != 0
+            && self.terminal_cause() == moto_rt::E_INTERNAL_ERROR
+    }
+
+    fn zero_io_result(&self) -> Result<usize, ErrorCode> {
+        if self.device_failed() {
+            Err(moto_rt::E_INTERNAL_ERROR)
+        } else {
+            Ok(0)
+        }
+    }
+
     fn can_write(&self) -> bool {
         self.state() & (api_vsock::STATE_WRITE_CLOSED | api_vsock::STATE_TERMINAL) == 0
             && !self.channel().is_failed()
@@ -517,6 +561,9 @@ impl VsockStream {
     }
 
     fn dead_read_result(&self) -> Result<usize, ErrorCode> {
+        if self.device_failed() {
+            return Err(moto_rt::E_INTERNAL_ERROR);
+        }
         if self.local_receive_shutdown.load(Ordering::Acquire) {
             return Ok(0);
         }
@@ -530,6 +577,9 @@ impl VsockStream {
 
     fn poll_rx(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
         let mut queue = self.recv_queue.lock();
+        if self.device_failed() {
+            return Err(moto_rt::E_INTERNAL_ERROR);
+        }
         if self.local_receive_shutdown.load(Ordering::Acquire) {
             return Ok(0);
         }
@@ -646,7 +696,7 @@ impl core::future::Future for VsockReadFuture<'_, '_, '_> {
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if this.bufs.iter().all(|buf| buf.is_empty()) {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(this.stream.zero_io_result());
         }
         match this.stream.poll_rx(this.bufs) {
             Err(moto_rt::E_NOT_READY) => {}

@@ -185,8 +185,10 @@ impl NetRuntime {
             Ok(_) if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] => {
                 moto_rt::E_INVALID_ARGUMENT
             }
-            Ok(_) if !inner.vsock.discovered() => moto_rt::E_NOT_FOUND,
-            Ok(_) => moto_rt::E_OK,
+            Ok(_) => match inner.vsock.availability() {
+                Ok(()) => moto_rt::E_OK,
+                Err(error) => error.into(),
+            },
         }
     }
 

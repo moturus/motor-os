@@ -101,6 +101,11 @@ impl EstablishedStream {
         self.receive.is_empty()
     }
 
+    pub(crate) fn device_failed(&mut self) {
+        self.receive.clear();
+        self.reset = true;
+    }
+
     /// Copy into storage already reserved by IPC. Validated bytes are delivered
     /// before the retained reset cause or orderly EOF becomes visible.
     pub(crate) fn read_into_reserved(&mut self, dst: &mut [u8]) -> ReadOutcome {

@@ -819,13 +819,13 @@ pub(crate) fn prepare_pools(queues: &[Rc<RefCell<Virtqueue>>]) -> IoResult<Prepa
 /// Device-lifetime vsock I/O ownership. Keep this facade alive after
 /// activation, including while sys-io caches a later transport failure.
 pub struct VsockDevice {
-    guest_cid: Cell<u32>,
+    guest_cid: u32,
     repost_buffers: Cell<bool>,
     tx: RefCell<TxPool>,
     rx: RefCell<Option<RxPool>>,
     events: RefCell<Option<EventPool>>,
     // Keep the BAR owner after every queue and DMA owner in drop order.
-    device: Rc<RefCell<VirtioDevice>>,
+    _device: Rc<RefCell<VirtioDevice>>,
 }
 
 impl VsockDevice {
@@ -856,12 +856,12 @@ impl VsockDevice {
         let event_queue = raw.virtqueues[VIRTQ_EVENT].clone();
         let rx_queue = raw.virtqueues[VIRTQ_RX].clone();
         let this = Rc::new(Self {
-            guest_cid: Cell::new(guest_cid),
+            guest_cid,
             repost_buffers: Cell::new(true),
             tx: RefCell::new(tx),
             rx: RefCell::new(None),
             events: RefCell::new(None),
-            device: device.clone(),
+            _device: device.clone(),
         });
 
         // No fallible work follows publication. Install every DMA owner before
@@ -877,13 +877,7 @@ impl VsockDevice {
     }
 
     pub fn guest_cid(&self) -> u32 {
-        self.guest_cid.get()
-    }
-
-    pub fn refresh_guest_cid(&self) -> IoResult<u32> {
-        let cid = read_guest_cid(&self.device.borrow())?;
-        self.guest_cid.set(cid);
-        Ok(cid)
+        self.guest_cid
     }
 
     /// Permanently retire returned RX/event buffers instead of reposting them.
@@ -892,7 +886,7 @@ impl VsockDevice {
     }
 
     pub fn try_send(&self, raw: RawHeader, bytes: &[u8]) -> IoResult<()> {
-        if raw.src_cid != u64::from(self.guest_cid.get()) {
+        if raw.src_cid != u64::from(self.guest_cid) {
             return Err(ErrorKind::InvalidInput.into());
         }
         self.tx.borrow_mut().try_submit(raw, bytes)

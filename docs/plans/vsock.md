@@ -1488,6 +1488,35 @@ D26's returned-DMA retirement primitive is implemented:
   warnings. Evidence: `/tmp/vsock-a29-dma-gate.wDcm2q/`. Runtime permanent
   failure and removal of CID-refresh logic follow in the next patch.
 
+D26's permanent runtime/native failure transition is implemented:
+
+- A transport-reset event disables reposting before returning its event
+  buffer, caches `InternalError`, stops TX submission/protocol dispatch,
+  and discards controls, stream RX, and queued TX. Retained device owners
+  still reap returned DMA. CID refresh and listener recovery are removed.
+- Fail pending listener accepts before removal; mark matched children failed
+  before removing their routing state. Later service operations check cached
+  availability before stale-handle lookup. Native streams discard buffered
+  RX/TX, wake waiters, and prioritize device failure over local EOF, empty
+  I/O, or a pending shutdown. Already-established normal peer closure still
+  preserves early data and successful open semantics.
+- Component fixtures cover connecting, empty-read and zero-credit states,
+  buffered-data discard, prior-cause override, idempotence, and late input.
+  All eight queued accept receivers are parked first; each registered waker
+  must fire before repoll returns `InternalError`. Queue fixtures separately
+  cover retirement without repost. These do not inject failure through the
+  complete runtime/IPC/native path or a live VMM.
+- The initial fixture build lacked a declared in-tree `moto-rt` dependency;
+  adding that test dependency fixed compilation, with no runtime-library or
+  toolchain source change. The original failure is preserved under
+  `/tmp/vsock-a29-failure-gate.FU0m8U/missing-test-dependency/`.
+- Fresh debug/release builds, descriptor/component/native-network suites,
+  all twenty peer cases, and discovery passed on QEMU, CHV, and FC. Clippy,
+  formatting, and frozen-source checks passed with no new warnings. Evidence:
+  `/tmp/vsock-a29-failure-gate.FU0m8U/`. This larger coordinated state change
+  includes its component fixtures; failure-aware publication under reply-ring
+  backpressure remains a separate follow-up.
+
 The progress entries above describe behavior at each incremental commit.
 D26 supersedes earlier CID-refresh/listener-recovery work and reset-test
 proposals: remove recovery rather than extending it.
@@ -2161,15 +2190,17 @@ waiters, timers, and reservations. Keep cleanup idempotent across peer reset,
 client drop, and late reply races. Device failure must be distinguishable
 from a single stream failure (D9, D14).
 
-In existing guest systest fixtures, test permanent failure during connect,
-queued accept, read, credit-blocked write, and in-flight DMA. Verify immediate
-errors, buffered-data discard, later-operation errors, repeated-event
-idempotence, stale completions, and no reposting after failure. Retain event
-length validation and ordinary create/use/drop resource-count tests. Do not
-add snapshots, restore, live CID-change tests, a sys-io self-test, or a
-production injection command. Label fixture coverage honestly: there is no
-claim of live VMM-triggered reset coverage. D26 deliberately excludes reset
-recovery; this is a terminal safety path, not snapshot support.
+In existing guest systest component fixtures, exercise failure of connecting,
+empty/buffered-read, and zero-credit write states and wake every queued accept
+oneshot. Check the terminal cause, data discard, later-state behavior,
+idempotence, and late protocol input. Queue fixtures separately check returned
+DMA retirement and no reposting; retain the existing outstanding-ownership
+and event-length assertions. These fixtures do not drive a reset through the
+joined sys-io/IPC/native task graph. Retain ordinary live API, teardown, and
+resource-count tests without claiming they inject device failure. Do not add
+snapshots, restore, live CID-change tests, a sys-io self-test, or a production
+injection command. D26 deliberately excludes reset recovery and live reset
+coverage; this is a terminal safety path, not snapshot support.
 
 ### 14. Add a hermetic host/guest acceptance phase
 
