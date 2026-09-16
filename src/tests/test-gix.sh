@@ -164,6 +164,8 @@ PY
     system_times_are_normalized_and_ordered
   "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
     an_index_shorter_than_its_checksum_is_rejected
+  "$cargo" test "${external[@]}" -p gix-pack --lib \
+    mmap::tests::native_reads_enforce_file_and_live_limits_and_release_reservations
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
     iter::new_from_header::
   "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \

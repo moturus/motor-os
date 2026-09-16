@@ -731,22 +731,23 @@ files on both host and Motor; the component fixtures and compiler/Clippy
 checks also pass. The user published the repair, and the declared remote
 was verified at this revision on 2026-09-15.
 
-Planned Q6 native pack-buffer implementation, selected on 2026-09-15: the
-external patch changes `gix-pack/src/lib.rs` and an extracted
-`gix-pack/src/mmap.rs` in the authoring checkout above. On Motor, limit
-each pack/index/multi-index buffer to 128 MiB and all live buffers from
-that reader to 256 MiB. Check the opened regular file's length and reserve
-the aggregate allowance before a fallible exact allocation; reject short
-reads or growth, and release the allowance after the buffer is dropped.
-Keep the existing non-Motor mapping behavior. A plain owned buffer and
-reservation guard suffice because the object store already shares files.
+Q6 native pack-buffer implementation, reviewed on 2026-09-15: external
+commit `68c53270d9275ed76d4418a6186027b8f012eba2` changes
+`gix-pack/src/lib.rs` and extracts `gix-pack/src/mmap.rs`. On Motor, each
+pack/index/multi-index buffer is limited to 128 MiB and all live buffers
+from that reader to 256 MiB. The reader requires a regular file, checks its
+metadata length, reserves the aggregate allowance before a fallible exact
+allocation, rejects short reads or growth, and releases the allowance after
+the owned bytes are dropped. Non-Motor builds retain the existing mmap
+behavior. Compact host tests cover file and aggregate boundaries, release,
+short input and growth; focused host and Motor compiler checks pass. The
+existing native repository fixture also passes with verified sources and a
+clean VM shutdown. Publication of the reviewed fork revision remains pending.
 The representative Motor OS history at `db5ce8e0` has 36,568 objects,
 a roughly 19.5 MiB stored pack, and an 89,401,252-byte transfer without
 deltas. These figures justify the initial buffer limits; decoded objects,
 metadata/counts, other file readers and temporary disk still need bounds,
-followed by native workload validation. Extend the existing host test
-entry point with compact helper-boundary tests and reuse the native
-repository fixture.
+followed by native workload validation.
 
 Clone policy integration, implementation follow-up on 2026-09-15:
 the external checkout now provides the small
@@ -756,8 +757,8 @@ repository before fetch so the application can validate paths, sanitize
 configuration and set `objects.ignore_replacements` without duplicating
 the library's clone/ref/HEAD orchestration, and returns `None` after a
 successful fetch consumes that handle. The application uses reviewed commit
-`d3e2dd89b0ea3f30b5cf24d4d7327de944d9824c`, published on
-`gix-moturus-cli` and verified on 2026-09-15.
+`68c53270d9275ed76d4418a6186027b8f012eba2`; publication of this revision
+on `gix-moturus-cli` remains pending.
 
 Pack-input follow-up, discussed and approved on 2026-09-15: repaired in
 Gitoxide `b4e6aeaa82be4183af466b7a99484c38322dd260`. In the external
