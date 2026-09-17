@@ -1356,6 +1356,19 @@ index bytes. Host/Motor component gates, formatting, strict Clippy and shell
 checks pass with matching source hashes. Command selection/output integration
 follows separately. Evidence is in `/tmp/motor-gix-diff-policy-405ea83a`.
 
+M2 checked HEAD publication: the reviewed helper validates exact HEAD and
+destination IDs again after acquiring the ref lock, then uses the approved
+external API for one symbolic HEAD update and exact old/new reflog IDs. It
+preserves branch refs/logs, the application's trusted ref-lock configuration,
+generic non-author identity fallback, cancellation classification and actual-state
+diagnostics for partial publication. The caller retains its mutation guard and
+operation record. The native lifecycle verifies changed/equal-ID switches,
+stale/moved refusal and guard lifetime. After correcting four explicit borrowed
+name conversions in the draft, all host/Motor component gates, formatting,
+strict Clippy and shell checks pass with matching source hashes. Original
+compiler diagnostics and final validation are preserved in
+`/tmp/motor-gix-head-attach-4cec3fec`. Switch/recovery command integration follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

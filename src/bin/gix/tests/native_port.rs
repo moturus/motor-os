@@ -2471,7 +2471,7 @@ fn check_head_ref(output: &Path) -> Result {
         false,
         &cancellation,
     )?;
-    let opened = motor_gix::repository::open(
+    let mut opened = motor_gix::repository::open(
         &repository,
         &["user.name=Native Test", "user.email=native@example.com"],
         false,
@@ -2530,5 +2530,101 @@ fn check_head_ref(output: &Path) -> Result {
         "HEAD attached outside the local-branch namespace was accepted"
     );
     fs::write(&head_path, b"ref: refs/heads/main\n")?;
+
+    let target_commit = opened.repo.new_commit("head target", tree, [commit])?.id;
+    for name in ["other", "same"] {
+        opened.repo.reference(
+            format!("refs/heads/{name}"),
+            target_commit,
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "head fixture",
+        )?;
+    }
+    let (other_ref, _) = motor_gix::head_ref::existing_local_branch(&opened.repo, "other")?;
+    let (same_ref, _) = motor_gix::head_ref::existing_local_branch(&opened.repo, "same")?;
+    let log_root = opened.repo.git_dir().join("logs");
+    let branch_logs = [
+        fs::read(log_root.join("refs/heads/main"))?,
+        fs::read(log_root.join("refs/heads/other"))?,
+        fs::read(log_root.join("refs/heads/same"))?,
+    ];
+    let mut head_log = fs::read(log_root.join("HEAD"))?;
+
+    let guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    run_mutation_child(&repository, "blocked")?;
+    let actual = motor_gix::head_ref::attach(
+        &mut opened.repo,
+        &attached,
+        &other_ref,
+        target_commit,
+        b"switch: other".as_bstr(),
+        &cancellation,
+    )?;
+    let on_other = Original {
+        reference: Some(other_ref.clone()),
+        id: Some(target_commit),
+    };
+    assert_eq!(actual, on_other);
+    assert_eq!(opened.repo.find_reference(&main)?.id(), commit);
+    assert_eq!(opened.repo.find_reference(&other_ref)?.id(), target_commit);
+    assert_eq!(opened.repo.find_reference(&same_ref)?.id(), target_commit);
+    assert_eq!(fs::read(log_root.join("refs/heads/main"))?, branch_logs[0]);
+    assert_eq!(fs::read(log_root.join("refs/heads/other"))?, branch_logs[1]);
+    assert_eq!(fs::read(log_root.join("refs/heads/same"))?, branch_logs[2]);
+    let changed_log = fs::read(log_root.join("HEAD"))?;
+    let appended = &changed_log[head_log.len()..];
+    assert!(appended.starts_with(format!("{commit} {target_commit} ").as_bytes()));
+    assert!(appended.ends_with(b"\tswitch: other\n"));
+    assert_eq!(appended.iter().filter(|byte| **byte == b'\n').count(), 1);
+    head_log = changed_log;
+
+    let error = motor_gix::head_ref::attach(
+        &mut opened.repo,
+        &attached,
+        &same_ref,
+        target_commit,
+        b"stale".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("a stale expected HEAD was accepted");
+    assert!(error.to_string().contains("HEAD changed"), "{error}");
+    let error = motor_gix::head_ref::attach(
+        &mut opened.repo,
+        &on_other,
+        &same_ref,
+        commit,
+        b"moved".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("a moved destination branch was accepted");
+    assert!(error.to_string().contains("destination branch"), "{error}");
+    assert_eq!(fs::read(log_root.join("HEAD"))?, head_log);
+
+    let on_same = motor_gix::head_ref::attach(
+        &mut opened.repo,
+        &on_other,
+        &same_ref,
+        target_commit,
+        b"switch: same".as_bstr(),
+        &cancellation,
+    )?;
+    assert_eq!(
+        on_same,
+        Original {
+            reference: Some(same_ref),
+            id: Some(target_commit),
+        }
+    );
+    let equal_log = fs::read(log_root.join("HEAD"))?;
+    let appended = &equal_log[head_log.len()..];
+    assert!(appended.starts_with(format!("{target_commit} {target_commit} ").as_bytes()));
+    assert!(appended.ends_with(b"\tswitch: same\n"));
+    assert_eq!(appended.iter().filter(|byte| **byte == b'\n').count(), 1);
+    assert_eq!(fs::read(log_root.join("refs/heads/main"))?, branch_logs[0]);
+    assert_eq!(fs::read(log_root.join("refs/heads/other"))?, branch_logs[1]);
+    assert_eq!(fs::read(log_root.join("refs/heads/same"))?, branch_logs[2]);
+    run_mutation_child(&repository, "blocked")?;
+    drop(guard);
+    run_mutation_child(&repository, "acquire")?;
     Ok(())
 }
