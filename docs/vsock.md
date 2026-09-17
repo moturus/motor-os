@@ -135,7 +135,13 @@ foreign or stale handles are `NotFound`.
 Pending accepts and shutdowns do not retain NET dispatch tickets while they
 wait for peer progress. Canceling a sent shutdown does not retract it: its
 slot is released when the reply is published or discarded. A shutdown
-rejected at the limit does not apply a new shutdown direction.
+rejected at the limit does not apply a new shutdown direction in sys-io.
+This is not a guarantee that the native stream remains usable: `shutdown_async`
+commits local closure when it queues the request, before sys-io checks the
+limit. On overflow, the requested direction may already be closed locally and
+buffered RX may have been discarded. Do not rely on continuing to use that
+stream after shutdown admission overflow; drop it and keep driving the channel
+for normal cleanup. The limit bounds server work, not client-side rollback.
 
 ## Tested launch configuration
 
@@ -166,6 +172,6 @@ src/tests/test-vsock.sh --release --vmm fc
 ```
 
 `src/tests/full-test.sh [--release] [--vmm qemu|chv|fc]` includes this phase.
-See [the implementation plan](plans/vsock.md) for validation status and
-[Stage 15 measurements](plans/vsock-measurements.md) for observed latency,
+See [the design](plans/vsock.md) for contracts and validation coverage, and
+[measurements](plans/vsock-measurements.md) for observed latency,
 footprint, and transfer rates with their accounting limitations.
