@@ -60,6 +60,8 @@ pub fn write(
     index: &gix::index::State,
     cancellation: &Cancellation,
 ) -> crate::Result<gix::ObjectId> {
+    cancellation.check()?;
+    index.verify_entries()?;
     for entry in index.entries() {
         cancellation.check()?;
         if entry.stage() != gix::index::entry::Stage::Unconflicted {
@@ -79,6 +81,32 @@ pub fn write(
                 entry.mode.bits()
             ))
             .into());
+        }
+        let path = entry.path(index);
+        // The editor accepts placeholders and file-to-tree replacement; an index must not.
+        if entry.id.is_null() {
+            return Err(invalid(format!(
+                "index entry '{}' has a null object ID",
+                path.to_str_lossy().escape_debug()
+            ))
+            .into());
+        }
+        for (offset, byte) in path.iter().enumerate() {
+            if *byte != b'/' {
+                continue;
+            }
+            let ancestor = path[..offset].as_bstr();
+            if index
+                .entry_by_path_and_stage(ancestor, gix::index::entry::Stage::Unconflicted)
+                .is_some()
+            {
+                return Err(invalid(format!(
+                    "index entry '{}' is an ancestor of '{}'",
+                    ancestor.to_str_lossy().escape_debug(),
+                    path.to_str_lossy().escape_debug()
+                ))
+                .into());
+            }
         }
     }
 
@@ -325,6 +353,27 @@ mod tests {
                 .lookup_entry_by_path(path)?
                 .ok_or_else(|| invalid(format!("tree entry '{path}' is missing")))?;
             assert_eq!((entry.mode().kind(), entry.object_id()), (kind, id));
+        }
+
+        // A sorted index may still contain leaves that cannot coexist in a tree.
+        for (paths, id, expected) in [
+            (&["a", "a.b", "a/c"][..], blob, "ancestor"),
+            (&["null"][..], repo.object_hash().null(), "null object ID"),
+        ] {
+            let mut invalid_index = gix::index::State::new(repo.object_hash());
+            for path in paths {
+                invalid_index.dangerously_push_entry(
+                    Default::default(),
+                    id,
+                    Flags::empty(),
+                    Mode::FILE,
+                    path.as_bytes().as_bstr(),
+                );
+            }
+            invalid_index.verify_entries()?;
+            let error = write(&repo, &invalid_index, &Cancellation::new())
+                .expect_err("invalid index entries were silently dropped");
+            assert!(error.to_string().contains(expected), "{error}");
         }
 
         index.dangerously_push_entry(

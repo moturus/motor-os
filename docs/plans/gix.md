@@ -317,7 +317,8 @@ unmatched paths. Resolve conflicts by replacing stages 1–3 with stage 0,
 or removing the entries when the selected file was deleted.
 
 Build commit trees from `repo.empty_tree().edit()` and all stage-0 entries,
-so deletions cannot survive from an old tree. Reject unresolved stages.
+so deletions cannot survive from an old tree. Reject unresolved stages, null
+object IDs and overlapping file/directory paths before editing the tree.
 Use `new_commit()` to obtain the exact object ID before ref publication,
 then a ref transaction with reflogs; do not create the commit twice.
 Ordinary commits have HEAD as parent, or no parent for an unborn branch.
@@ -1230,6 +1231,18 @@ This enables read-only diff loading and cleanliness hashing without duplicating
 file handling or copying staging content. Existing host/Motor staging lifecycles,
 all component gates, formatting and strict Clippy pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-shared-conversion-657e25b6`.
+
+M2 tree-writer validation correction: review found that the application writer
+introduced in `d77cc66c` relied on tree-editor behavior that permits replacing a
+file ancestor and omitting null placeholders. A sorted index can still contain
+`a`, `a.b`, and `a/c`; a stage-0 null ID also passed the earlier checks. Both
+small regressions produced successful tree IDs before the fix. The writer now
+checks ordering, rejects null IDs and checks every proper indexed ancestor
+before invoking the editor, without an extra path collection. The existing
+unit lifecycle covers both cases; host/Motor component gates, formatting and
+strict Clippy pass with matching source hashes. No external code changed.
+Original failures, review and gates are preserved in
+`/tmp/motor-gix-tree-writer-validation-e6806cc3`.
 
 ## 8. Discussion record
 
