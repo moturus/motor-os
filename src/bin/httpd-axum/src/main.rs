@@ -52,7 +52,7 @@ struct Args {
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
 
-    /// First request head deadline; also HTTP/1 keep-alive idle/header timeout, in seconds.
+    /// First request head/HTTP/1 idle timeout and HTTP/2 PING interval/ACK timeout, in seconds.
     #[arg(long, default_value = "10")]
     max_header_deadline_sec: std::num::NonZeroU32,
 
@@ -136,7 +136,7 @@ async fn main() -> std::io::Result<()> {
                     deadline,
                 ),
             );
-            configure_headers(&mut server, deadline);
+            configure_timeouts(&mut server, deadline);
             let mut redirect_app = url.router();
             if !args.no_request_log {
                 redirect_app = redirect_app.layer(axum::middleware::from_fn(log_request));
@@ -149,7 +149,7 @@ async fn main() -> std::io::Result<()> {
         let mut server = axum_server::from_tcp_rustls(listener, config).map(|acceptor| {
             connections::HeaderDeadline::new(acceptor.acceptor(admission), deadline)
         });
-        configure_headers(&mut server, deadline);
+        configure_timeouts(&mut server, deadline);
         if let Some((redirect_server, redirect_app, address)) = redirect_server {
             tracing::info!("HTTP redirect on {address}");
             tokio::try_join!(
@@ -164,18 +164,26 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("listening on {}", listener.local_addr()?);
         let mut server = axum_server::from_tcp(listener)
             .acceptor(connections::HeaderDeadline::new(admission, deadline));
-        configure_headers(&mut server, deadline);
+        configure_timeouts(&mut server, deadline);
         server.serve(app.into_make_service()).await?;
     };
     Ok(())
 }
 
-fn configure_headers<A>(server: &mut axum_server::Server<A>, deadline: std::time::Duration) {
+fn configure_timeouts<A>(server: &mut axum_server::Server<A>, deadline: std::time::Duration) {
     server
         .http_builder()
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(deadline);
+    // Hyper probes idle HTTP/2 connections too. A completed request must not
+    // let an unresponsive peer retain an admission permit indefinitely.
+    server
+        .http_builder()
+        .http2()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(deadline)
+        .keep_alive_timeout(deadline);
 }
 
 async fn log_request(

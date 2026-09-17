@@ -55,12 +55,17 @@ head (after TLS handshaking, if enabled), then each HTTP/1.1 header read,
 including idle keep-alive time before the next request.
 Tests cover idle clients, incomplete HTTP/1.1 headers, partial and complete HTTP/2 prefaces without request heads,
 subsequent requests on keep-alive connections, and HTTP/1.1 over TLS. The existing
-TLS handshake deadline remains separate. HTTP/2 support is preserved: its
-connections count toward admission, but subsequent HTTP/2 stream-header deadlines
-are not exposed by the current Hyper API and are not enforced by this flag.
-HTTP/2 idle time after the first request is also not bounded by this flag.
+TLS handshake deadline remains separate. For HTTP/2, the same value configures
+the keep-alive PING interval and the PING acknowledgement timeout, including
+idle connections. A peer that goes silent after a request closes after about
+two such intervals (20 seconds by default), releasing its admission permit.
+Responsive peers may keep idle connections open by acknowledging PINGs; this
+is not a maximum connection lifetime or a subsequent stream-header deadline.
 The HTTP/2 tests check both cleartext and certificate-validated TLS, repeat
 requests on one connection (including a cache hit), and verify admission limits.
+Raw peers additionally verify silent-peer closure and admission recovery after
+a successful request, and reuse after multiple PING acknowledgements, over
+both cleartext and TLS.
 
 `--http-redirect-url=https://example.com/landing` enables a separate port-80
 listener on the same bind IP; it requires TLS credentials and `--addr` on port

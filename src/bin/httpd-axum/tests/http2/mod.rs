@@ -1,9 +1,11 @@
 mod deadlines;
+mod keep_alive;
 use crate::common::Server;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub fn check() {
+    keep_alive::check();
     deadlines::check();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
