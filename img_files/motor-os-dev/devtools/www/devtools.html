@@ -496,12 +496,13 @@ how procedural macros and build scripts run on Motor OS, is on the
 
 <h2>Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
-anonymous smart-HTTPS remotes, stages local changes, and shows status and history.</p>
+anonymous smart-HTTPS remotes, stages and commits local changes, and shows status and history.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
+gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
 gix -r project tag list
@@ -519,6 +520,10 @@ changes and deletions. Tracked ignored files are included; explicitly naming an 
 or unmatched path fails. Executable and indexed symlink modes are preserved, and
 gitlinks remain unchanged. Staging refuses external filters and files over 16 MiB,
 and publishes the index only after all selected changes are prepared.</p>
+<p><code>commit -m MSG</code> commits the staged index to the attached local branch,
+including an unborn branch's first commit. It rejects unresolved entries and an
+unchanged index. Author and committer name and email must be configured;
+<code>user.name</code> and <code>user.email</code> provide both by default.</p>
 <p><code>branch list</code> and <code>tag list</code> print short names in sorted
 order. Creation takes a name and optional <code>REV</code>, which defaults to
 <code>HEAD</code>, and refuses to replace an existing reference. Branch targets are
@@ -535,8 +540,8 @@ for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or
 Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
 valid Motor file names; the current path policy also rejects Windows-reserved names and
 characters. Link entries become regular files containing their target text because Motor OS
-has no symbolic links. Commit, push, SSH remotes, and authenticated HTTPS are not
-part of this initial command set.</p>
+has no symbolic links. Push, SSH remotes, and authenticated HTTPS are not part of
+this initial command set.</p>
 
 <h2>Gears</h2>
 <p>Gears is a small, extensible agent harness for working with a language model from

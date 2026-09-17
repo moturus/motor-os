@@ -57,7 +57,7 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-inspect it, and stage local changes:
+inspect it, stage local changes, and commit the index:
 
 ```sh
 gix init scratch
@@ -65,6 +65,7 @@ gix clone https://example.test/project.git project
 gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
+gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
 gix -r project tag list
@@ -85,6 +86,11 @@ deletions. Tracked ignored files are included; explicitly naming an ignored
 or unmatched path fails. Executable and indexed symlink modes are preserved.
 Gitlinks are left unchanged. Staging refuses external filters and files over
 16 MiB, and publishes the index only after all selected changes are prepared.
+
+`commit -m MSG` commits the staged index to the attached local branch, including
+an unborn branch's first commit. It rejects unresolved entries and an unchanged
+index. Author and committer name and email must be configured; `user.name` and
+`user.email` provide both by default.
 
 `branch list` and `tag list` print short names in sorted order. Creation takes
 a name and optional `REV`, which defaults to `HEAD`, and refuses to replace an
@@ -107,6 +113,6 @@ Remove that owned directory explicitly before cloning again. Repository paths
 must be UTF-8 and valid Motor file names; the current path policy also rejects
 Windows-reserved names and characters. Because Motor OS has no symbolic links,
 link entries are checked out as regular files containing their target text. This command set does
-not yet include commit, push, or SSH remotes.
+not yet include push or SSH remotes.
 
 For more details, see [https://motor-os.org](https://motor-os.org).

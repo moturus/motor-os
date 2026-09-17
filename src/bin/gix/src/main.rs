@@ -8,7 +8,9 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, add, cancellation, clone, fetch, init, network, refs, repository, status};
+use motor_gix::{
+    Result, add, cancellation, clone, commit, fetch, init, network, refs, repository, status,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -77,6 +79,14 @@ fn run() -> Result {
                         .num_args(1..)
                         .required_unless_present("all"),
                 ),
+        )
+        .subcommand(
+            Command::new("commit").about("Commit the staged index").arg(
+                Arg::new("message")
+                    .short('m')
+                    .required(true)
+                    .value_name("MSG"),
+            ),
         )
         .subcommand(
             Command::new("clone")
@@ -171,6 +181,15 @@ fn run() -> Result {
                 .subcommand_matches("branch")
                 .expect("matched branch"),
             refs::Kind::Branch,
+            &cancellation,
+        ),
+        Some("commit") => commit::run(
+            &opened,
+            matches
+                .subcommand_matches("commit")
+                .expect("matched commit")
+                .get_one::<String>("message")
+                .expect("required message"),
             &cancellation,
         ),
         Some("fetch") => {

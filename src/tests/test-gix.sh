@@ -260,6 +260,19 @@ verify_add_cli() {
     fail "gix add -- wrote the wrong blob"
 }
 
+verify_commit_cli() {
+  local repository="$1"
+  [ "$(clean_git -C "$repository" symbolic-ref HEAD)" = refs/heads/main ] ||
+    fail "gix commit detached HEAD"
+  [ "$(clean_git -C "$repository" rev-list --count HEAD)" -eq 1 ] ||
+    fail "gix commit created the wrong initial history"
+  [ "$(clean_git -C "$repository" log -1 --format=%s)" = cli-initial ] ||
+    fail "gix commit wrote the wrong message"
+  [ "$(clean_git -C "$repository" show HEAD:-leading)" = 'cli stage' ] ||
+    fail "gix commit wrote the wrong tree"
+  clean_git -C "$repository" fsck --strict --no-dangling >/dev/null
+}
+
 verify_refs_cli() {
   local branches="$1" tags="$2"
   printf '%s\n' cli-earlier earlier main > "$temporary/expected-branches"
@@ -387,6 +400,8 @@ PY
   printf 'cli stage\n' > "$init_repo/-leading"
   "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
   verify_add_cli "$init_repo"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial
+  verify_commit_cli "$init_repo"
 
   "${app_env[@]}" "$gix_binary" -r "$fixture" branch create cli-earlier HEAD^
   "${app_env[@]}" "$gix_binary" -r "$fixture" tag create cli-head
@@ -664,9 +679,11 @@ printf 'cli stage\n' > "$temporary/add-cli-source"
 printf 'put "%s" "%s"\n' "$temporary/add-cli-source" "$guest_root/init/-leading" |
   "${sftp_command[@]}"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init add -- -leading"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial"
 printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |
   "${sftp_command[@]}"
 verify_add_cli "$temporary/guest-add-cli"
+verify_commit_cli "$temporary/guest-add-cli"
 
 start_https_server 192.168.4.1 192.168.4.1
 guest_clone="$guest_root/https-clone"

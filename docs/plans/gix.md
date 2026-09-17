@@ -1156,7 +1156,12 @@ operation-record work. The shared native lifecycle covers initial/second commits
 identity preflight, deleted tree paths, reflogs and ref-lock failure cleanup.
 Host/Motor component gates, selected-toolchain formatting, strict Clippy and
 shell checks pass, with all tested source hashes matching. Evidence is in
-`/tmp/motor-gix-commit-library-d77cc66c`. CLI integration follows separately.
+`/tmp/motor-gix-commit-library-d77cc66c`; the library patch is `27087011`.
+The reviewed CLI exposes `commit -m MSG`, with matching Markdown and developer
+HTML documentation. Its host and Motor smoke runs both produce a repository
+that passes host Git's history, tree and strict integrity checks. The component,
+formatting, strict Clippy and shell gates pass with matching source hashes;
+CLI validation is in `/tmp/motor-gix-commit-cli-27087011`.
 
 ## 8. Discussion record
 
