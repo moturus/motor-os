@@ -104,6 +104,7 @@ impl Guard {
                 return unsupported("repository has no interrupted gix operation");
             }
             (Admission::Recovery, Some(record)) if record.state == State::Ready => {
+                crate::head_ref::require(repo, &record.original)?;
                 return unsupported("ready merge must be committed or aborted");
             }
             (Admission::Recovery, Some(record)) => record.kind == Kind::Merge,
@@ -167,6 +168,24 @@ impl Guard {
         require_operation(&self.operation_path, expected)?;
         fs::remove_file(&self.operation_path)?;
         drop(lock);
+        Ok(())
+    }
+
+    /// Require the recorded merge parent before committing or returning a merge to ready.
+    pub fn require_merge_head(&self, expected: &Record) -> crate::Result {
+        self.require_operation(expected)?;
+        let path = self.operation_path.with_file_name("MERGE_HEAD");
+        if !fs::symlink_metadata(&path)?.is_file() {
+            return unsupported("owned merge state 'MERGE_HEAD' is not a regular file");
+        }
+        let file = gix::features::fs::open_options_no_follow()
+            .read(true)
+            .open(path)?;
+        let expected_bytes = format!("{}\n", expected.target_commit);
+        let actual = gix::features::fs::read_to_end_bounded(&file, expected_bytes.len())?;
+        if actual != expected_bytes.as_bytes() {
+            return unsupported("MERGE_HEAD does not match the recorded merge target");
+        }
         Ok(())
     }
 

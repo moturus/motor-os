@@ -1458,6 +1458,18 @@ properties and retains normal transition coverage. Host/Motor component gates,
 formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-restore-prepare-6910bec8`. Recovery dispatch follows.
 
+M2 recovery dispatch: the independently reviewed command validates recorded objects,
+exact HEAD attachment and relevant branch IDs before restoring or finishing cleanup.
+Incomplete original state uses the shared full-index restore; a published switch or
+fast-forward must have its exact stage-0 result index. Publishing merges either
+retain the published commit or return to ready after validating MERGE_HEAD. Native
+coverage extends the switch lifecycle with moved-branch refusal, original restoration,
+published-update preservation, unchanged branch logs and foreign-lock preservation.
+Host behavior passed initially; one equivalent let-chain simplification satisfied
+strict Clippy. All final host/Motor component gates, formatting and shell checks
+pass with matching source hashes. Original and final evidence is in
+`/tmp/motor-gix-recover-dispatch-3dff257d`. CLI exposure follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

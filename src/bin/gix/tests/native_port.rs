@@ -2068,8 +2068,8 @@ fn check_switch(output: &Path) -> Result {
         repo.find_reference(&fixture.target_ref)?.id(),
         fixture.target_commit
     );
-    assert_eq!(fs::read(main_log)?, branch_logs[0]);
-    assert_eq!(fs::read(target_log)?, branch_logs[1]);
+    assert_eq!(fs::read(&main_log)?, branch_logs[0]);
+    assert_eq!(fs::read(&target_log)?, branch_logs[1]);
     let changed_log = fs::read(log_root.join("HEAD"))?;
     let appended = &changed_log[head_log.len()..];
     assert!(
@@ -2114,11 +2114,88 @@ fn check_switch(output: &Path) -> Result {
     assert_eq!(
         motor_gix::head_ref::capture(&fixture.opened.repo)?,
         Original {
-            reference: Some(fixture.target_ref),
+            reference: Some(fixture.target_ref.clone()),
             id: Some(fixture.target_commit),
         }
     );
     assert_eq!(fs::read(log_root.join("HEAD"))?, changed_log);
+    assert!(!git_dir.join("index.lock").try_exists()?);
+
+    let repo = &fixture.opened.repo;
+    let workdir = repo.workdir().ok_or("switch worktree missing")?;
+    let record_bytes = fs::read(&operation_path)?;
+    let index_before = fs::read(repo.index_path())?;
+    let main_path = git_dir.join(gix::path::from_bstr(main.as_bstr()).as_ref());
+    let main_before = fs::read(&main_path)?;
+    fs::write(&main_path, format!("{}\n", fixture.target_commit))?;
+    let error = motor_gix::recover::run(&fixture.opened, &cancellation)
+        .expect_err("recovery accepted a moved destination branch");
+    assert!(
+        error
+            .to_string()
+            .contains("local branch 'refs/heads/main' changed"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&operation_path)?, record_bytes);
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
+    fs::write(&main_path, main_before)?;
+
+    motor_gix::recover::run(&fixture.opened, &cancellation)?;
+    assert!(!operation_path.try_exists()?);
+    assert_eq!(fs::read(&head_lock)?, b"foreign");
+    assert_eq!(fs::read(log_root.join("HEAD"))?, changed_log);
+    assert_eq!(fs::read(workdir.join("a/b"))?, b"new child\n");
+    let index = repo.open_index()?;
+    assert_eq!(
+        motor_gix::tree_index::write(repo, &index, &cancellation)?,
+        fixture.target_tree
+    );
+    assert!(
+        index
+            .entries()
+            .iter()
+            .all(|entry| entry.stat == Default::default())
+    );
+
+    let published = motor_gix::operation::Record {
+        state: motor_gix::operation::State::Incomplete,
+        kind: motor_gix::operation::Kind::Switch,
+        original: Original {
+            reference: Some(main),
+            id: Some(fixture.original_commit),
+        },
+        target_ref: fixture.target_ref,
+        target_commit: fixture.target_commit,
+        result_tree: fixture.target_tree,
+        intended_commit: None,
+    };
+    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.create_operation(&published)?;
+    drop(guard);
+    let published_index = fs::read(repo.index_path())?;
+    fs::write(
+        workdir.join("a/b"),
+        b"preserve an unstaged edit after publication\n",
+    )?;
+    motor_gix::recover::run(&fixture.opened, &cancellation)?;
+    assert!(!operation_path.try_exists()?);
+    assert_eq!(fs::read(repo.index_path())?, published_index);
+    assert_eq!(
+        fs::read(workdir.join("a/b"))?,
+        b"preserve an unstaged edit after publication\n"
+    );
+    assert_eq!(fs::read(log_root.join("HEAD"))?, changed_log);
+    assert_eq!(fs::read(&head_lock)?, b"foreign");
+    assert_eq!(
+        motor_gix::head_ref::capture(repo)?,
+        Original {
+            reference: Some(published.target_ref),
+            id: Some(fixture.target_commit),
+        }
+    );
+    assert_eq!(fs::read(&main_log)?, branch_logs[0]);
+    assert_eq!(fs::read(&target_log)?, branch_logs[1]);
     assert!(!git_dir.join("index.lock").try_exists()?);
     Ok(())
 }
@@ -2492,7 +2569,8 @@ fn check_operation_record(opened: &motor_gix::repository::OpenedRepository) -> R
     let error = motor_gix::mutation::Guard::acquire_for_recovery(repo)
         .err()
         .ok_or("recovery admitted a ready merge")?;
-    assert!(error.to_string().contains("must be committed or aborted"));
+    // This structurally valid fixture record names a different HEAD; diagnose that first.
+    assert!(error.to_string().contains("HEAD changed"), "{error}");
     fs::remove_file(&path)?;
 
     fs::write(&path, b"version=1\n")?;
