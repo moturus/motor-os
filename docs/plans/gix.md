@@ -1419,6 +1419,15 @@ that no index lock remains. Host/Motor component gates, formatting, strict Clipp
 and shell checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-diff-cli-a04b1424`.
 
+M2 shared installation source observations: the reviewed refactor separates an
+observed file's stat/mode from its original tree entry and extracts one private
+installation body. Normal transitions keep their existing prewrite rechecks;
+recovery can reuse the body without inventing source object IDs or duplicating
+checkout. Existing native late-source-change and collision coverage remains;
+only a representation-specific assertion was removed. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-transition-observed-040e5e57`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

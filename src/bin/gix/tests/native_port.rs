@@ -1638,14 +1638,6 @@ fn check_transition_delta(output: &Path) -> Result {
         &cancellation,
     )?;
     assert_eq!(prepared.target_index.entries().len(), 7);
-    assert!(
-        prepared
-            .changes
-            .iter()
-            .filter(|change| change.original.is_some())
-            .all(|change| change.original_stat.is_some())
-    );
-
     let mut filtered_target = prepared.target_index.clone();
     filtered_target.dangerously_push_entry(
         Default::default(),

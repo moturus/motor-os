@@ -28,11 +28,17 @@ pub struct Snapshot {
 }
 
 #[derive(Debug)]
+struct ObservedFile {
+    stat: Stat,
+    mode: Mode,
+}
+
+#[derive(Debug)]
 pub struct Change {
     pub path: BString,
     pub original: Option<Snapshot>,
     pub target: Option<Snapshot>,
-    pub original_stat: Option<Stat>,
+    observed: Option<ObservedFile>,
 }
 
 /// A repository-only tree delta. Worktree safety has not been preflighted.
@@ -137,7 +143,7 @@ pub fn prepare(
             .changes
             .binary_search_by(|change| change.path.as_bstr().cmp(path))
         {
-            delta.changes[offset].original_stat = Some(stat);
+            delta.changes[offset].observed = Some(ObservedFile { stat, mode });
         }
     }
     cancellation.check()?;
@@ -156,7 +162,7 @@ pub fn install(
     opened: &OpenedRepository,
     guard: &Guard,
     record: &Record,
-    mut prepared: Prepared,
+    prepared: Prepared,
     cancellation: &Cancellation,
 ) -> crate::Result<gix::index::State> {
     cancellation.check()?;
@@ -166,6 +172,24 @@ pub fn install(
     if record.result_tree != prepared.result_tree {
         return Err(invalid("operation result tree does not match the prepared transition").into());
     }
+    install_prepared(
+        opened,
+        guard,
+        record,
+        prepared.target_index,
+        prepared.changes,
+        cancellation,
+    )
+}
+
+fn install_prepared(
+    opened: &OpenedRepository,
+    guard: &Guard,
+    record: &Record,
+    mut target_index: gix::index::State,
+    changes: Vec<Change>,
+    cancellation: &Cancellation,
+) -> crate::Result<gix::index::State> {
     let repo = &opened.repo;
     let workdir = repo
         .workdir()
@@ -180,43 +204,36 @@ pub fn install(
     let mut objects = repo.objects.clone().into_arc()?;
     objects.ignore_replacements = true;
 
-    for (entry, path) in prepared.target_index.entries_mut_with_paths() {
-        let changed = prepared
-            .changes
+    for (entry, path) in target_index.entries_mut_with_paths() {
+        let changed = changes
             .binary_search_by(|change| change.path.as_bstr().cmp(path))
-            .is_ok_and(|offset| prepared.changes[offset].target.is_some());
+            .is_ok_and(|offset| changes[offset].target.is_some());
         if !changed || entry.mode == Mode::COMMIT {
             entry.flags.insert(Flags::SKIP_WORKTREE);
         }
     }
 
-    let target_directories = preflight_changes(repo, &prepared.changes, cancellation)?;
-    for change in prepared
-        .changes
-        .iter()
-        .filter(|change| change.original.is_some())
-    {
+    let target_directories = preflight_changes(repo, &changes, cancellation)?;
+    for change in &changes {
         cancellation.check()?;
-        recheck_original(workdir, change)?;
+        if change.original.is_some() || change.observed.is_some() {
+            recheck_observed(workdir, change)?;
+        }
     }
     cancellation.check()?;
     guard.require_operation(record)?;
 
-    for change in prepared
-        .changes
-        .iter()
-        .filter(|change| change.original.is_some())
-    {
+    for change in changes.iter().filter(|change| change.observed.is_some()) {
         cancellation.check()?;
-        fs::remove_file(recheck_original(workdir, change)?)?;
+        fs::remove_file(recheck_observed(workdir, change)?)?;
     }
     for offset in target_directories {
-        remove_target_directory(workdir, &prepared.changes, offset, cancellation)?;
+        remove_target_directory(workdir, &changes, offset, cancellation)?;
     }
 
     let discard = gix::features::progress::Discard;
     let outcome = gix::worktree::state::checkout(
-        &mut prepared.target_index,
+        &mut target_index,
         workdir,
         objects,
         &discard,
@@ -226,11 +243,11 @@ pub fn install(
     )
     .map_err(|error| cancellation.normalize_error(error.into()))?;
     checkout::check_outcome(&outcome).map_err(|error| cancellation.normalize_error(error))?;
-    for entry in prepared.target_index.entries_mut() {
+    for entry in target_index.entries_mut() {
         entry.flags.remove(Flags::SKIP_WORKTREE);
     }
     cancellation.check()?;
-    Ok(prepared.target_index)
+    Ok(target_index)
 }
 
 fn ensure_original_index(
@@ -320,7 +337,7 @@ fn collect_changes(
             path,
             original: before,
             target: after,
-            original_stat: None,
+            observed: None,
         });
     }
     Ok(out)
@@ -391,21 +408,18 @@ fn preflight_changes(
             reject_directory_contents(&absolute, workdir, changes, cancellation)?;
             target_directories.try_reserve(1)?;
             target_directories.push(offset);
-        } else if !metadata.is_file() || !change.original.is_some_and(|entry| ordinary(entry.mode))
-        {
+        } else if !metadata.is_file() || !has_removable_source(change) {
             return Err(obstruction(target, "would be overwritten").into());
         }
     }
     Ok(target_directories)
 }
 
-fn recheck_original(workdir: &Path, change: &Change) -> crate::Result<PathBuf> {
-    let original = change
-        .original
-        .ok_or_else(|| invalid("changed original entry is missing"))?;
-    let expected_stat = change
-        .original_stat
-        .ok_or_else(|| invalid("changed original entry has no observed stat"))?;
+fn recheck_observed(workdir: &Path, change: &Change) -> crate::Result<PathBuf> {
+    let observed = change
+        .observed
+        .as_ref()
+        .ok_or_else(|| invalid("changed source entry has no observation"))?;
     let path = change.path.as_bstr();
     let absolute = workdir.join(gix::path::from_bstr(path).as_ref());
     let Some(path_metadata) = selection::checked_symlink_metadata(workdir, path)? else {
@@ -421,14 +435,14 @@ fn recheck_original(workdir: &Path, change: &Change) -> crate::Result<PathBuf> {
         .into());
     }
     let actual_stat = Stat::from_fs(&metadata)?;
-    let actual_mode = if original.mode == Mode::SYMLINK {
+    let actual_mode = if observed.mode == Mode::SYMLINK {
         Mode::SYMLINK
     } else if metadata.is_executable() {
         Mode::FILE_EXECUTABLE
     } else {
         Mode::FILE
     };
-    if actual_stat != expected_stat || actual_mode != original.mode {
+    if actual_stat != observed.stat || actual_mode != observed.mode {
         return Err(path_error(
             io::ErrorKind::InvalidData,
             path,
@@ -539,12 +553,15 @@ fn repository_path(workdir: &Path, path: &Path) -> crate::Result<BString> {
 fn removable(changes: &[Change], path: &BStr) -> bool {
     changes
         .binary_search_by(|change| change.path.as_bstr().cmp(path))
-        .is_ok_and(|offset| {
-            changes[offset]
-                .original
-                .is_some_and(|entry| ordinary(entry.mode))
-                && changes[offset].target.is_none()
-        })
+        .is_ok_and(|offset| removable_change(&changes[offset]))
+}
+
+fn removable_change(change: &Change) -> bool {
+    change.target.is_none() && has_removable_source(change)
+}
+
+fn has_removable_source(change: &Change) -> bool {
+    change.observed.is_some() || change.original.is_some_and(|entry| ordinary(entry.mode))
 }
 
 fn has_removable_descendant(changes: &[Change], parent: &BStr) -> crate::Result<bool> {
@@ -557,9 +574,7 @@ fn has_removable_descendant(changes: &[Change], parent: &BStr) -> crate::Result<
     Ok(changes[offset..]
         .iter()
         .take_while(|change| change.path.starts_with(prefix.as_slice()))
-        .any(|change| {
-            change.original.is_some_and(|entry| ordinary(entry.mode)) && change.target.is_none()
-        }))
+        .any(removable_change))
 }
 
 fn ordinary(mode: Mode) -> bool {
