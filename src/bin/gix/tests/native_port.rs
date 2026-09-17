@@ -2516,6 +2516,78 @@ fn check_commit(output: &Path) -> Result {
     assert_eq!(opened.repo.head_id()?.detach(), second);
     assert_eq!(fs::read(opened.repo.index_path())?, conflicted_index);
     assert!(!repository.join(".git/index.lock").try_exists()?);
+
+    use motor_gix::operation::{Kind, Record, State};
+    let original = motor_gix::head_ref::capture(&opened.repo)?;
+    let target_ref = original
+        .reference
+        .clone()
+        .ok_or("commit fixture HEAD is detached")?;
+    let merge_target = opened
+        .repo
+        .new_commit("ready target", initial_tree.id().detach(), [initial])?
+        .id;
+    let incomplete = Record {
+        state: State::Incomplete,
+        kind: Kind::Merge,
+        original,
+        target_ref,
+        target_commit: merge_target,
+        result_tree: second_tree.id().detach(),
+        intended_commit: None,
+    };
+    let guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.create_operation(&incomplete)?;
+    let operation_path = opened
+        .repo
+        .git_dir()
+        .join(motor_gix::mutation::OPERATION_FILE);
+    let merge_head = repository.join(".git/MERGE_HEAD");
+    let merge_message = repository.join(".git/MERGE_MSG");
+    fs::write(&merge_head, format!("{merge_target}\n"))?;
+    fs::write(&merge_message, b"ready merge\n")?;
+    let mut ready = incomplete.clone();
+    ready.state = State::Ready;
+    guard.replace_operation(&incomplete, &ready)?;
+    drop(guard);
+    let error = motor_gix::mutation::Guard::acquire(&opened.repo)
+        .err()
+        .ok_or("ordinary mutation admitted a ready merge")?;
+    assert!(error.to_string().contains("merge ready"), "{error}");
+
+    fs::write(repository.join("conflict"), b"resolved ready merge\n")?;
+    fs::write(&merge_head, format!("{second}\n"))?;
+    let index_before = fs::read(opened.repo.index_path())?;
+    let error = motor_gix::add::run(&opened, false, &["conflict".into()], &cancellation)
+        .expect_err("add accepted a mismatched ready MERGE_HEAD");
+    assert!(error.to_string().contains("does not match"), "{error}");
+    assert_eq!(fs::read(opened.repo.index_path())?, index_before);
+
+    fs::write(&merge_head, format!("{merge_target}\n"))?;
+    motor_gix::add::run(&opened, false, &["conflict".into()], &cancellation)?;
+    let index = opened.repo.open_index()?;
+    let range = index
+        .entry_range(b"conflict".as_bstr())
+        .ok_or("resolved ready conflict is missing")?;
+    assert_eq!(range.len(), 1);
+    let entry = &index.entries()[range.start];
+    assert_eq!(entry.stage(), Stage::Unconflicted);
+    assert_eq!(
+        opened.repo.find_blob(entry.id)?.data,
+        b"resolved ready merge\n"
+    );
+    assert_eq!(
+        motor_gix::operation::read(&operation_path)?,
+        Some(ready.clone())
+    );
+    let (guard, observed) = motor_gix::mutation::Guard::acquire_ready_merge(&opened.repo)?;
+    assert_eq!(observed, ready);
+    guard.cleanup_operation(&observed, &cancellation)?;
+    assert!(
+        !operation_path.try_exists()?
+            && !merge_head.try_exists()?
+            && !merge_message.try_exists()?
+    );
     Ok(())
 }
 

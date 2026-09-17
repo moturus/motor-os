@@ -5,6 +5,8 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
+use crate::cancellation::Cancellation;
+
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +176,65 @@ pub fn read(path: &Path) -> io::Result<Option<Record>> {
             )
         })?;
     parse(&data).map(Some)
+}
+
+/// Require every object named by an operation record to retain its recorded type and hash.
+pub(crate) fn require_objects(
+    repo: &gix::Repository,
+    record: &Record,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    if let Some(id) = record.original.id {
+        checked_object(repo, id, cancellation)?
+            .try_into_commit()?
+            .decode()?;
+    }
+    let target = checked_object(repo, record.target_commit, cancellation)?.try_into_commit()?;
+    let target_tree = target.decode()?.tree();
+    checked_object(repo, record.result_tree, cancellation)?
+        .try_into_tree()?
+        .decode()?;
+    if record.kind != Kind::Merge && target_tree != record.result_tree {
+        return Err(object_invalid("recorded result tree does not match the target commit").into());
+    }
+    if let Some(id) = record.intended_commit {
+        let intended = checked_object(repo, id, cancellation)?.try_into_commit()?;
+        let decoded = intended.decode()?;
+        let parents = [
+            record
+                .original
+                .id
+                .expect("publishing merge has a born original"),
+            record.target_commit,
+        ];
+        if !decoded.parents().eq(parents) {
+            return Err(
+                object_invalid("recorded intended commit has different merge parents").into(),
+            );
+        }
+    }
+    cancellation.check()
+}
+
+fn checked_object<'repo>(
+    repo: &'repo gix::Repository,
+    id: gix::ObjectId,
+    cancellation: &Cancellation,
+) -> crate::Result<gix::Object<'repo>> {
+    cancellation.check()?;
+    let object = repo.find_object(id)?;
+    if gix::objs::compute_hash(repo.object_hash(), object.kind, &object.data)? != id {
+        return Err(object_invalid(format!(
+            "recorded object {id} has a mismatched content hash"
+        ))
+        .into());
+    }
+    cancellation.check()?;
+    Ok(object)
+}
+
+fn object_invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 pub(crate) fn validate_transition(current: &Record, next: &Record) -> io::Result<()> {

@@ -4,7 +4,7 @@ use crate::{
     cancellation::Cancellation,
     head_ref,
     mutation::Guard,
-    operation::{Kind, Original, Record, State},
+    operation::{self, Kind, Original, Record, State},
     repository::OpenedRepository,
     transition,
 };
@@ -14,7 +14,7 @@ pub fn run(opened: &OpenedRepository, cancellation: &Cancellation) -> crate::Res
     cancellation.check()?;
     let repo = &opened.repo;
     let (mut guard, record) = Guard::acquire_for_recovery(repo)?;
-    validate_objects(repo, &record, cancellation)?;
+    operation::require_objects(repo, &record, cancellation)?;
     require_switch_branches(repo, &record)?;
     let observed = head_ref::capture(repo)?;
     let published = Original {
@@ -91,58 +91,6 @@ fn require_switch_branches(repo: &gix::Repository, record: &Record) -> crate::Re
         }
     }
     Ok(())
-}
-
-fn validate_objects(
-    repo: &gix::Repository,
-    record: &Record,
-    cancellation: &Cancellation,
-) -> crate::Result {
-    if let Some(id) = record.original.id {
-        checked_object(repo, id, cancellation)?
-            .try_into_commit()?
-            .decode()?;
-    }
-    let target = checked_object(repo, record.target_commit, cancellation)?.try_into_commit()?;
-    let target_tree = target.decode()?.tree();
-    checked_object(repo, record.result_tree, cancellation)?
-        .try_into_tree()?
-        .decode()?;
-    if record.kind != Kind::Merge && target_tree != record.result_tree {
-        return Err(invalid("recorded result tree does not match the target commit").into());
-    }
-    if let Some(id) = record.intended_commit {
-        let intended = checked_object(repo, id, cancellation)?.try_into_commit()?;
-        let decoded = intended.decode()?;
-        let parents = [
-            record
-                .original
-                .id
-                .expect("publishing merge has a born original"),
-            record.target_commit,
-        ];
-        if !decoded.parents().eq(parents) {
-            return Err(invalid("recorded intended commit has different merge parents").into());
-        }
-    }
-    cancellation.check()
-}
-
-fn checked_object<'repo>(
-    repo: &'repo gix::Repository,
-    id: gix::ObjectId,
-    cancellation: &Cancellation,
-) -> crate::Result<gix::Object<'repo>> {
-    cancellation.check()?;
-    let object = repo.find_object(id)?;
-    if gix::objs::compute_hash(repo.object_hash(), object.kind, &object.data)? != id {
-        return Err(invalid(format!(
-            "recorded object {id} has a mismatched content hash"
-        ))
-        .into());
-    }
-    cancellation.check()?;
-    Ok(object)
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

@@ -1493,6 +1493,15 @@ published state. This coherent preparation/graph patch slightly exceeds the usua
 checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-merge-prepare-e02b957e`. Installation and merge publication follow.
 
+M2 ready-merge staging: the reviewed guard admits only idle or ready state for
+add/commit while ordinary mutation still refuses every record. Shared record-object
+validation moved from recovery; add validates exact Ready state, objects, original
+HEAD and MERGE_HEAD before preparation and immediately before index publication.
+The existing conflict lifecycle checks mismatched MERGE_HEAD with unchanged index,
+stage-zero resolution and exact record retention. All host/Motor component gates,
+formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-ready-add-16a0e561`. Ready commit and abort follow.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

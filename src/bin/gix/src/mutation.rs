@@ -45,6 +45,22 @@ impl Guard {
         Ok(guard)
     }
 
+    /// Acquire an ordinary index edit, admitting an installed ready merge when present.
+    pub fn acquire_for_ready_mutation(
+        repo: &gix::Repository,
+    ) -> crate::Result<(Self, Option<Record>)> {
+        Self::acquire_with(repo, Admission::ReadyMutation)
+    }
+
+    /// Acquire a ready merge for an operation such as abort.
+    pub fn acquire_ready_merge(repo: &gix::Repository) -> crate::Result<(Self, Record)> {
+        let (guard, record) = Self::acquire_for_ready_mutation(repo)?;
+        let Some(record) = record else {
+            return unsupported("repository has no ready merge");
+        };
+        Ok((guard, record))
+    }
+
     /// Acquire the mutation locks for an interrupted operation which recovery may finish.
     pub fn acquire_for_recovery(repo: &gix::Repository) -> crate::Result<(Self, Record)> {
         let (guard, record) = Self::acquire_with(repo, Admission::Recovery)?;
@@ -99,7 +115,14 @@ impl Guard {
                     record.description()
                 ));
             }
-            (Admission::Ordinary, None) => false,
+            (Admission::Ordinary, None) | (Admission::ReadyMutation, None) => false,
+            (Admission::ReadyMutation, Some(record)) if record.state == State::Ready => true,
+            (Admission::ReadyMutation, Some(record)) => {
+                return unsupported(format!(
+                    "repository has unfinished gix {} operation",
+                    record.description()
+                ));
+            }
             (Admission::Recovery, None) => {
                 return unsupported("repository has no interrupted gix operation");
             }
@@ -169,6 +192,24 @@ impl Guard {
         fs::remove_file(&self.operation_path)?;
         drop(lock);
         Ok(())
+    }
+
+    /// Require the exact live state of an installed merge before editing or committing it.
+    pub(crate) fn require_ready_merge(
+        &self,
+        repo: &gix::Repository,
+        expected: &Record,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> crate::Result {
+        cancellation.check()?;
+        if expected.kind != Kind::Merge || expected.state != State::Ready {
+            return unsupported("operation is not a ready merge");
+        }
+        self.require_operation(expected)?;
+        operation::require_objects(repo, expected, cancellation)?;
+        crate::head_ref::require(repo, &expected.original)?;
+        self.require_merge_head(expected)?;
+        cancellation.check()
     }
 
     /// Require the recorded merge parent before committing or returning a merge to ready.
@@ -269,6 +310,7 @@ impl Guard {
 #[derive(Clone, Copy)]
 enum Admission {
     Ordinary,
+    ReadyMutation,
     Recovery,
 }
 

@@ -46,7 +46,10 @@ pub fn run(
     };
 
     cancellation.check()?;
-    let mut guard = Guard::acquire(repo)?;
+    let (mut guard, ready) = Guard::acquire_for_ready_mutation(repo)?;
+    if let Some(record) = ready.as_ref() {
+        guard.require_ready_merge(repo, record, cancellation)?;
+    }
     let candidates = selection::enumerate(repo, guard.index(), &selection, cancellation)?;
     let mut classified = BTreeMap::<BString, Candidate>::new();
     for path in candidates {
@@ -135,6 +138,9 @@ pub fn run(
     }
 
     cancellation.check()?;
+    if let Some(record) = ready.as_ref() {
+        guard.require_ready_merge(repo, record, cancellation)?;
+    }
     guard.publish_edited_index(move |index| {
         index.remove_entries(|_, path, _| prepared.contains_key(path));
         for (path, change) in prepared {
