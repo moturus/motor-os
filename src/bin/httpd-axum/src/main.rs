@@ -10,6 +10,7 @@ mod cache_response;
 mod cache_store;
 mod connections;
 mod redirect;
+mod rejections;
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CacheMode {
@@ -42,7 +43,7 @@ struct Args {
     #[arg(long, requires = "ssl_cert")]
     http_redirect_url: Option<redirect::RedirectUrl>,
 
-    /// Maximum admitted TCP connections, including TLS handshakes and idle clients.
+    /// Maximum TCP connections per listener, including TLS handshakes and idle clients.
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
 
@@ -116,7 +117,7 @@ async fn main() -> std::io::Result<()> {
         },
     ));
 
-    let admission = connections::ConnectionLimit::new(args.max_active_connections.get());
+    let admission = connections::ConnectionLimit::new(args.max_active_connections.get(), "content");
     let deadline = std::time::Duration::from_secs(args.max_header_deadline_sec.get().into());
     if let Some(ssl_cert) = args.ssl_cert.as_ref() {
         rustls::crypto::ring::default_provider()
@@ -141,7 +142,13 @@ async fn main() -> std::io::Result<()> {
                 )
             })?;
             let mut server = axum_server::from_tcp(redirect_listener).acceptor(
-                connections::HeaderDeadline::new(admission.clone(), deadline),
+                connections::HeaderDeadline::new(
+                    connections::ConnectionLimit::new(
+                        args.max_active_connections.get(),
+                        "redirect",
+                    ),
+                    deadline,
+                ),
             );
             configure_headers(&mut server, deadline);
             Some((server, url.router(), address))

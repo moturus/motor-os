@@ -48,7 +48,10 @@ fn main() {
         request(&mut BufReader::new(limited.connect()), "GET", "/", "").status,
         200
     );
-    limited.stop();
+    let logs = limited.stop();
+    assert!(logs.contains("active connection limit reached"), "{logs}");
+    assert!(logs.contains("listener=\"content\""), "{logs}");
+    assert!(logs.contains("refused=1"), "{logs}");
     let server = Server::start(None, &["--cache=off"]);
     let mut io = BufReader::new(server.connect());
     let response = request(&mut io, "GET", "/", "");

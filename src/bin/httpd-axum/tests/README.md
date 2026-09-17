@@ -23,9 +23,11 @@ an existing executable. Keep the server and its test executable from the same bu
 
 This standalone gate does not build an OS image or invoke the full-system suite.
 
-`--max-active-connections` defaults to 128 and counts HTTP connections, idle
+`--max-active-connections` defaults to 128 per listener and counts HTTP connections, idle
 keep-alive connections, and TLS handshakes. Excess connections close immediately.
-The HTTP tests exercise admission, rejection, and release with a limit of one.
+The first refusal logs a warning to stdout identifying the listener and limit.
+Further refusals are counted and reported at most every five seconds on a new
+refusal. The HTTP tests exercise admission, rejection, and release with a limit of one.
 
 `--max-header-deadline-sec` defaults to 10. It limits the first complete request
 head (after TLS handshaking, if enabled), then each HTTP/1.1 header read,
@@ -44,12 +46,12 @@ listener on the same bind IP; it requires TLS credentials and `--addr` on port
 Incoming Host/forwarding headers, paths and queries do not affect the destination.
 The configured URL may contain its own port, path, query and fragment; it must
 be an absolute HTTPS URL without credentials, with non-ASCII characters escaped.
-Without the flag no additional listener opens. Both listeners share the connection
-budget and header deadlines, and startup fails if either required port cannot bind.
+Without the flag no additional listener opens. Both listeners have independent connection
+budgets and use the same header deadline setting, and startup fails if either required port cannot bind.
 
 `--test redirect` checks fixed responses without binding sockets. The `http` test
 automatically exercises real ports 80 and 443 on Motor OS, including disabled
-redirects, occupied port 80, exact Location, HTTPS content, shared admission and
+redirects, occupied port 80, exact Location, HTTPS content, independent admission and
 deadlines. Run that test alone in the disposable VM with those ports free. Host
 runs can enable the same checks with `HTTPD_AXUM_REDIRECT_TESTS=1` when the process
 has permission to bind both ports; regular host HTTP tests use ephemeral ports.

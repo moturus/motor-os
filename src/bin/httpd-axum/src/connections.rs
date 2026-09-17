@@ -4,21 +4,31 @@ use std::io;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 
 #[derive(Clone)]
-pub struct ConnectionLimit(Arc<Semaphore>);
+pub struct ConnectionLimit {
+    permits: Arc<Semaphore>,
+    rejections: Arc<Mutex<crate::rejections::Rejections>>,
+    listener: &'static str,
+    limit: u32,
+}
 
 impl ConnectionLimit {
-    pub fn new(limit: u32) -> Self {
-        Self(Arc::new(Semaphore::new(limit as usize)))
+    pub fn new(limit: u32, listener: &'static str) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(limit as usize)),
+            rejections: Arc::default(),
+            listener,
+            limit,
+        }
     }
 }
 
@@ -31,11 +41,19 @@ impl<S> Accept<TcpStream, S> for ConnectionLimit {
         ready((|| {
             // Admission happens before TLS handshaking. No waiter queue retains
             // excess connections, and the permit follows the stream's lifetime.
-            let permit = self
-                .0
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| io::Error::other("active connection limit reached"))?;
+            let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
+                let report = self.rejections.lock().unwrap().record(Instant::now());
+                if let Some((refused, total_refused)) = report {
+                    tracing::warn!(
+                        listener = self.listener,
+                        limit = self.limit,
+                        refused,
+                        total_refused,
+                        "active connection limit reached"
+                    );
+                }
+                io::Error::other("active connection limit reached")
+            })?;
             stream.set_nodelay(true)?;
             Ok((
                 Admitted {

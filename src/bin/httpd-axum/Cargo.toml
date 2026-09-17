@@ -36,6 +36,11 @@ name = "redirect"
 path = "tests/redirect.rs"
 harness = false
 
+[[test]]
+name = "rejections"
+path = "tests/rejections.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"

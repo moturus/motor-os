@@ -73,8 +73,6 @@ pub fn check() {
             DESTINATION,
             "--max-active-connections",
             "1",
-            "--max-header-deadline-sec",
-            "1",
         ],
         HTTPS,
     );
@@ -95,8 +93,40 @@ pub fn check() {
             assert!(response.body.is_empty());
         }
     }
-    // A redirect connection consumes the same budget as a TLS connection.
+    // Each listener rejects excess connections without starving the other.
+    assert_closed(&mut connect_http());
+    let mut secure = connect_https(&server);
+    let response = request(&mut secure, "GET", "/", "");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"test content\n");
     assert_closed(&mut server.connect());
+    request(&mut plain, "GET", "/", "Connection: close\r\n");
+    assert_closed(&mut plain);
+    let mut replacement = BufReader::new(connect_http());
+    assert_eq!(
+        request(&mut replacement, "GET", "/", "Connection: close\r\n").status,
+        308
+    );
+    assert_closed(&mut replacement);
+    request(&mut secure, "GET", "/", "Connection: close\r\n");
+    assert_closed(&mut secure);
+    server.stop();
+
+    // Deliberately short deadlines are confined to stalled-client scenarios.
+    let mut server = Server::start_tls_at(
+        None,
+        &[
+            "--http-redirect-url",
+            DESTINATION,
+            "--max-active-connections",
+            "1",
+            "--max-header-deadline-sec",
+            "1",
+        ],
+        HTTPS,
+    );
+    assert!(server.next_log().contains("HTTP redirect on 127.0.0.1:80"));
+    let mut plain = BufReader::new(connect_http());
     plain
         .get_mut()
         .write_all(b"GET / HTTP/1.1\r\nHost:")
@@ -107,7 +137,6 @@ pub fn check() {
     let response = request(&mut secure, "GET", "/", "");
     assert_eq!(response.status, 200);
     assert_eq!(response.body, b"test content\n");
-    assert_closed(&mut connect_http());
     secure
         .get_mut()
         .write_all(b"GET / HTTP/1.1\r\nHost:")
