@@ -25,14 +25,14 @@ impl Default for Change {
 }
 
 pub struct Report {
-    operation: Option<&'static str>,
+    operation: Option<String>,
     changes: BTreeMap<BString, Change>,
 }
 
 impl Report {
     pub fn write_to(&self, mut out: impl Write, cancellation: &Cancellation) -> crate::Result {
         cancellation.check()?;
-        if let Some(operation) = self.operation {
+        if let Some(operation) = &self.operation {
             writeln!(out, "operation {operation}")?;
         }
         for (path, change) in &self.changes {
@@ -153,7 +153,7 @@ pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate:
 
     Ok(Report {
         operation: mutation::owned_operation(repo.git_dir())?
-            .or_else(|| repo.state().map(operation_name)),
+            .or_else(|| repo.state().map(|state| operation_name(state).to_owned())),
         changes,
     })
 }

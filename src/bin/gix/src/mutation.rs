@@ -7,9 +7,12 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
+use crate::operation;
+
 pub const OPERATION_LOCK_FILE: &str = "gix-operation-lock";
 pub const OPERATION_FILE: &str = "gix-operation";
 pub const INCOMPLETE_CLONE_FILE: &str = "gix-incomplete-clone";
+const OPERATION_UPDATE_LOCK_FILE: &str = "gix-operation.lock";
 
 const INDEX_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 
@@ -66,6 +69,15 @@ impl Guard {
             gix::lock::acquire::Fail::Immediately,
             None,
         )?;
+        if exists(&repo.git_dir().join(OPERATION_UPDATE_LOCK_FILE))? {
+            return unsupported("repository has a stale gix operation update lock");
+        }
+        if let Some(record) = operation::read(&repo.git_dir().join(OPERATION_FILE))? {
+            return unsupported(format!(
+                "repository has unfinished gix {} operation",
+                record.description()
+            ));
+        }
         reject_operation_state(repo.git_dir())?;
         validate_repository(repo)?;
 
@@ -292,10 +304,10 @@ fn validate_index(index: &gix::index::File) -> crate::Result {
 }
 
 fn reject_operation_state(git_dir: &Path) -> crate::Result {
-    for name in [OPERATION_FILE, INCOMPLETE_CLONE_FILE] {
-        if exists(&git_dir.join(name))? {
-            return unsupported(format!("repository has unfinished gix state '{name}'"));
-        }
+    if exists(&git_dir.join(INCOMPLETE_CLONE_FILE))? {
+        return unsupported(format!(
+            "repository has unfinished gix state '{INCOMPLETE_CLONE_FILE}'"
+        ));
     }
     for name in FOREIGN_OPERATIONS {
         if exists(&git_dir.join(name))? {
@@ -307,16 +319,11 @@ fn reject_operation_state(git_dir: &Path) -> crate::Result {
     Ok(())
 }
 
-pub(crate) fn owned_operation(git_dir: &Path) -> io::Result<Option<&'static str>> {
-    for (file, name) in [
-        (INCOMPLETE_CLONE_FILE, "incomplete-clone"),
-        (OPERATION_FILE, "interrupted"),
-    ] {
-        if exists(&git_dir.join(file))? {
-            return Ok(Some(name));
-        }
+pub(crate) fn owned_operation(git_dir: &Path) -> io::Result<Option<String>> {
+    if exists(&git_dir.join(INCOMPLETE_CLONE_FILE))? {
+        return Ok(Some("incomplete-clone".into()));
     }
-    Ok(None)
+    Ok(operation::read(&git_dir.join(OPERATION_FILE))?.map(|record| record.description()))
 }
 
 fn reject_non_file(path: &Path) -> crate::Result {

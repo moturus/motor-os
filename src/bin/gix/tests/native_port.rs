@@ -1167,15 +1167,41 @@ fn check_mutation(output: &Path) -> Result {
     assert_eq!(fs::read(git_dir.join("index.lock"))?, b"foreign");
     fs::remove_file(git_dir.join("index.lock"))?;
 
-    for (name, expected) in [
-        (motor_gix::mutation::OPERATION_FILE, "unfinished gix state"),
-        ("MERGE_HEAD", "unsupported operation state"),
-    ] {
-        let marker = git_dir.join(name);
-        fs::write(&marker, [])?;
-        expect_guard_rejected(&opened.repo, expected)?;
-        fs::remove_file(marker)?;
-    }
+    let operation_path = git_dir.join(motor_gix::mutation::OPERATION_FILE);
+    let branch = b"refs/heads/non-utf8-\xff".as_bstr();
+    let mut operation = b"version=1\nstate=incomplete\nkind=merge\noriginal-ref=".to_vec();
+    operation.extend_from_slice(branch);
+    operation
+        .extend_from_slice(b"\noriginal-id=1111111111111111111111111111111111111111\ntarget-ref=");
+    operation.extend_from_slice(branch);
+    operation.extend_from_slice(b"\ntarget-commit=2222222222222222222222222222222222222222\nresult-tree=3333333333333333333333333333333333333333\nintended-commit=-\n");
+    fs::write(&operation_path, &operation)?;
+    let parsed = motor_gix::operation::read(&operation_path)?.ok_or("operation record missing")?;
+    assert_eq!(
+        parsed
+            .original
+            .reference
+            .as_ref()
+            .ok_or("original reference missing")?
+            .as_bstr(),
+        branch
+    );
+    assert_eq!(parsed.target_ref.as_bstr(), branch);
+    assert_eq!(parsed.description(), "merge incomplete");
+    expect_guard_rejected(&opened.repo, "merge incomplete")?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut status = Vec::new();
+    motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
+    assert!(status.starts_with(b"operation merge incomplete\n"));
+    fs::write(&operation_path, b"version=1\n")?;
+    expect_guard_rejected(&opened.repo, "invalid gix operation record")?;
+    assert!(motor_gix::status::collect(&opened, &cancellation).is_err());
+    fs::remove_file(operation_path)?;
+
+    let marker = git_dir.join("MERGE_HEAD");
+    fs::write(&marker, [])?;
+    expect_guard_rejected(&opened.repo, "unsupported operation state")?;
+    fs::remove_file(marker)?;
     let promisor = alternate.join("pack/fixture.promisor");
     fs::write(&promisor, [])?;
     expect_guard_rejected(&opened.repo, "promisor packs")?;

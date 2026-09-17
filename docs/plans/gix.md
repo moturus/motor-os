@@ -1202,6 +1202,16 @@ Host/Motor CLI smoke checks and host Git verification pass, along with formattin
 strict Clippy and shell checks; all tested source hashes match. CLI evidence is
 in `/tmp/motor-gix-restore-cli-236d895d`.
 
+M2 operation-record reader: the reviewed 64 KiB bounded, versioned format
+preserves raw validated reference bytes and checks record structure, including
+state/kind consistency and the branch advanced by merge/fast-forward. Status
+reports the recorded kind/state; ordinary mutation refuses pending or malformed
+records and retained update locks. The shared native lifecycle covers exact
+non-UTF-8 names, status, admission and malformed records. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-operation-read-298b4010`. Live object/ref validation
+belongs to the later transition/recovery commands.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
