@@ -1,11 +1,11 @@
 # Vsock lifecycle and dispatch review fixes
 
-Status: approved on 2026-09-16; implementation in progress.
+Status: completed on 2026-09-16; all fixes committed and final gate passed.
 
 Reviewed HEAD: `05f24d91`. The working tree was clean before this document.
 This follow-up addresses the three findings reported after implementation of
-[the vsock plan](vsock.md). The review below is based on source inspection;
-no new runtime reproduction or validation pass is claimed.
+[the vsock plan](vsock.md). The initial review below was based on source
+inspection; subsequent reproductions and validation are recorded below.
 
 ## Findings
 
@@ -180,6 +180,8 @@ the narrow accept race distinctly from the broader lifecycle test results.
 
 ## Progress and evidence
 
+The entries below are a chronological implementation and validation record.
+
 The client-death fix is implemented and focused-tested. The regression keeps
 an accepted stream, an outgoing stream, and the existing pending accepts/page
 owners alive after polling an empty receive. Leaving `block_on` ends adaptive
@@ -271,3 +273,31 @@ native TCP/UDP tests, formatting, and targeted Clippy passed without new
 warnings. Evidence is `owner-{build,clippy,vsock,native}-{debug,release}.log`
 in `/tmp/vsock-review-gate.zw7gYT`. All code fixes are ready for the frozen
 final gate.
+
+## Final validation
+
+The frozen-source gate passed on 2026-09-16 at `53d8750b`:
+
+- Three debug and three release build/full-test cycles on QEMU using
+  `src/tests/full-test.sh`, with all existing phases enabled.
+- One focused `src/tests/test-vsock.sh` run in each profile on Cloud
+  Hypervisor and Firecracker. All 20 peer cases and discovery checks passed
+  on every VMM/profile, including all five new regression markers.
+- All 696 recorded source hashes matched after the gate; the starting and
+  ending worktrees were clean. No nonzero active-thread-drop, unknown-socket,
+  or sys-io panic diagnostic was found in the six full-run logs.
+
+Every full-test invocation passed. The outer verification wrapper initially
+rejected the first run's PASS marker because of its leading carriage return.
+Only that log-matching check was corrected; the completed run was preserved
+and verified, then the five remaining runs proceeded. No OS test was retried,
+timeout extended, assertion weakened, or failure ignored.
+
+Evidence is in `/tmp/vsock-review-gate.zw7gYT/`: `final-gate.log` preserves
+the initial wrapper stop, `final-gate-resumed.log` records completion,
+`final-full-test-qemu-{debug,release}-{1,2,3}.log` holds the full runs, and
+`final-vsock-{chv,fc}-{debug,release}.log` holds the other VMM checks.
+`final-tested-source.sha256` and `final-source-verification.log` record
+the frozen-source comparison. This completion update changes documentation
+only. The exact narrow accept-assertion interleavings remain source-confirmed,
+not claimed as runtime reproductions.
