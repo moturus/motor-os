@@ -8,6 +8,7 @@ pub mod curl;
 pub mod curl_capture;
 pub mod diff_input;
 pub mod fetch;
+pub mod head_ref;
 pub mod http;
 pub mod http_request;
 pub mod https_url;

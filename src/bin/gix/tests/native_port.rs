@@ -77,6 +77,7 @@ fn main() -> Result {
     fs::create_dir(&worktree)?;
 
     check_refs(&fixture)?;
+    check_head_ref(&output)?;
     let opened = motor_gix::repository::open(&fixture, &[], false)?;
     let repo = &opened.repo;
     let hash = gix::hash::Kind::Sha1;
@@ -2294,5 +2295,78 @@ fn expect_restore_rejected(
     assert!(error.to_string().contains(expected), "{error}");
     assert_eq!(fs::read(opened.repo.index_path())?, before);
     assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_head_ref(output: &Path) -> Result {
+    use motor_gix::operation::Original;
+
+    let repository = output.join("head-ref-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    let opened = motor_gix::repository::open(
+        &repository,
+        &["user.name=Native Test", "user.email=native@example.com"],
+        false,
+    )?;
+    let main: gix::refs::FullName = "refs/heads/main".try_into()?;
+    let unborn = Original {
+        reference: Some(main.clone()),
+        id: None,
+    };
+    assert_eq!(motor_gix::head_ref::capture(&opened.repo)?, unborn);
+    motor_gix::head_ref::require(&opened.repo, &unborn)?;
+
+    fs::write(repository.join("tracked"), b"content\n")?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "head fixture", &cancellation)?;
+    let commit = opened.repo.head_id()?.detach();
+    let attached = Original {
+        reference: Some(main.clone()),
+        id: Some(commit),
+    };
+    assert_eq!(motor_gix::head_ref::capture(&opened.repo)?, attached);
+    assert_eq!(
+        motor_gix::head_ref::existing_local_branch(&opened.repo, "main")?,
+        (main.clone(), commit)
+    );
+
+    let head_path = opened.repo.git_dir().join("HEAD");
+    fs::write(&head_path, format!("{commit}\n"))?;
+    let detached = Original {
+        reference: None,
+        id: Some(commit),
+    };
+    assert_eq!(motor_gix::head_ref::capture(&opened.repo)?, detached);
+    assert!(motor_gix::head_ref::require(&opened.repo, &attached).is_err());
+
+    let tree = opened.repo.find_commit(commit)?.tree_id()?.detach();
+    fs::write(&head_path, format!("{tree}\n"))?;
+    assert!(
+        motor_gix::head_ref::capture(&opened.repo).is_err(),
+        "a detached non-commit HEAD was accepted"
+    );
+    fs::write(&head_path, b"ref: refs/heads/main\n")?;
+    motor_gix::head_ref::require(&opened.repo, &attached)?;
+
+    fs::write(
+        opened.repo.git_dir().join("refs/heads/symbolic"),
+        b"ref: refs/heads/main\n",
+    )?;
+    assert!(
+        motor_gix::head_ref::existing_local_branch(&opened.repo, "symbolic").is_err(),
+        "a symbolic local branch was followed"
+    );
+    fs::write(&head_path, b"ref: refs/tags/not-a-branch\n")?;
+    assert!(
+        motor_gix::head_ref::capture(&opened.repo).is_err(),
+        "HEAD attached outside the local-branch namespace was accepted"
+    );
+    fs::write(&head_path, b"ref: refs/heads/main\n")?;
     Ok(())
 }

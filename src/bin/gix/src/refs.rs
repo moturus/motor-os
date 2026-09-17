@@ -91,7 +91,7 @@ pub fn create(
     Ok(())
 }
 
-fn qualified_name(kind: Kind, name: &str) -> crate::Result<gix::refs::FullName> {
+pub(crate) fn qualified_name(kind: Kind, name: &str) -> crate::Result<gix::refs::FullName> {
     if matches!(kind, Kind::Branch) && name.starts_with('-') {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

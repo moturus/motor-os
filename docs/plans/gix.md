@@ -1325,6 +1325,15 @@ strict Clippy and shell checks pass with matching source hashes. The application
 HEAD helper follows separately. Evidence is in
 `/tmp/motor-gix-symbolic-reflog-integration`.
 
+M2 exact HEAD state: the reviewed read-only helper captures the raw HEAD
+attachment and direct commit ID, including unborn and detached states. It
+validates local branch names through the existing validator, rejects symbolic
+branch targets and non-commit IDs, and compares both recorded fields without
+peeling or ancestry inference. One isolated native lifecycle covers those states
+and stale-state refusal. Host/Motor component gates, formatting, strict Clippy
+and shell checks pass with matching source hashes. Ref publication remains the
+next separate slice. Evidence is in `/tmp/motor-gix-head-capture-eb5d038f`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
