@@ -139,6 +139,7 @@ fn main() -> Result {
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
+    check_executable_attributes(&output)?;
     check_commit(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
@@ -793,6 +794,60 @@ fn assert_index_blob(
         index.entry_range(path.as_bytes().as_bstr()).unwrap().len(),
         1
     );
+    Ok(())
+}
+
+fn check_executable_attributes(output: &Path) -> Result {
+    let repository = output.join("executable-attributes-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(&repository, &[], false, &cancellation)?;
+    fs::write(
+        repository.join(".gitattributes"),
+        b"payload filter=blocked\n",
+    )?;
+    fs::write(repository.join("payload"), b"must not be checked out\n")?;
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.publish_edited_index(|index| {
+        index
+            .entry_mut_by_path_and_stage(b".gitattributes".as_bstr(), Stage::Unconflicted)
+            .ok_or("attribute fixture entry is missing")?
+            .mode = Mode::FILE_EXECUTABLE;
+        Ok(())
+    })?;
+    drop(guard);
+    motor_gix::commit::run(&opened, "executable attributes", &cancellation)?;
+    let tree = opened.repo.head_tree()?;
+    let attributes = tree
+        .lookup_entry_by_path(".gitattributes")?
+        .ok_or("committed attribute fixture is missing")?;
+    assert_eq!(
+        attributes.mode().kind(),
+        gix::objs::tree::EntryKind::BlobExecutable
+    );
+
+    fs::remove_file(repository.join(".gitattributes"))?;
+    fs::remove_file(repository.join("payload"))?;
+    let filtered =
+        motor_gix::repository::open(&repository, &["filter.blocked.required=true"], false)?;
+    let guard = motor_gix::mutation::Guard::acquire(&filtered.repo)?;
+    let index_before = fs::read(filtered.repo.index_path())?;
+    let error = motor_gix::checkout::initial(&filtered, &cancellation)
+        .expect_err("checkout accepted an executable required-filter attribute file");
+    assert!(
+        error
+            .to_string()
+            .contains("path 'payload' uses unsupported filter 'blocked'"),
+        "{error}"
+    );
+    assert!(!repository.join(".gitattributes").try_exists()?);
+    assert!(!repository.join("payload").try_exists()?);
+    assert_eq!(fs::read(filtered.repo.index_path())?, index_before);
+    assert!(filtered.repo.git_dir().join("index.lock").try_exists()?);
+    drop(guard);
+    assert!(!filtered.repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

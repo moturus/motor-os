@@ -1522,6 +1522,52 @@ is in `/tmp/motor-gix-cancellation-fix`. Source reviews:
 `/tmp/motor-gix-commit-design/review.md` and
 `/tmp/motor-gix-commit-design/cancellation-normalization.md`.
 
+### Resolved implementation discussion — executable attribute files (2026-09-16)
+
+The restore source review found a preexisting Gitoxide defect in
+`gix-worktree/src/stack/state/mod.rs:139` at pin `86589c55`: index-backed
+attribute/ignore lookup admits only `Mode::FILE` (100644), omitting valid
+`Mode::FILE_EXECUTABLE` (100755) entries. Executable `.gitattributes` files
+therefore disappear from `Source::IdMapping`. This affects the existing initial
+checkout and its filter preflight, as well as planned restore/switch/merge work.
+It is an external library defect; no Motor OS filesystem change is needed.
+
+A small offline diagnostic using the current application library confirms the
+impact. Two local repositories differ only in the indexed mode of
+`.gitattributes`; both contain `file filter=blocked`. Host Git's cached attribute
+lookup reports `blocked` for both. With `filter.blocked.required=true`, application
+checkout correctly rejects the 100644 repository before writing worktree content, but
+incorrectly succeeds for 100755. The diagnostic exits 1 for this mismatch.
+No filter command is configured or executed. Source, fixture commands and
+results are preserved in `/tmp/motor-gix-executable-attributes-diagnosis`.
+No application or external source was modified for diagnosis.
+
+Discussed and approved on 2026-09-17: repair the external authoring checkout
+`/home/posk/motor-dev/gitoxide-motor-cli` by accepting both regular blob modes in
+the shared predicate, add one focused attribute-mapping regression, and extend
+the existing Motor/host application fixture to cover required-filter rejection
+for executable `.gitattributes`. Parent review, focused fork tests, component
+gates and an exact dependency-pin update follow the established workflow; the
+user publishes the external commit. This corrects the shared `.gitignore` mode
+handling too and avoids duplicating the library rule in application index copies.
+
+The reviewed fix is committed externally as
+`ddf4b6b7dab39328d6d045a7ca1ecc5bd9f03292`: one predicate change and one focused
+test, 48 insertions and one deletion after formatting. The application now pins
+that exact revision; package versions and dependency features are unchanged.
+Both new regressions failed against the unfixed source: the mapping test omitted
+executable entries, and the application fixture unexpectedly completed checkout.
+With the repair, all 11 worktree tests and the complete host/Motor component
+gates pass, including the specific required-filter error, unchanged index and
+absence of worktree writes. Selected-toolchain formatting, strict host/Motor
+Clippy and shell checks pass; all tested source hashes match. The new tests run
+through the existing component script and developer-suite integration.
+
+Review, original failures and final gates are preserved in
+`/tmp/motor-gix-executable-attributes-integration`. The revision was imported
+locally for offline validation; publishing the external commit remains the
+user's action. Independent unstage and restore work can continue with this fix.
+
 ### Open implementation discussion — text-diff limits (2026-09-16)
 
 Source review of the pinned diff library found that its token-count estimate

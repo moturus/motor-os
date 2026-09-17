@@ -358,6 +358,8 @@ PY
   "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
     an_index_shorter_than_its_checksum_is_rejected
   "$cargo" test "${external[@]}" -p gix-features --test features fs::
+  "$cargo" test "${external[@]}" -p gix-worktree --features sha1 --test worktree \
+    stack::attributes::index_mappings_accept_all_regular_file_modes
   "$cargo" test "${external[@]}" -p gix-ref --features sha1 --test refs file::store::
   "$cargo" test "${external[@]}" -p gix-ref --features sha1 --test refs file::transaction::
   "$cargo" test "${external[@]}" -p gix-commitgraph --lib --features sha1 native::tests::
