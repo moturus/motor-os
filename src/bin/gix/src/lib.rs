@@ -12,6 +12,7 @@ pub mod https_url;
 pub mod init;
 pub mod mutation;
 pub mod network;
+pub mod refs;
 pub mod repository;
 pub mod selection;
 pub mod stage_blob;

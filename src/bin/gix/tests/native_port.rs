@@ -76,6 +76,7 @@ fn main() -> Result {
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
 
+    check_refs(&fixture)?;
     let opened = motor_gix::repository::open(&fixture, &[], false)?;
     let repo = &opened.repo;
     let hash = gix::hash::Kind::Sha1;
@@ -448,6 +449,98 @@ fn check_init(output: &Path) -> Result {
         .ok_or("cancelled init succeeded")?;
     assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
     assert!(!cancelled.try_exists()?);
+    Ok(())
+}
+
+fn check_refs(repository: &Path) -> Result {
+    use motor_gix::refs::Kind;
+
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut opened = motor_gix::repository::open(repository, &[], false)?;
+    let operation_lock = opened
+        .repo
+        .git_dir()
+        .join(motor_gix::mutation::OPERATION_LOCK_FILE);
+    let index_path = opened.repo.index_path();
+    let index_before = fs::read(&index_path)?;
+    let earlier = opened.repo.rev_parse_single(b"HEAD^".as_bstr())?.detach();
+    let head = opened.repo.head_id()?.detach();
+
+    let mut branches = Vec::new();
+    motor_gix::refs::list(&opened.repo, Kind::Branch, &mut branches, &cancellation)?;
+    assert_eq!(branches, b"main\n");
+    let mut tags = Vec::new();
+    motor_gix::refs::list(&opened.repo, Kind::Tag, &mut tags, &cancellation)?;
+    assert!(tags.is_empty());
+    assert!(
+        !operation_lock.try_exists()?,
+        "listing references created the operation lock"
+    );
+
+    for invalid in ["HEAD", "-leading"] {
+        assert!(
+            motor_gix::refs::create(&mut opened, Kind::Branch, invalid, None, &cancellation)
+                .is_err(),
+            "accepted invalid branch name {invalid}"
+        );
+    }
+
+    motor_gix::refs::create(
+        &mut opened,
+        Kind::Branch,
+        "earlier",
+        Some("HEAD^"),
+        &cancellation,
+    )?;
+    motor_gix::refs::create(&mut opened, Kind::Tag, "at-head", None, &cancellation)?;
+    assert_eq!(
+        opened.repo.find_reference("refs/heads/earlier")?.id(),
+        earlier
+    );
+    assert_eq!(opened.repo.find_reference("refs/tags/at-head")?.id(), head);
+
+    branches.clear();
+    motor_gix::refs::list(&opened.repo, Kind::Branch, &mut branches, &cancellation)?;
+    assert_eq!(branches, b"earlier\nmain\n");
+    tags.clear();
+    motor_gix::refs::list(&opened.repo, Kind::Tag, &mut tags, &cancellation)?;
+    assert_eq!(tags, b"at-head\n");
+
+    assert!(
+        motor_gix::refs::create(
+            &mut opened,
+            Kind::Branch,
+            "earlier",
+            Some("HEAD"),
+            &cancellation,
+        )
+        .is_err(),
+        "duplicate branch creation succeeded"
+    );
+    assert_eq!(
+        opened.repo.find_reference("refs/heads/earlier")?.id(),
+        earlier,
+        "duplicate creation changed the existing target"
+    );
+    assert!(
+        motor_gix::refs::create(
+            &mut opened,
+            Kind::Branch,
+            "tree-target",
+            Some("HEAD^{tree}"),
+            &cancellation,
+        )
+        .is_err(),
+        "a branch accepted a non-commit target"
+    );
+    assert!(
+        opened
+            .repo
+            .try_find_reference("refs/heads/tree-target")?
+            .is_none()
+    );
+    assert_eq!(fs::read(index_path)?, index_before);
+    assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

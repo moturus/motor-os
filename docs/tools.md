@@ -65,6 +65,10 @@ gix clone https://example.test/project.git project
 gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
+gix -r project branch list
+gix -r project branch create topic HEAD^
+gix -r project tag list
+gix -r project tag create snapshot
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream
@@ -81,6 +85,12 @@ deletions. Tracked ignored files are included; explicitly naming an ignored
 or unmatched path fails. Executable and indexed symlink modes are preserved.
 Gitlinks are left unchanged. Staging refuses external filters and files over
 16 MiB, and publishes the index only after all selected changes are prepared.
+
+`branch list` and `tag list` print short names in sorted order. Creation takes
+a name and optional `REV`, which defaults to `HEAD`, and refuses to replace an
+existing reference. Branch targets are peeled to commits; lightweight tags retain
+the exact selected object. These commands do not change the checkout, index or
+worktree.
 
 Reference reads on Motor reject loose reference files larger than 8 MiB.
 

@@ -260,6 +260,16 @@ verify_add_cli() {
     fail "gix add -- wrote the wrong blob"
 }
 
+verify_refs_cli() {
+  local branches="$1" tags="$2"
+  printf '%s\n' cli-earlier earlier main > "$temporary/expected-branches"
+  printf '%s\n' at-head cli-head > "$temporary/expected-tags"
+  cmp "$temporary/expected-branches" "$branches" >/dev/null ||
+    fail "gix branch list output differs from expected names"
+  cmp "$temporary/expected-tags" "$tags" >/dev/null ||
+    fail "gix tag list output differs from expected names"
+}
+
 verify_pack() {
   local indices=("$1"/*.idx)
   [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
@@ -377,6 +387,16 @@ PY
   printf 'cli stage\n' > "$init_repo/-leading"
   "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
   verify_add_cli "$init_repo"
+
+  "${app_env[@]}" "$gix_binary" -r "$fixture" branch create cli-earlier HEAD^
+  "${app_env[@]}" "$gix_binary" -r "$fixture" tag create cli-head
+  "${app_env[@]}" "$gix_binary" -r "$fixture" branch list > "$temporary/host-branches"
+  "${app_env[@]}" "$gix_binary" -r "$fixture" tag list > "$temporary/host-tags"
+  verify_refs_cli "$temporary/host-branches" "$temporary/host-tags"
+  [ "$(git_fixture rev-parse refs/heads/cli-earlier)" = "$(git_fixture rev-parse HEAD^)" ] ||
+    fail "gix branch create selected the wrong commit"
+  [ "$(git_fixture rev-parse refs/tags/cli-head)" = "$(git_fixture rev-parse HEAD)" ] ||
+    fail "gix tag create did not default to HEAD"
 
   ca="$APP_DIR/tests/https-test-ca.pem"
   start_https_server 127.0.0.1 localhost
@@ -627,6 +647,13 @@ verify_pack "$temporary/guest-thin-pack"
 printf 'get -r "%s" "%s"\n' "$guest_root/output/add-repository" "$temporary/guest-add" |
   "${sftp_command[@]}"
 verify_add_repository "$temporary/guest-add"
+
+guest_fixture_app="HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/fixture"
+vm_ssh "$guest_fixture_app branch create cli-earlier HEAD^"
+vm_ssh "$guest_fixture_app tag create cli-head"
+vm_ssh "$guest_fixture_app branch list" > "$temporary/guest-branches"
+vm_ssh "$guest_fixture_app tag list" > "$temporary/guest-tags"
+verify_refs_cli "$temporary/guest-branches" "$temporary/guest-tags"
 
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix init $guest_root/init"
 printf 'get "%s" "%s"\n' "$guest_root/init/.git/HEAD" "$temporary/guest-init-head" |

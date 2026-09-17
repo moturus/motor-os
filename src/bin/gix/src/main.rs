@@ -4,11 +4,11 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Arg, ArgAction, Command, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 
 mod log;
 
-use motor_gix::{Result, add, cancellation, clone, fetch, init, network, repository, status};
+use motor_gix::{Result, add, cancellation, clone, fetch, init, network, refs, repository, status};
 
 fn main() -> ExitCode {
     match run() {
@@ -108,6 +108,8 @@ fn run() -> Result {
                         .value_name("REMOTE"),
                 ),
         )
+        .subcommand(reference_command("branch", "Manage local branches"))
+        .subcommand(reference_command("tag", "Manage lightweight tags"))
         .subcommand(Command::new("log").about("Show commit history"))
         .subcommand(Command::new("status").about("Show worktree status"))
         .get_matches();
@@ -163,6 +165,14 @@ fn run() -> Result {
                 .collect::<Vec<_>>();
             add::run(&opened, command.get_flag("all"), &paths, &cancellation)
         }
+        Some("branch") => reference_run(
+            &mut opened,
+            matches
+                .subcommand_matches("branch")
+                .expect("matched branch"),
+            refs::Kind::Branch,
+            &cancellation,
+        ),
         Some("fetch") => {
             let policy = network::Policy::new(&overrides, &cancellation)?;
             fetch::run(
@@ -177,10 +187,48 @@ fn run() -> Result {
             )
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("tag") => reference_run(
+            &mut opened,
+            matches.subcommand_matches("tag").expect("matched tag"),
+            refs::Kind::Tag,
+            &cancellation,
+        ),
         Some("status") => status::collect(&opened, &cancellation)
             .and_then(|report| report.write_to(io::stdout().lock(), &cancellation)),
         _ => unreachable!("clap accepts only declared subcommands"),
     };
     result?;
     cancellation.check()
+}
+
+fn reference_command(name: &'static str, about: &'static str) -> Command {
+    Command::new(name)
+        .about(about)
+        .subcommand_required(true)
+        .subcommand(Command::new("list").about("List names"))
+        .subcommand(
+            Command::new("create")
+                .about("Create without replacing an existing reference")
+                .arg(Arg::new("name").required(true).value_name("NAME"))
+                .arg(Arg::new("revision").value_name("REV")),
+        )
+}
+
+fn reference_run(
+    opened: &mut repository::OpenedRepository,
+    command: &ArgMatches,
+    kind: refs::Kind,
+    cancellation: &cancellation::Cancellation,
+) -> Result {
+    match command.subcommand() {
+        Some(("list", _)) => refs::list(&opened.repo, kind, io::stdout().lock(), cancellation),
+        Some(("create", create)) => refs::create(
+            opened,
+            kind,
+            create.get_one::<String>("name").expect("required name"),
+            create.get_one::<String>("revision").map(String::as_str),
+            cancellation,
+        ),
+        _ => unreachable!("clap requires a declared reference subcommand"),
+    }
 }
