@@ -1502,6 +1502,16 @@ stage-zero resolution and exact record retention. All host/Motor component gates
 formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-ready-add-16a0e561`. Ready commit and abort follow.
 
+M2 checked branch advancement: the reviewed helper uses one dereferenced HEAD
+transaction, validates the exact raw attachment and direct branch ID before and
+after preparing locks, writes ordinary HEAD/branch reflogs and verifies the result.
+It accepts an explicitly preflighted committer, supports unborn branches, and retains
+actual state and error sources on partial publication. The existing HEAD lifecycle
+covers born/unborn log IDs, foreign branch-lock preservation and refusal of another
+attachment with the same old ID. All host/Motor component gates, formatting, strict
+Clippy and shell checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-head-advance-522846bb`. Fast-forward and Ready commit reuse follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

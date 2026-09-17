@@ -3343,12 +3343,89 @@ fn check_head_ref(output: &Path) -> Result {
 
     fs::write(repository.join("tracked"), b"content\n")?;
     motor_gix::add::run(&opened, true, &[], &cancellation)?;
-    motor_gix::commit::run(&opened, "head fixture", &cancellation)?;
-    let commit = opened.repo.head_id()?.detach();
-    let attached = Original {
-        reference: Some(main.clone()),
-        id: Some(commit),
-    };
+    let staged = opened.repo.open_index()?;
+    let tree = motor_gix::tree_index::write(&opened.repo, &staged, &cancellation)?;
+    let first = opened
+        .repo
+        .new_commit("unborn advance", tree, std::iter::empty::<gix::ObjectId>())?
+        .id;
+    let committer = opened
+        .repo
+        .committer()
+        .ok_or("fixture committer is missing")??;
+    let first_state = motor_gix::head_ref::advance_attached(
+        &opened.repo,
+        &unborn,
+        first,
+        committer,
+        b"merge: unborn".as_bstr(),
+        &cancellation,
+    )?;
+    assert_eq!(
+        first_state,
+        Original {
+            reference: Some(main.clone()),
+            id: Some(first),
+        }
+    );
+    let log_root = opened.repo.git_dir().join("logs");
+    let main_log = log_root.join("refs/heads/main");
+    for log in [log_root.join("HEAD"), main_log.clone()] {
+        let bytes = fs::read(log)?;
+        assert!(bytes.starts_with(
+            format!("{} {first} ", gix::ObjectId::null(gix::hash::Kind::Sha1)).as_bytes()
+        ));
+        assert!(bytes.ends_with(b"\tmerge: unborn\n"));
+    }
+
+    let commit = opened.repo.new_commit("born advance", tree, [first])?.id;
+    let head_before = fs::read(log_root.join("HEAD"))?;
+    let branch_before = fs::read(&main_log)?;
+    let branch_lock = opened.repo.git_dir().join("refs/heads/main.lock");
+    fs::write(&branch_lock, b"foreign")?;
+    let committer = opened
+        .repo
+        .committer()
+        .ok_or("fixture committer is missing")??;
+    let error = motor_gix::head_ref::advance_attached(
+        &opened.repo,
+        &first_state,
+        commit,
+        committer,
+        b"blocked".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("a foreign branch lock allowed HEAD advancement");
+    assert!(
+        error.to_string().contains("HEAD publication failed"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&branch_lock)?, b"foreign");
+    assert_eq!(fs::read(log_root.join("HEAD"))?, head_before);
+    assert_eq!(fs::read(&main_log)?, branch_before);
+    fs::remove_file(branch_lock)?;
+
+    let committer = opened
+        .repo
+        .committer()
+        .ok_or("fixture committer is missing")??;
+    let attached = motor_gix::head_ref::advance_attached(
+        &opened.repo,
+        &first_state,
+        commit,
+        committer,
+        b"merge: fast-forward".as_bstr(),
+        &cancellation,
+    )?;
+    for (path, before) in [
+        (log_root.join("HEAD"), head_before),
+        (main_log, branch_before),
+    ] {
+        let bytes = fs::read(path)?;
+        let appended = &bytes[before.len()..];
+        assert!(appended.starts_with(format!("{first} {commit} ").as_bytes()));
+        assert!(appended.ends_with(b"\tmerge: fast-forward\n"));
+    }
     assert_eq!(motor_gix::head_ref::capture(&opened.repo)?, attached);
     assert_eq!(
         motor_gix::head_ref::existing_local_branch(&opened.repo, "main")?,
@@ -3389,6 +3466,30 @@ fn check_head_ref(output: &Path) -> Result {
     fs::write(&head_path, b"ref: refs/heads/main\n")?;
 
     let target_commit = opened.repo.new_commit("head target", tree, [commit])?.id;
+    opened.repo.reference(
+        "refs/heads/alias",
+        commit,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "head fixture",
+    )?;
+    fs::write(&head_path, b"ref: refs/heads/alias\n")?;
+    let committer = opened
+        .repo
+        .committer()
+        .ok_or("fixture committer is missing")??;
+    let error = motor_gix::head_ref::advance_attached(
+        &opened.repo,
+        &attached,
+        target_commit,
+        committer,
+        b"wrong attachment".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("a wrong attachment with the expected old ID was accepted");
+    assert!(error.to_string().contains("HEAD changed"), "{error}");
+    assert_eq!(opened.repo.find_reference(&main)?.id(), commit);
+    fs::write(&head_path, b"ref: refs/heads/main\n")?;
+
     for name in ["other", "same"] {
         opened.repo.reference(
             format!("refs/heads/{name}"),

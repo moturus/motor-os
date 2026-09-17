@@ -66,6 +66,85 @@ pub(crate) fn preflight_publication(
     ref_lock_policy(repo)
 }
 
+/// Advance the exact attached branch and write its ordinary branch and HEAD reflogs.
+///
+/// The committer must already have passed the caller's identity policy. The caller retains
+/// its mutation guard and operation record through this publication.
+pub fn advance_attached(
+    repo: &gix::Repository,
+    expected_head: &Original,
+    new_commit: gix::ObjectId,
+    committer: gix::actor::SignatureRef<'_>,
+    message: &BStr,
+    cancellation: &Cancellation,
+) -> crate::Result<Original> {
+    cancellation.check()?;
+    let target_ref = expected_head.reference.as_ref().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "advancing HEAD requires an attached local branch",
+        )
+    })?;
+    validate_local_branch(target_ref.as_ref())?;
+    let new_commit = require_commit(repo, &new_commit)?;
+    require(repo, expected_head)?;
+    require_local_branch(repo, target_ref.as_ref(), expected_head.id)?;
+
+    let expected = match expected_head.id {
+        Some(id) => PreviousValue::MustExistAndMatch(Target::Object(id)),
+        None => PreviousValue::MustNotExist,
+    };
+    let edit = RefEdit {
+        name: "HEAD".try_into().expect("HEAD is a valid reference name"),
+        deref: true,
+        change: Change::Update {
+            new: Target::Object(new_commit),
+            expected,
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: message.to_owned(),
+            },
+        },
+    };
+    let (file_lock_fail, packed_lock_fail) = ref_lock_policy(repo)?;
+    let result: crate::Result<Original> = (|| {
+        let transaction =
+            repo.refs
+                .transaction()
+                .prepare(Some(edit), file_lock_fail, packed_lock_fail)?;
+        require(repo, expected_head)?;
+        require_local_branch(repo, target_ref.as_ref(), expected_head.id)?;
+        cancellation.check()?;
+        transaction.commit(Some(committer))?;
+
+        let actual = capture(repo)?;
+        let destination = direct_branch_id(repo, target_ref.as_ref())?;
+        let expected = Original {
+            reference: Some(target_ref.clone()),
+            id: Some(new_commit),
+        };
+        if actual != expected || destination != Some(new_commit) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "published HEAD state differs: expected {expected:?}, observed {actual:?}, destination {destination:?}"
+                ),
+            )
+            .into());
+        }
+        cancellation.check()?;
+        Ok(actual)
+    })();
+    result.map_err(|source| {
+        publication_error(
+            repo,
+            target_ref.as_ref(),
+            cancellation.normalize_error(source),
+        )
+    })
+}
+
 /// Attach HEAD to an observed local branch without moving that branch.
 ///
 /// The caller retains its mutation guard and operation record through this publication.
@@ -263,7 +342,7 @@ impl fmt::Display for PublicationError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             out,
-            "HEAD attachment failed; HEAD or its reflog may already be updated; observed {}",
+            "HEAD publication failed; references or reflogs may already be updated; observed {}",
             self.observed
         )
     }
