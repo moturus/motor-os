@@ -266,6 +266,35 @@ impl RawVsockListener {
             .await
             .unwrap();
     }
+
+    pub async fn accept_with_full_reply_ring(&self) -> moto_ipc::io_channel::ClientConnection {
+        use moto_sys_io::api_net::{self, NetCmd};
+
+        let total_udp = crate::tcp::read_sys_io_metric("net.total_udp_sockets");
+        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
+            let mut request = moto_ipc::io_channel::Msg::new();
+            request.command = NetCmd::VsockAvailability as u16;
+            request.id = id;
+            connection.send(request).unwrap();
+        }
+        crate::net_harness::wait_until("full vsock accept reply ring", || {
+            connection.server_queue_full()
+        })
+        .await;
+
+        let mut accept = moto_sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
+        accept.id = moto_ipc::io_channel::QUEUE_SIZE + 1;
+        connection.send(accept).unwrap();
+        let mut barrier = api_net::bind_udp_socket_request(&"127.0.0.1:0".parse().unwrap(), 0);
+        barrier.id = accept.id + 1;
+        connection.send(barrier).unwrap();
+        // The following FIFO control task creates a socket before sending its
+        // own blocked reply. Its counter proves accept reached the full ring.
+        crate::tcp::wait_for_sys_io_metric("net.total_udp_sockets", |n| n == total_udp + 1);
+        assert!(connection.server_queue_full());
+        connection
+    }
 }
 
 pub async fn test_raw_vsock_pending_accepts() {

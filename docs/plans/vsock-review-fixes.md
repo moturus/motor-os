@@ -200,3 +200,17 @@ native TCP/UDP suite passed. Targeted Clippy and formatting passed with only
 preexisting warnings in unchanged code. Logs are `leak-{build,clippy,vsock,
 native}-{debug,release}.log` in the same directory. The final full gate remains
 pending, as approved by the user.
+
+The cross-channel accept fix now checks ownership installation and resets an
+unaccepted child if its destination disappeared. A regression fills the
+destination's reply ring before accepting, then tears it down with zero,
+one, or all filler replies consumed. Sixteen such rounds keep the listener
+channel alive, followed by exact global-capacity/reuse checks. Temporary
+diagnostics did not demonstrate the narrow post-send registration-failure
+branch; this is backpressure/teardown coverage, not a claimed reproduction
+of that exact interleaving. The diagnostics were removed before validation.
+
+Debug and release builds, all 20 QEMU peer cases, I/O-task fixtures, and native
+TCP/UDP tests passed. Formatting and targeted Clippy passed without new
+warnings. Logs are `accept-{build,clippy,vsock,native}-{debug,release}.log`
+in `/tmp/vsock-review-gate.zw7gYT`.

@@ -261,6 +261,8 @@ run_outgoing_case() {
       fail "guest connect-error PASS marker missing"
   fi
   if [ "$verdict" = native-accept ]; then
+    rg -Fx "vsock accept reply disconnect: PASS" "$guest_log" >/dev/null ||
+      fail "accept reply disconnect PASS marker missing"
     rg -Fx "vsock idle client cleanup: PASS" "$guest_log" >/dev/null ||
       fail "idle client cleanup PASS marker missing"
   fi

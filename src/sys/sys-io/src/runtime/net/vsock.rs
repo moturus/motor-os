@@ -1801,9 +1801,13 @@ impl NetRuntime {
 
         // No await after FIFO publication: install ownership and routing
         // before this runtime can dispatch another message for the stream.
+        if !socket.borrow_mut().set_client_sender(sender) {
+            drop(_guard);
+            self.reset_unaccepted(socket_id);
+            return Ok(());
+        }
         {
             let mut socket = socket.borrow_mut();
-            assert!(socket.set_client_sender(sender));
             let state = socket.unwrap_vsock_mut();
             state.subchannel_mask = subchannel_mask;
             state.listener_id = None;

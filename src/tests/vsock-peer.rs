@@ -59,6 +59,11 @@ const NATIVE_ACCEPT_BOTH_HELD: &[u8] = b"native-accept:both-held";
 const NATIVE_ACCEPT_EXITED: &[u8] = b"native-accept:exited";
 const NATIVE_ACCEPT_EXIT_CLEANED: &[u8] = b"native-accept:exit-cleaned";
 const NATIVE_ACCEPT_EXIT_REBOUND: &[u8] = b"native-accept:exit-rebound";
+const ACCEPT_DISCONNECT_READY: &[u8] = b"accept-disconnect:ready";
+const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
+const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
+const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
+const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -781,6 +786,13 @@ fn run() -> io::Result<()> {
                     expect_eof(&mut outgoing)?;
                     write_frame(&mut stream, NATIVE_ACCEPT_EXIT_CLEANED)?;
                     expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_REBOUND)?;
+                }
+                for _ in 0..ACCEPT_DISCONNECT_ROUNDS {
+                    expect_frame(&mut stream, ACCEPT_DISCONNECT_READY)?;
+                    let mut accepted = connect_guest(base, ACCEPT_DISCONNECT_PORT)?;
+                    write_frame(&mut stream, ACCEPT_DISCONNECT_HELD)?;
+                    expect_eof(&mut accepted)?;
+                    write_frame(&mut stream, ACCEPT_DISCONNECT_CLOSED)?;
                 }
                 run_global_capacity_cycle(base, &mut stream)?;
                 expect_frame(&mut stream, CASE_DONE)?;

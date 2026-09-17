@@ -58,6 +58,11 @@ const NATIVE_ACCEPT_BOTH_HELD: &[u8] = b"native-accept:both-held";
 const NATIVE_ACCEPT_EXITED: &[u8] = b"native-accept:exited";
 const NATIVE_ACCEPT_EXIT_CLEANED: &[u8] = b"native-accept:exit-cleaned";
 const NATIVE_ACCEPT_EXIT_REBOUND: &[u8] = b"native-accept:exit-rebound";
+const ACCEPT_DISCONNECT_READY: &[u8] = b"accept-disconnect:ready";
+const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
+const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
+const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
+const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -779,6 +784,29 @@ async fn run_native_accept(
         rebound.close().await;
         write_frame(control, NATIVE_ACCEPT_EXIT_REBOUND).await;
     }
+    let backpressured = crate::net_driver::RawVsockListener::bind(ACCEPT_DISCONNECT_PORT).await;
+    for round in 0..ACCEPT_DISCONNECT_ROUNDS {
+        write_frame(control, ACCEPT_DISCONNECT_READY).await;
+        expect_frame(control, ACCEPT_DISCONNECT_HELD).await;
+        let connection = backpressured.accept_with_full_reply_ring().await;
+        // Exercise both a still-blocked reply and a wake that can publish
+        // concurrently with destination teardown. Never consume the accept.
+        let drain = match round % 3 {
+            0 => 0,
+            1 => 1,
+            _ => moto_ipc::io_channel::QUEUE_SIZE,
+        };
+        for id in 1..=drain {
+            let response = connection.recv().unwrap();
+            assert_eq!(response.id, id);
+            response.status().unwrap();
+        }
+        drop(connection);
+        expect_frame(control, ACCEPT_DISCONNECT_CLOSED).await;
+    }
+    backpressured.close().await;
+    println!("vsock accept reply disconnect: PASS");
+
     // Peer EOF and port reuse alone do not prove that dead streams left the
     // global table. Exercise every stream slot after both process exits.
     run_global_stream_capacity_cycle(control).await;
