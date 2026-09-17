@@ -20,7 +20,17 @@ pub fn sanitize(repo: &mut gix::Repository) -> crate::Result<Policy> {
     remove_values(&mut config, "diff", &["external", "command", "textconv"]);
     remove_values(&mut config, "filter", &["clean", "smudge", "process"]);
     remove_named_merge_sections(&mut config);
-    remove_values(&mut config, "merge", &["default"]);
+    let safe_default = policy.default_merge_driver.as_ref().is_some_and(|name| {
+        !policy.external_merge_drivers.contains(name.as_bstr())
+            && name
+                .to_str()
+                .ok()
+                .and_then(gix::merge::blob::BuiltinDriver::by_name)
+                .is_some()
+    });
+    if !safe_default {
+        remove_values(&mut config, "merge", &["default"]);
+    }
     config.commit()?;
     Ok(policy)
 }

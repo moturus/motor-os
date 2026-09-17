@@ -144,6 +144,7 @@ fn main() -> Result {
     check_diff_render()?;
     check_diff_policy(&output)?;
     check_diff_run(&output)?;
+    check_merge_policy(&output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -1266,6 +1267,94 @@ fn check_diff_policy(output: &Path) -> Result {
     drop(opened);
     fs::remove_file(attributes)?;
     assert_eq!(fs::read(index_path)?, index_before);
+    Ok(())
+}
+
+fn check_merge_policy(output: &Path) -> Result {
+    use gix::merge::blob::{BuiltinDriver, ResourceKind, platform::DriverChoice};
+
+    let repository = output.join("add-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let safe = motor_gix::repository::open(&repository, &["merge.default=union"], false)?;
+    let index = safe.repo.open_index()?;
+    motor_gix::merge_policy::reject_unsupported(&safe, &index, &cancellation)?;
+
+    let entry = index
+        .entry_by_path(b"modified".as_bstr())
+        .ok_or("merge-policy fixture entry is missing")?;
+    let mut cache = safe.repo.merge_resource_cache(Default::default())?;
+    for side in [
+        ResourceKind::CommonAncestorOrBase,
+        ResourceKind::CurrentOrOurs,
+        ResourceKind::OtherOrTheirs,
+    ] {
+        cache.set_resource(
+            entry.id,
+            entry
+                .mode
+                .to_tree_entry_mode()
+                .ok_or("merge fixture has an invalid mode")?
+                .kind(),
+            b"modified".as_bstr(),
+            side,
+            &safe.repo.objects,
+        )?;
+    }
+    assert_eq!(
+        cache
+            .prepare_merge(&safe.repo.objects, Default::default())?
+            .driver,
+        DriverChoice::BuiltIn(BuiltinDriver::Union),
+        "the sanitized engine lost a safe built-in default"
+    );
+    drop(cache);
+
+    let shadowed = motor_gix::repository::open(
+        &repository,
+        &["merge.default=union", "merge.union.driver=must-not-run"],
+        false,
+    )?;
+    assert!(
+        shadowed
+            .repo
+            .config_snapshot()
+            .raw_value("merge.default")
+            .is_err(),
+        "a shadowed default remained configured"
+    );
+    assert!(
+        shadowed
+            .repo
+            .merge_resource_cache(Default::default())?
+            .drivers()
+            .is_empty(),
+        "an external merge definition survived sanitization"
+    );
+    let error = motor_gix::merge_policy::reject_unsupported(&shadowed, &index, &cancellation)
+        .expect_err("an external driver shadowing a built-in default was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("configured external default merge driver 'union'"),
+        "{error}"
+    );
+
+    let mut unknown = (*index).clone();
+    unknown.dangerously_push_entry(
+        Default::default(),
+        safe.repo.write_blob(b"modified merge=unknown\n")?.detach(),
+        Flags::empty(),
+        Mode::FILE,
+        b".gitattributes".as_bstr(),
+    );
+    unknown.sort_entries();
+    let error = motor_gix::merge_policy::reject_unsupported(&safe, &unknown, &cancellation)
+        .expect_err("an unknown named merge driver was accepted");
+    assert!(
+        error.to_string().contains("unknown merge driver 'unknown'"),
+        "{error}"
+    );
+    assert!(!safe.repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

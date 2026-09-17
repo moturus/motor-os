@@ -1437,6 +1437,17 @@ continued lock exclusion through completion. Host/Motor component gates,
 formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-operation-cleanup-4fd50c55`.
 
+M2 merge-driver policy: the reviewed sanitizer preserves only unshadowed built-in
+`merge.default` values while still removing executable driver definitions. A full
+supplied-index attribute scan rejects unknown or external selected/default drivers.
+The native lifecycle checks the engine's actual built-in selection, an external
+shadow and target-index attributes. Initial compilation found temporary diagnostic
+borrows and two new fixture API spelling errors; these were corrected from pinned
+source, with duplicate error formatting and a redundant assertion removed. All final
+host/Motor component gates, formatting, strict Clippy and shell checks pass with
+matching source hashes. Original failures and final evidence are in
+`/tmp/motor-gix-merge-policy-96d7992e`. Merge topology and publication follow.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
