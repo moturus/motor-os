@@ -1,0 +1,84 @@
+//! Shared framing and barriers for the existing host/guest vsock tests.
+
+pub(super) const MAX_FRAME: usize = 64 * 1024;
+pub(super) const ROLE_DATA: &[u8] = b"role:data";
+pub(super) const ROLE_SYNC: &[u8] = b"role:sync";
+pub(super) const SEND_SHUTDOWN_DONE: &[u8] = b"shutdown:send";
+pub(super) const RECEIVE_SHUTDOWN_DONE: &[u8] = b"shutdown:receive";
+pub(super) const CONTINUE: &[u8] = b"continue";
+pub(super) const TRANSFER_DONE: &[u8] = b"transfer:done";
+pub(super) const CASE_DONE: &[u8] = b"case:done";
+pub(super) const FINAL_SLOT_ADMITTED: &[u8] = b"final-slot:admitted";
+pub(super) const CANCEL_READY: &[u8] = b"cancel:ready";
+pub(super) const ROLES_READY: &[u8] = b"roles:ready";
+pub(super) const STALLED_DATA_READY: &[u8] = b"stalled:data-ready";
+pub(super) const UNRELATED_PING: &[u8] = b"unrelated:ping";
+pub(super) const UNRELATED_PONG: &[u8] = b"unrelated:pong";
+pub(super) const DRAIN_STARTED: &[u8] = b"drain:started";
+pub(super) const LISTENER_READY: &[u8] = b"listener:ready";
+pub(super) const BACKLOG_READY: &[u8] = b"backlog:ready";
+pub(super) const LISTENER_DROPPED: &[u8] = b"listener:dropped";
+pub(super) const BACKLOG_CLEARED: &[u8] = b"backlog:cleared";
+pub(super) const LISTENER_REBOUND: &[u8] = b"listener:rebound";
+pub(super) const NATIVE_ACCEPT_READY: &[u8] = b"native-accept:ready";
+pub(super) const NATIVE_ACCEPT_EARLY: &[u8] = b"early";
+pub(super) const NATIVE_ACCEPT_EARLY_READY: &[u8] = b"native-accept:early-ready";
+pub(super) const NATIVE_ACCEPT_REPLY: &[u8] = b"accepted";
+pub(super) const NATIVE_ACCEPT_DROPPED: &[u8] = b"native-accept:dropped";
+pub(super) const NATIVE_ACCEPT_CLOSE_READY: &[u8] = b"native-accept:close-ready";
+pub(super) const NATIVE_ACCEPT_CLOSED: &[u8] = b"closed";
+pub(super) const NATIVE_ACCEPT_CLOSED_READY: &[u8] = b"native-accept:closed-ready";
+pub(super) const NATIVE_ACCEPT_SIMULTANEOUS_READY: &[u8] = b"native-accept:simultaneous-ready";
+pub(super) const NATIVE_ACCEPT_SIMULTANEOUS_CONNECTED: &[u8] =
+    b"native-accept:simultaneous-connected";
+pub(super) const NATIVE_ACCEPT_SIMULTANEOUS_STARTED: &[u8] = b"native-accept:simultaneous-started";
+pub(super) const NATIVE_ACCEPT_SIMULTANEOUS_CLOSED: &[u8] = b"native-accept:simultaneous-closed";
+pub(super) const NATIVE_ACCEPT_REUSE_CONNECTED: &[u8] = b"native-accept:reuse-connected";
+pub(super) const NATIVE_ACCEPT_REUSED: &[u8] = b"native-accept:reused";
+pub(super) const NATIVE_ACCEPT_REUSE_PAYLOAD: &[u8] = b"reuse";
+pub(super) const NATIVE_ACCEPT_REUSE_REPLY: &[u8] = b"reused";
+pub(super) const NATIVE_ACCEPT_CANCEL_READY: &[u8] = b"native-accept:cancel-ready";
+pub(super) const NATIVE_ACCEPT_CANCEL_CLOSED: &[u8] = b"native-accept:cancel-closed";
+pub(super) const NATIVE_ACCEPT_EXIT_READY: &[u8] = b"native-accept:exit-ready";
+pub(super) const NATIVE_ACCEPT_ANCHOR_HELD: &[u8] = b"native-accept:anchor-held";
+pub(super) const NATIVE_ACCEPT_CONNECT_READY: &[u8] = b"native-accept:connect-ready";
+pub(super) const NATIVE_ACCEPT_BOTH_HELD: &[u8] = b"native-accept:both-held";
+pub(super) const NATIVE_ACCEPT_EXITED: &[u8] = b"native-accept:exited";
+pub(super) const NATIVE_ACCEPT_EXIT_CLEANED: &[u8] = b"native-accept:exit-cleaned";
+pub(super) const NATIVE_ACCEPT_EXIT_REBOUND: &[u8] = b"native-accept:exit-rebound";
+pub(super) const ACCEPT_DISCONNECT_READY: &[u8] = b"accept-disconnect:ready";
+pub(super) const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
+pub(super) const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
+pub(super) const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
+pub(super) const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
+pub(super) const ACCEPT_OWNER_READY: &[u8] = b"accept-owner:ready";
+pub(super) const ACCEPT_OWNER_HELD: &[u8] = b"accept-owner:held";
+pub(super) const ACCEPT_OWNER_CLOSED: &[u8] = b"accept-owner:closed";
+pub(super) const SHUTDOWN_DISPATCH_READY: &[u8] = b"shutdown-dispatch:ready";
+pub(super) const SHUTDOWN_DISPATCH_HELD: &[u8] = b"shutdown-dispatch:held";
+pub(super) const SHUTDOWN_DISPATCH_PROBE: &[u8] = b"shutdown-dispatch:probe";
+pub(super) const SHUTDOWN_DISPATCH_DONE: &[u8] = b"shutdown-dispatch:done";
+pub(super) const COEXIST_READY: &[u8] = b"coexist:ready";
+pub(super) const COEXIST_START: &[u8] = b"coexist:start";
+pub(super) const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
+pub(super) const COEXIST_CONTINUE: &[u8] = b"coexist:continue";
+pub(super) const COEXIST_PHASE_BYTES: usize = 256 * 1024;
+pub(super) const TAP_HOST: &str = "192.168.4.1";
+pub(super) const INCOMING_PORT: u32 = 70_001;
+pub(super) const NATIVE_ACCEPT_PORT: u32 = 70_002;
+pub(super) const NATIVE_ACCEPT_EXIT_PORT: u32 = 70_003;
+pub(super) const CAPACITY_READY: &[u8] = b"capacity:ready";
+pub(super) const CAPACITY_FULL: &[u8] = b"capacity:full";
+pub(super) const CAPACITY_PROGRESS: &[u8] = b"capacity:progress";
+pub(super) const CAPACITY_DROPPED: &[u8] = b"capacity:dropped";
+pub(super) const CAPACITY_CLEARED: &[u8] = b"capacity:cleared";
+pub(super) const CAPACITY_REBOUND: &[u8] = b"capacity:rebound";
+pub(super) const CAPACITY_REUSED: &[u8] = b"capacity:reused";
+pub(super) const CAPACITY_PORT_START: u32 = 70_010;
+pub(super) const CAPACITY_LISTENERS: usize = 8;
+pub(super) const GLOBAL_STREAM_LIMIT: usize = 64;
+pub(super) const SMALL_ECHO_ROUNDTRIPS: usize = 128;
+
+pub(super) fn pattern_byte(offset: usize) -> u8 {
+    (offset.wrapping_mul(37).wrapping_add(11) & 0xff) as u8
+}

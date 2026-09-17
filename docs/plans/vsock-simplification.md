@@ -1,7 +1,8 @@
 # Vsock simplification plan
 
-Status: first implementation tranche and small-commit workflow approved.
-Control scheduling and event-pool changes still require separate review.
+Status: first implementation tranche complete and validated.
+The global control queue is retained; the single-event-buffer candidate is
+unimplemented and still requires separate review.
 Baseline: `d8559ce2` on `vsock`, compared with local `origin/main` at
 `290bb9e3`. This plan follows the whole-stack review, not the completed
 lifecycle/dispatch fix plan's temporary gate exception.
@@ -83,12 +84,11 @@ Files: `src/sys/sys-io/src/runtime/vsock/{connection,stream}.rs`, the parent
 `src/sys/tests/virtio-task-tests/src/lib.rs`, and the few imports referring
 to `ReadOutcome`.
 
-`Connection` currently delegates through `EstablishedStream` to
-`StreamBuffer` and `CreditState`. Move the receive buffer and permanent peer
-shutdown flags into `Connection`; make its phase/terminal cause authoritative
-instead of retaining a second reset flag. Keep the small buffer and checked
-credit helpers. Keep runtime/client ownership and pending-control scheduling
-unchanged in this step.
+`Connection` now owns the receive buffer and permanent peer shutdown flags.
+Its phase/terminal cause is authoritative; the intermediate
+`EstablishedStream` layer and duplicate reset flag are gone. The small
+buffer and checked credit helpers remain, as do runtime/client ownership
+and pending-control scheduling.
 
 Before removing the intermediate layer, map its existing tests to retained
 connection cases. Preserve atomic RX rejection, zero-length reads, buffered
@@ -145,6 +145,10 @@ patch review, not a growing historical section in this plan.
 ## Later candidates: review before implementation
 
 ### 4. Pending control scheduling
+
+Review outcome: retain the global queue. Stream-owned intent still needs
+shared admission, coalescing, ordering, and wakeup accounting; moving it
+does not currently offer a demonstrated reduction in complexity.
 
 The runtime has a global `PendingControl` queue plus per-stream reset and
 shutdown requested/queued/published state and queue-space wakeups. Investigate
@@ -223,11 +227,14 @@ after their required gates.
 
 ## Completion
 
-The first tranche is complete when the redundant stream layer is gone,
-useful codec/test duplication is removed, coverage is accounted for, and
-the required gates pass on the final source. Report actual production,
-test, and documentation reductions separately. Do not promise to halve the
-stack or pursue a line target by dropping justified checks and tests.
-Later scheduling/event work completes only after its separate design review
-and gates; a recommendation to retain an existing mechanism is a valid
-outcome if the alternative is not simpler.
+The first tranche is complete: the redundant stream layer is gone, useful
+codec/test duplication is removed, and distinct coverage is retained.
+Production Rust is 140 lines smaller; tests are 101 lines smaller, including
+the separate UDP fixture correction. Documentation reductions are separate.
+
+Each core patch passed three debug and three release full gates. The final
+source passed focused vsock gates on all three VMMs in both profiles and the
+release developer-image gate. No new compiler or Clippy warnings were added.
+
+The event-buffer candidate still needs its separate lifetime/design review
+and approval before implementation.
