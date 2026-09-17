@@ -41,9 +41,16 @@ name = "rejections"
 path = "tests/rejections.rs"
 harness = false
 
+[[test]]
+name = "cache_fill"
+path = "tests/cache_fill.rs"
+harness = false
+
 [dependencies]
 axum = "0.8.1"
 http = "1.2"
+http-body = "1"
+http-body-util = "0.1"
 httpdate = "1.0"
 http-range-header = "0.4"
 hyper-util = { version = "0.1", features = ["tokio"] }

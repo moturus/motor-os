@@ -1,9 +1,8 @@
 use crate::cache_response;
 use crate::cache_store::{CacheStore, CachedFile, MAX_FILE_SIZE};
-use axum::body::to_bytes;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use http::{header, Method, StatusCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -65,12 +64,9 @@ impl Cache {
         }
 
         let (parts, body) = response.into_parts();
-        let body = match to_bytes(body, MAX_FILE_SIZE).await {
-            Ok(body) if body.len() == length => body,
-            _ => {
-                tracing::warn!("file changed size or could not be read during cache fill");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+        let body = match crate::cache_body::collect(body, length).await {
+            Ok(body) => body,
+            Err(body) => return Response::from_parts(parts, body),
         };
         cache.files.lock().unwrap().insert(
             path,
