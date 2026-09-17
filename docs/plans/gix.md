@@ -1559,6 +1559,20 @@ Host/Motor component gates, feature-enabled strict Clippy, formatting and shell
 checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-merge-preflight-70de21f3`.
 
+M2 merge orchestration: the reviewed library retains one guard across exact
+revision resolution, clean-start preflight, installation and publication.
+Up-to-date checks publish nothing. Born/unborn fast-forwards record Incomplete,
+install the target, publish the index and checked attached branch, then clean up.
+Divergence installs the result and exact conflict stages, atomically publishes
+owned merge markers, and becomes Ready. Conflicts remain available for resolution
+or abort; clean results immediately use the shared recoverable two-parent commit
+path. The extended native graph covers all four outcomes and dirty up-to-date
+refusal. The first host gate caught a new test's retained borrowed commit handle;
+explicitly dropping it after parent/ID inspection fixes that fixture lifetime.
+The original compiler failure is preserved. Host/Motor component gates, strict
+Clippy, formatting and shell checks pass with matching tested sources. Evidence:
+`/tmp/motor-gix-merge-run-918fc9fc`. CLI exposure follows separately.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

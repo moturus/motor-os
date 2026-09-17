@@ -1372,7 +1372,7 @@ fn check_merge_prepare(output: &Path) -> Result {
         &cancellation,
     )?;
     let identities = ["user.name=Native Test", "user.email=native@example.com"];
-    let opened = motor_gix::repository::open(&repository, &identities, false)?;
+    let mut opened = motor_gix::repository::open(&repository, &identities, false)?;
     let repo = &opened.repo;
     let make_tree = |entries: &[(&str, &[u8])]| -> Result<_> {
         let mut state = gix::index::State::new(repo.object_hash());
@@ -1413,6 +1413,18 @@ fn check_merge_prepare(output: &Path) -> Result {
             std::iter::empty::<gix::ObjectId>(),
         )?
         .id;
+    let (ff_tree, _) = make_tree(&[
+        ("binary", ours_binary),
+        ("ff", b"fast-forward\n"),
+        ("text", b"ours\n"),
+    ])?;
+    let fast_forward = repo.new_commit("fast-forward", ff_tree, [ours])?.id;
+    let (clean_tree, _) = make_tree(&[
+        ("binary", ours_binary),
+        ("clean", b"clean side\n"),
+        ("text", b"ours\n"),
+    ])?;
+    let clean_target = repo.new_commit("clean side", clean_tree, [ours])?.id;
 
     let main: gix::refs::FullName = "refs/heads/main".try_into()?;
     repo.reference(
@@ -1544,6 +1556,102 @@ fn check_merge_prepare(output: &Path) -> Result {
     assert_eq!(fs::read(repo.index_path())?, index_before);
     assert_eq!(motor_gix::head_ref::capture(repo)?, original);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
+
+    let workdir = repo
+        .workdir()
+        .ok_or("merge fixture has no worktree")?
+        .to_owned();
+    fs::write(workdir.join("binary"), ours_binary)?;
+    fs::write(workdir.join("text"), b"dirty\n")?;
+    let error = motor_gix::merge::run(&mut opened, &base.to_string(), &cancellation)
+        .expect_err("an up-to-date merge accepted a dirty worktree");
+    assert!(error.to_string().contains("local changes"), "{error}");
+    assert_eq!(fs::read(opened.repo.index_path())?, index_before);
+    fs::write(workdir.join("text"), b"ours\n")?;
+    motor_gix::merge::run(&mut opened, &base.to_string(), &cancellation)?;
+
+    motor_gix::merge::run(&mut opened, &fast_forward.to_string(), &cancellation)?;
+    assert_eq!(opened.repo.head_id()?.detach(), fast_forward);
+    assert_eq!(fs::read(workdir.join("ff"))?, b"fast-forward\n");
+
+    motor_gix::merge::run(&mut opened, &clean_target.to_string(), &cancellation)?;
+    let merged = opened.repo.head_commit()?;
+    assert_eq!(
+        merged
+            .parent_ids()
+            .map(|id| id.detach())
+            .collect::<Vec<_>>(),
+        [fast_forward, clean_target]
+    );
+    assert_eq!(fs::read(workdir.join("clean"))?, b"clean side\n");
+    let clean_merge = merged.id().detach();
+    drop(merged);
+
+    let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
+        .expect_err("a text conflict did not stop in Ready state");
+    assert!(error.to_string().contains("resolve them"), "{error}");
+    assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
+    let record = motor_gix::operation::read(
+        &opened
+            .repo
+            .git_dir()
+            .join(motor_gix::mutation::OPERATION_FILE),
+    )?
+    .ok_or("conflicted merge record is missing")?;
+    assert_eq!(record.state, motor_gix::operation::State::Ready);
+    assert_eq!(record.target_commit, theirs_text);
+    let index = opened.repo.open_index()?;
+    let range = index
+        .entry_range(b"text".as_bstr())
+        .ok_or("conflicted text stages are missing")?;
+    assert_eq!(
+        index.entries()[range]
+            .iter()
+            .map(|entry| entry.stage())
+            .collect::<Vec<_>>(),
+        [Stage::Ours, Stage::Theirs]
+    );
+    assert_eq!(
+        fs::read(opened.repo.git_dir().join("MERGE_HEAD"))?,
+        format!("{theirs_text}\n").as_bytes()
+    );
+    assert_eq!(
+        fs::read(opened.repo.git_dir().join("MERGE_MSG"))?,
+        format!("Merge {theirs_text}\n").as_bytes()
+    );
+    assert!(fs::read(workdir.join("text"))?.starts_with(b"<<<<<<< HEAD\n"));
+    assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
+
+    let unborn_path = output.join("merge-unborn-repository");
+    motor_gix::init::run(
+        &unborn_path,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    let creator = motor_gix::repository::open(&unborn_path, &identities, false)?;
+    let mut unborn_index = gix::index::State::new(creator.repo.object_hash());
+    unborn_index.dangerously_push_entry(
+        Default::default(),
+        creator.repo.write_blob(b"unborn target\n")?.detach(),
+        Flags::empty(),
+        Mode::FILE,
+        b"new".as_bstr(),
+    );
+    let unborn_tree = motor_gix::tree_index::write(&creator.repo, &unborn_index, &cancellation)?;
+    let unborn_target = creator
+        .repo
+        .new_commit(
+            "unborn target",
+            unborn_tree,
+            std::iter::empty::<gix::ObjectId>(),
+        )?
+        .id;
+    drop(creator);
+    let mut unborn = motor_gix::repository::open(&unborn_path, &[], false)?;
+    motor_gix::merge::run(&mut unborn, &unborn_target.to_string(), &cancellation)?;
+    assert_eq!(unborn.repo.head_id()?.detach(), unborn_target);
+    assert_eq!(fs::read(unborn_path.join("new"))?, b"unborn target\n");
     Ok(())
 }
 

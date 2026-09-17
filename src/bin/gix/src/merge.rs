@@ -1,4 +1,8 @@
-use std::{error::Error as StdError, fmt, io};
+use std::{
+    error::Error as StdError,
+    fmt, fs,
+    io::{self, Write},
+};
 
 use gix::{
     bstr::ByteSlice,
@@ -14,7 +18,7 @@ use crate::{
     cancellation::Cancellation,
     commit, head_ref, merge_policy,
     mutation::{self, Guard},
-    operation::{Original, State},
+    operation::{Kind, Original, Record, State},
     repository::OpenedRepository,
     tracked_filters, transition, tree_index,
 };
@@ -128,6 +132,164 @@ pub fn prepare(
     })
 }
 
+/// Merge one revision into the exact attached branch while retaining one mutation guard.
+pub fn run(
+    opened: &mut OpenedRepository,
+    revision: &str,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    cancellation.check()?;
+    let mut guard = Guard::acquire(&opened.repo)?;
+    reject_merge_markers(opened.repo.git_dir())?;
+    let original = head_ref::capture(&opened.repo)?;
+    let target_commit = opened
+        .repo
+        .rev_parse_single(revision.as_bytes().as_bstr())?
+        .object()?
+        .peel_to_commit()?
+        .id;
+    let original_tree = match original.id {
+        Some(id) => opened.repo.find_commit(id)?.tree_id()?.detach(),
+        None => gix::ObjectId::empty_tree(opened.repo.object_hash()),
+    };
+    let message = format!("Merge {target_commit}");
+    let prepared = prepare(
+        opened,
+        guard.index(),
+        &original,
+        target_commit,
+        cancellation,
+    )?;
+
+    match prepared {
+        Preparation::UpToDate => {
+            drop(transition::prepare(
+                opened,
+                guard.index(),
+                &original_tree,
+                &original_tree,
+                cancellation,
+            )?);
+            head_ref::require(&opened.repo, &original)?;
+            cancellation.check()
+        }
+        Preparation::FastForward { target_tree } => {
+            let prepared = transition::prepare(
+                opened,
+                guard.index(),
+                &original_tree,
+                &target_tree,
+                cancellation,
+            )?;
+            head_ref::require(&opened.repo, &original)?;
+            let _ = head_ref::preflight_publication(&mut opened.repo)?;
+            let committer = opened
+                .repo
+                .committer()
+                .expect("generic committer fallback was installed")?
+                .to_owned()?;
+            let target_ref = original
+                .reference
+                .clone()
+                .expect("merge preparation validated attached HEAD");
+            let record = Record {
+                state: State::Incomplete,
+                kind: Kind::FastForward,
+                original,
+                target_ref,
+                target_commit,
+                result_tree: target_tree,
+                intended_commit: None,
+            };
+            cancellation.check()?;
+            guard.create_operation(&record)?;
+            let result: crate::Result = (|| {
+                let index = transition::install(opened, &guard, &record, prepared, cancellation)?;
+                guard.publish_fresh_index(index)?;
+                guard.require_operation(&record)?;
+                let mut time = gix::date::parse::TimeBuf::default();
+                let reflog = gix::reference::log::message("merge", message.as_bytes().as_bstr(), 1);
+                head_ref::advance_attached(
+                    &opened.repo,
+                    &record.original,
+                    target_commit,
+                    committer.to_ref(&mut time),
+                    reflog.as_bstr(),
+                    cancellation,
+                )?;
+                guard.cleanup_operation(&record, cancellation)
+            })();
+            result.map_err(|source| {
+                incomplete_error("fast-forward merge", cancellation.normalize_error(source))
+            })
+        }
+        Preparation::Divergent {
+            result_tree,
+            conflicts,
+        } => {
+            let identities = commit::identities(&opened.repo)?;
+            let prepared = transition::prepare(
+                opened,
+                guard.index(),
+                &original_tree,
+                &result_tree,
+                cancellation,
+            )?;
+            let unresolved = conflicts
+                .iter()
+                .any(|conflict| conflict.is_unresolved(TreatAsUnresolved::git()));
+            head_ref::require(&opened.repo, &original)?;
+
+            let target_ref = original
+                .reference
+                .clone()
+                .expect("merge preparation validated attached HEAD");
+            let incomplete = Record {
+                state: State::Incomplete,
+                kind: Kind::Merge,
+                original,
+                target_ref,
+                target_commit,
+                result_tree,
+                intended_commit: None,
+            };
+            cancellation.check()?;
+            guard.create_operation(&incomplete)?;
+            let result: crate::Result<Record> = (|| {
+                let mut index =
+                    transition::install(opened, &guard, &incomplete, prepared, cancellation)?;
+                if apply_conflicts(&mut index, &conflicts)? != unresolved {
+                    return Err(invalid("installed merge conflicts changed after preflight").into());
+                }
+                guard.publish_fresh_index(index)?;
+                publish_merge_markers(&opened.repo, &guard, &incomplete, &message, cancellation)?;
+                let mut ready = incomplete.clone();
+                ready.state = State::Ready;
+                guard.replace_operation(&incomplete, &ready)?;
+                Ok(ready)
+            })();
+            let ready = result.map_err(|source| {
+                incomplete_error("merge installation", cancellation.normalize_error(source))
+            })?;
+            if unresolved {
+                return Err(io::Error::other(
+                    "merge has conflicts; resolve them, run 'gix add' and 'gix commit', or run 'gix merge --abort'",
+                )
+                .into());
+            }
+            commit::finish_ready(
+                opened,
+                &guard,
+                &ready,
+                result_tree,
+                &message,
+                &identities,
+                cancellation,
+            )
+        }
+    }
+}
+
 fn apply_conflicts(index: &mut gix::index::State, conflicts: &[Conflict]) -> crate::Result<bool> {
     let how = TreatAsUnresolved::git();
     let unresolved = conflicts.iter().any(|conflict| conflict.is_unresolved(how));
@@ -176,6 +338,54 @@ fn apply_conflicts(index: &mut gix::index::State, conflicts: &[Conflict]) -> cra
         }
     }
     Ok(unresolved)
+}
+
+fn reject_merge_markers(git_dir: &std::path::Path) -> crate::Result {
+    for name in ["MERGE_HEAD", "MERGE_MSG"] {
+        match fs::symlink_metadata(git_dir.join(name)) {
+            Ok(_) => {
+                return Err(unsupported(format!(
+                    "repository already contains merge state '{name}'"
+                ))
+                .into());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn publish_merge_markers(
+    repo: &gix::Repository,
+    guard: &Guard,
+    record: &Record,
+    message: &str,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    let head_path = repo.git_dir().join("MERGE_HEAD");
+    let message_path = repo.git_dir().join("MERGE_MSG");
+    let mut head = gix::lock::File::acquire_to_update_resource(
+        &head_path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    )?;
+    let mut merge_message = gix::lock::File::acquire_to_update_resource(
+        &message_path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    )?;
+    reject_merge_markers(repo.git_dir())?;
+    guard.require_operation(record)?;
+    head_ref::require(repo, &record.original)?;
+    cancellation.check()?;
+    writeln!(head, "{}", record.target_commit)?;
+    writeln!(merge_message, "{message}")?;
+    head.flush()?;
+    merge_message.flush()?;
+    head.commit().map_err(|error| error.error)?;
+    merge_message.commit().map_err(|error| error.error)?;
+    cancellation.check()
 }
 
 /// Discard an installed ready merge and restore its exact recorded original tree.
