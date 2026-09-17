@@ -150,6 +150,11 @@ impl Guard {
         write_operation(lock, next)
     }
 
+    /// Require the exact operation record to remain persisted under this guard.
+    pub(crate) fn require_operation(&self, expected: &Record) -> crate::Result {
+        require_operation(&self.operation_path, expected)
+    }
+
     pub fn replace_operation(&self, expected: &Record, next: &Record) -> crate::Result {
         operation::validate_transition(expected, next)?;
         let lock = operation_lock(&self.operation_path)?;

@@ -1082,6 +1082,8 @@ struct TransitionFixture {
     opened: motor_gix::repository::OpenedRepository,
     original_commit: gix::ObjectId,
     original_tree: gix::ObjectId,
+    target_ref: gix::refs::FullName,
+    target_commit: gix::ObjectId,
     target_tree: gix::ObjectId,
 }
 
@@ -1112,10 +1114,11 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
     target.remove_entries(|_, path, _| {
         path == "a" || path.starts_with(b"dir/") || path.starts_with(b"removed/")
     });
-    target
+    let keep = target
         .entry_mut_by_path_and_stage(b"keep".as_bstr(), Stage::Unconflicted)
-        .ok_or("transition fixture keep entry is missing")?
-        .id = repo.write_blob(b"target keep\n")?.detach();
+        .ok_or("transition fixture keep entry is missing")?;
+    keep.id = repo.write_blob(b"target keep\n")?.detach();
+    keep.mode = Mode::FILE_EXECUTABLE;
     for (path, data) in [
         ("a/b", b"new child\n".as_slice()),
         ("dir", b"new file\n"),
@@ -1133,10 +1136,22 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
     }
     target.sort_entries();
     let target_tree = motor_gix::tree_index::write(repo, &target, &cancellation)?;
+    let target_commit = repo
+        .new_commit("transition target", target_tree, [original_commit])?
+        .id;
+    let target_ref: gix::refs::FullName = "refs/heads/transition-target".try_into()?;
+    repo.reference(
+        target_ref.clone(),
+        target_commit,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "transition fixture",
+    )?;
     Ok(TransitionFixture {
         opened,
         original_commit,
         original_tree,
+        target_ref,
+        target_commit,
         target_tree,
     })
 }
@@ -1145,7 +1160,7 @@ fn check_transition_delta(output: &Path) -> Result {
     let fixture = transition_fixture(output)?;
     let repo = &fixture.opened.repo;
     let cancellation = motor_gix::cancellation::Cancellation::new();
-    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
     let locked = guard.index();
     let index_before = fs::read(repo.index_path())?;
     let delta = motor_gix::transition::compute(
@@ -1315,6 +1330,97 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
     assert_eq!(fs::read(repo.index_path())?, index_before);
     assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
+
+    use motor_gix::operation::{Kind, Original, Record, State};
+    let original_ref = repo
+        .head()?
+        .referent_name()
+        .ok_or("transition fixture HEAD is detached")?
+        .to_owned();
+    let record = Record {
+        state: State::Incomplete,
+        kind: Kind::Switch,
+        original: Original {
+            reference: Some(original_ref),
+            id: Some(fixture.original_commit),
+        },
+        target_ref: fixture.target_ref.clone(),
+        target_commit: fixture.target_commit,
+        result_tree: fixture.target_tree,
+        intended_commit: None,
+    };
+    guard.create_operation(&record)?;
+    let operation_path = repo.git_dir().join(motor_gix::mutation::OPERATION_FILE);
+    let operation_before = fs::read(&operation_path)?;
+    let unchanged_path = workdir.join(".gitignore");
+    let unchanged_bytes = fs::read(&unchanged_path)?;
+    let unchanged_stat = gix::index::entry::Stat::from_fs(
+        &gix::index::fs::Metadata::from_path_no_follow(&unchanged_path)?,
+    )?;
+    fs::create_dir(workdir.join("ignored-parent"))?;
+    let sentinel = workdir.join("ignored-parent/unrelated");
+    fs::write(&sentinel, b"preserve me\n")?;
+
+    fs::write(workdir.join("removed/old"), b"late stale source expanded\n")?;
+    let error =
+        motor_gix::transition::install(&fixture.opened, &guard, &record, prepared, &cancellation)
+            .expect_err("a source changed after preparation was accepted");
+    assert!(error.to_string().contains("removed/old"), "{error}");
+    assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
+    assert_eq!(fs::read(&operation_path)?, operation_before);
+
+    fs::write(workdir.join("removed/old"), b"removed child\n")?;
+    let prepared = motor_gix::transition::prepare(
+        &fixture.opened,
+        guard.index(),
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )?;
+    let installed =
+        motor_gix::transition::install(&fixture.opened, &guard, &record, prepared, &cancellation)?;
+    assert_eq!(fs::read(workdir.join("a/b"))?, b"new child\n");
+    assert_eq!(fs::read(workdir.join("dir"))?, b"new file\n");
+    assert_eq!(
+        fs::read(workdir.join("empty-target"))?,
+        b"new empty replacement\n"
+    );
+    assert_eq!(fs::read(workdir.join("keep"))?, b"target keep\n");
+    assert!(gix::index::fs::Metadata::from_path_no_follow(&workdir.join("keep"))?.is_executable());
+    assert!(!workdir.join("removed/old").try_exists()?);
+    assert_eq!(fs::read(&unchanged_path)?, unchanged_bytes);
+    assert_eq!(
+        gix::index::entry::Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(
+            &unchanged_path
+        )?,)?,
+        unchanged_stat
+    );
+    assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
+    assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
+    assert_eq!(fs::read(&operation_path)?, operation_before);
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    guard.publish_fresh_index(installed)?;
+    let published = repo.open_index()?;
+    assert_eq!(
+        published.entries().len(),
+        delta.target_index.entries().len()
+    );
+    assert!(
+        published
+            .entries()
+            .iter()
+            .zip(delta.target_index.entries())
+            .all(|(actual, expected)| {
+                actual.path(&published) == expected.path(&delta.target_index)
+                    && actual.id == expected.id
+                    && actual.mode == expected.mode
+                    && !actual.flags.contains(Flags::SKIP_WORKTREE)
+            })
+    );
+    assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
+    assert_eq!(motor_gix::operation::read(&operation_path)?, Some(record));
     drop(guard);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())

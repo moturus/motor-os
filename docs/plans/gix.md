@@ -1290,6 +1290,22 @@ with matching source hashes. Evidence is in
 `/tmp/motor-gix-transition-prepare-5a23f661`. Installation and ref publication
 remain subsequent steps.
 
+M2 transition installation: the reviewed helper requires the exact persisted
+incomplete record and prepared result-tree ID before destructive writes. It
+rechecks collisions and every changed source, repeats full no-follow/stat/mode
+checks per deletion, and removes blocking directories in bounded postorder with
+nonrecursive operations. Checkout recreates only changed destinations exclusively,
+using the complete target index for attributes; unchanged files and unrelated
+contents are preserved. Temporary selection flags are cleared and errors and
+cancellation checked before returning the fresh index for guarded publication.
+The existing native lifecycle covers stale-source refusal before earlier deletion,
+file/directory replacements, executable output, an ignored sibling, unchanged
+stat/content, retained HEAD/record and the exact published index. Parent and
+independent source reviews found no blocker; host/Motor component gates, formatting
+and strict Clippy pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-transition-install-2137cce8`. Command-level ref publication,
+merge-state handling and recovery remain to be implemented.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

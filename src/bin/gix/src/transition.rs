@@ -6,12 +6,18 @@ use std::{
 
 use gix::{
     bstr::{BStr, BString, ByteSlice},
-    index::entry::{Mode, Stage, Stat},
+    index::entry::{Flags, Mode, Stage, Stat},
     worktree::stack::state::attributes::Source,
 };
 
 use crate::{
-    cancellation::Cancellation, repository::OpenedRepository, stage_blob::Converter,
+    cancellation::Cancellation,
+    checkout,
+    mutation::Guard,
+    operation::{Record, State},
+    repository::OpenedRepository,
+    selection,
+    stage_blob::Converter,
     tracked_filters, tree_index,
 };
 
@@ -40,6 +46,7 @@ pub struct Delta {
 /// An observed preflight result, without worktree snapshot isolation.
 #[derive(Debug)]
 pub struct Prepared {
+    pub result_tree: gix::ObjectId,
     pub target_index: gix::index::State,
     pub changes: Vec<Change>,
 }
@@ -135,9 +142,95 @@ pub fn prepare(
     }
     cancellation.check()?;
     Ok(Prepared {
+        result_tree: target_tree.to_owned(),
         target_index: delta.target_index,
         changes: delta.changes,
     })
+}
+
+/// Install a prepared transition and return the fresh target index for later publication.
+///
+/// The caller retains `guard` and the incomplete operation record. This function may partially
+/// update the worktree on error, but never publishes the index, refs, or operation state.
+pub fn install(
+    opened: &OpenedRepository,
+    guard: &Guard,
+    record: &Record,
+    mut prepared: Prepared,
+    cancellation: &Cancellation,
+) -> crate::Result<gix::index::State> {
+    cancellation.check()?;
+    if record.state != State::Incomplete {
+        return Err(invalid("worktree installation requires an incomplete operation").into());
+    }
+    if record.result_tree != prepared.result_tree {
+        return Err(invalid("operation result tree does not match the prepared transition").into());
+    }
+    let repo = &opened.repo;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
+    let mut options = repo.checkout_options(Source::IdMapping)?;
+    options.fs.symlink = false;
+    options.thread_limit = Some(1);
+    // Selected destinations are removed first and must be recreated exclusively.
+    options.destination_is_initially_empty = true;
+    options.overwrite_existing = false;
+    options.keep_going = false;
+    let mut objects = repo.objects.clone().into_arc()?;
+    objects.ignore_replacements = true;
+
+    for (entry, path) in prepared.target_index.entries_mut_with_paths() {
+        let changed = prepared
+            .changes
+            .binary_search_by(|change| change.path.as_bstr().cmp(path))
+            .is_ok_and(|offset| prepared.changes[offset].target.is_some());
+        if !changed || entry.mode == Mode::COMMIT {
+            entry.flags.insert(Flags::SKIP_WORKTREE);
+        }
+    }
+
+    let target_directories = preflight_changes(repo, &prepared.changes, cancellation)?;
+    for change in prepared
+        .changes
+        .iter()
+        .filter(|change| change.original.is_some())
+    {
+        cancellation.check()?;
+        recheck_original(workdir, change)?;
+    }
+    cancellation.check()?;
+    guard.require_operation(record)?;
+
+    for change in prepared
+        .changes
+        .iter()
+        .filter(|change| change.original.is_some())
+    {
+        cancellation.check()?;
+        fs::remove_file(recheck_original(workdir, change)?)?;
+    }
+    for offset in target_directories {
+        remove_target_directory(workdir, &prepared.changes, offset, cancellation)?;
+    }
+
+    let discard = gix::features::progress::Discard;
+    let outcome = gix::worktree::state::checkout(
+        &mut prepared.target_index,
+        workdir,
+        objects,
+        &discard,
+        &discard,
+        cancellation.flag(),
+        options,
+    )
+    .map_err(|error| cancellation.normalize_error(error.into()))?;
+    checkout::check_outcome(&outcome).map_err(|error| cancellation.normalize_error(error))?;
+    for entry in prepared.target_index.entries_mut() {
+        entry.flags.remove(Flags::SKIP_WORKTREE);
+    }
+    cancellation.check()?;
+    Ok(prepared.target_index)
 }
 
 fn ensure_original_index(
@@ -246,10 +339,19 @@ pub fn preflight_collisions(
     delta: &Delta,
     cancellation: &Cancellation,
 ) -> crate::Result {
+    preflight_changes(repo, &delta.changes, cancellation).map(drop)
+}
+
+fn preflight_changes(
+    repo: &gix::Repository,
+    changes: &[Change],
+    cancellation: &Cancellation,
+) -> crate::Result<Vec<usize>> {
     let workdir = repo
         .workdir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
-    for change in &delta.changes {
+    let mut target_directories = Vec::new();
+    for (offset, change) in changes.iter().enumerate() {
         cancellation.check()?;
         let target = change.path.as_bstr();
         for (slash, _) in target.iter().enumerate().filter(|(_, byte)| **byte == b'/') {
@@ -262,9 +364,7 @@ pub fn preflight_collisions(
             };
             if metadata.is_dir() {
                 reject_repository(&absolute, prefix)?;
-            } else if change.target.is_none()
-                || metadata.is_file() && removable(&delta.changes, prefix)
-            {
+            } else if change.target.is_none() || metadata.is_file() && removable(changes, prefix) {
                 break;
             } else {
                 return Err(obstruction(prefix, "blocks a target path").into());
@@ -288,10 +388,91 @@ pub fn preflight_collisions(
             Err(error) => return Err(error.into()),
         };
         if metadata.is_dir() {
-            reject_directory_contents(&absolute, workdir, &delta.changes, cancellation)?;
+            reject_directory_contents(&absolute, workdir, changes, cancellation)?;
+            target_directories.try_reserve(1)?;
+            target_directories.push(offset);
         } else if !metadata.is_file() || !change.original.is_some_and(|entry| ordinary(entry.mode))
         {
             return Err(obstruction(target, "would be overwritten").into());
+        }
+    }
+    Ok(target_directories)
+}
+
+fn recheck_original(workdir: &Path, change: &Change) -> crate::Result<PathBuf> {
+    let original = change
+        .original
+        .ok_or_else(|| invalid("changed original entry is missing"))?;
+    let expected_stat = change
+        .original_stat
+        .ok_or_else(|| invalid("changed original entry has no observed stat"))?;
+    let path = change.path.as_bstr();
+    let absolute = workdir.join(gix::path::from_bstr(path).as_ref());
+    let Some(path_metadata) = selection::checked_symlink_metadata(workdir, path)? else {
+        return Err(path_error(io::ErrorKind::InvalidData, path, "is missing").into());
+    };
+    let metadata = gix::index::fs::Metadata::from_path_no_follow(&absolute)?;
+    if !path_metadata.is_file() || !metadata.is_file() {
+        return Err(path_error(
+            io::ErrorKind::InvalidData,
+            path,
+            "changed type since preparation",
+        )
+        .into());
+    }
+    let actual_stat = Stat::from_fs(&metadata)?;
+    let actual_mode = if original.mode == Mode::SYMLINK {
+        Mode::SYMLINK
+    } else if metadata.is_executable() {
+        Mode::FILE_EXECUTABLE
+    } else {
+        Mode::FILE
+    };
+    if actual_stat != expected_stat || actual_mode != original.mode {
+        return Err(path_error(
+            io::ErrorKind::InvalidData,
+            path,
+            "changed since preparation",
+        )
+        .into());
+    }
+    Ok(absolute)
+}
+
+fn remove_target_directory(
+    workdir: &Path,
+    changes: &[Change],
+    target_offset: usize,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    let root = workdir.join(gix::path::from_bstr(changes[target_offset].path.as_bstr()).as_ref());
+    let mut pending = Vec::new();
+    pending.try_reserve(1)?;
+    pending.push((root, false));
+    while let Some((directory, visited)) = pending.pop() {
+        cancellation.check()?;
+        let relative = repository_path(workdir, &directory)?;
+        let metadata = selection::checked_symlink_metadata(workdir, relative.as_bstr())?;
+        if !metadata.is_some_and(|metadata| metadata.is_dir()) {
+            return Err(obstruction(relative.as_bstr(), "changed during installation").into());
+        }
+        if visited {
+            fs::remove_dir(directory)?;
+            continue;
+        }
+        reject_repository(&directory, relative.as_bstr())?;
+        pending.try_reserve(1)?;
+        pending.push((directory.clone(), true));
+        for entry in fs::read_dir(&directory)? {
+            cancellation.check()?;
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            let relative = repository_path(workdir, &path)?;
+            if !metadata.is_dir() || !has_removable_descendant(changes, relative.as_bstr())? {
+                return Err(obstruction(relative.as_bstr(), "would be overwritten").into());
+            }
+            pending.try_reserve(1)?;
+            pending.push((path, false));
         }
     }
     Ok(())
@@ -383,6 +564,10 @@ fn has_removable_descendant(changes: &[Change], parent: &BStr) -> crate::Result<
 
 fn ordinary(mode: Mode) -> bool {
     matches!(mode, Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK)
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
 fn obstruction(path: &BStr, message: &str) -> io::Error {
