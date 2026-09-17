@@ -1458,6 +1458,37 @@ are unchanged. The completed run and source checks are preserved in
 `/tmp/motor-teardown-preallocation/developer-release-approved`. The original
 failed run remains part of the validation record.
 
+### Resolved implementation discussion — cancellation diagnostics (2026-09-16)
+
+The resumed source review found an existing application reporting defect.
+`src/bin/gix/src/main.rs` samples cancellation before returning a command's
+result, so a late Ctrl+C can replace a real error, including a ref/reflog
+publication error. `clone.rs:32` can report `clone did not complete` after
+checkout, index publication and removal of the incomplete marker have all
+succeeded. `fetch.rs:65` can skip the received outcome and its warning about
+references that may already have changed. These are result/diagnostic losses;
+exit 130 after a completed atomic edit alone does not establish a defect.
+
+Discussed and approved: preserve existing errors and inspect fetch update
+outcomes before any final cancellation check; attach the partial-state warning
+to interrupted fetches; use the incomplete-clone diagnostic only for an actual
+clone failure. Retain cancellation exit 130 and the documented possibility of
+partial ref/reflog publication. Do not add a new success-wins-late-Ctrl+C policy,
+rollback machinery, external crate changes, or a timing-sensitive race test.
+Reuse the existing cancelled-clone fixture and compact result-handling coverage.
+
+The user approved this application-only repair and continuation with gix.
+The reviewed implementation uses one cancellation error with an optional source,
+corrects result ordering in main, clone, fetch and init, and retains fetch's
+partial-publication warning. Upstream generic interruption errors retain their
+sources and cancellation classification, preserving exit 130. One compact
+source-chain unit test and the unchanged native interrupted-clone fixture pass.
+The complete host/Motor component gates, selected-toolchain formatting, strict
+Clippy and shell checks pass; all tested source hashes match. Validation evidence
+is in `/tmp/motor-gix-cancellation-fix`. Source reviews:
+`/tmp/motor-gix-commit-design/review.md` and
+`/tmp/motor-gix-commit-design/cancellation-normalization.md`.
+
 ### Open implementation discussion — text-diff limits (2026-09-16)
 
 Source review of the pinned diff library found that its token-count estimate
@@ -1481,28 +1512,3 @@ Recommended: yes. An alternative is an explicit oversized-text summary while
 still rejecting `minimal`. No renderer or policy change has been applied;
 branch/tag work and the shared bounded loader are independent of this choice.
 Source review: `/tmp/motor-gix-diff-design/review-current.md`.
-
-### Open implementation discussion — cancellation diagnostics (2026-09-16)
-
-The resumed source review found an existing application reporting defect.
-`src/bin/gix/src/main.rs` samples cancellation before returning a command's
-result, so a late Ctrl+C can replace a real error, including a ref/reflog
-publication error. `clone.rs:32` can report `clone did not complete` after
-checkout, index publication and removal of the incomplete marker have all
-succeeded. `fetch.rs:65` can skip the received outcome and its warning about
-references that may already have changed. These are result/diagnostic losses;
-exit 130 after a completed atomic edit alone does not establish a defect.
-
-Proposed narrow repair: preserve existing errors and inspect fetch update
-outcomes before any final cancellation check; attach the partial-state warning
-to interrupted fetches; use the incomplete-clone diagnostic only for an actual
-clone failure. Retain cancellation exit 130 and the documented possibility of
-partial ref/reflog publication. Do not add a new success-wins-late-Ctrl+C policy,
-rollback machinery, external crate changes, or a timing-sensitive race test.
-Reuse the existing cancelled-clone fixture and compact result-handling coverage.
-
-**Open question:** approve this application-only reporting repair before the
-next gix command patch? The runtime/toolchain repairs are complete and
-validated. The reviewed branch/tag patch remains under `/tmp`; no gix
-production source changed during this review. Source review:
-`/tmp/motor-gix-commit-design/review.md`.

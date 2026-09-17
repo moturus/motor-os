@@ -48,8 +48,8 @@ pub fn run(
         },
         options,
     );
-    cancellation.check()?;
     let mut repo = repo?.to_thread_local();
+    cancellation.check()?;
     repository::apply_policy(&mut repo, &selected, report_config_paths)?;
     cancellation.check()
 }

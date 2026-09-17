@@ -62,14 +62,20 @@ pub fn run(
         }
     }
     let result = pending.receive(gix::progress::Discard, cancellation.flag());
-    cancellation.check()?;
     let outcome = result.map_err(|error| {
         network::Failure::new(
             "fetch failed; downloaded objects or some references may already have changed"
                 .to_owned(),
-            error.into(),
+            cancellation.normalize_error(error.into()),
         )
     })?;
     network::check_outcome(&outcome)?;
+    cancellation.check().map_err(|source| {
+        network::Failure::new(
+            "fetch failed; downloaded objects or some references may already have changed"
+                .to_owned(),
+            source,
+        )
+    })?;
     Ok(())
 }

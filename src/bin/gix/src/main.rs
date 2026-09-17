@@ -132,8 +132,8 @@ fn run() -> Result {
             matches.get_flag("config-paths"),
             &cancellation,
         );
-        cancellation.check()?;
-        return result;
+        result?;
+        return cancellation.check();
     }
     if let Some(("clone", command)) = matches.subcommand() {
         let result = clone::run(
@@ -145,19 +145,12 @@ fn run() -> Result {
             matches.get_flag("config-paths"),
             &cancellation,
         );
-        // Keep the partial-directory diagnostic when it already carries cancellation.
-        if result
-            .as_ref()
-            .is_err_and(|error| cancellation::was_cancelled(error.as_ref()))
-        {
-            return result;
-        }
-        cancellation.check()?;
-        return result;
+        result?;
+        return cancellation.check();
     }
     let opened = repository::open(path, &overrides, matches.get_flag("config-paths"));
-    cancellation.check()?;
     let mut opened = opened?;
+    cancellation.check()?;
 
     let result = match matches.subcommand_name() {
         Some("add") => {
@@ -188,6 +181,6 @@ fn run() -> Result {
             .and_then(|report| report.write_to(io::stdout().lock(), &cancellation)),
         _ => unreachable!("clap accepts only declared subcommands"),
     };
-    cancellation.check()?;
-    result
+    result?;
+    cancellation.check()
 }

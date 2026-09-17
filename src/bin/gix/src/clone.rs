@@ -29,10 +29,13 @@ pub fn run(
         report_config_paths,
         cancellation,
     );
-    cancellation.check().and(result).map_err(|source| network::Failure::new(format!(
+    result.map_err(|source| {
+        network::Failure::new(format!(
             "clone did not complete; owned destination '{}' is retained for inspection; remove it explicitly before cloning again",
             destination.display()
-        ), source).into())
+        ), source)
+    })?;
+    cancellation.check()
 }
 
 fn clone_created(
@@ -78,9 +81,10 @@ fn clone_created(
         fs::File::create_new(&marker)?;
         cancellation.check()?;
         let fetched = prepare.fetch_only(gix::progress::Discard, cancellation.flag());
-        cancellation.check()?;
-        let (mut repo, outcome) = fetched?;
+        let (mut repo, outcome) =
+            fetched.map_err(|error| cancellation.normalize_error(error.into()))?;
         network::check_outcome(&outcome)?;
+        cancellation.check()?;
         repo.objects.ignore_replacements = true;
         let opened = repository::OpenedRepository {
             repo,
