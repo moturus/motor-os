@@ -16,14 +16,7 @@ use crate::{
 pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation) -> crate::Result {
     cancellation.check()?;
     let repo = &opened.repo;
-    let author = repo
-        .author()
-        .ok_or_else(|| invalid("author identity is not configured"))??;
-    validate_identity(author, "author")?;
-    let committer = repo
-        .committer()
-        .ok_or_else(|| invalid("committer identity is not configured"))??;
-    validate_identity(committer, "committer")?;
+    let (_, committer) = identities(repo)?;
     cancellation.check()?;
 
     let guard = Guard::acquire(repo)?;
@@ -76,6 +69,20 @@ pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation
     repo.edit_references_as([edit], Some(committer))?;
     drop(guard);
     Ok(())
+}
+
+pub(crate) fn identities(
+    repo: &gix::Repository,
+) -> crate::Result<(gix::actor::SignatureRef<'_>, gix::actor::SignatureRef<'_>)> {
+    let author = repo
+        .author()
+        .ok_or_else(|| invalid("author identity is not configured"))??;
+    validate_identity(author, "author")?;
+    let committer = repo
+        .committer()
+        .ok_or_else(|| invalid("committer identity is not configured"))??;
+    validate_identity(committer, "committer")?;
+    Ok((author, committer))
 }
 
 fn validate_identity(signature: gix::actor::SignatureRef<'_>, role: &str) -> crate::Result {

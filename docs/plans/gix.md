@@ -1481,6 +1481,18 @@ preservation of the original HEAD without a duplicate reflog entry. All host/Mot
 component gates, formatting, strict Clippy and shell checks pass with matching
 source hashes. Evidence is in `/tmp/motor-gix-switch-recover-cli-4ecb2ae6`.
 
+M2 merge topology and result preparation: the reviewed helper classifies unborn
+and born fast-forward and up-to-date cases without authoring identity or unused
+merge-driver checks. Divergence requires real identities, full original/incoming
+and result driver scans, recursive merge bases, and only unresolved same-path
+regular-text conflicts; binary fallback and rewritten paths refuse. Redundant
+index snapshots are dropped before the engine runs. One native graph covers
+classification, identity refusal, text markers, binary refusal and unchanged
+published state. This coherent preparation/graph patch slightly exceeds the usual
+300-line target. All host/Motor component gates, formatting, strict Clippy and shell
+checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-merge-prepare-e02b957e`. Installation and merge publication follow.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

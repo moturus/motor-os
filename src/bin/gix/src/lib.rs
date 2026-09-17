@@ -16,6 +16,7 @@ pub mod http;
 pub mod http_request;
 pub mod https_url;
 pub mod init;
+pub mod merge;
 pub mod merge_policy;
 pub mod mutation;
 pub mod network;

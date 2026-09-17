@@ -145,6 +145,7 @@ fn main() -> Result {
     check_diff_policy(&output)?;
     check_diff_run(&output)?;
     check_merge_policy(&output)?;
+    check_merge_prepare(&output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -1355,6 +1356,164 @@ fn check_merge_policy(output: &Path) -> Result {
         "{error}"
     );
     assert!(!safe.repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_merge_prepare(output: &Path) -> Result {
+    use motor_gix::{merge::Preparation, operation::Original};
+
+    let repository = output.join("merge-prepare-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    let identities = ["user.name=Native Test", "user.email=native@example.com"];
+    let opened = motor_gix::repository::open(&repository, &identities, false)?;
+    let repo = &opened.repo;
+    let make_tree = |entries: &[(&str, &[u8])]| -> Result<_> {
+        let mut state = gix::index::State::new(repo.object_hash());
+        for (path, data) in entries {
+            state.dangerously_push_entry(
+                Default::default(),
+                repo.write_blob(*data)?.detach(),
+                Flags::empty(),
+                Mode::FILE,
+                path.as_bytes().as_bstr(),
+            );
+        }
+        state.sort_entries();
+        let tree = motor_gix::tree_index::write(repo, &state, &cancellation)?;
+        Ok((tree, state))
+    };
+    let (base_tree, base_index) = make_tree(&[])?;
+    let base = repo
+        .new_commit("base", base_tree, std::iter::empty::<gix::ObjectId>())?
+        .id;
+    let ours_binary: &[u8] = &[0, b'o'];
+    let theirs_binary_data: &[u8] = &[0, b't'];
+    let (ours_tree, ours_index) = make_tree(&[("binary", ours_binary), ("text", b"ours\n")])?;
+    let ours = repo.new_commit("ours", ours_tree, [base])?.id;
+    let (text_tree, _) = make_tree(&[("text", b"theirs\n")])?;
+    let theirs_text = repo.new_commit("theirs text", text_tree, [base])?.id;
+    let (binary_tree, _) = make_tree(&[("binary", theirs_binary_data)])?;
+    let theirs_binary = repo.new_commit("theirs binary", binary_tree, [base])?.id;
+    let unrelated = repo
+        .new_commit(
+            "unrelated",
+            gix::ObjectId::empty_tree(repo.object_hash()),
+            std::iter::empty::<gix::ObjectId>(),
+        )?
+        .id;
+
+    let main: gix::refs::FullName = "refs/heads/main".try_into()?;
+    repo.reference(
+        main.clone(),
+        ours,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "merge fixture",
+    )?;
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.publish_fresh_index(ours_index.clone())?;
+    drop(guard);
+    let index_before = fs::read(repo.index_path())?;
+    let original = Original {
+        reference: Some(main.clone()),
+        id: Some(ours),
+    };
+
+    let without_identity =
+        motor_gix::repository::open(&repository, &["user.name=", "user.email="], false)?;
+    assert!(matches!(
+        motor_gix::merge::prepare(
+            &without_identity,
+            &base_index,
+            &Original {
+                reference: Some(main.clone()),
+                id: Some(base),
+            },
+            ours,
+            &cancellation,
+        )?,
+        Preparation::FastForward { target_tree } if target_tree == ours_tree
+    ));
+    assert!(matches!(
+        motor_gix::merge::prepare(
+            &without_identity,
+            &ours_index,
+            &original,
+            base,
+            &cancellation,
+        )?,
+        Preparation::UpToDate
+    ));
+    assert!(matches!(
+        motor_gix::merge::prepare(
+            &without_identity,
+            &base_index,
+            &Original {
+                reference: Some(main.clone()),
+                id: None,
+            },
+            ours,
+            &cancellation,
+        )?,
+        Preparation::FastForward { target_tree } if target_tree == ours_tree
+    ));
+    let error = motor_gix::merge::prepare(
+        &without_identity,
+        &ours_index,
+        &original,
+        theirs_text,
+        &cancellation,
+    )
+    .expect_err("divergent merge accepted missing identities");
+    assert!(error.to_string().contains("author identity"), "{error}");
+
+    let (result_tree, conflicts) = match motor_gix::merge::prepare(
+        &opened,
+        &ours_index,
+        &original,
+        theirs_text,
+        &cancellation,
+    )? {
+        Preparation::Divergent {
+            result_tree,
+            conflicts,
+        } => (result_tree, conflicts),
+        other => return Err(format!("text divergence classified as {other:?}").into()),
+    };
+    let mut unresolved = conflicts
+        .iter()
+        .filter(|conflict| conflict.is_unresolved(gix::merge::tree::TreatAsUnresolved::git()));
+    let conflict = unresolved.next().ok_or("text conflict is missing")?;
+    assert!(unresolved.next().is_none());
+    let stages = conflict.entries();
+    assert!(stages[0].is_none() && stages[1].is_some() && stages[2].is_some());
+    let text = repo
+        .find_tree(result_tree)?
+        .lookup_entry_by_path("text")?
+        .ok_or("merged text is missing")?;
+    assert!(
+        repo.find_blob(text.object_id())?
+            .data
+            .starts_with(b"<<<<<<< HEAD\n")
+    );
+
+    for (target, expected) in [
+        (theirs_binary, "binary"),
+        (unrelated, "unrelated histories"),
+    ] {
+        let error =
+            motor_gix::merge::prepare(&opened, &ours_index, &original, target, &cancellation)
+                .expect_err("unsupported merge was accepted");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(motor_gix::head_ref::capture(repo)?, original);
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

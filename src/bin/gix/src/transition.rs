@@ -380,7 +380,7 @@ fn install_prepared(
     Ok(target_index)
 }
 
-fn ensure_original_index(
+pub(crate) fn ensure_original_index(
     actual: &gix::index::State,
     expected: &gix::index::State,
 ) -> crate::Result {
