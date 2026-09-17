@@ -1398,6 +1398,17 @@ recovery state when a foreign HEAD lock blocks publication. Host/Motor component
 gates, formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-switch-bd97dfb7`. CLI exposure waits for recovery.
 
+M2 diff command library: the reviewed read-only entry point holds one index,
+preflights selected paths, conflict stages and worktree filters before output,
+and compares staged entries with a bounded HEAD snapshot in one sorted pass.
+Unchanged staged IDs/modes skip blob loading; unselected scan steps remain
+cancellable. One loader and resolver serve the run. The native lifecycle checks
+unborn/staged/worktree behavior, literal selection, rejection before file output
+and unchanged repository data. Host behavior passed initially; five new test
+assertions then needed the equivalent `expect_err()` spelling for strict Clippy.
+All final host/Motor component gates and formatting/shell checks pass with
+matching source hashes. Evidence is in `/tmp/motor-gix-diff-run-89685401`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

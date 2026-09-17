@@ -143,6 +143,7 @@ fn main() -> Result {
     check_diff_input(&output)?;
     check_diff_render()?;
     check_diff_policy(&output)?;
+    check_diff_run(&output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -953,6 +954,129 @@ fn check_diff_render() -> Result {
     .err()
     .expect("cancelled text diff was accepted");
     assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
+    Ok(())
+}
+
+fn check_diff_run(output: &Path) -> Result {
+    use motor_gix::diff_render::MAX_TEXT_LINES;
+
+    let repository = output.join("add-repository");
+    let opened = motor_gix::repository::open(&repository, &[], false)?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let invoke =
+        |opened: &motor_gix::repository::OpenedRepository, staged: bool, paths: &[String]| {
+            let mut out = Vec::new();
+            let result = motor_gix::diff::run(opened, staged, paths, &cancellation, &mut out);
+            (result, out)
+        };
+    let index_path = opened.repo.index_path();
+    let index_before = fs::read(&index_path)?;
+    let modified_path = repository.join("modified");
+    let modified_before = fs::read(&modified_path)?;
+    let selected = ["modified".to_owned()];
+
+    let (result, out) = invoke(&opened, true, &selected);
+    result?;
+    let staged = String::from_utf8(out)?;
+    assert!(staged.contains("--- /dev/null\n+++ b/modified\n") && staged.contains("+new\n"));
+
+    let (result, out) = invoke(&opened, false, &selected);
+    result?;
+    assert!(out.is_empty());
+    assert_eq!(fs::read(&index_path)?, index_before);
+    assert_eq!(fs::read(&modified_path)?, modified_before);
+
+    fs::write(&modified_path, b"worktree\n")?;
+    let (result, out) = invoke(&opened, false, &selected);
+    result?;
+    let worktree = String::from_utf8(out)?;
+    assert!(
+        worktree.contains("--- a/modified\n+++ b/modified\n")
+            && worktree.contains("-new\n+worktree\n")
+    );
+    assert_eq!(fs::read(&index_path)?, index_before);
+    assert_eq!(fs::read(&modified_path)?, b"worktree\n");
+
+    let (result, out) = invoke(&opened, false, &["absent".into()]);
+    let error = result.expect_err("an unmatched literal path was accepted");
+    assert!(
+        error.to_string().contains("did not match a tracked path"),
+        "{error}"
+    );
+    assert!(out.is_empty());
+
+    let attributes = opened.repo.git_dir().join("info/attributes");
+    fs::write(&attributes, b"modified filter=blocked\n")?;
+    let filtered = motor_gix::repository::open(
+        &repository,
+        &[
+            "filter.blocked.clean=must-not-run",
+            "filter.blocked.required=true",
+        ],
+        false,
+    )?;
+    let (result, out) = invoke(&filtered, false, &selected);
+    let error = result.expect_err("a required filter was accepted");
+    assert!(
+        error.to_string().contains("unsupported filter 'blocked'"),
+        "{error}"
+    );
+    assert!(out.is_empty());
+    drop(filtered);
+    fs::remove_file(&attributes)?;
+
+    let minimal = motor_gix::repository::open(&repository, &["diff.algorithm=minimal"], false)?;
+    let (result, out) = invoke(&minimal, false, &selected);
+    let error = result.expect_err("Minimal text diff was accepted");
+    assert!(
+        error.to_string().contains("minimal diff algorithm"),
+        "{error}"
+    );
+    assert!(out.is_empty(), "Minimal wrote a file preamble");
+    drop(minimal);
+    assert_eq!(fs::read(&index_path)?, index_before);
+    assert_eq!(fs::read(&modified_path)?, b"worktree\n");
+
+    fs::write(&modified_path, vec![b'\n'; MAX_TEXT_LINES as usize + 1])?;
+    let (result, out) = invoke(&opened, false, &selected);
+    let error = result.expect_err("the text line limit was not enforced");
+    assert!(error.to_string().contains("262144-line limit"), "{error}");
+    assert!(out.is_empty(), "the line-limit error wrote a file preamble");
+    fs::write(&modified_path, b"worktree\n")?;
+    assert_eq!(fs::read(&index_path)?, index_before);
+
+    {
+        let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+        guard.publish_edited_index(|index| {
+            index
+                .entry_mut_by_path_and_stage(b"modified".as_bstr(), Stage::Unconflicted)
+                .ok_or("modified fixture entry is missing")?
+                .flags = Flags::from_stage(Stage::Ours);
+            Ok(())
+        })?;
+    }
+    let conflicted_index = fs::read(&index_path)?;
+    let conflicted = motor_gix::repository::open(&repository, &[], false)?;
+    let (result, out) = invoke(&conflicted, false, &["added".into()]);
+    result?;
+    assert!(
+        out.is_empty(),
+        "an unselected conflict blocked an unchanged path"
+    );
+    let (result, out) = invoke(&conflicted, false, &selected);
+    let error = result.expect_err("a selected conflict was accepted");
+    assert!(
+        error.to_string().contains("index entry is conflicted"),
+        "{error}"
+    );
+    assert!(out.is_empty(), "conflict preflight wrote output");
+    assert_eq!(fs::read(&index_path)?, conflicted_index);
+    assert_eq!(fs::read(&modified_path)?, b"worktree\n");
+    drop(conflicted);
+
+    fs::write(&index_path, &index_before)?;
+    fs::write(&modified_path, &modified_before)?;
+    assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

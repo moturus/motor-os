@@ -98,7 +98,7 @@ fn normalize(input: &str, workdir: &Path) -> io::Result<BString> {
     Ok(out.into())
 }
 
-pub(super) fn validate_normalized(path: &BStr, workdir: &Path) -> io::Result<()> {
+pub(crate) fn validate_normalized(path: &BStr, workdir: &Path) -> io::Result<()> {
     let path = std::str::from_utf8(path)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     if path.is_empty() || path.split('/').any(str::is_empty) {
