@@ -6,10 +6,14 @@ use std::{
 
 use gix::{
     bstr::{BStr, BString, ByteSlice},
-    index::entry::{Mode, Stage},
+    index::entry::{Mode, Stage, Stat},
+    worktree::stack::state::attributes::Source,
 };
 
-use crate::{cancellation::Cancellation, tree_index};
+use crate::{
+    cancellation::Cancellation, repository::OpenedRepository, stage_blob::Converter,
+    tracked_filters, tree_index,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Snapshot {
@@ -22,12 +26,20 @@ pub struct Change {
     pub path: BString,
     pub original: Option<Snapshot>,
     pub target: Option<Snapshot>,
+    pub original_stat: Option<Stat>,
 }
 
 /// A repository-only tree delta. Worktree safety has not been preflighted.
 #[derive(Debug)]
 pub struct Delta {
     pub original_index: gix::index::State,
+    pub target_index: gix::index::State,
+    pub changes: Vec<Change>,
+}
+
+/// An observed preflight result, without worktree snapshot isolation.
+#[derive(Debug)]
+pub struct Prepared {
     pub target_index: gix::index::State,
     pub changes: Vec<Change>,
 }
@@ -52,6 +64,79 @@ pub fn compute(
         original_index,
         target_index,
         changes,
+    })
+}
+
+/// Validate filters, collisions, and tracked worktree content without writing repository state.
+///
+/// The caller retains its mutation guard and rechecks observed state and cancellation
+/// immediately before destructive writes.
+pub fn prepare(
+    opened: &OpenedRepository,
+    locked_index: &gix::index::State,
+    original_tree: &gix::oid,
+    target_tree: &gix::oid,
+    cancellation: &Cancellation,
+) -> crate::Result<Prepared> {
+    let mut delta = compute(
+        &opened.repo,
+        locked_index,
+        original_tree,
+        target_tree,
+        cancellation,
+    )?;
+    tracked_filters::reject_unsupported(
+        opened,
+        &delta.original_index,
+        Source::WorktreeThenIdMapping,
+        cancellation,
+    )?;
+    tracked_filters::reject_unsupported(
+        opened,
+        &delta.target_index,
+        Source::IdMapping,
+        cancellation,
+    )?;
+    preflight_collisions(&opened.repo, &delta, cancellation)?;
+
+    let repo = &opened.repo;
+    let mut converter = Converter::new(repo, &delta.original_index)?;
+    for entry in delta.original_index.entries() {
+        cancellation.check()?;
+        if entry.mode == Mode::COMMIT {
+            continue;
+        }
+        let path = entry.path(&delta.original_index);
+        let actual = converter.consume_git_content(
+            "verify transition",
+            path,
+            Some(entry.mode),
+            cancellation,
+            |data| {
+                Ok(gix::objs::compute_hash(
+                    repo.object_hash(),
+                    gix::objs::Kind::Blob,
+                    data,
+                )?)
+            },
+        )?;
+        let Some((id, mode, stat)) = actual else {
+            return Err(path_error(io::ErrorKind::InvalidData, path, "is missing").into());
+        };
+        if (Snapshot { id, mode }) != snapshot(entry) {
+            return Err(path_error(io::ErrorKind::InvalidData, path, "has local changes").into());
+        }
+        if let Ok(offset) = delta
+            .changes
+            .binary_search_by(|change| change.path.as_bstr().cmp(path))
+        {
+            delta.changes[offset].original_stat = Some(stat);
+        }
+    }
+    cancellation.check()?;
+    Ok(Prepared {
+        target_index: delta.target_index,
+        changes: delta.changes,
     })
 }
 
@@ -142,6 +227,7 @@ fn collect_changes(
             path,
             original: before,
             target: after,
+            original_stat: None,
         });
     }
     Ok(out)
@@ -300,8 +386,12 @@ fn ordinary(mode: Mode) -> bool {
 }
 
 fn obstruction(path: &BStr, message: &str) -> io::Error {
+    path_error(io::ErrorKind::AlreadyExists, path, message)
+}
+
+fn path_error(kind: io::ErrorKind, path: &BStr, message: &str) -> io::Error {
     io::Error::new(
-        io::ErrorKind::AlreadyExists,
+        kind,
         format!(
             "worktree path '{}' {message}",
             path.to_str_lossy().escape_debug()

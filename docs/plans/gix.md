@@ -1277,6 +1277,19 @@ and unchanged HEAD/index/worktree. Host/Motor component gates, formatting and
 strict Clippy pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-transition-collisions-cb2439cb`. Cleanliness validation follows.
 
+M2 transition cleanliness preflight: preparation now validates filters across
+both complete bounded indexes, checks collisions, and hashes canonical content
+and mode for every original ordinary entry without writing objects. Checking
+all target attributes also catches a new `.gitattributes` assigning a forbidden
+filter to an otherwise unchanged file. Changed original paths retain observed
+stats; callers keep the mutation guard and recheck state before destructive
+writes. The existing native lifecycle checks target-only filter rejection,
+unchanged-file dirtiness, saved stats, and no worktree/index/ref or hash-induced
+object writes. Host/Motor component gates, formatting and strict Clippy pass
+with matching source hashes. Evidence is in
+`/tmp/motor-gix-transition-prepare-5a23f661`. Installation and ref publication
+remain subsequent steps.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

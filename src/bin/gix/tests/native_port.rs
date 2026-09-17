@@ -1215,6 +1215,70 @@ fn check_transition_delta(output: &Path) -> Result {
     assert!(error.to_string().contains("removed"), "{error}");
     fs::remove_file(workdir.join("removed/.git"))?;
 
+    let prepared = motor_gix::transition::prepare(
+        &fixture.opened,
+        locked,
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )?;
+    assert_eq!(prepared.target_index.entries().len(), 7);
+    assert!(
+        prepared
+            .changes
+            .iter()
+            .filter(|change| change.original.is_some())
+            .all(|change| change.original_stat.is_some())
+    );
+
+    let mut filtered_target = prepared.target_index.clone();
+    filtered_target.dangerously_push_entry(
+        Default::default(),
+        repo.write_blob(b".gitignore filter=blocked\n")?.detach(),
+        Flags::empty(),
+        Mode::FILE,
+        b".gitattributes".as_bstr(),
+    );
+    filtered_target.sort_entries();
+    let filtered_target = motor_gix::tree_index::write(repo, &filtered_target, &cancellation)?;
+    let filtered = motor_gix::repository::open(workdir, &["filter.blocked.required=true"], false)?;
+    let error = motor_gix::transition::prepare(
+        &filtered,
+        locked,
+        &fixture.original_tree,
+        &filtered_target,
+        &cancellation,
+    )
+    .expect_err("a target attribute assigning a required external filter was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("path '.gitignore' uses unsupported filter 'blocked'"),
+        "{error}"
+    );
+    assert!(!workdir.join(".gitattributes").try_exists()?);
+
+    let gitignore = workdir.join(".gitignore");
+    let original_gitignore = fs::read(&gitignore)?;
+    let dirty = b"ignored-parent\ndir/block\n# dirty but unpersisted\n";
+    let dirty_id = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, dirty)?;
+    assert!(repo.try_find_object(dirty_id)?.is_none());
+    fs::write(&gitignore, dirty)?;
+    let error = motor_gix::transition::prepare(
+        &fixture.opened,
+        locked,
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )
+    .expect_err("a dirty unchanged tracked file was accepted");
+    assert!(
+        error.to_string().contains(".gitignore' has local changes"),
+        "{error}"
+    );
+    assert!(repo.try_find_object(dirty_id)?.is_none());
+    fs::write(gitignore, original_gitignore)?;
+
     assert!(
         motor_gix::transition::compute(
             repo,
