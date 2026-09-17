@@ -196,10 +196,25 @@ fn test_connect_response_codec() {
     let mut error = response;
     error.status = moto_rt::E_NOT_IMPLEMENTED;
     error.handle = 0;
+    error.flags = 1;
     error.payload.args_32_mut()[0] = 0;
+    error.payload.args_8_mut()[23] = 1;
     assert_eq!(
         api_vsock::decode_connect_response(&error).err(),
         Some(moto_rt::Error::NotImplemented)
+    );
+    for mut wrong_command in [response, error] {
+        wrong_command.command = NetCmd::VsockListenerBind as u16;
+        assert_eq!(
+            api_vsock::decode_connect_response(&wrong_command).err(),
+            Some(moto_rt::Error::InvalidData)
+        );
+    }
+    let mut wrong_request = request;
+    wrong_request.command = NetCmd::VsockListenerBind as u16;
+    assert_eq!(
+        api_vsock::encode_connect_response(&wrong_request, 1, local).err(),
+        Some(moto_rt::Error::InvalidArgument)
     );
     let mut bad = [response; 4];
     bad[0].handle = 0;
@@ -287,10 +302,29 @@ fn test_listener_bind_codec() {
     let mut error = bind_response;
     error.status = moto_rt::E_ALREADY_IN_USE;
     error.handle = 0;
+    error.flags = 1;
     error.payload.args_64_mut()[0] = 0;
+    error.payload.args_8_mut()[23] = 1;
     assert_eq!(
         api_vsock::decode_listener_bind_response(&error).err(),
         Some(moto_rt::Error::AlreadyInUse)
+    );
+    for mut wrong_command in [bind_response, error] {
+        wrong_command.command = NetCmd::VsockStreamConnect as u16;
+        assert_eq!(
+            api_vsock::decode_listener_bind_response(&wrong_command).err(),
+            Some(moto_rt::Error::InvalidData)
+        );
+    }
+    let mut wrong_request = bind;
+    wrong_request.command = NetCmd::VsockStreamConnect as u16;
+    assert_eq!(
+        api_vsock::encode_listener_bind_response(&wrong_request, 1, local).err(),
+        Some(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(
+        api_vsock::encode_listener_bind_response(&bind, 0, local).err(),
+        Some(moto_rt::Error::InvalidArgument)
     );
     let mut bad_response = [bind_response; 4];
     bad_response[0].handle = 0;

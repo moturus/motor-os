@@ -167,42 +167,14 @@ pub fn encode_connect_response(
     handle: u64,
     local: VsockAddr,
 ) -> moto_rt::Result<io_channel::Msg> {
-    if request.command != NetCmd::VsockStreamConnect as u16 || handle == 0 || !valid_local(local) {
-        return Err(moto_rt::Error::InvalidArgument);
-    }
-    let mut response = io_channel::Msg::new();
-    response.id = request.id;
-    response.wake_handle = request.wake_handle;
-    response.command = request.command;
-    response.handle = handle;
-    response.status = moto_rt::E_OK;
-    response.payload.args_32_mut()[0] = local.cid;
-    response.payload.args_32_mut()[1] = local.port;
-    Ok(response)
+    encode_endpoint_response(request, NetCmd::VsockStreamConnect, handle, local)
 }
 
 /// Decode a successful response whose flags and reserved payload bytes are
 /// zero. Native error status is returned before success-only fields are read.
 pub fn decode_connect_response(msg: &io_channel::Msg) -> moto_rt::Result<ConnectResponse> {
-    if msg.command != NetCmd::VsockStreamConnect as u16 {
-        return Err(moto_rt::Error::InvalidData);
-    }
-    msg.status()?;
-    let local = VsockAddr {
-        cid: msg.payload.args_32()[0],
-        port: msg.payload.args_32()[1],
-    };
-    if msg.handle == 0
-        || msg.flags != 0
-        || !msg.payload.args_8()[8..].iter().all(|byte| *byte == 0)
-        || !valid_local(local)
-    {
-        return Err(moto_rt::Error::InvalidData);
-    }
-    Ok(ConnectResponse {
-        handle: msg.handle,
-        local,
-    })
+    let (handle, local) = decode_endpoint_response(msg, NetCmd::VsockStreamConnect)?;
+    Ok(ConnectResponse { handle, local })
 }
 
 /// Build a combined bind/listen request. The requested u32 port occupies
@@ -239,7 +211,24 @@ pub fn encode_listener_bind_response(
     handle: u64,
     local: VsockAddr,
 ) -> moto_rt::Result<io_channel::Msg> {
-    if request.command != NetCmd::VsockListenerBind as u16 || handle == 0 || !valid_local(local) {
+    encode_endpoint_response(request, NetCmd::VsockListenerBind, handle, local)
+}
+
+pub fn decode_listener_bind_response(
+    msg: &io_channel::Msg,
+) -> moto_rt::Result<ListenerBindResponse> {
+    let (handle, local) = decode_endpoint_response(msg, NetCmd::VsockListenerBind)?;
+    Ok(ListenerBindResponse { handle, local })
+}
+
+/// Connect and bind share the successful handle/local-address layout.
+fn encode_endpoint_response(
+    request: &io_channel::Msg,
+    command: NetCmd,
+    handle: u64,
+    local: VsockAddr,
+) -> moto_rt::Result<io_channel::Msg> {
+    if request.command != command as u16 || handle == 0 || !valid_local(local) {
         return Err(moto_rt::Error::InvalidArgument);
     }
     let mut response = io_channel::Msg::new();
@@ -253,10 +242,11 @@ pub fn encode_listener_bind_response(
     Ok(response)
 }
 
-pub fn decode_listener_bind_response(
+fn decode_endpoint_response(
     msg: &io_channel::Msg,
-) -> moto_rt::Result<ListenerBindResponse> {
-    if msg.command != NetCmd::VsockListenerBind as u16 {
+    command: NetCmd,
+) -> moto_rt::Result<(u64, VsockAddr)> {
+    if msg.command != command as u16 {
         return Err(moto_rt::Error::InvalidData);
     }
     msg.status()?;
@@ -266,15 +256,12 @@ pub fn decode_listener_bind_response(
     };
     if msg.handle == 0
         || msg.flags != 0
-        || !valid_local(local)
         || !msg.payload.args_8()[8..].iter().all(|byte| *byte == 0)
+        || !valid_local(local)
     {
         return Err(moto_rt::Error::InvalidData);
     }
-    Ok(ListenerBindResponse {
-        handle: msg.handle,
-        local,
-    })
+    Ok((msg.handle, local))
 }
 
 /// Build one accept request for a listener handle. Payload byte 23 carries
