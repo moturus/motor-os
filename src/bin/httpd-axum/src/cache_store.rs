@@ -1,6 +1,6 @@
 use axum::body::Bytes;
 use http::HeaderMap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,9 +29,16 @@ impl CachedFile {
     }
 }
 
+struct Entry {
+    file: Arc<CachedFile>,
+    charge: usize,
+    sequence: u64,
+}
+
 pub struct CacheStore {
-    files: HashMap<String, Arc<CachedFile>>,
-    order: VecDeque<String>,
+    files: HashMap<String, Entry>,
+    order: BTreeMap<u64, String>,
+    sequence: u64,
     used: usize,
     budget: usize,
 }
@@ -40,16 +47,17 @@ impl CacheStore {
     pub fn new(budget: usize) -> Self {
         Self {
             files: HashMap::new(),
-            order: VecDeque::new(),
+            order: BTreeMap::new(),
+            sequence: 0,
             used: 0,
             budget,
         }
     }
 
     pub fn get(&mut self, path: &str, now: Instant) -> Option<Arc<CachedFile>> {
-        let file = self.files.get(path)?;
-        if now < file.expires {
-            return Some(file.clone());
+        let entry = self.files.get(path)?;
+        if now < entry.file.expires {
+            return Some(entry.file.clone());
         }
         self.remove(path);
         None
@@ -65,24 +73,37 @@ impl CacheStore {
         if self
             .files
             .get(&path)
-            .is_some_and(|old| old.expires >= file.expires)
+            .is_some_and(|old| old.file.expires >= file.expires)
         {
             return;
         }
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            return;
+        };
         self.remove(&path);
         while self.used > self.budget - charge || self.files.len() >= MAX_ENTRIES {
-            let oldest = self.order.front().unwrap().clone();
-            self.remove(&oldest);
+            let (_, oldest) = self.order.pop_first().unwrap();
+            self.used -= self.files.remove(&oldest).unwrap().charge;
         }
         self.used += charge;
-        self.order.push_back(path.clone());
-        self.files.insert(path, Arc::new(file));
+        self.sequence = sequence;
+        self.order.insert(sequence, path.clone());
+        self.files.insert(
+            path,
+            Entry {
+                file: Arc::new(file),
+                charge,
+                sequence,
+            },
+        );
     }
 
     fn remove(&mut self, path: &str) {
-        if let Some(file) = self.files.remove(path) {
-            self.used -= file.charge(path);
-            self.order.retain(|key| key != path);
+        if let Some(entry) = self.files.remove(path) {
+            self.used -= entry.charge;
+            // Keep exactly one index node per entry; no queue scan or retained
+            // tombstones on replacement, expiry, or cascaded eviction.
+            self.order.remove(&entry.sequence);
         }
     }
 }

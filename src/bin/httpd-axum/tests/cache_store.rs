@@ -65,5 +65,49 @@ fn main() {
         .insert("x-padding", "x".repeat(1200).parse().unwrap());
     cache.insert("/headers".into(), header_heavy, now);
     assert!(cache.get("/headers", now).is_none());
+    churn(now);
     println!("httpd-axum cache storage tests passed");
+}
+
+fn churn(now: Instant) {
+    let later = now + Duration::from_secs(10);
+    let mut cache = CacheStore::new(MAX_FILE_SIZE + 1024);
+    for _ in 0..3 {
+        for i in 0..400 {
+            cache.insert(format!("/{i:03}"), file("", later), now);
+        }
+        cache.insert(
+            "/large".into(),
+            CachedFile {
+                headers: HeaderMap::new(),
+                body: Bytes::from(vec![0; MAX_FILE_SIZE]),
+                loaded: now,
+                expires: later,
+            },
+            now,
+        );
+        for i in 0..400 {
+            assert!(cache.get(&format!("/{i:03}"), now).is_none());
+        }
+        assert!(cache.get("/large", now).is_some());
+        assert!(cache.get("/large", later).is_none());
+    }
+    let mut cache = CacheStore::new(1200);
+    cache.insert("/stay".into(), file("stay", later), now);
+    for i in 0..4096 {
+        let expires = now + Duration::from_micros(i + 1);
+        cache.insert("/churn".into(), file("churn", expires), now);
+        assert!(cache.get("/churn", expires).is_none());
+    }
+    assert!(cache.get("/stay", now).is_some());
+    cache.insert("/new".into(), file("new", later), now);
+    // Replacement is a new insertion and becomes newest in FIFO order.
+    cache.insert(
+        "/stay".into(),
+        file("replaced", later + Duration::from_secs(1)),
+        now,
+    );
+    cache.insert("/third".into(), file("third", later), now);
+    assert!(cache.get("/new", now).is_none());
+    assert_eq!(cache.get("/stay", now).unwrap().body, "replaced");
 }
