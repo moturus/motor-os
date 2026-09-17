@@ -41,7 +41,7 @@ impl Selection {
                 .any(|parent| contains(parent.as_bstr(), path))
     }
 
-    pub(super) fn paths(&self) -> &[BString] {
+    pub(crate) fn paths(&self) -> &[BString] {
         &self.paths
     }
 

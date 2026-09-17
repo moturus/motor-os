@@ -140,6 +140,7 @@ fn main() -> Result {
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
     check_executable_attributes(&output)?;
+    check_unstage(&output)?;
     check_commit(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
@@ -848,6 +849,113 @@ fn check_executable_attributes(output: &Path) -> Result {
     assert!(filtered.repo.git_dir().join("index.lock").try_exists()?);
     drop(guard);
     assert!(!filtered.repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_unstage(output: &Path) -> Result {
+    let repository = output.join("unstage-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    fs::create_dir(repository.join("dir"))?;
+    fs::write(repository.join("dir/tracked"), b"baseline\n")?;
+    fs::write(repository.join("retained"), b"retained\n")?;
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.publish_edited_index(|index| {
+        let entry = index
+            .entry_mut_by_path_and_stage(
+                b"retained".as_bstr(),
+                gix::index::entry::Stage::Unconflicted,
+            )
+            .ok_or("retained fixture entry is missing")?;
+        // Seed a non-racy cache; initial staging may have cleared its size.
+        entry.stat.size = fs::metadata(repository.join("retained"))?
+            .len()
+            .try_into()?;
+        entry.stat.mtime = gix::index::entry::stat::Time { secs: 1, nsecs: 0 };
+        Ok(())
+    })?;
+    drop(guard);
+    let before_unborn = opened.repo.open_index()?;
+    let retained = before_unborn
+        .entry_by_path(b"retained".as_bstr())
+        .ok_or("retained fixture entry is missing")?;
+    assert_ne!(retained.stat.size, 0, "retained cache setup lost its size");
+    let retained = (retained.stat, retained.id, retained.flags, retained.mode);
+    motor_gix::unstage::run(&opened, &["dir".into()], &cancellation)?;
+    let index = opened.repo.open_index()?;
+    assert!(index.entry_range(b"dir/tracked".as_bstr()).is_none());
+    let after = index
+        .entry_by_path(b"retained".as_bstr())
+        .ok_or("retained fixture entry is missing")?;
+    assert_eq!(
+        (after.stat, after.id, after.flags, after.mode),
+        retained,
+        "unstaging an unborn path changed an unselected stat cache"
+    );
+    assert_eq!(fs::read(repository.join("dir/tracked"))?, b"baseline\n");
+
+    motor_gix::add::run(&opened, false, &["dir".into()], &cancellation)?;
+    motor_gix::commit::run(&opened, "baseline", &cancellation)?;
+    let baseline = opened
+        .repo
+        .open_index()?
+        .entry_by_path(b"dir/tracked".as_bstr())
+        .ok_or("baseline entry is missing")?
+        .id;
+
+    fs::remove_file(repository.join("dir/tracked"))?;
+    fs::remove_dir(repository.join("dir"))?;
+    fs::write(repository.join("dir"), b"replacement\n")?;
+    motor_gix::add::run(&opened, false, &["dir".into()], &cancellation)?;
+    let index_before_rejection = fs::read(opened.repo.index_path())?;
+    let error = motor_gix::unstage::run(&opened, &["dir/tracked".into()], &cancellation)
+        .expect_err("an unselected file ancestor must obstruct a HEAD descendant");
+    assert!(
+        error.to_string().contains("retained index entry 'dir'"),
+        "{error}"
+    );
+    assert_eq!(fs::read(opened.repo.index_path())?, index_before_rejection);
+
+    let index = opened.repo.open_index()?;
+    let retained = index
+        .entry_by_path(b"retained".as_bstr())
+        .ok_or("retained fixture entry is missing")?;
+    let retained = (retained.stat, retained.id, retained.flags, retained.mode);
+    motor_gix::unstage::run(&opened, &["dir".into()], &cancellation)?;
+    let index = opened.repo.open_index()?;
+    assert_eq!(
+        index
+            .entry_by_path(b"dir/tracked".as_bstr())
+            .ok_or("HEAD entry was not restored")?
+            .id,
+        baseline
+    );
+    let after = index
+        .entry_by_path(b"retained".as_bstr())
+        .ok_or("retained fixture entry is missing")?;
+    assert_eq!((after.stat, after.id, after.flags, after.mode), retained);
+    assert_eq!(fs::read(repository.join("dir"))?, b"replacement\n");
+
+    let index_before_rejection = fs::read(opened.repo.index_path())?;
+    let error = motor_gix::unstage::run(&opened, &["missing".into()], &cancellation)
+        .expect_err("an unmatched literal path must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("did not match HEAD or the index"),
+        "{error}"
+    );
+    assert_eq!(fs::read(opened.repo.index_path())?, index_before_rejection);
+    assert!(!opened.repo.git_dir().join("index.lock").exists());
     Ok(())
 }
 

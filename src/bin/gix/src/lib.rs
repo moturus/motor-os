@@ -20,5 +20,6 @@ pub mod stage_blob;
 pub mod status;
 mod tracked_filters;
 pub mod tree_index;
+pub mod unstage;
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

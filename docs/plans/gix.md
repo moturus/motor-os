@@ -1163,6 +1163,20 @@ that passes host Git's history, tree and strict integrity checks. The component,
 formatting, strict Clippy and shell gates pass with matching source hashes;
 CLI validation is in `/tmp/motor-gix-commit-cli-27087011`.
 
+M2 unstage library: the reviewed implementation restores selected index entries
+from HEAD, or removes them on an unborn branch, through the existing mutation
+guard and index publisher. Literal selection reads only HEAD and the index;
+it rejects unmatched paths and an unselected file ancestor that would obstruct
+a restored HEAD descendant. Worktree files remain intact, and unselected entry
+caches are preserved subject to the publisher's existing racy-stat invalidation.
+One shared native lifecycle covers both HEAD states, the file/directory corner
+case, rejection without index changes, and a nonzero unselected stat cache.
+Host/Motor component gates, formatting, strict Clippy and shell checks pass;
+all tested source hashes match. The new fixture's initial API mismatch and
+racy-cache setup assumption were corrected without changing production behavior
+or weakening assertions. Original failures and final validation are preserved
+in `/tmp/motor-gix-unstage-library-5d3bc82a`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
