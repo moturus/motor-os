@@ -34,6 +34,9 @@ fn main() {
         .write_all(b"GET / HTTP/1.1\r\nHost:")
         .unwrap();
     assert_header_deadline(&mut persistent);
+    let mut idle = BufReader::new(deadlines.connect());
+    assert_eq!(request(&mut idle, "GET", "/", "").status, 200);
+    assert_header_deadline(&mut idle);
     deadlines.stop();
     let limited = Server::start(None, &["--max-active-connections", "1"]);
     let mut admitted = BufReader::new(limited.connect());
@@ -83,6 +86,12 @@ fn main() {
     std::fs::write(server.directory.join("index.html"), b"edited\n").unwrap();
     assert_eq!(request(&mut io, "GET", "/", "").body, b"edited\n");
     drop(io);
+    assert!(server.stop().contains("response prepared"));
+    let server = Server::start(None, &["--no-request-log"]);
+    assert_eq!(
+        request(&mut BufReader::new(server.connect()), "GET", "/", "").status,
+        200
+    );
     assert!(!server.stop().contains("response prepared"));
     cache::check();
 
@@ -93,15 +102,7 @@ fn main() {
     assert!(logs.contains("response prepared"), "{logs}");
     assert!(logs.contains("prepare_us="), "{logs}");
 
-    let server = Server::start_tls(
-        None,
-        &[
-            "--max-active-connections",
-            "1",
-            "--max-header-deadline-sec",
-            "1",
-        ],
-    );
+    let server = Server::start_tls(None, &["--max-active-connections", "1"]);
     let connection =
         rustls::ClientConnection::new(tls_config(b"http/1.1"), "localhost".try_into().unwrap())
             .unwrap();
@@ -113,6 +114,15 @@ fn main() {
     }
     assert_eq!(io.get_ref().conn.alpn_protocol(), Some(&b"http/1.1"[..]));
     assert_closed(&mut server.connect());
+    request(&mut io, "GET", "/", "Connection: close\r\n");
+    assert_closed(&mut io);
+    assert!(server.stop().contains("response prepared"));
+
+    let server = Server::start_tls(None, &["--max-header-deadline-sec", "1"]);
+    let connection =
+        rustls::ClientConnection::new(tls_config(b"http/1.1"), "localhost".try_into().unwrap())
+            .unwrap();
+    let mut io = BufReader::new(rustls::StreamOwned::new(connection, server.connect()));
     io.get_mut().write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
     io.get_mut().flush().unwrap();
     assert_header_deadline(&mut io);

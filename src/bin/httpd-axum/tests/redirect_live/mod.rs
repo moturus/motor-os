@@ -103,7 +103,9 @@ pub fn check() {
     assert_closed(&mut replacement);
     request(&mut secure, "GET", "/", "Connection: close\r\n");
     assert_closed(&mut secure);
-    server.stop();
+    let logs = server.stop();
+    assert!(logs.contains("status=308"), "{logs}");
+    assert!(logs.contains("status=200"), "{logs}");
 
     // Deliberately short deadlines are confined to stalled-client scenarios.
     let mut server = Server::start_tls_at(

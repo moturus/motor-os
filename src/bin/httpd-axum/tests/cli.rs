@@ -7,7 +7,11 @@ fn run(args: &[&str]) -> Output {
 }
 
 fn main() {
-    assert!(run(&["--help"]).status.success());
+    let help = run(&["--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8(help.stdout)
+        .unwrap()
+        .contains("--no-request-log"));
     check_redirect_options();
     for flag in [
         "--max-active-connections",

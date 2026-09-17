@@ -65,10 +65,12 @@ executable directly in the VM with `TMPDIR` set to a writable guest directory.
 
 `--test http` launches the server on loopback and checks persistent connections,
 GET, HEAD, ranges, conditional requests, traversal rejection, missing files,
-immediate visibility of file edits, and default/debug logging. Run it on Motor
+immediate visibility of file edits, and default/disabled/debug logging. Run it on Motor
 with `HTTPD_AXUM_BIN` and `TMPDIR` as above. Startup readiness comes from the
-bound-address log, without connection retries. Request timings are available
-with `RUST_LOG=httpd_axum=debug`; `prepare_us` includes cache-fill reads but excludes
+bound-address log, without connection retries. Requests to both listeners log to stdout at info level by default, including
+method, URI, status, and preparation time. Use `--no-request-log` to disable
+access logs while retaining startup and overload diagnostics. `RUST_LOG` can
+also filter logs; `prepare_us` includes cache-fill reads but excludes
 streamed body reads and transmission.
 
 The cache is enabled by default: `--cache-timeout-sec=10`, `--cache-size-mb=4`

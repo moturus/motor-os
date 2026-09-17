@@ -3,12 +3,15 @@ use std::net::{SocketAddr, TcpStream};
 mod fixture;
 pub use fixture::Fixture;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub struct Server {
     child: Child,
-    output: BufReader<ChildStdout>,
+    output: Receiver<std::io::Result<String>>,
+    reader: Option<JoinHandle<()>>,
     pub address: SocketAddr,
     pub directory: PathBuf,
     _fixture: Fixture,
@@ -53,25 +56,35 @@ impl Server {
             command.env("RUST_LOG", logging);
         }
         let mut child = command.spawn().unwrap();
-        let mut output = BufReader::new(child.stdout.take().unwrap());
-        // Startup reports the actual bound port. No sleeps or connection retries
-        // are needed, and an early startup failure closes stdout and fails here.
-        let mut line = String::new();
-        assert_ne!(output.read_line(&mut line).unwrap(), 0);
-        let address = line
+        let stdout = child.stdout.take().unwrap();
+        let (sender, output) = mpsc::channel();
+        // Drain stdout during requests, including at the default access-log
+        // level. A full pipe must not block the server under test.
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut server = Self {
+            child,
+            output,
+            reader: Some(reader),
+            address: address.parse().unwrap(),
+            directory,
+            _fixture: fixture,
+        };
+        // The bound-address event is readiness; no sleeps or connection retries.
+        let line = server.next_log();
+        server.address = line
             .split_once("listening on ")
             .expect(&line)
             .1
             .trim()
             .parse()
             .unwrap();
-        Self {
-            child,
-            output,
-            address,
-            directory,
-            _fixture: fixture,
-        }
+        server
     }
 
     pub fn connect(&self) -> TcpStream {
@@ -81,15 +94,15 @@ impl Server {
     pub fn stop(mut self) -> String {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
-        let mut logs = String::new();
-        self.output.read_to_string(&mut logs).unwrap();
-        logs
+        self.reader.take().unwrap().join().unwrap();
+        self.output
+            .try_iter()
+            .map(|line| line.unwrap() + "\n")
+            .collect()
     }
 
     pub fn next_log(&mut self) -> String {
-        let mut line = String::new();
-        assert_ne!(self.output.read_line(&mut line).unwrap(), 0);
-        line
+        self.output.recv().expect("server closed stdout").unwrap()
     }
 }
 
@@ -98,6 +111,9 @@ impl Drop for Server {
         if self.child.try_wait().unwrap().is_none() {
             self.child.kill().unwrap();
             self.child.wait().unwrap();
+        }
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
         }
     }
 }

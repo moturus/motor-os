@@ -44,6 +44,10 @@ struct Args {
     #[arg(long, requires = "ssl_cert")]
     http_redirect_url: Option<redirect::RedirectUrl>,
 
+    /// Disable request logs on stdout (enabled by default).
+    #[arg(long)]
+    no_request_log: bool,
+
     /// Maximum TCP connections per listener, including TLS handshakes and idle clients.
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
@@ -76,7 +80,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
@@ -95,28 +99,9 @@ async fn main() -> std::io::Result<()> {
             cache::Cache::serve,
         ));
     }
-    let app = app.layer(axum::middleware::from_fn(
-        |req: axum::extract::Request, next: axum::middleware::Next| async move {
-            if !tracing::enabled!(tracing::Level::DEBUG) {
-                return next.run(req).await;
-            }
-            let uri = req.uri().clone();
-            let method = req.method().clone();
-            let start = std::time::Instant::now();
-            let res = next.run(req).await;
-            let latency = start.elapsed();
-            // Cache fills include body reads; streamed bodies and transmission
-            // happen after response preparation.
-            tracing::debug!(
-                %method,
-                %uri,
-                status = res.status().as_u16(),
-                prepare_us = latency.as_micros(),
-                "response prepared"
-            );
-            res
-        },
-    ));
+    if !args.no_request_log {
+        app = app.layer(axum::middleware::from_fn(log_request));
+    }
 
     let admission = connections::ConnectionLimit::new(args.max_active_connections.get(), "content");
     let deadline = std::time::Duration::from_secs(args.max_header_deadline_sec.get().into());
@@ -152,7 +137,11 @@ async fn main() -> std::io::Result<()> {
                 ),
             );
             configure_headers(&mut server, deadline);
-            Some((server, url.router(), address))
+            let mut redirect_app = url.router();
+            if !args.no_request_log {
+                redirect_app = redirect_app.layer(axum::middleware::from_fn(log_request));
+            }
+            Some((server, redirect_app, address))
         } else {
             None
         };
@@ -187,4 +176,23 @@ fn configure_headers<A>(server: &mut axum_server::Server<A>, deadline: std::time
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(deadline);
+}
+
+async fn log_request(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !tracing::enabled!(tracing::Level::INFO) {
+        return next.run(req).await;
+    }
+    let uri = req.uri().clone();
+    let method = req.method().clone();
+    let start = std::time::Instant::now();
+    let response = next.run(req).await;
+    // Preparation includes cache fills, but not streamed reads or transmission.
+    tracing::info!(
+        %method, %uri, status = response.status().as_u16(),
+        prepare_us = start.elapsed().as_micros(), "response prepared"
+    );
+    response
 }
