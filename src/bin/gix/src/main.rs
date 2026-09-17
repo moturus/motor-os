@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, diff, fetch, init, network, refs, repository,
-    restore, status, unstage,
+    Result, add, cancellation, clone, commit, diff, fetch, init, network, recover, refs,
+    repository, restore, status, switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -156,6 +156,12 @@ fn run() -> Result {
         .subcommand(reference_command("tag", "Manage lightweight tags"))
         .subcommand(Command::new("log").about("Show commit history"))
         .subcommand(Command::new("status").about("Show worktree status"))
+        .subcommand(
+            Command::new("switch")
+                .about("Switch a clean worktree to an existing local branch")
+                .arg(Arg::new("branch").required(true).value_name("BRANCH")),
+        )
+        .subcommand(Command::new("recover").about("Repair a recorded interrupted operation"))
         .get_matches();
 
     let cancellation = cancellation::Cancellation::install()?;
@@ -256,6 +262,22 @@ fn run() -> Result {
             )
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("recover") => {
+            let action = recover::run(&opened, &cancellation)?;
+            let mut out = io::stdout().lock();
+            writeln!(out, "{action}")?;
+            out.flush()?;
+            Ok(())
+        }
+        Some("switch") => switch::run(
+            &mut opened,
+            matches
+                .subcommand_matches("switch")
+                .expect("matched switch")
+                .get_one::<String>("branch")
+                .expect("required branch"),
+            &cancellation,
+        ),
         Some("restore") => {
             let command = matches
                 .subcommand_matches("restore")

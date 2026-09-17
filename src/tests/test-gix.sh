@@ -428,6 +428,20 @@ PY
   verify_add_cli "$init_repo"
   verify_restore_cli "$init_repo"
   verify_commit_cli "$init_repo"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" branch create cli-topic
+  printf 'foreign\n' > "$init_repo/.git/HEAD.lock"
+  if "${app_env[@]}" "$gix_binary" -r "$init_repo" switch cli-topic 2> "$temporary/switch.err"; then
+    fail "switch published through a foreign HEAD lock"
+  fi
+  [ -f "$init_repo/.git/gix-operation" ] || fail "failed switch lost its operation record"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" recover > "$temporary/recover.out"
+  grep -Fqx 'restored recorded original state' "$temporary/recover.out" || fail "recover reported the wrong outcome"
+  [ ! -e "$init_repo/.git/gix-operation" ] || fail "recover retained a completed record"
+  grep -Fqx 'ref: refs/heads/main' "$init_repo/.git/HEAD" || fail "recover changed original HEAD"
+  grep -Fqx foreign "$init_repo/.git/HEAD.lock" || fail "recover changed a foreign HEAD lock"
+  rm "$init_repo/.git/HEAD.lock"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" switch cli-topic
+  grep -Fqx 'ref: refs/heads/cli-topic' "$init_repo/.git/HEAD" || fail "switch selected the wrong branch"
 
   "${app_env[@]}" "$gix_binary" -r "$fixture" branch create cli-earlier HEAD^
   "${app_env[@]}" "$gix_binary" -r "$fixture" tag create cli-head
@@ -732,6 +746,11 @@ printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |
 verify_add_cli "$temporary/guest-add-cli"
 verify_restore_cli "$temporary/guest-add-cli"
 verify_commit_cli "$temporary/guest-add-cli"
+guest_init_app="HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init"
+vm_ssh "$guest_init_app branch create cli-topic"
+vm_ssh "$guest_init_app switch cli-topic"
+vm_ssh "cat $guest_root/init/.git/HEAD" > "$temporary/guest-switch-head"
+grep -Fqx 'ref: refs/heads/cli-topic' "$temporary/guest-switch-head" || fail "native switch selected the wrong branch"
 
 start_https_server 192.168.4.1 192.168.4.1
 guest_clone="$guest_root/https-clone"

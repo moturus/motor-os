@@ -57,7 +57,7 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-inspect changes, stage local files, and commit the index:
+inspect changes, stage local files, commit the index, and switch branches:
 
 ```sh
 gix init scratch
@@ -72,6 +72,7 @@ gix -r project restore src/main.rs
 gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
+gix -r project switch topic
 gix -r project tag list
 gix -r project tag create snapshot
 gix -r project log
@@ -123,6 +124,19 @@ a name and optional `REV`, which defaults to `HEAD`, and refuses to replace an
 existing reference. Branch targets are peeled to commits; lightweight tags retain
 the exact selected object. These commands do not change the checkout, index or
 worktree.
+
+`switch BRANCH` selects an existing local branch. It requires the index to match
+`HEAD` and the tracked worktree to be clean, and refuses untracked or ignored
+obstructions. It preserves unchanged files and leaves both branches' IDs intact.
+
+An interrupted switch leaves an operation reported by `status` and blocks further
+mutation. After addressing the error, run `recover`. It restores the recorded
+original state, or preserves an already-published update and finishes cleanup.
+Restoration discards affected worktree changes and staged changes, preserves
+unrelated unstaged, untracked and ignored files, and refuses unsafe obstructions.
+Recovery leaves the record on failure so it can be invoked again. It never removes
+another writer's Git lockfile; remove a stale lock manually only after verifying
+that no writer remains. Power-loss recovery is not guaranteed.
 
 Reference reads on Motor reject loose reference files larger than 8 MiB.
 

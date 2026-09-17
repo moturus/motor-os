@@ -14,8 +14,8 @@ clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
 limits and measured results. M2 implementation is in progress: init, staging,
 ordinary commit, branch/tag creation, unstage, restore and diff are implemented
-and component-tested. The switch library is validated; its CLI and shared
-merge/recovery workflows remain. Section 7 records progress.
+and component-tested. Switch and explicit recovery are available through the CLI;
+merge workflows remain in progress. Section 7 records progress.
 Section 8 records the approved 8 MiB loose-ref
 limit and directory-entry repair. The managed stdlib and approved socket
 teardown repair passed three debug and three release main-image gates and the
@@ -411,8 +411,8 @@ difference between the original tree and the result tree, plus every path
 whose current index entry differs from the original tree. For those
 paths it reinstalls the original tree's content or deletes what the
 original lacks; it then rebuilds the whole index from the original tree
-with empty stat caches and finally reattaches the original HEAD. It
-explicitly discards merge work and staged changes, preserves unrelated
+with empty stat caches, retaining and rechecking the original HEAD attachment
+and ID without adding a reflog entry. It explicitly discards merge work and staged changes, preserves unrelated
 untracked and ignored files and unstaged edits to tracked paths outside
 the restore set, refuses obstructing directory
 contents, and never moves the destination branch. Repeating it over a
@@ -432,7 +432,7 @@ force mode:
 - Incomplete, with the ref already showing the result (HEAD
   attached to the target ref for switch, the target ref at the target
   commit for fast-forward): verify the index has no conflict stages and
-  matches the result tree for the restore set, remove the record, and
+  matches the complete result tree, remove the record, and
   preserve the published update and its reflog entries; never replay it.
 - Incomplete, with HEAD still at the recorded original: run restore, then
   cleanup, removing owned merge files before the record.
@@ -1469,6 +1469,17 @@ Host behavior passed initially; one equivalent let-chain simplification satisfie
 strict Clippy. All final host/Motor component gates, formatting and shell checks
 pass with matching source hashes. Original and final evidence is in
 `/tmp/motor-gix-recover-dispatch-3dff257d`. CLI exposure follows.
+
+M2 switch/recover CLI and documentation: both reviewed commands are exposed with
+checked recovery output. The existing host smoke exercises a blocked switch,
+explicit recovery and successful switch while preserving its foreign HEAD lock;
+one guest smoke verifies the resulting branch attachment. Shared native coverage
+owns the recovery decisions. Markdown and both developer HTML pages describe the
+clean-start requirement, discard/preservation policy and stale-lock handling.
+The recovery specification now states the implemented exact full-index check and
+preservation of the original HEAD without a duplicate reflog entry. All host/Motor
+component gates, formatting, strict Clippy and shell checks pass with matching
+source hashes. Evidence is in `/tmp/motor-gix-switch-recover-cli-4ecb2ae6`.
 
 ## 8. Discussion record
 
