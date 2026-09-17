@@ -10,6 +10,7 @@ const MAX_ENTRIES: usize = 1024;
 pub struct CachedFile {
     pub headers: HeaderMap,
     pub body: Bytes,
+    pub loaded: Instant,
     pub expires: Instant,
 }
 

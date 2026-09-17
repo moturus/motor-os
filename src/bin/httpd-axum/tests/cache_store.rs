@@ -10,6 +10,7 @@ fn file(body: &'static str, expires: Instant) -> CachedFile {
     CachedFile {
         headers: HeaderMap::new(),
         body: Bytes::from_static(body.as_bytes()),
+        loaded: expires - Duration::from_secs(10),
         expires,
     }
 }
@@ -24,6 +25,7 @@ fn main() {
     cache.insert("/c".into(), file("c", later), now);
     assert!(cache.get("/a", now).is_none());
     assert_eq!(retained.body, "a");
+    assert_eq!(retained.loaded, now);
     assert!(cache.get("/b", now).is_some());
     assert!(cache.get("/c", later).is_none());
     cache.insert(
@@ -47,6 +49,7 @@ fn main() {
         CachedFile {
             headers: HeaderMap::new(),
             body: Bytes::from(vec![0; MAX_FILE_SIZE + 1]),
+            loaded: now,
             expires: later,
         },
         now,

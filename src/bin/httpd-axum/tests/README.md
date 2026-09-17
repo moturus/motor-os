@@ -76,6 +76,10 @@ The cache is enabled by default: `--cache-timeout-sec=10`, `--cache-size-mb=4`
 on demand; larger files stream. Hits retain a snapshot until its load-start-based
 deadline, including after file deletion or permission changes. Queries share the
 same path entry. HEAD, conditional requests, and ranges use that snapshot.
+Cached responses include `Age` in whole seconds from the start of the load.
+Requests with `Cache-Control: no-cache`, `no-store`, or `max-age=0`, or legacy
+`Pragma: no-cache`, bypass lookup and storage. Bypass requests see the filesystem
+immediately; they do not evict the snapshot used by other requests.
 
 The budget charges bytes, keys, headers, and an entry allowance; the cache also
 caps entry count at 1,024 and concurrent fills at eight (fewer for small budgets).

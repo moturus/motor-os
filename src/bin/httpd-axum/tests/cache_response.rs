@@ -43,6 +43,7 @@ async fn main() {
             CachedFile {
                 headers,
                 body,
+                loaded: now,
                 expires: now + Duration::from_secs(10),
             },
             now,
@@ -70,7 +71,13 @@ async fn main() {
                     .header(name, value)
                     .body(Body::empty())
                     .unwrap();
-                let cached = cache_response::respond(&file, &method, request.headers());
+                let mut cached = cache_response::respond(
+                    &file,
+                    &method,
+                    request.headers(),
+                    now + Duration::from_secs(2),
+                );
+                assert_eq!(cached.headers_mut().remove(header::AGE).unwrap(), "2");
                 let original = service.clone().oneshot(request).await.unwrap();
                 assert_eq!(cached.status(), original.status(), "{method} {value}");
                 assert_eq!(cached.headers(), original.headers(), "{method} {value}");

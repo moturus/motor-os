@@ -2,7 +2,7 @@ use crate::cache_store::CachedFile;
 use axum::body::Body;
 use axum::response::Response;
 use http::{header, HeaderMap, Method, StatusCode};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 fn date(headers: &HeaderMap, name: http::HeaderName) -> Option<SystemTime> {
     httpdate::parse_http_date(headers.get(name)?.to_str().ok()?).ok()
@@ -15,19 +15,24 @@ fn empty(status: StatusCode) -> Response {
         .unwrap()
 }
 
-pub fn respond(file: &CachedFile, method: &Method, headers: &HeaderMap) -> Response {
-    let conditional = headers.contains_key(header::IF_UNMODIFIED_SINCE)
-        || headers.contains_key(header::IF_MODIFIED_SINCE);
-    let modified = conditional
-        .then(|| date(&file.headers, header::LAST_MODIFIED))
-        .flatten();
+pub fn respond(file: &CachedFile, method: &Method, headers: &HeaderMap, now: Instant) -> Response {
+    let mut response = respond_inner(file, method, headers);
+    response.headers_mut().insert(
+        header::AGE,
+        now.saturating_duration_since(file.loaded).as_secs().into(),
+    );
+    response
+}
+
+fn respond_inner(file: &CachedFile, method: &Method, headers: &HeaderMap) -> Response {
+    let modified = || date(&file.headers, header::LAST_MODIFIED);
     if let Some(since) = date(headers, header::IF_UNMODIFIED_SINCE) {
-        if modified.is_none_or(|modified| modified > since) {
+        if modified().is_none_or(|modified| modified > since) {
             return empty(StatusCode::PRECONDITION_FAILED);
         }
     }
     if let Some(since) = date(headers, header::IF_MODIFIED_SINCE) {
-        if modified.is_some_and(|modified| modified <= since) {
+        if modified().is_some_and(|modified| modified <= since) {
             return empty(StatusCode::NOT_MODIFIED);
         }
     }

@@ -3,7 +3,7 @@ use crate::cache_store::{CacheStore, CachedFile, MAX_FILE_SIZE};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use http::{header, Method, StatusCode};
+use http::{header, HeaderMap, Method, StatusCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -25,13 +25,16 @@ impl Cache {
     }
 
     pub async fn serve(State(cache): State<Arc<Self>>, req: Request, next: Next) -> Response {
-        if !matches!(*req.method(), Method::GET | Method::HEAD) || req.uri().path().len() > 4096 {
+        if !matches!(*req.method(), Method::GET | Method::HEAD)
+            || req.uri().path().len() > 4096
+            || bypass(req.headers())
+        {
             return next.run(req).await;
         }
         let started = Instant::now();
         let hit = cache.files.lock().unwrap().get(req.uri().path(), started);
         if let Some(file) = hit {
-            return cache_response::respond(&file, req.method(), req.headers());
+            return cache_response::respond(&file, req.method(), req.headers(), started);
         }
         // Cache whole representations; a range or conditional miss retains
         // ServeDir's streaming and validation behavior without a second fetch.
@@ -73,10 +76,32 @@ impl Cache {
             CachedFile {
                 headers: parts.headers.clone(),
                 body: body.clone(),
+                loaded: started,
                 expires: started + cache.ttl,
             },
             Instant::now(),
         );
         Response::from_parts(parts, body.into())
     }
+}
+
+fn bypass(headers: &HeaderMap) -> bool {
+    [header::CACHE_CONTROL, header::PRAGMA]
+        .iter()
+        .any(|header| {
+            headers
+                .get_all(header)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .any(|directive| {
+                    let (name, value) = directive.split_once('=').unwrap_or((directive, ""));
+                    let name = name.trim();
+                    name.eq_ignore_ascii_case("no-cache")
+                        || (*header == header::CACHE_CONTROL
+                            && (name.eq_ignore_ascii_case("no-store")
+                                || (name.eq_ignore_ascii_case("max-age")
+                                    && value.trim().trim_matches('"').parse::<u64>() == Ok(0))))
+                })
+        })
 }

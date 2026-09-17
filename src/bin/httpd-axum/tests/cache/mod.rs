@@ -2,8 +2,10 @@ use crate::common::{request, Server};
 use std::io::BufReader;
 use std::time::Duration;
 mod bench;
+mod bypass;
 
 pub fn check() {
+    bypass::check();
     let server = Server::start(None, &[]);
     let mut io = BufReader::new(server.connect());
     assert_eq!(request(&mut io, "GET", "/", "").body, b"test content\n");
