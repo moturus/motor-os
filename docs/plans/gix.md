@@ -137,6 +137,14 @@ deterministic version information. Paths are literal worktree-relative paths; su
 | `recover` | Restore the recorded original state of an interrupted switch, merge or abort, or finish the cleanup of one whose ref update already published; report the action taken. |
 | `push REMOTE SOURCE:DESTINATION` | One explicit ref update; details in section 5. |
 
+Text diff processes one file pair at a time, with at most 16 MiB and 262,144
+lines per side. Count lines exactly before allocating diff tokens. Oversized
+text fails with an error naming the path and limit. Honor heuristic Myers or
+Histogram; reject configured `minimal`, including named-driver settings,
+before tokenization or that file's output. Binary classification precedes
+text processing; forced text still receives both bounds. These limits and
+errors were discussed and approved on 2026-09-17.
+
 `fetch` followed by `merge origin/BRANCH` replaces pull. Configuration files
 or explicit `-c` settings supply identity and remotes; no config editor is
 needed. Shell deletion followed by `add` stages removal, and branch creation
@@ -328,7 +336,9 @@ including non-fast-forward merge. As discussed and approved in Q5, use
 gix's existing generic committer fallback for non-authoring reflog writes
 (clone/fetch/branch/switch/recovery), only when configured identity is missing.
 Never use that fallback for an authored commit. Supply switch's old/new
-HEAD reflog entry explicitly.
+HEAD reflog entry explicitly, including equal IDs when the attachment changes.
+Use the approved opt-in `gix-ref` transaction API to check the old raw HEAD
+target and append those IDs without changing or logging either branch.
 Ref/reflog publication can fail partially: report the actual state, rather
 than claiming every error left refs unchanged.
 
@@ -1252,7 +1262,7 @@ the shared callback, and indexed symlink text stays raw. Gitlinks remain opaque,
 including missing worktree paths. The shared native lifecycle checks those
 behaviors and unchanged index bytes. Host/Motor component gates, formatting,
 strict Clippy and shell checks pass with matching source hashes. Evidence is in
-`/tmp/motor-gix-diff-loader-b35b010f`. The renderer and open text-diff policy
+`/tmp/motor-gix-diff-loader-b35b010f`. The renderer and approved text-diff policy
 remain separate; no new limit or algorithm policy was applied.
 
 M2 transition delta: the reviewed helper builds bounded original/target indexes,
@@ -1305,6 +1315,15 @@ independent source reviews found no blocker; host/Motor component gates, formatt
 and strict Clippy pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-transition-install-2137cce8`. Command-level ref publication,
 merge-state handling and recovery remain to be implemented.
+
+M2 symbolic HEAD reflog dependency: the reviewed application pin now selects
+`176e1568e94c3bf4bd5add4ec65aeba13b40d8f5`, including the opt-in checked symbolic
+transaction API and the separate two-line test assertion cleanup. Versions and
+features are unchanged. The existing host gate runs the new exact/equal-ID HEAD
+lifecycle with all ref transaction tests. Host/Motor component gates, formatting,
+strict Clippy and shell checks pass with matching source hashes. The application
+HEAD helper follows separately. Evidence is in
+`/tmp/motor-gix-symbolic-reflog-integration`.
 
 ## 8. Discussion record
 
@@ -1717,17 +1736,16 @@ through the existing component script and developer-suite integration.
 
 Review, original failures and final gates are preserved in
 `/tmp/motor-gix-executable-attributes-integration`. The revision was imported
-locally for offline validation; publishing the external commit remains the
-user's action. Independent unstage and restore work can continue with this fix.
+locally for offline validation; the user confirmed publishing it on 2026-09-17.
 
-### Open implementation discussion — text-diff limits (2026-09-16)
+### Resolved implementation discussion — text-diff limits (2026-09-16)
 
 Source review of the pinned diff library found that its token-count estimate
 samples only the first 20 lines and can greatly overallocate even for a
 21-line file. A small application `TokenSource` can supply an exact count;
 no external crate change is needed. Count and check lines before interning,
 retain the existing 16 MiB per-side byte limit, and process one file pair at
-a time. The proposed additional limit is 262,144 lines per side. These bounds
+a time. The approved additional limit is 262,144 lines per side. These bounds
 cover renderer working storage, not total process memory; measure the latter
 through the approved Q6 workload, without another benchmark matrix.
 
@@ -1737,14 +1755,13 @@ hook. Ordinary heuristic Myers and Histogram remain available. Returning an
 error for unsupported settings avoids silently changing the requested
 algorithm. A file over the text-line limit must not be mislabeled binary.
 
-**Open question, asked during the managed-toolchain gates:** use an explicit
-path-and-limit error for oversized text and reject configured `minimal`?
-Recommended: yes. An alternative is an explicit oversized-text summary while
-still rejecting `minimal`. No renderer or policy change has been applied;
-branch/tag work and the shared bounded loader are independent of this choice.
+Discussed and approved on 2026-09-17: use an explicit path-and-limit error for
+oversized text and reject configured `minimal`, including named drivers.
+The shared bounded loader is committed; renderer implementation follows this
+policy, with focused boundary coverage and the existing Q6 measurement scope.
 Source review: `/tmp/motor-gix-diff-design/review-current.md`.
 
-### Open implementation discussion — symbolic HEAD reflogs (2026-09-17)
+### Resolved implementation discussion — symbolic HEAD reflogs (2026-09-17)
 
 Source review of the active `ddf4b6b7` pin found an API limitation affecting
 switch and HEAD restoration. A checked symbolic HEAD update skips its reflog;
@@ -1753,8 +1770,8 @@ rejected, while a dereferenced reflog-only edit also logs the current branch.
 Those APIs cannot express D13's exact old/new HEAD entry while changing only
 HEAD's attachment. The private reflog writer already supports the needed IDs.
 
-Proposed external scope: add an opt-in method for committing one prepared
-symbolic reference update with explicit previous/new reflog IDs, in
+Discussed and approved on 2026-09-17: add an opt-in method for committing one
+prepared symbolic reference update with explicit previous/new reflog IDs, in
 `/home/posk/motor-dev/gitoxide-motor-cli/gix-ref`. Keep existing callers and
 storage policy unchanged, reuse the private append implementation, and preserve
 its reflog-before-ref order and partial-publication errors. Explicit entries
@@ -1764,12 +1781,21 @@ stale or invalid edit refusal. The application continues to capture and check
 exact branch IDs while holding its mutation guard; this adds no guarantee of
 snapshot isolation against arbitrary external writers.
 
-**Open question:** approve this narrow external API extension, followed by
-focused validation, parent review and an exact application pin update?
-Recommended: yes. Application-managed reflog storage would duplicate library
-logic, and imprecise HEAD or extra branch entries would change the accepted
-contract. The external checkout has not been changed for this proposal.
+The approved scope includes focused validation, parent review and an exact
+application pin update; the user publishes the external commit. Application
+reflog storage would duplicate library logic, and imprecise HEAD or extra branch
+entries would change the accepted contract. Implementation and validation
+follow approval; the earlier proposal alone was not compiled or run.
+
+The reviewed API is committed externally as
+`176e1568e94c3bf4bd5add4ec65aeba13b40d8f5`, with 221 insertions and 10 deletions
+across production code and one focused lifecycle. All 41 ref transaction tests,
+the gix-ref unit tests, formatting and strict host/Motor Clippy pass. The first
+Clippy run exposed two preexisting empty-input assertions rejected by the
+selected toolchain. The equivalent two-line test-only cleanup was reviewed and
+committed separately as `4b38e88e9`; the original failure is preserved.
+Application validation uses the exact API revision imported locally; publication
+of these external commits remains the user's action. Evidence is in
+`/tmp/motor-gix-symbolic-reflog-integration`.
 Source review: `/tmp/motor-gix-head-ref-design/review.md`.
-Concrete source proposal and parent review: `/tmp/motor-gix-symbolic-reflog-api/`
-(`proposal.patch`, 235 insertions and 12 deletions across two files). Tests are
-drafted; they have not been compiled or run.
+Source proposal and parent review: `/tmp/motor-gix-symbolic-reflog-api/`.

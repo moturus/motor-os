@@ -26,7 +26,7 @@ clap = { version = "=4.6.0", default-features = false, features = [
     "suggestions",
     "usage",
 ] }
-gix = { git = "https://github.com/moturus/gitoxide.git", rev = "ddf4b6b7dab39328d6d045a7ca1ecc5bd9f03292", default-features = false, features = [
+gix = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
     "attributes",
     "blob-diff",
     "blocking-network-client",
@@ -39,10 +39,10 @@ gix = { git = "https://github.com/moturus/gitoxide.git", rev = "ddf4b6b7dab39328
     "status",
     "worktree-mutation",
 ] }
-gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "ddf4b6b7dab39328d6d045a7ca1ecc5bd9f03292", default-features = false, features = [
+gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
     "io-pipe",
 ] }
-gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "ddf4b6b7dab39328d6d045a7ca1ecc5bd9f03292", default-features = false, features = [
+gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
     "http-client",
 ] }
 
