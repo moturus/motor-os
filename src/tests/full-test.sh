@@ -6,9 +6,9 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
-  # Debug builds run the same suite several minutes slower.
+  # Debug builds and developer-image checks need the larger overall budget.
   TIMEOUT=1500
-  if [ "${1:-}" = "--release" ]; then
+  if [ "${1:-}" = "--release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     TIMEOUT=900
   fi
   set -m
