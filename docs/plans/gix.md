@@ -1130,6 +1130,23 @@ reuse/parallel packing, a fork fix with a regression test for the
 `gix-pack` merge-commit counting defect (section 3), other protocols and
 SHA-256. Native builds through Lorry are optional later work.
 
+M2 branch/tag commands are implemented in `3b63a839`. Listing streams sorted
+short names without a mutation lock; creation uses the existing guard and
+no-replacement ref transaction. Branches peel to commits and lightweight tags
+retain the selected object after a header check. The shared native lifecycle,
+CLI checks, and matching MD/HTML documentation cover the narrow interface.
+Host/Motor component gates, formatting, strict Clippy and shell checks pass.
+Evidence is in `/tmp/motor-gix-refs-bc78fc2a`.
+
+M2 index-to-tree writer: the reviewed shared helper is applied. It preflights
+all stages and ordinary leaf modes, then fills an empty-tree editor from the
+validated index held by the mutation guard. Missing paths cannot survive from
+an earlier tree; gitlinks remain opaque. One focused test covers the empty
+index, nested paths, supported modes, absent gitlink targets and conflicts.
+Host/Motor component gates, selected-toolchain formatting, strict Clippy
+and shell checks pass. Evidence is in `/tmp/motor-gix-tree-writer-integration`.
+No commit command is exposed by this slice.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

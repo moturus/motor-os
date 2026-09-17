@@ -53,6 +53,48 @@ pub fn build(
     build_with_limits(repo, root, destination, cancellation, LIMITS)
 }
 
+/// Write the validated index snapshot held by the mutation guard as a tree
+/// rooted at the empty tree.
+pub fn write(
+    repo: &gix::Repository,
+    index: &gix::index::State,
+    cancellation: &Cancellation,
+) -> crate::Result<gix::ObjectId> {
+    for entry in index.entries() {
+        cancellation.check()?;
+        if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            return Err(invalid(format!(
+                "index entry '{}' is unresolved",
+                entry.path(index).to_str_lossy()
+            ))
+            .into());
+        }
+        if !matches!(
+            entry.mode,
+            Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK | Mode::COMMIT
+        ) {
+            return Err(invalid(format!(
+                "index entry '{}' has unsupported mode {:o}",
+                entry.path(index).to_str_lossy(),
+                entry.mode.bits()
+            ))
+            .into());
+        }
+    }
+
+    let mut editor = repo.empty_tree().edit()?;
+    for entry in index.entries() {
+        cancellation.check()?;
+        let mode = entry
+            .mode
+            .to_tree_entry_mode()
+            .expect("supported index modes convert to tree modes");
+        editor.upsert(entry.path(index), mode.kind(), entry.id)?;
+    }
+    cancellation.check()?;
+    Ok(editor.write()?.detach())
+}
+
 fn build_with_limits(
     repo: &gix::Repository,
     root: &gix::oid,
@@ -232,6 +274,69 @@ mod tests {
         entries: Vec<gix::objs::tree::Entry>,
     ) -> crate::Result<gix::ObjectId> {
         Ok(repo.write_object(gix::objs::Tree { entries })?.detach())
+    }
+
+    #[test]
+    fn writes_all_index_modes_and_rejects_conflicts() -> crate::Result {
+        let path = std::env::temp_dir().join(format!(
+            "motor-gix-tree-write-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let _cleanup = Cleanup(path.clone());
+        let repo = gix::init_bare(path)?;
+        let empty = gix::index::State::new(repo.object_hash());
+        assert_eq!(
+            write(&repo, &empty, &Cancellation::new())?,
+            gix::ObjectId::empty_tree(repo.object_hash())
+        );
+
+        let blob = repo.write_blob(b"data")?.detach();
+        let gitlink = gix::ObjectId::from_bytes_or_panic(&[1; 20]);
+        assert!(!repo.has_object(gitlink));
+        let mut index = gix::index::State::new(repo.object_hash());
+        for (path, mode, id) in [
+            ("nested/file", Mode::FILE, blob),
+            ("executable", Mode::FILE_EXECUTABLE, blob),
+            ("link", Mode::SYMLINK, blob),
+            ("submodule", Mode::COMMIT, gitlink),
+        ] {
+            index.dangerously_push_entry(
+                Default::default(),
+                id,
+                Flags::empty(),
+                mode,
+                path.as_bytes().as_bstr(),
+            );
+        }
+        index.sort_entries();
+        index.verify_entries()?;
+
+        let tree = repo.find_tree(write(&repo, &index, &Cancellation::new())?)?;
+        for (path, kind, id) in [
+            ("nested/file", EntryKind::Blob, blob),
+            ("executable", EntryKind::BlobExecutable, blob),
+            ("link", EntryKind::Link, blob),
+            ("submodule", EntryKind::Commit, gitlink),
+        ] {
+            let entry = tree
+                .lookup_entry_by_path(path)?
+                .ok_or_else(|| invalid(format!("tree entry '{path}' is missing")))?;
+            assert_eq!((entry.mode().kind(), entry.object_id()), (kind, id));
+        }
+
+        index.dangerously_push_entry(
+            Default::default(),
+            blob,
+            Flags::from_stage(gix::index::entry::Stage::Ours),
+            Mode::FILE,
+            b"conflict".as_bstr(),
+        );
+        index.sort_entries();
+        assert!(write(&repo, &index, &Cancellation::new()).is_err());
+        Ok(())
     }
 
     #[test]
