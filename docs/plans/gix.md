@@ -1377,6 +1377,17 @@ coverage remains; no duplicate control-flow tests were added. Host/Motor compone
 gates, formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-diff-prepared-aac171ba`.
 
+M2 per-file diff output: the reviewed helper emits escaped labels, mode-only
+metadata, unified text, binary summaries and opaque gitlink IDs. Raw symlink
+pairs use the global text algorithm; regular-file attributes apply only to
+regular pairs. Text preparation precedes each file's metadata, and equal-byte
+mode changes need no text algorithm. The first native run exposed a new test's
+incorrect abbreviated hunk-header expectation; source inspection confirmed
+Gitoxide's explicit counts and only that expectation was corrected. All final
+host/Motor component gates, formatting, strict Clippy and shell checks pass with
+matching source hashes. Evidence, including the original failure, is in
+`/tmp/motor-gix-diff-pair-46041664`. Command enumeration follows separately.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

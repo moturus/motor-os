@@ -63,6 +63,11 @@ impl<'repo> Resolver<'repo> {
         })
     }
 
+    /// Return the configured global algorithm without resolving path attributes.
+    pub fn default_algorithm(&self) -> Algorithm {
+        self.cache.options.algorithm.unwrap_or_default()
+    }
+
     pub fn resolve(
         &mut self,
         path: &BStr,

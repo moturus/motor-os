@@ -957,7 +957,11 @@ fn check_diff_render() -> Result {
 
 fn check_diff_policy(output: &Path) -> Result {
     use gix::diff::blob::Algorithm;
-    use motor_gix::diff_policy::{BinaryMode, PathPolicy, Resolver};
+    use motor_gix::{
+        diff::render_pair,
+        diff_input::{Loaded, Pair},
+        diff_policy::{BinaryMode, PathPolicy, Resolver},
+    };
 
     let repository = output.join("add-repository");
     let attributes = repository.join(".git/info/attributes");
@@ -1020,6 +1024,117 @@ fn check_diff_policy(output: &Path) -> Result {
     assert!(!BinaryMode::Auto.is_binary(b"text", b"more text"));
     assert!(!BinaryMode::Text.is_binary(b"\0", b"\0"));
     assert!(BinaryMode::Binary.is_binary(b"", b""));
+    let render = |path: &str, pair: Pair, resolver: &mut Resolver<'_>| -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        render_pair(
+            path.as_bytes().as_bstr(),
+            pair,
+            resolver,
+            &cancellation,
+            &mut out,
+        )?;
+        Ok(out)
+    };
+    assert_eq!(
+        render(
+            "executable",
+            Pair {
+                old: Loaded::Blob {
+                    mode: Mode::FILE,
+                    bytes: b"same\n".to_vec(),
+                },
+                new: Loaded::Blob {
+                    mode: Mode::FILE_EXECUTABLE,
+                    bytes: b"same\n".to_vec(),
+                },
+            },
+            &mut resolver,
+        )?,
+        b"diff --git a/executable b/executable\nold mode 100644\nnew mode 100755\n"
+    );
+    assert_eq!(
+        render(
+            "executable",
+            Pair {
+                old: Loaded::Blob {
+                    mode: Mode::SYMLINK,
+                    bytes: b"old\n".to_vec(),
+                },
+                new: Loaded::Blob {
+                    mode: Mode::FILE,
+                    bytes: b"new\n".to_vec(),
+                },
+            },
+            &mut resolver,
+        )?,
+        b"diff --git a/executable b/executable\nold mode 120000\nnew mode 100644\n--- a/executable\n+++ b/executable\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+    );
+    assert_eq!(
+        render(
+            "added",
+            Pair {
+                old: Loaded::Missing,
+                new: Loaded::Blob {
+                    mode: Mode::FILE,
+                    bytes: b"binary\0data".to_vec(),
+                },
+            },
+            &mut resolver,
+        )?,
+        b"diff --git a/added b/added\nnew file mode 100644\nBinary files /dev/null and b/added differ\n"
+    );
+
+    let first = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111")?;
+    let second = gix::ObjectId::from_hex(b"2222222222222222222222222222222222222222")?;
+    let mut gitlinks = Vec::new();
+    for (path, pair) in [
+        (
+            "changed-submodule",
+            Pair {
+                old: Loaded::Gitlink { id: first },
+                new: Loaded::Gitlink { id: second },
+            },
+        ),
+        (
+            "new-submodule",
+            Pair {
+                old: Loaded::Missing,
+                new: Loaded::Gitlink { id: first },
+            },
+        ),
+        (
+            "replaced-submodule",
+            Pair {
+                old: Loaded::Gitlink { id: first },
+                new: Loaded::Blob {
+                    mode: Mode::FILE,
+                    bytes: b"ordinary\n".to_vec(),
+                },
+            },
+        ),
+    ] {
+        render_pair(
+            path.as_bytes().as_bstr(),
+            pair,
+            &mut resolver,
+            &cancellation,
+            &mut gitlinks,
+        )?;
+    }
+    assert_eq!(
+        String::from_utf8(gitlinks)?,
+        concat!(
+            "diff --git a/changed-submodule b/changed-submodule\n",
+            "Gitlinks a/changed-submodule (1111111111111111111111111111111111111111) and b/changed-submodule (2222222222222222222222222222222222222222) differ\n",
+            "diff --git a/new-submodule b/new-submodule\n",
+            "new file mode 160000\n",
+            "Gitlinks /dev/null (absent) and b/new-submodule (1111111111111111111111111111111111111111) differ\n",
+            "diff --git a/replaced-submodule b/replaced-submodule\n",
+            "old mode 160000\n",
+            "new mode 100644\n",
+            "Gitlinks a/replaced-submodule (1111111111111111111111111111111111111111) and b/replaced-submodule (non-gitlink) differ\n",
+        )
+    );
 
     drop(resolver);
     drop(index);
