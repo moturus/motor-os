@@ -362,7 +362,6 @@ pub fn run_tests() {
     test_virtio_capacity();
     test_vsock_credit();
     test_vsock_stream_buffer();
-    test_vsock_established_stream();
     test_vsock_connection();
     test_vsock_shutdown_state();
     test_vsock_output_state();
@@ -671,147 +670,6 @@ fn test_vsock_stream_buffer() {
     }
 }
 
-fn test_vsock_established_stream() {
-    use credit::{CreditAdvertisement as Ad, CreditError};
-    use stream::{EstablishedStream, ReadOutcome};
-
-    let mut stream = EstablishedStream::new().unwrap();
-    let peer = Ad {
-        buf_alloc: 16,
-        fwd_cnt: 0,
-    };
-    stream.try_receive_packet(peer, b"accepted").unwrap();
-    stream.charge_tx_after_publish(6).unwrap();
-    assert_eq!(stream.credit().tx_allowance(), 10);
-    assert!(stream.accepts_new_writes());
-    stream
-        .update_peer_credit(Ad {
-            buf_alloc: 20,
-            fwd_cnt: 2,
-        })
-        .unwrap();
-    assert_eq!(stream.credit().tx_allowance(), 16);
-
-    let invalid = Ad {
-        buf_alloc: 64,
-        fwd_cnt: 7,
-    };
-    assert_eq!(
-        stream.try_receive_packet(invalid, b"rejected"),
-        Err(CreditError::PeerForwardedBeyondSent)
-    );
-    assert_eq!(stream.credit().tx_allowance(), 16);
-    assert!(!stream.accepts_new_writes());
-
-    let mut bytes = [0; 16];
-    assert_eq!(
-        stream.read_into_reserved(&mut bytes),
-        ReadOutcome::Copied(8)
-    );
-    assert_eq!(&bytes[..8], b"accepted");
-    assert_eq!(
-        stream.read_into_reserved(&mut bytes),
-        ReadOutcome::ConnectionReset
-    );
-
-    let mut independent = EstablishedStream::new().unwrap();
-    assert!(independent.accepts_new_writes());
-    assert_eq!(
-        independent.read_into_reserved(&mut bytes),
-        ReadOutcome::Pending
-    );
-    independent.try_receive_packet(peer, b"still live").unwrap();
-    assert_eq!(
-        independent.read_into_reserved(&mut bytes),
-        ReadOutcome::Copied(10)
-    );
-    assert_eq!(&bytes[..10], b"still live");
-
-    let mut receive_only = EstablishedStream::new().unwrap();
-    receive_only.peer_shutdown(true, false);
-    assert!(!receive_only.accepts_new_writes());
-    assert_eq!(
-        receive_only.read_into_reserved(&mut bytes),
-        ReadOutcome::Pending
-    );
-    receive_only.try_receive_packet(peer, b"readable").unwrap();
-    assert_eq!(
-        receive_only.read_into_reserved(&mut bytes),
-        ReadOutcome::Copied(8)
-    );
-    assert_eq!(&bytes[..8], b"readable");
-    assert_eq!(
-        receive_only.read_into_reserved(&mut bytes),
-        ReadOutcome::Pending
-    );
-
-    let mut shutdown = EstablishedStream::new().unwrap();
-    shutdown.try_receive_packet(peer, b"drain").unwrap();
-    shutdown.peer_shutdown(false, false);
-    assert!(shutdown.accepts_new_writes());
-    shutdown.peer_shutdown(false, true);
-    assert!(shutdown.accepts_new_writes());
-    assert_eq!(
-        shutdown.read_into_reserved(&mut bytes),
-        ReadOutcome::Copied(5)
-    );
-    assert_eq!(&bytes[..5], b"drain");
-    assert_eq!(shutdown.read_into_reserved(&mut bytes), ReadOutcome::Eof);
-    shutdown.peer_shutdown(true, false);
-    assert!(!shutdown.accepts_new_writes());
-    shutdown.peer_shutdown(false, false);
-    assert!(!shutdown.accepts_new_writes());
-    assert_eq!(shutdown.read_into_reserved(&mut bytes), ReadOutcome::Eof);
-
-    let mut reset = EstablishedStream::new().unwrap();
-    reset.try_receive_packet(peer, b"before reset").unwrap();
-    reset.peer_reset();
-    assert_eq!(
-        reset.read_into_reserved(&mut bytes),
-        ReadOutcome::Copied(12)
-    );
-    assert_eq!(&bytes[..12], b"before reset");
-    assert_eq!(
-        reset.read_into_reserved(&mut bytes),
-        ReadOutcome::ConnectionReset
-    );
-    let mut empty = [];
-    assert_eq!(reset.read_into_reserved(&mut empty), ReadOutcome::Copied(0));
-
-    const CAPACITY: usize = 128 * 1024;
-    let mut capacity = EstablishedStream::new().unwrap();
-    let full = vec![0x5a; CAPACITY];
-    capacity
-        .try_receive_packet(
-            Ad {
-                buf_alloc: 23,
-                fwd_cnt: 0,
-            },
-            &full,
-        )
-        .unwrap();
-    assert_eq!(capacity.credit().rx_allowance(), 0);
-    assert_eq!(capacity.credit().tx_allowance(), 23);
-    assert_eq!(
-        capacity.try_receive_packet(
-            Ad {
-                buf_alloc: 99,
-                fwd_cnt: 0,
-            },
-            b"x"
-        ),
-        Err(CreditError::ReceiveCapacityExceeded)
-    );
-    assert_eq!(capacity.credit().rx_allowance(), 0);
-    assert_eq!(capacity.credit().tx_allowance(), 23);
-    let mut copied = vec![0; CAPACITY];
-    assert_eq!(
-        capacity.read_into_reserved(&mut copied),
-        ReadOutcome::Copied(CAPACITY)
-    );
-    assert_eq!(copied, full);
-}
-
 fn test_vsock_connection() {
     use connection::{Connection, ConnectionPhase as Phase, ReceiveOutcome as Rx, TerminalCause};
     use credit::CreditError;
@@ -1000,7 +858,41 @@ fn test_vsock_connection() {
         ReadOutcome::ConnectionReset
     );
 
+    const CAPACITY: usize = 128 * 1024;
+    let mut full = Connection::new_incoming(&request).unwrap();
+    let payload = vec![0x5a; CAPACITY];
+    assert_eq!(
+        full.receive(
+            &packet(Operation::ReadWrite, CAPACITY as u32, 0, 23, 0),
+            &payload
+        ),
+        Rx::None
+    );
+    assert_eq!(full.credit().rx_allowance(), 0);
+    assert_eq!(full.credit().tx_allowance(), 23);
+    assert_eq!(
+        full.receive(&packet(Operation::ReadWrite, 1, 0, 99, 0), b"x"),
+        Rx::SendReset
+    );
+    assert_eq!(full.credit().rx_allowance(), 0);
+    assert_eq!(full.credit().tx_allowance(), 23);
+    let mut copied = vec![0; CAPACITY];
+    assert_eq!(
+        full.read_into_reserved(&mut copied),
+        ReadOutcome::Copied(CAPACITY)
+    );
+    assert_eq!(copied, payload);
+    assert_eq!(
+        full.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+
     let mut independent = Connection::new_incoming(&request).unwrap();
+    assert!(independent.accepts_new_writes());
+    assert_eq!(
+        independent.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
     assert_eq!(
         independent.receive(&packet(Operation::ReadWrite, 4, 0, 32, 0), b"live"),
         Rx::None
@@ -1224,6 +1116,24 @@ fn test_vsock_output_state() {
     assert!(!peer_reset.local_receive_shutdown());
     assert!(!peer_reset.abandon_unread_rx());
     assert!(peer_reset.local_receive_shutdown());
+    assert_eq!(
+        peer_reset.read_into_reserved(&mut []),
+        ReadOutcome::Copied(0)
+    );
+    assert!(peer_reset.has_buffered_rx());
+    assert_eq!(
+        peer_reset.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes, b"peer");
+    assert_eq!(
+        peer_reset.read_into_reserved(&mut bytes),
+        ReadOutcome::ConnectionReset
+    );
+    assert_eq!(
+        peer_reset.read_into_reserved(&mut []),
+        ReadOutcome::Copied(0)
+    );
 
     let mut abandoned = Connection::new_incoming(&request).unwrap();
     packet.operation = Operation::ReadWrite;
@@ -1256,10 +1166,18 @@ fn test_vsock_output_state() {
     assert_eq!(failed.terminal_cause(), Some(TerminalCause::InternalError));
 
     let mut peer_send = Connection::new_incoming(&request).unwrap();
+    assert_eq!(peer_send.receive(&packet, b"last"), Rx::None);
     packet.operation = Operation::Shutdown;
     packet.len = 0;
     packet.flags = SHUTDOWN_SEND;
     assert_eq!(peer_send.receive(&packet, b""), Rx::None);
+    assert!(!peer_send.local_read_closed());
+    assert_eq!(
+        peer_send.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes, b"last");
+    assert_eq!(peer_send.read_into_reserved(&mut bytes), ReadOutcome::Eof);
     assert!(peer_send.local_read_closed());
     assert!(!peer_send.local_write_closed());
     assert!(peer_send.can_publish_accepted_tx());
@@ -1271,6 +1189,23 @@ fn test_vsock_output_state() {
     assert!(!peer_receive.local_read_closed());
     assert!(peer_receive.local_write_closed());
     assert!(!peer_receive.can_publish_accepted_tx());
+    assert_eq!(
+        peer_receive.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
+    packet.operation = Operation::ReadWrite;
+    packet.flags = 0;
+    packet.len = 4;
+    assert_eq!(peer_receive.receive(&packet, b"live"), Rx::None);
+    assert_eq!(
+        peer_receive.read_into_reserved(&mut bytes),
+        ReadOutcome::Copied(4)
+    );
+    assert_eq!(&bytes, b"live");
+    assert_eq!(
+        peer_receive.read_into_reserved(&mut bytes),
+        ReadOutcome::Pending
+    );
 
     let mut local = Connection::new_incoming(&request).unwrap();
     local.request_shutdown(SHUTDOWN_RECEIVE);
