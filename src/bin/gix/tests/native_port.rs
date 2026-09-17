@@ -141,6 +141,7 @@ fn main() -> Result {
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
     check_diff_input(&output)?;
+    check_diff_render()?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -872,6 +873,92 @@ fn check_diff_input(output: &Path) -> Result {
     fs::remove_file(attributes)?;
     assert_eq!(fs::read(repo.index_path())?, index_before);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_diff_render() -> Result {
+    use gix::diff::blob::Algorithm;
+    use motor_gix::diff_render::{MAX_TEXT_LINES, render_text};
+
+    let before = b"zero\none\ntwo\nthree\nold";
+    let after = b"zero\none\ntwo\nthree\nnew";
+    let expected = b"--- a/sample\n+++ b/sample\n@@ -2,4 +2,4 @@\n one\n two\n three\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+    for algorithm in [Algorithm::Myers, Algorithm::Histogram] {
+        let mut out = Vec::new();
+        render_text(
+            b"sample".as_bstr(),
+            (b"a/sample", b"b/sample"),
+            before,
+            after,
+            algorithm,
+            &motor_gix::cancellation::Cancellation::new(),
+            &mut out,
+        )?;
+        assert_eq!(out, expected, "{algorithm:?}");
+    }
+
+    let mut boundary = vec![b'\n'; MAX_TEXT_LINES as usize];
+    let mut out = Vec::new();
+    render_text(
+        b"boundary".as_bstr(),
+        (b"a/boundary", b"b/boundary"),
+        &boundary,
+        &boundary,
+        Algorithm::Histogram,
+        &motor_gix::cancellation::Cancellation::new(),
+        &mut out,
+    )?;
+    assert!(out.is_empty());
+    boundary.push(b'\n');
+    let mut out = b"untouched".to_vec();
+    let error = render_text(
+        b"odd\npath".as_bstr(),
+        (b"a/odd\\npath", b"b/odd\\npath"),
+        b"",
+        &boundary,
+        Algorithm::Myers,
+        &motor_gix::cancellation::Cancellation::new(),
+        &mut out,
+    )
+    .expect_err("one line over the text limit was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("odd\\npath': after text exceeds the 262144-line limit"),
+        "{error}"
+    );
+    assert_eq!(out, b"untouched");
+
+    let error = render_text(
+        b"sample".as_bstr(),
+        (b"a/sample", b"b/sample"),
+        before,
+        after,
+        Algorithm::MyersMinimal,
+        &motor_gix::cancellation::Cancellation::new(),
+        &mut out,
+    )
+    .expect_err("minimal diff was accepted");
+    assert!(
+        error.to_string().contains("minimal diff algorithm"),
+        "{error}"
+    );
+    assert_eq!(out, b"untouched");
+
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    cancellation.cancel();
+    let error = render_text(
+        b"sample".as_bstr(),
+        (b"a/sample", b"b/sample"),
+        before,
+        after,
+        Algorithm::Myers,
+        &cancellation,
+        &mut out,
+    )
+    .expect_err("cancelled text diff was accepted");
+    assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
+    assert_eq!(out, b"untouched");
     Ok(())
 }
 

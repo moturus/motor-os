@@ -1334,6 +1334,17 @@ and stale-state refusal. Host/Motor component gates, formatting, strict Clippy
 and shell checks pass with matching source hashes. Ref publication remains the
 next separate slice. Evidence is in `/tmp/motor-gix-head-capture-eb5d038f`.
 
+M2 bounded text rendering: the reviewed renderer supplies exact byte-line counts
+before interning, enforces the approved 262,144-line per-side limit and rejects
+Minimal before that text pair's output. It streams three-context hunks and newline
+markers to buffered output, preserving write errors and cancellation checks.
+The shared loader remains the 16 MiB per-side prerequisite. Focused native
+coverage checks exact Myers/Histogram output, the exact/one-over line boundary,
+escaped limit diagnostics, Minimal refusal and cancellation without output.
+Host/Motor component gates, formatting, strict Clippy and shell checks pass with
+matching source hashes. Attribute/driver resolution and the diff command follow
+separately. Evidence is in `/tmp/motor-gix-diff-renderer-e34572e6`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
