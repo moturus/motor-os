@@ -67,6 +67,12 @@ responses-per-second limits with a one-second burst. They limit traffic whose
 destination is controlled by a possibly forged source address. Zero is
 rejected; omit a key to use its compiled default.
 
+The client runtime reserves storage for socket close requests and pending
+TCP transmissions before admitting a socket. Closing it uses that storage
+without allocating or waiting for send-queue space, including after a
+canceled operation receives a late reply. Insufficient cleanup storage
+refuses a new reservation with `OutOfMemory`.
+
 ## Failure and diagnostics
 
 sys-io owns live filesystem and networking state that cannot currently be

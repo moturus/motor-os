@@ -607,8 +607,8 @@ impl TcpListener {
 
     /// Transfer one accept RPC and its reservation to the reservation's
     /// channel driver. The listener owns the reservation until a response
-    /// arrives; dropping the listener cancels indefinitely pending accepts
-    /// without waiting for a response that sys-io does not send.
+    /// arrives; dropping it closes the listener, and sys-io answers each
+    /// canceled pending accept with `NotConnected`.
     fn post_accept_reservation(&self, mut channel_reservation: ChannelReservation) {
         let channel = channel_reservation.channel().clone();
 
@@ -618,6 +618,8 @@ impl TcpListener {
         let mut req = api_net::accept_tcp_listener_request(self.handle, subchannel_mask);
         req.id = channel.new_req_id();
 
+        let request_credit = channel_reservation.driver_credit();
+        let cleanup = channel_reservation.driver_credit();
         assert!(
             self.accept_requests
                 .lock()
@@ -627,8 +629,9 @@ impl TcpListener {
 
         let waiter = RpcWaiter::Accept {
             listener: self.me.clone(),
+            cleanup,
         };
-        channel.enqueue_rpc(req, waiter);
+        channel.enqueue_rpc(req, waiter, request_credit);
     }
 
     /// Set the listener TTL without blocking the polling thread.
@@ -863,18 +866,23 @@ impl Drop for TcpStream {
         let reservation = self.channel_reservation.take().unwrap();
         let channel = reservation.channel().clone();
 
-        // Transfer written bytes and the close as one FIFO record. Its
-        // reservation keeps the channel alive until the driver has accepted
-        // every message; drop itself never waits for staging/ring room.
-        let mut messages = VecDeque::new();
+        // A subchannel owns at most sixteen pages, and every TX message
+        // consumes at least one. Storage for these messages and close was
+        // reserved before the stream was admitted.
+        const MAX_MESSAGES: usize =
+            io_channel::CHANNEL_PAGE_COUNT / api_net::IO_SUBCHANNELS as usize + 1;
+        let mut messages = [io_channel::Msg::new(); MAX_MESSAGES];
+        let mut num_messages = 0;
         while let Some(msg) = self.claim_pending_tx() {
-            messages.push_back(msg);
+            messages[num_messages] = msg;
+            num_messages += 1;
         }
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamClose as u16;
         req.handle = self.handle();
-        messages.push_back(req);
+        messages[num_messages] = req;
+        num_messages += 1;
 
         // Clear RX queue: basically, free up server-allocated pages.
         super::channel::clear_rx_queue(&self.recv_queue, &channel);
@@ -886,7 +894,7 @@ impl Drop for TcpStream {
         if channel.is_failed() {
             drop(reservation);
         } else {
-            channel.enqueue_teardown_messages(reservation, messages);
+            channel.enqueue_teardown_messages(reservation, &messages[..num_messages]);
         }
     }
 }
@@ -930,7 +938,12 @@ impl TcpStream {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamRxAck as u16;
         req.handle = self.handle();
-        self.channel().enqueue_control(req);
+        let credit = self
+            .channel_reservation
+            .as_ref()
+            .expect("a live stream has its reservation")
+            .driver_credit();
+        self.channel().enqueue_control(credit, req);
     }
 
     pub fn tcp_state(&self) -> api_net::TcpState {
@@ -1202,6 +1215,11 @@ impl TcpStream {
             RpcWaiter::Connect {
                 stream: new_stream.me.clone(),
                 tx: None,
+                cleanup: new_stream
+                    .channel_reservation
+                    .as_ref()
+                    .unwrap()
+                    .driver_credit(),
             },
         )?;
         Ok(new_stream)
@@ -1249,7 +1267,15 @@ impl TcpStream {
         // We only learn the outcome through the oneshot.
         let resp = new_stream
             .channel()
-            .rpc_connect(req, new_stream.me.clone())
+            .rpc_connect(
+                req,
+                new_stream.me.clone(),
+                new_stream
+                    .channel_reservation
+                    .as_ref()
+                    .unwrap()
+                    .driver_credit(),
+            )
             .await;
         if resp.status().is_err() {
             return Err(resp.status);

@@ -556,6 +556,12 @@ unreachable, broken pipe) still surface as <code>NotConnected</code>, and giving
 their own codes is on the follow-up list. A connect through <code>std</code> currently
 tries only the first resolved address.</p>
 
+<p>The client runtime reserves storage for socket close requests and pending TCP
+transmissions before admitting a socket. Closing it uses that storage without
+allocating or waiting for send-queue space, including after a canceled operation
+receives a late reply. Insufficient cleanup storage refuses a new reservation with
+<code>OutOfMemory</code>.</p>
+
 <h2>Failure and diagnostics</h2>
 <p>sys-io owns live filesystem and networking state that cannot be reconstructed safely
 in a replacement process, so Motor OS uses a fail-stop policy: if sys-io exits or is

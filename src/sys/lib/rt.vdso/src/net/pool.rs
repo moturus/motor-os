@@ -19,7 +19,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use moto_io::net::NetClient;
-use moto_io::net::Reservation;
+use moto_io::net::{Reservation, ReserveError};
 use moto_rt::mutex::Mutex;
 use moto_sys::SysHandle;
 
@@ -94,6 +94,14 @@ impl PoolInner {
     }
 }
 
+fn try_reserve(client: &NetClient) -> Result<Option<Reservation>, moto_rt::Error> {
+    match client.try_reserve() {
+        Ok(reservation) => Ok(Some(reservation)),
+        Err(ReserveError::AtCapacity | ReserveError::ShuttingDown) => Ok(None),
+        Err(ReserveError::OutOfMemory) => Err(moto_rt::Error::OutOfMemory),
+    }
+}
+
 impl NetPool {
     /// Reserve one socket slot, parking until a channel has room.
     /// Synchronous POSIX entry points bridge via
@@ -110,10 +118,16 @@ impl NetPool {
         let (tx, rx) = moto_async::oneshot();
         let (need_spawn, id) = {
             let mut inner = self.inner.lock();
+            let mut out_of_memory = false;
             for client in &inner.clients {
-                if let Ok(reservation) = client.try_reserve() {
-                    return Ok(reservation);
+                match try_reserve(client) {
+                    Ok(Some(reservation)) => return Ok(reservation),
+                    Ok(None) => {}
+                    Err(_) => out_of_memory = true,
                 }
+            }
+            if out_of_memory {
+                return Err(moto_rt::Error::OutOfMemory);
             }
 
             inner
@@ -252,10 +266,10 @@ extern "C" fn channel_thread_entry(ctx: u64) {
             // the channel under us. The sends run under the pool lock;
             // the wakers they run flag and wake a parked thread and take
             // no pool re-entry.
-            let mut next = client.try_reserve().ok();
-            debug_assert!(
-                next.is_some(),
-                "a fresh channel refused its first reservation"
+            let mut next = Some(
+                client
+                    .try_reserve()
+                    .expect("fresh channel cleanup storage was preallocated"),
             );
             let mut satisfied = 0usize;
             while let Some(reservation) = next.take() {
@@ -268,7 +282,13 @@ extern "C" fn channel_thread_entry(ctx: u64) {
                 match waiter.tx.send(Ok(reservation)) {
                     Ok(()) => {
                         satisfied += 1;
-                        next = client.try_reserve().ok();
+                        next = match try_reserve(&client) {
+                            Ok(next) => next,
+                            Err(err) => {
+                                inner.fail_waiters(err);
+                                None
+                            }
+                        };
                     }
                     Err(returned) => {
                         next = returned.ok();
