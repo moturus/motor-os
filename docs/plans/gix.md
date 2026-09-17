@@ -1525,6 +1525,16 @@ weakening assertions. All final host/Motor component gates, formatting, strict
 Clippy and shell checks pass with matching source hashes. Original failures and
 final evidence are in `/tmp/motor-gix-ready-commit-3410ce35`.
 
+M2 merge abort: the reviewed command validates Ready state and fully preflights
+restoration before persisting Incomplete. It then uses the shared installer,
+publishes the zero-stat original index, rechecks HEAD and removes owned merge files
+before the record. Only post-Incomplete failures require recovery. One native
+lifecycle reuses the transition fixture to check staged-resolution and extra-file
+discard, original content/shapes/index, unchanged HEAD, preservation of unrelated
+ignored files and cleanup. All host/Motor component gates, formatting, strict Clippy
+and shell checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-merge-abort-0df63a90`. Merge installation and CLI exposure follow.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

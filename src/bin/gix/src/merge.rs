@@ -1,4 +1,4 @@
-use std::io;
+use std::{error::Error as StdError, fmt, io};
 
 use gix::{
     bstr::ByteSlice,
@@ -9,8 +9,12 @@ use gix::{
 };
 
 use crate::{
-    cancellation::Cancellation, commit, merge_policy, operation::Original,
-    repository::OpenedRepository, transition, tree_index,
+    cancellation::Cancellation,
+    commit, head_ref, merge_policy,
+    mutation::Guard,
+    operation::{Original, State},
+    repository::OpenedRepository,
+    transition, tree_index,
 };
 
 #[derive(Debug)]
@@ -114,6 +118,62 @@ pub fn prepare(
         result_tree,
         conflicts,
     })
+}
+
+/// Discard an installed ready merge and restore its exact recorded original tree.
+///
+/// Preflight failures retain the Ready merge. Once the record becomes Incomplete, every failure
+/// retains a recovery record and directs the caller to finish with `gix recover`.
+pub fn abort(opened: &OpenedRepository, cancellation: &Cancellation) -> crate::Result {
+    cancellation.check()?;
+    let repo = &opened.repo;
+    let (mut guard, ready) = Guard::acquire_ready_merge(repo)?;
+    guard.require_ready_merge(repo, &ready, cancellation)?;
+
+    let mut incomplete = ready.clone();
+    incomplete.state = State::Incomplete;
+    let prepared = transition::prepare_restore(opened, guard.index(), &incomplete, cancellation)?;
+    guard.require_ready_merge(repo, &ready, cancellation)?;
+    cancellation.check()?;
+    guard.replace_operation(&ready, &incomplete)?;
+
+    let result: crate::Result = (|| {
+        let index =
+            transition::install_restore(opened, &guard, &incomplete, prepared, cancellation)?;
+        guard.publish_fresh_index(index)?;
+        head_ref::require(repo, &incomplete.original)?;
+        guard.cleanup_operation(&incomplete, cancellation)
+    })();
+    result.map_err(|source| incomplete_error("merge abort", cancellation.normalize_error(source)))
+}
+
+fn incomplete_error(
+    action: &'static str,
+    source: Box<dyn StdError + Send + Sync>,
+) -> Box<dyn StdError + Send + Sync> {
+    Box::new(IncompleteError { action, source })
+}
+
+#[derive(Debug)]
+struct IncompleteError {
+    action: &'static str,
+    source: Box<dyn StdError + Send + Sync>,
+}
+
+impl fmt::Display for IncompleteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} is incomplete; run 'gix recover'",
+            self.action
+        )
+    }
+}
+
+impl StdError for IncompleteError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 fn supported_text_conflict(conflict: &Conflict) -> bool {

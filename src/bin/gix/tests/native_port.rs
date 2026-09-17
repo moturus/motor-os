@@ -151,6 +151,7 @@ fn main() -> Result {
     check_unstage(&output)?;
     check_commit(&output)?;
     check_transition_delta(&output)?;
+    check_merge_abort(&output)?;
     check_switch(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
@@ -2190,6 +2191,107 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
     assert_eq!(motor_gix::operation::read(&operation_path)?, Some(record));
     drop(guard);
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_merge_abort(output: &Path) -> Result {
+    use motor_gix::operation::{Kind, Record, State};
+
+    let fixture = transition_fixture(output, "merge-abort-repository")?;
+    let repo = &fixture.opened.repo;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let original = motor_gix::head_ref::capture(repo)?;
+    let target_ref = original
+        .reference
+        .clone()
+        .ok_or("merge abort fixture HEAD is detached")?;
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let prepared = motor_gix::transition::prepare(
+        &fixture.opened,
+        guard.index(),
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )?;
+    let incomplete = Record {
+        state: State::Incomplete,
+        kind: Kind::Merge,
+        original: original.clone(),
+        target_ref,
+        target_commit: fixture.target_commit,
+        result_tree: fixture.target_tree,
+        intended_commit: None,
+    };
+    guard.create_operation(&incomplete)?;
+    let installed = motor_gix::transition::install(
+        &fixture.opened,
+        &guard,
+        &incomplete,
+        prepared,
+        &cancellation,
+    )?;
+    guard.publish_fresh_index(installed)?;
+    let merge_head = repo.git_dir().join("MERGE_HEAD");
+    let merge_message = repo.git_dir().join("MERGE_MSG");
+    fs::write(&merge_head, format!("{}\n", fixture.target_commit))?;
+    fs::write(&merge_message, b"abort fixture\n")?;
+    let mut ready = incomplete.clone();
+    ready.state = State::Ready;
+    guard.replace_operation(&incomplete, &ready)?;
+    drop(guard);
+
+    let workdir = repo
+        .workdir()
+        .ok_or("merge abort fixture has no worktree")?;
+    fs::write(workdir.join("keep"), b"resolved merge\n")?;
+    fs::write(workdir.join("merge-extra"), b"extra staged path\n")?;
+    fs::write(workdir.join("ignored-parent/unrelated"), b"preserve me\n")?;
+    motor_gix::add::run(
+        &fixture.opened,
+        false,
+        &["keep".into(), "merge-extra".into()],
+        &cancellation,
+    )?;
+    assert_eq!(
+        motor_gix::operation::read(&repo.git_dir().join(motor_gix::mutation::OPERATION_FILE))?,
+        Some(ready)
+    );
+
+    motor_gix::merge::abort(&fixture.opened, &cancellation)?;
+
+    assert_eq!(motor_gix::head_ref::capture(repo)?, original);
+    assert_eq!(fs::read(workdir.join("keep"))?, b"unchanged\n");
+    assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
+    assert_eq!(fs::read(workdir.join("dir/sub/old"))?, b"old child\n");
+    assert!(!workdir.join("empty-target").try_exists()?);
+    assert!(!workdir.join("merge-extra").try_exists()?);
+    assert!(!workdir.join("ignored-parent/leaf").try_exists()?);
+    assert_eq!(
+        fs::read(workdir.join("ignored-parent/unrelated"))?,
+        b"preserve me\n"
+    );
+
+    let expected =
+        motor_gix::tree_index::build(repo, &fixture.original_tree, workdir, &cancellation)?;
+    let actual = repo.open_index()?;
+    assert_eq!(actual.entries().len(), expected.entries().len());
+    assert!(actual.entries().iter().zip(expected.entries()).all(
+        |(actual_entry, expected_entry)| {
+            actual_entry.path(&actual) == expected_entry.path(&expected)
+                && actual_entry.id == expected_entry.id
+                && actual_entry.mode == expected_entry.mode
+                && actual_entry.flags == expected_entry.flags
+                && actual_entry.stat == Default::default()
+        }
+    ));
+    assert!(
+        !repo
+            .git_dir()
+            .join(motor_gix::mutation::OPERATION_FILE)
+            .try_exists()?
+    );
+    assert!(!merge_head.try_exists()? && !merge_message.try_exists()?);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
