@@ -10,6 +10,7 @@ mod log;
 
 use motor_gix::{
     Result, add, cancellation, clone, commit, fetch, init, network, refs, repository, status,
+    unstage,
 };
 
 fn main() -> ExitCode {
@@ -78,6 +79,17 @@ fn run() -> Result {
                         .action(ArgAction::Append)
                         .num_args(1..)
                         .required_unless_present("all"),
+                ),
+        )
+        .subcommand(
+            Command::new("unstage")
+                .about("Restore index entries from HEAD without changing the worktree")
+                .arg(
+                    Arg::new("paths")
+                        .value_name("PATH")
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .required(true),
                 ),
         )
         .subcommand(
@@ -206,6 +218,17 @@ fn run() -> Result {
             )
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("unstage") => {
+            let command = matches
+                .subcommand_matches("unstage")
+                .expect("matched unstage");
+            let paths = command
+                .get_many::<String>("paths")
+                .expect("required paths")
+                .cloned()
+                .collect::<Vec<_>>();
+            unstage::run(&opened, &paths, &cancellation)
+        }
         Some("tag") => reference_run(
             &mut opened,
             matches.subcommand_matches("tag").expect("matched tag"),

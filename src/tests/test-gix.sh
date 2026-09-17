@@ -260,6 +260,16 @@ verify_add_cli() {
     fail "gix add -- wrote the wrong blob"
 }
 
+verify_unstage_cli() {
+  local repository="$1" entries
+  entries="$(clean_git -C "$repository" ls-files -- -leading)"
+  [ -z "$entries" ] ||
+    fail "gix unstage retained the selected unborn entry"
+  [ "$(cat "$repository/-leading")" = 'cli stage' ] ||
+    fail "gix unstage changed the worktree file"
+  [ ! -e "$repository/.git/index.lock" ] || fail "gix unstage left index.lock"
+}
+
 verify_commit_cli() {
   local repository="$1"
   [ "$(clean_git -C "$repository" symbolic-ref HEAD)" = refs/heads/main ] ||
@@ -402,6 +412,9 @@ PY
   printf 'cli stage\n' > "$init_repo/-leading"
   "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
   verify_add_cli "$init_repo"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" unstage -- -leading
+  verify_unstage_cli "$init_repo"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
   "${app_env[@]}" "$gix_binary" -r "$init_repo" -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial
   verify_commit_cli "$init_repo"
 
@@ -680,6 +693,10 @@ grep -Fqx 'ref: refs/heads/main' "$temporary/guest-init-head" ||
 printf 'cli stage\n' > "$temporary/add-cli-source"
 printf 'put "%s" "%s"\n' "$temporary/add-cli-source" "$guest_root/init/-leading" |
   "${sftp_command[@]}"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init add -- -leading"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init unstage -- -leading"
+guest_unstage_status="$(vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init status")"
+[ "$guest_unstage_status" = '?? -leading' ] || fail "native gix unstage changed the worktree or retained the index entry"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init add -- -leading"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial"
 printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |

@@ -502,6 +502,7 @@ gix clone https://example.test/project.git project
 gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
+gix -r project unstage src/main.rs
 gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
@@ -520,6 +521,11 @@ changes and deletions. Tracked ignored files are included; explicitly naming an 
 or unmatched path fails. Executable and indexed symlink modes are preserved, and
 gitlinks remain unchanged. Staging refuses external filters and files over 16 MiB,
 and publishes the index only after all selected changes are prepared.</p>
+<p><code>unstage PATH…</code> restores the selected index entries from
+<code>HEAD</code>, or removes them from an unborn branch's index, without changing
+worktree files. It requires one or more literal paths, accepts <code>--</code>
+before a name starting with a dash, and refuses while a merge or another
+operation is active.</p>
 <p><code>commit -m MSG</code> commits the staged index to the attached local branch,
 including an unborn branch's first commit. It rejects unresolved entries and an
 unchanged index. Author and committer name and email must be configured;

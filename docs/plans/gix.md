@@ -1176,6 +1176,12 @@ all tested source hashes match. The new fixture's initial API mismatch and
 racy-cache setup assumption were corrected without changing production behavior
 or weakening assertions. Original failures and final validation are preserved
 in `/tmp/motor-gix-unstage-library-5d3bc82a`.
+The library is committed as `fc914dd8`. The reviewed CLI now exposes
+`unstage PATH…`, with matching Markdown and developer HTML documentation.
+Its host and Motor smoke checks extend the existing init/add/commit lifecycle,
+including a leading-dash path and host Git interoperability. All component,
+formatting, strict Clippy and shell gates pass with matching source hashes;
+CLI evidence is in `/tmp/motor-gix-unstage-cli-fc914dd8`.
 
 ## 8. Discussion record
 
