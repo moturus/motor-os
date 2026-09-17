@@ -1265,6 +1265,18 @@ gates, formatting, strict Clippy and shell checks pass with matching source hash
 Evidence is in `/tmp/motor-gix-transition-delta-cea65c30`. This data-only result
 does not certify worktree cleanliness or collision safety; that preflight follows.
 
+M2 transition collision preflight: changed-path ancestors and destination
+contents are inspected without following symbolic links. Only known tracked
+deletions permit file/directory replacement; ignored and untracked contents,
+unrelated empty descendant directories, and nested repositories block it.
+An empty exact target directory is permitted. Directory work storage is bounded
+by admitted original deletion paths, and sorted prefix lookup includes the slash
+so an intervening sibling cannot hide a descendant. The existing native lifecycle
+covers those cases, including deletion-only ancestors, while retaining the guard
+and unchanged HEAD/index/worktree. Host/Motor component gates, formatting and
+strict Clippy pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-transition-collisions-cb2439cb`. Cleanliness validation follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
@@ -1702,3 +1714,33 @@ Recommended: yes. An alternative is an explicit oversized-text summary while
 still rejecting `minimal`. No renderer or policy change has been applied;
 branch/tag work and the shared bounded loader are independent of this choice.
 Source review: `/tmp/motor-gix-diff-design/review-current.md`.
+
+### Open implementation discussion — symbolic HEAD reflogs (2026-09-17)
+
+Source review of the active `ddf4b6b7` pin found an API limitation affecting
+switch and HEAD restoration. A checked symbolic HEAD update skips its reflog;
+the clone exception can only supply a null old ID. Duplicate HEAD edits are
+rejected, while a dereferenced reflog-only edit also logs the current branch.
+Those APIs cannot express D13's exact old/new HEAD entry while changing only
+HEAD's attachment. The private reflog writer already supports the needed IDs.
+
+Proposed external scope: add an opt-in method for committing one prepared
+symbolic reference update with explicit previous/new reflog IDs, in
+`/home/posk/motor-dev/gitoxide-motor-cli/gix-ref`. Keep existing callers and
+storage policy unchanged, reuse the private append implementation, and preserve
+its reflog-before-ref order and partial-publication errors. Explicit entries
+must also be written when both IDs are equal but the branch attachment changes.
+One focused lifecycle covers exact entries, unchanged branch refs/logs, and
+stale or invalid edit refusal. The application continues to capture and check
+exact branch IDs while holding its mutation guard; this adds no guarantee of
+snapshot isolation against arbitrary external writers.
+
+**Open question:** approve this narrow external API extension, followed by
+focused validation, parent review and an exact application pin update?
+Recommended: yes. Application-managed reflog storage would duplicate library
+logic, and imprecise HEAD or extra branch entries would change the accepted
+contract. The external checkout has not been changed for this proposal.
+Source review: `/tmp/motor-gix-head-ref-design/review.md`.
+Concrete source proposal and parent review: `/tmp/motor-gix-symbolic-reflog-api/`
+(`proposal.patch`, 235 insertions and 12 deletions across two files). Tests are
+drafted; they have not been compiled or run.

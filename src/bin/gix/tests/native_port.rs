@@ -1089,12 +1089,15 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
     let repository = output.join("transition-repository");
     let cancellation = motor_gix::cancellation::Cancellation::new();
     motor_gix::init::run(&repository, &[], false, &cancellation)?;
-    fs::create_dir(repository.join("dir"))?;
+    fs::create_dir_all(repository.join("dir/sub"))?;
+    fs::create_dir(repository.join("removed"))?;
     for (path, data) in [
         (".gitignore", b"ignored-parent\ndir/block\n".as_slice()),
         ("a", b"old a\n"),
-        ("dir/old", b"old child\n"),
+        ("dir/sub.extra", b"old sibling\n"),
+        ("dir/sub/old", b"old child\n"),
         ("keep", b"unchanged\n"),
+        ("removed/old", b"removed child\n"),
     ] {
         fs::write(repository.join(path), data)?;
     }
@@ -1106,7 +1109,9 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
     let original_commit = repo.head_id()?.detach();
     let original_tree = repo.head_tree()?.id().detach();
     let (mut target, _) = repo.open_index()?.into_parts();
-    target.remove_entries(|_, path, _| path == "a" || path == "dir/old");
+    target.remove_entries(|_, path, _| {
+        path == "a" || path.starts_with(b"dir/") || path.starts_with(b"removed/")
+    });
     target
         .entry_mut_by_path_and_stage(b"keep".as_bstr(), Stage::Unconflicted)
         .ok_or("transition fixture keep entry is missing")?
@@ -1114,6 +1119,7 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
     for (path, data) in [
         ("a/b", b"new child\n".as_slice()),
         ("dir", b"new file\n"),
+        ("empty-target", b"new empty replacement\n"),
         ("ignored-parent/leaf", b"ignored parent child\n"),
         ("untracked-parent/leaf", b"untracked parent child\n"),
     ] {
@@ -1163,15 +1169,52 @@ fn check_transition_delta(output: &Path) -> Result {
             ("a", true, false),
             ("a/b", false, true),
             ("dir", false, true),
-            ("dir/old", true, false),
+            ("dir/sub.extra", true, false),
+            ("dir/sub/old", true, false),
+            ("empty-target", false, true),
             ("ignored-parent/leaf", false, true),
             ("keep", true, true),
+            ("removed/old", true, false),
             ("untracked-parent/leaf", false, true),
         ]
         .map(|(path, old, new)| (path.as_bytes().as_bstr(), old, new))
     );
-    assert_eq!(delta.original_index.entries().len(), 4);
-    assert_eq!(delta.target_index.entries().len(), 6);
+    assert_eq!(delta.original_index.entries().len(), 6);
+    assert_eq!(delta.target_index.entries().len(), 7);
+    let workdir = repo.workdir().ok_or("worktree missing")?;
+    fs::create_dir(workdir.join("empty-target"))?;
+    motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)?;
+    for parent in ["untracked-parent", "ignored-parent"] {
+        fs::write(workdir.join(parent), b"obstruction\n")?;
+        let error = motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)
+            .expect_err("an untracked or ignored ancestor was accepted");
+        assert!(error.to_string().contains(parent), "{error}");
+        fs::remove_file(workdir.join(parent))?;
+    }
+    fs::write(workdir.join("dir/block"), b"ignored obstruction\n")?;
+    let error = motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)
+        .expect_err("an ignored descendant was accepted");
+    assert!(error.to_string().contains("dir/block"), "{error}");
+    fs::remove_file(workdir.join("dir/block"))?;
+    fs::create_dir(workdir.join("dir/empty"))?;
+    let error = motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)
+        .expect_err("an unrelated empty descendant directory was accepted");
+    assert!(error.to_string().contains("dir/empty"), "{error}");
+    fs::remove_dir(workdir.join("dir/empty"))?;
+
+    fs::create_dir(workdir.join("untracked-parent"))?;
+    fs::write(workdir.join("untracked-parent/.git"), b"foreign repository")?;
+    let error = motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)
+        .expect_err("a nested repository ancestor was accepted");
+    assert!(error.to_string().contains("nested repository"), "{error}");
+    fs::remove_dir_all(workdir.join("untracked-parent"))?;
+
+    fs::write(workdir.join("removed/.git"), b"foreign repository")?;
+    let error = motor_gix::transition::preflight_collisions(repo, &delta, &cancellation)
+        .expect_err("a nested repository on a deletion-only path was accepted");
+    assert!(error.to_string().contains("removed"), "{error}");
+    fs::remove_file(workdir.join("removed/.git"))?;
+
     assert!(
         motor_gix::transition::compute(
             repo,
@@ -1207,10 +1250,7 @@ fn check_transition_delta(output: &Path) -> Result {
     );
     assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
     assert_eq!(fs::read(repo.index_path())?, index_before);
-    assert_eq!(
-        fs::read(repo.workdir().ok_or("worktree missing")?.join("a"))?,
-        b"old a\n"
-    );
+    assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
     drop(guard);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())

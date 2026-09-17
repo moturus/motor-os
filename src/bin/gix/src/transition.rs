@@ -1,7 +1,11 @@
-use std::{cmp::Ordering, io};
+use std::{
+    cmp::Ordering,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use gix::{
-    bstr::{BString, ByteSlice},
+    bstr::{BStr, BString, ByteSlice},
     index::entry::{Mode, Stage},
 };
 
@@ -148,4 +152,159 @@ fn snapshot(entry: &gix::index::Entry) -> Snapshot {
         id: entry.id,
         mode: entry.mode,
     }
+}
+
+/// Reject worktree objects that would obstruct this delta without following symbolic links.
+pub fn preflight_collisions(
+    repo: &gix::Repository,
+    delta: &Delta,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
+    for change in &delta.changes {
+        cancellation.check()?;
+        let target = change.path.as_bstr();
+        for (slash, _) in target.iter().enumerate().filter(|(_, byte)| **byte == b'/') {
+            let prefix = target[..slash].as_bstr();
+            let absolute = workdir.join(gix::path::from_bstr(prefix).as_ref());
+            let metadata = match fs::symlink_metadata(&absolute) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.is_dir() {
+                reject_repository(&absolute, prefix)?;
+            } else if change.target.is_none()
+                || metadata.is_file() && removable(&delta.changes, prefix)
+            {
+                break;
+            } else {
+                return Err(obstruction(prefix, "blocks a target path").into());
+            }
+        }
+
+        if change.target.is_none() {
+            continue;
+        }
+        let absolute = workdir.join(gix::path::from_bstr(target).as_ref());
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_dir() {
+            reject_directory_contents(&absolute, workdir, &delta.changes, cancellation)?;
+        } else if !metadata.is_file() || !change.original.is_some_and(|entry| ordinary(entry.mode))
+        {
+            return Err(obstruction(target, "would be overwritten").into());
+        }
+    }
+    Ok(())
+}
+
+fn reject_directory_contents(
+    root: &Path,
+    workdir: &Path,
+    changes: &[Change],
+    cancellation: &Cancellation,
+) -> crate::Result {
+    let mut pending = Vec::<PathBuf>::new();
+    pending.try_reserve(1)?;
+    pending.push(root.to_owned());
+    while let Some(directory) = pending.pop() {
+        cancellation.check()?;
+        let relative = repository_path(workdir, &directory)?;
+        reject_repository(&directory, relative.as_bstr())?;
+        for entry in fs::read_dir(&directory)? {
+            cancellation.check()?;
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            let relative = repository_path(workdir, &path)?;
+            if metadata.is_dir() {
+                if !has_removable_descendant(changes, relative.as_bstr())? {
+                    return Err(obstruction(relative.as_bstr(), "would be overwritten").into());
+                }
+                pending.try_reserve(1)?;
+                pending.push(path);
+            } else if !metadata.is_file() || !removable(changes, relative.as_bstr()) {
+                return Err(obstruction(relative.as_bstr(), "would be overwritten").into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_repository(directory: &Path, relative: &BStr) -> crate::Result {
+    if metadata(directory.join(".git"))?.is_some() {
+        return Err(obstruction(relative, "is a nested repository").into());
+    }
+    let looks_bare = metadata(directory.join("HEAD"))?.is_some_and(|meta| meta.is_file())
+        && metadata(directory.join("objects"))?.is_some_and(|meta| meta.is_dir())
+        && metadata(directory.join("refs"))?.is_some_and(|meta| meta.is_dir());
+    if looks_bare {
+        return Err(obstruction(relative, "is a nested repository").into());
+    }
+    Ok(())
+}
+
+fn metadata(path: PathBuf) -> io::Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn repository_path(workdir: &Path, path: &Path) -> crate::Result<BString> {
+    let path = path.strip_prefix(workdir)?;
+    Ok(gix::path::to_unix_separators_on_windows(gix::path::try_into_bstr(path)?).into_owned())
+}
+
+fn removable(changes: &[Change], path: &BStr) -> bool {
+    changes
+        .binary_search_by(|change| change.path.as_bstr().cmp(path))
+        .is_ok_and(|offset| {
+            changes[offset]
+                .original
+                .is_some_and(|entry| ordinary(entry.mode))
+                && changes[offset].target.is_none()
+        })
+}
+
+fn has_removable_descendant(changes: &[Change], parent: &BStr) -> crate::Result<bool> {
+    let mut prefix = Vec::new();
+    prefix.try_reserve_exact(parent.len() + 1)?;
+    prefix.extend_from_slice(parent);
+    prefix.push(b'/');
+    let prefix = BString::from(prefix);
+    let offset = changes.partition_point(|change| change.path.as_bstr() < prefix.as_bstr());
+    Ok(changes[offset..]
+        .iter()
+        .take_while(|change| change.path.starts_with(prefix.as_slice()))
+        .any(|change| {
+            change.original.is_some_and(|entry| ordinary(entry.mode)) && change.target.is_none()
+        }))
+}
+
+fn ordinary(mode: Mode) -> bool {
+    matches!(mode, Mode::FILE | Mode::FILE_EXECUTABLE | Mode::SYMLINK)
+}
+
+fn obstruction(path: &BStr, message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "worktree path '{}' {message}",
+            path.to_str_lossy().escape_debug()
+        ),
+    )
 }
