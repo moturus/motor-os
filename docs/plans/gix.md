@@ -1223,6 +1223,14 @@ formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-operation-write-6ddf59c1`. Command-level recovery
 and live object/ref checks remain part of the transition implementation.
 
+M2 shared content conversion: the reviewed staging refactor exposes a short-lived
+callback over bounded canonical Git bytes. Staging still writes the borrowed
+slice directly, with unchanged source/conversion limits, checks and diagnostics.
+This enables read-only diff loading and cleanliness hashing without duplicating
+file handling or copying staging content. Existing host/Motor staging lifecycles,
+all component gates, formatting and strict Clippy pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-shared-conversion-657e25b6`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
