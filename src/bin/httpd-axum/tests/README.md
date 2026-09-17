@@ -1,5 +1,25 @@
 # Component tests
 
+Run the complete component gate with cached Cargo dependencies:
+
+```sh
+bash src/bin/httpd-axum/tests/run.sh
+bash src/bin/httpd-axum/tests/run.sh --release
+```
+
+Add `--motor` to cross-compile and run all component tests in a disposable
+snapshot of an existing Motor image. It uses the repository's VM lock,
+network and SSH helpers, and uploads fresh executable paths. It does not
+build an OS image. `HTTPD_AXUM_VM_BUILD=release` selects an existing release
+image while testing debug component binaries. Motor runs include real ports
+80/443, certificate-validated TLS, HTTP/2 and listener isolation. Failed runs
+retain their build artifact list and console log under the printed `/tmp` path.
+
+This component driver is not currently called by `src/tests/full-test.sh`.
+The filesystem workload in `src/tests/stress-soak.sh` also needs an explicit
+`--cache=off` when launching httpd-axum to preserve its per-GET filesystem
+coverage; the current soak launch does not pass it.
+
 Run the CLI regressions on the host with the repository-selected toolchain:
 
 ```sh
@@ -37,6 +57,7 @@ subsequent requests on keep-alive connections, and HTTP/1.1 over TLS. The existi
 TLS handshake deadline remains separate. HTTP/2 support is preserved: its
 connections count toward admission, but subsequent HTTP/2 stream-header deadlines
 are not exposed by the current Hyper API and are not enforced by this flag.
+HTTP/2 idle time after the first request is also not bounded by this flag.
 The HTTP/2 tests check both cleartext and certificate-validated TLS, repeat
 requests on one connection (including a cache hit), and verify admission limits.
 
@@ -90,6 +111,12 @@ not total process RSS: active responses can still reference evicted bytes.
 `cache_store` and `cache_response` are standalone host/Motor tests. The HTTP test
 also checks default caching, disabled caching, expiry, deletion, and large-file
 streaming. No cache is populated at server startup.
+
+`cache_fill` deterministically appends/truncates files between response metadata
+and body collection, checks growth beyond the cache limit, and preserves read
+errors. A failed fill returns the original response stream without caching or
+refetching it. `rejections` checks overload accounting and warning frequency
+without timed sleeps.
 
 Set `HTTPD_AXUM_BENCH=1` when running the HTTP test to also report preparation
 and complete loopback-request timings with caching on and off. It measures a
