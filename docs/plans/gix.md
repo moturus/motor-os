@@ -1345,6 +1345,17 @@ Host/Motor component gates, formatting, strict Clippy and shell checks pass with
 matching source hashes. Attribute/driver resolution and the diff command follow
 separately. Evidence is in `/tmp/motor-gix-diff-renderer-e34572e6`.
 
+M2 diff metadata: the reviewed resolver reuses Gitoxide's typed global and
+named-driver configuration with attributes tied to the held index. It loads no
+diff resources: the bounded loader remains the content reader. Bare `diff`
+forces text, `-diff` forces binary, and named drivers can select either or
+automatic NUL detection over the first 8,000 bytes per side. Minimal reaches the
+text renderer's explicit refusal; binary resources need no text algorithm.
+One existing native repository lifecycle covers these policies and unchanged
+index bytes. Host/Motor component gates, formatting, strict Clippy and shell
+checks pass with matching source hashes. Command selection/output integration
+follows separately. Evidence is in `/tmp/motor-gix-diff-policy-405ea83a`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

@@ -142,6 +142,7 @@ fn main() -> Result {
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
     check_diff_input(&output)?;
     check_diff_render()?;
+    check_diff_policy(&output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -959,6 +960,80 @@ fn check_diff_render() -> Result {
     .expect_err("cancelled text diff was accepted");
     assert!(motor_gix::cancellation::was_cancelled(error.as_ref()));
     assert_eq!(out, b"untouched");
+    Ok(())
+}
+
+fn check_diff_policy(output: &Path) -> Result {
+    use gix::diff::blob::Algorithm;
+    use motor_gix::diff_policy::{BinaryMode, PathPolicy, Resolver};
+
+    let repository = output.join("add-repository");
+    let attributes = repository.join(".git/info/attributes");
+    assert!(!attributes.try_exists()?);
+    fs::write(
+        &attributes,
+        b"modified diff\nadded -diff\nignored-tracked diff=named\nexecutable diff=minimal\ndeleted diff=unknown\n",
+    )?;
+    let opened = motor_gix::repository::open(
+        &repository,
+        &[
+            "diff.algorithm=histogram",
+            "diff.named.binary=false",
+            "diff.named.algorithm=myers",
+            "diff.minimal.binary=false",
+            "diff.minimal.algorithm=minimal",
+        ],
+        false,
+    )?;
+    let index_path = opened.repo.index_path();
+    let index_before = fs::read(&index_path)?;
+    let index = opened.repo.open_index()?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut resolver = Resolver::new(&opened, &index)?;
+    let resolve = |resolver: &mut Resolver<'_>, path: &str| {
+        resolver.resolve(path.as_bytes().as_bstr(), Mode::FILE, &cancellation)
+    };
+
+    assert_eq!(
+        resolve(&mut resolver, "unmentioned")?,
+        PathPolicy {
+            algorithm: Algorithm::Histogram,
+            binary: BinaryMode::Auto,
+        }
+    );
+    assert_eq!(resolve(&mut resolver, "modified")?.binary, BinaryMode::Text);
+    assert_eq!(resolve(&mut resolver, "added")?.binary, BinaryMode::Binary);
+    assert_eq!(
+        resolve(&mut resolver, "ignored-tracked")?,
+        PathPolicy {
+            algorithm: Algorithm::Myers,
+            binary: BinaryMode::Text,
+        }
+    );
+    assert_eq!(
+        resolve(&mut resolver, "executable")?,
+        PathPolicy {
+            algorithm: Algorithm::MyersMinimal,
+            binary: BinaryMode::Text,
+        }
+    );
+    assert_eq!(
+        resolve(&mut resolver, "deleted")?,
+        PathPolicy {
+            algorithm: Algorithm::Histogram,
+            binary: BinaryMode::Auto,
+        }
+    );
+    assert!(BinaryMode::Auto.is_binary(b"text", b"binary\0data"));
+    assert!(!BinaryMode::Auto.is_binary(b"text", b"more text"));
+    assert!(!BinaryMode::Text.is_binary(b"\0", b"\0"));
+    assert!(BinaryMode::Binary.is_binary(b"", b""));
+
+    drop(resolver);
+    drop(index);
+    drop(opened);
+    fs::remove_file(attributes)?;
+    assert_eq!(fs::read(index_path)?, index_before);
     Ok(())
 }
 

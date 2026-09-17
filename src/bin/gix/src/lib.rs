@@ -7,6 +7,7 @@ pub mod commit;
 pub mod curl;
 pub mod curl_capture;
 pub mod diff_input;
+pub mod diff_policy;
 pub mod diff_render;
 pub mod fetch;
 pub mod head_ref;
