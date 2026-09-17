@@ -1244,6 +1244,17 @@ strict Clippy pass with matching source hashes. No external code changed.
 Original failures, review and gates are preserved in
 `/tmp/motor-gix-tree-writer-validation-e6806cc3`.
 
+M2 bounded diff inputs: the reviewed loader reads object and worktree inputs
+one pair at a time, retaining one lazy conversion pipeline across the command.
+That avoids rebuilding the index-backed attribute mapping for every path.
+Object headers are checked before bounded reads; canonical worktree content uses
+the shared callback, and indexed symlink text stays raw. Gitlinks remain opaque,
+including missing worktree paths. The shared native lifecycle checks those
+behaviors and unchanged index bytes. Host/Motor component gates, formatting,
+strict Clippy and shell checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-diff-loader-b35b010f`. The renderer and open text-diff policy
+remain separate; no new limit or algorithm policy was applied.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

@@ -139,6 +139,7 @@ fn main() -> Result {
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
+    check_diff_input(&output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
@@ -753,6 +754,122 @@ fn check_add(output: &Path, executable_source: &Path, gitlink_id: gix::ObjectId)
     }
     assert!(index.entry_by_path(b".gitignore".as_bstr()).is_some());
     assert!(!repo.git_dir().join("index.lock").exists());
+    Ok(())
+}
+
+fn check_diff_input(output: &Path) -> Result {
+    use motor_gix::diff_input::{Loaded, Loader, Source};
+
+    let repository = output.join("add-repository");
+    let attributes = repository.join(".git/info/attributes");
+    assert!(!attributes.try_exists()?);
+    let modified_before = fs::read(repository.join("modified"))?;
+    let link_before = fs::read(repository.join("link-preserved"))?;
+    fs::write(&attributes, b"modified text\nlink-preserved text\n")?;
+    fs::write(repository.join("modified"), b"new\r\n")?;
+    fs::write(repository.join("link-preserved"), b"new\r\ntarget")?;
+
+    let opened = motor_gix::repository::open(&repository, &[], false)?;
+    let repo = &opened.repo;
+    let index = repo.open_index()?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let index_before = fs::read(repo.index_path())?;
+
+    let entry = |path: &str| {
+        index
+            .entry_by_path(path.as_bytes().as_bstr())
+            .map(|entry| (entry.id, entry.mode))
+            .ok_or("diff input fixture entry is missing")
+    };
+    let (modified_id, modified_mode) = entry("modified")?;
+    let (link_id, link_mode) = entry("link-preserved")?;
+    let (gitlink_id, gitlink_mode) = entry("gitlink")?;
+    let (missing_gitlink_id, missing_gitlink_mode) = entry("missing-gitlink")?;
+    let mut loader = Loader::new(&opened, &index);
+
+    let pair = loader.load_pair(
+        b"gitlink".as_bstr(),
+        Source::Object {
+            id: gitlink_id,
+            mode: gitlink_mode,
+        },
+        Source::Worktree {
+            index_id: gitlink_id,
+            index_mode: gitlink_mode,
+        },
+        &cancellation,
+    )?;
+    assert_eq!(pair.old, Loaded::Gitlink { id: gitlink_id });
+    assert_eq!(pair.new, Loaded::Gitlink { id: gitlink_id });
+
+    let pair = loader.load_pair(
+        b"missing-gitlink".as_bstr(),
+        Source::Worktree {
+            index_id: missing_gitlink_id,
+            index_mode: missing_gitlink_mode,
+        },
+        Source::Missing,
+        &cancellation,
+    )?;
+    assert_eq!(
+        pair.old,
+        Loaded::Gitlink {
+            id: missing_gitlink_id,
+        }
+    );
+    assert_eq!(pair.new, Loaded::Missing);
+
+    let pair = loader.load_pair(
+        b"modified".as_bstr(),
+        Source::Object {
+            id: modified_id,
+            mode: modified_mode,
+        },
+        Source::Worktree {
+            index_id: modified_id,
+            index_mode: modified_mode,
+        },
+        &cancellation,
+    )?;
+    assert_eq!(
+        pair,
+        motor_gix::diff_input::Pair {
+            old: Loaded::Blob {
+                mode: Mode::FILE,
+                bytes: b"new\n".to_vec(),
+            },
+            new: Loaded::Blob {
+                mode: Mode::FILE,
+                bytes: b"new\n".to_vec(),
+            },
+        }
+    );
+
+    let pair = loader.load_pair(
+        b"link-preserved".as_bstr(),
+        Source::Object {
+            id: link_id,
+            mode: link_mode,
+        },
+        Source::Worktree {
+            index_id: link_id,
+            index_mode: link_mode,
+        },
+        &cancellation,
+    )?;
+    assert_eq!(
+        pair.new,
+        Loaded::Blob {
+            mode: Mode::SYMLINK,
+            bytes: b"new\r\ntarget".to_vec(),
+        }
+    );
+
+    fs::write(repository.join("modified"), modified_before)?;
+    fs::write(repository.join("link-preserved"), link_before)?;
+    fs::remove_file(attributes)?;
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

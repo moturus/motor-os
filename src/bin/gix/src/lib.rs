@@ -6,6 +6,7 @@ pub mod command_config;
 pub mod commit;
 pub mod curl;
 pub mod curl_capture;
+pub mod diff_input;
 pub mod fetch;
 pub mod http;
 pub mod http_request;
