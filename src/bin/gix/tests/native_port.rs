@@ -2555,6 +2555,16 @@ fn check_commit(output: &Path) -> Result {
         .ok_or("ordinary mutation admitted a ready merge")?;
     assert!(error.to_string().contains("merge ready"), "{error}");
 
+    let error = motor_gix::commit::run(&opened, "unresolved ready", &cancellation)
+        .err()
+        .ok_or("a ready merge committed an unresolved index")?;
+    assert!(error.to_string().contains("is unresolved"), "{error}");
+    assert_eq!(opened.repo.head_id()?.detach(), second);
+    assert_eq!(
+        motor_gix::operation::read(&operation_path)?,
+        Some(ready.clone())
+    );
+
     fs::write(repository.join("conflict"), b"resolved ready merge\n")?;
     fs::write(&merge_head, format!("{second}\n"))?;
     let index_before = fs::read(opened.repo.index_path())?;
@@ -2583,6 +2593,98 @@ fn check_commit(output: &Path) -> Result {
     let (guard, observed) = motor_gix::mutation::Guard::acquire_ready_merge(&opened.repo)?;
     assert_eq!(observed, ready);
     guard.cleanup_operation(&observed, &cancellation)?;
+    assert!(
+        !operation_path.try_exists()?
+            && !merge_head.try_exists()?
+            && !merge_message.try_exists()?
+    );
+    drop(guard);
+
+    let second_tree_id = second_tree.id().detach();
+    let clean_index =
+        motor_gix::tree_index::build(&opened.repo, &second_tree_id, &repository, &cancellation)?;
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.publish_fresh_index(clean_index)?;
+    drop(guard);
+    let index_before = fs::read(opened.repo.index_path())?;
+    let worktree_before = [
+        fs::read(repository.join("conflict"))?,
+        fs::read(repository.join("third"))?,
+    ];
+    let head_log = repository.join(".git/logs/HEAD");
+    let branch_log = repository.join(".git/logs/refs/heads/main");
+    let logs_before = [fs::read(&head_log)?, fs::read(&branch_log)?];
+
+    let guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.create_operation(&incomplete)?;
+    fs::write(&merge_head, format!("{merge_target}\n"))?;
+    fs::write(&merge_message, b"ready merge\n")?;
+    guard.replace_operation(&incomplete, &ready)?;
+    drop(guard);
+
+    let ref_lock = repository.join(".git/refs/heads/main.lock");
+    fs::write(&ref_lock, b"foreign")?;
+    let error = motor_gix::commit::run(&opened, "ready merge", &cancellation)
+        .err()
+        .ok_or("a locked branch accepted a ready merge commit")?;
+    assert!(error.to_string().contains("run 'gix recover'"), "{error}");
+    let publishing = motor_gix::operation::read(&operation_path)?
+        .ok_or("failed Ready publication removed the operation record")?;
+    assert_eq!(publishing.state, State::Publishing);
+    let intended = publishing
+        .intended_commit
+        .ok_or("Publishing record is missing its intended commit")?;
+    let intended_commit = opened.repo.find_commit(intended)?;
+    assert_eq!(
+        intended_commit.tree_id()?.detach(),
+        second_tree.id().detach()
+    );
+    assert_eq!(
+        intended_commit
+            .parent_ids()
+            .map(|id| id.detach())
+            .collect::<Vec<_>>(),
+        vec![second, merge_target]
+    );
+    assert_eq!(opened.repo.head_id()?.detach(), second);
+
+    let outcome = motor_gix::recover::run(&opened, &cancellation)?;
+    assert_eq!(
+        outcome,
+        "merge commit did not publish; merge is ready to commit or abort"
+    );
+    assert_eq!(motor_gix::operation::read(&operation_path)?, Some(ready));
+    assert_eq!(fs::read(opened.repo.index_path())?, index_before);
+    assert_eq!(
+        [
+            fs::read(repository.join("conflict"))?,
+            fs::read(repository.join("third"))?,
+        ],
+        worktree_before
+    );
+    assert_eq!([fs::read(&head_log)?, fs::read(&branch_log)?], logs_before);
+    assert_eq!(fs::read(&ref_lock)?, b"foreign");
+    fs::remove_file(ref_lock)?;
+
+    motor_gix::commit::run(&opened, "ready merge", &cancellation)?;
+    let merged = opened.repo.head_id()?.detach();
+    let merged_commit = opened.repo.find_commit(merged)?;
+    assert_eq!(merged_commit.tree_id()?.detach(), second_tree.id().detach());
+    assert_eq!(
+        merged_commit
+            .parent_ids()
+            .map(|id| id.detach())
+            .collect::<Vec<_>>(),
+        vec![second, merge_target]
+    );
+    for (path, before) in [(&head_log, &logs_before[0]), (&branch_log, &logs_before[1])] {
+        let after = fs::read(path)?;
+        assert!(after.starts_with(before));
+        assert!(after.ends_with(b"\tcommit (merge): ready merge\n"));
+        let appended = &after[before.len()..];
+        assert!(appended.starts_with(format!("{second} {merged} ").as_bytes()));
+        assert_eq!(appended.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
     assert!(
         !operation_path.try_exists()?
             && !merge_head.try_exists()?

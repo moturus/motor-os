@@ -1512,6 +1512,19 @@ attachment with the same old ID. All host/Motor component gates, formatting, str
 Clippy and shell checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-head-advance-522846bb`. Fast-forward and Ready commit reuse follows.
 
+M2 Ready merge commit: the reviewed authoring path owns validated real identities
+before taking its guard, allows an unchanged resolved tree only for Ready merges,
+and writes exactly the recorded two parents. Shared finishing persists Publishing
+with the intended commit before checked branch advancement and removes merge state
+last, retaining the same guard for clean merge reuse. The native lifecycle checks
+unresolved refusal, unchanged-tree authoring, blocked publication, recovery to Ready
+with index/worktree/log preservation, and final exact parents/reflogs/cleanup.
+Initial validation caught a new BString-to-BStr call mismatch and a fixture guard
+kept across its next scenario; both were corrected without changing behavior or
+weakening assertions. All final host/Motor component gates, formatting, strict
+Clippy and shell checks pass with matching source hashes. Original failures and
+final evidence are in `/tmp/motor-gix-ready-commit-3410ce35`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
