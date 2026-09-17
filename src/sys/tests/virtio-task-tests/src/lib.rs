@@ -11,8 +11,6 @@ mod listener;
 #[path = "../../../sys-io/src/runtime/vsock/rx_buffer.rs"]
 mod rx_buffer;
 mod stats;
-#[path = "../../../sys-io/src/runtime/vsock/stream.rs"]
-mod stream;
 #[path = "../../../sys-io/src/runtime/virtio_capacity.rs"]
 mod virtio_capacity;
 #[path = "../../../sys-io/src/runtime/vsock/admission.rs"]
@@ -671,9 +669,10 @@ fn test_vsock_stream_buffer() {
 }
 
 fn test_vsock_connection() {
-    use connection::{Connection, ConnectionPhase as Phase, ReceiveOutcome as Rx, TerminalCause};
+    use connection::{
+        Connection, ConnectionPhase as Phase, ReadOutcome, ReceiveOutcome as Rx, TerminalCause,
+    };
     use credit::CreditError;
-    use stream::ReadOutcome;
     use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
 
     let packet = |operation, len, flags, buf_alloc, fwd_cnt| PacketHeader {
@@ -911,8 +910,9 @@ fn test_vsock_connection() {
 }
 
 fn test_vsock_shutdown_state() {
-    use connection::{Connection, ConnectionPhase as Phase, ReceiveOutcome as Rx, TerminalCause};
-    use stream::ReadOutcome;
+    use connection::{
+        Connection, ConnectionPhase as Phase, ReadOutcome, ReceiveOutcome as Rx, TerminalCause,
+    };
     use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
 
     const BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
@@ -1051,8 +1051,7 @@ fn test_vsock_shutdown_state() {
 }
 
 fn test_vsock_output_state() {
-    use connection::{Connection, ReceiveOutcome as Rx, TerminalCause};
-    use stream::ReadOutcome;
+    use connection::{Connection, ReadOutcome, ReceiveOutcome as Rx, TerminalCause};
     use vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType};
 
     let mut packet = PacketHeader {

@@ -21,7 +21,7 @@ use crate::runtime::channel_budget::ClientSender;
 use crate::runtime::vsock::admission::{
     AdmissionError, ConnectionTuple, MAX_LISTENERS, TupleIndex, VsockAddr,
 };
-use crate::runtime::vsock::connection::{Connection, ReceiveOutcome, TerminalCause};
+use crate::runtime::vsock::connection::{Connection, ReadOutcome, ReceiveOutcome, TerminalCause};
 use crate::runtime::vsock::listener::ListenerState;
 
 const MAX_PENDING_CONTROLS: usize = 64;
@@ -2071,7 +2071,7 @@ impl NetRuntime {
                     }
                     let mut page = page;
                     let outcome = state.connection.read_into_reserved(page.bytes_mut());
-                    let crate::runtime::vsock::stream::ReadOutcome::Copied(len) = outcome else {
+                    let ReadOutcome::Copied(len) = outcome else {
                         drop(page);
                         continue;
                     };

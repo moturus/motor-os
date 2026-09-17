@@ -1,10 +1,19 @@
 use std::io::{ErrorKind, Result as IoResult};
 
 use super::credit::{CreditAdvertisement, CreditError, CreditState};
-use super::stream::{EstablishedStream, ReadOutcome};
+use super::rx_buffer::StreamBuffer;
 use super::vsock_wire::{Operation, PacketHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND};
 
+const STREAM_RX_CAPACITY: usize = 128 * 1024;
 const SHUTDOWN_BOTH: u32 = SHUTDOWN_RECEIVE | SHUTDOWN_SEND;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadOutcome {
+    Copied(usize),
+    Pending,
+    Eof,
+    ConnectionReset,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalCause {
@@ -34,7 +43,8 @@ pub(crate) enum ReceiveOutcome {
 /// the common socket owner. Inputs must already be decoded and tuple-matched.
 pub(crate) struct Connection {
     phase: ConnectionPhase,
-    stream: EstablishedStream,
+    receive: StreamBuffer,
+    peer_shutdown: u32,
     shutdown_requested: u32,
     shutdown_queued: u32,
     shutdown_published: u32,
@@ -46,7 +56,8 @@ impl Connection {
     pub(crate) fn new_outgoing() -> IoResult<Self> {
         Ok(Self {
             phase: ConnectionPhase::Connecting,
-            stream: EstablishedStream::new()?,
+            receive: StreamBuffer::new(STREAM_RX_CAPACITY)?,
+            peer_shutdown: 0,
             shutdown_requested: 0,
             shutdown_queued: 0,
             shutdown_published: 0,
@@ -60,18 +71,13 @@ impl Connection {
         if request.operation != Operation::Request {
             return Err(ErrorKind::InvalidInput.into());
         }
-        let mut stream = EstablishedStream::new()?;
-        stream
-            .update_peer_credit(advertisement(request))
+        let mut connection = Self::new_outgoing()?;
+        connection
+            .receive
+            .update_peer(advertisement(request))
             .map_err(|_| ErrorKind::InvalidData)?;
-        Ok(Self {
-            phase: ConnectionPhase::Established,
-            stream,
-            shutdown_requested: 0,
-            shutdown_queued: 0,
-            shutdown_published: 0,
-            cleanup_started: false,
-        })
+        connection.phase = ConnectionPhase::Established;
+        Ok(connection)
     }
 
     pub(crate) fn phase(&self) -> ConnectionPhase {
@@ -79,39 +85,37 @@ impl Connection {
     }
 
     pub(crate) fn credit(&self) -> &CreditState {
-        self.stream.credit()
+        self.receive.credit()
     }
 
     pub(crate) fn charge_tx_after_publish(&mut self, len: u32) -> Result<(), CreditError> {
-        self.stream.charge_tx_after_publish(len)
+        self.receive.charge_tx_after_publish(len)
     }
 
     pub(crate) fn accepts_new_writes(&self) -> bool {
-        self.phase == ConnectionPhase::Established
-            && self.shutdown_requested & SHUTDOWN_SEND == 0
-            && self.stream.accepts_new_writes()
+        self.can_publish_accepted_tx() && self.shutdown_requested & SHUTDOWN_SEND == 0
     }
 
     /// Previously accepted bytes may drain after local SEND shutdown, but not
     /// after peer RECEIVE shutdown or terminalization.
     pub(crate) fn can_publish_accepted_tx(&self) -> bool {
-        self.phase == ConnectionPhase::Established && self.stream.accepts_new_writes()
+        self.phase == ConnectionPhase::Established && self.peer_shutdown & SHUTDOWN_RECEIVE == 0
     }
 
     pub(crate) fn has_buffered_rx(&self) -> bool {
-        !self.stream.rx_is_empty()
+        !self.receive.is_empty()
     }
 
     pub(crate) fn local_write_closed(&self) -> bool {
         self.shutdown_requested & SHUTDOWN_SEND != 0
-            || !self.stream.accepts_new_writes()
+            || self.peer_shutdown & SHUTDOWN_RECEIVE != 0
             || matches!(self.phase, ConnectionPhase::Terminal(_))
     }
 
     pub(crate) fn local_read_closed(&self) -> bool {
         self.shutdown_requested & SHUTDOWN_RECEIVE != 0
-            || self.stream.rx_is_empty()
-                && (self.stream.peer_send_shutdown()
+            || self.receive.is_empty()
+                && (self.peer_shutdown & SHUTDOWN_SEND != 0
                     || matches!(self.phase, ConnectionPhase::Terminal(_)))
     }
 
@@ -126,14 +130,20 @@ impl Connection {
         Some(cause)
     }
 
+    /// Deliver validated RX before the retained reset cause or orderly EOF.
     pub(crate) fn read_into_reserved(&mut self, dst: &mut [u8]) -> ReadOutcome {
-        let result = self.stream.read_into_reserved(dst);
-        if result == ReadOutcome::Pending
-            && self.phase == ConnectionPhase::Terminal(TerminalCause::OrderlyClosed)
-        {
-            ReadOutcome::Eof
-        } else {
-            result
+        if dst.is_empty() {
+            return ReadOutcome::Copied(0);
+        }
+        let copied = self.receive.copy_into_reserved(dst);
+        if copied != 0 {
+            return ReadOutcome::Copied(copied);
+        }
+        match self.phase {
+            ConnectionPhase::Terminal(TerminalCause::OrderlyClosed) => ReadOutcome::Eof,
+            ConnectionPhase::Terminal(_) => ReadOutcome::ConnectionReset,
+            _ if self.peer_shutdown & SHUTDOWN_SEND != 0 => ReadOutcome::Eof,
+            _ => ReadOutcome::Pending,
         }
     }
 
@@ -175,8 +185,8 @@ impl Connection {
     /// drained. The owner then sends the one orderly RST response.
     pub(crate) fn take_orderly_reset_if_ready(&mut self) -> bool {
         if matches!(self.phase, ConnectionPhase::Terminal(_))
-            || !self.stream.peer_fully_shutdown()
-            || !self.stream.rx_is_empty()
+            || self.peer_shutdown != SHUTDOWN_BOTH
+            || !self.receive.is_empty()
         {
             return false;
         }
@@ -198,7 +208,7 @@ impl Connection {
         if !self.cleanup_started || matches!(self.phase, ConnectionPhase::Terminal(_)) {
             return false;
         }
-        self.enter_terminal(TerminalCause::ConnectionReset, true);
+        self.enter_terminal(TerminalCause::ConnectionReset);
         true
     }
 
@@ -206,20 +216,20 @@ impl Connection {
         if self.phase != ConnectionPhase::Connecting {
             return false;
         }
-        self.enter_terminal(TerminalCause::TimedOut, true)
+        self.enter_terminal(TerminalCause::TimedOut)
     }
 
     /// Locally abandon a connection whose unread bytes have no remaining
     /// consumer. The owner still retains it until the required RST publishes.
     pub(crate) fn abandon_unread_rx(&mut self) -> bool {
         self.request_shutdown(SHUTDOWN_RECEIVE);
-        self.enter_terminal(TerminalCause::ConnectionReset, true)
+        self.enter_terminal(TerminalCause::ConnectionReset)
     }
 
     pub(crate) fn device_failed(&mut self) -> bool {
         let changed = self.phase != ConnectionPhase::Terminal(TerminalCause::InternalError)
             || self.has_buffered_rx();
-        self.stream.device_failed();
+        self.receive.clear();
         self.phase = ConnectionPhase::Terminal(TerminalCause::InternalError);
         changed
     }
@@ -245,13 +255,13 @@ impl Connection {
                 }
             }
             Operation::ReadWrite if self.phase == ConnectionPhase::Established => {
-                if !payload.is_empty() && !self.stream.accepts_peer_data() {
+                if !payload.is_empty() && self.peer_shutdown & SHUTDOWN_SEND != 0
+                    || payload.len() > self.credit().rx_allowance()
+                {
                     return self.reject();
                 }
-                if self
-                    .stream
-                    .try_receive_packet(advertisement(header), payload)
-                    .is_ok()
+                if self.receive.update_peer(advertisement(header)).is_ok()
+                    && self.receive.try_append_packet(payload).is_ok()
                 {
                     ReceiveOutcome::None
                 } else {
@@ -276,10 +286,7 @@ impl Connection {
                 if !self.update_peer_credit(header) {
                     return ReceiveOutcome::SendReset;
                 }
-                self.stream.peer_shutdown(
-                    header.flags & SHUTDOWN_RECEIVE != 0,
-                    header.flags & SHUTDOWN_SEND != 0,
-                );
+                self.peer_shutdown |= header.flags & SHUTDOWN_BOTH;
                 ReceiveOutcome::None
             }
             _ => self.reject(),
@@ -287,11 +294,7 @@ impl Connection {
     }
 
     fn update_peer_credit(&mut self, header: &PacketHeader) -> bool {
-        if self
-            .stream
-            .update_peer_credit(advertisement(header))
-            .is_ok()
-        {
+        if self.receive.update_peer(advertisement(header)).is_ok() {
             true
         } else {
             self.reject();
@@ -302,12 +305,12 @@ impl Connection {
     fn receive_reset(&mut self) {
         let cause = if self.phase == ConnectionPhase::Connecting {
             TerminalCause::Refused
-        } else if self.shutdown_published == SHUTDOWN_BOTH || self.stream.peer_fully_shutdown() {
+        } else if self.shutdown_published == SHUTDOWN_BOTH || self.peer_shutdown == SHUTDOWN_BOTH {
             TerminalCause::OrderlyClosed
         } else {
             TerminalCause::ConnectionReset
         };
-        self.enter_terminal(cause, cause != TerminalCause::OrderlyClosed);
+        self.enter_terminal(cause);
     }
 
     fn reject(&mut self) -> ReceiveOutcome {
@@ -316,16 +319,13 @@ impl Connection {
         } else {
             TerminalCause::ConnectionReset
         };
-        self.enter_terminal(cause, true);
+        self.enter_terminal(cause);
         ReceiveOutcome::SendReset
     }
 
-    fn enter_terminal(&mut self, cause: TerminalCause, reset_stream: bool) -> bool {
+    fn enter_terminal(&mut self, cause: TerminalCause) -> bool {
         if matches!(self.phase, ConnectionPhase::Terminal(_)) {
             return false;
-        }
-        if reset_stream {
-            self.stream.peer_reset();
         }
         self.phase = ConnectionPhase::Terminal(cause);
         true
