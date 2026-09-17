@@ -1167,37 +1167,7 @@ fn check_mutation(output: &Path) -> Result {
     assert_eq!(fs::read(git_dir.join("index.lock"))?, b"foreign");
     fs::remove_file(git_dir.join("index.lock"))?;
 
-    let operation_path = git_dir.join(motor_gix::mutation::OPERATION_FILE);
-    let branch = b"refs/heads/non-utf8-\xff".as_bstr();
-    let mut operation = b"version=1\nstate=incomplete\nkind=merge\noriginal-ref=".to_vec();
-    operation.extend_from_slice(branch);
-    operation
-        .extend_from_slice(b"\noriginal-id=1111111111111111111111111111111111111111\ntarget-ref=");
-    operation.extend_from_slice(branch);
-    operation.extend_from_slice(b"\ntarget-commit=2222222222222222222222222222222222222222\nresult-tree=3333333333333333333333333333333333333333\nintended-commit=-\n");
-    fs::write(&operation_path, &operation)?;
-    let parsed = motor_gix::operation::read(&operation_path)?.ok_or("operation record missing")?;
-    assert_eq!(
-        parsed
-            .original
-            .reference
-            .as_ref()
-            .ok_or("original reference missing")?
-            .as_bstr(),
-        branch
-    );
-    assert_eq!(parsed.target_ref.as_bstr(), branch);
-    assert_eq!(parsed.description(), "merge incomplete");
-    expect_guard_rejected(&opened.repo, "merge incomplete")?;
-    let cancellation = motor_gix::cancellation::Cancellation::new();
-    let mut status = Vec::new();
-    motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
-    assert!(status.starts_with(b"operation merge incomplete\n"));
-    fs::write(&operation_path, b"version=1\n")?;
-    expect_guard_rejected(&opened.repo, "invalid gix operation record")?;
-    assert!(motor_gix::status::collect(&opened, &cancellation).is_err());
-    fs::remove_file(operation_path)?;
-
+    check_operation_record(&opened)?;
     let marker = git_dir.join("MERGE_HEAD");
     fs::write(&marker, [])?;
     expect_guard_rejected(&opened.repo, "unsupported operation state")?;
@@ -1229,6 +1199,134 @@ fn check_mutation(output: &Path) -> Result {
         skip_hash: false,
     })?;
     expect_guard_rejected(&opened.repo, "intent-to-add")
+}
+
+fn check_operation_record(opened: &motor_gix::repository::OpenedRepository) -> Result {
+    use motor_gix::operation::{Kind, Original, Record, State};
+
+    let repo = &opened.repo;
+    let path = repo.git_dir().join(motor_gix::mutation::OPERATION_FILE);
+    let branch = gix::refs::FullName::try_from(b"refs/heads/non-utf8-\xff".as_bstr())?;
+    let mut record = Record {
+        state: State::Incomplete,
+        kind: Kind::Merge,
+        original: Original {
+            reference: Some(branch.clone()),
+            id: Some(gix::ObjectId::from_hex(
+                b"1111111111111111111111111111111111111111",
+            )?),
+        },
+        target_ref: branch,
+        target_commit: gix::ObjectId::from_hex(b"2222222222222222222222222222222222222222")?,
+        result_tree: gix::ObjectId::from_hex(b"3333333333333333333333333333333333333333")?,
+        intended_commit: None,
+    };
+    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let mut invalid = record.clone();
+    invalid.original = Original {
+        reference: None,
+        id: None,
+    };
+    assert!(guard.create_operation(&invalid).is_err());
+    invalid = record.clone();
+    invalid.original.reference = Some(gix::refs::FullName::try_from("refs/heads/other")?);
+    assert!(guard.create_operation(&invalid).is_err());
+    invalid = record.clone();
+    invalid.state = State::Ready;
+    assert!(guard.create_operation(&invalid).is_err());
+    assert!(!path.exists() && !path.with_extension("lock").exists());
+    guard.create_operation(&record)?;
+    assert_eq!(motor_gix::operation::read(&path)?, Some(record.clone()));
+    assert!(!path.with_extension("lock").exists());
+
+    for (state, intended) in [
+        (State::Ready, None),
+        (State::Publishing, Some(record.result_tree)),
+        (State::Ready, None),
+        (State::Incomplete, None),
+    ] {
+        let mut next = record.clone();
+        next.state = state;
+        next.intended_commit = intended;
+        guard.replace_operation(&record, &next)?;
+        assert_eq!(motor_gix::operation::read(&path)?, Some(next.clone()));
+        record = next;
+    }
+    let before = fs::read(&path)?;
+    let mut stale = record.clone();
+    stale.state = State::Ready;
+    let mut publishing = stale.clone();
+    publishing.state = State::Publishing;
+    publishing.intended_commit = Some(record.result_tree);
+    let error = guard
+        .replace_operation(&stale, &publishing)
+        .expect_err("a stale operation snapshot was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("changed while it was being updated")
+    );
+    assert_eq!(fs::read(&path)?, before);
+
+    let mut changed = record.clone();
+    changed.state = State::Ready;
+    changed.target_commit = changed.result_tree;
+    assert!(guard.replace_operation(&record, &changed).is_err());
+    assert_eq!(motor_gix::operation::read(&path)?, Some(record.clone()));
+    guard.remove_operation(&record)?;
+    assert!(!path.exists() && !path.with_extension("lock").exists());
+    drop(guard);
+    fs::write(path.with_extension("lock"), [])?;
+    expect_guard_rejected(repo, "stale gix operation update lock")?;
+    fs::remove_file(path.with_extension("lock"))?;
+
+    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.create_operation(&record)?;
+    drop(guard);
+    expect_guard_rejected(repo, "merge incomplete")?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let mut output = Vec::new();
+    motor_gix::status::collect(opened, &cancellation)?.write_to(&mut output, &cancellation)?;
+    assert!(output.starts_with(b"operation merge incomplete\n"));
+    fs::write(
+        repo.git_dir().join("MERGE_HEAD"),
+        record.target_commit.to_string(),
+    )?;
+    let (guard, observed) = motor_gix::mutation::Guard::acquire_for_recovery(repo)?;
+    assert_eq!(observed, record);
+    run_mutation_child(
+        repo.workdir().ok_or("mutation worktree missing")?,
+        "blocked",
+    )?;
+    guard.remove_operation(&observed)?;
+    drop(guard);
+    fs::remove_file(repo.git_dir().join("MERGE_HEAD"))?;
+    run_mutation_child(
+        repo.workdir().ok_or("mutation worktree missing")?,
+        "acquire",
+    )?;
+
+    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.create_operation(&record)?;
+    let mut ready = record.clone();
+    ready.state = State::Ready;
+    guard.replace_operation(&record, &ready)?;
+    drop(guard);
+    let error = motor_gix::mutation::Guard::acquire_for_recovery(repo)
+        .err()
+        .ok_or("recovery admitted a ready merge")?;
+    assert!(error.to_string().contains("must be committed or aborted"));
+    fs::remove_file(&path)?;
+
+    fs::write(&path, b"version=1\n")?;
+    let error = motor_gix::operation::read(&path)
+        .err()
+        .ok_or("truncated operation record was accepted")?;
+    assert!(error.to_string().contains("invalid gix operation record"));
+    expect_guard_rejected(repo, "invalid gix operation record")?;
+    assert!(motor_gix::status::collect(opened, &cancellation).is_err());
+    fs::remove_file(path)?;
+    Ok(())
 }
 
 fn check_edited_index_publication(opened: &motor_gix::repository::OpenedRepository) -> Result {

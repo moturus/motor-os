@@ -1,4 +1,7 @@
-use std::{io, path::Path};
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
 use gix::bstr::ByteSlice;
 
@@ -58,6 +61,49 @@ pub struct Record {
 impl Record {
     pub fn description(&self) -> String {
         format!("{} {}", self.kind.as_str(), self.state.as_str())
+    }
+
+    pub(crate) fn encode(&self) -> io::Result<Vec<u8>> {
+        self.validate()?;
+        // Fixed fields, newlines and four SHA-1 IDs fit in 512 bytes.
+        let refs_len = self
+            .original
+            .reference
+            .as_ref()
+            .map_or(0, |name| name.as_bstr().len())
+            .checked_add(self.target_ref.as_bstr().len())
+            .and_then(|len| len.checked_add(512))
+            .ok_or_else(|| invalid("record length overflow"))?;
+        if refs_len > MAX_RECORD_BYTES {
+            return Err(invalid("record exceeds 64 KiB"));
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(refs_len)
+            .map_err(|source| io::Error::new(io::ErrorKind::OutOfMemory, source))?;
+        field(&mut out, b"version=", b"1");
+        field(&mut out, b"state=", self.state.as_str().as_bytes());
+        field(&mut out, b"kind=", self.kind.as_str().as_bytes());
+        field(
+            &mut out,
+            b"original-ref=",
+            self.original
+                .reference
+                .as_ref()
+                .map_or(b"-".as_slice(), |name| name.as_bstr().as_bytes()),
+        );
+        id_field(&mut out, b"original-id=", self.original.id)?;
+        field(
+            &mut out,
+            b"target-ref=",
+            self.target_ref.as_bstr().as_bytes(),
+        );
+        id_field(&mut out, b"target-commit=", Some(self.target_commit))?;
+        id_field(&mut out, b"result-tree=", Some(self.result_tree))?;
+        id_field(&mut out, b"intended-commit=", self.intended_commit)?;
+        if out.len() > MAX_RECORD_BYTES {
+            return Err(invalid("record exceeds 64 KiB"));
+        }
+        Ok(out)
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -128,6 +174,30 @@ pub fn read(path: &Path) -> io::Result<Option<Record>> {
             )
         })?;
     parse(&data).map(Some)
+}
+
+pub(crate) fn validate_transition(current: &Record, next: &Record) -> io::Result<()> {
+    current.validate()?;
+    next.validate()?;
+    if current.kind != next.kind
+        || current.original != next.original
+        || current.target_ref != next.target_ref
+        || current.target_commit != next.target_commit
+        || current.result_tree != next.result_tree
+    {
+        return Err(invalid("operation identity changed during a state update"));
+    }
+    let allowed = matches!(
+        (current.state, next.state),
+        (State::Incomplete, State::Ready)
+            | (State::Ready, State::Publishing)
+            | (State::Publishing, State::Ready)
+            | (State::Ready, State::Incomplete)
+    );
+    if !allowed {
+        return Err(invalid("unsupported operation state transition"));
+    }
+    Ok(())
 }
 
 fn parse(data: &[u8]) -> io::Result<Record> {
@@ -209,6 +279,22 @@ fn required_id(value: &[u8]) -> io::Result<gix::ObjectId> {
         return Err(invalid("object ID is not 40 hexadecimal bytes"));
     }
     gix::ObjectId::from_hex(value).map_err(|error| invalid(format!("invalid object ID: {error}")))
+}
+
+fn field(out: &mut Vec<u8>, prefix: &[u8], value: &[u8]) {
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(value);
+    out.push(b'\n');
+}
+
+fn id_field(out: &mut Vec<u8>, prefix: &[u8], id: Option<gix::ObjectId>) -> io::Result<()> {
+    out.extend_from_slice(prefix);
+    match id {
+        Some(id) => write!(out, "{id}")?,
+        None => out.push(b'-'),
+    }
+    out.push(b'\n');
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

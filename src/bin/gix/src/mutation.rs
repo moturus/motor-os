@@ -2,12 +2,12 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions, TryLockError},
     io::{self, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use gix::bstr::ByteSlice;
 
-use crate::operation;
+use crate::operation::{self, Kind, Record, State};
 
 pub const OPERATION_LOCK_FILE: &str = "gix-operation-lock";
 pub const OPERATION_FILE: &str = "gix-operation";
@@ -34,20 +34,38 @@ const FOREIGN_OPERATIONS: [&str; 6] = [
 pub struct Guard {
     index_lock: Option<gix::lock::File>,
     index: gix::index::File,
+    operation_path: PathBuf,
     // Fields drop in declaration order; release the advisory lock last.
     _operation_lock: fs::File,
 }
 
 impl Guard {
     pub fn acquire(repo: &gix::Repository) -> crate::Result<Self> {
-        let operation_path = repo.git_dir().join(OPERATION_LOCK_FILE);
-        reject_non_file(&operation_path)?;
+        let (guard, _) = Self::acquire_with(repo, Admission::Ordinary)?;
+        Ok(guard)
+    }
+
+    /// Acquire the mutation locks for an interrupted operation which recovery may finish.
+    pub fn acquire_for_recovery(repo: &gix::Repository) -> crate::Result<(Self, Record)> {
+        let (guard, record) = Self::acquire_with(repo, Admission::Recovery)?;
+        let Some(record) = record else {
+            return unsupported("repository has no interrupted gix operation");
+        };
+        Ok((guard, record))
+    }
+
+    fn acquire_with(
+        repo: &gix::Repository,
+        admission: Admission,
+    ) -> crate::Result<(Self, Option<Record>)> {
+        let lock_path = repo.git_dir().join(OPERATION_LOCK_FILE);
+        reject_non_file(&lock_path)?;
         let operation_lock = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&operation_path)?;
+            .open(&lock_path)?;
         let metadata = operation_lock.metadata()?;
         if !metadata.is_file() || metadata.len() != 0 {
             return unsupported("the persistent gix operation lock is not an empty regular file");
@@ -69,16 +87,28 @@ impl Guard {
             gix::lock::acquire::Fail::Immediately,
             None,
         )?;
+        let operation_path = repo.git_dir().join(OPERATION_FILE);
         if exists(&repo.git_dir().join(OPERATION_UPDATE_LOCK_FILE))? {
             return unsupported("repository has a stale gix operation update lock");
         }
-        if let Some(record) = operation::read(&repo.git_dir().join(OPERATION_FILE))? {
-            return unsupported(format!(
-                "repository has unfinished gix {} operation",
-                record.description()
-            ));
-        }
-        reject_operation_state(repo.git_dir())?;
+        let record = operation::read(&operation_path)?;
+        let allow_merge_head = match (admission, record.as_ref()) {
+            (Admission::Ordinary, Some(record)) => {
+                return unsupported(format!(
+                    "repository has unfinished gix {} operation",
+                    record.description()
+                ));
+            }
+            (Admission::Ordinary, None) => false,
+            (Admission::Recovery, None) => {
+                return unsupported("repository has no interrupted gix operation");
+            }
+            (Admission::Recovery, Some(record)) if record.state == State::Ready => {
+                return unsupported("ready merge must be committed or aborted");
+            }
+            (Admission::Recovery, Some(record)) => record.kind == Kind::Merge,
+        };
+        reject_operation_state(repo.git_dir(), allow_merge_head)?;
         validate_repository(repo)?;
 
         // Bypass the repository's shared snapshot: mutation must read the
@@ -94,15 +124,45 @@ impl Guard {
             Err(error) => return Err(error.into()),
         };
         validate_index(&index)?;
-        Ok(Guard {
-            index_lock: Some(index_lock),
-            index,
-            _operation_lock: operation_lock,
-        })
+        Ok((
+            Guard {
+                index_lock: Some(index_lock),
+                index,
+                operation_path,
+                _operation_lock: operation_lock,
+            },
+            record,
+        ))
     }
 
     pub fn index(&self) -> &gix::index::File {
         &self.index
+    }
+
+    pub fn create_operation(&self, next: &Record) -> crate::Result {
+        if next.state != State::Incomplete {
+            return unsupported("a new gix operation must be incomplete");
+        }
+        let lock = operation_lock(&self.operation_path)?;
+        if operation::read(&self.operation_path)?.is_some() {
+            return unsupported("repository already has a gix operation");
+        }
+        write_operation(lock, next)
+    }
+
+    pub fn replace_operation(&self, expected: &Record, next: &Record) -> crate::Result {
+        operation::validate_transition(expected, next)?;
+        let lock = operation_lock(&self.operation_path)?;
+        require_operation(&self.operation_path, expected)?;
+        write_operation(lock, next)
+    }
+
+    pub fn remove_operation(&self, expected: &Record) -> crate::Result {
+        let lock = operation_lock(&self.operation_path)?;
+        require_operation(&self.operation_path, expected)?;
+        fs::remove_file(&self.operation_path)?;
+        drop(lock);
+        Ok(())
     }
 
     /// Publish a newly reconstructed state with no retained stat/cache data.
@@ -151,6 +211,35 @@ impl Guard {
             .take()
             .ok_or_else(|| io::Error::other("the index lock was already consumed").into())
     }
+}
+
+#[derive(Clone, Copy)]
+enum Admission {
+    Ordinary,
+    Recovery,
+}
+
+fn operation_lock(path: &Path) -> crate::Result<gix::lock::File> {
+    Ok(gix::lock::File::acquire_to_update_resource(
+        path,
+        gix::lock::acquire::Fail::Immediately,
+        None,
+    )?)
+}
+
+fn require_operation(path: &Path, expected: &Record) -> crate::Result {
+    match operation::read(path)? {
+        Some(actual) if actual == *expected => Ok(()),
+        Some(_) => unsupported("gix operation changed while it was being updated"),
+        None => unsupported("gix operation disappeared while it was being updated"),
+    }
+}
+
+fn write_operation(mut lock: gix::lock::File, record: &Record) -> crate::Result {
+    lock.write_all(&record.encode()?)?;
+    lock.flush()?;
+    lock.commit().map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn publish_index(
@@ -303,13 +392,16 @@ fn validate_index(index: &gix::index::File) -> crate::Result {
     Ok(())
 }
 
-fn reject_operation_state(git_dir: &Path) -> crate::Result {
+fn reject_operation_state(git_dir: &Path, allow_merge_head: bool) -> crate::Result {
     if exists(&git_dir.join(INCOMPLETE_CLONE_FILE))? {
         return unsupported(format!(
             "repository has unfinished gix state '{INCOMPLETE_CLONE_FILE}'"
         ));
     }
     for name in FOREIGN_OPERATIONS {
+        if allow_merge_head && name == "MERGE_HEAD" {
+            continue;
+        }
         if exists(&git_dir.join(name))? {
             return unsupported(format!(
                 "repository has unsupported operation state '{name}'"

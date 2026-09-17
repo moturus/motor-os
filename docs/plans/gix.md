@@ -1212,6 +1212,17 @@ gates, formatting, strict Clippy and shell checks pass with matching source hash
 Evidence is in `/tmp/motor-gix-operation-read-298b4010`. Live object/ref validation
 belongs to the later transition/recovery commands.
 
+M2 operation-record writer: the reviewed guard now creates, replaces and removes
+records under an adjacent Git lock, comparing the expected record before updates.
+Only the documented state transitions are allowed; operation identity is immutable.
+Recovery admission accepts incomplete/publishing records and owned merge state,
+while ordinary mutation and ready-merge recovery remain blocked. The shared native
+lifecycle covers state changes, stale snapshots, retained locks, recovery admission
+and process exclusion without a separate fixture. Host/Motor component gates,
+formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-operation-write-6ddf59c1`. Command-level recovery
+and live object/ref checks remain part of the transition implementation.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
