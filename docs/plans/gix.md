@@ -1147,6 +1147,17 @@ Host/Motor component gates, selected-toolchain formatting, strict Clippy
 and shell checks pass. Evidence is in `/tmp/motor-gix-tree-writer-integration`.
 No commit command is exposed by this slice.
 
+M2 ordinary commit library: the reviewed implementation validates configured
+author and committer identity before acquiring the mutation guard, writes one
+commit from the held index, then advances attached local HEAD with an
+expected-value ref transaction and reflogs. It rejects unresolved entries,
+ordinary unchanged trees and detached HEAD; merge authoring follows with the
+operation-record work. The shared native lifecycle covers initial/second commits,
+identity preflight, deleted tree paths, reflogs and ref-lock failure cleanup.
+Host/Motor component gates, selected-toolchain formatting, strict Clippy and
+shell checks pass, with all tested source hashes matching. Evidence is in
+`/tmp/motor-gix-commit-library-d77cc66c`. CLI integration follows separately.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

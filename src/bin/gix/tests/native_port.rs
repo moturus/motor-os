@@ -139,6 +139,7 @@ fn main() -> Result {
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
+    check_commit(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);
@@ -792,6 +793,166 @@ fn assert_index_blob(
         index.entry_range(path.as_bytes().as_bstr()).unwrap().len(),
         1
     );
+    Ok(())
+}
+
+fn check_commit(output: &Path) -> Result {
+    let repository = output.join("commit-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    fs::write(repository.join("first"), b"first\n")?;
+    let staged = motor_gix::repository::open(&repository, &[], false)?;
+    motor_gix::add::run(&staged, true, &[], &cancellation)?;
+    let index_before = fs::read(staged.repo.index_path())?;
+    let operation_lock = staged
+        .repo
+        .git_dir()
+        .join(motor_gix::mutation::OPERATION_LOCK_FILE);
+    fs::write(&operation_lock, b"identity preflight sentinel")?;
+
+    for (overrides, expected) in [
+        (
+            ["user.name=", "user.email="],
+            "author identity requires a nonempty name and email",
+        ),
+        (
+            ["user.name=Bad<Name", "user.email=native@example.com"],
+            "Signature name or email",
+        ),
+    ] {
+        let invalid = motor_gix::repository::open(&repository, &overrides, false)?;
+        let error = motor_gix::commit::run(&invalid, "must fail", &cancellation)
+            .err()
+            .ok_or("invalid identity created a commit")?;
+        assert!(error.to_string().contains(expected), "{error}");
+        assert!(invalid.repo.head()?.is_unborn());
+        assert_eq!(fs::read(invalid.repo.index_path())?, index_before);
+        assert_eq!(
+            fs::read(&operation_lock)?,
+            b"identity preflight sentinel",
+            "identity failure reached the mutation guard"
+        );
+    }
+    fs::write(&operation_lock, [])?;
+
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::commit::run(&opened, "initial", &cancellation)?;
+    let initial = opened.repo.head_id()?.detach();
+    let initial_commit = opened.repo.find_commit(initial)?;
+    assert_eq!(initial_commit.parent_ids().count(), 0);
+    assert_eq!(initial_commit.message_raw()?, b"initial".as_bstr());
+    assert_eq!(initial_commit.author()?.name, b"Native Test".as_bstr());
+    assert_eq!(
+        initial_commit.committer()?.email,
+        b"native@example.com".as_bstr()
+    );
+    let initial_tree = initial_commit.tree()?;
+    let first = initial_tree
+        .lookup_entry_by_path("first")?
+        .ok_or("initial tree entry is missing")?;
+    assert_eq!(opened.repo.find_blob(first.object_id())?.data, b"first\n");
+    assert!(
+        opened
+            .repo
+            .head()?
+            .referent_name()
+            .is_some_and(|name| name.as_bstr() == b"refs/heads/main")
+    );
+    for path in [".git/logs/HEAD", ".git/logs/refs/heads/main"] {
+        assert!(
+            fs::read(repository.join(path))?.ends_with(b"\tcommit (initial): initial\n"),
+            "{path} has the wrong initial reflog"
+        );
+    }
+
+    fs::remove_file(repository.join("first"))?;
+    fs::write(repository.join("second"), b"second\n")?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "second", &cancellation)?;
+    let second = opened.repo.head_id()?.detach();
+    let second_commit = opened.repo.find_commit(second)?;
+    assert_eq!(
+        second_commit
+            .parent_ids()
+            .map(|id| id.detach())
+            .collect::<Vec<_>>(),
+        vec![initial]
+    );
+    let second_tree = second_commit.tree()?;
+    assert!(second_tree.lookup_entry_by_path("first")?.is_none());
+    let entry = second_tree
+        .lookup_entry_by_path("second")?
+        .ok_or("second tree entry is missing")?;
+    assert_eq!(opened.repo.find_blob(entry.object_id())?.data, b"second\n");
+    for path in [".git/logs/HEAD", ".git/logs/refs/heads/main"] {
+        assert!(
+            fs::read(repository.join(path))?.ends_with(b"\tcommit: second\n"),
+            "{path} has the wrong second reflog"
+        );
+    }
+
+    assert!(motor_gix::commit::run(&opened, "empty", &cancellation).is_err());
+    assert_eq!(opened.repo.head_id()?.detach(), second);
+
+    fs::write(repository.join("third"), b"third\n")?;
+    motor_gix::add::run(&opened, false, &["third".into()], &cancellation)?;
+    let staged_index = fs::read(opened.repo.index_path())?;
+    fs::write(repository.join(".git/HEAD"), format!("{second}\n"))?;
+    let detached = motor_gix::repository::open(&repository, &overrides, false)?;
+    let error = motor_gix::commit::run(&detached, "detached", &cancellation)
+        .err()
+        .ok_or("detached HEAD accepted a commit")?;
+    assert!(error.to_string().contains("attached to a local branch"));
+    assert_eq!(fs::read(detached.repo.index_path())?, staged_index);
+    fs::write(repository.join(".git/HEAD"), b"ref: refs/heads/main\n")?;
+
+    let opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    let ref_lock = repository.join(".git/refs/heads/main.lock");
+    fs::write(&ref_lock, b"foreign")?;
+    assert!(motor_gix::commit::run(&opened, "locked", &cancellation).is_err());
+    assert_eq!(opened.repo.head_id()?.detach(), second);
+    assert_eq!(fs::read(opened.repo.index_path())?, staged_index);
+    assert_eq!(fs::read(&ref_lock)?, b"foreign");
+    assert!(!repository.join(".git/index.lock").try_exists()?);
+    assert!(!repository.join(".git/HEAD.lock").try_exists()?);
+    fs::remove_file(ref_lock)?;
+
+    let ids = [
+        opened.repo.write_blob(b"base\n")?.detach(),
+        opened.repo.write_blob(b"ours\n")?.detach(),
+        opened.repo.write_blob(b"theirs\n")?.detach(),
+    ];
+    let mut guard = motor_gix::mutation::Guard::acquire(&opened.repo)?;
+    guard.publish_edited_index(|index| {
+        for (stage, id) in [Stage::Base, Stage::Ours, Stage::Theirs]
+            .into_iter()
+            .zip(ids)
+        {
+            index.dangerously_push_entry(
+                Default::default(),
+                id,
+                Flags::from_stage(stage),
+                Mode::FILE,
+                b"conflict".as_bstr(),
+            );
+        }
+        Ok(())
+    })?;
+    drop(guard);
+    let conflicted_index = fs::read(opened.repo.index_path())?;
+    let error = motor_gix::commit::run(&opened, "conflict", &cancellation)
+        .err()
+        .ok_or("unresolved index created a commit")?;
+    assert!(error.to_string().contains("is unresolved"), "{error}");
+    assert_eq!(opened.repo.head_id()?.detach(), second);
+    assert_eq!(fs::read(opened.repo.index_path())?, conflicted_index);
+    assert!(!repository.join(".git/index.lock").try_exists()?);
     Ok(())
 }
 
