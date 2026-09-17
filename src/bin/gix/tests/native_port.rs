@@ -1830,7 +1830,135 @@ fn check_transition_delta(output: &Path) -> Result {
         result_tree: fixture.target_tree,
         intended_commit: None,
     };
+
+    let put = |index: &mut gix::index::State,
+               path: &[u8],
+               id: gix::ObjectId,
+               mode: Mode,
+               flags: Flags| {
+        index.dangerously_push_entry(Default::default(), id, flags, mode, path.as_bstr());
+    };
+    let prepare_restore = |index: &gix::index::State, record: &Record| {
+        motor_gix::transition::prepare_restore(&fixture.opened, index, record, &cancellation)
+    };
+
+    let extra_id = repo.write_blob(b"extra staged path\n")?.detach();
+    let mut current = delta.target_index.clone();
+    put(
+        &mut current,
+        b"restore-extra",
+        extra_id,
+        Mode::FILE,
+        Flags::empty(),
+    );
+    current.sort_entries();
+    fs::write(workdir.join("restore-extra"), b"extra staged path\n")?;
+    fs::write(workdir.join("empty-target/unrelated"), b"preserve\n")?;
+    let restore = prepare_restore(&current, &record)?;
     guard.create_operation(&record)?;
+    let restored = motor_gix::transition::install_restore(
+        &fixture.opened,
+        &guard,
+        &record,
+        restore,
+        &cancellation,
+    )?;
+    assert!(!workdir.join("restore-extra").try_exists()?);
+    assert_eq!(
+        fs::read(workdir.join("empty-target/unrelated"))?,
+        b"preserve\n"
+    );
+    fs::remove_file(workdir.join("empty-target/unrelated"))?;
+    assert_eq!(
+        motor_gix::tree_index::write(repo, &restored, &cancellation)?,
+        fixture.original_tree
+    );
+    assert!(
+        restored
+            .entries()
+            .iter()
+            .all(|entry| entry.stat == Default::default())
+    );
+    current.remove_entries(|_, path, _| path == b"restore-extra");
+
+    let keep = current
+        .entry_by_path_and_stage(b"keep".as_bstr(), Stage::Unconflicted)
+        .ok_or("target keep entry missing")?
+        .clone();
+    current.remove_entries(|_, path, _| path == b"keep");
+    for stage in [Stage::Base, Stage::Ours, Stage::Theirs] {
+        put(
+            &mut current,
+            b"keep",
+            keep.id,
+            keep.mode,
+            Flags::from_stage(stage),
+        );
+    }
+    current.sort_entries();
+    let _conflicted_restore = prepare_restore(&current, &record)?;
+    let error = motor_gix::transition::require_result_index(
+        repo,
+        &current,
+        &fixture.target_tree,
+        &cancellation,
+    )
+    .expect_err("a conflicted result index was accepted");
+    assert!(error.to_string().contains("does not match"), "{error}");
+
+    put(
+        &mut current,
+        b"invalid//path",
+        extra_id,
+        Mode::FILE,
+        Flags::empty(),
+    );
+    current.sort_entries();
+    let error =
+        prepare_restore(&current, &record).expect_err("an invalid current-index path was accepted");
+    assert!(error.to_string().contains("not normalized"), "{error}");
+
+    let mut opaque = delta.original_index.clone();
+    put(
+        &mut opaque,
+        b"opaque",
+        fixture.original_commit,
+        Mode::COMMIT,
+        Flags::empty(),
+    );
+    opaque.sort_entries();
+    let opaque_tree = motor_gix::tree_index::write(repo, &opaque, &cancellation)?;
+    let opaque_commit = repo
+        .new_commit("opaque original", opaque_tree, [fixture.original_commit])?
+        .id;
+    let mut opaque_record = record.clone();
+    opaque_record.original.id = Some(opaque_commit);
+    opaque_record.result_tree = opaque_tree;
+    fs::create_dir(workdir.join("opaque"))?;
+    fs::write(workdir.join("opaque/.git"), b"opaque nested repository")?;
+    let _opaque_restore = prepare_restore(&delta.original_index, &opaque_record)?;
+
+    let mut descendant = delta.original_index.clone();
+    put(
+        &mut descendant,
+        b"opaque/child",
+        extra_id,
+        Mode::FILE,
+        Flags::empty(),
+    );
+    descendant.sort_entries();
+    let error = prepare_restore(&descendant, &opaque_record)
+        .expect_err("a current-index path inside an unchanged gitlink was accepted");
+    assert!(error.to_string().contains("unchanged gitlink"), "{error}");
+    fs::remove_dir_all(workdir.join("opaque"))?;
+    let prepared = motor_gix::transition::prepare(
+        &fixture.opened,
+        guard.index(),
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )?;
+
     let operation_path = repo.git_dir().join(motor_gix::mutation::OPERATION_FILE);
     let operation_before = fs::read(&operation_path)?;
     let unchanged_path = workdir.join(".gitignore");

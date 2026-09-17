@@ -57,6 +57,14 @@ pub struct Prepared {
     pub changes: Vec<Change>,
 }
 
+/// A fully preflighted restoration to the recorded original tree.
+#[derive(Debug)]
+pub struct RestorePrepared {
+    expected_record: Record,
+    original_index: gix::index::State,
+    changes: Vec<Change>,
+}
+
 /// Compute a bounded tree delta and verify that the held index represents its original tree.
 /// The caller retains its mutation guard; this step does not inspect worktree content.
 pub fn compute(
@@ -152,6 +160,128 @@ pub fn prepare(
         target_index: delta.target_index,
         changes: delta.changes,
     })
+}
+
+/// Prepare an idempotent restoration of the operation's original tree.
+///
+/// This accepts conflicts and partial old/new index states. `current` is the validated index
+/// snapshot held by the mutation guard. This does not write the worktree, index, refs, or record.
+pub fn prepare_restore(
+    opened: &OpenedRepository,
+    current: &gix::index::State,
+    record: &Record,
+    cancellation: &Cancellation,
+) -> crate::Result<RestorePrepared> {
+    cancellation.check()?;
+    if record.state != State::Incomplete {
+        return Err(invalid("worktree restoration requires an incomplete operation").into());
+    }
+    let repo = &opened.repo;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
+    let original_tree = match record.original.id {
+        Some(id) => repo.find_commit(id)?.tree_id()?.detach(),
+        None => gix::ObjectId::empty_tree(repo.object_hash()),
+    };
+    let original_index = tree_index::build(repo, &original_tree, workdir, cancellation)?;
+    let result_index = tree_index::build(repo, &record.result_tree, workdir, cancellation)?;
+    tracked_filters::reject_unsupported(opened, &original_index, Source::IdMapping, cancellation)?;
+
+    let tree_changes = collect_changes(&original_index, &result_index, cancellation)?;
+    drop(result_index);
+    let capacity = tree_changes
+        .len()
+        .checked_add(original_index.entries().len())
+        .and_then(|count| count.checked_add(current.entries().len()))
+        .ok_or_else(|| io::Error::other("restore path count overflow"))?;
+    let mut paths = Vec::new();
+    paths.try_reserve(capacity)?;
+    paths.extend(tree_changes.into_iter().map(|change| change.path));
+    collect_current_differences(&original_index, current, workdir, cancellation, &mut paths)?;
+    paths.sort_unstable();
+    paths.dedup();
+
+    let mut changes = Vec::new();
+    changes.try_reserve(paths.len())?;
+    for path in paths {
+        cancellation.check()?;
+        let target = original_index
+            .entry_by_path_and_stage(path.as_bstr(), Stage::Unconflicted)
+            .map(snapshot);
+        if target.is_some_and(|entry| entry.mode == Mode::COMMIT) {
+            continue;
+        }
+        if has_gitlink_ancestor(&original_index, path.as_bstr()) {
+            return Err(path_error(
+                io::ErrorKind::Unsupported,
+                path.as_bstr(),
+                "is inside an unchanged gitlink",
+            )
+            .into());
+        }
+        let observed = observe_current(workdir, path.as_bstr())?;
+        changes.push(Change {
+            path,
+            original: None,
+            target,
+            observed,
+        });
+    }
+    preflight_changes(repo, &changes, cancellation)?;
+    cancellation.check()?;
+    Ok(RestorePrepared {
+        expected_record: record.clone(),
+        original_index,
+        changes,
+    })
+}
+
+/// Require the complete, guard-validated current index to be the result tree at stage zero.
+pub fn require_result_index(
+    repo: &gix::Repository,
+    current: &gix::index::State,
+    result_tree: &gix::oid,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    cancellation.check()?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
+    let expected = tree_index::build(repo, result_tree, workdir, cancellation)?;
+    if !index_matches_tree(current, &expected) {
+        return Err(invalid("the index does not match the operation result tree").into());
+    }
+    cancellation.check()
+}
+
+/// Install a prepared restoration and return a fresh original-tree index.
+///
+/// The caller retains the exact incomplete record and publishes the returned index separately.
+pub fn install_restore(
+    opened: &OpenedRepository,
+    guard: &Guard,
+    record: &Record,
+    prepared: RestorePrepared,
+    cancellation: &Cancellation,
+) -> crate::Result<gix::index::State> {
+    cancellation.check()?;
+    if record.state != State::Incomplete || prepared.expected_record != *record {
+        return Err(invalid("restore preparation does not match the incomplete operation").into());
+    }
+    let mut index = install_prepared(
+        opened,
+        guard,
+        record,
+        prepared.original_index,
+        prepared.changes,
+        cancellation,
+    )?;
+    for entry in index.entries_mut() {
+        entry.stat = Default::default();
+    }
+    cancellation.check()?;
+    Ok(index)
 }
 
 /// Install a prepared transition and return the fresh target index for later publication.
@@ -254,7 +384,18 @@ fn ensure_original_index(
     actual: &gix::index::State,
     expected: &gix::index::State,
 ) -> crate::Result {
-    let equal = actual.entries().len() == expected.entries().len()
+    if !index_matches_tree(actual, expected) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the index does not match the original tree",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn index_matches_tree(actual: &gix::index::State, expected: &gix::index::State) -> bool {
+    actual.entries().len() == expected.entries().len()
         && actual
             .entries()
             .iter()
@@ -264,15 +405,90 @@ fn ensure_original_index(
                     && a.path(actual) == b.path(expected)
                     && a.id == b.id
                     && a.mode == b.mode
-            });
-    if !equal {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the index does not match the original tree",
+            })
+}
+
+fn collect_current_differences(
+    original: &gix::index::State,
+    current: &gix::index::State,
+    workdir: &Path,
+    cancellation: &Cancellation,
+    out: &mut Vec<BString>,
+) -> crate::Result {
+    let mut offset = 0;
+    while offset < current.entries().len() {
+        cancellation.check()?;
+        let end = current_group_end(current, offset);
+        let group = &current.entries()[offset..end];
+        let path = group[0].path(current);
+        let old = original.entry_by_path_and_stage(path, Stage::Unconflicted);
+        if group.len() != 1
+            || group[0].stage() != Stage::Unconflicted
+            || !old.is_some_and(|entry| entry.id == group[0].id && entry.mode == group[0].mode)
+        {
+            selection::validate_normalized(path, workdir)?;
+            out.push(path.to_owned());
+        }
+        offset = end;
+    }
+    for old in original.entries() {
+        cancellation.check()?;
+        if current.entry_range(old.path(original)).is_none() {
+            out.push(old.path(original).to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn current_group_end(index: &gix::index::State, start: usize) -> usize {
+    let path = index.entries()[start].path(index);
+    let mut end = start + 1;
+    while end < index.entries().len() && index.entries()[end].path(index) == path {
+        end += 1;
+    }
+    end
+}
+
+fn has_gitlink_ancestor(index: &gix::index::State, path: &BStr) -> bool {
+    path.iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'/')
+        .any(|(slash, _)| {
+            index
+                .entry_by_path_and_stage(path[..slash].as_bstr(), Stage::Unconflicted)
+                .is_some_and(|entry| entry.mode == Mode::COMMIT)
+        })
+}
+
+fn observe_current(workdir: &Path, path: &BStr) -> crate::Result<Option<ObservedFile>> {
+    let Some(path_metadata) = selection::checked_symlink_metadata(workdir, path)? else {
+        return Ok(None);
+    };
+    if path_metadata.is_dir() {
+        return Ok(None);
+    }
+    if !path_metadata.is_file() {
+        return Err(path_error(io::ErrorKind::Unsupported, path, "has an unsupported type").into());
+    }
+    let absolute = workdir.join(gix::path::from_bstr(path).as_ref());
+    let metadata = gix::index::fs::Metadata::from_path_no_follow(&absolute)?;
+    if !metadata.is_file() {
+        return Err(path_error(
+            io::ErrorKind::InvalidData,
+            path,
+            "changed type during preparation",
         )
         .into());
     }
-    Ok(())
+    let mode = if metadata.is_executable() {
+        Mode::FILE_EXECUTABLE
+    } else {
+        Mode::FILE
+    };
+    Ok(Some(ObservedFile {
+        stat: Stat::from_fs(&metadata)?,
+        mode,
+    }))
 }
 
 fn collect_changes(

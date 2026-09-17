@@ -1448,6 +1448,16 @@ host/Motor component gates, formatting, strict Clippy and shell checks pass with
 matching source hashes. Original failures and final evidence are in
 `/tmp/motor-gix-merge-policy-96d7992e`. Merge topology and publication follow.
 
+M2 shared recovery restore primitive: the reviewed preparer combines recorded
+tree changes with every current-index difference, including conflicts and extra
+staged paths. It validates selected paths, keeps unchanged gitlinks opaque and
+refuses descendants beneath them. Installation uses observed current files and
+the shared checkout body, preserves unrelated deletion-only directory contents,
+and clears every stat after checkout. The compact native lifecycle checks these
+properties and retains normal transition coverage. Host/Motor component gates,
+formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-restore-prepare-6910bec8`. Recovery dispatch follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
