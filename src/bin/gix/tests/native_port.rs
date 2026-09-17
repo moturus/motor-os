@@ -1399,6 +1399,11 @@ fn check_merge_prepare(output: &Path) -> Result {
     let ours = repo.new_commit("ours", ours_tree, [base])?.id;
     let (text_tree, _) = make_tree(&[("text", b"theirs\n")])?;
     let theirs_text = repo.new_commit("theirs text", text_tree, [base])?.id;
+    let (filtered_tree, _) = make_tree(&[
+        (".gitattributes", b"text filter=blocked\n"),
+        ("text", b"filtered\n"),
+    ])?;
+    let filtered_target = repo.new_commit("filtered", filtered_tree, [base])?.id;
     let (binary_tree, _) = make_tree(&[("binary", theirs_binary_data)])?;
     let theirs_binary = repo.new_commit("theirs binary", binary_tree, [base])?.id;
     let unrelated = repo
@@ -1472,6 +1477,30 @@ fn check_merge_prepare(output: &Path) -> Result {
     )
     .expect_err("divergent merge accepted missing identities");
     assert!(error.to_string().contains("author identity"), "{error}");
+
+    let filtered = motor_gix::repository::open(
+        &repository,
+        &[
+            "user.name=Native Test",
+            "user.email=native@example.com",
+            "filter.blocked.required=true",
+        ],
+        false,
+    )?;
+    let error = motor_gix::merge::prepare(
+        &filtered,
+        &ours_index,
+        &original,
+        filtered_target,
+        &cancellation,
+    )
+    .expect_err("an incoming required filter was accepted");
+    assert!(
+        error
+            .to_string()
+            .contains("path 'text' uses unsupported filter 'blocked'"),
+        "{error}"
+    );
 
     let (result_tree, conflicts) = match motor_gix::merge::prepare(
         &opened,

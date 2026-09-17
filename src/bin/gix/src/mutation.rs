@@ -337,6 +337,24 @@ fn write_operation(mut lock: gix::lock::File, record: &Record) -> crate::Result 
     Ok(())
 }
 
+pub(crate) fn preflight_index(state: gix::index::State) -> crate::Result {
+    let index = gix::index::File::from_state(state, PathBuf::new());
+    validate_index(&index)?;
+    let mut writer = LimitedWriter {
+        inner: io::sink(),
+        remaining: INDEX_BYTES_LIMIT,
+    };
+    index.write_to(
+        &mut writer,
+        gix::index::write::Options {
+            extensions: gix::index::write::Extensions::None,
+            skip_hash: true,
+        },
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
 fn publish_index(
     lock: gix::lock::File,
     index: &gix::index::File,

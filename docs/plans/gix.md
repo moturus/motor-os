@@ -1548,6 +1548,17 @@ preserved. Host/Motor component gates and feature-enabled strict Clippy pass;
 formatting, shell checks and all tested source hashes match. Evidence is in
 `/tmp/motor-gix-install-failpoint-1ed1345c`. No runtime failure knobs or retries.
 
+M2 divergent merge preflight: complete original, incoming and computed-result
+snapshots now reject unsupported filters before installation. Supported conflict
+stages are applied to the owned scratch result index and checked for exact
+IDs/modes/stages, then serialized through the existing 16 MiB bounded writer
+before worktree writes. This includes the checksum bytes without hashing or an
+extra index copy. The existing text-conflict fixture exercises serialization;
+one incoming required-filter case proves that target-only policy is checked.
+Host/Motor component gates, feature-enabled strict Clippy, formatting and shell
+checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-merge-preflight-70de21f3`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

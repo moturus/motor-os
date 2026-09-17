@@ -2,19 +2,21 @@ use std::{error::Error as StdError, fmt, io};
 
 use gix::{
     bstr::ByteSlice,
+    index::entry::Stage,
     merge::{
         blob::{Resolution as BlobResolution, builtin_driver::text::Labels},
-        tree::{Conflict, Resolution, TreatAsUnresolved},
+        tree::{Conflict, Resolution, TreatAsUnresolved, apply_index_entries},
     },
+    worktree::stack::state::attributes::Source,
 };
 
 use crate::{
     cancellation::Cancellation,
     commit, head_ref, merge_policy,
-    mutation::Guard,
+    mutation::{self, Guard},
     operation::{Original, State},
     repository::OpenedRepository,
-    transition, tree_index,
+    tracked_filters, transition, tree_index,
 };
 
 #[derive(Debug)]
@@ -78,6 +80,8 @@ pub fn prepare(
     commit::identities(repo)?;
     let target_index = tree_index::build(repo, &target_tree, workdir, cancellation)?;
     // Ancestor cases never invoke the merge engine, so its driver policy applies only here.
+    tracked_filters::reject_unsupported(opened, &original_index, Source::IdMapping, cancellation)?;
+    tracked_filters::reject_unsupported(opened, &target_index, Source::IdMapping, cancellation)?;
     merge_policy::reject_unsupported(opened, &original_index, cancellation)?;
     merge_policy::reject_unsupported(opened, &target_index, cancellation)?;
     drop(original_index);
@@ -112,12 +116,66 @@ pub fn prepare(
     }
     let result_tree = tree.write()?.detach();
     let result_index = tree_index::build(repo, &result_tree, workdir, cancellation)?;
+    tracked_filters::reject_unsupported(opened, &result_index, Source::IdMapping, cancellation)?;
     merge_policy::reject_unsupported(opened, &result_index, cancellation)?;
+    let mut conflict_index = result_index;
+    apply_conflicts(&mut conflict_index, &conflicts)?;
+    mutation::preflight_index(conflict_index)?;
     cancellation.check()?;
     Ok(Preparation::Divergent {
         result_tree,
         conflicts,
     })
+}
+
+fn apply_conflicts(index: &mut gix::index::State, conflicts: &[Conflict]) -> crate::Result<bool> {
+    let how = TreatAsUnresolved::git();
+    let unresolved = conflicts.iter().any(|conflict| conflict.is_unresolved(how));
+    let changed = apply_index_entries(
+        conflicts,
+        how,
+        index,
+        gix::merge::tree::apply_index_entries::RemovalMode::Prune,
+    );
+    if unresolved && !changed {
+        return Err(invalid("unresolved merge conflicts did not change the result index").into());
+    }
+    for conflict in conflicts
+        .iter()
+        .filter(|conflict| conflict.is_unresolved(how))
+    {
+        let path = conflict.changes_in_resolution().1.location();
+        let expected = conflict.entries();
+        let Some(range) = index.entry_range(path) else {
+            return Err(invalid(format!(
+                "merge conflict index entries are missing for '{}'",
+                path.to_str_lossy().escape_debug()
+            ))
+            .into());
+        };
+        let actual = &index.entries()[range];
+        if actual.len() != expected.iter().flatten().count() {
+            return Err(invalid("merge conflict produced unexpected index stages").into());
+        }
+        for (actual, (offset, expected)) in actual.iter().zip(
+            expected
+                .into_iter()
+                .enumerate()
+                .filter_map(|(offset, entry)| entry.map(|entry| (offset, entry))),
+        ) {
+            let stage = match offset {
+                0 => Stage::Base,
+                1 => Stage::Ours,
+                2 => Stage::Theirs,
+                _ => unreachable!("three conflict index entries"),
+            };
+            let expected_mode: gix::index::entry::Mode = expected.mode.into();
+            if actual.stage() != stage || actual.id != expected.id || actual.mode != expected_mode {
+                return Err(invalid("merge conflict produced unexpected index stages").into());
+            }
+        }
+    }
+    Ok(unresolved)
 }
 
 /// Discard an installed ready merge and restore its exact recorded original tree.
@@ -193,6 +251,10 @@ fn supported_text_conflict(conflict: &Conflict) -> bool {
         && ours.source_location() == ours.location()
         && entries.iter().flatten().all(|entry| entry.mode.is_blob())
         && merged_blob.merged_blob_id != ours_entry.id
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 fn unsupported(message: impl Into<String>) -> io::Error {
