@@ -46,7 +46,7 @@ struct Args {
     #[arg(long, default_value = "128")]
     max_active_connections: std::num::NonZeroU32,
 
-    /// HTTP/1.1 header and initial protocol-detection deadlines, in seconds.
+    /// First request head deadline; also HTTP/1 keep-alive idle/header timeout, in seconds.
     #[arg(long, default_value = "10")]
     max_header_deadline_sec: std::num::NonZeroU32,
 

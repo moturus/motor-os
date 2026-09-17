@@ -2,12 +2,16 @@ use axum_server::accept::Accept;
 use std::future::{ready, Future, Ready};
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tower::Service;
 
 #[derive(Clone)]
 pub struct ConnectionLimit(Arc<Semaphore>);
@@ -19,9 +23,9 @@ impl ConnectionLimit {
 }
 
 impl<S> Accept<TcpStream, S> for ConnectionLimit {
-    type Stream = Connection;
+    type Stream = Admitted;
     type Service = S;
-    type Future = Ready<io::Result<(Connection, S)>>;
+    type Future = Ready<io::Result<(Admitted, S)>>;
 
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         ready((|| {
@@ -34,9 +38,8 @@ impl<S> Accept<TcpStream, S> for ConnectionLimit {
                 .map_err(|_| io::Error::other("active connection limit reached"))?;
             stream.set_nodelay(true)?;
             Ok((
-                Connection {
+                Admitted {
                     permit: Some(permit),
-                    preface: None,
                     stream,
                 },
                 service,
@@ -45,39 +48,23 @@ impl<S> Accept<TcpStream, S> for ConnectionLimit {
     }
 }
 
-pub struct Connection<T = TcpStream> {
+pub struct Admitted {
     // Release admission before dropping the TCP stream and sending its FIN.
     permit: Option<OwnedSemaphorePermit>,
-    stream: T,
-    preface: Option<Preface>,
+    stream: TcpStream,
 }
 
-impl<T: AsyncRead + Unpin> AsyncRead for Connection<T> {
+impl AsyncRead for Admitted {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Some(preface) = &mut self.preface {
-            if preface.timer.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "HTTP protocol detection timed out",
-                )));
-            }
-        }
-        let before = buf.filled().len();
-        let result = Pin::new(&mut self.stream).poll_read(cx, buf);
-        if let Some(preface) = &mut self.preface {
-            if preface.detected(&buf.filled()[before..]) {
-                self.preface = None;
-            }
-        }
-        result
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
 
-impl<T: AsyncWrite + Unpin> AsyncWrite for Connection<T> {
+impl AsyncWrite for Admitted {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -108,27 +95,6 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Connection<T> {
     }
 }
 
-struct Preface {
-    timer: Pin<Box<tokio::time::Sleep>>,
-    matched: usize,
-}
-
-impl Preface {
-    fn detected(&mut self, bytes: &[u8]) -> bool {
-        const HTTP2: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        for byte in bytes {
-            if *byte != HTTP2[self.matched] {
-                return true;
-            }
-            self.matched += 1;
-            if self.matched == HTTP2.len() {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 #[derive(Clone)]
 pub struct HeaderDeadline<A> {
     inner: A,
@@ -148,28 +114,99 @@ where
     A::Stream: Send + 'static,
     A::Service: Send + 'static,
 {
-    type Stream = Connection<A::Stream>;
-    type Service = A::Service;
+    type Stream = Deadline<A::Stream>;
+    type Service = FirstRequest<A::Service>;
     type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, Self::Service)>> + Send>>;
 
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         let future = self.inner.accept(stream, service);
         let duration = self.duration;
         Box::pin(async move {
-            let (stream, service) = future.await?;
-            // Hyper's header timer starts after protocol detection. Cover idle
-            // clients and partial HTTP/2 prefaces here, after any TLS handshake.
+            let (stream, inner) = future.await?;
+            // Start after any TLS handshake. Only a parsed request head can
+            // disarm this timer; protocol detection and control frames cannot.
+            let received = Arc::new(AtomicBool::new(false));
             Ok((
-                Connection {
-                    permit: None,
+                Deadline {
                     stream,
-                    preface: Some(Preface {
-                        timer: Box::pin(tokio::time::sleep(duration)),
-                        matched: 0,
-                    }),
+                    timer: Box::pin(tokio::time::sleep(duration)),
+                    received: received.clone(),
                 },
-                service,
+                FirstRequest { inner, received },
             ))
         })
+    }
+}
+
+#[derive(Clone)]
+pub struct FirstRequest<S> {
+    inner: S,
+    received: Arc<AtomicBool>,
+}
+
+impl<S: Service<R>, R> Service<R> for FirstRequest<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        self.received.store(true, Ordering::Relaxed);
+        self.inner.call(request)
+    }
+}
+
+pub struct Deadline<T> {
+    stream: T,
+    timer: Pin<Box<tokio::time::Sleep>>,
+    received: Arc<AtomicBool>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Deadline<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.received.load(Ordering::Relaxed) && self.timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "first HTTP request head timed out",
+            )));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Deadline<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
     }
 }

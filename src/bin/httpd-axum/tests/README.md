@@ -27,12 +27,13 @@ This standalone gate does not build an OS image or invoke the full-system suite.
 keep-alive connections, and TLS handshakes. Excess connections close immediately.
 The HTTP tests exercise admission, rejection, and release with a limit of one.
 
-`--max-header-deadline-sec` defaults to 10. It limits initial HTTP protocol
-detection (after TLS handshaking, if enabled), then each HTTP/1.1 header read.
-Tests cover idle clients, incomplete HTTP/1.1 headers, partial HTTP/2 prefaces,
+`--max-header-deadline-sec` defaults to 10. It limits the first complete request
+head (after TLS handshaking, if enabled), then each HTTP/1.1 header read,
+including idle keep-alive time before the next request.
+Tests cover idle clients, incomplete HTTP/1.1 headers, partial and complete HTTP/2 prefaces without request heads,
 subsequent requests on keep-alive connections, and HTTP/1.1 over TLS. The existing
 TLS handshake deadline remains separate. HTTP/2 support is preserved: its
-connections count toward admission, but complete HTTP/2 stream-header deadlines
+connections count toward admission, but subsequent HTTP/2 stream-header deadlines
 are not exposed by the current Hyper API and are not enforced by this flag.
 The HTTP/2 tests check both cleartext and certificate-validated TLS, repeat
 requests on one connection (including a cache hit), and verify admission limits.

@@ -1,8 +1,10 @@
+mod deadlines;
 use crate::common::Server;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub fn check() {
+    deadlines::check();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -49,7 +51,7 @@ where
 {
     let (mut client, connection) = h2::client::handshake(stream).await.unwrap();
     let driver = tokio::spawn(connection);
-    for _ in 0..2 {
+    for index in 0..2 {
         client = client.ready().await.unwrap();
         let request = http::Request::builder()
             .uri(format!("{scheme}://localhost/index.html"))
@@ -66,6 +68,10 @@ where
             body.flow_control().release_capacity(chunk.len()).unwrap();
         }
         assert_eq!(bytes, b"test content\n");
+        // A parsed request must disarm the initial deadline for HTTP/2.
+        if index == 0 {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+        }
     }
     crate::assert_closed(&mut server.connect());
     drop(client);
