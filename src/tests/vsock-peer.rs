@@ -768,18 +768,21 @@ fn run() -> io::Result<()> {
                 expect_eof(&mut canceled)?;
                 write_frame(&mut stream, NATIVE_ACCEPT_CANCEL_CLOSED)?;
 
-                expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_READY)?;
-                let mut anchor = connect_guest(base, NATIVE_ACCEPT_EXIT_PORT)?;
-                anchor.write_all(b"r")?;
-                write_frame(&mut stream, NATIVE_ACCEPT_ANCHOR_HELD)?;
-                expect_frame(&mut stream, NATIVE_ACCEPT_CONNECT_READY)?;
-                let mut outgoing = configure_stream(accept_before(&listener, deadline)?)?;
-                write_frame(&mut stream, NATIVE_ACCEPT_BOTH_HELD)?;
-                expect_frame(&mut stream, NATIVE_ACCEPT_EXITED)?;
-                expect_prefix_then_eof(&mut anchor, b"t")?;
-                expect_eof(&mut outgoing)?;
-                write_frame(&mut stream, NATIVE_ACCEPT_EXIT_CLEANED)?;
-                expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_REBOUND)?;
+                for _ in 0..2 {
+                    expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_READY)?;
+                    let mut anchor = connect_guest(base, NATIVE_ACCEPT_EXIT_PORT)?;
+                    anchor.write_all(b"r")?;
+                    write_frame(&mut stream, NATIVE_ACCEPT_ANCHOR_HELD)?;
+                    expect_frame(&mut stream, NATIVE_ACCEPT_CONNECT_READY)?;
+                    let mut outgoing = configure_stream(accept_before(&listener, deadline)?)?;
+                    write_frame(&mut stream, NATIVE_ACCEPT_BOTH_HELD)?;
+                    expect_frame(&mut stream, NATIVE_ACCEPT_EXITED)?;
+                    expect_prefix_then_eof(&mut anchor, b"t")?;
+                    expect_eof(&mut outgoing)?;
+                    write_frame(&mut stream, NATIVE_ACCEPT_EXIT_CLEANED)?;
+                    expect_frame(&mut stream, NATIVE_ACCEPT_EXIT_REBOUND)?;
+                }
+                run_global_capacity_cycle(base, &mut stream)?;
                 expect_frame(&mut stream, CASE_DONE)?;
             }
             Action::GlobalStreamCapacity => {

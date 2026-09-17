@@ -230,6 +230,7 @@ pub(super) struct VsockSocketState {
     output_lock: Rc<moto_async::LocalMutex<()>>,
     connected_observed: bool,
     client_ready: bool,
+    client_gone: bool,
     notified_flags: u32,
     pending_reset: bool,
     reset_queued: bool,
@@ -265,6 +266,7 @@ impl VsockSocketState {
             output_lock: Rc::new(moto_async::LocalMutex::new(())),
             connected_observed: false,
             client_ready: false,
+            client_gone: false,
             notified_flags: 0,
             pending_reset: false,
             reset_queued: false,
@@ -1842,6 +1844,11 @@ impl NetRuntime {
                 continue;
             }
             let sent = loop {
+                // A terminal stream must leave the tables even when its
+                // former client can no longer receive the final notification.
+                if socket.borrow().unwrap_vsock().client_gone {
+                    break true;
+                }
                 let mut changed = core::pin::pin!(notify.notified().fuse());
                 let message = {
                     let socket = socket.borrow();
@@ -1874,14 +1881,12 @@ impl NetRuntime {
                 }
                 break false;
             };
+            drop(_guard);
             if !sent {
-                drop(_guard);
-                self.start_vsock_cleanup(&socket);
-                continue;
+                self.disconnect_vsock_client(&socket);
             }
             let finish = socket.borrow().unwrap_vsock().terminal_ready_to_drop();
             let socket_id = socket.borrow().socket_id();
-            drop(_guard);
             if finish {
                 self.remove_vsock_socket(socket_id);
                 return;
@@ -1933,7 +1938,7 @@ impl NetRuntime {
                     page = page => match page {
                         Ok(page) => page,
                         Err(_) => {
-                            self.start_vsock_cleanup(&socket);
+                            self.disconnect_vsock_client(&socket);
                             return;
                         }
                     },
@@ -1968,7 +1973,7 @@ impl NetRuntime {
                 let sent = sender.send(message).await.is_ok();
                 drop(_guard);
                 if !sent {
-                    self.start_vsock_cleanup(&socket);
+                    self.disconnect_vsock_client(&socket);
                     return;
                 }
                 if orderly_reset {
@@ -2027,6 +2032,16 @@ impl NetRuntime {
                 Err(_) => return,
             }
         }
+    }
+
+    pub(super) fn disconnect_vsock_client(&self, socket: &Rc<RefCell<MotoSocket>>) {
+        if std::mem::replace(
+            &mut socket.borrow_mut().unwrap_vsock_mut().client_gone,
+            true,
+        ) {
+            return;
+        }
+        self.start_vsock_cleanup(socket);
     }
 
     pub(super) fn start_vsock_cleanup(&self, socket: &Rc<RefCell<MotoSocket>>) {

@@ -199,7 +199,8 @@ impl RawVsockListener {
         let mut request = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
         request.id = 0x564f_7000;
         let response = raw_vsock_response(&owner, &mut owner_rx, request).await;
-        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response)
+            .unwrap_or_else(|error| panic!("binding vsock port {port}: {error:?}"));
         assert_eq!(listener.local.port, port);
         Self {
             owner,
@@ -453,10 +454,11 @@ pub fn run_vsock_foreign_accept_child(handle: u64) -> ! {
 }
 
 pub fn is_vsock_exit_accept_child(args: &[String]) -> bool {
-    args.len() == 4 && args[1] == VSOCK_EXIT_ACCEPT_CHILD
+    (args.len() == 4 || (args.len() == 5 && args[4] == "--idle"))
+        && args[1] == VSOCK_EXIT_ACCEPT_CHILD
 }
 
-pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32) -> ! {
+pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
     const ACCEPT_LIMIT: usize = 8;
     const FIRST_ID: u64 = 0x564f_8300;
 
@@ -465,7 +467,7 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32) -> ! {
         0,
         "exit accept child lacks CAP_VSOCK"
     );
-    moto_async::LocalRuntime::new().block_on(async move {
+    let _owners = moto_async::LocalRuntime::new().block_on(async move {
         use std::io::Write;
 
         let marker = |bytes: &[u8]| {
@@ -545,6 +547,21 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32) -> ! {
         sender.send(connect).await.unwrap();
         marker(b"armed\n");
 
+        if idle {
+            let response = bounded_output(receiver.recv(), 2)
+                .await
+                .expect("timed out waiting for idle child's connect response")
+                .unwrap();
+            assert_eq!(response.id, connect.id);
+            moto_sys_io::api_vsock::decode_connect_response(&response).unwrap();
+            core::future::poll_fn(|cx| {
+                assert!(receiver.poll_recv(cx).is_pending());
+                core::task::Poll::Ready(())
+            })
+            .await;
+            return (sender, receiver, claimed_rx);
+        }
+
         let mut exit = String::new();
         std::io::stdin().read_line(&mut exit).unwrap();
         assert_eq!(exit, "exit\n");
@@ -554,7 +571,15 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32) -> ! {
         // submitted TX, unread connect response, and raw channel live until
         // process teardown; no explicit/native Drop may close them.
         std::process::exit(0)
-    })
+    });
+    // Leaving block_on ends adaptive IPC spinning and re-arms WaitingToRecv.
+    // Retain every owner without polling again, so the parent kills a client
+    // whose idle receiver definitely requires a wake for the next message.
+    println!("idle");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    loop {
+        std::thread::park();
+    }
 }
 
 pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {

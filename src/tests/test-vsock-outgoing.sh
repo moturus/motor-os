@@ -260,6 +260,10 @@ run_outgoing_case() {
     rg -Fx "vsock connect errors: PASS" "$guest_log" >/dev/null ||
       fail "guest connect-error PASS marker missing"
   fi
+  if [ "$verdict" = native-accept ]; then
+    rg -Fx "vsock idle client cleanup: PASS" "$guest_log" >/dev/null ||
+      fail "idle client cleanup PASS marker missing"
+  fi
 
   wait "$PEER_PID" || peer_status=$?
   PEER_PID=""

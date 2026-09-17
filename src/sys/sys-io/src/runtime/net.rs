@@ -648,7 +648,7 @@ impl NetRuntime {
                         drop(moto_socket);
                         let _ = self.remove_vsock_listener(*socket_id, conn_id);
                     } else if is_vsock {
-                        self.start_vsock_cleanup(&moto_socket);
+                        self.disconnect_vsock_client(&moto_socket);
                     } else {
                         MotoSocket::reclaim_tcp_socket(moto_socket).await;
                     }

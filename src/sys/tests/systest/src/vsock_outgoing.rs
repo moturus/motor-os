@@ -740,35 +740,49 @@ async fn run_native_accept(
     write_frame(control, NATIVE_ACCEPT_CANCEL_READY).await;
     expect_frame(control, NATIVE_ACCEPT_CANCEL_CLOSED).await;
 
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .arg("vsock-exit-accept-child")
-        .arg(NATIVE_ACCEPT_EXIT_PORT.to_string())
-        .arg(control.peer_addr().unwrap().port.to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut child_stdin = child.stdin.take().unwrap();
-    let mut child_stdout = BufReader::new(child.stdout.take().unwrap());
-    expect_child_marker(&mut child_stdout, "queued");
-    write_frame(control, NATIVE_ACCEPT_EXIT_READY).await;
-    expect_frame(control, NATIVE_ACCEPT_ANCHOR_HELD).await;
-    expect_child_marker(&mut child_stdout, "accepted");
-    expect_child_marker(&mut child_stdout, "armed");
-    write_frame(control, NATIVE_ACCEPT_CONNECT_READY).await;
-    expect_frame(control, NATIVE_ACCEPT_BOTH_HELD).await;
-    child_stdin.write_all(b"exit\n").unwrap();
-    child_stdin.flush().unwrap();
-    drop(child_stdin);
-    assert_eq!(child.wait().unwrap().code(), Some(0));
-    write_frame(control, NATIVE_ACCEPT_EXITED).await;
+    for idle in [false, true] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("vsock-exit-accept-child")
+            .arg(NATIVE_ACCEPT_EXIT_PORT.to_string())
+            .arg(control.peer_addr().unwrap().port.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        if idle {
+            command.arg("--idle");
+        }
+        let mut child = command.spawn().unwrap();
+        let mut child_stdin = child.stdin.take().unwrap();
+        let mut child_stdout = BufReader::new(child.stdout.take().unwrap());
+        expect_child_marker(&mut child_stdout, "queued");
+        write_frame(control, NATIVE_ACCEPT_EXIT_READY).await;
+        expect_frame(control, NATIVE_ACCEPT_ANCHOR_HELD).await;
+        expect_child_marker(&mut child_stdout, "accepted");
+        expect_child_marker(&mut child_stdout, "armed");
+        write_frame(control, NATIVE_ACCEPT_CONNECT_READY).await;
+        expect_frame(control, NATIVE_ACCEPT_BOTH_HELD).await;
+        if idle {
+            expect_child_marker(&mut child_stdout, "idle");
+            child.kill().unwrap();
+            assert!(!child.wait().unwrap().success());
+        } else {
+            child_stdin.write_all(b"exit\n").unwrap();
+            child_stdin.flush().unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(0));
+        }
+        drop(child_stdin);
+        write_frame(control, NATIVE_ACCEPT_EXITED).await;
 
-    // Host EOF proves sys-io has processed child-channel teardown. Only that
-    // causal token permits the different process to reclaim the same port.
-    expect_frame(control, NATIVE_ACCEPT_EXIT_CLEANED).await;
-    let rebound = crate::net_driver::RawVsockListener::bind(NATIVE_ACCEPT_EXIT_PORT).await;
-    rebound.close().await;
-    write_frame(control, NATIVE_ACCEPT_EXIT_REBOUND).await;
+        expect_frame(control, NATIVE_ACCEPT_EXIT_CLEANED).await;
+        println!("vsock process-exit peers closed: idle={idle}");
+        let rebound = crate::net_driver::RawVsockListener::bind(NATIVE_ACCEPT_EXIT_PORT).await;
+        rebound.close().await;
+        write_frame(control, NATIVE_ACCEPT_EXIT_REBOUND).await;
+    }
+    // Peer EOF and port reuse alone do not prove that dead streams left the
+    // global table. Exercise every stream slot after both process exits.
+    run_global_stream_capacity_cycle(control).await;
+    println!("vsock idle client cleanup: PASS");
 
     drop(listener);
     drop(keeper);
