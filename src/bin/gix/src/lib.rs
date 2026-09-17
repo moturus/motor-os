@@ -29,6 +29,8 @@ pub mod selection;
 pub mod stage_blob;
 pub mod status;
 pub mod switch;
+#[cfg(feature = "native-test-support")]
+pub mod test_support;
 mod tracked_filters;
 pub mod transition;
 pub mod tree_index;

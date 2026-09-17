@@ -356,6 +356,8 @@ fn install_prepared(
     for change in changes.iter().filter(|change| change.observed.is_some()) {
         cancellation.check()?;
         fs::remove_file(recheck_observed(workdir, change)?)?;
+        #[cfg(feature = "native-test-support")]
+        crate::test_support::checkpoint(crate::test_support::Failure::AfterFirstInstallRemoval)?;
     }
     for offset in target_directories {
         remove_target_directory(workdir, &changes, offset, cancellation)?;
@@ -688,6 +690,10 @@ fn remove_target_directory(
         }
         if visited {
             fs::remove_dir(directory)?;
+            #[cfg(feature = "native-test-support")]
+            crate::test_support::checkpoint(
+                crate::test_support::Failure::AfterFirstInstallRemoval,
+            )?;
             continue;
         }
         reject_repository(&directory, relative.as_bstr())?;

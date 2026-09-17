@@ -390,7 +390,7 @@ PY
     clone::blocking_io::from_shallow_allowed_by_default
   "$cargo" test "${external[@]}" -p gix --test gix \
     --features blocking-network-client,worktree-mutation init::
-  "$cargo" test "${common[@]}" --test native-port -- \
+  "$cargo" test "${common[@]}" --features native-test-support --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
   verify_add_repository "$temporary/host-output/add-repository"
@@ -642,6 +642,7 @@ native_env=(
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes"
 )
 env "${native_env[@]}" "$cargo" build "${common[@]}" \
+  --features native-test-support \
   --target x86_64-unknown-motor --bin gix --test native-port \
   --message-format json-render-diagnostics > "$messages"
 artifact_paths="$(python3 - "$messages" <<'PY'

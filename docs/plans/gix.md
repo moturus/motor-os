@@ -1535,6 +1535,19 @@ ignored files and cleanup. All host/Motor component gates, formatting, strict Cl
 and shell checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-merge-abort-0df63a90`. Merge installation and CLI exposure follow.
 
+M2 deterministic installation interruption: a nondefault `native-test-support`
+feature adds one ownership-safe failure after the first actual removal in the
+shared installer. The normal installed binary omits this code. Existing native
+lifecycles now prove partial-removal recovery and public add/recover exclusion
+while the same guard remains held after record replacement and index publication.
+The first host run exposed a fixture sequencing error: recovery correctly cleared
+stat caches, but the next installer assertion still compared the initial cached
+index. The corrected fixture checks the rebuilt tree and empty caches, then takes
+a fresh byte baseline for the following installation. The original failure is
+preserved. Host/Motor component gates and feature-enabled strict Clippy pass;
+formatting, shell checks and all tested source hashes match. Evidence is in
+`/tmp/motor-gix-install-failpoint-1ed1345c`. No runtime failure knobs or retries.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

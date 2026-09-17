@@ -2141,6 +2141,63 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(fs::read(&operation_path)?, operation_before);
 
     fs::write(workdir.join("removed/old"), b"removed child\n")?;
+    #[cfg(feature = "native-test-support")]
+    {
+        use motor_gix::test_support::{Failure, fail_once};
+
+        let prepared = motor_gix::transition::prepare(
+            &fixture.opened,
+            guard.index(),
+            &fixture.original_tree,
+            &fixture.target_tree,
+            &cancellation,
+        )?;
+        let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+        let error = motor_gix::transition::install(
+            &fixture.opened,
+            &guard,
+            &record,
+            prepared,
+            &cancellation,
+        )
+        .expect_err("the first install removal did not inject a failure");
+        assert!(
+            error.to_string().contains("first install removal"),
+            "{error}"
+        );
+        assert!(!workdir.join("a").try_exists()?);
+        assert_eq!(fs::read(repo.index_path())?, index_before);
+        assert_eq!(
+            motor_gix::operation::read(&operation_path)?,
+            Some(record.clone())
+        );
+        assert!(fail_once(Failure::AfterFirstInstallRemoval).is_err());
+        drop(armed);
+        drop(guard);
+
+        assert_eq!(
+            motor_gix::recover::run(&fixture.opened, &cancellation)?,
+            "restored recorded original state"
+        );
+        assert_eq!(fs::read(workdir.join("a"))?, b"old a\n");
+        assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
+        let recovered = repo.open_index()?;
+        assert_eq!(
+            motor_gix::tree_index::write(repo, &recovered, &cancellation)?,
+            fixture.original_tree
+        );
+        assert!(
+            recovered
+                .entries()
+                .iter()
+                .all(|entry| entry.stat == Default::default())
+        );
+        assert!(!operation_path.try_exists()?);
+
+        guard = motor_gix::mutation::Guard::acquire(repo)?;
+        guard.create_operation(&record)?;
+    }
+    let index_before_install = fs::read(repo.index_path())?;
     let prepared = motor_gix::transition::prepare(
         &fixture.opened,
         guard.index(),
@@ -2169,7 +2226,7 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
     assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
     assert_eq!(fs::read(&operation_path)?, operation_before);
-    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(fs::read(repo.index_path())?, index_before_install);
     guard.publish_fresh_index(installed)?;
     let published = repo.open_index()?;
     assert_eq!(
@@ -2896,7 +2953,7 @@ fn check_operation_record(opened: &motor_gix::repository::OpenedRepository) -> R
         result_tree: gix::ObjectId::from_hex(b"3333333333333333333333333333333333333333")?,
         intended_commit: None,
     };
-    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
     let mut invalid = record.clone();
     invalid.original = Original {
         reference: None,
@@ -2914,8 +2971,22 @@ fn check_operation_record(opened: &motor_gix::repository::OpenedRepository) -> R
     assert_eq!(motor_gix::operation::read(&path)?, Some(record.clone()));
     assert!(!path.with_extension("lock").exists());
 
+    let mut ready = record.clone();
+    ready.state = State::Ready;
+    guard.replace_operation(&record, &ready)?;
+    record = ready;
+    let retained: gix::index::State = guard.index().clone().into();
+    guard.publish_fresh_index(retained)?;
+    run_mutation_child(
+        repo.workdir().ok_or("mutation worktree missing")?,
+        "add-blocked",
+    )?;
+    run_mutation_child(
+        repo.workdir().ok_or("mutation worktree missing")?,
+        "recover-blocked",
+    )?;
+
     for (state, intended) in [
-        (State::Ready, None),
         (State::Publishing, Some(record.result_tree)),
         (State::Ready, None),
         (State::Incomplete, None),
@@ -3160,10 +3231,15 @@ fn run_mutation_child(repository: &Path, expectation: &str) -> Result {
 
 fn mutation_child(repository: &Path, expectation: &OsStr) -> Result {
     let opened = motor_gix::repository::open(repository, &[], false)?;
-    let result = motor_gix::mutation::Guard::acquire(&opened.repo);
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let result: motor_gix::Result = match expectation.to_str() {
+        Some("add-blocked") => motor_gix::add::run(&opened, true, &[], &cancellation),
+        Some("recover-blocked") => motor_gix::recover::run(&opened, &cancellation).map(drop),
+        _ => motor_gix::mutation::Guard::acquire(&opened.repo).map(drop),
+    };
     match expectation.to_str() {
         Some("acquire") if result.is_ok() => Ok(()),
-        Some("blocked")
+        Some("blocked" | "add-blocked" | "recover-blocked")
             if result.as_ref().is_err_and(|error| {
                 error
                     .downcast_ref::<std::io::Error>()
