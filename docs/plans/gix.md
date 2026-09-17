@@ -13,8 +13,9 @@ gates, `full-test-dev.sh --release`, and the representative native HTTPS
 clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
 limits and measured results. M2 implementation is in progress: init, staging,
-ordinary commit, branch/tag creation, unstage and restore are implemented and
-component-tested. Diff and switch/merge/recovery remain; section 7 records progress.
+ordinary commit, branch/tag creation, unstage, restore and diff are implemented
+and component-tested. The switch library is validated; its CLI and shared
+merge/recovery workflows remain. Section 7 records progress.
 Section 8 records the approved 8 MiB loose-ref
 limit and directory-entry repair. The managed stdlib and approved socket
 teardown repair passed three debug and three release main-image gates and the
@@ -1408,6 +1409,15 @@ and unchanged repository data. Host behavior passed initially; five new test
 assertions then needed the equivalent `expect_err()` spelling for strict Clippy.
 All final host/Motor component gates and formatting/shell checks pass with
 matching source hashes. Evidence is in `/tmp/motor-gix-diff-run-89685401`.
+
+M2 diff CLI and documentation: `diff [--staged] [PATH…]` is available with literal
+worktree-relative selection and `--` for leading-dash names. Markdown and both
+developer HTML pages describe output, read-only behavior and the approved limits.
+The existing host smoke checks worktree/staged text and staged deletion with an
+unchanged index hash; the guest adds one leading-dash worktree smoke and checks
+that no index lock remains. Host/Motor component gates, formatting, strict Clippy
+and shell checks pass with matching source hashes. Evidence is in
+`/tmp/motor-gix-diff-cli-a04b1424`.
 
 ## 8. Discussion record
 

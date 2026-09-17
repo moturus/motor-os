@@ -496,10 +496,12 @@ how procedural macros and build scripts run on Motor OS, is on the
 
 <h2>Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
-anonymous smart-HTTPS remotes, stages and commits local changes, and shows status and history.</p>
+anonymous smart-HTTPS remotes, stages and commits local changes, and shows status, diffs and history.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
+gix -r project diff
+gix -r project diff --staged src/main.rs
 gix -r project add src/main.rs
 gix -r project add -A
 gix -r project unstage src/main.rs
@@ -516,6 +518,15 @@ gix -r project fetch upstream</code></pre>
 files in <code>DIR</code>, which defaults to the current directory, and refuses
 reinitialization. It uses
 <code>init.defaultBranch</code> when configured and <code>main</code> otherwise.</p>
+<p><code>diff [PATH…]</code> compares tracked worktree files with the index;
+<code>diff --staged</code> compares the index with <code>HEAD</code> (empty for an
+unborn branch). Optional paths are literal and relative to the selected worktree;
+use <code>--</code> before a leading dash. It prints unified text changes, mode
+changes, binary summaries and opaque gitlink IDs without updating the repository.
+Selected conflicts are rejected; worktree conversion also rejects unsupported
+filters. Inputs are limited to 16 MiB per side and text to 262,144 lines per side;
+configured <code>minimal</code> is unsupported for text. Myers and Histogram are
+supported.</p>
 <p><code>add PATH…</code> stages literal paths relative to the selected worktree; use
 <code>--</code> for names starting with a dash. <code>add -A</code> stages all additions,
 changes and deletions. Tracked ignored files are included; explicitly naming an ignored

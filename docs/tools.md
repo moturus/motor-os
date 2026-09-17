@@ -57,12 +57,14 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-inspect it, stage local changes, and commit the index:
+inspect changes, stage local files, and commit the index:
 
 ```sh
 gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
+gix -r project diff
+gix -r project diff --staged src/main.rs
 gix -r project add src/main.rs
 gix -r project add -A
 gix -r project unstage src/main.rs
@@ -81,6 +83,15 @@ gix -r project fetch upstream
 which defaults to the current directory. It refuses to reinitialize a
 repository. The initial branch is
 `init.defaultBranch` when configured and `main` otherwise.
+
+`diff [PATH…]` compares tracked worktree files with the index; `diff --staged`
+compares the index with `HEAD` (empty for an unborn branch). Optional paths are
+literal and relative to the selected worktree; use `--` before a leading dash.
+It prints unified text changes, mode changes, binary summaries and opaque gitlink
+IDs without updating the repository. Selected conflicts are rejected; worktree
+conversion also rejects unsupported filters. Inputs are limited to 16 MiB per side
+and text to 262,144 lines per side; configured `minimal` is unsupported for text.
+Myers and Histogram are supported.
 
 `add PATH…` stages literal paths relative to the selected worktree; use `--`
 for names starting with a dash. `add -A` stages all additions, changes and

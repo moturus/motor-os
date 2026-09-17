@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, fetch, init, network, refs, repository, restore,
-    status, unstage,
+    Result, add, cancellation, clone, commit, diff, fetch, init, network, refs, repository,
+    restore, status, unstage,
 };
 
 fn main() -> ExitCode {
@@ -79,6 +79,17 @@ fn run() -> Result {
                         .action(ArgAction::Append)
                         .num_args(1..)
                         .required_unless_present("all"),
+                ),
+        )
+        .subcommand(
+            Command::new("diff")
+                .about("Show worktree or staged changes")
+                .arg(Arg::new("staged").long("staged").action(ArgAction::SetTrue))
+                .arg(
+                    Arg::new("paths")
+                        .value_name("PATH")
+                        .action(ArgAction::Append)
+                        .num_args(1..),
                 ),
         )
         .subcommand(
@@ -215,6 +226,22 @@ fn run() -> Result {
                 .expect("required message"),
             &cancellation,
         ),
+        Some("diff") => {
+            let command = matches.subcommand_matches("diff").expect("matched diff");
+            let paths = command
+                .get_many::<String>("paths")
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            diff::run(
+                &opened,
+                command.get_flag("staged"),
+                &paths,
+                &cancellation,
+                io::stdout().lock(),
+            )
+        }
         Some("fetch") => {
             let policy = network::Policy::new(&overrides, &cancellation)?;
             fetch::run(

@@ -603,8 +603,16 @@ EOF
   "${app_env[@]}" "$gix_binary" -r "$fixture" status > "$temporary/status.out"
   cmp "$temporary/expected.status" "$temporary/status.out" >/dev/null ||
     fail "gix status output differs from the expected state"
+  "${app_env[@]}" "$gix_binary" -r "$fixture" diff editable > "$temporary/worktree.diff"
+  "${app_env[@]}" "$gix_binary" -r "$fixture" diff --staged > "$temporary/staged.diff"
+  for line in '--- a/editable' '+++ b/editable' '-staged' '+unstaged'; do
+    grep -Fqx -- "$line" "$temporary/worktree.diff" || fail "worktree diff lacks $line"
+  done
+  for line in '--- a/editable' '+++ b/editable' '-other' '+staged' 'deleted file mode 120000' '+++ /dev/null'; do
+    grep -Fqx -- "$line" "$temporary/staged.diff" || fail "staged diff lacks $line"
+  done
   [ "$(sha256sum "$fixture/.git/index")" = "$index_before" ] ||
-    fail "gix status modified the source index"
+    fail "gix status or diff modified the source index"
   [ ! -e "$temporary/git-invoked" ] || fail "repository open invoked installed Git"
   echo "test-gix host PASS"
   exit
@@ -713,6 +721,11 @@ vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $gue
 printf 'dirty\n' > "$temporary/add-cli-source"
 printf 'put "%s" "%s"\n' "$temporary/add-cli-source" "$guest_root/init/-leading" |
   "${sftp_command[@]}"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init diff -- -leading" > "$temporary/guest-worktree.diff"
+for line in '--- a/-leading' '+++ b/-leading' '-cli stage' '+dirty'; do
+  grep -Fqx -- "$line" "$temporary/guest-worktree.diff" || fail "native worktree diff lacks $line"
+done
+vm_ssh "[ ! -e $guest_root/init/.git/index.lock ]" || fail "native diff left index.lock"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init restore -- -leading"
 printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |
   "${sftp_command[@]}"
