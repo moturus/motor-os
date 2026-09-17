@@ -1369,6 +1369,14 @@ strict Clippy and shell checks pass with matching source hashes. Original
 compiler diagnostics and final validation are preserved in
 `/tmp/motor-gix-head-attach-4cec3fec`. Switch/recovery command integration follows.
 
+M2 text preparation: the renderer now prepares bounded tokens and the diff before
+any file metadata is emitted, then streams the existing hunks through a separate
+writer. This replaces the unpublished one-shot API without a wrapper or rendered
+output buffer. Existing native output, line-boundary, Minimal and cancellation
+coverage remains; no duplicate control-flow tests were added. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-diff-prepared-aac171ba`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
@@ -1838,8 +1846,8 @@ the gix-ref unit tests, formatting and strict host/Motor Clippy pass. The first
 Clippy run exposed two preexisting empty-input assertions rejected by the
 selected toolchain. The equivalent two-line test-only cleanup was reviewed and
 committed separately as `4b38e88e9`; the original failure is preserved.
-Application validation uses the exact API revision imported locally; publication
-of these external commits remains the user's action. Evidence is in
+The user confirmed publication of both external commits on 2026-09-17.
+Application validation uses the exact published API revision. Evidence is in
 `/tmp/motor-gix-symbolic-reflog-integration`.
 Source review: `/tmp/motor-gix-head-ref-design/review.md`.
 Source proposal and parent review: `/tmp/motor-gix-symbolic-reflog-api/`.

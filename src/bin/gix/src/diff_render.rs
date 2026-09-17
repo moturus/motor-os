@@ -31,20 +31,23 @@ impl<'a> TokenSource for ExactLines<'a> {
     }
 }
 
-/// Render one bounded text pair as a unified diff.
+/// A bounded text diff whose validation and computation completed before output.
+pub struct PreparedText<'a> {
+    input: InternedInput<&'a [u8]>,
+    diff: gix::diff::blob::Diff,
+}
+
+/// Validate and compute one bounded text pair without producing output.
 ///
-/// `labels` must already be escaped for terminal output, and `before` and `after` must come from
-/// the bounded [`crate::diff_input::Loader`] (at most 16 MiB per side). The caller should provide
-/// buffered output.
-pub fn render_text(
+/// `before` and `after` must come from the bounded [`crate::diff_input::Loader`] (at most 16 MiB
+/// per side). Callers may safely write this file's metadata only after this function succeeds.
+pub fn prepare_text<'a>(
     path: &BStr,
-    labels: (&[u8], &[u8]),
-    before: &[u8],
-    after: &[u8],
+    before: &'a [u8],
+    after: &'a [u8],
     algorithm: Algorithm,
     cancellation: &Cancellation,
-    out: &mut impl Write,
-) -> crate::Result {
+) -> crate::Result<PreparedText<'a>> {
     cancellation.check()?;
     if algorithm == Algorithm::MyersMinimal {
         return Err(
@@ -58,31 +61,47 @@ pub fn render_text(
     cancellation.check()?;
     let diff = diff_with_slider_heuristics(algorithm, &input);
     cancellation.check()?;
-    if diff.count_removals() == 0 && diff.count_additions() == 0 {
-        return Ok(());
+    Ok(PreparedText { input, diff })
+}
+
+impl PreparedText<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.diff.count_removals() == 0 && self.diff.count_additions() == 0
     }
 
-    let (before_label, after_label) = labels;
-    cancellation.check()?;
-    out.write_all(b"--- ")?;
-    out.write_all(before_label)?;
-    out.write_all(b"\n")?;
-    cancellation.check()?;
-    out.write_all(b"+++ ")?;
-    out.write_all(after_label)?;
-    out.write_all(b"\n")?;
-    UnifiedDiff::new(
-        &diff,
-        &input,
-        HunkWriter {
-            out: &mut *out,
-            cancellation,
-        },
-        ContextSize::symmetrical(3),
-    )
-    .consume()?;
-    out.flush()?;
-    cancellation.check()
+    /// Stream this diff with already-escaped labels to buffered output.
+    pub fn write_to(
+        self,
+        labels: (&[u8], &[u8]),
+        cancellation: &Cancellation,
+        out: &mut impl Write,
+    ) -> crate::Result {
+        if self.is_empty() {
+            return cancellation.check();
+        }
+
+        let (before_label, after_label) = labels;
+        cancellation.check()?;
+        out.write_all(b"--- ")?;
+        out.write_all(before_label)?;
+        out.write_all(b"\n")?;
+        cancellation.check()?;
+        out.write_all(b"+++ ")?;
+        out.write_all(after_label)?;
+        out.write_all(b"\n")?;
+        UnifiedDiff::new(
+            &self.diff,
+            &self.input,
+            HunkWriter {
+                out: &mut *out,
+                cancellation,
+            },
+            ContextSize::symmetrical(3),
+        )
+        .consume()?;
+        out.flush()?;
+        cancellation.check()
+    }
 }
 
 fn exact_lines<'a>(path: &BStr, side: &str, bytes: &'a [u8]) -> io::Result<ExactLines<'a>> {
