@@ -503,6 +503,7 @@ gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
 gix -r project unstage src/main.rs
+gix -r project restore src/main.rs
 gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
@@ -526,6 +527,13 @@ and publishes the index only after all selected changes are prepared.</p>
 worktree files. It requires one or more literal paths, accepts <code>--</code>
 before a name starting with a dash, and refuses while a merge or another
 operation is active.</p>
+<p><code>restore PATH…</code> replaces selected tracked worktree files with their
+staged index contents without changing the index or references. Paths are literal
+and accept <code>--</code> before a leading dash. It refuses during a merge or
+another active operation, and rejects selected conflicts and unsafe filesystem
+or filter obstructions. Gitlinks remain unchanged; blobs are limited to 16 MiB.
+An I/O error or cancellation may leave selected files changed or missing. After
+addressing the cause, rerun the command to restore them from the unchanged index.</p>
 <p><code>commit -m MSG</code> commits the staged index to the attached local branch,
 including an unborn branch's first commit. It rejects unresolved entries and an
 unchanged index. Author and committer name and email must be configured;

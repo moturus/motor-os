@@ -12,10 +12,10 @@ anonymous HTTPS clone/fetch and read-only status/log. Host/Motor component
 gates, `full-test-dev.sh --release`, and the representative native HTTPS
 clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
-limits and measured results. M2 implementation is in progress. Its init review
-found a library directory-creation race; the narrow external fix was
-discussed, approved and implemented on 2026-09-16. Init and staging progress
-is recorded in section 7. Section 8 records the approved 8 MiB loose-ref
+limits and measured results. M2 implementation is in progress: init, staging,
+ordinary commit, branch/tag creation, unstage and restore are implemented and
+component-tested. Diff and switch/merge/recovery remain; section 7 records progress.
+Section 8 records the approved 8 MiB loose-ref
 limit and directory-entry repair. The managed stdlib and approved socket
 teardown repair passed three debug and three release main-image gates and the
 complete release developer suite. The original developer-budget diagnosis,
@@ -1194,6 +1194,13 @@ gates, formatting, strict Clippy and shell checks pass with matching source hash
 The first host gate passed its tests but caught an unnecessary borrow in Clippy;
 that was corrected. Review and validation are in
 `/tmp/motor-gix-restore-library-5d8c23b1`.
+The library is committed as `236d895d`. The reviewed CLI exposes
+`restore PATH…` and documents its limits and repeatable recovery after an I/O
+error or cancellation. The extended native lifecycle verifies executable and
+link-text modes, empty-directory replacement and ancestor obstruction refusal.
+Host/Motor CLI smoke checks and host Git verification pass, along with formatting,
+strict Clippy and shell checks; all tested source hashes match. CLI evidence is
+in `/tmp/motor-gix-restore-cli-236d895d`.
 
 ## 8. Discussion record
 

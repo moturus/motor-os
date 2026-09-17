@@ -66,6 +66,7 @@ gix -r project status
 gix -r project add src/main.rs
 gix -r project add -A
 gix -r project unstage src/main.rs
+gix -r project restore src/main.rs
 gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
@@ -92,6 +93,14 @@ Gitlinks are left unchanged. Staging refuses external filters and files over
 from an unborn branch's index, without changing worktree files. It requires one
 or more literal paths, accepts `--` before a name starting with a dash, and
 refuses while a merge or another operation is active.
+
+`restore PATH…` replaces selected tracked worktree files with their staged index
+contents without changing the index or references. Paths are literal and accept
+`--` before a leading dash. It refuses during a merge or another active operation,
+and rejects selected conflicts and unsafe filesystem or filter obstructions.
+Gitlinks remain unchanged; blobs are limited to 16 MiB. An I/O error or cancellation
+may leave selected files changed or missing. After addressing the cause, rerun
+the command to restore them from the unchanged index.
 
 `commit -m MSG` commits the staged index to the attached local branch, including
 an unborn branch's first commit. It rejects unresolved entries and an unchanged

@@ -270,6 +270,13 @@ verify_unstage_cli() {
   [ ! -e "$repository/.git/index.lock" ] || fail "gix unstage left index.lock"
 }
 
+verify_restore_cli() {
+  local repository="$1"
+  [ "$(cat "$repository/-leading")" = 'cli stage' ] ||
+    fail "gix restore wrote the wrong worktree content"
+  [ ! -e "$repository/.git/index.lock" ] || fail "gix restore left index.lock"
+}
+
 verify_commit_cli() {
   local repository="$1"
   [ "$(clean_git -C "$repository" symbolic-ref HEAD)" = refs/heads/main ] ||
@@ -416,6 +423,10 @@ PY
   verify_unstage_cli "$init_repo"
   "${app_env[@]}" "$gix_binary" -r "$init_repo" add -- -leading
   "${app_env[@]}" "$gix_binary" -r "$init_repo" -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial
+  printf 'dirty\n' > "$init_repo/-leading"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" restore -- -leading
+  verify_add_cli "$init_repo"
+  verify_restore_cli "$init_repo"
   verify_commit_cli "$init_repo"
 
   "${app_env[@]}" "$gix_binary" -r "$fixture" branch create cli-earlier HEAD^
@@ -699,9 +710,14 @@ guest_unstage_status="$(vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_roo
 [ "$guest_unstage_status" = '?? -leading' ] || fail "native gix unstage changed the worktree or retained the index entry"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init add -- -leading"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init -c user.name=CLI -c user.email=cli@example.com commit -m cli-initial"
+printf 'dirty\n' > "$temporary/add-cli-source"
+printf 'put "%s" "%s"\n' "$temporary/add-cli-source" "$guest_root/init/-leading" |
+  "${sftp_command[@]}"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/init restore -- -leading"
 printf 'get -r "%s" "%s"\n' "$guest_root/init" "$temporary/guest-add-cli" |
   "${sftp_command[@]}"
 verify_add_cli "$temporary/guest-add-cli"
+verify_restore_cli "$temporary/guest-add-cli"
 verify_commit_cli "$temporary/guest-add-cli"
 
 start_https_server 192.168.4.1 192.168.4.1

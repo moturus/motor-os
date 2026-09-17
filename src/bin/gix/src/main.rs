@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, fetch, init, network, refs, repository, status,
-    unstage,
+    Result, add, cancellation, clone, commit, fetch, init, network, refs, repository, restore,
+    status, unstage,
 };
 
 fn main() -> ExitCode {
@@ -84,6 +84,17 @@ fn run() -> Result {
         .subcommand(
             Command::new("unstage")
                 .about("Restore index entries from HEAD without changing the worktree")
+                .arg(
+                    Arg::new("paths")
+                        .value_name("PATH")
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("restore")
+                .about("Restore worktree files from the index")
                 .arg(
                     Arg::new("paths")
                         .value_name("PATH")
@@ -218,6 +229,17 @@ fn run() -> Result {
             )
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("restore") => {
+            let command = matches
+                .subcommand_matches("restore")
+                .expect("matched restore");
+            let paths = command
+                .get_many::<String>("paths")
+                .expect("required paths")
+                .cloned()
+                .collect::<Vec<_>>();
+            restore::run(&opened, &paths, &cancellation)
+        }
         Some("unstage") => {
             let command = matches
                 .subcommand_matches("unstage")

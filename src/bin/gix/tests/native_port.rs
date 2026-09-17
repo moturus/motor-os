@@ -1601,24 +1601,48 @@ fn check_restore(output: &Path) -> Result {
 
     fs::write(repository.join("modified"), b"dirty\n")?;
     fs::remove_file(repository.join("ignored-tracked"))?;
+    fs::copy(
+        repository.join("executable"),
+        repository.join("link-preserved"),
+    )?;
+    fs::copy(repository.join("modified"), repository.join("executable"))?;
     fs::write(repository.join("added"), b"nonselected\n")?;
     let paths = [
         "modified".into(),
         "ignored-tracked".into(),
+        "executable".into(),
+        "link-preserved".into(),
         "gitlink".into(),
     ];
     motor_gix::restore::run(&opened, &paths, &cancellation)?;
-    assert_eq!(fs::read(repository.join("modified"))?, b"new\n");
-    assert_eq!(
-        fs::read(repository.join("ignored-tracked"))?,
-        b"new ignored\n"
-    );
+    for (path, data, executable) in [
+        ("modified", b"new\n".as_slice(), false),
+        ("ignored-tracked", b"new ignored\n", false),
+        ("executable", b"new executable\n", true),
+        ("link-preserved", b"new-target", false),
+    ] {
+        assert_eq!(fs::read(repository.join(path))?, data, "{path}");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(repository.join(path))?;
+        assert_eq!(
+            gix::index::fs::Metadata::from_file(&file)?.is_executable(),
+            executable,
+            "{path}"
+        );
+    }
     assert_eq!(fs::read(repository.join("added"))?, b"nonselected\n");
     assert_eq!(
         fs::read(repository.join("gitlink/untracked-child"))?,
         b"must not stage\n"
     );
     assert_eq!(fs::read(repo.index_path())?, index_before);
+
+    fs::remove_file(repository.join("modified"))?;
+    fs::create_dir(repository.join("modified"))?;
+    motor_gix::restore::run(&opened, &["modified".into()], &cancellation)?;
+    assert_eq!(fs::read(repository.join("modified"))?, b"new\n");
 
     fs::remove_file(repository.join("ignored-tracked"))?;
     fs::create_dir(repository.join("ignored-tracked"))?;
@@ -1637,6 +1661,16 @@ fn check_restore(output: &Path) -> Result {
         fs::read(repository.join("ignored-tracked/keep"))?,
         b"preserved\n"
     );
+
+    fs::remove_file(repository.join("file-parent/child"))?;
+    fs::remove_dir(repository.join("file-parent"))?;
+    fs::write(repository.join("file-parent"), b"obstruction\n")?;
+    expect_restore_rejected(
+        &opened,
+        &["file-parent/child".into()],
+        "worktree ancestor is not a directory",
+    )?;
+    assert_eq!(fs::read(repository.join("file-parent"))?, b"obstruction\n");
 
     let id = repo.write_blob(b"conflict\n")?.detach();
     let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
