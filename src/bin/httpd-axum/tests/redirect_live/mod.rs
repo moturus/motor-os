@@ -1,23 +1,15 @@
-use crate::common::{request, request_with_host, Server};
+use crate::common::{certificates, connect, request, request_with_host, Fixture, Server};
 use crate::{assert_closed, assert_header_deadline, tls_config};
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::time::Duration;
 
 const HTTPS: &str = "127.0.0.1:443";
 const HTTP: &str = "127.0.0.1:80";
 const DESTINATION: &str = "https://localhost/landing?q=%2f#section";
 
 fn connect_http() -> TcpStream {
-    let stream = TcpStream::connect(HTTP).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    stream
+    connect(HTTP)
 }
 
 fn connect_https(
@@ -39,16 +31,17 @@ pub fn check() {
         b"test content\n"
     );
     server.stop();
-    let fixtures = Server::start_tls(None, &[]);
+    let fixtures = Fixture::new("redirect");
+    let (cert, key) = certificates(&fixtures.0);
     let binary = std::env::var_os("HTTPD_AXUM_BIN")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_httpd-axum").into());
     let output = Command::new(binary)
         .args(["-a", HTTPS, "-d"])
-        .arg(&fixtures.directory)
+        .arg(&fixtures.0)
         .arg("--ssl-cert")
-        .arg(fixtures.directory.join("cert.pem"))
+        .arg(cert)
         .arg("--ssl-key")
-        .arg(fixtures.directory.join("key.pem"))
+        .arg(key)
         .args(["--http-redirect-url", DESTINATION])
         .env_remove("RUST_LOG")
         .output()
@@ -63,7 +56,7 @@ pub fn check() {
         "{error}"
     );
     drop(TcpListener::bind(HTTPS).unwrap());
-    fixtures.stop();
+    drop(fixtures);
     drop(occupied);
 
     let mut server = Server::start_tls_at(

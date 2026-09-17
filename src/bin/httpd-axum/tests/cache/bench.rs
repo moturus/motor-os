@@ -1,4 +1,7 @@
+#[path = "../common/report.rs"]
+mod report;
 use crate::common::{request, Server};
+use report::report;
 use std::io::BufReader;
 use std::time::{Duration, Instant};
 
@@ -18,7 +21,7 @@ pub fn run() {
                 }
                 let start = Instant::now();
                 let response = request(&mut io, "GET", "/index.html", "");
-                let elapsed = start.elapsed().as_secs_f64() * 1e6;
+                let elapsed = start.elapsed();
                 assert_eq!(response.status, 200);
                 assert_eq!(response.body, content);
                 // Drain each log event so the diagnostic itself cannot fill the
@@ -31,10 +34,10 @@ pub fn run() {
                     .split_whitespace()
                     .next()
                     .unwrap()
-                    .parse::<f64>()
+                    .parse::<u64>()
                     .unwrap();
                 if i >= 4 {
-                    prepared.push(time);
+                    prepared.push(Duration::from_micros(time));
                     complete.push(elapsed);
                 }
             }
@@ -43,21 +46,10 @@ pub fn run() {
                 if cached { "on" } else { "off" },
                 if sparse { "sparse" } else { "burst" }
             );
-            report(&format!("{label} prepare"), prepared);
-            report(&format!("{label} client"), complete);
+            report(&format!("{label} prepare"), &prepared);
+            report(&format!("{label} client"), &complete);
         }
         drop(io);
         server.stop();
     }
-}
-
-fn report(label: &str, mut samples: Vec<f64>) {
-    samples.sort_by(f64::total_cmp);
-    println!(
-        "{label}: n={} mean={:.2}us p50={:.2}us p95={:.2}us",
-        samples.len(),
-        samples.iter().sum::<f64>() / samples.len() as f64,
-        samples[samples.len() / 2],
-        samples[samples.len() * 95 / 100]
-    );
 }

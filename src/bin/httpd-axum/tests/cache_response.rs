@@ -6,19 +6,17 @@ mod cache_store;
 use axum::body::{to_bytes, Body};
 use cache_store::{CacheStore, CachedFile};
 use http::{header, Method, Request};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[path = "common/fixture.rs"]
+mod fixture;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("httpd-response-{nonce}"));
-    std::fs::create_dir(&dir).unwrap();
-    let service = ServeDir::new(&dir);
+    let fixture = fixture::Fixture::new("response");
+    let dir = &fixture.0;
+    let service = ServeDir::new(dir);
     for content in [b"0123456789".as_slice(), b""] {
         std::fs::write(dir.join("file.txt"), content).unwrap();
         let response = service
@@ -89,6 +87,5 @@ async fn main() {
             }
         }
     }
-    std::fs::remove_dir_all(dir).unwrap();
     println!("httpd-axum cached responses match ServeDir");
 }

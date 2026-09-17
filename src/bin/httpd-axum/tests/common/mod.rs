@@ -1,14 +1,17 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+mod fixture;
+pub use fixture::Fixture;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub struct Server {
     child: Child,
     output: BufReader<ChildStdout>,
     pub address: SocketAddr,
     pub directory: PathBuf,
+    _fixture: Fixture,
 }
 
 impl Server {
@@ -25,21 +28,14 @@ impl Server {
     }
 
     fn start_with_tls(logging: Option<&str>, extra: &[&str], tls: bool, address: &str) -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!("httpd-http-{nonce}"));
-        std::fs::create_dir(&directory).unwrap();
+        let fixture = Fixture::new("http");
+        let directory = fixture.0.clone();
         std::fs::write(directory.join("index.html"), b"test content\n").unwrap();
         let binary = std::env::var_os("HTTPD_AXUM_BIN")
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_httpd-axum").into());
         let mut command = Command::new(binary);
         if tls {
-            let cert = directory.join("cert.pem");
-            let key = directory.join("key.pem");
-            std::fs::write(&cert, include_bytes!("../fixtures/cert.pem")).unwrap();
-            std::fs::write(&key, include_bytes!("../fixtures/key.pem")).unwrap();
+            let (cert, key) = certificates(&directory);
             command
                 .arg("--ssl-cert")
                 .arg(cert)
@@ -74,19 +70,12 @@ impl Server {
             output,
             address,
             directory,
+            _fixture: fixture,
         }
     }
 
     pub fn connect(&self) -> TcpStream {
-        let stream = TcpStream::connect(self.address).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        stream.set_nodelay(true).unwrap();
-        stream
+        connect(self.address)
     }
 
     pub fn stop(mut self) -> String {
@@ -110,8 +99,27 @@ impl Drop for Server {
             self.child.kill().unwrap();
             self.child.wait().unwrap();
         }
-        std::fs::remove_dir_all(&self.directory).unwrap();
     }
+}
+
+pub fn certificates(directory: &Path) -> (PathBuf, PathBuf) {
+    let cert = directory.join("cert.pem");
+    let key = directory.join("key.pem");
+    std::fs::write(&cert, include_bytes!("../fixtures/cert.pem")).unwrap();
+    std::fs::write(&key, include_bytes!("../fixtures/key.pem")).unwrap();
+    (cert, key)
+}
+
+pub fn connect(address: impl std::net::ToSocketAddrs) -> TcpStream {
+    let stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream.set_nodelay(true).unwrap();
+    stream
 }
 
 pub struct Response {
@@ -143,11 +151,15 @@ pub fn request_with_host<S: Read + Write>(
     .unwrap();
     io.get_mut().flush().unwrap();
     let mut line = String::new();
-    io.read_line(&mut line).unwrap();
+    assert_ne!(
+        io.read_line(&mut line).unwrap(),
+        0,
+        "server closed the connection before responding to {method} {path}"
+    );
     let status = line
         .split_whitespace()
         .nth(1)
-        .expect(&line)
+        .unwrap_or_else(|| panic!("invalid status line for {method} {path}: {line:?}"))
         .parse()
         .unwrap();
     let mut headers = String::new();

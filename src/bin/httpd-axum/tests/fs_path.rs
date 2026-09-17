@@ -1,45 +1,17 @@
 use axum::{body::Body, Router};
-use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[path = "common/fixture.rs"]
+mod fixture;
+#[path = "common/report.rs"]
+mod report;
+use fixture::Fixture;
+use report::report;
 use tokio::io::AsyncReadExt;
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 const SAMPLES: usize = 64;
 const CONTENT: &[u8] = &[b'x'; 256];
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("httpd-fs-{nonce}"));
-        std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("index.html"), CONTENT).unwrap();
-        Self(dir)
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
-}
-
-fn report(label: &str, samples: &[Duration]) {
-    let mut nanos: Vec<_> = samples.iter().map(Duration::as_nanos).collect();
-    nanos.sort_unstable();
-    println!(
-        "{label}: n={} mean={:.2}us p50={:.2}us p95={:.2}us",
-        nanos.len(),
-        nanos.iter().sum::<u128>() as f64 / nanos.len() as f64 / 1000.0,
-        nanos[nanos.len() / 2] as f64 / 1000.0,
-        nanos[nanos.len() * 95 / 100] as f64 / 1000.0,
-    );
-}
 
 async fn pace(sparse: bool) {
     if sparse {
@@ -49,7 +21,8 @@ async fn pace(sparse: bool) {
 
 #[tokio::main]
 async fn main() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("fs");
+    std::fs::write(fixture.0.join("index.html"), CONTENT).unwrap();
     let path = fixture.0.join("index.html");
     let app = Router::new().fallback_service(ServeDir::new(&fixture.0));
 
