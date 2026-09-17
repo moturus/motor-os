@@ -22,6 +22,7 @@ pub mod selection;
 pub mod stage_blob;
 pub mod status;
 mod tracked_filters;
+pub mod transition;
 pub mod tree_index;
 pub mod unstage;
 

@@ -144,6 +144,7 @@ fn main() -> Result {
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
     check_commit(&output)?;
+    check_transition_delta(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);
@@ -1074,6 +1075,144 @@ fn check_unstage(output: &Path) -> Result {
     );
     assert_eq!(fs::read(opened.repo.index_path())?, index_before_rejection);
     assert!(!opened.repo.git_dir().join("index.lock").exists());
+    Ok(())
+}
+
+struct TransitionFixture {
+    opened: motor_gix::repository::OpenedRepository,
+    original_commit: gix::ObjectId,
+    original_tree: gix::ObjectId,
+    target_tree: gix::ObjectId,
+}
+
+fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
+    let repository = output.join("transition-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(&repository, &[], false, &cancellation)?;
+    fs::create_dir(repository.join("dir"))?;
+    for (path, data) in [
+        (".gitignore", b"ignored-parent\ndir/block\n".as_slice()),
+        ("a", b"old a\n"),
+        ("dir/old", b"old child\n"),
+        ("keep", b"unchanged\n"),
+    ] {
+        fs::write(repository.join(path), data)?;
+    }
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "original", &cancellation)?;
+    let repo = &opened.repo;
+    let original_commit = repo.head_id()?.detach();
+    let original_tree = repo.head_tree()?.id().detach();
+    let (mut target, _) = repo.open_index()?.into_parts();
+    target.remove_entries(|_, path, _| path == "a" || path == "dir/old");
+    target
+        .entry_mut_by_path_and_stage(b"keep".as_bstr(), Stage::Unconflicted)
+        .ok_or("transition fixture keep entry is missing")?
+        .id = repo.write_blob(b"target keep\n")?.detach();
+    for (path, data) in [
+        ("a/b", b"new child\n".as_slice()),
+        ("dir", b"new file\n"),
+        ("ignored-parent/leaf", b"ignored parent child\n"),
+        ("untracked-parent/leaf", b"untracked parent child\n"),
+    ] {
+        target.dangerously_push_entry(
+            Default::default(),
+            repo.write_blob(data)?.detach(),
+            Flags::empty(),
+            Mode::FILE,
+            path.as_bytes().as_bstr(),
+        );
+    }
+    target.sort_entries();
+    let target_tree = motor_gix::tree_index::write(repo, &target, &cancellation)?;
+    Ok(TransitionFixture {
+        opened,
+        original_commit,
+        original_tree,
+        target_tree,
+    })
+}
+
+fn check_transition_delta(output: &Path) -> Result {
+    let fixture = transition_fixture(output)?;
+    let repo = &fixture.opened.repo;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let guard = motor_gix::mutation::Guard::acquire(repo)?;
+    let locked = guard.index();
+    let index_before = fs::read(repo.index_path())?;
+    let delta = motor_gix::transition::compute(
+        repo,
+        locked,
+        &fixture.original_tree,
+        &fixture.target_tree,
+        &cancellation,
+    )?;
+    assert_eq!(
+        delta
+            .changes
+            .iter()
+            .map(|change| (
+                change.path.as_bstr(),
+                change.original.is_some(),
+                change.target.is_some(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("a", true, false),
+            ("a/b", false, true),
+            ("dir", false, true),
+            ("dir/old", true, false),
+            ("ignored-parent/leaf", false, true),
+            ("keep", true, true),
+            ("untracked-parent/leaf", false, true),
+        ]
+        .map(|(path, old, new)| (path.as_bytes().as_bstr(), old, new))
+    );
+    assert_eq!(delta.original_index.entries().len(), 4);
+    assert_eq!(delta.target_index.entries().len(), 6);
+    assert!(
+        motor_gix::transition::compute(
+            repo,
+            &delta.target_index,
+            &fixture.original_tree,
+            &fixture.target_tree,
+            &cancellation,
+        )
+        .is_err(),
+        "an index that differs from the original tree was accepted"
+    );
+
+    let mut gitlink_target = delta.target_index.clone();
+    gitlink_target.dangerously_push_entry(
+        Default::default(),
+        fixture.original_commit,
+        Flags::empty(),
+        Mode::COMMIT,
+        b"gitlink".as_bstr(),
+    );
+    gitlink_target.sort_entries();
+    let gitlink_tree = motor_gix::tree_index::write(repo, &gitlink_target, &cancellation)?;
+    assert!(
+        motor_gix::transition::compute(
+            repo,
+            locked,
+            &fixture.original_tree,
+            &gitlink_tree,
+            &cancellation,
+        )
+        .is_err(),
+        "a changed gitlink was accepted"
+    );
+    assert_eq!(repo.head_id()?.detach(), fixture.original_commit);
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(
+        fs::read(repo.workdir().ok_or("worktree missing")?.join("a"))?,
+        b"old a\n"
+    );
+    drop(guard);
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
     Ok(())
 }
 

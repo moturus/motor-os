@@ -1255,6 +1255,16 @@ strict Clippy and shell checks pass with matching source hashes. Evidence is in
 `/tmp/motor-gix-diff-loader-b35b010f`. The renderer and open text-diff policy
 remain separate; no new limit or algorithm policy was applied.
 
+M2 transition delta: the reviewed helper builds bounded original/target indexes,
+checks held-index path/ID/mode/stage equivalence, and merges sorted entries into
+one add/delete/modify list. It reserves the bounded union before inserting and
+does not copy unchanged paths. Changed gitlinks are rejected; unchanged entries
+remain opaque. The native lifecycle holds the mutation guard and checks the
+delta, rejection paths, and unchanged HEAD/index/worktree. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-transition-delta-cea65c30`. This data-only result
+does not certify worktree cleanliness or collision safety; that preflight follows.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
