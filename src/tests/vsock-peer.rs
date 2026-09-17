@@ -64,6 +64,10 @@ const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
 const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
 const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
 const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
+const SHUTDOWN_DISPATCH_READY: &[u8] = b"shutdown-dispatch:ready";
+const SHUTDOWN_DISPATCH_HELD: &[u8] = b"shutdown-dispatch:held";
+const SHUTDOWN_DISPATCH_PROBE: &[u8] = b"shutdown-dispatch:probe";
+const SHUTDOWN_DISPATCH_DONE: &[u8] = b"shutdown-dispatch:done";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -794,6 +798,23 @@ fn run() -> io::Result<()> {
                     expect_eof(&mut accepted)?;
                     write_frame(&mut stream, ACCEPT_DISCONNECT_CLOSED)?;
                 }
+                expect_frame(&mut stream, SHUTDOWN_DISPATCH_READY)?;
+                let mut stalled = configure_stream(accept_before(&listener, deadline)?)?;
+                write_frame(&mut stream, SHUTDOWN_DISPATCH_HELD)?;
+                expect_frame(&mut stream, SHUTDOWN_DISPATCH_PROBE)?;
+                stalled.write_all(b"r")?;
+                let length: [u8; 8] = read_frame(&mut stream)?
+                    .ok_or_else(|| invalid("EOF before stalled TX length"))?
+                    .try_into()
+                    .map_err(|_| invalid("invalid stalled TX length"))?;
+                let total = usize::try_from(u64::from_be_bytes(length))
+                    .map_err(|_| invalid("stalled TX length overflow"))?;
+                if total >= 16 * 1024 * 1024 {
+                    return Err(invalid("stalled TX exceeds fixture bound"));
+                }
+                receive_raw_pattern(&mut stalled, total)?;
+                expect_eof(&mut stalled)?;
+                write_frame(&mut stream, SHUTDOWN_DISPATCH_DONE)?;
                 run_global_capacity_cycle(base, &mut stream)?;
                 expect_frame(&mut stream, CASE_DONE)?;
             }

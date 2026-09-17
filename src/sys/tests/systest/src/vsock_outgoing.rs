@@ -63,6 +63,10 @@ const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
 const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
 const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
 const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
+const SHUTDOWN_DISPATCH_READY: &[u8] = b"shutdown-dispatch:ready";
+const SHUTDOWN_DISPATCH_HELD: &[u8] = b"shutdown-dispatch:held";
+const SHUTDOWN_DISPATCH_PROBE: &[u8] = b"shutdown-dispatch:probe";
+const SHUTDOWN_DISPATCH_DONE: &[u8] = b"shutdown-dispatch:done";
 const COEXIST_READY: &[u8] = b"coexist:ready";
 const COEXIST_START: &[u8] = b"coexist:start";
 const COEXIST_PROGRESS: &[u8] = b"coexist:progress";
@@ -807,6 +811,8 @@ async fn run_native_accept(
     backpressured.close().await;
     println!("vsock accept reply disconnect: PASS");
 
+    run_pending_shutdowns(control).await;
+
     // Peer EOF and port reuse alone do not prove that dead streams left the
     // global table. Exercise every stream slot after both process exits.
     run_global_stream_capacity_cycle(control).await;
@@ -818,6 +824,134 @@ async fn run_native_accept(
     assert_eq!(accept_client.reservations(), 0);
     write_frame(control, CASE_DONE).await;
     vec![counter]
+}
+
+async fn run_pending_shutdowns(control: &VsockStream) {
+    use moto_ipc::io_channel;
+    use moto_sys_io::{api_net, api_vsock};
+
+    const LIMIT: usize = 8;
+    const FIRST_ID: u64 = 0x564f_a000;
+    async fn reply(receiver: &mut io_channel::Receiver, handle: u64) -> io_channel::Msg {
+        loop {
+            let response = crate::net_harness::bounded_output(receiver.recv(), 2)
+                .await
+                .expect("timed out waiting for pending-shutdown reply")
+                .unwrap();
+            if response.command != api_net::NetCmd::EvtVsockStreamStateChanged as u16 {
+                return response;
+            }
+            let state = api_vsock::decode_state_changed(&response).unwrap();
+            assert_eq!(state.handle, handle);
+            assert_eq!(state.cause, None);
+        }
+    }
+
+    write_frame(control, SHUTDOWN_DISPATCH_READY).await;
+    let (sender, mut receiver) = io_channel::connect("sys-io").unwrap();
+    let mut connect = api_vsock::connect_request(
+        api_vsock::VsockAddr {
+            cid: 2,
+            port: control.peer_addr().unwrap().port,
+        },
+        0,
+    )
+    .unwrap();
+    connect.id = FIRST_ID - 1;
+    sender.send(connect).await.unwrap();
+    let response = reply(&mut receiver, 0).await;
+    assert_eq!(response.id, connect.id);
+    let handle = api_vsock::decode_connect_response(&response)
+        .unwrap()
+        .handle;
+    expect_frame(control, SHUTDOWN_DISPATCH_HELD).await;
+
+    // The host explicitly withholds reads. Fill until page allocation stays
+    // pending for the harness's normal observation budget, then require all
+    // admitted SEND shutdowns to remain pending until the host is released.
+    let mut total = 0;
+    while let Some(page) =
+        crate::net_harness::bounded_output(sender.alloc_page(api_net::io_subchannel_mask(0)), 2)
+            .await
+    {
+        let page = page.unwrap();
+        for (index, byte) in page.bytes_mut().iter_mut().enumerate() {
+            *byte = pattern_byte(total + index);
+        }
+        sender
+            .send(api_vsock::stream_tx_msg(handle, page, PAGE_SIZE, 0))
+            .await
+            .unwrap();
+        total += PAGE_SIZE;
+        assert!(total < 16 * 1024 * 1024, "host did not backpressure TX");
+    }
+    assert!(total >= PAGES_PER_SUBCHANNEL * PAGE_SIZE);
+    for index in 0..80 {
+        let flags = if index < LIMIT {
+            api_vsock::SHUTDOWN_SEND
+        } else {
+            api_vsock::SHUTDOWN_RECEIVE
+        };
+        let mut shutdown = api_vsock::shutdown_request(handle, flags).unwrap();
+        shutdown.id = FIRST_ID + index as u64;
+        sender.send(shutdown).await.unwrap();
+        if index >= LIMIT {
+            let response = reply(&mut receiver, handle).await;
+            assert_eq!(
+                response.id, shutdown.id,
+                "admitted shutdown completed while TX was stalled"
+            );
+            assert_eq!(response.command, shutdown.command);
+            assert_eq!(response.status(), Err(moto_rt::Error::OutOfMemory));
+        }
+    }
+    // Rejecting RECEIVE at the limit must not apply that shutdown direction.
+    write_frame(control, SHUTDOWN_DISPATCH_PROBE).await;
+    let rx = reply(&mut receiver, handle).await;
+    assert_eq!(rx.command, api_net::NetCmd::VsockStreamRx as u16);
+    assert_eq!(rx.handle, handle);
+    assert_eq!(rx.payload.args_64()[1], 1);
+    let page = receiver.get_page(rx.payload.shared_pages()[0]).unwrap();
+    assert_eq!(page.bytes()[0], b'r');
+    drop(page);
+
+    let mut query = io_channel::Msg::new();
+    query.command = api_net::NetCmd::VsockAvailability as u16;
+    query.id = FIRST_ID + 80;
+    let mut udp = api_net::bind_udp_socket_request(&"127.0.0.1:0".parse().unwrap(), 0);
+    udp.id = query.id + 1;
+    for request in [query, udp] {
+        sender.send(request).await.unwrap();
+        let response = reply(&mut receiver, handle).await;
+        assert_eq!(response.id, request.id);
+        response.status().unwrap();
+        if request.command == udp.command {
+            let mut drop_udp = io_channel::Msg::new();
+            drop_udp.command = api_net::NetCmd::UdpSocketDrop as u16;
+            drop_udp.handle = response.handle;
+            sender.send(drop_udp).await.unwrap();
+        }
+    }
+    sender.send(api_vsock::close_request(handle)).await.unwrap();
+    query.id += 2;
+    sender.send(query).await.unwrap();
+    assert_eq!(reply(&mut receiver, handle).await.id, query.id);
+    write_frame(control, &(total as u64).to_be_bytes()).await;
+    let mut seen = [false; LIMIT];
+    for _ in 0..LIMIT {
+        let response = reply(&mut receiver, handle).await;
+        assert_eq!(
+            response.command,
+            api_net::NetCmd::VsockStreamShutdown as u16
+        );
+        assert_eq!(response.handle, handle);
+        response.status().unwrap();
+        let index = (response.id - FIRST_ID) as usize;
+        assert!(index < LIMIT);
+        assert!(!std::mem::replace(&mut seen[index], true));
+    }
+    expect_frame(control, SHUTDOWN_DISPATCH_DONE).await;
+    println!("vsock pending shutdown dispatch: PASS");
 }
 
 async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {

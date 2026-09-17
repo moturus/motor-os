@@ -259,8 +259,12 @@ run_outgoing_case() {
   if [ "$verdict" = "echo 0" ]; then
     rg -Fx "vsock connect errors: PASS" "$guest_log" >/dev/null ||
       fail "guest connect-error PASS marker missing"
+    rg -Fx "vsock pending accept dispatch: PASS" "$guest_log" >/dev/null ||
+      fail "pending accept dispatch PASS marker missing"
   fi
   if [ "$verdict" = native-accept ]; then
+    rg -Fx "vsock pending shutdown dispatch: PASS" "$guest_log" >/dev/null ||
+      fail "pending shutdown dispatch PASS marker missing"
     rg -Fx "vsock accept reply disconnect: PASS" "$guest_log" >/dev/null ||
       fail "accept reply disconnect PASS marker missing"
     rg -Fx "vsock idle client cleanup: PASS" "$guest_log" >/dev/null ||

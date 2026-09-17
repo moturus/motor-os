@@ -290,7 +290,8 @@ impl RawVsockListener {
         barrier.id = accept.id + 1;
         connection.send(barrier).unwrap();
         // The following FIFO control task creates a socket before sending its
-        // own blocked reply. Its counter proves accept reached the full ring.
+        // own blocked reply. Its counter proves accept was dispatched while
+        // the destination's reply ring was full.
         crate::tcp::wait_for_sys_io_metric("net.total_udp_sockets", |n| n == total_udp + 1);
         assert!(connection.server_queue_full());
         connection
@@ -298,52 +299,99 @@ impl RawVsockListener {
 }
 
 pub async fn test_raw_vsock_pending_accepts() {
+    use moto_sys_io::{api_net, api_vsock};
+
     const PORT: u32 = 80_004;
     const ACCEPT_LIMIT: usize = 8;
+    const LISTENERS: usize = 8;
     const FIRST_ID: u64 = 0x564f_8000;
 
-    let listener = RawVsockListener::bind(PORT).await;
-    let handle = listener.handle;
-    // Accepts may ride a different channel owned by the same process.
     let (accept_tx, mut accept_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
-    for index in 0..ACCEPT_LIMIT {
-        let mut request =
-            moto_sys_io::api_vsock::listener_accept_request(handle, index as u8 % 4).unwrap();
-        request.id = FIRST_ID + index as u64;
-        accept_tx.send(request).await.unwrap();
+    let mut handles = [0; LISTENERS];
+    for (index, handle) in handles.iter_mut().enumerate() {
+        let mut bind = api_vsock::listener_bind_request(PORT + index as u32).unwrap();
+        bind.id = FIRST_ID - index as u64 - 1;
+        let response = raw_vsock_response(&accept_tx, &mut accept_rx, bind).await;
+        *handle = api_vsock::decode_listener_bind_response(&response)
+            .unwrap()
+            .handle;
     }
-    let mut overflow = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
-    overflow.id = FIRST_ID + ACCEPT_LIMIT as u64;
-    expect_raw_vsock_error(
-        &accept_tx,
-        &mut accept_rx,
-        overflow,
-        moto_rt::Error::OutOfMemory,
-    )
-    .await;
-
-    listener.close().await;
-    let mut seen = [false; ACCEPT_LIMIT];
-    for _ in 0..ACCEPT_LIMIT {
-        let response = bounded_output(accept_rx.recv(), 2)
-            .await
-            .expect("timed out waiting for dropped-listener accept response")
-            .unwrap();
-        let index = usize::try_from(response.id - FIRST_ID).unwrap();
-        assert!(index < ACCEPT_LIMIT);
-        assert!(!std::mem::replace(&mut seen[index], true));
-        assert_eq!(
-            response.command,
-            moto_sys_io::api_net::NetCmd::VsockListenerAccept as u16
-        );
-        assert_eq!(response.handle, handle);
-        assert_eq!(response.status(), Err(moto_rt::Error::NotConnected));
+    for (listener, handle) in handles.iter().enumerate() {
+        for index in 0..ACCEPT_LIMIT {
+            let mut request = api_vsock::listener_accept_request(*handle, index as u8 % 4).unwrap();
+            request.id = FIRST_ID + (listener * ACCEPT_LIMIT + index) as u64;
+            accept_tx.send(request).await.unwrap();
+        }
     }
-    assert!(seen.into_iter().all(|seen| seen));
+    // All 64 dispatch tickets used to remain held by these unmatched accepts.
+    let mut query = moto_ipc::io_channel::Msg::new();
+    query.command = api_net::NetCmd::VsockAvailability as u16;
+    query.id = FIRST_ID + 64;
+    raw_vsock_response(&accept_tx, &mut accept_rx, query)
+        .await
+        .status()
+        .unwrap();
+    let mut udp = api_net::bind_udp_socket_request(&"127.0.0.1:0".parse().unwrap(), 0);
+    udp.id = query.id + 1;
+    let response = raw_vsock_response(&accept_tx, &mut accept_rx, udp).await;
+    response.status().unwrap();
+    let mut drop_udp = moto_ipc::io_channel::Msg::new();
+    drop_udp.command = api_net::NetCmd::UdpSocketDrop as u16;
+    drop_udp.handle = response.handle;
+    drop_udp.id = udp.id + 1;
+    accept_tx.send(drop_udp).await.unwrap();
+    query.id = drop_udp.id + 1;
+    raw_vsock_response(&accept_tx, &mut accept_rx, query)
+        .await
+        .status()
+        .unwrap();
 
-    let mut stale = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
-    stale.id = FIRST_ID + ACCEPT_LIMIT as u64 + 1;
+    for (listener, handle) in handles.iter().enumerate() {
+        let mut overflow = api_vsock::listener_accept_request(*handle, 0).unwrap();
+        overflow.id = FIRST_ID + 128 + listener as u64;
+        expect_raw_vsock_error(
+            &accept_tx,
+            &mut accept_rx,
+            overflow,
+            moto_rt::Error::OutOfMemory,
+        )
+        .await;
+    }
+    for (listener, handle) in handles.iter().enumerate() {
+        let mut drop = api_vsock::listener_drop_request(*handle);
+        drop.id = FIRST_ID + 256 + listener as u64;
+        accept_tx.send(drop).await.unwrap();
+        let mut seen = [false; ACCEPT_LIMIT + 1];
+        for _ in 0..=ACCEPT_LIMIT {
+            let response = bounded_output(accept_rx.recv(), 2)
+                .await
+                .expect("timed out waiting for dropped-listener response")
+                .unwrap();
+            assert_eq!(response.handle, *handle);
+            let index = if response.id == drop.id {
+                assert_eq!(response.command, api_net::NetCmd::VsockListenerDrop as u16);
+                response.status().unwrap();
+                ACCEPT_LIMIT
+            } else {
+                assert_eq!(
+                    response.command,
+                    api_net::NetCmd::VsockListenerAccept as u16
+                );
+                assert_eq!(response.status(), Err(moto_rt::Error::NotConnected));
+                let index = (response.id - FIRST_ID) as usize - listener * ACCEPT_LIMIT;
+                assert!(index < ACCEPT_LIMIT);
+                index
+            };
+            assert!(!std::mem::replace(&mut seen[index], true));
+        }
+        assert!(seen.into_iter().all(|seen| seen));
+    }
+
+    let mut stale = api_vsock::listener_accept_request(handles[0], 0).unwrap();
+    stale.id = FIRST_ID + 512;
     expect_raw_vsock_error(&accept_tx, &mut accept_rx, stale, moto_rt::Error::NotFound).await;
+    RawVsockListener::bind(PORT).await.close().await;
+    println!("vsock pending accept dispatch: PASS");
 }
 
 pub async fn test_raw_vsock_listener_bind() {

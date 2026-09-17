@@ -214,3 +214,41 @@ Debug and release builds, all 20 QEMU peer cases, I/O-task fixtures, and native
 TCP/UDP tests passed. Formatting and targeted Clippy passed without new
 warnings. Logs are `accept-{build,clippy,vsock,native}-{debug,release}.log`
 in `/tmp/vsock-review-gate.zw7gYT`.
+
+The dispatch-ticket changes are implemented but not committed. Against the
+previous handlers, 64 pending accepts reproducibly stalled the following
+availability query (`0x564f8040`), preserved in `dispatch-before-release.log`.
+With the changes, the debug guest passed the pending-accept regression and
+the new stalled-TX test: eight admitted SEND shutdowns, 72 explicit overflow
+responses, a successful RX probe after rejected RECEIVE shutdowns, same-channel
+query/UDP/close progress, and all admitted replies after peer drain. Existing
+peer cases and capacity reuse also passed. The focused gate itself did not
+pass: the new host fixture initially had a compile error (fixed), then its
+shell assertion looked for the accept marker in `native-accept` instead of
+`echo 0` (fixed). Original logs are `dispatch-vsock-debug.log` and
+`dispatch-v2-vsock-debug.log`. The corrected complete focused gate, release
+tests, and final full gate remain pending.
+
+Implementation paused for review of an additional source-confirmed
+ownership race. `net.rs::on_connection_done` drains the old channel's socket
+set before reclaiming its sockets. Reclaiming an open TCP socket can await
+`device.rs::poll_completion`, leaving that client entry, a vsock listener,
+and a matched child in the common map. A cross-channel accept can then
+publish its reply to a still-active destination. `socket.rs::set_client_sender`
+checks only the destination and asserts that removal from the previous
+client's already-drained socket set succeeds. This assertion can still abort
+sys-io, independently of the destination-registration check fixed above.
+The interleaving is diagnosed from source, not claimed as a runtime
+reproduction. The user subsequently approved fixing this additional path.
+It will be a separate commit: synchronously remove vsock listeners before
+the first TCP teardown await, invalidating matched accepts before another
+task can publish success against a closing owner. This preserves active
+ownership assertions and avoids rejecting ownership only after a live
+destination has received a successful reply.
+
+The corrected dispatch focused gate passed in debug and release, including
+all 20 QEMU peer cases, I/O-task fixtures, and native TCP/UDP tests. Formatting
+and targeted Clippy found no new warnings. Logs are
+`dispatch-v3-{build,clippy,vsock,native}-{debug,release}.log`. This issue's
+patch is larger than the preferred range because it keeps both bounded wait
+paths and their regressions together. The final full gate remains pending.

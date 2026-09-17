@@ -597,6 +597,7 @@ impl NetRuntime {
 
         // Then remove sockets. Client death cancels any pending linger and
         // makes every active TCP socket take the immediate reclaim path.
+        let mut vsock_accepts = std::collections::VecDeque::new();
         let socket_cnt = {
             self.discard_vsock_accepts_from(conn_id);
             let mut socket_ids = {
@@ -646,7 +647,9 @@ impl NetRuntime {
                 if let Some((Some(moto_socket), is_vsock, is_vsock_listener)) = socket_kind {
                     if is_vsock_listener {
                         drop(moto_socket);
-                        let _ = self.remove_vsock_listener(*socket_id, conn_id);
+                        if let Ok(mut accepts) = self.remove_vsock_listener(*socket_id, conn_id) {
+                            vsock_accepts.append(&mut accepts);
+                        }
                     } else if is_vsock {
                         self.disconnect_vsock_client(&moto_socket);
                     } else {
@@ -671,6 +674,9 @@ impl NetRuntime {
             socket_cnt,
             listener_cnt
         );
+        // Cleanup must not wait for another channel's accept reply space.
+        self.fail_vsock_accepts(vsock_accepts, moto_rt::Error::NotConnected)
+            .await;
         // Note: client will drop here.
     }
 

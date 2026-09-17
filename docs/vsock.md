@@ -86,7 +86,7 @@ translation layer.
 - Invalid CIDs, ports, flags, and request shapes are `InvalidArgument`.
   A refused connection is `NotConnected`; a silent connect reaches the fixed
   two-second deadline as `TimedOut`. Peer reset is `ConnectionReset`.
-- Global stream/listener/pending-accept admission returns `OutOfMemory`. A full
+- Global stream/listener/pending-accept/shutdown admission returns `OutOfMemory`. A full
   client channel returns `ReserveError::AtCapacity`; a retiring
   channel returns `ReserveError::ShuttingDown`.
 - A device reset permanently caches `InternalError` for vsock. Existing
@@ -123,12 +123,19 @@ The fixed bounds are:
 - 64 streams globally, including connecting, unaccepted, and closing streams;
 - 32 listeners globally;
 - eight unaccepted children and, separately, eight waiting accept RPCs per
-  listener; and
+  listener;
+- eight outstanding shutdown RPCs per stream, including replies waiting for
+  client IPC space; and
 - 128 KiB of buffered receive data per stream.
 
 The accepted-child and pending-accept bounds are independent. A pending
 accept may reserve a slot from another channel owned by the same process;
 foreign or stale handles are `NotFound`.
+
+Pending accepts and shutdowns do not retain NET dispatch tickets while they
+wait for peer progress. Canceling a sent shutdown does not retract it: its
+slot is released when the reply is published or discarded. A shutdown
+rejected at the limit does not apply a new shutdown direction.
 
 ## Tested launch configuration
 
