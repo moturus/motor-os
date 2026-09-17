@@ -1183,6 +1183,18 @@ including a leading-dash path and host Git interoperability. All component,
 formatting, strict Clippy and shell gates pass with matching source hashes;
 CLI evidence is in `/tmp/motor-gix-unstage-cli-fc914dd8`.
 
+M2 narrow restore library: the reviewed implementation borrows selected entries
+from the locked index, preflights all paths/filters/blob limits before deletion,
+and uses a full index copy for attribute lookup while skipping unselected output.
+It replaces regular files or empty directories nonrecursively, rejects selected
+conflicts and unsafe obstructions, and leaves the index and refs unchanged.
+A shared native lifecycle verifies restoration, whole-selection preflight,
+preserved local files, conflict refusal and lock cleanup. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+The first host gate passed its tests but caught an unnecessary borrow in Clippy;
+that was corrected. Review and validation are in
+`/tmp/motor-gix-restore-library-5d8c23b1`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

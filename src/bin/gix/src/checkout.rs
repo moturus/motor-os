@@ -58,7 +58,7 @@ pub fn initial(
     Ok(index)
 }
 
-fn check_outcome(outcome: &gix::worktree::state::checkout::Outcome) -> crate::Result {
+pub(crate) fn check_outcome(outcome: &gix::worktree::state::checkout::Outcome) -> crate::Result {
     if let Some(record) = outcome.errors.first() {
         return Err(io::Error::other(format!(
             "checkout failed at '{}': {}",

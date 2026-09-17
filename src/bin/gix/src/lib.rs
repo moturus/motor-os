@@ -15,6 +15,7 @@ pub mod mutation;
 pub mod network;
 pub mod refs;
 pub mod repository;
+pub mod restore;
 pub mod selection;
 pub mod stage_blob;
 pub mod status;

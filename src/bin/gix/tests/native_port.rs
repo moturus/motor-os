@@ -139,6 +139,7 @@ fn main() -> Result {
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
     check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
+    check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;
     check_commit(&output)?;
@@ -1588,4 +1589,86 @@ fn capture_file(path: &Path) -> std::io::Result<fs::File> {
         .create(true)
         .truncate(true)
         .open(path)
+}
+
+fn check_restore(output: &Path) -> Result {
+    let repository = output.join("add-repository");
+    let opened = motor_gix::repository::open(&repository, &[], false)?;
+    let repo = &opened.repo;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let index_before = fs::read(repo.index_path())?;
+    let head_before = fs::read(repo.git_dir().join("HEAD"))?;
+
+    fs::write(repository.join("modified"), b"dirty\n")?;
+    fs::remove_file(repository.join("ignored-tracked"))?;
+    fs::write(repository.join("added"), b"nonselected\n")?;
+    let paths = [
+        "modified".into(),
+        "ignored-tracked".into(),
+        "gitlink".into(),
+    ];
+    motor_gix::restore::run(&opened, &paths, &cancellation)?;
+    assert_eq!(fs::read(repository.join("modified"))?, b"new\n");
+    assert_eq!(
+        fs::read(repository.join("ignored-tracked"))?,
+        b"new ignored\n"
+    );
+    assert_eq!(fs::read(repository.join("added"))?, b"nonselected\n");
+    assert_eq!(
+        fs::read(repository.join("gitlink/untracked-child"))?,
+        b"must not stage\n"
+    );
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+
+    fs::remove_file(repository.join("ignored-tracked"))?;
+    fs::create_dir(repository.join("ignored-tracked"))?;
+    fs::write(repository.join("ignored-tracked/keep"), b"preserved\n")?;
+    fs::write(repository.join("added"), b"preflight preserved\n")?;
+    expect_restore_rejected(
+        &opened,
+        &["added".into(), "ignored-tracked".into()],
+        "worktree directory is not empty",
+    )?;
+    assert_eq!(
+        fs::read(repository.join("added"))?,
+        b"preflight preserved\n"
+    );
+    assert_eq!(
+        fs::read(repository.join("ignored-tracked/keep"))?,
+        b"preserved\n"
+    );
+
+    let id = repo.write_blob(b"conflict\n")?.detach();
+    let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
+    guard.publish_edited_index(|index| {
+        let path = b"conflict".as_bstr();
+        index.remove_entries(|_, entry_path, _| entry_path == path);
+        for stage in [Stage::Base, Stage::Ours, Stage::Theirs] {
+            let flags = Flags::from_stage(stage);
+            index.dangerously_push_entry(Default::default(), id, flags, Mode::FILE, path);
+        }
+        Ok(())
+    })?;
+    drop(guard);
+    expect_restore_rejected(&opened, &["conflict".into()], "index entry is conflicted")?;
+    fs::write(repo.index_path(), &index_before)?;
+    assert_eq!(fs::read(repo.index_path())?, index_before);
+    assert_eq!(fs::read(repo.git_dir().join("HEAD"))?, head_before);
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn expect_restore_rejected(
+    opened: &motor_gix::repository::OpenedRepository,
+    paths: &[String],
+    expected: &str,
+) -> Result {
+    let before = fs::read(opened.repo.index_path())?;
+    let error =
+        motor_gix::restore::run(opened, paths, &motor_gix::cancellation::Cancellation::new())
+            .expect_err("restore unexpectedly succeeded");
+    assert!(error.to_string().contains(expected), "{error}");
+    assert_eq!(fs::read(opened.repo.index_path())?, before);
+    assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
 }

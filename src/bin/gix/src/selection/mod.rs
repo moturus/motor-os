@@ -213,7 +213,7 @@ impl std::error::Error for InspectError {
     }
 }
 
-fn contains(parent: &BStr, path: &BStr) -> bool {
+pub(crate) fn contains(parent: &BStr, path: &BStr) -> bool {
     let parent = parent.as_bytes();
     let path = path.as_bytes();
     parent.is_empty()
