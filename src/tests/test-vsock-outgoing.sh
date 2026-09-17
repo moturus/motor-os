@@ -263,6 +263,8 @@ run_outgoing_case() {
       fail "pending accept dispatch PASS marker missing"
   fi
   if [ "$verdict" = native-accept ]; then
+    rg -Fx "vsock accept owner disconnect: PASS" "$guest_log" >/dev/null ||
+      fail "accept owner disconnect PASS marker missing"
     rg -Fx "vsock pending shutdown dispatch: PASS" "$guest_log" >/dev/null ||
       fail "pending shutdown dispatch PASS marker missing"
     rg -Fx "vsock accept reply disconnect: PASS" "$guest_log" >/dev/null ||

@@ -252,3 +252,22 @@ and targeted Clippy found no new warnings. Logs are
 `dispatch-v3-{build,clippy,vsock,native}-{debug,release}.log`. This issue's
 patch is larger than the preferred range because it keeps both bounded wait
 paths and their regressions together. The final full gate remains pending.
+
+The additional ownership fix removes a closing channel's vsock listeners
+synchronously, before any TCP teardown await. Matched accept tasks are woken
+with their listener already absent; the shared ownership assertions and the
+reply-before-RX ordering are unchanged. A controlled regression fills a
+separate TCP accept channel's reply ring, blocking its cancellation reply,
+then requires the vsock peer to observe listener loss before releasing that
+ring. Both TCP and vsock accepts must return `NotConnected`, followed by
+listener-port and exact stream-capacity reuse.
+
+The old ordering failed the peer-close check in
+`owner-before-v2-release.log`; `owner-before-release.log` records an earlier
+compile error in the new fixture, corrected before that reproduction. This
+reproduces the unsafe teardown ordering, not the exact ownership assertion.
+With the fix, debug/release builds, all 20 QEMU peer cases, I/O-task fixtures,
+native TCP/UDP tests, formatting, and targeted Clippy passed without new
+warnings. Evidence is `owner-{build,clippy,vsock,native}-{debug,release}.log`
+in `/tmp/vsock-review-gate.zw7gYT`. All code fixes are ready for the frozen
+final gate.

@@ -64,6 +64,9 @@ const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
 const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
 const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
 const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
+const ACCEPT_OWNER_READY: &[u8] = b"accept-owner:ready";
+const ACCEPT_OWNER_HELD: &[u8] = b"accept-owner:held";
+const ACCEPT_OWNER_CLOSED: &[u8] = b"accept-owner:closed";
 const SHUTDOWN_DISPATCH_READY: &[u8] = b"shutdown-dispatch:ready";
 const SHUTDOWN_DISPATCH_HELD: &[u8] = b"shutdown-dispatch:held";
 const SHUTDOWN_DISPATCH_PROBE: &[u8] = b"shutdown-dispatch:probe";
@@ -798,6 +801,11 @@ fn run() -> io::Result<()> {
                     expect_eof(&mut accepted)?;
                     write_frame(&mut stream, ACCEPT_DISCONNECT_CLOSED)?;
                 }
+                expect_frame(&mut stream, ACCEPT_OWNER_READY)?;
+                let mut closing = connect_guest(base, ACCEPT_DISCONNECT_PORT)?;
+                write_frame(&mut stream, ACCEPT_OWNER_HELD)?;
+                expect_eof(&mut closing)?;
+                write_frame(&mut stream, ACCEPT_OWNER_CLOSED)?;
                 expect_frame(&mut stream, SHUTDOWN_DISPATCH_READY)?;
                 let mut stalled = configure_stream(accept_before(&listener, deadline)?)?;
                 write_frame(&mut stream, SHUTDOWN_DISPATCH_HELD)?;

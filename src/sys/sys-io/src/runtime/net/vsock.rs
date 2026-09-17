@@ -664,7 +664,7 @@ impl NetRuntime {
         }
     }
 
-    pub(super) fn discard_vsock_accepts_from(&self, client: SysHandle) {
+    pub(super) fn disconnect_vsock_listeners(&self, client: SysHandle) -> VecDeque<PendingAccept> {
         let listeners = {
             let inner = self.inner.borrow();
             let mut listeners: [Option<Rc<RefCell<MotoSocket>>>; MAX_LISTENERS] =
@@ -679,7 +679,21 @@ impl NetRuntime {
             }
             listeners
         };
+        let mut accepts = VecDeque::new();
         for listener in listeners.into_iter().flatten() {
+            let owned = listener.borrow().sender().remote_handle() == client;
+            if owned {
+                let socket_id = listener.borrow().socket_id();
+                // Release the temporary owner so removal resets matched
+                // children and wakes their reply tasks synchronously.
+                drop(listener);
+                accepts.append(
+                    &mut self
+                        .remove_vsock_listener(socket_id, client)
+                        .expect("owned vsock listener disappeared during disconnect"),
+                );
+                continue;
+            }
             while listener
                 .borrow_mut()
                 .unwrap_vsock_listener_mut()
@@ -687,6 +701,7 @@ impl NetRuntime {
                 .is_some()
             {}
         }
+        accepts
     }
 
     async fn vsock_connect(

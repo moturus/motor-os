@@ -63,6 +63,9 @@ const ACCEPT_DISCONNECT_HELD: &[u8] = b"accept-disconnect:held";
 const ACCEPT_DISCONNECT_CLOSED: &[u8] = b"accept-disconnect:closed";
 const ACCEPT_DISCONNECT_PORT: u32 = 70_004;
 const ACCEPT_DISCONNECT_ROUNDS: usize = 16;
+const ACCEPT_OWNER_READY: &[u8] = b"accept-owner:ready";
+const ACCEPT_OWNER_HELD: &[u8] = b"accept-owner:held";
+const ACCEPT_OWNER_CLOSED: &[u8] = b"accept-owner:closed";
 const SHUTDOWN_DISPATCH_READY: &[u8] = b"shutdown-dispatch:ready";
 const SHUTDOWN_DISPATCH_HELD: &[u8] = b"shutdown-dispatch:held";
 const SHUTDOWN_DISPATCH_PROBE: &[u8] = b"shutdown-dispatch:probe";
@@ -810,6 +813,21 @@ async fn run_native_accept(
     }
     backpressured.close().await;
     println!("vsock accept reply disconnect: PASS");
+
+    let closing = crate::net_driver::RawVsockListener::bind(ACCEPT_DISCONNECT_PORT).await;
+    write_frame(control, ACCEPT_OWNER_READY).await;
+    expect_frame(control, ACCEPT_OWNER_HELD).await;
+    let (tcp, vsock) = closing.accept_with_blocked_tcp_teardown().await;
+    assert!(
+        bounded(expect_frame(control, ACCEPT_OWNER_CLOSED), 2).await,
+        "vsock listener cleanup waited for a blocked TCP cancellation reply"
+    );
+    crate::net_driver::finish_blocked_owner_accepts(tcp, vsock);
+    crate::net_driver::RawVsockListener::bind(ACCEPT_DISCONNECT_PORT)
+        .await
+        .close()
+        .await;
+    println!("vsock accept owner disconnect: PASS");
 
     run_pending_shutdowns(control).await;
 

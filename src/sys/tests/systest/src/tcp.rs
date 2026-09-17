@@ -72,7 +72,7 @@ pub(crate) fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool
     }
 }
 
-fn recv_raw_net_response(
+pub(crate) fn recv_raw_net_response(
     connection: &moto_ipc::io_channel::ClientConnection,
 ) -> moto_ipc::io_channel::Msg {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);

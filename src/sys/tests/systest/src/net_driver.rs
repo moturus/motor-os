@@ -296,6 +296,73 @@ impl RawVsockListener {
         assert!(connection.server_queue_full());
         connection
     }
+
+    pub async fn accept_with_blocked_tcp_teardown(
+        mut self,
+    ) -> (
+        moto_ipc::io_channel::ClientConnection,
+        moto_ipc::io_channel::ClientConnection,
+    ) {
+        use moto_sys_io::api_net::{self, NetCmd};
+
+        let mut bind = api_net::bind_tcp_listener_request(&"127.0.0.1:0".parse().unwrap(), Some(1));
+        bind.id = self.next_id;
+        let response = raw_vsock_response(&self.owner, &mut self.owner_rx, bind).await;
+        response.status().unwrap();
+        let tcp = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        let mut accept =
+            api_net::accept_tcp_listener_request(response.handle, api_net::io_subchannel_mask(0));
+        accept.id = 0x564f_d000;
+        tcp.send(accept).unwrap();
+        let mut query = moto_ipc::io_channel::Msg::new();
+        query.command = NetCmd::VsockAvailability as u16;
+        query.id = accept.id + 1;
+        tcp.send(query).unwrap();
+        let response = crate::tcp::recv_raw_net_response(&tcp);
+        assert_eq!(response.id, query.id);
+        response.status().unwrap();
+        // The FIFO query proves TCP accept is queued. Keep its cancellation
+        // reply blocked until after the vsock peer has observed listener loss.
+        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
+            query.id = id;
+            tcp.send(query).unwrap();
+        }
+        crate::net_harness::wait_until("full TCP teardown reply ring", || tcp.server_queue_full())
+            .await;
+        let vsock = self.accept_with_full_reply_ring().await;
+        drop(self);
+        (tcp, vsock)
+    }
+}
+
+pub fn finish_blocked_owner_accepts(
+    tcp: moto_ipc::io_channel::ClientConnection,
+    vsock: moto_ipc::io_channel::ClientConnection,
+) {
+    use moto_sys_io::api_net::NetCmd;
+
+    for (connection, command, count) in [
+        (vsock, NetCmd::VsockListenerAccept as u16, 2),
+        (tcp, NetCmd::TcpListenerAccept as u16, 1),
+    ] {
+        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
+            let response = crate::tcp::recv_raw_net_response(&connection);
+            assert_eq!(response.id, id);
+            response.status().unwrap();
+        }
+        let mut canceled = false;
+        for _ in 0..count {
+            let response = crate::tcp::recv_raw_net_response(&connection);
+            if response.command == command {
+                assert_eq!(response.status(), Err(moto_rt::Error::NotConnected));
+                assert!(!std::mem::replace(&mut canceled, true));
+            } else {
+                assert_eq!(response.command, NetCmd::UdpSocketBind as u16);
+                response.status().unwrap();
+            }
+        }
+        assert!(canceled);
+    }
 }
 
 pub async fn test_raw_vsock_pending_accepts() {

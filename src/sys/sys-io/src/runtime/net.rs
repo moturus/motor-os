@@ -589,6 +589,10 @@ impl NetRuntime {
             listeners
         };
 
+        // Invalidate matched vsock accepts before any TCP teardown can yield.
+        // Otherwise they can publish into a live destination after the old
+        // owner's socket set has been drained below.
+        let mut vsock_accepts = self.disconnect_vsock_listeners(conn_id);
         let listener_cnt = tcp_listeners.len();
         for tcp_listener in tcp_listeners {
             tcp_listener::TcpListener::hard_reset(tcp_listener).await;
@@ -597,9 +601,7 @@ impl NetRuntime {
 
         // Then remove sockets. Client death cancels any pending linger and
         // makes every active TCP socket take the immediate reclaim path.
-        let mut vsock_accepts = std::collections::VecDeque::new();
         let socket_cnt = {
-            self.discard_vsock_accepts_from(conn_id);
             let mut socket_ids = {
                 let mut inner = self.inner.borrow_mut();
                 let client = inner.clients.get_mut(&conn_id).unwrap();
