@@ -15,10 +15,11 @@ image while testing debug component binaries. Motor runs include real ports
 80/443, certificate-validated TLS, HTTP/2 and listener isolation. Failed runs
 retain their build artifact list and console log under the printed `/tmp` path.
 
-This component driver is not currently called by `src/tests/full-test.sh`.
-The filesystem workload in `src/tests/stress-soak.sh` also needs an explicit
-`--cache=off` when launching httpd-axum to preserve its per-GET filesystem
-coverage; the current soak launch does not pass it.
+`src/tests/full-test-dev.sh` runs this driver on the host and in a snapshot of
+the developer image, using the suite's selected build profile. The core
+`src/tests/full-test.sh` does not run the component gate.
+The filesystem workload in `src/tests/stress-soak.sh` launches httpd-axum with
+`--cache=off` to preserve its per-GET filesystem coverage.
 
 Run the CLI regressions on the host with the repository-selected toolchain:
 

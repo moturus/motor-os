@@ -2,9 +2,9 @@
 #
 # full-test-dev.sh — the full test suite against the dev image.
 #
-# The dev-image full test includes the repository suite, native source builds,
-# and Lorry's bounded product suite. Lorry validation is profile-independent
-# and does not multiply coverage by the OS image profile.
+# The dev-image full test includes the repository suite, httpd-axum regressions,
+# native source builds, and Lorry's bounded product suite. Lorry validation is
+# profile-independent and does not multiply coverage by the OS image profile.
 #
 # Work that is not explicitly scoped to Lorry runs this suite only with
 # --release. If such work necessarily changes src/bin/lorry, ask before adding
@@ -27,6 +27,10 @@ MOTO_MEMORY_MIB="$REPOSITORY_MEMORY_MIB" \
   FULL_TEST_IMG_TARGET=dev.img FULL_TEST_IMAGE=motor-os-dev.qcow2 \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "$@"
+
+"$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" "$@"
+MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
+  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --motor "$@"
 
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "$@"

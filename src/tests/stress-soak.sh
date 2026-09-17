@@ -461,7 +461,7 @@ spawn_server() { # tag cmd
   SERVER_PIDS+=($!)
 }
 spawn_server httpd      "$HTTPD --addr $VM_IP:$HTTP_STD_PORT --dir $SERVE_DIR"
-spawn_server httpd-axum "$HTTPD_AXUM --addr $VM_IP:$HTTP_AXUM_PORT --dir $SERVE_DIR"
+spawn_server httpd-axum "$HTTPD_AXUM --addr $VM_IP:$HTTP_AXUM_PORT --dir $SERVE_DIR --cache=off"
 sleep 6
 
 FETCH_SIZE_STD=0; FETCH_SIZE_AXUM=0

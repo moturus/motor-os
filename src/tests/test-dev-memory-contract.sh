@@ -4,7 +4,8 @@ set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-mkdir -p "$temporary/src/tests" "$temporary/src/bin/lorry/tests" "$temporary/bin"
+mkdir -p "$temporary/src/tests" "$temporary/src/bin/lorry/tests" \
+  "$temporary/src/bin/httpd-axum/tests" "$temporary/bin"
 cp "$WD/full-test-dev.sh" "$temporary/src/tests/"
 for script in full-test.sh test-dev-sources.sh; do
   printf '%s\n' '#!/bin/bash' \
@@ -15,17 +16,23 @@ done
 printf '%s\n' '#!/bin/bash' 'exit 0' > "$temporary/bin/python3"
 cp "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
 chmod +x "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
+cat > "$temporary/src/bin/httpd-axum/tests/run.sh" <<'EOF'
+#!/bin/bash
+printf 'httpd-axum %s %s %s\n' "${MOTO_MEMORY_MIB:-unset}" "${MOTO_IMAGE:-unset}" "$*" >> "$MEMORY_TEST_LOG"
+EOF
+chmod +x "$temporary/src/bin/httpd-axum/tests/run.sh"
 export MEMORY_TEST_LOG="$temporary/observed"
 export PATH="$temporary/bin:$PATH"
 
-env -u MOTO_MEMORY_MIB bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
-expected=$'full-test.sh 8192 --release\ntest-dev-sources.sh 4096 --release'
+env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
+expected=$'full-test.sh 8192 --release\nhttpd-axum unset unset --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM defaults changed' >&2; exit 1;
 }
 : > "$MEMORY_TEST_LOG"
-MOTO_MEMORY_MIB=6144 bash "$temporary/src/tests/full-test-dev.sh" --release >> "$temporary/wrapper.log"
-expected=$'full-test.sh 6144 --release\ntest-dev-sources.sh 6144 --release'
+MOTO_MEMORY_MIB=6144 MOTO_IMAGE=caller.qcow2 \
+  bash "$temporary/src/tests/full-test-dev.sh" --release >> "$temporary/wrapper.log"
+expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 caller.qcow2 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 6144 --release'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM caller override was not preserved' >&2; exit 1;
 }
