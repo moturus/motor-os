@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Rejections {
-    last_report: Option<Instant>,
+    next_report: Option<Instant>,
     pending: u64,
     total: u64,
 }
@@ -13,13 +13,12 @@ impl Rejections {
         self.total = self.total.saturating_add(1);
         // Report immediately on the first refusal, then at most once per five
         // seconds of overload. No background timer or work on admitted clients.
-        if self
-            .last_report
-            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(5))
-        {
+        if self.next_report.is_some_and(|deadline| now < deadline) {
             return None;
         }
-        self.last_report = Some(now);
+        // Compare instants directly: a ticks-to-duration round trip can round
+        // down at the exact boundary on Motor.
+        self.next_report = Some(now + Duration::from_secs(5));
         Some((std::mem::take(&mut self.pending), self.total))
     }
 }

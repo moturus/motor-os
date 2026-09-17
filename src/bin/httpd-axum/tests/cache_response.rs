@@ -69,11 +69,13 @@ async fn main() {
                     .header(name, value)
                     .body(Body::empty())
                     .unwrap();
+                // Use a fractional age to test truncation to whole seconds
+                // without assuming exact native tick/duration round trips.
                 let mut cached = cache_response::respond(
                     &file,
                     &method,
                     request.headers(),
-                    now + Duration::from_secs(2),
+                    now + Duration::from_millis(2500),
                 );
                 assert_eq!(cached.headers_mut().remove(header::AGE).unwrap(), "2");
                 let original = service.clone().oneshot(request).await.unwrap();
