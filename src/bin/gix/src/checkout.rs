@@ -43,7 +43,7 @@ pub fn initial(
     cancellation.check()?;
     let files = gix::features::progress::Discard;
     let bytes = gix::features::progress::Discard;
-    let result = gix::worktree::state::checkout(
+    let outcome = gix::worktree::state::checkout(
         &mut index,
         workdir,
         objects,
@@ -51,9 +51,9 @@ pub fn initial(
         &bytes,
         cancellation.flag(),
         options,
-    );
-    cancellation.check()?;
-    check_outcome(&result?)?;
+    )
+    .map_err(|error| cancellation.normalize_error(error.into()))?;
+    check_outcome(&outcome).map_err(|error| cancellation.normalize_error(error))?;
     cancellation.check()?;
     Ok(index)
 }

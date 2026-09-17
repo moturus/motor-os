@@ -1542,6 +1542,15 @@ is in `/tmp/motor-gix-cancellation-fix`. Source reviews:
 `/tmp/motor-gix-commit-design/review.md` and
 `/tmp/motor-gix-commit-design/cancellation-normalization.md`.
 
+A follow-up source review on 2026-09-17 found the same approved error-ordering
+correction still needed inside `checkout::initial`: it checked cancellation
+before consuming the checkout result and its errors/collisions. The small
+completion consumes and normalizes those errors before the final success-only
+cancellation check, retaining their diagnostics and exit 130. Existing error-chain
+coverage and the interrupted-clone lifecycle pass, as do the full host/Motor
+component gates, formatting and strict Clippy. Tested source hashes match;
+evidence is in `/tmp/motor-gix-checkout-cancellation-completion`.
+
 ### Resolved implementation discussion — executable attribute files (2026-09-16)
 
 The restore source review found a preexisting Gitoxide defect in
