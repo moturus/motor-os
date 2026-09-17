@@ -57,6 +57,15 @@ pub fn existing_local_branch(
     Ok((name, id))
 }
 
+/// Preflight the fallible identity and ref-lock policy used by HEAD publication.
+pub(crate) fn preflight_publication(
+    repo: &mut gix::Repository,
+) -> crate::Result<(gix::lock::acquire::Fail, gix::lock::acquire::Fail)> {
+    repo.committer_or_set_generic_fallback()?
+        .write_to(&mut io::sink())?;
+    ref_lock_policy(repo)
+}
+
 /// Attach HEAD to an observed local branch without moving that branch.
 ///
 /// The caller retains its mutation guard and operation record through this publication.
@@ -70,14 +79,13 @@ pub fn attach(
     cancellation: &Cancellation,
 ) -> crate::Result<Original> {
     cancellation.check()?;
-    require_target(repo, target_ref.as_ref(), target_commit)?;
+    require_local_branch(repo, target_ref.as_ref(), Some(target_commit))?;
     require(repo, expected_head)?;
     let previous_oid = expected_head
         .id
         .unwrap_or_else(|| gix::ObjectId::null(repo.object_hash()));
     let expected_target = raw_target(expected_head)?;
-    let (file_lock_fail, packed_lock_fail) = ref_lock_policy(repo)?;
-    repo.committer_or_set_generic_fallback()?;
+    let (file_lock_fail, packed_lock_fail) = preflight_publication(repo)?;
     let committer = repo
         .committer()
         .expect("generic committer fallback was installed")?;
@@ -100,7 +108,7 @@ pub fn attach(
             repo.refs
                 .transaction()
                 .prepare(Some(edit), file_lock_fail, packed_lock_fail)?;
-        require_target(repo, target_ref.as_ref(), target_commit)?;
+        require_local_branch(repo, target_ref.as_ref(), Some(target_commit))?;
         require(repo, expected_head)?;
         cancellation.check()?;
         transaction.commit_with_reflog_ids(committer, previous_oid, target_commit)?;
@@ -153,17 +161,17 @@ fn direct_branch_id(
     }
 }
 
-fn require_target(
+pub(crate) fn require_local_branch(
     repo: &gix::Repository,
     name: &gix::refs::FullNameRef,
-    expected: gix::ObjectId,
+    expected: Option<gix::ObjectId>,
 ) -> crate::Result {
     let actual = direct_branch_id(repo, name)?;
-    if actual != Some(expected) {
+    if actual != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "destination branch '{}' changed: expected {expected}, observed {actual:?}",
+                "local branch '{}' changed: expected {expected:?}, observed {actual:?}",
                 name.as_bstr().to_str_lossy()
             ),
         )

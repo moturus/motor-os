@@ -1388,6 +1388,16 @@ host/Motor component gates, formatting, strict Clippy and shell checks pass with
 matching source hashes. Evidence, including the original failure, is in
 `/tmp/motor-gix-diff-pair-46041664`. Command enumeration follows separately.
 
+M2 checked switch library: the reviewed command preflights exact branch state,
+identity, attributes, cleanliness and collisions under the mutation guard. It
+creates the incomplete record before worktree writes, publishes the fresh index
+and checked HEAD attachment, then removes the record last. Same-branch requests
+still require a clean worktree but produce no ref update. One shared native
+lifecycle covers success, ref/reflog preservation, the checked no-op and retained
+recovery state when a foreign HEAD lock blocks publication. Host/Motor component
+gates, formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-switch-bd97dfb7`. CLI exposure waits for recovery.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

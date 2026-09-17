@@ -148,6 +148,7 @@ fn main() -> Result {
     check_unstage(&output)?;
     check_commit(&output)?;
     check_transition_delta(&output)?;
+    check_switch(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);
@@ -1357,10 +1358,15 @@ struct TransitionFixture {
     target_tree: gix::ObjectId,
 }
 
-fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
-    let repository = output.join("transition-repository");
+fn transition_fixture(output: &Path, name: &str) -> Result<TransitionFixture> {
+    let repository = output.join(name);
     let cancellation = motor_gix::cancellation::Cancellation::new();
-    motor_gix::init::run(&repository, &[], false, &cancellation)?;
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
     fs::create_dir_all(repository.join("dir/sub"))?;
     fs::create_dir(repository.join("removed"))?;
     for (path, data) in [
@@ -1427,7 +1433,7 @@ fn transition_fixture(output: &Path) -> Result<TransitionFixture> {
 }
 
 fn check_transition_delta(output: &Path) -> Result {
-    let fixture = transition_fixture(output)?;
+    let fixture = transition_fixture(output, "transition-repository")?;
     let repo = &fixture.opened.repo;
     let cancellation = motor_gix::cancellation::Cancellation::new();
     let mut guard = motor_gix::mutation::Guard::acquire(repo)?;
@@ -1693,6 +1699,94 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(motor_gix::operation::read(&operation_path)?, Some(record));
     drop(guard);
     assert!(!repo.git_dir().join("index.lock").try_exists()?);
+    Ok(())
+}
+
+fn check_switch(output: &Path) -> Result {
+    use motor_gix::operation::Original;
+
+    let mut fixture = transition_fixture(output, "switch-repository")?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    let git_dir = fixture.opened.repo.git_dir().to_owned();
+    let main = fixture
+        .opened
+        .repo
+        .head()?
+        .referent_name()
+        .ok_or("switch fixture HEAD is detached")?
+        .to_owned();
+    let log_root = git_dir.join("logs");
+    let main_log = log_root.join(gix::path::from_bstr(main.as_bstr()).as_ref());
+    let target_log = log_root.join(gix::path::from_bstr(fixture.target_ref.as_bstr()).as_ref());
+    let branch_logs = [fs::read(&main_log)?, fs::read(&target_log)?];
+    let head_log = fs::read(log_root.join("HEAD"))?;
+
+    motor_gix::switch::run(&mut fixture.opened, "transition-target", &cancellation)?;
+    let repo = &fixture.opened.repo;
+    assert_eq!(
+        motor_gix::head_ref::capture(repo)?,
+        Original {
+            reference: Some(fixture.target_ref.clone()),
+            id: Some(fixture.target_commit),
+        }
+    );
+    assert_eq!(repo.find_reference(&main)?.id(), fixture.original_commit);
+    assert_eq!(
+        repo.find_reference(&fixture.target_ref)?.id(),
+        fixture.target_commit
+    );
+    assert_eq!(fs::read(main_log)?, branch_logs[0]);
+    assert_eq!(fs::read(target_log)?, branch_logs[1]);
+    let changed_log = fs::read(log_root.join("HEAD"))?;
+    let appended = &changed_log[head_log.len()..];
+    assert!(
+        appended.starts_with(
+            format!("{} {} ", fixture.original_commit, fixture.target_commit).as_bytes()
+        )
+    );
+    assert!(appended.ends_with(b"\tswitch: transition-target\n"));
+    assert_eq!(appended.iter().filter(|byte| **byte == b'\n').count(), 1);
+
+    let index = repo.open_index()?;
+    assert_eq!(
+        motor_gix::tree_index::write(repo, &index, &cancellation)?,
+        fixture.target_tree
+    );
+    assert_eq!(
+        fs::read(repo.workdir().ok_or("switch worktree missing")?.join("a/b"))?,
+        b"new child\n"
+    );
+    assert!(
+        !git_dir
+            .join(motor_gix::mutation::OPERATION_FILE)
+            .try_exists()?
+    );
+    assert!(!git_dir.join("index.lock").try_exists()?);
+
+    motor_gix::switch::run(&mut fixture.opened, "transition-target", &cancellation)?;
+    assert_eq!(fs::read(log_root.join("HEAD"))?, changed_log);
+    let operation_path = git_dir.join(motor_gix::mutation::OPERATION_FILE);
+    assert!(!operation_path.try_exists()?);
+
+    let head_lock = git_dir.join("HEAD.lock");
+    fs::write(&head_lock, b"foreign")?;
+    let error = motor_gix::switch::run(&mut fixture.opened, "main", &cancellation)
+        .expect_err("a foreign HEAD lock allowed switch publication");
+    assert!(
+        error.to_string().contains("switch is incomplete"),
+        "{error}"
+    );
+    assert_eq!(fs::read(&head_lock)?, b"foreign");
+    assert!(operation_path.try_exists()?);
+    assert_eq!(
+        motor_gix::head_ref::capture(&fixture.opened.repo)?,
+        Original {
+            reference: Some(fixture.target_ref),
+            id: Some(fixture.target_commit),
+        }
+    );
+    assert_eq!(fs::read(log_root.join("HEAD"))?, changed_log);
+    assert!(!git_dir.join("index.lock").try_exists()?);
     Ok(())
 }
 
@@ -2704,7 +2798,7 @@ fn check_head_ref(output: &Path) -> Result {
         &cancellation,
     )
     .expect_err("a moved destination branch was accepted");
-    assert!(error.to_string().contains("destination branch"), "{error}");
+    assert!(error.to_string().contains("local branch"), "{error}");
     assert_eq!(fs::read(log_root.join("HEAD"))?, head_log);
 
     let on_same = motor_gix::head_ref::attach(
