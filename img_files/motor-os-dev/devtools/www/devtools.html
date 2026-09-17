@@ -494,9 +494,10 @@ lorry run</code></pre>
 how procedural macros and build scripts run on Motor OS, is on the
 <a href="lorry.html">Lorry</a> page.</p>
 
-<h2>Git with gix</h2>
+<h2 id="gix">Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
-anonymous smart-HTTPS remotes, stages and commits local changes, switches branches, and shows status, diffs and history.</p>
+anonymous smart-HTTPS remotes, stages and commits local changes, switches branches,
+merges commits, and shows status, diffs and history.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
 gix -r project status
@@ -510,6 +511,7 @@ gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
 gix -r project switch topic
+gix -r project merge main
 gix -r project tag list
 gix -r project tag create snapshot
 gix -r project log
@@ -547,9 +549,10 @@ or filter obstructions. Gitlinks remain unchanged; blobs are limited to 16 MiB.
 An I/O error or cancellation may leave selected files changed or missing. After
 addressing the cause, rerun the command to restore them from the unchanged index.</p>
 <p><code>commit -m MSG</code> commits the staged index to the attached local branch,
-including an unborn branch's first commit. It rejects unresolved entries and an
-unchanged index. Author and committer name and email must be configured;
-<code>user.name</code> and <code>user.email</code> provide both by default.</p>
+including an unborn branch's first commit. It rejects unresolved entries. Outside a
+ready merge, it also rejects an unchanged index. Author and committer name and
+email must be configured; <code>user.name</code> and <code>user.email</code> provide
+both by default.</p>
 <p><code>branch list</code> and <code>tag list</code> print short names in sorted
 order. Creation takes a name and optional <code>REV</code>, which defaults to
 <code>HEAD</code>, and refuses to replace an existing reference. Branch targets are
@@ -558,11 +561,25 @@ not change the checkout, index or worktree.</p>
 <p><code>switch BRANCH</code> selects an existing local branch. It requires the index
 to match <code>HEAD</code> and the tracked worktree to be clean, and refuses untracked
 or ignored obstructions. It preserves unchanged files and leaves both branches' IDs intact.</p>
-<p>An interrupted switch leaves an operation reported by <code>status</code> and blocks
-further mutation. After addressing the error, run <code>recover</code>. It restores
-the recorded original state, or preserves an already-published update and finishes
-cleanup. Restoration discards affected worktree changes and staged changes, preserves
-unrelated unstaged, untracked and ignored files, and refuses unsafe obstructions.
+<p><code>merge REV</code> integrates a commit into the current attached local branch.
+It requires the index to match <code>HEAD</code> and the tracked worktree to be clean.
+An ancestor target is up to date, a descendant target fast-forwards, and a clean
+divergent result creates a two-parent merge commit. Divergent authoring requires
+configured author and committer identity.</p>
+<p>Only unresolved same-path regular-text conflicts are installed; other unresolved
+kinds fail before worktree changes. Supported conflicts leave
+conflict markers in the worktree, index stages, <code>MERGE_HEAD</code>,
+<code>MERGE_MSG</code>, and a ready operation. Resolve them, run <code>add</code>,
+then <code>commit -m MSG</code>, or run <code>merge --abort</code>. Abort explicitly
+discards merge work, all staged changes and affected worktree edits; it preserves
+unrelated unstaged, untracked and ignored files.</p>
+<p>An incomplete operation is reported by <code>status</code> and blocks other
+mutations. After addressing the error, run <code>recover</code>. It restores the
+recorded original state, or preserves an already-published update and finishes
+cleanup. If a merge commit did not publish, recovery keeps the staged resolutions
+and makes the merge ready to commit or abort. Restoration discards affected
+worktree changes and staged changes, preserves unrelated unstaged, untracked and
+ignored files, and refuses unsafe obstructions.
 Recovery leaves the record on failure so it can be invoked again. It never removes
 another writer's Git lockfile; remove a stale lock manually only after verifying
 that no writer remains. Power-loss recovery is not guaranteed.</p>

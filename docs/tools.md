@@ -57,7 +57,8 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-inspect changes, stage local files, commit the index, and switch branches:
+inspect changes, stage local files, commit the index, switch branches, and merge
+commits:
 
 ```sh
 gix init scratch
@@ -73,6 +74,7 @@ gix -r project commit -m 'Describe the change'
 gix -r project branch list
 gix -r project branch create topic HEAD^
 gix -r project switch topic
+gix -r project merge main
 gix -r project tag list
 gix -r project tag create snapshot
 gix -r project log
@@ -115,9 +117,9 @@ may leave selected files changed or missing. After addressing the cause, rerun
 the command to restore them from the unchanged index.
 
 `commit -m MSG` commits the staged index to the attached local branch, including
-an unborn branch's first commit. It rejects unresolved entries and an unchanged
-index. Author and committer name and email must be configured; `user.name` and
-`user.email` provide both by default.
+an unborn branch's first commit. It rejects unresolved entries. Outside a ready
+merge, it also rejects an unchanged index. Author and committer name and email must
+be configured; `user.name` and `user.email` provide both by default.
 
 `branch list` and `tag list` print short names in sorted order. Creation takes
 a name and optional `REV`, which defaults to `HEAD`, and refuses to replace an
@@ -129,9 +131,24 @@ worktree.
 `HEAD` and the tracked worktree to be clean, and refuses untracked or ignored
 obstructions. It preserves unchanged files and leaves both branches' IDs intact.
 
-An interrupted switch leaves an operation reported by `status` and blocks further
-mutation. After addressing the error, run `recover`. It restores the recorded
-original state, or preserves an already-published update and finishes cleanup.
+`merge REV` integrates a commit into the current attached local branch. It
+requires the index to match `HEAD` and the tracked worktree to be clean. An
+ancestor target is up to date, a descendant target fast-forwards, and a clean
+divergent result creates a two-parent merge commit. Divergent authoring requires
+configured author and committer identity.
+
+Only unresolved same-path regular-text conflicts are installed; other unresolved
+kinds fail before worktree changes. Supported conflicts leave conflict markers in
+the worktree, index stages, `MERGE_HEAD`, `MERGE_MSG`, and a ready operation.
+Resolve them, run `add`, then `commit -m MSG`, or run `merge --abort`. Abort
+explicitly discards merge work, all staged changes and affected worktree edits;
+it preserves unrelated unstaged, untracked and ignored files.
+
+An incomplete operation is reported by `status` and blocks other mutations.
+After addressing the error, run `recover`. It restores the recorded original
+state, or preserves an already-published update and finishes cleanup. If a merge
+commit did not publish, recovery keeps the staged resolutions and makes the
+merge ready to commit or abort.
 Restoration discards affected worktree changes and staged changes, preserves
 unrelated unstaged, untracked and ignored files, and refuses unsafe obstructions.
 Recovery leaves the record on failure so it can be invoked again. It never removes

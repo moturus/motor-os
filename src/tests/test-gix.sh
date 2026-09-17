@@ -442,6 +442,12 @@ PY
   rm "$init_repo/.git/HEAD.lock"
   "${app_env[@]}" "$gix_binary" -r "$init_repo" switch cli-topic
   grep -Fqx 'ref: refs/heads/cli-topic' "$init_repo/.git/HEAD" || fail "switch selected the wrong branch"
+  "${app_env[@]}" "$gix_binary" -r "$init_repo" merge main
+  if "${app_env[@]}" "$gix_binary" -r "$init_repo" merge --abort 2> "$temporary/merge-abort.err"; then
+    fail "merge --abort accepted an idle repository"
+  fi
+  grep -F "repository has no ready merge" "$temporary/merge-abort.err" >/dev/null ||
+    fail "merge --abort reported the wrong admission error"
 
   "${app_env[@]}" "$gix_binary" -r "$fixture" branch create cli-earlier HEAD^
   "${app_env[@]}" "$gix_binary" -r "$fixture" tag create cli-head
@@ -752,6 +758,7 @@ vm_ssh "$guest_init_app branch create cli-topic"
 vm_ssh "$guest_init_app switch cli-topic"
 vm_ssh "cat $guest_root/init/.git/HEAD" > "$temporary/guest-switch-head"
 grep -Fqx 'ref: refs/heads/cli-topic' "$temporary/guest-switch-head" || fail "native switch selected the wrong branch"
+vm_ssh "$guest_init_app merge main"
 
 start_https_server 192.168.4.1 192.168.4.1
 guest_clone="$guest_root/https-clone"

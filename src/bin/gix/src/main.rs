@@ -9,7 +9,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, diff, fetch, init, network, recover, refs,
+    Result, add, cancellation, clone, commit, diff, fetch, init, merge, network, recover, refs,
     repository, restore, status, switch, unstage,
 };
 
@@ -155,6 +155,21 @@ fn run() -> Result {
         .subcommand(reference_command("branch", "Manage local branches"))
         .subcommand(reference_command("tag", "Manage lightweight tags"))
         .subcommand(Command::new("log").about("Show commit history"))
+        .subcommand(
+            Command::new("merge")
+                .about("Merge a commit into the attached local branch")
+                .arg(
+                    Arg::new("abort")
+                        .long("abort")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("revision"),
+                )
+                .arg(
+                    Arg::new("revision")
+                        .value_name("REV")
+                        .required_unless_present("abort"),
+                ),
+        )
         .subcommand(Command::new("status").about("Show worktree status"))
         .subcommand(
             Command::new("switch")
@@ -262,6 +277,20 @@ fn run() -> Result {
             )
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("merge") => {
+            let command = matches.subcommand_matches("merge").expect("matched merge");
+            if command.get_flag("abort") {
+                merge::abort(&opened, &cancellation)
+            } else {
+                merge::run(
+                    &mut opened,
+                    command
+                        .get_one::<String>("revision")
+                        .expect("required revision"),
+                    &cancellation,
+                )
+            }
+        }
         Some("recover") => {
             let action = recover::run(&opened, &cancellation)?;
             let mut out = io::stdout().lock();

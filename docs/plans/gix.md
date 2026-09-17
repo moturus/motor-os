@@ -12,10 +12,10 @@ anonymous HTTPS clone/fetch and read-only status/log. Host/Motor component
 gates, `full-test-dev.sh --release`, and the representative native HTTPS
 clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
-limits and measured results. M2 implementation is in progress: init, staging,
-ordinary commit, branch/tag creation, unstage, restore and diff are implemented
-and component-tested. Switch and explicit recovery are available through the CLI;
-merge workflows remain in progress. Section 7 records progress.
+limits and measured results. All M2 commands are now implemented and
+component-tested, including switch, merge, conflict resolution, abort and
+explicit recovery. Consolidated failure coverage and the full M2 milestone
+validation are still in progress. Section 7 records progress.
 Section 8 records the approved 8 MiB loose-ref
 limit and directory-entry repair. The managed stdlib and approved socket
 teardown repair passed three debug and three release main-image gates and the
@@ -1572,6 +1572,15 @@ explicitly dropping it after parent/ID inspection fixes that fixture lifetime.
 The original compiler failure is preserved. Host/Motor component gates, strict
 Clippy, formatting and shell checks pass with matching tested sources. Evidence:
 `/tmp/motor-gix-merge-run-918fc9fc`. CLI exposure follows separately.
+
+M2 merge CLI and documentation: reviewed wiring exposes `merge REV` and
+`merge --abort` with mutually exclusive arguments. Existing host/guest smoke
+checks exercise up-to-date merging; the host also checks idle-abort admission.
+Markdown and both developer HTML pages describe divergence, conflict resolution,
+unchanged-tree Ready commits, discard/preservation rules and recovery outcomes.
+The HTML command table links to the detailed description instead of repeating it.
+Host/Motor component gates, strict Clippy, formatting and shell checks pass;
+tested sources match. Evidence is in `/tmp/motor-gix-merge-cli-9d14551e`.
 
 ## 8. Discussion record
 
