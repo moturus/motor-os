@@ -170,6 +170,35 @@ impl Guard {
         Ok(())
     }
 
+    /// Remove owned merge files before the operation record, retaining the record on failure.
+    /// The caller must validate the recorded objects and current refs before cleanup.
+    pub fn cleanup_operation(
+        &self,
+        expected: &Record,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> crate::Result {
+        cancellation.check()?;
+        self.require_operation(expected)?;
+        if expected.kind == Kind::Merge {
+            for name in ["MERGE_HEAD", "MERGE_MSG"] {
+                cancellation.check()?;
+                let path = self.operation_path.with_file_name(name);
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => fs::remove_file(path)?,
+                    Ok(_) => {
+                        return unsupported(format!(
+                            "owned merge state '{name}' is not a regular file"
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        cancellation.check()?;
+        self.remove_operation(expected)
+    }
+
     /// Publish a newly reconstructed state with no retained stat/cache data.
     /// The caller must not use this for an edited copy of the loaded index.
     pub fn publish_fresh_index(

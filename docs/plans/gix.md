@@ -1428,6 +1428,15 @@ only a representation-specific assertion was removed. Host/Motor component
 gates, formatting, strict Clippy and shell checks pass with matching source hashes.
 Evidence is in `/tmp/motor-gix-transition-observed-040e5e57`.
 
+M2 owned operation cleanup: the independently reviewed guard helper removes
+owned merge files without following links, tolerates already-missing files and
+removes the exact operation record last. Incomplete `MERGE_HEAD` content is not
+interpreted. The existing native operation lifecycle now checks partial cleanup,
+non-file refusal, record retention, successful cleanup on a later invocation and
+continued lock exclusion through completion. Host/Motor component gates,
+formatting, strict Clippy and shell checks pass with matching source hashes.
+Evidence is in `/tmp/motor-gix-operation-cleanup-4fd50c55`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including

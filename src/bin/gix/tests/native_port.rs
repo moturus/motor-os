@@ -2234,19 +2234,33 @@ fn check_operation_record(opened: &motor_gix::repository::OpenedRepository) -> R
     let mut output = Vec::new();
     motor_gix::status::collect(opened, &cancellation)?.write_to(&mut output, &cancellation)?;
     assert!(output.starts_with(b"operation merge incomplete\n"));
-    fs::write(
-        repo.git_dir().join("MERGE_HEAD"),
-        record.target_commit.to_string(),
-    )?;
+    let merge_head = repo.git_dir().join("MERGE_HEAD");
+    let merge_message = repo.git_dir().join("MERGE_MSG");
+    // Incomplete merge files may contain only a prefix from an interrupted write.
+    fs::write(&merge_head, b"partial owned header")?;
+    fs::create_dir(&merge_message)?;
     let (guard, observed) = motor_gix::mutation::Guard::acquire_for_recovery(repo)?;
     assert_eq!(observed, record);
+    let error = guard
+        .cleanup_operation(&observed, &cancellation)
+        .expect_err("cleanup removed a non-file merge message");
+    assert!(error.to_string().contains("MERGE_MSG"), "{error}");
+    assert!(!merge_head.try_exists()?);
+    assert!(merge_message.is_dir());
+    assert_eq!(motor_gix::operation::read(&path)?, Some(observed.clone()));
     run_mutation_child(
         repo.workdir().ok_or("mutation worktree missing")?,
         "blocked",
     )?;
-    guard.remove_operation(&observed)?;
+    fs::remove_dir(&merge_message)?;
+    fs::write(&merge_message, b"owned message\n")?;
+    guard.cleanup_operation(&observed, &cancellation)?;
+    assert!(!merge_message.try_exists()? && !path.try_exists()?);
+    run_mutation_child(
+        repo.workdir().ok_or("mutation worktree missing")?,
+        "blocked",
+    )?;
     drop(guard);
-    fs::remove_file(repo.git_dir().join("MERGE_HEAD"))?;
     run_mutation_child(
         repo.workdir().ok_or("mutation worktree missing")?,
         "acquire",
