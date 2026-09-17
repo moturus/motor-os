@@ -1164,6 +1164,17 @@ fn path_resolution_test() {
     std::fs::create_dir_all(root.join("a/b")).unwrap();
     std::fs::write(root.join("a/b/file"), "x").unwrap();
 
+    let expected = root.join("a/b/file");
+    for suffix in ["a/b", "a/b/"] {
+        let mut entries = std::fs::read_dir(root.join(suffix)).unwrap();
+        let entry = entries.next().unwrap().unwrap();
+        assert!(entries.next().is_none());
+        assert_eq!(
+            entry.path().as_os_str().as_encoded_bytes(),
+            expected.as_os_str().as_encoded_bytes()
+        );
+    }
+
     assert!(std::fs::metadata(root.join("a/b/file")).unwrap().is_file());
     assert!(std::fs::metadata(root.join("a/b")).unwrap().is_dir());
     assert!(

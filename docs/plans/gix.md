@@ -15,8 +15,11 @@ clone pass. The M1 dependency pin is
 limits and measured results. M2 implementation is in progress. Its init review
 found a library directory-creation race; the narrow external fix was
 discussed, approved and implemented on 2026-09-16. Init and staging progress
-is recorded in section 7. The final section records a newly diagnosed loose-ref
-allocation issue and the proposed external repair awaiting review.
+is recorded in section 7. Section 8 records the approved 8 MiB loose-ref
+limit and directory-entry repair. The managed stdlib and approved socket
+teardown repair passed three debug and three release main-image gates and the
+complete release developer suite. The original developer-budget diagnosis,
+its approved correction, and open implementation questions are recorded below.
 
 ## 1. Goal and decisions
 
@@ -155,7 +158,7 @@ of the pinned fork (below); no runtime test was performed.
 | Source | Identity / integration |
 | --- | --- |
 | Motor OS | `290bb9e3889d95686a6be368adfd4d949947acb1` |
-| Toolchain | `motor-1.99.0-beta-f47d5bb-dev.2-669057dcd9e729bc97418edb8b926b9e7526202a217dfc8dd9dd8dda561ca4e4`, from [rust-toolchain.toml](../../rust-toolchain.toml) |
+| Toolchain | `motor-1.99.0-beta-f47d5bb-dev.2-9c9208d2239aed04ea1b553c26a73b5876cf6b194468f82ecc196a98262dfce2`, from [rust-toolchain.toml](../../rust-toolchain.toml) |
 | Gitoxide fork | [Pinned revision](https://github.com/moturus/gitoxide/tree/4604ac322369a2e429a805cf6e5b7267712283f1): gix 0.86.0, gitoxide 0.56.0 |
 | Application integration | [Makefile](../../Makefile), [Lorry Cargo configuration](../../src/bin/lorry/.cargo/config.toml), [developer manifest](../../src/imager/motor-os-dev.yaml) |
 | Transport references | [Lorry HTTP adapter](../../src/bin/lorry/src/git/http.rs) and [curl TLS tests](../../src/bin/curl/tests/https.rs) for M1; [host SSH server](../../src/tests/test-ssh-client-host.sh) for M3 |
@@ -1281,7 +1284,7 @@ Host/Motor Clippy, selected-toolchain formatting and shell checks pass.
 Evidence is in `/tmp/motor-gix-loose-ref-integration`. The M2 completion
 `full-test-dev.sh --release` gate remains due at the milestone boundary.
 
-### Open implementation discussion — native directory-entry paths (2026-09-16)
+### Resolved implementation discussion — native directory-entry paths (2026-09-16)
 
 The new native boundary fixture exposed a separate preexisting defect in
 Rust's Motor port. `DirEntry::path()` in
@@ -1301,15 +1304,205 @@ Evidence, original failure and temporary instrumentation are retained in
 size-limit fixture uses unfiltered overlay iteration to cover the same
 bounded reader; it does not claim to validate or fix prefixed listing.
 
-Proposed external repair: construct the entry path with
-`Path::new(&self.parent_path).join(self.filename())`, add a focused
-slash-terminated `read_dir` regression to the existing native filesystem
-suite, rebuild/select the toolchain assembly through its normal workflow,
-and validate the previously failing prefixed listing and applicable
-platform gates. No standard-library change has been applied. This repair
-requires the explicit std-port discussion specified by AGENTS.md; avoid
-an application workaround that hides the malformed paths.
+Discussed and approved: construct the entry path with
+`Path::new(&self.parent_path).join(self.filename())`, cover slash-terminated
+`read_dir` in the existing native filesystem test, and validate the affected
+branch/tag traversal. This is ordinary path construction, not a change to
+compiler or memory-layout behavior.
 
-**Open question:** approve this narrow external standard-library repair
-and toolchain rebuild, then resume branch/tag implementation? Recommended:
-yes. The 8 MiB reader repair is independent; branch/tag work remains paused.
+The source change was authored in the separate external checkout
+`/home/posk/motor-dev/rust-motor-gix`, on branch
+`motor-os-1.99.0-beta-f47d5bb`, based on
+`d9b95d4a8f17021fc769a0685c5d943fa0ce797b`. The diagnosed
+`toolchain-src/rust` directory is managed input and is updated only by the
+normal producer, never edited by hand.
+No runtime ABI change is needed: `rt.vdso` returns only the filename and
+metadata, while std retains the original parent string and adds the slash.
+
+Reviewed and committed in the external fork as
+`b4eb29b6f00ae2190f565f56595d51403c8baf13`: replace the four concatenation
+lines with the single `Path::join` expression above. No other Rust files
+changed.
+
+Keep regression coverage in the existing fixtures: 11 systest lines compare
+exact directory-entry path bytes for ordinary and slash-terminated parents;
+12 gix lines check slash-terminated branch and tag prefixes. Comparing raw
+path bytes is necessary because `Path` equality normalizes duplicate
+separators. Both regressions failed on the selected unfixed stdlib, with
+`a/b//file` versus `a/b/file` and `prefixed ref missing`, respectively.
+
+Candidate validation passed using Cargo `-Zbuild-std` and an isolated sysroot
+pointing at the corrected fork: the full systest invocation reports
+`ALL PASS`, and the native gix component gate passes. Candidate testing left
+the selected compiler, installed prefix, and managed Rust source unchanged. Logs, build
+commands, the original failures, and reviewed patches are retained in
+`/tmp/motor-std-direntry-integration`. The same regression additions are
+included in the managed cutover gates below.
+
+The user published the fork commit; remote verification confirmed its exact
+revision. The official `src/build-motor-os.sh` producer completed successfully.
+`MOTOR_RUST_REV` and `rust-toolchain.toml` now select the published revision and
+toolchain key `9c9208d2239aed04ea1b553c26a73b5876cf6b194468f82ecc196a98262dfce2`.
+The cutover check, formatting, and strict Clippy for the changed packages pass.
+The initial gate sequence passed one release and one debug `full-test.sh`
+run, including the new path regression, then stopped on the listener-teardown
+allocation defect diagnosed below. After the approved runtime repair, a new
+complete sequence passed three debug and three release main-image runs.
+The first release developer gate passed both gix component gates, but its
+repository suite reached the overall 900-second deadline before completion.
+Its diagnosis and the approved developer-only budget correction are recorded
+below. The subsequent cold run of `full-test-dev.sh --release` passed the
+repository suite, native source builds and complete Lorry product suite.
+All tested source hashes matched at completion. Managed cutover is fully
+validated; authoring candidates must not bypass publication/cutover checks.
+
+### Resolved workflow discussion — Motor fork guidelines
+
+Discussed and resolved: the user explicitly directed this work to follow
+Motor OS guidelines, without the upstream Rust `AGENTS.md` requirements.
+Continue the approved sub-agent implementation and parent-review workflow.
+
+### Resolved implementation discussion — allocation during socket teardown (2026-09-16)
+
+The second managed release gate failed in
+`admission::test_aggregate_listener_exhaustion`: the child failed a 1,992-byte
+allocation while dropping its held TCP listeners, then the parent reported
+`flood child failed to exit cleanly`. This is a preexisting Motor runtime
+defect, separate from the directory-entry fix and gix.
+
+The preserved backtrace resolves to `SegQueue<DriverRecord>::push`,
+`NetChannel::enqueue_teardown_messages`, `TcpListener` destruction, and
+`posix_close`, reached from `subcommand::do_command`. Diagnostic release builds
+with symbols have byte-identical `.text` sections to both failing binaries;
+no pressure-test retry or temporary source instrumentation was needed.
+A Crossbeam segment for this 56-byte record is exactly
+`8 + 31 * 64 = 1,992` bytes. The shared teardown path also constructs message
+`VecDeque`s, which can allocate while the memory floor is already reached.
+
+Discussed and approved: make the shared driver teardown/control path allocation-free
+once its operation is admitted. Reserve its required storage through a
+fallible path before accepting the resource or operation, then transfer that
+storage during cleanup. Cover TCP listeners, TCP streams and UDP sockets,
+including pending-data ordering and cancellation/late-response cleanup;
+preserve the existing staging fences and reservation lifetime. Increasing
+queue capacity without guaranteed admission credits, waiting inside Drop,
+changing the memory floor, or weakening the existing pressure test would not
+fix the contract.
+
+The user approved preallocating the storage needed for teardown before
+resuming managed cutover and gix implementation. The reviewed runtime patch
+is applied. It reserves queue capacity before socket admission, with twenty
+credits per reservation: at most sixteen pending TCP data messages, close,
+initial receive ACK, accept request, and late-response cleanup. Cancellation
+releases its socket slot immediately; a weak credit retained by the RPC waiter
+covers any eventual close. Queue growth is fallible at admission. The vDSO
+pool propagates `OutOfMemory` after checking other existing channels.
+
+The driver retains the final reservation until the close reaches sys-io and
+preserves FIFO order and staging fences. Single-message records, a one-message
+carry slot, and fixed-size socket snapshots remove the teardown storage
+allocations. Existing exhaustion, cancellation, backpressure, UDP ordering,
+and channel reclamation tests are unchanged. Selected-toolchain formatting
+and strict runtime Clippy pass. Three debug and three release main-image
+runs passed, including the original listener-exhaustion test. That test and
+the cancellation/backpressure cases also passed in the first developer run
+before its overall deadline expired. After the separately approved harness
+correction, the complete cold release developer gate passed, including native
+source builds and Lorry. The unchanged reviewed runtime patch is committed as
+`be9da7c8`. Runtime source, review and validation evidence are in
+`/tmp/motor-teardown-preallocation`.
+Original failure evidence remains in
+`/tmp/motor-std-direntry-integration/managed-gates/release-2.log` and
+`/tmp/motor-std-direntry-integration/admission-diagnosis`.
+
+### Resolved implementation discussion — developer-suite time budget (2026-09-16)
+
+The release developer gate exited with status 124 after `full-test.sh`'s
+900-second deadline. That deadline starts before image builds, host tests,
+and guest-test preparation (`src/tests/full-test.sh:3`). The preserved log
+records approximately 219 seconds of sequential host gix Cargo work and
+90 seconds of later developer-only compilation, including 66 seconds for
+the native gix binaries. Both gix component gates passed.
+
+The main developer VM started about 640 seconds into the suite. Its system
+tests continued reporting passes until about ten seconds before wrapper
+completion, including listener exhaustion and socket teardown/cancellation.
+The last completed test was `test_half_open_accounting`; the following
+backlog-growth test normally waits for bounded sweep recovery. No test
+assertion or new allocation failure was recorded before the overall timeout.
+This supports exhaustion of the suite budget during normal progress; the
+run does not establish that all remaining tests pass.
+
+The failed run and console are preserved in
+`/tmp/motor-teardown-preallocation/gates/developer-release.log` and
+`/tmp/motor-teardown-preallocation/developer-timeout-diagnosis`.
+All tested source/configuration hashes still match the reviewed inputs.
+No test-local timeout was changed, and no warm-cache rerun was used to
+dismiss the failure. A later pass alone would not resolve it.
+
+An independent source/log review reached the same conclusion. Discussed and
+approved: the user accepted a developer-only 1,500-second overall budget,
+then completion of validation and resumption of gix implementation. The
+reviewed two-line change uses `FULL_TEST_VERIFY_DEV_SOURCES=1` to select the
+existing debug budget; ordinary release runs retain 900 seconds. This is
+an explicit exception to `AGENTS.md` note (1), based on the diagnosis above.
+Separating all build preparation from timed execution would require broader
+restructuring.
+
+The approved change is committed as `734f90b2`. With the generated gix
+component cache cleared, `src/tests/full-test-dev.sh --release` passed on
+2026-09-16, including the repository suite, native source builds and complete
+Lorry product suite. All tested source hashes matched. The 1,500-second bound
+applies to the repository phase; the separate source-build and Lorry bounds
+are unchanged. The completed run and source checks are preserved in
+`/tmp/motor-teardown-preallocation/developer-release-approved`. The original
+failed run remains part of the validation record.
+
+### Open implementation discussion — text-diff limits (2026-09-16)
+
+Source review of the pinned diff library found that its token-count estimate
+samples only the first 20 lines and can greatly overallocate even for a
+21-line file. A small application `TokenSource` can supply an exact count;
+no external crate change is needed. Count and check lines before interning,
+retain the existing 16 MiB per-side byte limit, and process one file pair at
+a time. The proposed additional limit is 262,144 lines per side. These bounds
+cover renderer working storage, not total process memory; measure the latter
+through the approved Q6 workload, without another benchmark matrix.
+
+Configured `diff.algorithm=minimal`, including named-driver settings, selects
+an algorithm with quadratic worst-case work and no internal cancellation
+hook. Ordinary heuristic Myers and Histogram remain available. Returning an
+error for unsupported settings avoids silently changing the requested
+algorithm. A file over the text-line limit must not be mislabeled binary.
+
+**Open question, asked during the managed-toolchain gates:** use an explicit
+path-and-limit error for oversized text and reject configured `minimal`?
+Recommended: yes. An alternative is an explicit oversized-text summary while
+still rejecting `minimal`. No renderer or policy change has been applied;
+branch/tag work and the shared bounded loader are independent of this choice.
+Source review: `/tmp/motor-gix-diff-design/review-current.md`.
+
+### Open implementation discussion — cancellation diagnostics (2026-09-16)
+
+The resumed source review found an existing application reporting defect.
+`src/bin/gix/src/main.rs` samples cancellation before returning a command's
+result, so a late Ctrl+C can replace a real error, including a ref/reflog
+publication error. `clone.rs:32` can report `clone did not complete` after
+checkout, index publication and removal of the incomplete marker have all
+succeeded. `fetch.rs:65` can skip the received outcome and its warning about
+references that may already have changed. These are result/diagnostic losses;
+exit 130 after a completed atomic edit alone does not establish a defect.
+
+Proposed narrow repair: preserve existing errors and inspect fetch update
+outcomes before any final cancellation check; attach the partial-state warning
+to interrupted fetches; use the incomplete-clone diagnostic only for an actual
+clone failure. Retain cancellation exit 130 and the documented possibility of
+partial ref/reflog publication. Do not add a new success-wins-late-Ctrl+C policy,
+rollback machinery, external crate changes, or a timing-sensitive race test.
+Reuse the existing cancelled-clone fixture and compact result-handling coverage.
+
+**Open question:** approve this application-only reporting repair before the
+next gix command patch? The runtime/toolchain repairs are complete and
+validated. The reviewed branch/tag patch remains under `/tmp`; no gix
+production source changed during this review. Source review:
+`/tmp/motor-gix-commit-design/review.md`.

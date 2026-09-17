@@ -359,6 +359,18 @@ fn check_loose_ref_limit(output: &Path) -> Result {
     );
     assert!(refs.next().is_none());
 
+    let tag_name = "refs/tags/bounded";
+    fs::create_dir_all(directory.join("refs/tags"))?;
+    writeln!(fs::File::create(directory.join(tag_name))?, "{id}")?;
+    for (prefix, expected) in [("refs/heads/", name), ("refs/tags/", tag_name)] {
+        let mut refs = platform.prefixed(prefix.as_bytes().as_bstr().try_into()?)?;
+        assert_eq!(
+            refs.next().ok_or("prefixed ref missing")??.name.as_bstr(),
+            expected
+        );
+        assert!(refs.next().is_none());
+    }
+
     file.set_len(8 * 1024 * 1024 + 1)?;
     let lookup = store.try_find(name).expect_err("lookup must enforce 8 MiB");
     assert!(matches!(
