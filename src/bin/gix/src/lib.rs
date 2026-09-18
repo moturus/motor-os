@@ -23,6 +23,7 @@ pub mod network;
 pub mod object_database;
 pub mod operation;
 pub mod push_objects;
+pub mod push_pack;
 pub mod recover;
 pub mod refs;
 pub mod repository;
