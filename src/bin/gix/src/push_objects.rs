@@ -121,6 +121,19 @@ fn select_commits(
     Ok(())
 }
 
+/// Prove ancestry with the same checked, bounded all-parent walk used for selection.
+pub(crate) fn is_ancestor(
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    ancestor: gix::ObjectId,
+    cancellation: &Cancellation,
+) -> crate::Result<bool> {
+    let reachable = preflight_commits(&Reader::new(repo, cancellation), tip)
+        .map_err(|error| cancellation.normalize_error(error))?;
+    cancellation.check()?;
+    Ok(reachable.contains(&ancestor))
+}
+
 fn preflight_commits(
     objects: &Reader<'_>,
     tip: gix::ObjectId,

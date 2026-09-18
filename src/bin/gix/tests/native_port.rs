@@ -3845,6 +3845,51 @@ fn check_push_pack(output: &Path) -> Result {
         "push pack fixture",
     )?;
 
+    use motor_gix::push_policy::Spec;
+    for source in ["HEAD".to_owned(), "main".to_owned(), merge.to_string()] {
+        let spec = Spec::parse(&format!("{source}:refs/heads/main"), None)?;
+        assert_eq!(spec.resolve(repo, &cancellation)?, merge);
+        assert!(!spec.validate_update(repo, merge, Some(c0), &cancellation)?);
+    }
+    let branch = Spec::parse("HEAD:refs/heads/main", None)?;
+    assert!(branch.validate_update(repo, merge, Some(merge), &cancellation)?);
+    assert!(
+        branch
+            .validate_update(repo, c0, Some(merge), &cancellation)
+            .is_err()
+    );
+    let missing = gix::ObjectId::from_bytes_or_panic(&[1; 20]);
+    assert!(
+        branch
+            .validate_update(repo, merge, Some(missing), &cancellation)
+            .is_err()
+    );
+    let lease = format!("refs/heads/main:{c0}");
+    let leased = Spec::parse("HEAD:refs/heads/main", Some(&lease))?;
+    assert!(
+        leased
+            .validate_update(repo, merge, Some(merge), &cancellation)
+            .is_err()
+    );
+    assert!(!leased.validate_update(repo, merge, Some(c0), &cancellation)?);
+    let tag = Spec::parse(&format!("{base}:refs/tags/blob"), None)?;
+    assert_eq!(tag.resolve(repo, &cancellation)?, base);
+    assert!(!tag.validate_update(repo, base, None, &cancellation)?);
+    assert!(
+        tag.validate_update(repo, base, Some(unchanged), &cancellation)
+            .is_err()
+    );
+    assert!(
+        Spec::parse(&format!("{base}:refs/heads/main"), None)?
+            .resolve(repo, &cancellation)
+            .is_err()
+    );
+    assert!(
+        Spec::parse("HEAD^:refs/heads/main", None)?
+            .resolve(repo, &cancellation)
+            .is_err()
+    );
+
     let assert_ids = |selection: &motor_gix::push_objects::Selection,
                       expected: &[gix::ObjectId]| {
         let mut actual = selection.ids().to_vec();
