@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsStr,
     fs::{self, OpenOptions, TryLockError},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
@@ -405,29 +404,7 @@ impl<W: Write> Write for LimitedWriter<W> {
 }
 
 fn validate_repository(repo: &gix::Repository) -> crate::Result {
-    if repo.object_hash() != gix::hash::Kind::Sha1 {
-        return unsupported("only SHA-1 repositories support mutation");
-    }
-    if repo.namespace().is_some() {
-        return unsupported("reference namespaces are unsupported for mutation");
-    }
-    let shallow = repo.git_dir().join("shallow");
-    if repo.shallow_file() != shallow {
-        return unsupported("repository configuration selected a different shallow file");
-    }
-    match fs::metadata(&shallow) {
-        Ok(metadata) if !metadata.is_file() || metadata.len() != 0 => {
-            return unsupported("shallow repositories are unsupported for mutation");
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let store = repo.objects.store_ref();
-    reject_promisor_packs(store.path())?;
-    for object_dir in store.alternate_db_paths()? {
-        reject_promisor_packs(&object_dir)?;
-    }
+    crate::object_database::validate_full(repo, "mutation")?;
 
     let snapshot = repo.config_snapshot();
     for key in [
@@ -442,43 +419,7 @@ fn validate_repository(repo: &gix::Repository) -> crate::Result {
     if snapshot.try_boolean("index.skipHash")?.unwrap_or(false) {
         return unsupported("index.skipHash is unsupported for mutation");
     }
-    let config = snapshot.plumbing();
-    if config
-        .sections_by_name("extensions")
-        .into_iter()
-        .flatten()
-        .any(|section| section.contains_value_name("partialClone"))
-    {
-        return unsupported("partial-clone repositories are unsupported for mutation");
-    }
-    for section in config.sections_by_name("remote").into_iter().flatten() {
-        if section.contains_value_name("partialCloneFilter") {
-            return unsupported("partial-clone filters are unsupported for mutation");
-        }
-        if section.contains_value_name("promisor")
-            && config
-                .boolean_by("remote", section.header().subsection_name(), "promisor")?
-                .unwrap_or(false)
-        {
-            return unsupported("promisor remotes are unsupported for mutation");
-        }
-    }
     Ok(())
-}
-
-fn reject_promisor_packs(object_dir: &Path) -> crate::Result {
-    match fs::read_dir(object_dir.join("pack")) {
-        Ok(entries) => {
-            for entry in entries {
-                if entry?.path().extension() == Some(OsStr::new("promisor")) {
-                    return unsupported("promisor packs are unsupported for mutation");
-                }
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
 }
 
 fn validate_index(index: &gix::index::File) -> crate::Result {

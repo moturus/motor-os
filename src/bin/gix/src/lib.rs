@@ -20,6 +20,7 @@ pub mod merge;
 pub mod merge_policy;
 pub mod mutation;
 pub mod network;
+pub mod object_database;
 pub mod operation;
 pub mod recover;
 pub mod refs;
