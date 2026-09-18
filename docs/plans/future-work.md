@@ -2,9 +2,10 @@
 
 ## Deferred PCI BAR-boundary hardening (2026-09-15)
 
-Defending against buggy or malicious VMMs is outside the current vsock
-work, per maintainer direction (vsock plan Q21). The shared virtio mapper
-checks that a BAR selector is below six, but not whether it names the upper
+Additional defenses against buggy or malicious VMMs are outside the
+[implemented vsock profile](../vsock.md#transport-and-dma-ownership), per
+maintainer direction. The shared virtio mapper checks that a BAR selector is
+below six, but not whether it names the upper
 half of a 64-bit BAR; malformed VMM metadata could therefore make it probe
 the wrong register or derive an invalid mapping. No such failure was
 observed on tested QEMU, CHV, or Firecracker configurations.

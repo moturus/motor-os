@@ -37,7 +37,7 @@ the runner's hugepage policy and any `MOTO_HUGEPAGES` override.
 
 `src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]` runs outgoing stream
 tests on the selected VMM (QEMU by default), then the existing IP-disabled
-Cloud Hypervisor discovery cases. The full standard suite calls this phase.
+discovery cases on the same VMM. The full standard suite calls this phase.
 The selected Firecracker phase requests `raw.img`; developer-image tests
 support QEMU and Cloud Hypervisor only. All phases share the VM lock and run
 sequentially; each owns and reaps its VMM and any backend/peer processes.
