@@ -57,8 +57,8 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `gix` in `/devtools/bin`. Its initial command set
 can initialize or clone an ordinary SHA-1 worktree, update a configured remote,
-inspect changes, stage local files, commit the index, switch branches, and merge
-commits:
+inspect changes, stage local files, commit the index, switch branches, merge
+commits, and publish one branch or tag over SSH:
 
 ```sh
 gix init scratch
@@ -81,6 +81,8 @@ gix -r project tag create snapshot
 gix -r project log
 gix -r project fetch            # fetches origin
 gix -r project fetch upstream
+gix -r ssh-project push --dry-run origin HEAD:refs/heads/topic
+gix -r ssh-project push origin HEAD:refs/heads/topic
 ```
 
 `init` creates `.git` exclusively while preserving existing files in `DIR`,
@@ -164,7 +166,7 @@ can be selected explicitly with
 `gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR`; repository configuration
 cannot disable certificate verification or replace the trust roots.
 
-SSH clone/fetch uses the existing default key
+SSH clone/fetch/push uses the existing default key
 `/user/cfg/ssh/id_ed25519` and `/user/cfg/ssh/known_hosts`. Set them up with the
 SSH tools first: gix uses batch mode, requires an already trusted host and never
 prompts. SSH URLs and scp-style `user@host:path` addresses are supported. Each
@@ -172,13 +174,32 @@ session allows 8 MiB of discovery data, 128 MiB of total response data and
 64 KiB of stderr, with a 30-second connection timeout and a 300-second session
 limit. Cancellation terminates and reaps the SSH child.
 
+`push [--dry-run] [--force-with-lease=DESTINATION:OID] REMOTE SOURCE:DESTINATION`
+updates exactly one branch or tag over SSH. Name the remote explicitly; its push
+URL is used when configured. SOURCE is a local ref, HEAD or a full SHA-1 object
+ID; DESTINATION must start with `refs/heads/` or `refs/tags/`. Branches require
+commit objects. Creating a ref or fast-forwarding a branch needs no lease;
+rewriting a branch or replacing a tag requires the exact advertised old ID in
+`--force-with-lease`. An empty lease OID requires the destination to be absent.
+A supplied lease is checked even for a no-op. Dry-run checks remote state and
+update policy without sending an update. Push leaves local tracking refs and
+configuration unchanged; fetch separately to refresh them.
+
+Push prepares its pack before sending the update. The current limits allow
+65,536 outgoing objects, 65,536 reachable commits, 16 MiB per decoded object
+and a 128 MiB temporary pack. Packs contain full objects without delta
+compression, so an initial push can send more data than Git. If the result is
+reported as unknown, inspect the remote ref before pushing again; gix never
+retries automatically. A confirmed remote acceptance remains reported if
+command completion later fails.
+
 Clone creates `DIR` exclusively and never adopts an existing directory.
 A failed clone retains its owned directory for inspection; the
 `.git/gix-incomplete-clone` marker identifies unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Repository paths
 must be UTF-8 and valid Motor file names; the current path policy also rejects
 Windows-reserved names and characters. Because Motor OS has no symbolic links,
-link entries are checked out as regular files containing their target text. This command set does
-not yet include push or authenticated HTTPS.
+link entries are checked out as regular files containing their target text.
+Authenticated HTTPS and HTTPS push are not yet supported.
 
 For more details, see [https://motor-os.org](https://motor-os.org).

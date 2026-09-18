@@ -497,7 +497,7 @@ how procedural macros and build scripts run on Motor OS, is on the
 <h2 id="gix">Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
 anonymous smart-HTTPS or SSH remotes, stages and commits local changes, switches branches,
-merges commits, and shows status, diffs and history.</p>
+merges commits, shows status, diffs and history, and publishes one branch or tag over SSH.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
 gix clone ssh://git@example.test/project.git ssh-project
@@ -517,7 +517,9 @@ gix -r project tag list
 gix -r project tag create snapshot
 gix -r project log
 gix -r project fetch            # fetches origin
-gix -r project fetch upstream</code></pre>
+gix -r project fetch upstream
+gix -r ssh-project push --dry-run origin HEAD:refs/heads/topic
+gix -r ssh-project push origin HEAD:refs/heads/topic</code></pre>
 <p><code>init</code> creates <code>.git</code> exclusively while preserving existing
 files in <code>DIR</code>, which defaults to the current directory, and refuses
 reinitialization. It uses
@@ -590,20 +592,35 @@ current branch, index or worktree. HTTPS uses the system CA bundle. Select a tes
 CA explicitly with
 <code>gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR</code>; repository configuration
 cannot disable verification or replace the trust roots.</p>
-<p>SSH clone/fetch uses the existing default key
+<p>SSH clone/fetch/push uses the existing default key
 <code>/user/cfg/ssh/id_ed25519</code> and <code>/user/cfg/ssh/known_hosts</code>.
 Set them up with the SSH tools first: gix uses batch mode, requires an already
 trusted host and never prompts. SSH URLs and scp-style <code>user@host:path</code>
 addresses are supported. Each session allows 8 MiB of discovery data, 128 MiB of
 total response data and 64 KiB of stderr, with a 30-second connection timeout and
 a 300-second session limit. Cancellation terminates and reaps the SSH child.</p>
+<p><code>push [--dry-run] [--force-with-lease=DESTINATION:OID] REMOTE SOURCE:DESTINATION</code>
+updates exactly one branch or tag over SSH. Name the remote explicitly; its push URL is
+used when configured. SOURCE is a local ref, HEAD or a full SHA-1 object ID; DESTINATION
+must start with <code>refs/heads/</code> or <code>refs/tags/</code>. Branches require
+commit objects. Creating a ref or fast-forwarding a branch needs no lease; rewriting a
+branch or replacing a tag requires the exact advertised old ID in
+<code>--force-with-lease</code>. An empty lease OID requires the destination to be absent.
+A supplied lease is checked even for a no-op. Dry-run checks remote state and update
+policy without sending an update. Push leaves local tracking refs and configuration
+unchanged; fetch separately to refresh them.</p>
+<p>Push prepares its pack before sending the update. Current limits allow 65,536 outgoing
+objects, 65,536 reachable commits, 16 MiB per decoded object and a 128 MiB temporary pack.
+Packs contain full objects without delta compression, so an initial push can send more
+data than Git. If the result is reported as unknown, inspect the remote ref before
+pushing again; gix never retries automatically. A confirmed remote acceptance remains
+reported if command completion later fails.</p>
 <p>Clone creates <code>DIR</code> exclusively. A failed clone retains its owned directory
 for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
 valid Motor file names; the current path policy also rejects Windows-reserved names and
 characters. Link entries become regular files containing their target text because Motor OS
-has no symbolic links. Push and authenticated HTTPS are not part of
-this initial command set.</p>
+has no symbolic links. Authenticated HTTPS and HTTPS push are not yet supported.</p>
 
 <h2>Gears</h2>
 <p>Gears is a small, extensible agent harness for working with a language model from
