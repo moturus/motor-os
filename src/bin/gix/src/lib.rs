@@ -22,6 +22,7 @@ pub mod mutation;
 pub mod network;
 pub mod object_database;
 pub mod operation;
+pub mod push_objects;
 pub mod recover;
 pub mod refs;
 pub mod repository;

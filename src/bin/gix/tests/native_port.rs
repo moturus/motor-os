@@ -103,6 +103,7 @@ fn main() -> Result {
         .map_err(|err| err.into_error())?;
 
     check_pack_validation(repo, &output)?;
+    check_push_objects(&output)?;
 
     let capabilities = gix::fs::Capabilities::probe_dir(&worktree);
     assert!(
@@ -3679,6 +3680,101 @@ fn expect_guard_rejected(repo: &gix::Repository, expected: &str) -> Result {
         .err()
         .ok_or_else(|| format!("mutation guard accepted {expected}"))?;
     assert!(error.to_string().contains(expected), "{error}");
+    Ok(())
+}
+
+fn check_push_objects(output: &Path) -> Result {
+    let repository = output.join("push-object-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    let opened = motor_gix::repository::open(
+        &repository,
+        &["user.name=Native Test", "user.email=native@example.com"],
+        false,
+    )?;
+    let repo = &opened.repo;
+    let blob = repo.write_blob(b"selected blob\n")?.detach();
+    let missing_gitlink = gix::ObjectId::from_bytes_or_panic(&[0x42; 20]);
+    let unknown_advertised = gix::ObjectId::from_bytes_or_panic(&[0x24; 20]);
+    assert!(!repo.has_object(missing_gitlink));
+    assert!(!repo.has_object(unknown_advertised));
+
+    let tree = repo
+        .write_object(gix::objs::Tree {
+            entries: vec![
+                gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Blob.into(),
+                    filename: "file".into(),
+                    oid: blob,
+                },
+                gix::objs::tree::Entry {
+                    mode: gix::objs::tree::EntryKind::Commit.into(),
+                    filename: "submodule".into(),
+                    oid: missing_gitlink,
+                },
+            ],
+        })?
+        .detach();
+    let commit = repo
+        .new_commit("push source", tree, std::iter::empty::<gix::ObjectId>())?
+        .id;
+    let write_tag = |target, target_kind, name: &str| -> Result<gix::ObjectId> {
+        Ok(repo
+            .write_object(gix::objs::Tag {
+                target,
+                target_kind,
+                name: name.into(),
+                tagger: None,
+                message: "fixture tag\n".into(),
+                pgp_signature: None,
+            })?
+            .detach())
+    };
+    let blob_tag = write_tag(blob, gix::objs::Kind::Blob, "blob-tag")?;
+    let tree_tag = write_tag(tree, gix::objs::Kind::Tree, "tree-tag")?;
+    let inner_tag = write_tag(commit, gix::objs::Kind::Commit, "inner-tag")?;
+    let outer_tag = write_tag(inner_tag, gix::objs::Kind::Tag, "outer-tag")?;
+
+    let direct_blob = [blob];
+    let tagged_blob = [blob, blob_tag];
+    let tagged_tree = [blob, tree, tree_tag];
+    let nested_commit = [blob, tree, commit, inner_tag, outer_tag];
+    let none: [gix::ObjectId; 0] = [];
+    let unknown = [unknown_advertised];
+    for (name, source, advertised, expected) in [
+        ("direct blob", blob, none.as_slice(), direct_blob.as_slice()),
+        (
+            "annotated blob",
+            blob_tag,
+            none.as_slice(),
+            tagged_blob.as_slice(),
+        ),
+        (
+            "annotated tree",
+            tree_tag,
+            none.as_slice(),
+            tagged_tree.as_slice(),
+        ),
+        (
+            "nested commit tag with unknown advertisement",
+            outer_tag,
+            unknown.as_slice(),
+            nested_commit.as_slice(),
+        ),
+    ] {
+        let mut actual = motor_gix::push_objects::select(repo, source, advertised, &cancellation)?
+            .ids()
+            .to_vec();
+        let mut expected = expected.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{name}");
+    }
     Ok(())
 }
 
