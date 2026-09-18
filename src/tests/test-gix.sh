@@ -861,8 +861,11 @@ BUILD=release
 prepare_ssh_client_host "$WD/test.key"
 ssh_bin="$SSH_CLIENT_HOST_ROOT/gix-bin"
 ssh_remote="$SSH_CLIENT_HOST_ROOT/repo name's.git"
+ssh_push_remote="$SSH_CLIENT_HOST_ROOT/push.git"
 mkdir -p "$ssh_bin"
 clean_git clone -q --bare --no-hardlinks "$fixture" "$ssh_remote"
+clean_git init --bare -q "$ssh_push_remote"
+mkdir -p "$ssh_push_remote/hooks"
 ssh_initial_head="$(clean_git --git-dir="$ssh_remote" rev-parse refs/heads/main)"
 cat > "$ssh_bin/git-upload-pack" <<'SH'
 #!/bin/sh
@@ -891,7 +894,24 @@ case "${1:-}" in
   ;;
 esac
 SH
-chmod 755 "$ssh_bin/git-upload-pack"
+cat > "$ssh_bin/git-receive-pack" <<'SH'
+#!/bin/sh
+root=${0%/gix-bin/git-receive-pack}
+case "${1:-}" in
+"$root/push.git") exec /usr/bin/git-receive-pack "$@" ;;
+*) printf 'unexpected receive-pack path: %s\n' "${1:-}" >&2; exit 97 ;;
+esac
+SH
+cat > "$ssh_push_remote/hooks/pre-receive" <<'SH'
+#!/bin/sh
+cat >/dev/null
+if [ -e hooks/reject ]; then
+  printf 'fixture hook rejection\n' >&2
+  exit 1
+fi
+SH
+chmod 755 "$ssh_bin/git-upload-pack" "$ssh_bin/git-receive-pack" \
+  "$ssh_push_remote/hooks/pre-receive"
 start_ssh_client_host "$WD/test.key" 0 "$ssh_bin:/bin:/usr/bin"
 ssh_base="ssh://motor@192.168.4.1:$SSH_CLIENT_HOST_PORT$SSH_CLIENT_HOST_ROOT"
 ssh_repo_url="$ssh_base/repo%20name%27s.git"
@@ -912,6 +932,119 @@ printf 'get "%s" "%s"\n' \
 [ ! -s "$temporary/ssh-unknown-marker" ] || fail "unknown-host clone marker was not empty"
 
 trust_ssh_client_host "$SSH_CLIENT_HOST_PORT"
+
+guest_push_source="$guest_root/output/push-pack/source"
+guest_push_app="HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_push_source push"
+ssh_push_url="$ssh_base/push.git"
+guest_named_push_app="HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_push_source -c remote.fixture.url=$ssh_base/not-push.git -c remote.fixture.pushUrl=$ssh_push_url push"
+read -r push_c0 < "$temporary/guest-push-pack/C0"
+read -r push_m < "$temporary/guest-push-pack/M"
+expect_guest_push() {
+  local expected="$1" actual
+  shift
+  actual="$(vm_ssh "$guest_push_app $*")" || fail "SSH push failed: $*"
+  [ "$actual" = "$expected" ] ||
+    fail "SSH push output differs: got '$actual', want '$expected'"
+}
+expect_guest_push_failure() {
+  local name="$1" expected="$2" status
+  shift 2
+  set +e
+  vm_ssh "$guest_push_app $*" > "$temporary/$name.stdout" 2> "$temporary/$name.stderr"
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail "$name push exited $status, want 1"
+  grep -F "$expected" "$temporary/$name.stderr" >/dev/null ||
+    fail "$name push lacked '$expected': $(cat "$temporary/$name.stderr")"
+}
+push_remote_snapshot() {
+  (
+    cd "$ssh_push_remote"
+    while IFS= read -r -d '' file; do sha256sum "$file"; done \
+      < <(find . -type f -print0 | sort -z)
+  )
+}
+verify_read_only_push() {
+  local name="$1" before="$2" after
+  after="$temporary/$name-remote-after"
+  push_remote_snapshot > "$after"
+  cmp "$before" "$after" >/dev/null || fail "$name push changed the remote"
+  printf 'get -r "%s" "%s"\n' "$guest_push_source" "$temporary/$name-source" |
+    "${sftp_command[@]}"
+  diff -qr "$temporary/guest-push-pack/source" "$temporary/$name-source" >/dev/null ||
+    fail "$name push changed the source repository"
+  vm_ssh "[ ! -e $guest_push_source/.git/index.lock ] && [ ! -e $guest_push_source/.git/gix-operation ] && [ ! -e $guest_push_source/.git/packed-refs.lock ]" ||
+    fail "$name push left a source lock"
+  [ -z "$(find "$ssh_push_remote" -name '*.lock' -print -quit)" ] ||
+    fail "$name push left a remote lock"
+}
+
+push_output="$(vm_ssh "$guest_named_push_app fixture $push_c0:refs/heads/main")" ||
+  fail "configured-remote SSH push failed"
+[ "$push_output" = "remote accepted: refs/heads/main -> $push_c0" ] ||
+  fail "configured-remote SSH push output differs: $push_output"
+[ "$(clean_git -C "$ssh_push_remote" rev-parse refs/heads/main)" = "$push_c0" ] ||
+  fail "initial SSH push wrote the wrong main"
+if clean_git -C "$ssh_push_remote" cat-file -e "$push_m^{commit}" 2>/dev/null; then
+  fail "initial SSH push sent the incremental commit"
+fi
+
+push_remote_snapshot > "$temporary/push-dry-remote-before"
+expect_guest_push "would update: refs/heads/main -> $push_m" \
+  --dry-run "$ssh_push_url" "HEAD:refs/heads/main"
+verify_read_only_push push-dry "$temporary/push-dry-remote-before"
+
+expect_guest_push "remote accepted: refs/heads/main -> $push_m" \
+  "$ssh_push_url" "HEAD:refs/heads/main"
+[ "$(clean_git -C "$ssh_push_remote" show main:conflict)" = resolved ] ||
+  fail "incremental SSH push has the wrong merge resolution"
+[ "$(clean_git -C "$ssh_push_remote" show main:unchanged)" = unchanged ] ||
+  fail "incremental SSH push lost baseline content"
+clean_git -C "$ssh_push_remote" fsck --strict --no-dangling >/dev/null
+
+expect_guest_push_failure push-stale-lease \
+  'push lease does not match the advertised destination' \
+  "--force-with-lease=refs/heads/main:$push_c0" "$ssh_push_url" "HEAD:refs/heads/main"
+push_remote_snapshot > "$temporary/push-noop-remote-before"
+expect_guest_push "up to date: refs/heads/main -> $push_m" \
+  "$ssh_push_url" "HEAD:refs/heads/main"
+verify_read_only_push push-noop "$temporary/push-noop-remote-before"
+
+expect_guest_push_failure push-non-ff \
+  'push is not a fast-forward; an explicit matching lease is required' \
+  "$ssh_push_url" "$push_c0:refs/heads/main"
+expect_guest_push "remote accepted: refs/heads/main -> $push_c0" \
+  "--force-with-lease=refs/heads/main:$push_m" "$ssh_push_url" "$push_c0:refs/heads/main"
+expect_guest_push "remote accepted: refs/heads/main -> $push_m" \
+  "--force-with-lease=refs/heads/main:$push_c0" "$ssh_push_url" "$push_m:refs/heads/main"
+
+expect_guest_push "remote accepted: refs/tags/published -> $push_c0" \
+  "$ssh_push_url" "$push_c0:refs/tags/published"
+expect_guest_push_failure push-tag-replace \
+  'replacing an existing tag requires an explicit matching lease' \
+  "$ssh_push_url" "$push_m:refs/tags/published"
+expect_guest_push "remote accepted: refs/tags/published -> $push_m" \
+  "--force-with-lease=refs/tags/published:$push_c0" "$ssh_push_url" "$push_m:refs/tags/published"
+
+# M is already advertised, so this successful new-ref update carries the valid empty pack.
+expect_guest_push "remote accepted: refs/heads/copy -> $push_m" \
+  "$ssh_push_url" "$push_m:refs/heads/copy"
+touch "$ssh_push_remote/hooks/reject"
+expect_guest_push_failure push-hook-reject \
+  'remote rejected the update: pre-receive hook declined' \
+  "$ssh_push_url" "$push_m:refs/heads/rejected"
+rm "$ssh_push_remote/hooks/reject"
+if clean_git -C "$ssh_push_remote" rev-parse --verify refs/heads/rejected >/dev/null 2>&1; then
+  fail "rejected SSH push created its destination"
+fi
+[ "$(clean_git -C "$ssh_push_remote" rev-parse refs/heads/main)" = "$push_m" ] ||
+  fail "SSH push lifecycle left main at the wrong commit"
+[ "$(clean_git -C "$ssh_push_remote" rev-parse refs/heads/copy)" = "$push_m" ] ||
+  fail "empty-pack SSH push wrote the wrong ref"
+[ "$(clean_git -C "$ssh_push_remote" rev-parse refs/tags/published)" = "$push_m" ] ||
+  fail "leased SSH tag replacement wrote the wrong ref"
+clean_git -C "$ssh_push_remote" fsck --strict --no-dangling >/dev/null
+
 ssh_clone="$guest_root/ssh-clone"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix clone $ssh_repo_url $ssh_clone" \
   > "$temporary/ssh-clone.stdout" 2> "$temporary/ssh-clone.stderr" ||
