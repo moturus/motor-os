@@ -5,6 +5,10 @@ SSH_CLIENT_HOST_OUTPUT_FD=""
 SSH_CLIENT_HOST_BASE=""
 SSH_CLIENT_HOST_ROOT=""
 SSH_CLIENT_HOST_PORT=""
+SSH_CLIENT_HOST_PUBLIC_KEY=""
+SSH_CLIENT_HOST_IDENTITY_INSTALLED=0
+SSH_CLIENT_HOST_GUEST_KEY=/user/cfg/ssh/id_ed25519
+SSH_CLIENT_HOST_GUEST_KNOWN=/user/cfg/ssh/known_hosts
 
 stop_ssh_client_host() {
   if [ -n "$SSH_CLIENT_HOST_PROCESS" ]; then
@@ -19,8 +23,21 @@ stop_ssh_client_host() {
   fi
 }
 
+remove_ssh_client_host_identity() {
+  local status=0 guest_file
+  if [ "$SSH_CLIENT_HOST_IDENTITY_INSTALLED" -eq 1 ]; then
+    for guest_file in "$SSH_CLIENT_HOST_GUEST_KEY" \
+      "$SSH_CLIENT_HOST_GUEST_KEY.pub" "$SSH_CLIENT_HOST_GUEST_KNOWN"; do
+      vm_ssh "/system/bin/rm $guest_file" >/dev/null || status=1
+    done
+    [ "$status" -ne 0 ] || SSH_CLIENT_HOST_IDENTITY_INSTALLED=0
+  fi
+  return "$status"
+}
+
 cleanup_ssh_client_host() {
   stop_ssh_client_host
+  remove_ssh_client_host_identity >/dev/null 2>&1 || true
   if [ -n "$SSH_CLIENT_HOST_ROOT" ]; then
     case "$SSH_CLIENT_HOST_ROOT" in
       "$SSH_CLIENT_HOST_BASE"/ssh-client-host.*)
@@ -35,12 +52,49 @@ cleanup_ssh_client_host() {
   fi
 }
 
+prepare_ssh_client_host() {
+  local host_key="$1" public_file repo_root guest_file
+  repo_root="$(cd "$ROOT_DIR" && pwd)"
+  SSH_CLIENT_HOST_BASE="$repo_root/build/host-tests"
+  mkdir -p "$SSH_CLIENT_HOST_BASE"
+  SSH_CLIENT_HOST_ROOT="$(mktemp -d "$SSH_CLIENT_HOST_BASE/ssh-client-host.XXXXXX")"
+  public_file="$SSH_CLIENT_HOST_ROOT/id_ed25519.pub"
+  SSH_CLIENT_HOST_PUBLIC_KEY="$(ssh-keygen -y -f "$host_key")"
+  printf '%s\n' "$SSH_CLIENT_HOST_PUBLIC_KEY" > "$public_file"
+
+  SSH_CLIENT_HOST_IDENTITY_INSTALLED=1
+  for guest_file in "$SSH_CLIENT_HOST_GUEST_KEY" \
+    "$SSH_CLIENT_HOST_GUEST_KEY.pub" "$SSH_CLIENT_HOST_GUEST_KNOWN"; do
+    vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
+  done
+  printf 'put %s %s\nchmod 600 %s\nput %s %s\nchmod 644 %s\n' \
+    "$host_key" "$SSH_CLIENT_HOST_GUEST_KEY" "$SSH_CLIENT_HOST_GUEST_KEY" \
+    "$public_file" "$SSH_CLIENT_HOST_GUEST_KEY.pub" "$SSH_CLIENT_HOST_GUEST_KEY.pub" |
+    sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+      -i "$WD/test.key" motor@192.168.4.2 >/dev/null
+}
+
+trust_ssh_client_host() {
+  local port="$1" host=192.168.4.1 output known
+  output="$(vm_ssh "/user/bin/ssh -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new motor@$host /bin/echo unknown-ok")" ||
+    fail "Motor client rejected an unknown host under accept-new"
+  [ "$output" = unknown-ok ] || fail "unknown-host command returned '$output'"
+  output="$(vm_ssh "/user/bin/ssh -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo matching-ok")" ||
+    fail "Motor client rejected its recorded host key"
+  [ "$output" = matching-ok ] || fail "matching-host command returned '$output'"
+  known="$(vm_ssh /system/bin/cat "$SSH_CLIENT_HOST_GUEST_KNOWN")"
+  [ "$known" = "[$host]:$port $SSH_CLIENT_HOST_PUBLIC_KEY" ] ||
+    fail "known_hosts contains an unexpected record: '$known'"
+}
+
 write_ssh_client_host_config() {
   local path="$1"
   local address="$2"
   local host_key="$3"
+  local command_path="${4:-/bin:/usr/bin}"
   {
-    printf "version = 1\nlisten_on = '%s'\npath = '/bin:/usr/bin'\n" "$address"
+    printf "version = 1\nlisten_on = '%s'\npath = '%s'\n" "$address" "$command_path"
     printf 'host_key = """%s"""\n\n[users.motor]\n' "$(cat "$host_key")"
     printf "salt = 'd6973342749609329b41f52d390fcd0a4732df20e15dc6766d37f09ac8f129a1'\n"
     printf "password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d41'\n"
@@ -51,6 +105,7 @@ write_ssh_client_host_config() {
 start_ssh_client_host() {
   local host_key="$1"
   local requested_port="$2"
+  local command_path="${3:-/bin:/usr/bin}"
   local repo_root
   repo_root="$(cd "$ROOT_DIR" && pwd)"
   local host_bin="$repo_root/src/bin/russhd/target/$BUILD/russhd"
@@ -60,7 +115,7 @@ start_ssh_client_host() {
   local deadline
 
   [ -x "$host_bin" ] || fail "host russhd is missing at $host_bin"
-  write_ssh_client_host_config "$config" "192.168.4.1:$requested_port" "$host_key"
+  write_ssh_client_host_config "$config" "192.168.4.1:$requested_port" "$host_key" "$command_path"
   coproc SSH_CLIENT_HOST_SERVER {
     cd "$SSH_CLIENT_HOST_ROOT"
     exec env HOME="$SSH_CLIENT_HOST_ROOT" "$host_bin" "$config" </dev/null 2>&1
@@ -110,47 +165,28 @@ test_ssh_client_host() {
   local host=192.168.4.1
   local first_key="$WD/test.key"
   local second_key="$WD/test-host-alt.key"
-  local public_file
   local public_key
   local known
   local output
   local port
-  local repo_root
   local guest_file
 
   echo "-- Motor SSH client private-network compatibility --"
-  repo_root="$(cd "$ROOT_DIR" && pwd)"
-  SSH_CLIENT_HOST_BASE="$repo_root/build/host-tests"
-  mkdir -p "$SSH_CLIENT_HOST_BASE"
-  SSH_CLIENT_HOST_ROOT="$(mktemp -d "$SSH_CLIENT_HOST_BASE/ssh-client-host.XXXXXX")"
-  public_file="$SSH_CLIENT_HOST_ROOT/id_ed25519.pub"
-  public_key="$(ssh-keygen -y -f "$first_key")"
-  printf '%s\n' "$public_key" > "$public_file"
-
-  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known" "$guest_executable"; do
+  prepare_ssh_client_host "$first_key"
+  public_key="$SSH_CLIENT_HOST_PUBLIC_KEY"
+  for guest_file in "$guest_wrong" "$guest_executable"; do
     vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
   done
   vm_ssh "/system/bin/rm -r $guest_transfer_root" >/dev/null 2>&1 || true
-  printf 'put %s %s\nchmod 600 %s\nput %s %s\nchmod 644 %s\nput %s %s\nchmod 600 %s\n' \
-    "$first_key" "$guest_key" "$guest_key" \
-    "$public_file" "$guest_key.pub" "$guest_key.pub" \
-    "$second_key" "$guest_wrong" "$guest_wrong" |
+  printf 'put %s %s\nchmod 600 %s\n' "$second_key" "$guest_wrong" "$guest_wrong" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2 >/dev/null
 
   start_ssh_client_host "$first_key" 0
   port="$SSH_CLIENT_HOST_PORT"
-  output="$(vm_ssh "/user/bin/ssh -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=accept-new motor@$host /bin/echo unknown-ok")" ||
-    fail "Motor client rejected an unknown host under accept-new"
-  [ "$output" = unknown-ok ] || fail "unknown-host command returned '$output'"
-
-  output="$(vm_ssh "/user/bin/ssh -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo matching-ok")" ||
-    fail "Motor client rejected its recorded host key"
-  [ "$output" = matching-ok ] || fail "matching-host command returned '$output'"
+  trust_ssh_client_host "$port"
   known="$(vm_ssh /system/bin/cat "$guest_known")"
-  [ "$known" = "[$host]:$port $public_key" ] ||
-    fail "known_hosts contains an unexpected record: '$known'"
 
   local host_executable="$SSH_CLIENT_HOST_ROOT/executable"
   local returned_executable="$SSH_CLIENT_HOST_ROOT/returned-executable"
@@ -239,7 +275,8 @@ test_ssh_client_host() {
     fail "changed host key modified known_hosts"
 
   stop_ssh_client_host
-  for guest_file in "$guest_key" "$guest_key.pub" "$guest_wrong" "$guest_known" "$guest_executable"; do
+  remove_ssh_client_host_identity || fail "failed to remove the guest SSH identity fixture"
+  for guest_file in "$guest_wrong" "$guest_executable"; do
     vm_ssh "/system/bin/rm $guest_file" >/dev/null ||
       fail "failed to remove guest SSH fixture $guest_file"
   done

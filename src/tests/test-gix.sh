@@ -20,6 +20,7 @@ gix_pty_pid=
 gix_pty_out=
 gix_pty_in=
 fail() { echo "test-gix: $*" >&2; exit 1; }
+. "$WD/test-ssh-client-host.sh"
 cleanup() {
   local status=$? server_status=0
   if [ -n "$gix_pty_pid" ]; then
@@ -28,6 +29,7 @@ cleanup() {
   fi
   [ -z "$gix_pty_in" ] || exec {gix_pty_in}>&-
   [ -z "$gix_pty_out" ] || exec {gix_pty_out}<&-
+  cleanup_ssh_client_host
   if [ -n "$https_pid" ]; then
     kill "$https_pid" 2>/dev/null || status=1
     wait "$https_pid" 2>/dev/null || server_status=$?
@@ -102,43 +104,63 @@ clean_git() {
 git_fixture() {
   clean_git -C "$fixture" "$@"
 }
-advance_https_remote() {
-  local update="$temporary/https-update"
-  clean_git clone -q --no-hardlinks "$https_remote" "$update"
+advance_remote() {
+  local remote="$1" update="$2" content="$3"
+  clean_git clone -q --no-hardlinks "$remote" "$update"
   clean_git -C "$update" config user.name "Motor Test"
   clean_git -C "$update" config user.email motor-test@example.invalid
-  printf 'remote update\n' > "$update/remote-only"
+  printf '%s\n' "$content" > "$update/remote-only"
   clean_git -C "$update" add remote-only
   GIT_AUTHOR_DATE=2001-01-03T00:00:00Z GIT_COMMITTER_DATE=2001-01-03T00:00:00Z \
     clean_git -C "$update" commit -qm remote-update
   clean_git -C "$update" push -q origin main
 }
-verify_https_clone() {
-  local before="$1" after="$2" initial remote initial_index
+verify_network_clone() {
+  local before="$1" after="$2" remote_repo="$3" initial_head="$4" label="$5"
+  local initial remote initial_index
   initial="$(clean_git -C "$before" rev-parse HEAD)"
-  remote="$(clean_git --git-dir="$https_remote" rev-parse refs/heads/main)"
-  [ "$initial" = "$https_initial_head" ] || fail "initial HTTPS clone has the wrong HEAD"
-  [ "$(clean_git -C "$before" rev-parse refs/remotes/origin/main)" = "$https_initial_head" ] ||
-    fail "initial HTTPS clone has the wrong tracking ref"
+  remote="$(clean_git --git-dir="$remote_repo" rev-parse refs/heads/main)"
+  [ "$initial" = "$initial_head" ] || fail "initial $label clone has the wrong HEAD"
+  [ "$(clean_git -C "$before" rev-parse refs/remotes/origin/main)" = "$initial_head" ] ||
+    fail "initial $label clone has the wrong tracking ref"
   initial_index="$(sha256sum "$before/.git/index")"
   clean_git -C "$before" -c core.symlinks=false diff-index --cached --quiet \
-    --ignore-submodules=all "$https_initial_head" -- || fail "initial HTTPS index differs from HEAD"
+    --ignore-submodules=all "$initial_head" -- || fail "initial $label index differs from HEAD"
   # Copying changes stat data; inspect Git's content/mode diff without refreshing the index.
   clean_git -C "$before" -c core.symlinks=false -c core.fileMode=true \
     diff-files -p --no-ext-diff --no-textconv --ignore-submodules=all -- \
-    > "$temporary/https-worktree.diff"
-  [ ! -s "$temporary/https-worktree.diff" ] || fail "initial HTTPS worktree differs from the index"
+    > "$temporary/network-worktree.diff"
+  [ ! -s "$temporary/network-worktree.diff" ] || fail "initial $label worktree differs from the index"
   [ "$(sha256sum "$before/.git/index")" = "$initial_index" ] ||
-    fail "host Git verification modified the initial HTTPS index"
-  [ "$remote" != "$initial" ] || fail "HTTPS remote did not advance"
+    fail "host Git verification modified the initial $label index"
+  [ "$remote" != "$initial" ] || fail "$label remote did not advance"
   [ "$(clean_git -C "$after" rev-parse HEAD)" = "$initial" ] ||
-    fail "fetch changed the checked-out HTTPS branch"
+    fail "fetch changed the checked-out $label branch"
   [ "$(clean_git -C "$after" rev-parse refs/remotes/origin/main)" = "$remote" ] ||
-    fail "fetch did not advance origin/main"
-  cmp "$before/.git/index" "$after/.git/index" >/dev/null || fail "fetch changed the index"
-  diff -r --exclude=.git "$before" "$after" >/dev/null || fail "fetch changed the worktree"
+    fail "fetch did not advance $label origin/main"
+  cmp "$before/.git/index" "$after/.git/index" >/dev/null || fail "fetch changed the $label index"
+  diff -r --exclude=.git "$before" "$after" >/dev/null || fail "fetch changed the $label worktree"
   clean_git -C "$after" fsck --strict
 }
+wait_ssh_fixture_closed() {
+  local name="$1" pid deadline=$((SECONDS + 20))
+  wait_ssh_fixture_file "$SSH_CLIENT_HOST_ROOT/$name.closed" "$name-closed"
+  pid="$(cat "$SSH_CLIENT_HOST_ROOT/$name.pid")"
+  case "$pid" in ""|*[!0-9]*) fail "SSH fixture returned an invalid child pid" ;; esac
+  while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.05
+  done
+  ! kill -0 "$pid" 2>/dev/null || fail "SSH fixture $name process survived completion"
+}
+wait_ssh_fixture_file() {
+  local path="$1" label="$2" deadline=$((SECONDS + 20))
+  while [ ! -e "$path" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    kill -0 "$SSH_CLIENT_HOST_PROCESS" 2>/dev/null || fail "host russhd exited while waiting for $label"
+    sleep 0.05
+  done
+  [ -e "$path" ] || fail "SSH fixture did not create $label"
+}
+
 build_fixture() {
   local initial_id link_id utf8_name
   utf8_name=$'caf\xc3\xa9'
@@ -465,9 +487,9 @@ PY
   "${app_env[@]}" "$gix_binary" -c "http.sslCAInfo=$ca" \
     clone "$https_origin/redirect/repo.git" "$clone"
   cp -a "$clone" "$temporary/https-clone-before"
-  advance_https_remote
+  advance_remote "$https_remote" "$temporary/https-update" "remote update"
   "${app_env[@]}" "$gix_binary" -r "$clone" -c "http.sslCAInfo=$ca" fetch
-  verify_https_clone "$temporary/https-clone-before" "$clone"
+  verify_network_clone "$temporary/https-clone-before" "$clone" "$https_remote" "$https_initial_head" HTTPS
 
   mkdir "$temporary/preexisting"
   printf 'preserve\n' > "$temporary/preexisting/sentinel"
@@ -765,11 +787,11 @@ guest_clone="$guest_root/https-clone"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -c http.sslCAInfo=$guest_root/test-ca.pem clone $https_origin/redirect/repo.git $guest_clone"
 printf 'get -r "%s" "%s"\n' "$guest_clone" "$temporary/guest-clone-before" |
   "${sftp_command[@]}"
-advance_https_remote
+advance_remote "$https_remote" "$temporary/https-update" "remote update"
 vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_clone -c http.sslCAInfo=$guest_root/test-ca.pem fetch"
 printf 'get -r "%s" "%s"\n' "$guest_clone" "$temporary/guest-clone-after" |
   "${sftp_command[@]}"
-verify_https_clone "$temporary/guest-clone-before" "$temporary/guest-clone-after"
+verify_network_clone "$temporary/guest-clone-before" "$temporary/guest-clone-after" "$https_remote" "$https_initial_head" HTTPS
 
 coproc GIX_PTY {
   ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \
