@@ -12,10 +12,10 @@ anonymous HTTPS clone/fetch and read-only status/log. Host/Motor component
 gates, `full-test-dev.sh --release`, and the representative native HTTPS
 clone pass. The M1 dependency pin is
 `087dbd18e849a4275477572ec36a81385ff1e9b9`; section 7 records the repairs,
-limits and measured results. All M2 commands are now implemented and
-component-tested, including switch, merge, conflict resolution, abort and
-explicit recovery. Consolidated failure coverage and the full M2 milestone
-validation are still in progress. Section 7 records progress.
+limits and measured results. M2 is complete as of 2026-09-17: all local
+commands, consolidated interruption/recovery coverage, the full release
+developer suite, and the representative authoring/Git round-trip passed.
+M3 adds SSH acquisition and single-ref push. Section 7 records progress.
 Section 8 records the approved 8 MiB loose-ref
 limit and directory-entry repair. The managed stdlib and approved socket
 teardown repair passed three debug and three release main-image gates and the
@@ -1602,6 +1602,47 @@ the separate existing `add_object`/`create_ipc_pair` admission gap; this patch
 only changes the ordering of cleanup for already-owned handles. Diagnosis and
 validation evidence are retained under `/tmp/motor-fs-lock-exit-fix` and
 `/tmp/motor-gix-merge-death-diagnosis`.
+
+**M2 completion, 2026-09-17.** Commit `97fd7cbf` consolidates installed-merge
+interruption, process death with a stale Git index lock, interrupted abort
+and recovery, and cleanup after successful merge publication into the existing
+lifecycle. The operation record and exact original HEAD are rechecked before
+marking a merge Ready. Both target Clippy gates and host/Motor fixtures pass.
+The final release developer suite also passed on these exact source bytes,
+including native source builds and Lorry; its evidence is retained under
+`/tmp/motor-fs-lock-exit-fix/gates-2`. The separate OS correction is `c0880dc5`.
+No repeated developer gate was needed after committing the tested patches;
+source identity and gate provenance are recorded under
+`/tmp/motor-gix-m2-milestone`.
+
+The representative workload reused M1's packed history at `db5ce8e0`
+(36,548 packed objects) in a 1 GiB release VM. Native diff/stage/commit,
+branch/switch and a divergent two-parent merge passed, followed by a finished
+Motor → host Git → Motor authoring round-trip. Exact parent/content checks,
+clean status at each crossing and one final strict Git fsck passed. The
+original pack and pack index stayed byte-identical. Final loose storage was
+18 objects and 4,286 bytes; the index was 179,136 bytes, and total logical
+file contents were 37,786,662 bytes. These are final sizes, not allocated or
+peak temporary disk usage.
+
+One 100 ms sampler window over the native authoring sequence collected 31
+samples and observed seven gix processes. Its highest gix virtual-memory
+reading was 36,843,520 bytes (about 35.1 MiB); short-lived processes and peaks
+can be missed, so this is neither exact peak memory nor RSS. Host-observed
+SSH command times were 595/630 ms for the two switches, 651 ms for the clean
+merge, and 33–72 ms for the ordinary commits. Timing and memory samples are
+separate observations, with no per-command peak-memory claim. No additional
+workload or benchmark matrix was added.
+
+The default-feature installed binary matched `build/bin/release/gix` exactly:
+7,041,312 bytes, SHA-256
+`61d6ed391fb994b11adec833e0bde2d348bf59334ff7ea136c70119cc40f0e1c`.
+The Gitoxide pin is `176e1568e94c3bf4bd5add4ec65aeba13b40d8f5`; the lockfile
+SHA-256 is `d8dcb0d53685d3c06131f4fe0c9d8acd8a388903bd565cb663d162a21e72fb35`.
+The feature set is in `src/bin/gix/Cargo.toml`; release retains aborting
+panics, fat LTO and one codegen unit. Source/toolchain/assembly identities,
+raw resource samples, timings, transferred repositories and fsck results are
+under `/tmp/motor-gix-m2-measurement` and `/tmp/motor-gix-m2-milestone`.
 
 ## 8. Discussion record
 
