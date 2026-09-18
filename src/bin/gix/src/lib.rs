@@ -25,6 +25,7 @@ pub mod operation;
 pub mod push_discovery;
 pub mod push_objects;
 pub mod push_pack;
+pub mod push_report;
 pub mod recover;
 pub mod refs;
 pub mod repository;
