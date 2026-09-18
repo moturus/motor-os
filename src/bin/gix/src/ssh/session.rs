@@ -20,19 +20,19 @@ const MAX_FAILURES: usize = 8;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-pub struct Session {
+pub(super) struct Session {
     worker: Option<JoinHandle<Outcome>>,
     stop: Arc<AtomicBool>,
     input_closed: InputClosed,
 }
 
-pub struct Startup(Receiver<(ChildStdout, ChildStdin)>);
+pub(super) struct Startup(Receiver<(ChildStdout, ChildStdin)>);
 
 #[derive(Clone)]
-pub struct InputClosed(Arc<AtomicBool>);
+pub(super) struct InputClosed(Arc<AtomicBool>);
 
 impl Session {
-    pub fn launch(
+    pub(super) fn launch(
         mut command: Command,
         cancellation: &Cancellation,
     ) -> io::Result<(Self, Startup)> {
@@ -71,19 +71,19 @@ impl Session {
         ))
     }
 
-    pub fn stop(&self) {
+    pub(super) fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
 
-    pub fn input_closed(&self) -> InputClosed {
+    pub(super) fn input_closed(&self) -> InputClosed {
         self.input_closed.clone()
     }
 
-    pub fn is_closed(&self) -> bool {
+    pub(super) fn is_closed(&self) -> bool {
         self.input_closed.0.load(Ordering::Acquire)
     }
 
-    pub fn join(mut self, expected_stop: bool) -> crate::Result<Vec<u8>> {
+    pub(super) fn join(mut self, expected_stop: bool) -> crate::Result<Vec<u8>> {
         let worker = self
             .worker
             .take()
@@ -105,7 +105,7 @@ impl Drop for Session {
 }
 
 impl Startup {
-    pub fn wait(self) -> io::Result<(ChildStdout, ChildStdin)> {
+    pub(super) fn wait(self) -> io::Result<(ChildStdout, ChildStdin)> {
         self.0
             .recv()
             .map_err(|_| io::Error::other("SSH supervisor stopped during startup"))
@@ -113,7 +113,7 @@ impl Startup {
 }
 
 impl InputClosed {
-    pub fn mark(&self) {
+    pub(super) fn mark(&self) {
         self.0.store(true, Ordering::Release);
     }
 }

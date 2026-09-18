@@ -119,6 +119,22 @@ impl Failure {
     pub fn new(message: String, source: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Self { message, source }
     }
+
+    /// Keep the primary source and include every cause of a secondary failure.
+    pub fn with_secondary(
+        label: &str,
+        source: Box<dyn std::error::Error + Send + Sync>,
+        secondary: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        let mut message = format!("{label}: {secondary}");
+        let mut cause = secondary.source();
+        while let Some(error) = cause {
+            message.push_str(": ");
+            message.push_str(&error.to_string());
+            cause = error.source();
+        }
+        Self { message, source }
+    }
 }
 
 impl std::fmt::Display for Failure {

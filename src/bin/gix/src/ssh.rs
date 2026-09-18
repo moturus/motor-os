@@ -1,15 +1,24 @@
-pub mod session;
+mod input;
+mod session;
 
 use std::{
-    io,
-    process::{Command, Stdio},
+    any::Any,
+    borrow::Cow,
+    error::Error,
+    io::{self, Write},
+    process::{ChildStdin, ChildStdout, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
+use crate::cancellation::Cancellation;
 use gix::{
     bstr::{BStr, ByteSlice},
     url::{ArgumentSafety, Scheme, Url},
 };
-use gix_transport::Service;
+use gix_transport::{Service, client};
 
 #[cfg(target_os = "motor")]
 const SSH_PROGRAM: &str = "/user/bin/ssh";
@@ -138,6 +147,241 @@ impl Prepared {
     /// The decoded, shell-style repository path used by the process connection.
     pub fn repository(&self) -> &BStr {
         self.repository.as_bstr()
+    }
+}
+
+use input::{DISCOVERY_BYTES, Input, SESSION_BYTES};
+use session::{InputClosed, Session};
+
+const MAX_SESSIONS: usize = 3;
+type Sessions = [Option<Session>; MAX_SESSIONS];
+type Connection =
+    gix_transport::client::git::blocking_io::Connection<Input<ChildStdout>, ChildStdin>;
+
+pub enum Finish {
+    Complete,
+    Abort,
+}
+
+/// Sole completion owner; factories receive a registrar instead.
+pub struct Operation(Arc<Mutex<Group>>);
+
+#[derive(Clone)]
+pub struct Registrar {
+    group: Arc<Mutex<Group>>,
+    cancellation: Cancellation,
+}
+
+struct Group {
+    accepting: bool,
+    sessions: Sessions,
+}
+
+impl Operation {
+    pub fn new(cancellation: &Cancellation) -> (Self, Registrar) {
+        let group = Arc::new(Mutex::new(Group {
+            accepting: true,
+            sessions: std::array::from_fn(|_| None),
+        }));
+        (
+            Self(group.clone()),
+            Registrar {
+                group,
+                cancellation: cancellation.clone(),
+            },
+        )
+    }
+
+    fn take(&self) -> Sessions {
+        let mut group = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        group.accepting = false;
+        std::mem::replace(&mut group.sessions, std::array::from_fn(|_| None))
+    }
+
+    pub fn finish(self, finish: Finish) -> crate::Result {
+        let sessions = self.take();
+        let missing_close = matches!(finish, Finish::Complete)
+            && sessions
+                .iter()
+                .flatten()
+                .any(|session| !session.is_closed());
+        if matches!(finish, Finish::Abort) || missing_close {
+            stop_all(&sessions);
+        }
+        // Finish all children before terminal output can block or fail.
+        let expected_stop = matches!(finish, Finish::Abort) || missing_close;
+        let results = sessions.map(|session| session.map(|session| session.join(expected_stop)));
+        let mut failure: Option<Box<dyn Error + Send + Sync>> = missing_close.then(|| {
+            io::Error::other("SSH transport input was not closed before completion").into()
+        });
+        let mut stderr = io::stderr().lock();
+        let mut wrote = false;
+        for result in results.into_iter().flatten() {
+            let result = result.and_then(|bytes| {
+                if !bytes.is_empty() {
+                    stderr.write_all(&bytes)?;
+                    wrote = true;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
+                append_failure(&mut failure, error);
+            }
+        }
+        if wrote && let Err(error) = stderr.flush() {
+            append_failure(&mut failure, error.into());
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+fn append_failure(
+    failure: &mut Option<Box<dyn Error + Send + Sync>>,
+    next: Box<dyn Error + Send + Sync>,
+) {
+    *failure = Some(match failure.take() {
+        None => next,
+        Some(previous) => {
+            crate::network::Failure::with_secondary("additional SSH failure", previous, next).into()
+        }
+    });
+}
+
+fn stop_all(sessions: &Sessions) {
+    for session in sessions.iter().flatten() {
+        session.stop();
+    }
+}
+
+impl Drop for Operation {
+    fn drop(&mut self) {
+        let sessions = self.take();
+        stop_all(&sessions);
+        // Session's Drop joins its supervisor after all stop flags are set.
+        drop(sessions);
+    }
+}
+
+impl Registrar {
+    fn start(&self, command: Command) -> io::Result<(ChildStdout, ChildStdin, InputClosed)> {
+        let mut group = self
+            .group
+            .lock()
+            .map_err(|_| io::Error::other("SSH session registry was poisoned"))?;
+        if !group.accepting {
+            return Err(io::Error::other("SSH session registration is closed"));
+        }
+        let slot = group
+            .sessions
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or_else(|| io::Error::other("SSH operation exceeded its three-session limit"))?;
+        let (session, startup) = Session::launch(command, &self.cancellation)?;
+        let closed = session.input_closed();
+        *slot = Some(session);
+        drop(group);
+        let (stdout, stdin) = startup.wait()?;
+        Ok((stdout, stdin, closed))
+    }
+}
+
+/// A fixed SSH connection, started only when Gitoxide selects the service.
+pub struct Transport {
+    prepared: Prepared,
+    registrar: Registrar,
+    canonical_url: gix::bstr::BString,
+    connection: Option<(Service, Connection, InputClosed)>,
+    response_limit: Arc<AtomicU64>,
+}
+
+impl Prepared {
+    pub fn transport(self, registrar: Registrar) -> Transport {
+        Transport {
+            canonical_url: self.url.to_bstring(),
+            prepared: self,
+            registrar,
+            connection: None,
+            response_limit: Arc::new(AtomicU64::new(DISCOVERY_BYTES)),
+        }
+    }
+}
+
+impl client::TransportWithoutIO for Transport {
+    fn to_url(&self) -> Cow<'_, BStr> {
+        Cow::Borrowed(self.canonical_url.as_bstr())
+    }
+
+    fn connection_persists_across_multiple_requests(&self) -> bool {
+        true
+    }
+
+    fn configure(&mut self, _config: &dyn Any) -> crate::Result {
+        Ok(())
+    }
+}
+
+impl client::blocking_io::Transport for Transport {
+    fn handshake<'a>(
+        &mut self,
+        service: Service,
+        extra_parameters: &'a [(&'a str, Option<&'a str>)],
+    ) -> Result<client::blocking_io::SetServiceResponse<'_>, client::Error> {
+        if let Some((previous, _, _)) = self.connection.as_ref() {
+            if *previous != service {
+                return Err(
+                    io::Error::other("one SSH transport cannot change Git services").into(),
+                );
+            }
+        } else {
+            let (stdout, stdin, closed) = self.registrar.start(self.prepared.command(service))?;
+            let connection = Connection::new(
+                Input::new(stdout, self.response_limit.clone()),
+                stdin,
+                gix_transport::Protocol::V1,
+                self.prepared.repository.clone(),
+                None::<(&str, Option<u16>)>,
+                client::git::ConnectMode::Process,
+                false,
+            )
+            .custom_url(Some(self.canonical_url.clone()));
+            self.connection = Some((service, connection, closed));
+        }
+        let response = self
+            .connection
+            .as_mut()
+            .expect("connection initialized")
+            .1
+            .handshake(service, extra_parameters)?;
+        if response.actual_protocol == gix_transport::Protocol::V2 {
+            return Err(io::Error::other("SSH supports Git protocol V0/V1 only").into());
+        }
+        Ok(response)
+    }
+
+    fn request(
+        &mut self,
+        write_mode: client::WriteMode,
+        on_into_read: client::MessageKind,
+        trace: bool,
+    ) -> Result<client::blocking_io::RequestWriter<'_>, client::Error> {
+        let (_, connection, _) = self
+            .connection
+            .as_mut()
+            .ok_or(client::Error::MissingHandshake)?;
+        // This raises the cumulative ceiling; discovery bytes remain counted.
+        self.response_limit.store(SESSION_BYTES, Ordering::Relaxed);
+        connection.request(write_mode, on_into_read, trace)
+    }
+}
+
+impl Drop for Transport {
+    fn drop(&mut self) {
+        if let Some((_, connection, closed)) = self.connection.take() {
+            let (stdout, stdin) = connection.into_inner();
+            drop(stdin);
+            drop(stdout);
+            closed.mark();
+        }
     }
 }
 
