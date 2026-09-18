@@ -46,6 +46,7 @@ gix = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4
 gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
     "io-pipe",
 ] }
+gix-quote = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5" }
 gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
     "http-client",
 ] }

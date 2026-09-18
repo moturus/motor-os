@@ -1370,6 +1370,7 @@ dependencies = [
  "clap",
  "gix",
  "gix-features",
+ "gix-quote",
  "gix-transport",
  "moto-rt",
  "rustls",

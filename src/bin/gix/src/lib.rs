@@ -26,6 +26,7 @@ pub mod refs;
 pub mod repository;
 pub mod restore;
 pub mod selection;
+pub mod ssh;
 pub mod stage_blob;
 pub mod status;
 pub mod switch;

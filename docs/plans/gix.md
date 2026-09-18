@@ -1644,6 +1644,19 @@ panics, fat LTO and one codegen unit. Source/toolchain/assembly identities,
 raw resource samples, timings, transferred repositories and fsck results are
 under `/tmp/motor-gix-m2-measurement` and `/tmp/motor-gix-m2-milestone`.
 
+M3 SSH preparation: the reviewed application helper validates SSH URLs and
+builds the fixed `/user/bin/ssh` invocation with strict known-host checking,
+batch mode, no PTY, a 30-second connect bound and the existing key setup.
+Only `USER` joins fixed locale values in the cleared child environment.
+Decoded destination delimiters and NUL bytes are rejected before command
+construction; paths use the pinned `gix-quote` helper, already a transitive
+dependency. The two focused command/rejection tests pass through the existing
+host unit gate, as do strict host/Motor Clippy and formatting checks. This
+slice spawns nothing; the shared lifecycle and acquisition integration follow.
+Evidence is under `/tmp/motor-gix-m3-ssh-preparation-gates-2`; the initial
+incorrect bracket fixture and its source-based diagnosis remain in the
+adjacent original gate directory.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
