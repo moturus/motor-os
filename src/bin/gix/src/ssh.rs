@@ -1,3 +1,5 @@
+pub mod session;
+
 use std::{
     io,
     process::{Command, Stdio},
