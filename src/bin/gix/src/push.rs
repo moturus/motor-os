@@ -24,7 +24,7 @@ pub fn run(
     lease: Option<&str>,
     dry_run: bool,
     cancellation: &Cancellation,
-    mut out: impl Write,
+    out: impl Write,
 ) -> crate::Result {
     let spec = Spec::parse(refspec, lease)?;
     let source = spec
@@ -83,7 +83,14 @@ pub fn run(
             unreachable!("finish returns rejections as errors")
         }
     };
-    let message = format!("{status}: {} -> {source}", spec.destination.as_bstr());
+    write_status(
+        &format!("{status}: {} -> {source}", spec.destination.as_bstr()),
+        out,
+        cancellation,
+    )
+}
+
+fn write_status(message: &str, mut out: impl Write, cancellation: &Cancellation) -> crate::Result {
     writeln!(out, "{message}")
         .and_then(|_| out.flush())
         .map_err(|error| {
@@ -92,7 +99,9 @@ pub fn run(
                 cancellation.normalize_error(error.into()),
             )
         })?;
-    Ok(())
+    cancellation.check().map_err(|source| {
+        Failure::new(format!("{message}; command completion failed"), source).into()
+    })
 }
 
 fn finish(
@@ -147,6 +156,32 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CancelOnFlush<'a>(&'a Cancellation);
+
+    impl Write for CancelOnFlush<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.cancel();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancellation_during_successful_output_preserves_acceptance() {
+        let cancellation = Cancellation::new();
+        let error = write_status(
+            "remote accepted: refs/heads/main",
+            CancelOnFlush(&cancellation),
+            &cancellation,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("remote accepted"));
+        assert!(crate::cancellation::was_cancelled(error.as_ref()));
+    }
 
     #[test]
     fn completion_preserves_confirmed_results_and_unknown_outcomes() {
