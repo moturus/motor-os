@@ -263,6 +263,10 @@ pub fn run(
                 }
                 guard.publish_fresh_index(index)?;
                 publish_merge_markers(&opened.repo, &guard, &incomplete, &message, cancellation)?;
+                guard.require_operation(&incomplete)?;
+                head_ref::require(&opened.repo, &incomplete.original)?;
+                #[cfg(feature = "native-test-support")]
+                crate::test_support::checkpoint(crate::test_support::Failure::BeforeMergeReady)?;
                 let mut ready = incomplete.clone();
                 ready.state = State::Ready;
                 guard.replace_operation(&incomplete, &ready)?;

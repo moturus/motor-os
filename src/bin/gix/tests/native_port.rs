@@ -1587,40 +1587,275 @@ fn check_merge_prepare(output: &Path) -> Result {
     let clean_merge = merged.id().detach();
     drop(merged);
 
-    let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
-        .expect_err("a text conflict did not stop in Ready state");
-    assert!(error.to_string().contains("resolve them"), "{error}");
-    assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
-    let record = motor_gix::operation::read(
-        &opened
+    #[cfg(not(feature = "native-test-support"))]
+    {
+        let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
+            .expect_err("a text conflict did not stop in Ready state");
+        assert!(error.to_string().contains("resolve them"), "{error}");
+        assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
+        require_installed_text_merge(
+            &opened.repo,
+            theirs_text,
+            motor_gix::operation::State::Ready,
+        )?;
+    }
+    #[cfg(feature = "native-test-support")]
+    {
+        use motor_gix::test_support::{Failure, fail_once};
+
+        let operation_path = opened
             .repo
             .git_dir()
-            .join(motor_gix::mutation::OPERATION_FILE),
-    )?
-    .ok_or("conflicted merge record is missing")?;
-    assert_eq!(record.state, motor_gix::operation::State::Ready);
-    assert_eq!(record.target_commit, theirs_text);
-    let index = opened.repo.open_index()?;
-    let range = index
-        .entry_range(b"text".as_bstr())
-        .ok_or("conflicted text stages are missing")?;
-    assert_eq!(
-        index.entries()[range]
-            .iter()
-            .map(|entry| entry.stage())
-            .collect::<Vec<_>>(),
-        [Stage::Ours, Stage::Theirs]
-    );
-    assert_eq!(
-        fs::read(opened.repo.git_dir().join("MERGE_HEAD"))?,
-        format!("{theirs_text}\n").as_bytes()
-    );
-    assert_eq!(
-        fs::read(opened.repo.git_dir().join("MERGE_MSG"))?,
-        format!("Merge {theirs_text}\n").as_bytes()
-    );
-    assert!(fs::read(workdir.join("text"))?.starts_with(b"<<<<<<< HEAD\n"));
-    assert!(!opened.repo.git_dir().join("index.lock").try_exists()?);
+            .join(motor_gix::mutation::OPERATION_FILE);
+        let merge_head = opened.repo.git_dir().join("MERGE_HEAD");
+        let merge_message = opened.repo.git_dir().join("MERGE_MSG");
+        let head_log = opened.repo.git_dir().join("logs/HEAD");
+        let branch_log = opened.repo.git_dir().join("logs/refs/heads/main");
+        let original_logs = [fs::read(&head_log)?, fs::read(&branch_log)?];
+        let sentinel = workdir.join("unrelated-sentinel");
+        fs::write(&sentinel, b"preserve me\n")?;
+
+        let armed = fail_once(Failure::BeforeMergeReady)?;
+        let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
+            .expect_err("an installed merge became Ready before the injected failure");
+        assert!(
+            error
+                .to_string()
+                .contains("merge installation is incomplete"),
+            "{error}"
+        );
+        assert!(
+            error
+                .source()
+                .is_some_and(|source| source.to_string().contains("before the merge became ready")),
+            "{error:?}"
+        );
+        let incomplete = require_installed_text_merge(
+            &opened.repo,
+            theirs_text,
+            motor_gix::operation::State::Incomplete,
+        )?;
+        assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
+        let installed_index = fs::read(opened.repo.index_path())?;
+        let installed_text = fs::read(workdir.join("text"))?;
+        let installed_record = fs::read(&operation_path)?;
+        drop(armed);
+
+        run_mutation_child(&repository, "die-recovery")?;
+        let stale_index_lock = opened.repo.git_dir().join("index.lock");
+        assert!(stale_index_lock.try_exists()?);
+        motor_gix::recover::run(&opened, &cancellation)
+            .expect_err("recovery ignored the dead child's index lock");
+        assert!(stale_index_lock.try_exists()?);
+        assert_eq!(fs::read(opened.repo.index_path())?, installed_index);
+        assert_eq!(fs::read(workdir.join("text"))?, installed_text);
+        assert_eq!(fs::read(&operation_path)?, installed_record);
+        fs::remove_file(stale_index_lock)?;
+        assert_eq!(
+            motor_gix::recover::run(&opened, &cancellation)?,
+            "restored recorded original state"
+        );
+        assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
+        assert_eq!(fs::read(workdir.join("text"))?, b"ours\n");
+        assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
+        assert_eq!(
+            [fs::read(&head_log)?, fs::read(&branch_log)?],
+            original_logs
+        );
+        assert!(
+            !operation_path.try_exists()?
+                && !merge_head.try_exists()?
+                && !merge_message.try_exists()?
+        );
+        let recovered = opened.repo.open_index()?;
+        assert_eq!(
+            motor_gix::tree_index::write(&opened.repo, &recovered, &cancellation)?,
+            opened.repo.find_commit(clean_merge)?.tree_id()?.detach()
+        );
+
+        let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
+            .expect_err("a text conflict did not stop in Ready state");
+        assert!(error.to_string().contains("resolve them"), "{error}");
+        let ready = require_installed_text_merge(
+            &opened.repo,
+            theirs_text,
+            motor_gix::operation::State::Ready,
+        )?;
+        assert_eq!(ready.original.id, incomplete.original.id);
+        fs::write(workdir.join("text"), b"resolved\n")?;
+        fs::write(workdir.join("merge-extra"), b"extra staged path\n")?;
+        motor_gix::add::run(
+            &opened,
+            false,
+            &["text".into(), "merge-extra".into()],
+            &cancellation,
+        )?;
+
+        let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+        let error = motor_gix::merge::abort(&opened, &cancellation)
+            .expect_err("merge abort passed the injected removal failure");
+        assert!(
+            error.to_string().contains("merge abort is incomplete"),
+            "{error}"
+        );
+        assert!(
+            error
+                .source()
+                .is_some_and(|source| source.to_string().contains("first install removal")),
+            "{error:?}"
+        );
+        assert!(!workdir.join("merge-extra").try_exists()?);
+        let record = motor_gix::operation::read(&operation_path)?
+            .ok_or("interrupted abort removed its operation record")?;
+        assert_eq!(record.state, motor_gix::operation::State::Incomplete);
+        drop(armed);
+
+        let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+        let error = motor_gix::recover::run(&opened, &cancellation)
+            .expect_err("recovery passed the injected removal failure");
+        assert!(
+            error.to_string().contains("first install removal"),
+            "{error:?}"
+        );
+        assert!(!workdir.join("text").try_exists()?);
+        assert_eq!(motor_gix::operation::read(&operation_path)?, Some(record));
+        drop(armed);
+
+        assert_eq!(
+            motor_gix::recover::run(&opened, &cancellation)?,
+            "restored recorded original state"
+        );
+        assert_eq!(opened.repo.head_id()?.detach(), clean_merge);
+        assert_eq!(fs::read(workdir.join("text"))?, b"ours\n");
+        assert!(!workdir.join("merge-extra").try_exists()?);
+        assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
+        assert_eq!(
+            [fs::read(&head_log)?, fs::read(&branch_log)?],
+            original_logs
+        );
+        assert!(
+            !operation_path.try_exists()?
+                && !merge_head.try_exists()?
+                && !merge_message.try_exists()?
+        );
+        let recovered = opened.repo.open_index()?;
+        assert!(
+            recovered
+                .entries()
+                .iter()
+                .all(|entry| entry.stat == Default::default())
+        );
+        #[cfg(not(target_os = "motor"))]
+        write_at(
+            &workdir.join("text"),
+            b"edit\n",
+            fs::metadata(workdir.join("text"))?.modified()?,
+        )?;
+        #[cfg(target_os = "motor")]
+        fs::write(workdir.join("text"), b"edit\n")?;
+        let mut status = Vec::new();
+        motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
+        assert!(
+            status
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == b" M text")
+        );
+        fs::write(workdir.join("text"), b"ours\n")?;
+
+        let error = motor_gix::merge::run(&mut opened, &theirs_text.to_string(), &cancellation)
+            .expect_err("the final text conflict did not stop in Ready state");
+        assert!(error.to_string().contains("resolve them"), "{error}");
+        let ready = require_installed_text_merge(
+            &opened.repo,
+            theirs_text,
+            motor_gix::operation::State::Ready,
+        )?;
+        fs::write(workdir.join("text"), b"published\n")?;
+        motor_gix::add::run(&opened, false, &["text".into()], &cancellation)?;
+        let published_index = fs::read(opened.repo.index_path())?;
+        let published_text = fs::read(workdir.join("text"))?;
+        let logs_before_publish = [fs::read(&head_log)?, fs::read(&branch_log)?];
+        fs::remove_file(&merge_message)?;
+        fs::create_dir(&merge_message)?;
+        fs::write(
+            merge_message.join("sentinel"),
+            b"preserve cleanup failure\n",
+        )?;
+
+        let error = motor_gix::commit::run(&opened, "published merge", &cancellation)
+            .expect_err("a non-file MERGE_MSG did not fail final cleanup");
+        assert!(
+            error.to_string().contains("publication is incomplete"),
+            "{error}"
+        );
+        let publishing = motor_gix::operation::read(&operation_path)?
+            .ok_or("published merge removed its operation record")?;
+        assert_eq!(publishing.state, motor_gix::operation::State::Publishing);
+        assert_eq!(publishing.original, ready.original);
+        assert_eq!(publishing.target_commit, ready.target_commit);
+        let published = publishing
+            .intended_commit
+            .ok_or("Publishing record lacks its intended commit")?;
+        assert_eq!(opened.repo.head_id()?.detach(), published);
+        let published_commit = opened.repo.find_commit(published)?;
+        assert_eq!(
+            published_commit
+                .parent_ids()
+                .map(|id| id.detach())
+                .collect::<Vec<_>>(),
+            [clean_merge, theirs_text]
+        );
+        let committed_index = opened.repo.open_index()?;
+        assert_eq!(
+            published_commit.tree_id()?.detach(),
+            motor_gix::tree_index::write(&opened.repo, &committed_index, &cancellation)?
+        );
+        assert_eq!(fs::read(opened.repo.index_path())?, published_index);
+        assert_eq!(fs::read(workdir.join("text"))?, published_text);
+        assert!(!merge_head.try_exists()?);
+        assert_eq!(
+            fs::read(merge_message.join("sentinel"))?,
+            b"preserve cleanup failure\n"
+        );
+        for (path, before) in [
+            (&head_log, &logs_before_publish[0]),
+            (&branch_log, &logs_before_publish[1]),
+        ] {
+            let after = fs::read(path)?;
+            assert!(after.starts_with(before));
+            assert!(
+                after[before.len()..].starts_with(format!("{clean_merge} {published} ").as_bytes())
+            );
+            assert!(after.ends_with(b"\tcommit (merge): published merge\n"));
+            assert_eq!(
+                after[before.len()..]
+                    .iter()
+                    .filter(|byte| **byte == b'\n')
+                    .count(),
+                1
+            );
+        }
+        let published_logs = [fs::read(&head_log)?, fs::read(&branch_log)?];
+        fs::remove_file(merge_message.join("sentinel"))?;
+        fs::remove_dir(&merge_message)?;
+        assert_eq!(
+            motor_gix::recover::run(&opened, &cancellation)?,
+            "preserved published merge commit and finished cleanup"
+        );
+        assert_eq!(opened.repo.head_id()?.detach(), published);
+        assert_eq!(fs::read(opened.repo.index_path())?, published_index);
+        assert_eq!(fs::read(workdir.join("text"))?, published_text);
+        assert_eq!(
+            [fs::read(&head_log)?, fs::read(&branch_log)?],
+            published_logs
+        );
+        assert_eq!(fs::read(&sentinel)?, b"preserve me\n");
+        assert!(
+            !operation_path.try_exists()?
+                && !merge_head.try_exists()?
+                && !merge_message.try_exists()?
+        );
+    }
 
     let unborn_path = output.join("merge-unborn-repository");
     motor_gix::init::run(
@@ -1653,6 +1888,47 @@ fn check_merge_prepare(output: &Path) -> Result {
     assert_eq!(unborn.repo.head_id()?.detach(), unborn_target);
     assert_eq!(fs::read(unborn_path.join("new"))?, b"unborn target\n");
     Ok(())
+}
+
+fn require_installed_text_merge(
+    repo: &gix::Repository,
+    target: gix::ObjectId,
+    state: motor_gix::operation::State,
+) -> Result<motor_gix::operation::Record> {
+    let record =
+        motor_gix::operation::read(&repo.git_dir().join(motor_gix::mutation::OPERATION_FILE))?
+            .ok_or("conflicted merge record is missing")?;
+    assert_eq!(record.state, state);
+    assert_eq!(record.target_commit, target);
+    let index = repo.open_index()?;
+    let range = index
+        .entry_range(b"text".as_bstr())
+        .ok_or("conflicted text stages are missing")?;
+    assert_eq!(
+        index.entries()[range]
+            .iter()
+            .map(|entry| entry.stage())
+            .collect::<Vec<_>>(),
+        [Stage::Ours, Stage::Theirs]
+    );
+    assert_eq!(
+        fs::read(repo.git_dir().join("MERGE_HEAD"))?,
+        format!("{target}\n").as_bytes()
+    );
+    assert_eq!(
+        fs::read(repo.git_dir().join("MERGE_MSG"))?,
+        format!("Merge {target}\n").as_bytes()
+    );
+    assert!(
+        fs::read(
+            repo.workdir()
+                .ok_or("merge fixture has no worktree")?
+                .join("text")
+        )?
+        .starts_with(b"<<<<<<< HEAD\n")
+    );
+    assert!(!repo.git_dir().join("index.lock").try_exists()?);
+    Ok(record)
 }
 
 fn expect_add_rejected(
@@ -3368,6 +3644,10 @@ fn run_mutation_child(repository: &Path, expectation: &str) -> Result {
 
 fn mutation_child(repository: &Path, expectation: &OsStr) -> Result {
     let opened = motor_gix::repository::open(repository, &[], false)?;
+    if expectation == OsStr::new("die-recovery") {
+        let _owned = motor_gix::mutation::Guard::acquire_for_recovery(&opened.repo)?;
+        std::process::exit(0);
+    }
     let cancellation = motor_gix::cancellation::Cancellation::new();
     let result: motor_gix::Result = match expectation.to_str() {
         Some("add-blocked") => motor_gix::add::run(&opened, true, &[], &cancellation),

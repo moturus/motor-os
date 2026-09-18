@@ -11,6 +11,7 @@ static FAILURE: AtomicU8 = AtomicU8::new(IDLE);
 #[repr(u8)]
 pub enum Failure {
     AfterFirstInstallRemoval = 1,
+    BeforeMergeReady = 2,
 }
 
 #[must_use]
@@ -43,7 +44,11 @@ pub(crate) fn checkpoint(failure: Failure) -> crate::Result {
         .compare_exchange(failure as u8, CONSUMED, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        return Err(io::Error::other("injected failure after the first install removal").into());
+        let message = match failure {
+            Failure::AfterFirstInstallRemoval => "injected failure after the first install removal",
+            Failure::BeforeMergeReady => "injected failure before the merge became ready",
+        };
+        return Err(io::Error::other(message).into());
     }
     Ok(())
 }
