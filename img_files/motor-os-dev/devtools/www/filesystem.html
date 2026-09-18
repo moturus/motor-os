@@ -476,7 +476,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Directory</th><th>Purpose</th></tr>
-  <tr><td><code>/system/bin</code></td><td>System commands: rush, sysbox and its command scripts, ripgrep, curl (developer image). Never writable.</td></tr>
+  <tr><td><code>/system/bin</code></td><td>System commands: rush, sysbox and its command scripts, ripgrep, curl (developer image). Commands initially deny write access to every role.</td></tr>
   <tr><td><code>/system/services</code></td><td>sys-init, sys-tty, strobe, russhd, dns-resolver.</td></tr>
   <tr><td><code>/system/cfg</code></td><td>Configuration: <code>sys-init.cfg</code>, <code>sys-net.toml</code>, <code>sshd.toml</code>, <code>rush.cfg</code>, <code>libc/</code> (hosts, resolv.conf), <code>ssl/</code>.</td></tr>
   <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
@@ -497,14 +497,14 @@ nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</c
 <ul>
   <li>On a directory, <code>x</code> controls listing, traversal, and lookup, and
   <code>w</code> controls creating, deleting, and renaming children. A non-writable file
-  can therefore still be replaced when its parent directory is writable; directory modes
-  are what make a tree read-only.</li>
+  can therefore still be replaced when its parent directory is writable. Runtime
+  permission changes can make an initially read-only directory writable.</li>
   <li>On a file, <code>x</code> is a hint enforced by the program loader, which refuses
   to run a file the caller's role cannot execute. It is enforced cooperatively: a process
   with <code>CAP_SPAWN</code> could build a child by hand from a readable file. The
   boundaries that hold against a hostile process are read, write, and directory
   traversal, which sys-io enforces, and the unforgeable role.</li>
-  <li>W^X for executables: an installed ELF is never writable by any role. Scripts are
+  <li>Image W^X: a shipped ELF initially grants no role write access. Scripts are
   text interpreted by an executable and may be writable where the policy says so.</li>
 </ul>
 <p>sys-io learns the role of each client once, when the client connects, by asking the
@@ -528,14 +528,15 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
 </div>
 <p><code>/system/cfg/sshd.toml</code> and <code>/system/cfg/ssl/ssl-key.pem</code> are
 <code>rw-r-----</code>: readable by the Interactive services that need them, invisible to
-None. Consequences worth knowing: Interactive cannot create a new top-level directory or
+None. With the initial modes, Interactive cannot create a new top-level directory or
 replace <code>/system</code>; it can edit a launcher script in <code>/devtools/bin</code>
 in place but not add or remove entries there; only System can create or rotate files in
 <code>/system/logs</code>.</p>
 <p>The imager classifies each source file by its host execute bit (a host-executable file
 must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
 every mode before it creates the image, and creates non-writable files through a
-staging step so that a shipped ELF is never writable and executable at the same time,
+staging step so that a shipped ELF is never writable and executable at the same time
+during image construction,
 even during image construction. An image description that does not name a policy does
 not parse.</p>
 
@@ -546,17 +547,21 @@ not parse.</p>
   <code>rwx</code> for the creator and higher roles and <code>r-x</code> for lower
   roles.</li>
   <li>A process can narrow its own role's permissions on an entry, and lower roles are
-  narrowed with it. The one widening allowed is the one-way <code>rw-</code> to
-  <code>r-x</code> transition that turns a freshly written program into an executable.
-  A creation call that specifies the complete mode up front also exists, for files that
-  must be linked with their final mode.</li>
-  <li><strong>Write permission cannot be restored.</strong> A Unix-style
-  <code>chmod -w</code> followed by <code>chmod +w</code> fails on the second step with
-  PermissionDenied, for every role. This is what makes a read-only file genuinely
-  read-only. To replace such a file, read it, create a new writable file, write the bytes,
-  delete the read-only entry (which needs only <code>w</code> on the parent directory), and
-  rename the new file into place. <code>std::fs::copy</code> is not a substitute, because it preserves the
-  source permissions.</li>
+  narrowed with it. It may also change <code>rw-</code> to <code>r-x</code>, or
+  <code>r-x</code> to <code>rwx</code>. These rules apply to files and directories,
+  for every role. Direct <code>rw-</code> to <code>rwx</code> remains denied; use
+  <code>rw-</code> &rarr; <code>r-x</code> &rarr; <code>rwx</code> for an editable
+  executable. Exact-permissions creation is also available.</li>
+  <li>Every change must fit within the immediately higher role's permissions; System
+  has no higher role. Widening does not automatically restore lower-role permissions.
+  <strong><code>r-x</code> is not a permanent seal:</strong> System can make a shipped
+  ELF writable, and a lower role can make an <code>r-x</code> directory writable when
+  its higher-role ceiling is <code>rwx</code>.</li>
+  <li>A role at <code>r--</code> or <code>---</code> still cannot widen itself. The std
+  readonly round-trip (<code>rw-</code> &rarr; <code>r--</code> &rarr; <code>rw-</code>)
+  therefore fails on its second step. Replacing such a file requires reading it,
+  writing a new file, and renaming it into place under a writable parent.
+  <code>std::fs::copy</code> preserves source permissions.</li>
   <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
   Interactive, None order; <code>cp</code> preserves file permissions.</li>
 </ul>
@@ -565,7 +570,10 @@ not parse.</p>
 <p>Advisory file locks (<code>std::fs::File::lock</code>, <code>lock_shared</code>,
 <code>try_lock</code>, <code>unlock</code>) are served by a lock manager in sys-io,
 keyed by connection, with at most 64 queued waiters per connection. A lock is released
-when the file is closed or when its owner's connection to sys-io goes away. Under memory pressure, releasing
+when the file is closed or when its owner's connection to sys-io goes away.
+After <code>wait()</code> or <code>try_wait()</code> reports process completion, its locks
+no longer block other clients: acquisition checks disconnected owners even if the
+connection cleanup task has not run yet. Under memory pressure, releasing
 a lock is the one filesystem request that is still served, so that waiters queued before
 an episode are not stranded.</p>
 <nav class="pager">

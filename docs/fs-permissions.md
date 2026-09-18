@@ -22,16 +22,17 @@ None ⊆ Interactive ⊆ System
 
 Directory `x` controls listing, traversal, and lookup. Directory `w` controls
 creation, deletion, and rename of children. A non-writable file can therefore
-still be replaced when its parent directory is writable; directory modes form
-the image's integrity boundaries.
+still be replaced when its parent directory is writable. The modes below are
+the image's initial permissions; runtime changes follow the authority rules
+described below.
 
-W^X applies to compiled executable ELF files in an image: when an ELF can be
-executed, no role may write it. Directory `x` is traversal authority and does
+W^X applies when constructing an image: a shipped executable ELF grants no
+role write access. Directory `x` is traversal authority and does
 not make directory bytes executable. Scripts are source text interpreted by an
 executable and may intentionally be writable and executable in
 Interactive-owned locations.
 
-The policy follows these principles:
+The initial image policy follows these principles:
 
 - System owns installed OS and toolchain content. Installed executable ELFs
   are read/execute-only. Files directly under `/system/bin` are also
@@ -76,7 +77,7 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |
 | `/devtools/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Native build and test scratch |
 
-Important consequences of the directory modes are:
+Before any runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
 - Interactive can create and replace entries throughout `/user`, except where
@@ -210,9 +211,9 @@ their resolved policy modes. Files whose final mode lets System write are
 created with that final mode. Files whose final mode denies System write are
 created temporarily as `rw-------`, populated, and atomically changed through
 the image-administration API to their final mode before the image is flushed.
-Consequently, a shipped ELF is never writable and executable at the same time,
-even during image construction. The transition happens only in the offline,
-unpublished scratch filesystem.
+Consequently, a shipped ELF is never writable and executable at the same time
+during image construction. The transition happens only in the offline,
+unpublished scratch filesystem; runtime changes follow the rules below.
 
 The builder retains the host checks for named required executables. These catch
 missing or non-executable generated inputs independently of policy
@@ -233,8 +234,8 @@ entries matching `/*/bin/*`:
 - any regular data file or unexpected mode in those directories fails the
   suite.
 
-The development-image suite also proves that Interactive can edit
-`/devtools/bin/www` in place but cannot delete or rename it. Functional checks
+With the initial image permissions, the development-image suite proves that
+Interactive can edit `/devtools/bin/www` in place but cannot delete or rename it. Functional checks
 prove that Interactive cannot create a root-level directory and can write the
 appropriate scratch and source trees. Tests do not walk and assert the modes of
 every other image file.
@@ -250,9 +251,22 @@ every component grants None traversal; `/user/cfg` would not be suitable.
 - Runtime-created regular files start `rw-` for their creator, `rwx` for
   higher roles, and `r--` for lower roles. Directories start `rwx` for the
   creator and higher roles and `r-x` for lower roles. Producers finalize
-  executables with the one-way `rw-` → `r-x` self-role transition after all
-  writes succeed; exact-permissions creation is available for entries that
-  must be linked with their final mode.
+  executables with `rw-` → `r-x` after all writes succeed. A process may also
+  change its own role from `r-x` → `rwx`, restoring write access. These two
+  transitions and ordinary narrowing are allowed for every role, on files
+  and directories. Direct `rw-` → `rwx` remains denied; editable executables
+  can use `rw-` → `r-x` → `rwx`.
+- Every change must stay within the immediately higher role's permissions;
+  System has no higher role. Narrowing cascades to lower roles, while
+  widening does not automatically restore their removed permissions. Thus
+  `r-x` is not a permanent seal: System can make a shipped ELF writable, and a
+  lower role can make an `r-x` directory writable if its ceiling is `rwx`.
+  Image directory modes alone do not prevent these explicit changes.
+- A role at `r--` or `---` still cannot widen its own permissions. The
+  `std::fs::Permissions::set_readonly(true)` transition to `r--` remains
+  irreversible for that role; replacing the file still requires a writable
+  parent. Exact-permissions creation is available for entries that must be
+  linked with their final mode.
 - Runtime logs are created atomically as `rw-r-----` by System-role strobe via
   the exact-permissions API. Rotation renames the current file to `.prev`,
   preserving its mode. Authorized lower-role processes use `moto_log`;
@@ -263,9 +277,9 @@ every component grants None traversal; `/user/cfg` would not be suitable.
   audit of None-role services.
 - The model has no users, ownership, groups, ACLs, sticky directories,
   symlinks, numeric Unix modes, or recursive chmod.
-- Non-writable shipped ELF files can still be replaced where their parent
-  directory is writable. `/system/bin` additionally protects scripts, but
-  broader System sealing requires an update and recovery design.
+- Non-writable files can be replaced where their parent directory is
+  writable. A permanent System seal requires `r--` or `---`, which also
+  removes execute or directory traversal permission.
 
 ## Non-obvious implementation decisions
 
@@ -350,13 +364,13 @@ after they are accepted.
     development image ships `/devtools/tmp` writable by every role while its
     `/devtools` parent remains System-owned. Unconditionally calling
     `create_dir_all` for that existing directory asks Motor FS for create
-    permission on the sealed parent before it observes the child, so an
+    permission on the non-writable parent before it observes the child, so an
     Interactive systest receives `PermissionDenied`. Making `/devtools`
-    writable would weaken the installation boundary, and changing
+    writable initially would broaden the image policy, and changing
     `create_dir_all` semantics is outside image-policy scope. A shared systest
     helper therefore skips creation when `TMPDIR` is already a directory and
     retains creation for standalone runs that select an absent path.
-14. **Lorry likewise preserves a sealed parent of an existing staging
+14. **Lorry likewise preserves a non-writable parent of an existing staging
     directory.** Lorry's atomic-output helper used `create_dir_all` on every
     staging parent, including the existing `/devtools/tmp` used for admission,
     review, and vendoring scratch. Motor FS consequently required Interactive
@@ -364,4 +378,4 @@ after they are accepted.
     inside the writable scratch directory. The helper now creates the parent
     only when it is not already a directory. This preserves absent custom
     staging paths, Lorry's private-child and atomic-publication behavior, and
-    the System-owned `/devtools` boundary.
+    the initial System-owned `/devtools` permissions.

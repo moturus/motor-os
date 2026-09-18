@@ -6,10 +6,12 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
-  # Debug builds run the same suite several minutes slower.
+  # Debug builds and developer-image checks need the larger overall budget.
   TIMEOUT=1500
   for argument in "$@"; do
-    [ "$argument" != "--release" ] || TIMEOUT=900
+    if [ "$argument" = "--release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+      TIMEOUT=900
+    fi
   done
   set -m
   timeout "${TIMEOUT}s" "$0" "$@" < /dev/null
@@ -170,6 +172,7 @@ fi
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-size.sh"
   "$WD/test-rustfmt-size.sh"
+  "$WD/test-gix.sh" --host
 fi
 
 # Run selected-VMM outgoing acceptance and discovery with and without a device
@@ -535,6 +538,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-crates.sh"
   "$WD/test-rust-analyzer-native.sh"
   "$WD/test-rustfmt-native.sh"
+  "$WD/test-gix.sh" --guest
 fi
 
 if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then

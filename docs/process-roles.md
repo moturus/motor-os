@@ -571,24 +571,24 @@ belong to `PERMISSIONS_DESIGN.md`:
 - The existing `set_permissions` request carries `(entry_id, access)` and is
   interpreted as **target = caller role**. Thus ordinary
   `std::fs::set_permissions` changes the caller's own byte; motor-fs permits a
-  narrowing or the exact `Rw` → `Rx` finalization transition, cascades removed
-  permissions to lower roles, and rejects every other self-widen. A future
+  narrowing or either exact transition `Rw` → `Rx` and `Rx` → `Rwx`, cascades
+  removed permissions to lower roles, and rejects other direct self-widens.
+  Each change still obeys the immediately higher role's ceiling; System has
+  none. This applies to files and directories. A future
   administrative API that explicitly edits a lower role can add a distinct
   command/target field when it has a real consumer; it is not required to make
   chmod work correctly.
 
-  Be explicit about what that deferral means: no client of sys-io — not even a
-  System process — can restore `w` or any other removed permission through its
-  own byte. The sole exception adds `x` while permanently dropping `w`.
-  A Unix-style `chmod -w` → `chmod +w` round-trip, common in ported software
-  and test suites, fails on the second step with PermissionDenied. This is
-  accepted, not accidental — it is what makes sealing real
-  (PERMISSIONS_DESIGN.md §4a) — but it must be called out in user-facing docs,
-  The recovery idiom is an explicit read/create/write/delete/rename sequence:
-  copying bytes into an ordinarily created writable staging file before
-  replacing the sealed entry. `std::fs::copy` is not suitable because it
-  preserves the source permission byte; delete still needs only
-  parent-directory `w` (§10.7).
+  A writable executable can now use `Rw` → `Rx` → `Rwx`, and an existing
+  `Rx` entry can regain write permission when its ceiling permits it.
+  Widening does not automatically restore permissions removed from lower roles.
+  `Rx` is therefore not a permanent seal, including for System or for
+  directories. Direct `Rw` → `Rwx` and `Rx` → `Rw` remain denied.
+  A role at `R` or `None` still cannot widen itself: the std readonly
+  round-trip (`Rw` → `R` → `Rw`) fails on its second step. Its recovery idiom
+  remains read/create/write/delete/rename through a writable staging file.
+  `std::fs::copy` preserves source permissions; deletion and replacement
+  require parent-directory `w` (§10.7).
 - Ordinary client create requests use creator-relative defaults: files are
   `Rw` for the creator, `Rwx` for higher roles, and `R` for lower roles;
   directories are `Rwx` for the creator and higher roles and `Rx` for lower
@@ -657,9 +657,10 @@ Required coverage spans systest (alongside `test_caps`) and small pure tests:
    `size_of::<ProcessInfoV1>() == 56`.
 7. **FS attribution**: create an entry while Interactive, narrow it with public
    chmod, and verify the Interactive and cascaded None bytes change while the
-   System byte remains `Rwx`. Verify self-widening fails — including the
-   Unix-style readonly round-trip (`set_permissions` readonly, then
-   un-readonly fails on the second step) — and exercise the explicit
+   System byte remains `Rwx`. Verify `Rw` → `Rx` → `Rwx` succeeds under an
+   `Rwx` ceiling, that `Rx` → `Rwx` fails under an `Rx` ceiling, and that
+   widening does not restore lower-role permissions. The readonly round-trip
+   (`Rw` → `R` → `Rw`) still fails on its second step; exercise the explicit
    read/create/write → delete → rename recovery idiom (§8). Spawn a None child and
    exercise read, write, resize, create/delete, move (both parents), and
    directory traversal/listing denial according to `PERMISSIONS_DESIGN.md`.

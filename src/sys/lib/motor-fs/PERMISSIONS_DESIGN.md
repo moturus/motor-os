@@ -71,7 +71,8 @@ gates `x`, a directory needs at least `Rx` to be listed. Consequences of the
 model:
 - A `Rw` directory (write, no execute) is a **write-only "drop-box"**: entries
   can be created/deleted but not listed or looked up by name.
-- A `Rx` directory (execute, no write) is **listable but immutable**.
+- A `Rx` directory (execute, no write) is listable but not currently writable;
+  its role may regain write through `Rx` → `Rwx` if its ceiling allows it.
 - "Traverse a known name" cannot be separated from "list all entries" — both
   require `x` (unlike Unix, which splits them across `x` and `r`). This is an
   intentional simplification.
@@ -85,17 +86,16 @@ subset (the same relation `can_narrow_to` tests) applied independently to `r`,
 `w`, and `x`. In words: "if System cannot write, neither can Interactive or
 None"; "if None can execute, so can Interactive and System".
 
-This is enforced on every change (§4a) and validated at creation (§6.2). It is
-what turns the System byte into a true whole-entry ceiling and gives the sealing
-guarantee its teeth (§4).
+This is enforced on every change (§4a) and validated at creation (§6.2). The
+System byte is a whole-entry ceiling, although System may change its own byte
+under the authority rules in §4.
 
 ### Zero means "everything allowed"
 
 The encoding is chosen so that an all-zero permission byte decodes to `Rwx`.
-This makes the feature backward-compatible for free: every existing entry, and
-every entry produced by the current format/creation paths (which zero
-`Metadata`), is born fully permissive. No migration, no superblock version bump
-is required.
+Legacy entries with zeroed permission bytes remain fully permissive. Current
+creation paths supply explicit creator-relative permissions (§6.3). No
+migration or superblock version bump is required.
 
 ---
 
@@ -316,14 +316,15 @@ impl Metadata {
 /// invariant (§4a) is a separate constraint applied by the txn layer (cap +
 /// cascade).
 ///   - target strictly below caller : any change (widen or narrow)
-///   - target == caller (own byte)  : narrow only, plus `Rw` -> `Rx`
+///   - target == caller (own byte)  : narrow, `Rw` -> `Rx`, or `Rx` -> `Rwx`
 ///   - target strictly above caller : forbidden
 pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPermissions) -> bool {
     use core::cmp::Ordering::*;
     match (caller as u8).cmp(&(target as u8)) {
         Greater => true,
         Equal   => old.can_narrow_to(new)
-            || (old == AccessPermissions::Rw && new == AccessPermissions::Rx),
+            || (old == AccessPermissions::Rw && new == AccessPermissions::Rx)
+            || (old == AccessPermissions::Rx && new == AccessPermissions::Rwx),
         Less    => false,
     }
 }
@@ -346,16 +347,17 @@ byte of target role `T`:
 
 | Caller ↓ \ Target → | System byte | Interactive byte | None byte |
 |---------------------|-------------|------------------|-----------|
-| **System**          | narrow-only, plus `Rw` → `Rx` | any (widen/narrow)| any       |
-| **Interactive**     | forbidden   | narrow-only, plus `Rw` → `Rx` | any       |
-| **None**            | forbidden   | forbidden        | narrow-only, plus `Rw` → `Rx` |
+| **System**          | own-role rule | any (widen/narrow) | any |
+| **Interactive**     | forbidden | own-role rule | any |
+| **None**            | forbidden | forbidden | own-role rule |
 
 This table is captured by `may_set` (§3) and governs **authority** only. The
-sole self-role exception is `Rw` → `Rx`: it lets a producer finish a writable
-file as executable while permanently removing write. It applies to System too,
-so a System interactive console can create and finish scripts. Every change
-must *additionally* preserve cross-role monotonicity (§4a); in particular, the
-higher-role ceiling must already contain `x`.
+own-role rule allows narrowing, `Rw` → `Rx`, and `Rx` → `Rwx`. A producer can
+finish a writable file as executable, then restore write access when needed.
+These transitions apply to files and directories for all roles, including
+System. Direct `Rw` → `Rwx` and `Rx` → `Rw` remain denied; use the permitted
+intermediate state. Every change must *additionally* preserve cross-role
+monotonicity (§4a): the higher-role ceiling must contain every requested bit.
 
 ### 4a. Cross-role monotonicity enforcement
 
@@ -381,19 +383,19 @@ Both the cap and the cascade can fire in one call (e.g. setting a lower role to
 a value incomparable to its old one). The cascade is why narrowing the System
 byte restricts every role at once.
 
-### Sealing / immutability consequence
+### Restoring write and permanent seals
 
 With the invariant enforced, the **System byte is a true whole-entry ceiling**:
-no role can exceed it. The `Rw` → `Rx` exception can add execute only while
-removing write; no self-role transition can ever restore write or restore any
-other removed permission. Therefore:
+no role can exceed its current value. The permitted own-role transitions
+connect `Rw` → `Rx` → `Rwx`, while narrowing allows `Rwx` → `Rw`. Therefore:
 
-- **Sealing works.** Narrowing the System byte's `w` off cascades every role's
-  `w` off (step 4) and can never be undone, so the entry becomes permanently
-  read-only to *all* roles — a real `chattr +i`. Narrowing System to `None`
-  makes it permanently inaccessible to every role. Narrowing System to `Rw`
-  is not an execute seal because System may subsequently finish it as `Rx`;
-  use `R` or `None` when execute must remain denied too.
+- `Rx` is not a permanent write seal. System can restore its own write
+  permission with `Rx` → `Rwx`; a lower role can do so only beneath an `Rwx`
+  ceiling. Widening leaves lower roles unchanged, so permissions removed by
+  an earlier cascade are not automatically restored.
+- `R` and `None` still permit only narrowing for the same role. System can
+  permanently deny write and execute by choosing `R`, or all access by
+  choosing `None`. This also removes traversal when the entry is a directory.
 - Narrowing a *lower* role (Interactive or None) is **not** permanent: a
   higher-privileged role may re-widen it, up to the System ceiling.
 - Sealing contents does not prevent deletion — deletion is gated by the
@@ -413,10 +415,9 @@ modes, sequenced per the §9 plan (Phase 0 wiring → Mode S → Mode E).
 
 - The FS **stores** the three bytes and **reports** them via `metadata()`
   (already returns `Metadata` by value, so reporting is free once populated).
-- The FS **enforces `may_set`** in `set_permissions` and `create_entry`. This is
-  valuable even without access enforcement: it makes the on-disk narrow-only
-  invariant — especially System-byte monotonicity — impossible to violate
-  regardless of buggy callers.
+- The FS enforces permission-change authority and cross-role monotonicity,
+  and validates creation authority before linking an entry. Callers cannot
+  edit a higher role or grant a lower role more than its ceiling permits.
 - The FS does **not** gate `read`/`write`/etc. in Mode S. The `role` parameter is
   already present (Phase 0) but unused on the data path until Mode E; access
   enforcement is done above the FS in the meantime.
@@ -604,8 +605,9 @@ Add to `motor-fs/src/tests.rs` (and unit tests in `async-fs` for the pure types)
    inversion (e.g. `[Rwx, R, R]`) and any incomparable adjacent pair
    (e.g. `[None, Rx, Rw]`).
 7. `may_set` — exhaustively over the 3×3 caller/target matrix and both
-   directions; assert it matches the §4 table. Verify `Rw` → `Rx` succeeds for
-   every self role, including System, and the reverse fails.
+   directions; assert it matches the §4 table. Verify `Rw` → `Rx` and
+   `Rx` → `Rwx` succeed for every self role, including System, while direct
+   `Rw` → `Rwx`, `Rx` → `Rw`, and widening from `R` or `None` fail.
 
 **FS integration tests (`motor-fs`):**
 8. Create entries with each creator role through sys-io and verify the complete
@@ -613,17 +615,18 @@ Add to `motor-fs/src/tests.rs` (and unit tests in `async-fs` for the pure types)
    creation still persists across flush + reopen.
 9. Create with restricted (still monotonic) perms as System → values persist
    across reopen; creation with a non-monotonic array is rejected.
-10. `set_permissions` authority: own-byte narrow and `Rw` → `Rx` succeed;
+10. `set_permissions` authority: own-byte narrow, `Rw` → `Rx`, and `Rx` → `Rwx` succeed;
     other own-byte widening fails; lower-role narrow succeeds; higher-role
     change fails — asserting `PermissionDenied`.
 11. `set_permissions` cap: widening a lower role beyond its higher-role ceiling
     is rejected (`PermissionDenied`); widening up to the ceiling succeeds.
 12. `set_permissions` cascade: narrowing System (e.g. drop `w`) clamps
     Interactive and None to lose `w` too, in one call.
-13. Sealing: after narrowing System's `w` off, every role reports no `w`, and
-    every attempt to re-grant `w` to any role fails permanently. Verify the
-    `Rw` → `Rx` exception still performs the lower-role cascade and obeys a
-    higher-role ceiling.
+13. Sealing: System at `R` cannot restore write for any role. At `Rx`, System
+    can restore its own write, leaving lower roles unchanged. Verify both
+    permitted transitions obey higher-role ceilings, and that a rejected
+    transition leaves every role unchanged. Exercise the native
+    `Rw` → `Rx` → `Rwx` cycle through file permissions and a real write.
 14. Backward compat: format an image, manually zero the `perms` bytes (or open a
     pre-feature image), confirm all roles read `Rwx`.
 15. (Mode E only) `read` denied when caller's role byte lacks `r`; `write`/

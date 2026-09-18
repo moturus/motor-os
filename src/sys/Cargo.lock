@@ -982,7 +982,6 @@ dependencies = [
  "async-fs",
  "async-trait",
  "crossbeam",
- "crossbeam-queue",
  "log",
  "moto-async",
  "moto-io-internal",

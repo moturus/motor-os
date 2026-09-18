@@ -11,7 +11,6 @@ use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
-use alloc::vec::Vec;
 use core::future::Future;
 use core::sync::atomic::*;
 use core::task::Poll;
@@ -160,6 +159,9 @@ pub enum ReserveError {
     /// All `capacity()` slots are reserved. Try another channel, or retry
     /// after a release.
     AtCapacity,
+    /// The channel could not reserve the driver's teardown storage before
+    /// admitting another socket.
+    OutOfMemory,
     /// The channel is shutting down -- its last reservation was released or
     /// the host requested shutdown -- and takes no new reservations.
     ShuttingDown,
@@ -351,6 +353,7 @@ pub(super) enum RpcWaiter {
     Connect {
         stream: Weak<TcpStream>,
         tx: Option<moto_async::oneshot::Sender<io_channel::Msg>>,
+        cleanup: DriverCredit,
     },
     /// VsockStream connect/accept completion. Registration and canceled
     /// success rollback run inline for the same ordering reason as TCP.
@@ -358,12 +361,16 @@ pub(super) enum RpcWaiter {
         stream: Weak<VsockStream>,
         expected_command: u16,
         tx: moto_async::oneshot::Sender<io_channel::Msg>,
+        cleanup: DriverCredit,
     },
     /// TcpListener accept completion. The listener owns the dispatch: an
     /// awaiting `accept()` caller is served from its waiter queue, because
     /// the response sys-io sends first need not belong to that caller's own
     /// request.
-    Accept { listener: Weak<TcpListener> },
+    Accept {
+        listener: Weak<TcpListener>,
+        cleanup: DriverCredit,
+    },
     /// TcpListener/UdpSocket bind completion. The reservation rides in the
     /// waiter so a bind future cancelled after its request was queued still
     /// has the channel slot needed to roll the new handle back.
@@ -655,6 +662,13 @@ pub(crate) fn stats_udp_socket_dropped() {
 /// multi-page format stores `total_len <= TCP_TX_MAX_BYTES` there.
 pub(super) const TCP_TX_MARKER_FLAGS: u32 = u32::MAX;
 
+/// A reservation can own at most sixteen TX pages. In the worst fragmented
+/// case they become sixteen driver messages; close and the initial RX ACK
+/// need two more credits. Accept additionally has one queued request and one
+/// late-response cleanup credit.
+const DRIVER_CREDITS_PER_RESERVATION: usize =
+    io_channel::CHANNEL_PAGE_COUNT / IO_SUBCHANNELS as usize + 4;
+
 pub(super) fn tcp_stream_close_msg(handle: u64) -> io_channel::Msg {
     debug_assert_ne!(0, handle);
     let mut msg = io_channel::Msg::new();
@@ -696,7 +710,7 @@ enum TxBatch {
 /// reservation until every message has reached sys-io; the driver drains
 /// control work even after the channel's last reservation requests exit.
 struct DriverRecord {
-    messages: VecDeque<io_channel::Msg>,
+    msg: Option<io_channel::Msg>,
 
     /// The staging queue's push count when this record was enqueued: work
     /// staged before it was queued for sys-io first and must reach it first.
@@ -708,6 +722,71 @@ struct DriverRecord {
     staged_fence: u64,
 
     _reservation: Option<ChannelReservation>,
+}
+
+/// Storage reserved before a socket operation is admitted. `reserved`
+/// counts credits which haven't become queue entries yet, so every enqueue
+/// can move one credit into `records` without allocating.
+struct DriverQueue {
+    records: VecDeque<DriverRecord>,
+    reserved: usize,
+}
+
+impl DriverQueue {
+    fn push(&mut self, mut credit: DriverCredit, record: DriverRecord) {
+        self.reserved -= 1;
+        credit.consume();
+        self.records.push_back(record);
+    }
+}
+
+struct DriverCredits {
+    channel: Weak<NetChannel>,
+    remaining: AtomicU8,
+}
+
+impl DriverCredits {
+    fn take(&self) -> DriverCredit {
+        let remaining = self
+            .remaining
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .expect("driver credits exhausted");
+        debug_assert!(remaining > 0);
+        DriverCredit {
+            channel: Some(self.channel.clone()),
+        }
+    }
+}
+
+impl Drop for DriverCredits {
+    fn drop(&mut self) {
+        let remaining = self.remaining.swap(0, Ordering::AcqRel) as usize;
+        if remaining != 0
+            && let Some(channel) = self.channel.upgrade()
+        {
+            channel.release_driver_credits(remaining);
+        }
+    }
+}
+
+pub(super) struct DriverCredit {
+    channel: Option<Weak<NetChannel>>,
+}
+
+impl DriverCredit {
+    fn consume(&mut self) {
+        self.channel = None;
+    }
+}
+
+impl Drop for DriverCredit {
+    fn drop(&mut self) {
+        if let Some(channel) = self.channel.take().and_then(|channel| channel.upgrade()) {
+            channel.release_driver_credits(1);
+        }
+    }
 }
 
 /// A communication channel between the current process and sys-io.
@@ -754,7 +833,7 @@ pub(crate) struct NetChannel {
 
     // Destructors and inline response dispatch cannot await send-queue room.
     // They transfer guaranteed work here for the channel driver to deliver.
-    driver_queue: crossbeam_queue::SegQueue<DriverRecord>,
+    driver_queue: Mutex<DriverQueue>,
 
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
@@ -926,7 +1005,8 @@ impl NetChannel {
             // drop happened while we still held that lock (the channel wedges
             // mid-dispatch and every socket on it hangs).
             let mut queued_to_listener = false;
-            let mut upgraded_listeners: Vec<Arc<TcpListener>> = Vec::new();
+            let mut upgraded_listeners: [Option<Arc<TcpListener>>; IO_SUBCHANNELS as usize] =
+                core::array::from_fn(|_| None);
             let stream = {
                 let streams = self.streams.lock();
                 if let Some(WeakStream::Tcp(stream)) = streams.get(&stream_handle) {
@@ -938,12 +1018,12 @@ impl NetChannel {
                     // while holding the streams lock, otherwise we could race with
                     // the accept converting into a stream...
                     let tcp_listeners = self.tcp_listeners.lock();
-                    for listener in tcp_listeners.values() {
-                        let Some(listener) = listener.upgrade() else {
-                            continue;
-                        };
+                    for (num_upgraded, listener) in
+                        tcp_listeners.values().filter_map(Weak::upgrade).enumerate()
+                    {
                         let did_queue = listener.add_to_pending_queue(msg);
-                        upgraded_listeners.push(listener);
+                        debug_assert!(num_upgraded < upgraded_listeners.len());
+                        upgraded_listeners[num_upgraded] = Some(listener);
                         if did_queue {
                             queued_to_listener = true;
                             break;
@@ -995,14 +1075,18 @@ impl NetChannel {
                     // delivery to the dropped receiver is skipped.
                     let _ = tx.send(msg);
                 }
-                Some(RpcWaiter::Connect { stream, tx }) => {
+                Some(RpcWaiter::Connect {
+                    stream,
+                    tx,
+                    cleanup,
+                }) => {
                     if let Some(stream) = stream.upgrade() {
                         let _ = stream.on_connect_response(msg);
                     } else if msg.status().is_ok() {
                         // The caller cancelled after sending the request. The
-                        // driver remains alive long enough to send this close
-                        // even if that released the channel's last reservation.
-                        self.enqueue_control(tcp_stream_close_msg(msg.handle));
+                        // reserved credit guarantees this close can be queued
+                        // even if cancellation released the socket reservation.
+                        self.enqueue_control(cleanup, tcp_stream_close_msg(msg.handle));
                     }
                     if let Some(tx) = tx {
                         let _ = tx.send(msg);
@@ -1012,16 +1096,17 @@ impl NetChannel {
                     stream,
                     expected_command,
                     tx,
+                    cleanup,
                 }) => {
                     let mut msg = msg;
                     if let Some(stream) = stream.upgrade() {
                         let _ = stream.on_open_response(&mut msg, expected_command);
                     } else if msg.status().is_ok() && msg.handle != 0 {
-                        self.enqueue_control(api_vsock::close_request(msg.handle));
+                        self.enqueue_control(cleanup, api_vsock::close_request(msg.handle));
                     }
                     let _ = tx.send(msg);
                 }
-                Some(RpcWaiter::Accept { listener }) => {
+                Some(RpcWaiter::Accept { listener, cleanup }) => {
                     if let Some(listener) = listener.upgrade() {
                         listener.on_accept_response(msg);
                         #[cfg(feature = "netdev")]
@@ -1029,7 +1114,7 @@ impl NetChannel {
                     } else if msg.status().is_ok() {
                         // The listener went away after posting this accept but
                         // before sys-io returned the accepted stream.
-                        self.enqueue_control(tcp_stream_close_msg(msg.handle));
+                        self.enqueue_control(cleanup, tcp_stream_close_msg(msg.handle));
                     }
                 }
                 Some(RpcWaiter::Bind {
@@ -1163,12 +1248,12 @@ impl NetChannel {
     /// sent; they are older than anything in the queue and are sent first.
     fn tx_send_batch(
         &self,
-        carry: &mut VecDeque<io_channel::Msg>,
+        carry: &mut Option<io_channel::Msg>,
         driver_record: &mut Option<DriverRecord>,
     ) -> TxBatch {
         let mut sent_messages = 0;
         while let Some(msg) = carry
-            .pop_front()
+            .take()
             // Driver work outranks the staging work queued after it, so a
             // reservation-pinning record cannot starve under sustained send
             // load; work staged before it still goes first (see
@@ -1200,7 +1285,7 @@ impl NetChannel {
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
                 assert_eq!(err, moto_rt::Error::NotReady);
-                carry.push_front(msg);
+                *carry = Some(msg);
                 return TxBatch::RingFull;
             }
 
@@ -1218,19 +1303,19 @@ impl NetChannel {
     fn next_driver_msg(&self, driver_record: &mut Option<DriverRecord>) -> Option<io_channel::Msg> {
         loop {
             if let Some(record) = driver_record.as_mut()
-                && !record.messages.is_empty()
+                && record.msg.is_some()
             {
                 if self.staged_popped.load(Ordering::Relaxed) < record.staged_fence {
                     // The staging queue still holds work queued before this
                     // record; the caller sends that instead and asks again.
                     return None;
                 }
-                return record.messages.pop_front();
+                return record.msg.take();
             }
 
-            // Replacing an exhausted teardown record drops its reservation
-            // only after its final message was accepted by the sys-io ring.
-            *driver_record = self.driver_queue.pop();
+            // Replacing an exhausted record drops its reservation only after
+            // its message (including a ring-full carry) was accepted.
+            *driver_record = self.pop_driver_record();
             driver_record.as_ref()?;
         }
     }
@@ -1273,16 +1358,24 @@ impl NetChannel {
         }
     }
 
+    fn socket_snapshot<T>(
+        map: &Mutex<BTreeMap<u64, Weak<T>>>,
+    ) -> [Option<Arc<T>>; IO_SUBCHANNELS as usize] {
+        let map = map.lock();
+        debug_assert!(map.len() <= IO_SUBCHANNELS as usize);
+        let mut snapshot = core::array::from_fn(|_| None);
+        for (idx, value) in map.values().filter_map(Weak::upgrade).enumerate() {
+            snapshot[idx] = Some(value);
+        }
+        snapshot
+    }
+
     fn progress_udp_tx(&self) {
-        // Upgrade under the map lock, but invoke socket code after releasing it.
-        // Live entries are bounded by the channel's subchannel count.
-        let sockets: Vec<Arc<UdpSocket>> = self
-            .udp_sockets
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for socket in sockets {
+        // Invoke socket code after releasing the map lock.
+        for socket in Self::socket_snapshot(&self.udp_sockets)
+            .into_iter()
+            .flatten()
+        {
             socket.on_channel_tx_progress();
         }
     }
@@ -1406,15 +1499,13 @@ impl NetChannel {
     /// boundaries yields to the rx task; when drained, parks until a caller
     /// queues work (see `park_until_send_work`).
     async fn tx_task(&self) {
-        // Messages already popped from `send_queue` but not yet sent (a
-        // full-ring leftover or a coalescing run terminator); older than
-        // anything in `send_queue`, so always sent first.
-        let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
+        // One message was removed from its queue but rejected by a full
+        // ring. It must be sent before any later work.
+        let mut carry: Option<io_channel::Msg> = None;
         let mut driver_record = None;
 
         loop {
             if self.failed.load(Ordering::Acquire) {
-                carry.clear();
                 drop(driver_record.take());
                 self.discard_queued_work();
                 return;
@@ -1461,12 +1552,10 @@ impl NetChannel {
                         // drained. Records are checked explicitly rather than
                         // inferred from the batch: one can be held back by its
                         // staging fence.
-                        if carry.is_empty()
+                        if carry.is_none()
                             && self.send_queue.is_empty()
-                            && self.driver_queue.is_empty()
-                            && driver_record
-                                .as_ref()
-                                .is_none_or(|record| record.messages.is_empty())
+                            && self.driver_queue_is_empty()
+                            && driver_record.is_none()
                         {
                             return;
                         }
@@ -1504,7 +1593,7 @@ impl NetChannel {
             // Teardown wakes this waker after setting `exiting`; return so the
             // tx loop re-checks its exit condition instead of re-parking.
             if !self.send_queue.is_empty()
-                || !self.driver_queue.is_empty()
+                || !self.driver_queue_is_empty()
                 || self.exiting.load(Ordering::Acquire)
             {
                 return Poll::Ready(());
@@ -1555,11 +1644,55 @@ impl NetChannel {
         }
     }
 
+    fn reserve_driver_credits(
+        self: &Arc<Self>,
+        count: usize,
+    ) -> Result<DriverCredits, ReserveError> {
+        let mut queue = self.driver_queue.lock();
+        let additional = queue
+            .reserved
+            .checked_add(count)
+            .ok_or(ReserveError::OutOfMemory)?;
+        queue
+            .records
+            .try_reserve(additional)
+            .map_err(|_| ReserveError::OutOfMemory)?;
+        queue.reserved += count;
+        drop(queue);
+        Ok(DriverCredits {
+            channel: Arc::downgrade(self),
+            remaining: AtomicU8::new(count.try_into().unwrap()),
+        })
+    }
+
+    fn release_driver_credits(&self, count: usize) {
+        let mut queue = self.driver_queue.lock();
+        debug_assert!(queue.reserved >= count);
+        queue.reserved -= count;
+    }
+
+    fn pop_driver_record(&self) -> Option<DriverRecord> {
+        self.driver_queue.lock().records.pop_front()
+    }
+
+    fn driver_queue_is_empty(&self) -> bool {
+        self.driver_queue.lock().records.is_empty()
+    }
+
     /// Reserve one host-side slot (see `client_state`). The count and the
     /// closed bit travel in one CAS, so a reserve and the closing release
     /// serialize: whichever lands first decides whether the channel stays
     /// open with the new reservation or refuses it.
     fn client_try_reserve(self: &Arc<Self>) -> Result<Reservation, ReserveError> {
+        let state = self.client_state.load(Ordering::Acquire);
+        if state & CLIENT_CLOSED != 0 {
+            return Err(ReserveError::ShuttingDown);
+        }
+        if state & CLIENT_COUNT_MASK >= IO_SUBCHANNELS as u32 {
+            return Err(ReserveError::AtCapacity);
+        }
+
+        let driver_credits = self.reserve_driver_credits(DRIVER_CREDITS_PER_RESERVATION)?;
         let mut state = self.client_state.load(Ordering::Acquire);
         loop {
             if state & CLIENT_CLOSED != 0 {
@@ -1578,6 +1711,7 @@ impl NetChannel {
                     return Ok(Reservation(ChannelReservation {
                         channel: self.clone(),
                         subchannel_idx: None,
+                        driver_credits,
                     }));
                 }
                 Err(current) => state = current,
@@ -1638,21 +1772,19 @@ impl NetChannel {
 
         self.client_state.fetch_or(CLIENT_CLOSED, Ordering::AcqRel);
 
-        let streams: Vec<_> = self.streams.lock().values().cloned().collect();
-        let listeners: Vec<_> = self
-            .tcp_listeners
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-        let sockets: Vec<_> = self
-            .udp_sockets
-            .lock()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
+        let streams: [Option<WeakStream>; IO_SUBCHANNELS as usize] = {
+            let streams = self.streams.lock();
+            debug_assert!(streams.len() <= IO_SUBCHANNELS as usize);
+            let mut snapshot = core::array::from_fn(|_| None);
+            for (idx, stream) in streams.values().enumerate() {
+                snapshot[idx] = Some(stream.clone());
+            }
+            snapshot
+        };
+        let listeners = Self::socket_snapshot(&self.tcp_listeners);
+        let sockets = Self::socket_snapshot(&self.udp_sockets);
 
-        for stream in streams {
+        for stream in streams.into_iter().flatten() {
             match stream {
                 WeakStream::Tcp(stream) => {
                     if let Some(stream) = stream.upgrade() {
@@ -1666,10 +1798,10 @@ impl NetChannel {
                 }
             }
         }
-        for listener in listeners {
+        for listener in listeners.into_iter().flatten() {
             listener.on_channel_failed();
         }
-        for socket in sockets {
+        for socket in sockets.into_iter().flatten() {
             socket.on_channel_failed();
         }
 
@@ -1691,7 +1823,11 @@ impl NetChannel {
             RpcWaiter::Response(tx) => {
                 let _ = tx.send(resp);
             }
-            RpcWaiter::Connect { stream, tx } => {
+            RpcWaiter::Connect {
+                stream,
+                tx,
+                cleanup: _,
+            } => {
                 if let Some(stream) = stream.upgrade() {
                     let _ = stream.on_connect_response(resp);
                 }
@@ -1703,13 +1839,17 @@ impl NetChannel {
                 stream,
                 expected_command,
                 tx,
+                cleanup: _,
             } => {
                 if let Some(stream) = stream.upgrade() {
                     let _ = stream.on_open_response(&mut resp, expected_command);
                 }
                 let _ = tx.send(resp);
             }
-            RpcWaiter::Accept { listener } => {
+            RpcWaiter::Accept {
+                listener,
+                cleanup: _,
+            } => {
                 if let Some(listener) = listener.upgrade() {
                     listener.on_accept_response(resp);
                 }
@@ -1730,7 +1870,9 @@ impl NetChannel {
 
     fn discard_queued_work(&self) {
         while self.unstage_msg().is_some() {}
-        while self.driver_queue.pop().is_some() {}
+        while let Some(record) = self.pop_driver_record() {
+            drop(record);
+        }
     }
 
     pub(super) fn is_failed(&self) -> bool {
@@ -1742,6 +1884,10 @@ impl NetChannel {
     /// the channel's [`NetDriver`].
     fn with_conn(conn: io_channel::ClientConnection) -> moto_rt::Result<Arc<Self>> {
         let (send_queue, send_queue_rx) = moto_mpmc::try_bounded(io_channel::CHANNEL_PAGE_COUNT)?;
+        let mut driver_records = VecDeque::new();
+        driver_records
+            .try_reserve_exact(DRIVER_CREDITS_PER_RESERVATION * IO_SUBCHANNELS as usize)
+            .map_err(|_| moto_rt::Error::OutOfMemory)?;
 
         // Exercise a late failure with real IPC and queue resources to release.
         #[cfg(feature = "netdev")]
@@ -1761,7 +1907,10 @@ impl NetChannel {
             send_queue_rx,
             staged_pushed: AtomicU64::new(0),
             staged_popped: AtomicU64::new(0),
-            driver_queue: crossbeam_queue::SegQueue::new(),
+            driver_queue: Mutex::new(DriverQueue {
+                records: driver_records,
+                reserved: 0,
+            }),
             write_waiters: Mutex::new(VecDeque::new()),
             tx_waiters: WaitSet::new(),
             rpc_map: Mutex::new(BTreeMap::new()),
@@ -1978,6 +2127,7 @@ impl NetChannel {
         &self,
         mut req: io_channel::Msg,
         stream: Weak<TcpStream>,
+        cleanup: DriverCredit,
     ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
         req.id = self.new_req_id();
@@ -1999,6 +2149,7 @@ impl NetChannel {
                         RpcWaiter::Connect {
                             stream,
                             tx: Some(tx),
+                            cleanup,
                         },
                     )
                     .is_none()
@@ -2020,6 +2171,7 @@ impl NetChannel {
         &self,
         mut req: io_channel::Msg,
         stream: Weak<VsockStream>,
+        cleanup: DriverCredit,
     ) -> io_channel::Msg {
         let expected_command = req.command;
         debug_assert!(matches!(
@@ -2047,6 +2199,7 @@ impl NetChannel {
                             stream,
                             expected_command,
                             tx,
+                            cleanup,
                         },
                     )
                     .is_none()
@@ -2064,9 +2217,14 @@ impl NetChannel {
         rx.await.expect("vsock connect RPC sender dropped")
     }
 
-    /// Queue an RPC from inline driver dispatch. The waiter is installed
-    /// first, then the request moves to the driver's guaranteed FIFO.
-    pub(super) fn enqueue_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
+    /// Queue an RPC from inline driver dispatch. The caller reserved both
+    /// this request's queue entry and any later orphan cleanup before admission.
+    pub(super) fn enqueue_rpc(
+        &self,
+        req: io_channel::Msg,
+        waiter: RpcWaiter,
+        credit: DriverCredit,
+    ) {
         assert_ne!(0, req.id);
         let mut rpc_map = self.rpc_map.lock();
         if self.is_failed() {
@@ -2076,7 +2234,7 @@ impl NetChannel {
         }
         assert!(rpc_map.insert(req.id, waiter).is_none());
         drop(rpc_map);
-        self.enqueue_driver_messages(VecDeque::from([req]), None);
+        self.enqueue_driver_message(credit, req, None);
     }
 
     /// Queue an RPC only if staging has immediate room. On backpressure the
@@ -2123,35 +2281,64 @@ impl NetChannel {
     }
 
     pub(super) fn enqueue_teardown(&self, reservation: ChannelReservation, msg: io_channel::Msg) {
-        self.enqueue_teardown_messages(reservation, VecDeque::from([msg]));
+        self.enqueue_teardown_messages(reservation, &[msg]);
     }
 
     pub(super) fn enqueue_teardown_messages(
         &self,
         reservation: ChannelReservation,
-        messages: VecDeque<io_channel::Msg>,
+        messages: &[io_channel::Msg],
     ) {
         debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
         debug_assert!(!messages.is_empty());
-        self.enqueue_driver_messages(messages, Some(reservation));
+        let mut queue = self.driver_queue.lock();
+        let staged_fence = self.staged_pushed.load(Ordering::Relaxed);
+        for msg in &messages[..messages.len() - 1] {
+            queue.push(
+                reservation.driver_credit(),
+                DriverRecord {
+                    msg: Some(*msg),
+                    staged_fence,
+                    _reservation: None,
+                },
+            );
+        }
+        queue.push(
+            reservation.driver_credit(),
+            DriverRecord {
+                msg: Some(*messages.last().unwrap()),
+                staged_fence,
+                _reservation: Some(reservation),
+            },
+        );
+        drop(queue);
+        self.driver_work_queued();
     }
 
-    /// Queue infallible driver-owned control work. The runtime thread drains
-    /// this queue before exit even if the caller releases the last reservation.
-    pub(super) fn enqueue_control(&self, msg: io_channel::Msg) {
-        self.enqueue_driver_messages(VecDeque::from([msg]), None);
+    /// Queue driver-owned control work using storage reserved before the
+    /// operation which can require it.
+    pub(super) fn enqueue_control(&self, credit: DriverCredit, msg: io_channel::Msg) {
+        self.enqueue_driver_message(credit, msg, None);
     }
 
-    fn enqueue_driver_messages(
+    fn enqueue_driver_message(
         &self,
-        messages: VecDeque<io_channel::Msg>,
+        credit: DriverCredit,
+        msg: io_channel::Msg,
         reservation: Option<ChannelReservation>,
     ) {
-        self.driver_queue.push(DriverRecord {
-            messages,
+        let mut queue = self.driver_queue.lock();
+        let record = DriverRecord {
+            msg: Some(msg),
             staged_fence: self.staged_pushed.load(Ordering::Relaxed),
             _reservation: reservation,
-        });
+        };
+        queue.push(credit, record);
+        drop(queue);
+        self.driver_work_queued();
+    }
+
+    fn driver_work_queued(&self) {
         if self.is_failed() {
             self.discard_queued_work();
         }
@@ -2255,6 +2442,7 @@ impl NetChannel {
 pub(crate) struct ChannelReservation {
     channel: Arc<NetChannel>,
     subchannel_idx: Option<u8>,
+    driver_credits: DriverCredits,
 }
 
 impl Drop for ChannelReservation {
@@ -2270,6 +2458,10 @@ impl Drop for ChannelReservation {
 impl ChannelReservation {
     pub fn channel(&self) -> &Arc<NetChannel> {
         &self.channel
+    }
+
+    pub(super) fn driver_credit(&self) -> DriverCredit {
+        self.driver_credits.take()
     }
 
     pub fn reserve_subchannel(&mut self) {

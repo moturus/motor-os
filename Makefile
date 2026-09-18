@@ -57,7 +57,7 @@ sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
 user: user-base kibim httpd httpd-axum ssh
-user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
+user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
@@ -66,7 +66,7 @@ user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-mock-provider
-.PHONY: lorry curl
+.PHONY: gix lorry curl
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy assembly-selected
 
@@ -232,6 +232,21 @@ lorry: assembly-selected
 		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
+gix: assembly-selected
+	mkdir -p $(BIN_DIR)
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
+	cd src/bin/gix && \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_BUILD) --locked --offline
+	bash -c '. "$$1/src/toolchain-lib.sh"; . "$$1/src/toolchain-native.sh"; \
+		toolchain_validate_native_elf "$$2" "$$3"' _ "$(ROOT_DIR)" \
+		"$(OBJ_DIR)/gix/$(SUB_DIR)/gix" "$$(command -v readelf)"
+	strip -o "$(BIN_DIR)/gix" "$(OBJ_DIR)/gix/$(SUB_DIR)/gix"
+	bash -c '. "$$1/src/toolchain-lib.sh"; . "$$1/src/toolchain-native.sh"; \
+		toolchain_validate_native_elf "$$2" "$$3"' _ "$(ROOT_DIR)" \
+		"$(BIN_DIR)/gix" "$$(command -v readelf)"
+
 # ring's Git checkout generates packaged assembly on the Linux host. Curl is
 # therefore cross-built by Cargo and is not part of the native Lorry surface.
 curl: assembly-selected
@@ -348,6 +363,11 @@ clippy: vdso
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/bin/gears && $(DO_CLIPPY)
 	cd src/bin/gears-mock-provider && $(DO_CLIPPY)
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
+	cd src/bin/gix && \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_CLIPPY) --locked --offline
 	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo clippy $(CARGO_RELEASE)
 

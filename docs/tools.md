@@ -77,4 +77,11 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 ![ps -H](ps.png)
 
+## Git on the developer image
+
+The developer image includes `/devtools/bin/gix` for Git repositories:
+HTTPS/SSH clone and fetch, local inspection and authoring, branch switching,
+merging, and single-ref SSH push. See [gix on Motor OS](gix.md) for commands,
+configuration, recovery and limits.
+
 For more details, see [https://motor-os.org](https://motor-os.org).

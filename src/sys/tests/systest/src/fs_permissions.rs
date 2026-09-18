@@ -323,6 +323,11 @@ pub fn run_all_tests() {
         );
 
         let finalized = create_file(&client, root_id, "self-finalized", b"#!/bin/sh\n").await;
+        expect_denied(
+            client
+                .set_permissions(finalized, AccessPermissions::Rwx)
+                .await,
+        );
         client
             .set_permissions(finalized, AccessPermissions::Rx)
             .await
@@ -341,6 +346,20 @@ pub fn run_all_tests() {
                 .set_permissions(finalized, AccessPermissions::Rw)
                 .await,
         );
+        client
+            .set_permissions(finalized, AccessPermissions::Rwx)
+            .await
+            .unwrap();
+        assert_eq!(
+            AccessPermissions::Rwx,
+            client
+                .metadata(finalized)
+                .await
+                .unwrap()
+                .access(Role::Interactive)
+                .unwrap()
+        );
+        assert_eq!(client.write(finalized, 0, b"ok").await.unwrap(), 2);
 
         let no_read = create_file(&client, root_id, "no-read", b"secret").await;
         client

@@ -761,6 +761,16 @@ impl Process {
         exited_thread.cleanup();
 
         if exited {
+            // Close existing IPC endpoints before completion becomes visible
+            // to waiters or status queries; services may run cleanup later.
+            let objects = core::mem::take(&mut *self.wait_objects.lock(line!()));
+            for object in objects.values() {
+                if object.sys_object.remove_process_handle() {
+                    super::shared::on_drop(&object.sys_object);
+                }
+            }
+            drop(objects);
+
             let self_obj = {
                 let (self_mut, mut status_lock) = unsafe { self.get_mut() };
                 match *status_lock {
@@ -795,13 +805,6 @@ impl Process {
             };
             self_obj.mark_done();
             SysObject::wake(&self_obj, false);
-
-            let objects = core::mem::take(&mut *self.wait_objects.lock(line!()));
-            for object in objects.values() {
-                if object.sys_object.remove_process_handle() {
-                    super::shared::on_drop(&object.sys_object);
-                }
-            }
 
             if self.pid().as_u64() == moto_sys::stats::PID_SYS_IO {
                 crate::init::init_exited(self);

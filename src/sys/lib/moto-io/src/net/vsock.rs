@@ -1,6 +1,5 @@
 //! Native virtio-vsock streams driven by the existing networking channel.
 
-use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -114,10 +113,11 @@ impl VsockListener {
         reservation.reserve_subchannel();
         let request = api_vsock::listener_accept_request(self.handle, reservation.subchannel_idx())
             .map_err(ErrorCode::from)?;
+        let cleanup = reservation.driver_credit();
         let stream = VsockStream::new_pending(reservation, None);
         let response = stream
             .channel()
-            .rpc_vsock_open(request, stream.me.clone())
+            .rpc_vsock_open(request, stream.me.clone(), cleanup)
             .await;
         response.status()?;
         Ok(stream)
@@ -176,11 +176,12 @@ impl VsockStream {
         reservation.reserve_subchannel();
         let request = api_vsock::connect_request(peer, reservation.subchannel_idx())
             .map_err(ErrorCode::from)?;
+        let cleanup = reservation.driver_credit();
         let stream = Self::new_pending(reservation, Some(peer));
 
         let response = stream
             .channel()
-            .rpc_vsock_open(request, stream.me.clone())
+            .rpc_vsock_open(request, stream.me.clone(), cleanup)
             .await;
         response.status()?;
         Ok(stream)
@@ -354,8 +355,13 @@ impl VsockStream {
             Ok(decoded) => decoded,
             Err(error) => {
                 if response.handle != 0 {
+                    let credit = self
+                        .channel_reservation
+                        .as_ref()
+                        .unwrap()
+                        .driver_credit();
                     self.channel()
-                        .enqueue_control(api_vsock::close_request(response.handle));
+                        .enqueue_control(credit, api_vsock::close_request(response.handle));
                 }
                 response.status = error.into();
                 return Err(response.status);
@@ -661,11 +667,17 @@ impl Drop for VsockStream {
         }
         let reservation = self.channel_reservation.take().unwrap();
         let channel = reservation.channel().clone();
-        let mut messages = VecDeque::new();
+        // One message per reserved TX page, plus close, bounds teardown storage.
+        const MAX_MESSAGES: usize =
+            io_channel::CHANNEL_PAGE_COUNT / api_net::IO_SUBCHANNELS as usize + 1;
+        let mut messages = [io_channel::Msg::new(); MAX_MESSAGES];
+        let mut num_messages = 0;
         while let Some(msg) = self.claim_pending_tx() {
-            messages.push_back(msg);
+            messages[num_messages] = msg;
+            num_messages += 1;
         }
-        messages.push_back(api_vsock::close_request(handle));
+        messages[num_messages] = api_vsock::close_request(handle);
+        num_messages += 1;
 
         super::channel::clear_vsock_rx_queue(&self.recv_queue, &channel);
         debug_assert!(self.recv_queue.lock().is_empty());
@@ -673,7 +685,7 @@ impl Drop for VsockStream {
         if channel.is_failed() {
             drop(reservation);
         } else {
-            channel.enqueue_teardown_messages(reservation, messages);
+            channel.enqueue_teardown_messages(reservation, &messages[..num_messages]);
         }
     }
 }

@@ -1,0 +1,76 @@
+[package]
+name = "motor-gix"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+native-test-support = []
+
+[[bin]]
+name = "gix"
+path = "src/main.rs"
+
+[[test]]
+name = "native-port"
+path = "tests/native_port.rs"
+harness = false
+
+[[test]]
+name = "https-server"
+path = "tests/https_server.rs"
+harness = false
+
+[dependencies]
+clap = { version = "=4.6.0", default-features = false, features = [
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
+gix = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
+    "attributes",
+    "blob-diff",
+    "blocking-network-client",
+    "dirwalk",
+    "excludes",
+    "index",
+    "merge",
+    "revision",
+    "sha1",
+    "status",
+    "worktree-mutation",
+] }
+gix-features = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
+    "io-pipe",
+] }
+gix-pack = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
+    "generate",
+    "sha1",
+] }
+gix-quote = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5" }
+gix-transport = { git = "https://github.com/moturus/gitoxide.git", rev = "176e1568e94c3bf4bd5add4ec65aeba13b40d8f5", default-features = false, features = [
+    "http-client",
+] }
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt = "0.17.6"
+
+[target.'cfg(not(target_os = "motor"))'.dev-dependencies]
+rustls = { version = "=0.23.42", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "=2.2.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

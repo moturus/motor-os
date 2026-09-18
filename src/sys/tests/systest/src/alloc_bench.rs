@@ -74,7 +74,7 @@ fn immediate(threads: usize, steps: usize) {
     let hs: Vec<_> = (0..threads)
         .map(|i| {
             std::thread::spawn(move || {
-                let mut r = Rng(0x1234_5678_9abc_def1 ^ (i as u64 + 1) * 0x9E37);
+                let mut r = Rng(0x1234_5678_9abc_def1 ^ ((i as u64 + 1) * 0x9E37));
                 for _ in 0..steps {
                     let l = Layout::from_size_align(r.size(), 8).unwrap();
                     let p = unsafe { System.alloc(l) };
@@ -104,7 +104,7 @@ fn ring(threads: usize, ring: usize, steps: usize) {
     let hs: Vec<_> = (0..threads)
         .map(|i| {
             std::thread::spawn(move || {
-                let mut r = Rng(0xdead_beef_cafe_f00d ^ (i as u64 + 1) * 0x9E37);
+                let mut r = Rng(0xdead_beef_cafe_f00d ^ ((i as u64 + 1) * 0x9E37));
                 let mut slots: Vec<(*mut u8, Layout)> = (0..ring)
                     .map(|_| {
                         let l = Layout::from_size_align(r.size(), 8).unwrap();
