@@ -858,16 +858,13 @@ fn send_recv_udp(mut tx: UdpSocket, mut rx: UdpSocket, connected: bool) {
                         handler.rx.recv(&mut handler.rx_buf).unwrap()
                     };
 
-                    unsafe { handler.rx_buf.set_len(cnt) };
-                    assert_eq!(
-                        str::from_utf8(handler.rx_buf.as_ref()).unwrap(),
-                        handler.msg
-                    );
+                    assert_eq!(str::from_utf8(&handler.rx_buf[..cnt]).unwrap(), handler.msg);
                     handler.shutdown = true;
+                    break;
                 }
             }
 
-            if event.is_writable() {
+            if event.is_writable() && !handler.buf.is_empty() {
                 if let SENDER = event.token() {
                     let cnt = if !handler.connected {
                         let addr = handler.rx.local_addr().unwrap();
@@ -876,8 +873,10 @@ fn send_recv_udp(mut tx: UdpSocket, mut rx: UdpSocket, connected: bool) {
                         handler.tx.send(&handler.buf).unwrap()
                     };
 
-                    // Advance the buffer.
-                    drop(handler.buf.drain(..cnt));
+                    // A datagram is sent whole, once; repeated writable events
+                    // must not turn the drained buffer into empty datagrams.
+                    assert_eq!(cnt, handler.buf.len());
+                    handler.buf.clear();
                 }
             }
         }

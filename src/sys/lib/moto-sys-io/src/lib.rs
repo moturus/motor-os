@@ -4,6 +4,7 @@
 
 pub mod api_fs;
 pub mod api_net;
+pub mod api_vsock;
 
 #[cfg(feature = "std")]
 pub mod icmp;

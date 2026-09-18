@@ -645,98 +645,115 @@ impl LocalRuntimeInner {
         self.merge_incoming();
     }
 
-    fn wait(&self, timeo: Option<Instant>, wake_target: SysHandle) {
-        let sys_waiters = self.sys_handle_futures.borrow();
-        if sys_waiters.is_empty() {
+    fn wait(&self, mut timeo: Option<Instant>, mut wake_target: SysHandle) {
+        let mut wait_handles = Vec::new();
+        loop {
+            let sys_waiters = self.sys_handle_futures.borrow();
+            if sys_waiters.is_empty() {
+                core::mem::drop(sys_waiters);
+                let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, wake_target, timeo);
+                return;
+            }
+
+            // Retain this allocation when invalid handles require another pass.
+            wait_handles.clear();
+            wait_handles.reserve(sys_waiters.len());
+            wait_handles.extend(sys_waiters.keys().copied());
             core::mem::drop(sys_waiters);
-            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, wake_target, timeo);
-            return;
-        }
 
-        // Prepare wait handles.
-        let mut wait_handles = Vec::with_capacity(sys_waiters.len());
-        for sw in sys_waiters.keys() {
-            wait_handles.push(*sw);
-        }
-        core::mem::drop(sys_waiters);
+            let result = moto_sys::SysCpu::wait(
+                wait_handles.as_mut_slice(),
+                SysHandle::NONE,
+                wake_target,
+                timeo,
+            );
 
-        let result = moto_sys::SysCpu::wait(
-            wait_handles.as_mut_slice(),
-            SysHandle::NONE,
-            wake_target,
-            timeo,
-        );
-
-        match result {
-            Ok(()) | Err(moto_rt::E_TIMED_OUT) => {
-                for handle in wait_handles {
-                    if handle.is_none() {
-                        break;
-                    }
-                    // The kernel queues wakers for signals arriving while
-                    // this thread is awake, so a wait may report a handle
-                    // no future waits on anymore. The signal stays latched
-                    // on the object; there is nothing to deliver.
-                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
-                    else {
-                        continue;
-                    };
-                    let mut to_wake = Vec::new();
-                    for future in done_futures {
-                        let mut inner_future = future.borrow_mut();
-                        if inner_future.dropped {
+            match result {
+                Ok(()) | Err(moto_rt::E_TIMED_OUT) => {
+                    for handle in &wait_handles {
+                        if handle.is_none() {
+                            break;
+                        }
+                        // The kernel queues wakers for signals arriving while
+                        // this thread is awake, so a wait may report a handle
+                        // no future waits on anymore. The signal stays latched
+                        // on the object; there is nothing to deliver.
+                        let Some(done_futures) =
+                            self.sys_handle_futures.borrow_mut().remove(handle)
+                        else {
                             continue;
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            if inner_future.debug_log {
-                                log::debug!("{}: woke ok", inner_future.name());
+                        };
+                        let mut to_wake = Vec::new();
+                        for future in done_futures {
+                            let mut inner_future = future.borrow_mut();
+                            if inner_future.dropped {
+                                continue;
                             }
+                            #[cfg(debug_assertions)]
+                            {
+                                if inner_future.debug_log {
+                                    log::debug!("{}: woke ok", inner_future.name());
+                                }
+                            }
+                            inner_future.result = Some(Ok(()));
+                            to_wake.extend(inner_future.waker.take());
                         }
-                        inner_future.result = Some(Ok(()));
-                        to_wake.extend(inner_future.waker.take());
+                        for waker in to_wake {
+                            waker.wake();
+                        }
                     }
-                    for waker in to_wake {
-                        waker.wake();
-                    }
+                    return;
                 }
-            }
-            Err(moto_rt::E_BAD_HANDLE) => {
-                for handle in wait_handles {
-                    if handle.is_none() {
-                        break;
-                    }
+                Err(moto_rt::E_BAD_HANDLE) => {
+                    let mut removed = false;
+                    for handle in &wait_handles {
+                        if handle.is_none() {
+                            break;
+                        }
 
-                    // See above: a stale queued waker may name a handle
-                    // with no remaining waiters.
-                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
-                    else {
-                        continue;
-                    };
-                    let mut to_wake = Vec::new();
-                    for future in done_futures {
-                        let mut inner_future = future.borrow_mut();
-                        if inner_future.dropped {
+                        // See above: a stale queued waker may name a handle
+                        // with no remaining waiters.
+                        let Some(done_futures) =
+                            self.sys_handle_futures.borrow_mut().remove(handle)
+                        else {
                             continue;
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            if inner_future.debug_log {
-                                log::debug!("{}: woke BAD_HANDLE", inner_future.name());
+                        };
+                        removed = true;
+                        let mut to_wake = Vec::new();
+                        for future in done_futures {
+                            let mut inner_future = future.borrow_mut();
+                            if inner_future.dropped {
+                                continue;
                             }
+                            #[cfg(debug_assertions)]
+                            {
+                                if inner_future.debug_log {
+                                    log::debug!("{}: woke BAD_HANDLE", inner_future.name());
+                                }
+                            }
+                            inner_future.result = Some(Err(moto_rt::Error::BadHandle));
+                            to_wake.extend(inner_future.waker.take());
                         }
-                        inner_future.result = Some(Err(moto_rt::Error::BadHandle));
-                        to_wake.extend(inner_future.waker.take());
+                        for waker in to_wake {
+                            waker.wake();
+                        }
                     }
-                    for waker in to_wake {
-                        waker.wake();
+                    // Preserve the old behavior for an unrelated bad wake
+                    // target or a stale returned handle.
+                    if !removed {
+                        return;
                     }
+                    // The wake target was processed before wait-set validation.
+                    // Each failed pass removes an entry, so this is finite.
+                    // Error waiters are runnable now: subsequent passes must not sleep.
+                    wake_target = SysHandle::NONE;
+                    timeo = Some(Instant::nan());
                 }
+                Err(moto_rt::E_STORAGE_FULL) => {
+                    panic!("SysCpu::wait(): too many handles: {}", wait_handles.len());
+                }
+                Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
             }
-            Err(moto_rt::E_STORAGE_FULL) => {
-                panic!("SysCpu::wait(): too many handles: {}", wait_handles.len());
-            }
-            Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
         }
     }
 

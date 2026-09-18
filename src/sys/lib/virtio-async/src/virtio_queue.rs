@@ -8,6 +8,7 @@ use crate::virtio_device::mapper;
 
 use moto_async::AsFuture;
 use moto_sys::SysHandle;
+use moto_sys::syscalls::RaiiHandle;
 use moto_tooling::iobuf::IoBuf;
 
 use std::cell::RefCell;
@@ -127,9 +128,51 @@ struct HeaderBuffer {
     in_use_by_completion: bool,
 }
 
+impl HeaderBuffer {
+    fn new(device_kind: crate::VirtioDeviceKind) -> Result<Self> {
+        let size = match device_kind {
+            crate::VirtioDeviceKind::Vsock => 64,
+            _ => 16,
+        };
+        Ok(Self {
+            buf: IoBuf::new_from_size_align(size).ok_or(ErrorKind::OutOfMemory)?,
+            consumed: 0,
+            in_use_by_device: false,
+            in_use_by_completion: false,
+        })
+    }
+
+    fn assert_layout<T>(&self) {
+        assert_header_layout::<T>(self.buf.capacity(), self.buf.raw_ptr() as usize);
+    }
+}
+
+fn assert_header_layout<T>(capacity: usize, address: usize) {
+    assert!(
+        core::mem::size_of::<T>() <= capacity,
+        "virtio header buffer too small"
+    );
+    assert!(
+        address.is_multiple_of(core::mem::align_of::<T>()),
+        "virtio header buffer is misaligned"
+    );
+}
+
 pub(crate) struct VqAlloc {
     num_to_alloc: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
+}
+
+/// A one-shot view of completions in device used-ring order.
+///
+/// Capture this cursor on an idle queue before publishing RX buffers. The
+/// owner must retain all undelivered completions, then synchronously resolve
+/// and handle each returned head before polling again or reposting its buffer.
+/// That bounded-pool discipline prevents overwrite of an unread ring slot;
+/// this cursor does not own or release descriptor chains itself.
+pub(crate) struct OrderedCompletions {
+    virtqueue: Rc<RefCell<Virtqueue>>,
+    next_used_idx: u16,
 }
 
 impl VqAlloc {
@@ -148,23 +191,21 @@ impl Future for VqAlloc {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        loop {
-            let mut virtq = self.virtqueue.borrow_mut();
-            if let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc) {
-                return std::task::Poll::Ready(chain_head);
-            }
-
-            let mut empty = true;
-            while let Some(_chain_head) = virtq.reclaim_used() {
-                empty = false;
-            }
-            if !empty {
-                continue;
-            }
-
-            virtq.alloc_waiters.push_back(cx.local_waker().clone());
-            return std::task::Poll::Pending;
+        let mut virtq = self.virtqueue.borrow_mut();
+        if let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc) {
+            return std::task::Poll::Ready(chain_head);
         }
+
+        // Opportunistic reclamation must keep interrupts armed while the
+        // main reclaimer is asleep.
+        if virtq.reclaim_used_and_rearm() != 0
+            && let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc)
+        {
+            return std::task::Poll::Ready(chain_head);
+        }
+
+        virtq.alloc_waiters.push_back(cx.local_waker().clone());
+        std::task::Poll::Pending
     }
 }
 
@@ -183,7 +224,8 @@ pub(super) struct Virtqueue {
     free_head_idx: u16,
     next_used_idx: u16,
 
-    wait_handle: SysHandle,
+    wait_handle: RaiiHandle,
+    tasks_started: bool,
 
     // Most (all?) requests placed into virtqueues have descriptors pointing to
     // a header and a status. These are internal to VirtIO machinery; as our virtqueues
@@ -207,6 +249,9 @@ pub(super) struct Virtqueue {
 
     // For each slot we may have a waker.
     completion_waiters: Vec<Option<std::task::LocalWaker>>,
+
+    ordered_consumer_claimed: bool,
+    ordered_waiter: Option<std::task::LocalWaker>,
 
     virtio_f_event_idx_negotiated: bool,
 }
@@ -263,13 +308,7 @@ impl Virtqueue {
 
         let mut header_buffers = Vec::with_capacity(queue_sz as usize);
         for _ in 0..queue_sz {
-            let buffer = HeaderBuffer {
-                buf: IoBuf::new_from_size_align(16).unwrap(),
-                consumed: 0,
-                in_use_by_device: false,
-                in_use_by_completion: false,
-            };
-            header_buffers.push(buffer);
+            header_buffers.push(HeaderBuffer::new(dev.kind())?);
         }
 
         let mut completion_waiters = Vec::with_capacity(queue_size as usize);
@@ -288,7 +327,8 @@ impl Virtqueue {
             used_ring,
             free_head_idx: 0,
             next_used_idx: 0,
-            wait_handle: SysHandle::NONE,
+            wait_handle: RaiiHandle::from(SysHandle::NONE),
+            tasks_started: false,
             last_kick_idx: 0,
             header_buffers,
             notify_bar: core::ptr::null(),
@@ -296,18 +336,36 @@ impl Virtqueue {
             queue_size_mask: queue_size - 1,
             alloc_waiters: VecDeque::new(),
             completion_waiters,
+            ordered_consumer_claimed: false,
+            ordered_waiter: None,
 
             virtio_f_event_idx_negotiated: false,
         }));
 
-        let self_clone = self_.clone();
-        moto_async::LocalRuntime::spawn(async move {
-            Self::reclaim_task(self_clone).await;
-        });
-
-        #[cfg(debug_assertions)]
-        Self::spawn_monitoring_task(self_.clone());
         Ok(self_)
+    }
+
+    /// Start a complete device's queue tasks. A returned error leaves every
+    /// queue unstarted; validation precedes all task ownership.
+    pub(crate) fn start_tasks(queues: &[Rc<RefCell<Self>>]) -> Result<()> {
+        for queue in queues {
+            let queue = queue.borrow();
+            if queue.wait_handle.syshandle() == SysHandle::NONE || queue.tasks_started {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+        }
+        for queue in queues {
+            queue.borrow_mut().tasks_started = true;
+        }
+        for queue in queues {
+            let reclaim_queue = queue.clone();
+            moto_async::LocalRuntime::spawn(async move {
+                Self::reclaim_task(reclaim_queue).await;
+            });
+            #[cfg(debug_assertions)]
+            Self::spawn_monitoring_task(queue.clone());
+        }
+        Ok(())
     }
 
     #[cfg(debug_assertions)]
@@ -332,6 +390,7 @@ impl Virtqueue {
                 }
 
                 let alloc_waiters = vq.alloc_waiters.len();
+                let ordered_waiters = usize::from(vq.ordered_waiter.is_some());
                 let mut completion_waiters = 0;
                 let mut cw_idx = 0;
                 for (idx, cw) in vq.completion_waiters.iter().enumerate() {
@@ -342,12 +401,12 @@ impl Virtqueue {
                 }
 
                 let has_used = vq.has_new_used();
-                if has_used && (alloc_waiters + completion_waiters > 0) {
+                if has_used && (alloc_waiters + completion_waiters + ordered_waiters > 0) {
                     errors += 1;
                     let device_used_idx = unsafe { vq.used_ring.idx.read_volatile() };
 
                     log::error!(
-                        "vq {:?}:{}: aw: {alloc_waiters} cw: {completion_waiters} driver used: 0x{driver_used_idx:x} device used: 0x{device_used_idx:x} idx: 0x{cw_idx:x}",
+                        "vq {:?}:{}: aw: {alloc_waiters} cw: {completion_waiters} ow: {ordered_waiters} driver used: 0x{driver_used_idx:x} device used: 0x{device_used_idx:x} idx: 0x{cw_idx:x}",
                         vq.device_kind,
                         vq.queue_num
                     );
@@ -355,10 +414,7 @@ impl Virtqueue {
                     if errors == 2 {
                         drop(vq);
                         let mut vq = this.borrow_mut();
-                        let mut reclaimed = 0;
-                        while let Some(_chain_head) = vq.reclaim_used() {
-                            reclaimed += 1;
-                        }
+                        let reclaimed = vq.reclaim_used_and_rearm();
 
                         for waiter in vq.completion_waiters.iter() {
                             if let Some(waiter) = waiter {
@@ -379,19 +435,12 @@ impl Virtqueue {
     }
 
     async fn reclaim_task(this: Rc<RefCell<Self>>) {
-        let wait_handle = this.borrow().wait_handle;
+        let wait_handle = this.borrow().wait_handle.syshandle();
 
         loop {
             let mut virtq = this.borrow_mut();
 
-            virtq.disable_irq();
-            while let Some(_chain_head) = virtq.reclaim_used() {}
-
-            virtq.enable_irq();
-            if virtq.has_new_used() {
-                continue;
-            }
-
+            virtq.reclaim_used_and_rearm();
             drop(virtq);
             wait_handle.as_future().await.unwrap();
         }
@@ -402,11 +451,40 @@ impl Virtqueue {
     }
 
     pub fn set_wait_handle(&mut self, handle: SysHandle) {
-        self.wait_handle = handle;
+        self.wait_handle = RaiiHandle::from(handle);
     }
 
     pub fn set_f_event_idx_negotiated(&mut self) {
         self.virtio_f_event_idx_negotiated = true;
+    }
+
+    pub(crate) fn ordered_completions(this: Rc<RefCell<Self>>) -> OrderedCompletions {
+        let next_used_idx = {
+            let mut virtq = this.borrow_mut();
+            assert!(
+                !virtq.ordered_consumer_claimed,
+                "ordered completion consumer already claimed"
+            );
+            mfence();
+            let device_used_idx = unsafe { virtq.used_ring.idx.read_volatile() };
+            assert_eq!(
+                device_used_idx, virtq.next_used_idx,
+                "ordered completion consumer requires no pending used entries"
+            );
+            assert!(
+                virtq
+                    .header_buffers
+                    .iter()
+                    .all(|header| !header.in_use_by_device && !header.in_use_by_completion),
+                "ordered completion consumer requires an idle queue"
+            );
+            virtq.ordered_consumer_claimed = true;
+            virtq.next_used_idx
+        };
+        OrderedCompletions {
+            virtqueue: this,
+            next_used_idx,
+        }
     }
 
     fn notify_device_if_needed(&mut self, new_idx: u16) {
@@ -428,11 +506,11 @@ impl Virtqueue {
                 if new_idx.wrapping_sub(event_idx).wrapping_sub(1)
                     < new_idx.wrapping_sub(self.last_kick_idx)
                 {
-                    (*self.notify_bar).write_u16(self.notify_offset, 0);
+                    (*self.notify_bar).write_u16(self.notify_offset, self.queue_num);
                     self.last_kick_idx = new_idx;
                 }
             } else if (self.used_ring.flags as *const u16).read_volatile() == 0 {
-                (*self.notify_bar).write_u16(self.notify_offset, 0);
+                (*self.notify_bar).write_u16(self.notify_offset, self.queue_num);
                 self.last_kick_idx = new_idx;
             }
         }
@@ -470,7 +548,7 @@ impl Virtqueue {
         self.notify_offset = notify_offset;
     }
 
-    fn update_and_increment_available_idx(&mut self, head: u16) {
+    fn update_and_increment_available_idx<const NOTIFY: bool>(&mut self, head: u16) {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
         mfence();
@@ -488,7 +566,21 @@ impl Virtqueue {
                 .write_volatile(next_idx);
             next_idx
         };
-        self.notify_device_if_needed(new_idx);
+        if NOTIFY {
+            self.notify_device_if_needed(new_idx);
+        } else {
+            // Order the available index before a later DRIVER_OK write.
+            mfence();
+        }
+    }
+
+    /// Notify after a bounded batch was published with notifications deferred.
+    /// The caller must invoke this only after setting DRIVER_OK.
+    pub(crate) fn kick_deferred(&mut self) {
+        let new_idx = unsafe { self.available_ring.next_available_idx.read_volatile() };
+        if new_idx != self.last_kick_idx {
+            self.notify_device_if_needed(new_idx);
+        }
     }
 
     pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {
@@ -571,9 +663,9 @@ impl Virtqueue {
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
     pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u64, u16) {
         debug_assert!(idx < self.queue_size);
-        debug_assert!(core::mem::size_of::<T>() <= 16);
         let next = self.get_descriptor_mut(idx).next;
-        // Safety: checked above that the inded and the size are Ok.
+        self.header_buffers[idx as usize].assert_layout::<T>();
+        // Safety: the type's size and alignment were checked above.
         unsafe {
             let pbuf = &mut self.header_buffers[idx as usize].buf;
             let addr = pbuf.raw_ptr_mut() as usize;
@@ -610,6 +702,32 @@ impl Virtqueue {
         chain_head: u16,
         bytes: T,
     ) -> VqCompletion<T> {
+        Self::add_buffs_with_notification::<T, true>(
+            this, data, outgoing, incoming, chain_head, bytes,
+        )
+    }
+
+    pub(crate) fn add_buffs_deferred<T>(
+        this: Rc<RefCell<Self>>,
+        data: &[UserData],
+        outgoing: u16,
+        incoming: u16,
+        chain_head: u16,
+        bytes: T,
+    ) -> VqCompletion<T> {
+        Self::add_buffs_with_notification::<T, false>(
+            this, data, outgoing, incoming, chain_head, bytes,
+        )
+    }
+
+    fn add_buffs_with_notification<T, const NOTIFY: bool>(
+        this: Rc<RefCell<Self>>,
+        data: &[UserData],
+        outgoing: u16,
+        incoming: u16,
+        chain_head: u16,
+        bytes: T,
+    ) -> VqCompletion<T> {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
@@ -639,7 +757,7 @@ impl Virtqueue {
 
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
-        this_mut.update_and_increment_available_idx(chain_head);
+        this_mut.update_and_increment_available_idx::<NOTIFY>(chain_head);
         core::mem::drop(this_mut);
 
         VqCompletion {
@@ -666,7 +784,12 @@ impl Virtqueue {
         let head = self.next_used_idx & self.queue_size_mask;
         let elem = &self.used_ring.ring[head as usize];
 
-        let chain_head = elem.id as u16;
+        let raw_chain_head = elem.id;
+        assert!(
+            raw_chain_head < u32::from(self.queue_size),
+            "virtio used descriptor ID out of range"
+        );
+        let chain_head = raw_chain_head as u16;
         self.header_buffers[chain_head as usize].consumed = elem.len;
 
         let mut curr = chain_head;
@@ -695,11 +818,30 @@ impl Virtqueue {
         }
 
         self.next_used_idx = self.next_used_idx.wrapping_add(1);
-        assert!(chain_head < self.queue_size);
+        if let Some(waker) = self.ordered_waiter.take() {
+            waker.wake();
+        }
         if let Some(waker) = self.completion_waiters[chain_head as usize].take() {
             waker.wake();
         }
         Some(chain_head)
+    }
+
+    /// Drain complete chains and leave interrupts armed at the stable cursor.
+    /// Every reclamation path must update EVENT_IDX before returning, including
+    /// opportunistic callers outside the main reclaimer task.
+    fn reclaim_used_and_rearm(&mut self) -> usize {
+        let mut reclaimed = 0;
+        loop {
+            self.disable_irq();
+            while self.reclaim_used().is_some() {
+                reclaimed += 1;
+            }
+            self.enable_irq();
+            if !self.has_new_used() {
+                return reclaimed;
+            }
+        }
     }
 
     fn get_result(&self, chain_head: u16) -> u32 {
@@ -740,6 +882,59 @@ impl Virtqueue {
     }
 }
 
+impl OrderedCompletions {
+    pub(crate) fn poll_next(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<u16> {
+        let mut virtq = self.virtqueue.borrow_mut();
+        mfence();
+        let device_used_idx = unsafe { virtq.used_ring.idx.read_volatile() };
+        let reclaimed_lag = virtq.next_used_idx.wrapping_sub(self.next_used_idx);
+        let device_lag = device_used_idx.wrapping_sub(self.next_used_idx);
+        assert!(
+            reclaimed_lag <= virtq.queue_size,
+            "ordered completion cursor exceeded by reclaimer"
+        );
+        assert!(
+            device_lag <= virtq.queue_size,
+            "ordered completion cursor exceeded by device"
+        );
+        assert!(
+            reclaimed_lag <= device_lag,
+            "ordered completion reclaimer passed device"
+        );
+
+        if reclaimed_lag == 0 {
+            match &mut virtq.ordered_waiter {
+                Some(waker) => waker.clone_from(cx.local_waker()),
+                None => virtq.ordered_waiter = Some(cx.local_waker().clone()),
+            }
+            return std::task::Poll::Pending;
+        }
+
+        let slot = self.next_used_idx & virtq.queue_size_mask;
+        let raw_head =
+            unsafe { core::ptr::addr_of!(virtq.used_ring.ring[slot as usize].id).read_volatile() };
+        assert!(
+            raw_head < u32::from(virtq.queue_size),
+            "virtio used descriptor ID out of range"
+        );
+        let head = raw_head as u16;
+        let header = &virtq.header_buffers[head as usize];
+        assert!(
+            !header.in_use_by_device && header.in_use_by_completion,
+            "ordered completion is not retained by its owner"
+        );
+        self.next_used_idx = self.next_used_idx.wrapping_add(1);
+        virtq.ordered_waiter = None;
+        std::task::Poll::Ready(head)
+    }
+}
+
+impl Drop for OrderedCompletions {
+    fn drop(&mut self) {
+        self.virtqueue.borrow_mut().ordered_waiter = None;
+    }
+}
+
 impl Drop for Virtqueue {
     fn drop(&mut self) {
         log::error!("Virtqueue::drop(): not implemented");
@@ -756,17 +951,22 @@ pub(crate) struct VqCompletion<T> {
 }
 
 impl<T> VqCompletion<T> {
+    pub(crate) fn chain_head(&self) -> u16 {
+        self.chain_head
+    }
+
     /// A copy of the chain head's header buffer, i.e. of whatever the device
     /// wrote into the first descriptor. Only meaningful once the completion
     /// has resolved; the buffer stays ours until this completion is dropped,
-    /// which is what releases the chain.
+    /// which is what releases the chain. The caller must already have valid
+    /// completion ownership.
     pub(crate) fn read_header<H: Copy>(&self) -> H {
-        debug_assert!(core::mem::size_of::<H>() <= 16);
         let virtq = self.virtqueue.borrow();
         let header_buffer = &virtq.header_buffers[self.chain_head as usize];
+        header_buffer.assert_layout::<H>();
         debug_assert!(!header_buffer.in_use_by_device);
-        // SAFETY: the header buffer is 16-byte aligned and at least as large
-        // as H (asserted above), and the device no longer owns it.
+        // SAFETY: size/alignment were checked above, and the device no longer
+        // owns the buffer.
         unsafe { (header_buffer.buf.raw_ptr() as *const H).read_volatile() }
     }
 
@@ -834,7 +1034,7 @@ impl<T> Drop for VqCompletion<T> {
         };
         if device_owned(&virtqueue) {
             // An unpolled completion may already be on the used ring.
-            while virtqueue.reclaim_used().is_some() {}
+            virtqueue.reclaim_used_and_rearm();
             assert!(
                 !device_owned(&virtqueue),
                 "virtio completion dropped while the device still owns its DMA buffers"

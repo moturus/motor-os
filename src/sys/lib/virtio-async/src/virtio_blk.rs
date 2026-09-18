@@ -9,7 +9,6 @@ use std::io::Result;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::WriteCompletion;
 use crate::virtio_queue::ReadCompletion;
@@ -46,6 +45,14 @@ const VIRTIO_BLK_F_SEG_MAX: u64 = 1u64 << 2;
 const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
+
+pub(crate) fn effective_seg_max(queue_size: u16, offered: usize) -> Result<usize> {
+    let half_queue = usize::from(queue_size) / 2;
+    if half_queue <= 2 {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    Ok(offered.clamp(1, half_queue - 2))
+}
 
 // See struct virtio_blk_req in VirtIO spec.
 #[derive(Clone, Copy)]
@@ -175,8 +182,8 @@ impl BlockDevice {
 
     fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<BlockDevice>> {
         let mut dev_mut = dev.borrow_mut();
-        dev_mut.init();
-        dev_mut.reset();
+        dev_mut.init()?;
+        dev_mut.reset()?;
         dev_mut.acknowledge_device();
 
         if dev_mut.device_cfg.is_none() {
@@ -187,14 +194,22 @@ impl BlockDevice {
         dev_mut.acknowledge_driver(); // Step 3
         let (capacity, read_only, seg_max) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         dev_mut.init_virtqueues(1, 1)?; // Step 7
-        dev_mut.driver_ok(); // Step 8
-
-        let virtqueue = dev_mut.virtqueues[0].clone();
 
         // Requests also need a header and a status descriptor; keep each
         // chain within half the queue.
-        let queue_size = virtqueue.borrow().queue_size() as usize;
-        let seg_max = seg_max.clamp(1, queue_size / 2 - 2);
+        let queue_size = dev_mut.virtqueues[0].borrow().queue_size();
+        let seg_max = match effective_seg_max(queue_size, seg_max) {
+            Ok(seg_max) => seg_max,
+            Err(err) => {
+                log::error!(
+                    "Virtio BLOCK queue has {queue_size} descriptors; at least 8 required."
+                );
+                return Err(err);
+            }
+        };
+
+        dev_mut.driver_ok()?; // Step 8
+        let virtqueue = dev_mut.virtqueues[0].clone();
 
         log::debug!(
             "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {} seg_max: {}.",
@@ -274,16 +289,14 @@ impl BlockDevice {
 
         let read_only = (features_acked & VIRTIO_BLK_F_RO) != 0;
 
-        let device_cfg = dev.device_cfg.as_ref().unwrap();
-        let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]
-            .as_ref()
-            .unwrap();
-        let capacity = cfg_bar.read_u64(device_cfg.offset as u64);
+        let required_config_len = if seg_max_offered { 16 } else { 8 };
+        let (cfg_bar, config_offset) = dev.device_config(required_config_len)?;
+        let capacity = cfg_bar.read_u64(config_offset);
 
         // struct virtio_blk_config: capacity: u64, size_max: u32, seg_max: u32.
         // The seg_max field is valid only if the feature was offered.
         let seg_max = if seg_max_offered {
-            cfg_bar.read_u32(device_cfg.offset as u64 + 12) as usize
+            cfg_bar.read_u32(config_offset + 12) as usize
         } else {
             1
         };

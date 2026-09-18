@@ -31,10 +31,12 @@ impl MotoSocket {
         let udp_state = state.unwrap_udp();
 
         let mut inner = base.runtime.inner.borrow_mut();
-        let device = &mut inner.devices[base.device_idx];
+        let device = &mut inner.devices[base.ip_backend().device_idx];
         let netstack_socket = device
             .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket<'static>>(base.handle());
+            .get_mut::<moto_netstack::socket::udp::Socket<'static>>(
+                base.ip_backend().handle(base.socket_id),
+            );
         f(base.socket_id(), netstack_socket, udp_state)
     }
 
@@ -72,8 +74,8 @@ impl MotoSocket {
             socket_id
         };
 
-        let base = SocketBase::new(socket_id, runtime, device_idx, socket_addr, client_sender);
-        MotoSocket::new(
+        let base = SocketBase::new_ip(socket_id, runtime, device_idx, socket_addr, client_sender);
+        MotoSocket::new_ip(
             base,
             SocketState::Udp(UdpState {
                 ephemeral_port,
@@ -177,9 +179,9 @@ impl MotoSocket {
     pub(super) fn on_udp_socket_drop(base: &mut super::SocketBase, state: &mut UdpState) {
         // UDP sockets don't linger.
         let runtime = base.runtime.clone();
-        let device_idx = base.device_idx;
-        let socket_addr = base.local_addr;
-        let netstack_handle = base.handle();
+        let device_idx = base.ip_backend().device_idx;
+        let socket_addr = base.ip_backend().local_addr;
+        let netstack_handle = base.ip_backend().handle(base.socket_id);
         let socket_id = base.socket_id;
 
         log::debug!("UDP socket 0x{socket_id:x} dropped.");
@@ -290,6 +292,12 @@ impl MotoSocket {
         device_idx: usize,
     ) -> std::io::Result<()> {
         // The single socket-creating UDP path, covering both bind entry points.
+        let subchannel_idx = msg.payload.args_8()[23];
+        if subchannel_idx >= api_net::IO_SUBCHANNELS {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
+
         runtime.pressure.admit()?;
         let mut runtime_mut = runtime.inner.borrow_mut();
         let mut resp = msg;
@@ -319,8 +327,6 @@ impl MotoSocket {
             return Err(err);
         }
         drop(runtime_mut);
-
-        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
 
         let udp_socket = match Self::create_udp_socket(
             runtime,
@@ -452,9 +458,11 @@ impl MotoSocket {
 
         let mut inner_ref = runtime.inner.borrow_mut();
         let mut inner = &mut *inner_ref;
-        let netstack_socket = inner.devices[base.device_idx]
+        let netstack_socket = inner.devices[base.ip_backend().device_idx]
             .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket>(base.handle());
+            .get_mut::<moto_netstack::socket::udp::Socket>(
+            base.ip_backend().handle(base.socket_id),
+        );
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
@@ -495,7 +503,7 @@ impl MotoSocket {
                     datagram.slice().len(),
                     datagram.addr
                 );
-                base.device_notify.notify_one();
+                base.ip_backend().device_notify.notify_one();
             }
         }
 

@@ -1,4 +1,4 @@
-/// A helper TCP RX stream.
+/// Shared-page storage for a native byte stream's receive side.
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use moto_ipc::io_channel;
@@ -28,7 +28,7 @@ impl RxBuf {
 pub struct InnerRxStream {
     recv_queue: VecDeque<io_channel::Msg>,
 
-    // Pages claimed out of TcpStreamRx messages but not yet consumed by the
+    // Pages claimed out of stream RX messages but not yet consumed by the
     // application, in stream order. Each page is freed back to the channel
     // when dropped.
     rx_bufs: VecDeque<RxBuf>,

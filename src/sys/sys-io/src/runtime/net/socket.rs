@@ -20,6 +20,8 @@ mod udp;
 pub(super) enum SocketState {
     Udp(udp::UdpState),
     Tcp(tcp::TcpState),
+    Vsock(super::vsock::VsockSocketState),
+    VsockListener(crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept>),
 }
 
 impl SocketState {
@@ -50,9 +52,7 @@ impl SocketState {
 pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
-    device_idx: usize,
-    device_notify: Rc<moto_async::LocalNotify>,
-    local_addr: SocketAddr,
+    backend: SocketBackend,
 
     // Denormalized for quick validation.
     client_sender: ClientSender,
@@ -63,8 +63,20 @@ pub(super) struct SocketBase {
     lingering: bool,
 }
 
+pub(super) struct IpSocketBackend {
+    device_idx: usize,
+    device_notify: Rc<moto_async::LocalNotify>,
+    local_addr: SocketAddr,
+}
+
+pub(super) enum SocketBackend {
+    Ip(IpSocketBackend),
+    Vsock(crate::runtime::vsock::admission::ConnectionTuple),
+    VsockListener,
+}
+
 impl SocketBase {
-    pub(super) fn new(
+    pub(super) fn new_ip(
         socket_id: u64,
         runtime: super::NetRuntime,
         device_idx: usize,
@@ -78,9 +90,11 @@ impl SocketBase {
         Self {
             socket_id,
             runtime,
-            device_idx,
-            device_notify,
-            local_addr: socket_addr,
+            backend: SocketBackend::Ip(IpSocketBackend {
+                device_idx,
+                device_notify,
+                local_addr: socket_addr,
+            }),
             client_sender,
             lingering: false,
         }
@@ -90,14 +104,63 @@ impl SocketBase {
         self.socket_id
     }
 
-    /// The same id as `socket_id`, in the netstack's handle type: since the
-    /// id collapse there is one identity, allocated by `next_socket_id`.
-    pub(super) fn handle(&self) -> moto_netstack::iface::SocketHandle {
-        self.socket_id.into()
+    pub(super) fn new_vsock(
+        socket_id: u64,
+        runtime: super::NetRuntime,
+        tuple: crate::runtime::vsock::admission::ConnectionTuple,
+        client_sender: ClientSender,
+    ) -> Self {
+        Self {
+            socket_id,
+            runtime,
+            backend: SocketBackend::Vsock(tuple),
+            client_sender,
+            lingering: false,
+        }
+    }
+
+    pub(super) fn new_vsock_listener(
+        socket_id: u64,
+        runtime: super::NetRuntime,
+        client_sender: ClientSender,
+    ) -> Self {
+        Self {
+            socket_id,
+            runtime,
+            backend: SocketBackend::VsockListener,
+            client_sender,
+            lingering: false,
+        }
+    }
+
+    pub(super) fn ip_backend(&self) -> &IpSocketBackend {
+        let SocketBackend::Ip(backend) = &self.backend else {
+            panic!("vsock has no IP backend")
+        };
+        backend
+    }
+
+    pub(super) fn vsock_tuple(&self) -> crate::runtime::vsock::admission::ConnectionTuple {
+        let SocketBackend::Vsock(tuple) = self.backend else {
+            panic!("IP socket has no vsock tuple")
+        };
+        tuple
     }
 
     pub(super) fn sender(&self) -> &ClientSender {
         &self.client_sender
+    }
+
+    pub(super) fn runtime(&self) -> &super::NetRuntime {
+        &self.runtime
+    }
+}
+
+impl IpSocketBackend {
+    /// The socket id in the netstack's handle type. There is one identity,
+    /// allocated by `next_socket_id`.
+    pub(super) fn handle(&self, socket_id: u64) -> moto_netstack::iface::SocketHandle {
+        socket_id.into()
     }
 
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
@@ -120,15 +183,29 @@ impl Drop for MotoSocket {
 
         let Self { base, state } = self;
 
-        match state {
-            SocketState::Udp(udp_state) => Self::on_udp_socket_drop(base, udp_state),
-            SocketState::Tcp(tcp_state) => Self::on_tcp_socket_drop(base, tcp_state),
+        match (&base.backend, state) {
+            (SocketBackend::Ip(_), SocketState::Udp(udp_state)) => {
+                Self::on_udp_socket_drop(base, udp_state)
+            }
+            (SocketBackend::Ip(_), SocketState::Tcp(tcp_state)) => {
+                Self::on_tcp_socket_drop(base, tcp_state)
+            }
+            (SocketBackend::Vsock(_), SocketState::Vsock(vsock_state)) => {
+                super::vsock::on_socket_drop(base, vsock_state);
+                return;
+            }
+            (SocketBackend::VsockListener, SocketState::VsockListener(listener)) => {
+                super::vsock::on_listener_drop(base, listener);
+                return;
+            }
+            _ => panic!("socket state/backend mismatch"),
         }
 
         let socket_id = base.socket_id;
         let client_handle = base.client_sender.remote_handle();
-        let device_idx = base.device_idx;
-        let netstack_handle = base.handle();
+        let ip = base.ip_backend();
+        let device_idx = ip.device_idx;
+        let netstack_handle = ip.handle(socket_id);
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         #[cfg(debug_assertions)]
@@ -148,15 +225,34 @@ impl MotoSocket {
         self.base.socket_id
     }
 
+    pub(super) fn sender(&self) -> &ClientSender {
+        self.base.sender()
+    }
+
+    pub(super) fn vsock_tuple(&self) -> crate::runtime::vsock::admission::ConnectionTuple {
+        self.base.vsock_tuple()
+    }
+
     pub(super) fn is_tcp(&self) -> bool {
         matches!(self.state, SocketState::Tcp(_))
     }
 
-    pub(super) fn new(base: SocketBase, kind: SocketState) -> std::io::Result<Rc<RefCell<Self>>> {
+    pub(super) fn is_vsock(&self) -> bool {
+        matches!(self.state, SocketState::Vsock(_))
+    }
+
+    pub(super) fn is_vsock_listener(&self) -> bool {
+        matches!(self.state, SocketState::VsockListener(_))
+    }
+
+    pub(super) fn new_ip(
+        base: SocketBase,
+        kind: SocketState,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let device_idx = base.device_idx;
-        let netstack_handle = base.handle();
+        let device_idx = base.ip_backend().device_idx;
+        let netstack_handle = base.ip_backend().handle(socket_id);
         let client_handle = base.client_sender.remote_handle();
         let mut inner = runtime.inner.borrow_mut();
         if !inner
@@ -181,7 +277,73 @@ impl MotoSocket {
         Ok(this)
     }
 
-    // Listening TCP sockets on accept change their clients.
+    pub(super) fn new_vsock(
+        base: SocketBase,
+        state: super::vsock::VsockSocketState,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
+        let runtime = base.runtime.clone();
+        let socket_id = base.socket_id;
+        let client_handle = base.client_sender.remote_handle();
+        let mut inner = runtime.inner.borrow_mut();
+        if !inner
+            .clients
+            .get(&client_handle)
+            .is_some_and(|client| !client.shutting_down)
+        {
+            inner.vsock.tuples.remove_stream(socket_id);
+            return Err(ErrorKind::NotConnected.into());
+        }
+
+        let this = Rc::new(RefCell::new(Self {
+            base,
+            state: SocketState::Vsock(state),
+        }));
+        assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
+        assert!(
+            inner
+                .clients
+                .get_mut(&client_handle)
+                .unwrap()
+                .sockets
+                .insert(socket_id)
+        );
+        Ok(this)
+    }
+
+    pub(super) fn new_vsock_listener(
+        base: SocketBase,
+        listener: crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept>,
+    ) -> std::io::Result<Rc<RefCell<Self>>> {
+        let runtime = base.runtime.clone();
+        let socket_id = base.socket_id;
+        let client_handle = base.client_sender.remote_handle();
+        let mut inner = runtime.inner.borrow_mut();
+        if !inner
+            .clients
+            .get(&client_handle)
+            .is_some_and(|client| !client.shutting_down)
+        {
+            inner.vsock.tuples.remove_listener(socket_id);
+            return Err(ErrorKind::NotConnected.into());
+        }
+
+        let this = Rc::new(RefCell::new(Self {
+            base,
+            state: SocketState::VsockListener(listener),
+        }));
+        assert!(inner.sockets.insert(socket_id, this.clone()).is_none());
+        assert!(
+            inner
+                .clients
+                .get_mut(&client_handle)
+                .unwrap()
+                .sockets
+                .insert(socket_id)
+        );
+        Ok(this)
+    }
+
+    // Accepted TCP/vsock sockets may move to another channel of the owner.
     pub(super) fn set_client_sender(&mut self, client_sender: &ClientSender) -> bool {
         let prev_handle = self.base.client_sender.remote_handle();
         let next_handle = client_sender.remote_handle();
@@ -217,5 +379,37 @@ impl MotoSocket {
     }
     pub(super) fn unwrap_tcp_mut(&mut self) -> &mut tcp::TcpState {
         self.state.unwrap_tcp_mut()
+    }
+
+    pub(super) fn unwrap_vsock(&self) -> &super::vsock::VsockSocketState {
+        let SocketState::Vsock(state) = &self.state else {
+            panic!("not a vsock stream")
+        };
+        state
+    }
+
+    pub(super) fn unwrap_vsock_mut(&mut self) -> &mut super::vsock::VsockSocketState {
+        let SocketState::Vsock(state) = &mut self.state else {
+            panic!("not a vsock stream")
+        };
+        state
+    }
+
+    pub(super) fn unwrap_vsock_listener(
+        &self,
+    ) -> &crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept> {
+        let SocketState::VsockListener(listener) = &self.state else {
+            panic!("not a vsock listener")
+        };
+        listener
+    }
+
+    pub(super) fn unwrap_vsock_listener_mut(
+        &mut self,
+    ) -> &mut crate::runtime::vsock::listener::ListenerState<super::vsock::PendingAccept> {
+        let SocketState::VsockListener(listener) = &mut self.state else {
+            panic!("not a vsock listener")
+        };
+        listener
     }
 }

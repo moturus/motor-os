@@ -20,15 +20,17 @@ vm_ssh() {
 }
 
 start_test_vm() {
-  local img_dir="$1"
-  local console_log="$2"
+  local runner="$1"
+  local vmm_label="$2"
+  local console_log="$3"
   local vmm_status=0
+  shift 3
 
-  [ -x "$img_dir/run-qemu.sh" ] || fail "VM launcher is missing: $img_dir/run-qemu.sh"
+  [ -x "$runner" ] || fail "VM launcher is missing: $runner"
 
   # Do not forward the guest's terminal queries: a host terminal may answer
   # them or leave responses queued for the shell after this run.
-  "$img_dir/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} \
+  "$runner" "$@" \
     > >(filter_vm_console | tee "$console_log") 2>&1 &
   VMM_PID="$!"
 
@@ -41,7 +43,7 @@ start_test_vm() {
       wait "$VMM_PID" || vmm_status="$?"
       VMM_PID=""
       cat "$console_log" >&2
-      fail "QEMU exited before SSH became ready (status $vmm_status)"
+      fail "$vmm_label exited before SSH became ready (status $vmm_status)"
     fi
     sleep 1
   done
@@ -49,6 +51,6 @@ start_test_vm() {
     wait "$VMM_PID" || vmm_status="$?"
     VMM_PID=""
     cat "$console_log" >&2
-    fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
+    fail "SSH reached a VM after this run's $vmm_label exited (status $vmm_status)"
   fi
 }

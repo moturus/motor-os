@@ -41,11 +41,34 @@ set -e
 WD="$(dirname "$0")"
 
 BUILD="debug"
-if [ "${1:-}" = "--release" ]; then
-  BUILD="release"
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "test-tui: duplicate --release" >&2; exit 2; }
+      BUILD=release; SEEN_RELEASE=1; shift ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-tui: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "test-tui: --vmm requires qemu, chv, or fc" >&2; exit 2; }
+      VMM="$2"; SEEN_VMM=1; shift 2 ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-tui: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"; SEEN_VMM=1; shift ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2; exit 2 ;;
+  esac
+done
+case "$VMM" in qemu|chv|fc) ;; *) echo "test-tui: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
+  echo "test-tui: Firecracker does not support developer images" >&2
+  exit 2
 fi
 ROOT_DIR="$WD/../.."
-IMG_DIR="$WD/../../vm_images/$BUILD"
+. "$WD/vm-test-selection.sh"
+TEST_VM_PHASE=standard
+[ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ] || TEST_VM_PHASE=developer
+select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   MOTOR_TEST_ROOT=/devtools
@@ -64,8 +87,15 @@ HELIX_LSP_EVIDENCE=""
 
 # Image selection mirrors full-test.sh so full-test-dev.sh covers this script
 # against the dev image as well.
-IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
+IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
+export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+export MOTO_SMP="${MOTO_SMP:-4}"
+case "$VMM:$MOTO_IMAGE" in
+  fc:*.img|fc:*.raw|qemu:*.qcow2|qemu:*.img|qemu:*.raw|chv:*.qcow2|chv:*.img|chv:*.raw) ;;
+  fc:*) echo "test-tui: Firecracker requires a raw image, not '$MOTO_IMAGE'" >&2; exit 2 ;;
+  *) echo "test-tui: unsupported image filename '$MOTO_IMAGE'" >&2; exit 2 ;;
+esac
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = "release" ]; then
@@ -94,6 +124,7 @@ vm_ssh() {
 
 # stop_vm(): bounded teardown, shared with the other VM harnesses.
 . "$WD/vm-cleanup.sh"
+. "$WD/vm-test-serial.sh"
 
 fail() {
   echo "test-tui: $*" >&2
@@ -102,7 +133,11 @@ fail() {
 
 CONSOLE_LOG=/tmp/test-tui.log
 SCRATCH="$(mktemp -d)"
+export MOTO_CHV_RUNTIME_DIR="$SCRATCH/chv"
+export MOTO_FC_RUNTIME_DIR="$SCRATCH/fc"
+export MOTO_FC_VSOCK_UDS=''
 VMM_PID=""
+VM_CHILD_PID=""
 TEST_ROOT_CREATED=0
 PTY_PID=""
 PTY_OUT_FD=""
@@ -112,7 +147,7 @@ PTY_OUTPUT=""
 GUEST_SSH="/user/bin/ssh -p 2222 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$GUEST_KNOWN -i $GUEST_KEY"
 
 remove_ssh_fixtures() {
-  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
+  if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
     vm_ssh "/system/bin/rm $GUEST_KEY $GUEST_KNOWN $GUEST_STREAM_HELPER" \
       >/dev/null 2>&1 || true
   fi
@@ -120,7 +155,7 @@ remove_ssh_fixtures() {
 
 remove_test_root() {
   if [ "$TEST_ROOT_CREATED" = "1" ] && [ -n "$VMM_PID" ] &&
-    kill -0 "$VMM_PID" 2>/dev/null; then
+    serial_test_vm_alive; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
       motor@192.168.4.2 /system/bin/rm -r "$MOTOR_TEST_ROOT" >/dev/null 2>&1
     TEST_ROOT_CREATED=0
@@ -129,13 +164,15 @@ remove_test_root() {
 
 remove_helix_fixtures() {
   if [ -n "$GUEST_HELIX_ROOT" ] && [ -n "$VMM_PID" ] &&
-    kill -0 "$VMM_PID" 2>/dev/null; then
+    serial_test_vm_alive; then
     vm_ssh "/system/bin/rm -r $GUEST_HELIX_ROOT" >/dev/null 2>&1 || true
     GUEST_HELIX_ROOT=""
   fi
 }
 
 cleanup() {
+  local status=$?
+  trap - EXIT
   set +e
   if [ -n "$HELIX_LSP_EVIDENCE" ]; then
     vm_ssh "cat $helix_lsp_log" > "$HELIX_LSP_EVIDENCE/helix.log"
@@ -154,30 +191,26 @@ cleanup() {
   remove_ssh_fixtures
   remove_helix_fixtures
   remove_test_root
-  stop_vm "$VMM_PID"
-  VMM_PID=""
   exec 3>&-
+  stop_serial_test_vm || status=1
   rm -rf "$SCRATCH"
+  exit "$status"
 }
 trap cleanup EXIT
 
 # The serial console's stdin: the fifo stays open on fd 3 so console input
-# can be typed at any point, and qemu never sees EOF until cleanup.
+# can be typed at any point, and the VMM never sees EOF until cleanup.
 mkfifo "$SCRATCH/console-in"
 
-echo "test-tui: starting a $BUILD VM; console log in $CONSOLE_LOG"
-"$IMG_DIR/run-qemu.sh" < "$SCRATCH/console-in" > "$CONSOLE_LOG" 2>&1 &
-VMM_PID="$!"
-exec 3> "$SCRATCH/console-in"
+exec 3<> "$SCRATCH/console-in"
+start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
+  "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
-    vmm_status=0
-    wait "$VMM_PID" || vmm_status="$?"
-    VMM_PID=""
+  if ! serial_test_vm_alive; then
     cat "$CONSOLE_LOG" >&2
-    fail "QEMU exited before SSH became ready (status $vmm_status)"
+    fail "$TEST_VM_LABEL exited before SSH became ready"
   fi
   sleep 1
 done
@@ -371,14 +404,14 @@ finish_nested_pty() {
 # ordering: input typed earlier would reach the shell's line editor instead.
 echo "-- sys-tty console child --"
 wait_console "motor-os"
-printf 'if [ "$PWD" = /user ] && [ "$HOME" = /user ]; then echo CONSOLE_"HOME_OK"; else echo CONSOLE_"HOME_BAD"; fi\n' >&3
+printf 'if [ "$PWD" = /user ] && [ "$HOME" = /user ]; then echo CONSOLE_"HOME_OK"; else echo CONSOLE_"HOME_BAD"; fi\r' >&3
 wait_console "CONSOLE_HOME_"
 if grep -aq "CONSOLE_HOME_BAD" "$CONSOLE_LOG"; then
   fail "sys-tty did not start the console shell with HOME and PWD set to /user"
 fi
-printf 'TMPDIR=%s %s/systest stdio-terminal-report-child\n' "$TEST_TMP" "$TEST_BIN" >&3
+printf 'TMPDIR=%s %s/systest stdio-terminal-report-child\r' "$TEST_TMP" "$TEST_BIN" >&3
 wait_console "dupnew="
-printf 'exit\n' >&3
+printf 'exit\r' >&3
 check_report "sys-tty console child" "$(cat "$CONSOLE_LOG")" 111 1
 
 # A non-pty ssh session: russhd removes the terminal hint, so the command and
@@ -665,7 +698,6 @@ fi
 
 remove_ssh_fixtures
 remove_test_root
-stop_vm "$VMM_PID"
-VMM_PID=""
+stop_serial_test_vm
 
 echo "-------- TEST-TUI PASS ---------"

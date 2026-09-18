@@ -86,8 +86,11 @@ pub fn ordinary_child_cap_grant() -> Option<(&'static str, String)> {
     ) {
         return None;
     }
-    let child =
-        own & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG);
+    let child = own
+        & (moto_sys::caps::CAP_SYS
+            | moto_sys::caps::CAP_SPAWN
+            | moto_sys::caps::CAP_LOG
+            | moto_sys::caps::CAP_VSOCK);
     Some((
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!("0x{child:x}"),
@@ -115,6 +118,7 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
         & (moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_LOG
             | moto_sys::caps::CAP_SPAWN_DETACHED
+            | moto_sys::caps::CAP_VSOCK
             | role_cap);
     Some((
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,

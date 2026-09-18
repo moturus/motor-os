@@ -25,6 +25,7 @@ mod pressure;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
+mod vsock;
 
 /// The net runtime's self-tests, gathered here because the modules holding them
 /// are private to this one. See [`crate::self_test`].
@@ -48,6 +49,7 @@ struct ClientConnection {
     tcp_listeners: HashSet<u64>,
     shutting_down: bool,
     pid: u64,
+    capabilities: Option<core::result::Result<u64, moto_rt::ErrorCode>>,
 }
 
 impl Drop for ClientConnection {
@@ -65,6 +67,7 @@ impl ClientConnection {
             tcp_listeners: HashSet::new(),
             shutting_down: false,
             pid: 0,
+            capabilities: None,
         }
     }
 }
@@ -89,6 +92,8 @@ struct NetRuntimeInner {
     // Resolver servers are kept per device so losing one DHCP lease does not
     // discard another device's static or leased configuration.
     dns_servers: Vec<Vec<IpAddr>>,
+
+    vsock: vsock::VsockRuntime,
 
     clients: HashMap<SysHandle, ClientConnection>,
 }
@@ -159,6 +164,45 @@ impl NetRuntime {
             .clients
             .get(&handle)
             .is_some_and(|client| !client.shutting_down)
+    }
+
+    fn vsock_availability_status(
+        &self,
+        handle: SysHandle,
+        msg: &moto_ipc::io_channel::Msg,
+    ) -> moto_rt::ErrorCode {
+        let mut inner = self.inner.borrow_mut();
+        let client = inner.clients.get_mut(&handle).unwrap();
+        let capabilities = *client
+            .capabilities
+            .get_or_insert_with(|| moto_sys::SysObj::get_capabilities(handle));
+
+        match capabilities {
+            Err(err) => err,
+            Ok(capabilities) if capabilities & moto_sys::caps::CAP_VSOCK == 0 => {
+                moto_rt::E_NOT_ALLOWED
+            }
+            Ok(_) if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] => {
+                moto_rt::E_INVALID_ARGUMENT
+            }
+            Ok(_) => match inner.vsock.availability() {
+                Ok(()) => moto_rt::E_OK,
+                Err(error) => error.into(),
+            },
+        }
+    }
+
+    async fn vsock_availability(
+        &self,
+        mut msg: moto_ipc::io_channel::Msg,
+        sender: &channel_budget::ClientSender,
+    ) {
+        msg.status = self.vsock_availability_status(sender.remote_handle(), &msg);
+        if msg.status == moto_rt::E_OK {
+            let _ = self.send_vsock_success(msg, sender).await;
+        } else {
+            let _ = sender.send(msg).await;
+        }
     }
 
     async fn spawn_net_runtime(&self) {
@@ -462,6 +506,7 @@ impl NetRuntime {
                     // are multi-page: fewer messages to spawn for).
                     if msg.command == (NetCmd::TcpStreamTx as u16)
                         || msg.command == (NetCmd::TcpStreamRxAck as u16)
+                        || msg.command == (NetCmd::VsockStreamTx as u16)
                     {
                         self.on_msg(msg, sender.clone()).await;
                         inline_data_messages += 1;
@@ -544,6 +589,10 @@ impl NetRuntime {
             listeners
         };
 
+        // Invalidate matched vsock accepts before any TCP teardown can yield.
+        // Otherwise they can publish into a live destination after the old
+        // owner's socket set has been drained below.
+        let mut vsock_accepts = self.disconnect_vsock_listeners(conn_id);
         let listener_cnt = tcp_listeners.len();
         for tcp_listener in tcp_listeners {
             tcp_listener::TcpListener::hard_reset(tcp_listener).await;
@@ -581,20 +630,33 @@ impl NetRuntime {
             for socket_id in &socket_ids {
                 // Because the loop below is asynchronous, removing one socket may trigger
                 // another terminating/quitting, so not every client socket may be present.
-                let maybe_tcp_socket = {
+                let socket_kind = {
                     let socket = self.inner.borrow().sockets.get(socket_id).cloned();
 
-                    socket.and_then(|moto_socket| {
+                    socket.map(|moto_socket| {
                         if moto_socket.borrow().is_tcp() {
-                            Some(moto_socket)
+                            (Some(moto_socket), false, false)
+                        } else if moto_socket.borrow().is_vsock() {
+                            (Some(moto_socket), true, false)
+                        } else if moto_socket.borrow().is_vsock_listener() {
+                            (Some(moto_socket), false, true)
                         } else {
                             assert!(self.inner.borrow_mut().sockets.remove(socket_id).is_some());
-                            None
+                            (None, false, false)
                         }
                     })
                 };
-                if let Some(moto_socket) = maybe_tcp_socket {
-                    MotoSocket::reclaim_tcp_socket(moto_socket).await;
+                if let Some((Some(moto_socket), is_vsock, is_vsock_listener)) = socket_kind {
+                    if is_vsock_listener {
+                        drop(moto_socket);
+                        if let Ok(mut accepts) = self.remove_vsock_listener(*socket_id, conn_id) {
+                            vsock_accepts.append(&mut accepts);
+                        }
+                    } else if is_vsock {
+                        self.disconnect_vsock_client(&moto_socket);
+                    } else {
+                        MotoSocket::reclaim_tcp_socket(moto_socket).await;
+                    }
                 }
             }
 
@@ -614,6 +676,9 @@ impl NetRuntime {
             socket_cnt,
             listener_cnt
         );
+        // Cleanup must not wait for another channel's accept reply space.
+        self.fail_vsock_accepts(vsock_accepts, moto_rt::Error::NotConnected)
+            .await;
         // Note: client will drop here.
     }
 
@@ -747,6 +812,21 @@ impl NetRuntime {
 
         log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
 
+        if matches!(
+            net_cmd,
+            NetCmd::VsockStreamConnect
+                | NetCmd::VsockLocalCid
+                | NetCmd::VsockStreamTx
+                | NetCmd::VsockStreamShutdown
+                | NetCmd::VsockStreamClose
+                | NetCmd::VsockListenerBind
+                | NetCmd::VsockListenerAccept
+                | NetCmd::VsockListenerDrop
+        ) {
+            self.on_vsock_msg(msg, sender).await;
+            return;
+        }
+
         if let Err(err) = match net_cmd {
             NetCmd::TcpListenerBind => tcp_listener::TcpListener::bind(self, msg, &sender).await,
             NetCmd::TcpListenerAccept => {
@@ -788,6 +868,10 @@ impl NetRuntime {
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
             NetCmd::IcmpEcho => icmp::echo(self, msg, &sender).await,
+            NetCmd::VsockAvailability => {
+                self.vsock_availability(msg, &sender).await;
+                return;
+            }
 
             cmd => {
                 log::warn!(
@@ -814,9 +898,10 @@ impl NetRuntime {
 /// Takes filesystem parameter to read net config.
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
+    vsock_device: Option<virtio_async::VirtioDevice>,
     fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
-) -> Result<()> {
+) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
     let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
@@ -867,11 +952,11 @@ pub(super) async fn init(
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
 
-    if devices.is_empty() {
+    if devices.is_empty() && vsock_device.is_none() {
         log::warn!(
             "NET runtime intentionally disabled: valid configuration produced zero usable devices."
         );
-        return Ok(());
+        return Ok(virtio_devices);
     }
 
     let mut device_idx = 0;
@@ -895,6 +980,7 @@ pub(super) async fn init(
             devices,
             ip_addresses,
             dns_servers,
+            vsock: vsock::VsockRuntime::new(vsock_device),
             clients: HashMap::new(),
         })),
         stats: net_stats.clone(),
@@ -915,27 +1001,28 @@ pub(super) async fn init(
         channel_budget,
     };
 
-    let initial_dns_servers = {
-        let inner = runtime.inner.borrow();
-        let mut seen = HashSet::new();
-        inner
-            .dns_servers
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|server| seen.insert(*server))
-            .collect::<Vec<_>>()
-    };
-    config::write_resolv_conf(&fs, &initial_dns_servers).await?;
-
     runtime.stats.num_devices.set(device_idx as u64);
-    stats::spawn_stats_responder(runtime.clone());
-    pressure::spawn_recovery(runtime.clone());
+    if device_idx != 0 {
+        let initial_dns_servers = {
+            let inner = runtime.inner.borrow();
+            let mut seen = HashSet::new();
+            inner
+                .dns_servers
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|server| seen.insert(*server))
+                .collect::<Vec<_>>()
+        };
+        config::write_resolv_conf(&fs, &initial_dns_servers).await?;
+        stats::spawn_stats_responder(runtime.clone());
+        pressure::spawn_recovery(runtime.clone());
+    }
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");
 
-    Ok(())
+    Ok(virtio_devices)
 }
 
 struct EphemeralTcpPort {

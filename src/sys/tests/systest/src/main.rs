@@ -50,6 +50,8 @@ mod threads;
 mod tls;
 mod udp;
 mod virtio;
+mod vsock;
+mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
 mod xor_server;
@@ -86,11 +88,13 @@ pub(crate) fn ensure_temp_dir() {
 }
 
 /// The capabilities a complete run needs; `full-test.sh` grants this set.
-/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE` only and
-/// cannot delegate `CAP_LOG`, so the tests that spawn logging children skip
-/// themselves instead of failing on their first spawn.
-pub(crate) const FULL_RUN_CAPS: u64 =
-    moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_INTERACTIVE;
+/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK`
+/// and cannot delegate `CAP_LOG`, so the tests that spawn logging children
+/// skip themselves instead of failing on their first spawn.
+pub(crate) const FULL_RUN_CAPS: u64 = moto_sys::caps::CAP_SPAWN
+    | moto_sys::caps::CAP_LOG
+    | moto_sys::caps::CAP_INTERACTIVE
+    | moto_sys::caps::CAP_VSOCK;
 
 pub(crate) fn has_cap_log() -> bool {
     moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
@@ -1108,6 +1112,22 @@ fn main() {
         virtio_async::test_premature_completion_drop(args[2] == "block");
         return;
     }
+    if args.get(1).map(String::as_str) == Some("test-virtio-rx-pool-drop") {
+        virtio_async::test_premature_rx_pool_drop();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-header-layout" {
+        virtio_async::test_header_layout_rejection(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-used-id" {
+        virtio_async::test_used_id_rejection(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-ordered-completion" {
+        virtio_async::test_ordered_completion_rejection(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "checked-copy-in-tests" {
         checked_copy_in::run_all_tests();
         return;
@@ -1141,6 +1161,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "admission-class-tests" {
         admission::test_process_classes();
+        return;
+    }
+    if args.len() == 2 && args[1] == "capability-policy-tests" {
+        test_caps();
         return;
     }
     if args.len() == 4 && args[1] == "admission-class-child" {
@@ -1178,8 +1202,36 @@ fn main() {
     if args.len() == 2 && args[1] == "pool-cold-start-child" {
         net_driver::pool_cold_start_child();
     }
+    if net_driver::is_vsock_discovery_denied_child(&args) {
+        net_driver::run_vsock_discovery_denied_child(args.len() == 3);
+    }
+    if net_driver::is_vsock_foreign_accept_child(&args) {
+        net_driver::run_vsock_foreign_accept_child(args[2].parse().unwrap());
+    }
+    if net_driver::is_vsock_exit_accept_child(&args) {
+        net_driver::run_vsock_exit_accept_child(
+            args[2].parse().unwrap(),
+            args[3].parse().unwrap(),
+            args.len() == 5,
+        );
+    }
+    if args.len() == 3 && args[1] == "test-vsock-discovery" {
+        net_driver::test_vsock_discovery(&args[2]);
+        return;
+    }
+    if args.len() >= 5 && args[1] == "test-vsock-outgoing" {
+        vsock_outgoing::run(&args[2..]);
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-net-cancellation" {
         tcp::test_native_net_cancellation();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-native-net" {
+        net_driver::run_all_tests();
+        tcp::run_all_tests();
+        udp::run_all_tests();
+        println!("systest: test-native-net PASS");
         return;
     }
     if args.len() == 2 && args[1] == "test-tcp-teardown" {
@@ -1263,6 +1315,10 @@ fn main() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if args.len() == 2 && args[1] == "test-thread-creation-exit-rollback" {
+        spawn_wait_kill::test_thread_creation_exit_rollback();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-kill-after-wait" {
         spawn_wait_kill::test_kill_after_wait();
         return;
@@ -1279,6 +1335,9 @@ fn main() {
     if spawn_wait_kill::is_caps_policy_child(&args) {
         spawn_wait_kill::run_caps_policy_child();
     }
+    if spawn_wait_kill::is_denied_vsock_child(&args) {
+        spawn_wait_kill::run_denied_vsock_child();
+    }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
     }
@@ -1287,6 +1346,9 @@ fn main() {
     }
     if spawn_wait_kill::is_empty_args_child(&args) {
         spawn_wait_kill::run_empty_args_child(&args);
+    }
+    if spawn_wait_kill::is_thread_exit_race_child(&args) {
+        spawn_wait_kill::run_thread_exit_race_child();
     }
     if ctrl_c::is_helper(&args) {
         ctrl_c::run_helper(&args);
@@ -1459,6 +1521,7 @@ fn main() {
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
+    spawn_wait_kill::test_thread_creation_exit_rollback();
     ctrl_c::run_tests();
     command_output::run_test();
     sysbox_find::run_test();

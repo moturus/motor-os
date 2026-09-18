@@ -61,7 +61,7 @@ user-dev: user curl gears gears-mock-provider lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
-.PHONY: base.img main.img dev.img system-tty.img
+.PHONY: base.img main.img raw.img dev.img system-tty.img vsock-test.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
@@ -255,8 +255,7 @@ endef
 main.img: assembly-selected boot core sys user
 	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
 	cd src/imager && \
 		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
@@ -264,6 +263,20 @@ main.img: assembly-selected boot core sys user
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
+
+# The standard image in the raw format required by Firecracker. This remains
+# explicit: default and aggregate image targets do not depend on it.
+raw.img: assembly-selected boot core sys user
+	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" && \
+	cd src/imager && \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml --raw-output motor-os.img
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the raw standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
 
 # A small test-only image whose later overlay selects a System serial console.
 system-tty.img: boot core sys-base user-base
@@ -275,6 +288,17 @@ system-tty.img: boot core sys-base user-base
 			"$(ROOT_DIR)" $(IMG_CMD) motor-os-system-tty.yaml
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the System-console test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
+
+# An isolated System-console image for vsock tests that must run without IP.
+vsock-test.img: boot core sys-base sysbox rush systest
+	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
+	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-vsock-test.img"
+	cd src/imager && \
+		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
+		cargo run $(CARGO_RELEASE) -- \
+			"$(ROOT_DIR)" $(IMG_CMD) motor-os-vsock-test.yaml
+	$(INSTALL_VM_SCRIPTS)
+	@echo "built the IP-disabled vsock test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-vsock-test.img"
 
 # The minimal base image; it does not consume toolchain assembly overlays.
 base.img: boot core sys-base user-base

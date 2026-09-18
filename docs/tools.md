@@ -16,7 +16,31 @@ and several useful scripts:
   the same steps, so it is needed only after a host reboot;
 - `run-qemu.sh` and `run-chv.sh` run the image selected by `MOTO_IMAGE`; it
   defaults to `motor-os.qcow2`. QEMU and Cloud Hypervisor also accept the raw
-  base image; Firecracker supports only that raw image.
+  images. `run-fc.sh` requires a raw image and defaults to the base image.
+  `make raw.img` (or `make raw.img BUILD=release`) explicitly builds
+  `motor-os.img`, the standard image in raw format; ordinary `make` does not.
+
+## Vsock test prerequisites
+
+The vsock guest tests use local Unix-domain host peers, not host `AF_VSOCK`
+or `/dev/vhost-vsock`. QEMU requires the pinned `vhost-device-vsock` backend:
+
+```sh
+cargo install --locked vhost-device-vsock --version 0.3.0
+```
+
+Install it during developer setup, not during tests. Put its binary on `PATH`
+or set `VHOST_DEVICE_VSOCK` to its path. The harness checks the version and
+fails on missing prerequisites; it does not download dependencies or skip
+coverage. QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
+the runner's hugepage policy and any `MOTO_HUGEPAGES` override.
+
+`src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]` runs outgoing stream
+tests on the selected VMM (QEMU by default), then the existing IP-disabled
+discovery cases on the same VMM. The full standard suite calls this phase.
+The selected Firecracker phase requests `raw.img`; developer-image tests
+support QEMU and Cloud Hypervisor only. All phases share the VM lock and run
+sequentially; each owns and reaps its VMM and any backend/peer processes.
 
 ## Tools available inside the Motor OS VM
 

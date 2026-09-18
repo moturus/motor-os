@@ -8,9 +8,9 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
   # Debug builds run the same suite several minutes slower.
   TIMEOUT=1500
-  if [ "${1:-}" = "--release" ]; then
-    TIMEOUT=900
-  fi
+  for argument in "$@"; do
+    [ "$argument" != "--release" ] || TIMEOUT=900
+  done
   set -m
   timeout "${TIMEOUT}s" "$0" "$@" < /dev/null
   status=$?
@@ -26,17 +26,45 @@ set -e
 
 WD="$(dirname "$0")"
 
-# Select the VM image build: debug by default, release with --release.
-# run-qemu.sh lives in vm_images/<build>/, two levels up from src/tests/.
 BUILD="debug"
-if [ "${1:-}" = "--release" ]; then
-  BUILD="release"
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "full-test: duplicate --release" >&2; exit 2; }
+      BUILD=release
+      SEEN_RELEASE=1
+      shift
+      ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "full-test: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "full-test: --vmm requires qemu, chv, or fc" >&2; exit 2; }
+      VMM="$2"
+      SEEN_VMM=1
+      shift 2
+      ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "full-test: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"
+      SEEN_VMM=1
+      shift
+      ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2; exit 2 ;;
+  esac
+done
+case "$VMM" in qemu|chv|fc) ;; *) echo "full-test: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
+  echo "full-test: Firecracker does not support developer images" >&2
+  exit 2
 fi
 # The repo root is two levels up from src/tests/.
 ROOT_DIR="$WD/../.."
-IMG_DIR="$WD/../../vm_images/$BUILD"
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
+. "$WD/vm-test-boot-check.sh"
+. "$WD/vm-test-selection.sh"
 
 # Host russhd tests also use this key, before the VM tests below.
 test_vm_configure_ssh
@@ -89,21 +117,51 @@ fi
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 
-# The image under test: the main image by default. full-test-dev.sh overrides
-# both to run this same suite against the dev image.
-IMG_TARGET="${FULL_TEST_IMG_TARGET:-main.img}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-motor-os.qcow2}"
+TEST_VM_PHASE=standard
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
+  TEST_VM_PHASE=developer
+fi
+select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
+IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
+export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
+export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+export MOTO_SMP="${MOTO_SMP:-4}"
+case "$VMM:$MOTO_IMAGE" in
+  fc:*.img|fc:*.raw|qemu:*.qcow2|qemu:*.img|qemu:*.raw|chv:*.qcow2|chv:*.img|chv:*.raw) ;;
+  fc:*) echo "full-test: Firecracker requires a raw image, not '$MOTO_IMAGE'" >&2; exit 2 ;;
+  *) echo "full-test: unsupported image filename '$MOTO_IMAGE'" >&2; exit 2 ;;
+esac
+IMAGE_TARGETS=("$IMG_TARGET")
+if [ "$TEST_VM_PHASE" = standard ]; then
+  for required_target in main.img base.img; do
+    [ "$IMG_TARGET" = "$required_target" ] || IMAGE_TARGETS+=("$required_target")
+  done
+fi
+echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TARGET image=$MOTO_IMAGE"
+if [ "$TEST_VM_PHASE" = standard ]; then
+  required_vmm_tools=(qemu-system-x86_64 cloud-hypervisor-static firecracker)
+elif [ "$VMM" = qemu ]; then
+  required_vmm_tools=(qemu-system-x86_64)
+else
+  required_vmm_tools=(cloud-hypervisor-static)
+fi
+for required_tool in "${required_vmm_tools[@]}"; do
+  command -v "$required_tool" >/dev/null 2>&1 || {
+    echo "full-test: required host tool is missing: $required_tool" >&2
+    exit 1
+  }
+done
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-kernel-wait-set.sh" --release
-  make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
   bash "$WD/test-kernel-wait-set.sh"
-  make -C "$ROOT_DIR" "$IMG_TARGET" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
@@ -112,6 +170,14 @@ fi
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   "$WD/test-rust-analyzer-size.sh"
   "$WD/test-rustfmt-size.sh"
+fi
+
+# Run selected-VMM outgoing acceptance and discovery with and without a device
+# before the longer-lived acceptance VMs.
+if [ "$BUILD" = "release" ]; then
+  "$WD/test-vsock.sh" --release --vmm "$VMM"
+else
+  "$WD/test-vsock.sh" --vmm "$VMM"
 fi
 
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
@@ -193,9 +259,9 @@ fi
 # and proves the opt-in System serial session without changing standard-image
 # role expectations.
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-system-tty.sh" --release
+  "$WD/test-system-tty.sh" --release --vmm "$VMM"
 else
-  "$WD/test-system-tty.sh"
+  "$WD/test-system-tty.sh" --vmm "$VMM"
 fi
 
 # The terminal acceptance suite (docs/tui.md) boots its own VM: the sys-tty
@@ -203,9 +269,9 @@ fi
 # connects. It runs before this script's VM starts, since both use the same
 # tap interface and address.
 if [ "$BUILD" = "release" ]; then
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --release
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --release --vmm "$VMM"
 else
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh"
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --vmm "$VMM"
 fi
 
 # In-band terminal size (docs/tui.md), from the application's end. Its
@@ -213,9 +279,9 @@ fi
 # mode-2048-capable terminal, so it needs that stdin too and boots its own VM
 # for it -- and, like the suite above, must have the tap to itself.
 if [ "$BUILD" = "release" ]; then
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --release
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --release --vmm "$VMM"
 else
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh"
+  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --vmm "$VMM"
 fi
 
 # motor-fs's own tests: the filesystem's B+tree, transaction log, resize and
@@ -248,8 +314,6 @@ vm_rmux() {
   vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
 }
 
-# stop_vm(): bounded teardown, shared with the other VM harnesses.
-. "$WD/vm-cleanup.sh"
 . "$WD/test-udp-fragmentation.sh"
 . "$WD/test-ssh-client-host.sh"
 
@@ -358,8 +422,12 @@ RMUX_TITLE_SSH_PID=""
 RMUX_TITLE_IN_FD=""
 RMUX_TITLE_OUT_FD=""
 
-# cleanup routine
-stop_vmm() {
+# Preserve the suite's original failure while making teardown failure turn an
+# otherwise successful run into a failure.
+cleanup_full_test() {
+  local status="$1"
+  local cleanup_status=0
+  trap - EXIT
   set +e
   if [ -n "$RMUX_TITLE_IN_FD" ]; then
     exec {RMUX_TITLE_IN_FD}>&-
@@ -373,24 +441,54 @@ stop_vmm() {
   fi
   cleanup_ssh_client_host
   stop_udp_fragment_echo
-  stop_vm "$VMM_PID"
-  VMM_PID=""
+  if [ -n "$VMM_PID" ]; then
+    stop_test_vm_owned "$VMM" "$TEST_VM_LABEL" || cleanup_status=1
+  fi
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
     wait "$DNS_RESOLVER_SSH_PID"
   fi
+  set -e
+  [ "$status" -ne 0 ] && return "$status"
+  return "$cleanup_status"
 }
 
-# set the trap to call cleanup on exit
-trap stop_vmm EXIT
+exit_full_test() {
+  local status=$?
+  local cleanup_status
+  if cleanup_full_test "$status"; then
+    cleanup_status=0
+  else
+    cleanup_status=$?
+  fi
+  exit "$cleanup_status"
+}
+trap exit_full_test EXIT
 
 echo "Starting Motor OS test."
 echo "Console output is streamed below and saved to /tmp/full-test.log."
+if [ "$TEST_VM_PHASE" = standard ]; then
+  for boot_vmm in qemu chv fc; do
+    [ "$boot_vmm" = "$VMM" ] ||
+      run_test_vm_boot_check "$ROOT_DIR" "$BUILD" "$boot_vmm"
+  done
+fi
+
+MAIN_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/full-test-runtime.XXXXXX")"
+export MOTO_CHV_RUNTIME_DIR="$MAIN_RUNTIME_DIR/chv"
+export MOTO_FC_RUNTIME_DIR="$MAIN_RUNTIME_DIR/fc"
+export MOTO_FC_VSOCK_UDS=''
+main_runner_args=()
+if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
+  # Keep the suite's existing QEMU-only argument splitting.
+  main_runner_args+=(${FULL_TEST_QEMU_ARGS})
+fi
 echo ""
 echo ""
 
 
-start_test_vm "$IMG_DIR" /tmp/full-test.log
+start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" /tmp/full-test.log \
+  "${main_runner_args[@]}"
 
 ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
 ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
@@ -576,8 +674,8 @@ systest_status=0
 set -o pipefail
 # The SSH shell is Interactive, whose unadorned children no longer receive
 # CAP_LOG. The complete suite exercises logging, so grant
-# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE explicitly.
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x4c $TEST_BIN/systest" 2>&1 |
+# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK explicitly.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xcc $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -589,12 +687,13 @@ systest_output="$(cat "$SYSTEST_LOG")"
   fail "systest did not finish with 'systest: ALL PASS'"
 
 # The SSH login shell consumes russhd's one-time capability environment.
-# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE
+# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
+# CAP_VSOCK
 # from that shell to the focused lifetime coordinator so it can create the
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x6c $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xec $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
@@ -1077,4 +1176,7 @@ vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/mio-test"
 
 vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 
+kill -0 "$VMM_PID" 2>/dev/null ||
+  fail "owned $TEST_VM_LABEL exited before final teardown"
+cleanup_full_test 0 || exit "$?"
 echo "-------- MOTOR OS FULL TEST PASS ---------"

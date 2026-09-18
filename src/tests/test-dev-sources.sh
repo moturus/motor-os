@@ -21,12 +21,46 @@ set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 BUILD=debug
-if [ "${1:-}" = "--release" ]; then
-  BUILD=release
-fi
-IMG_DIR="$ROOT_DIR/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-dev.qcow2
+VMM=qemu
+SEEN_RELEASE=0
+SEEN_VMM=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release)
+      [ "$SEEN_RELEASE" = 0 ] || { echo "test-dev-sources: duplicate --release" >&2; exit 2; }
+      BUILD=release
+      SEEN_RELEASE=1
+      shift
+      ;;
+    --vmm)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-dev-sources: duplicate --vmm" >&2; exit 2; }
+      [ "$#" -ge 2 ] || { echo "test-dev-sources: --vmm requires qemu or chv" >&2; exit 2; }
+      VMM="$2"
+      SEEN_VMM=1
+      shift 2
+      ;;
+    --vmm=*)
+      [ "$SEEN_VMM" = 0 ] || { echo "test-dev-sources: duplicate --vmm" >&2; exit 2; }
+      VMM="${1#--vmm=}"
+      SEEN_VMM=1
+      shift
+      ;;
+    *) echo "usage: $0 [--release] [--vmm qemu|chv]" >&2; exit 2 ;;
+  esac
+done
+case "$VMM" in
+  qemu|chv) ;;
+  fc) echo "test-dev-sources: Firecracker does not support developer images" >&2; exit 2 ;;
+  *) echo "test-dev-sources: unsupported VMM '$VMM'" >&2; exit 2 ;;
+esac
+. "$WD/vm-console-filter.sh"
+. "$WD/vm-test-boot.sh"
+. "$WD/vm-test-selection.sh"
+select_test_vm "$ROOT_DIR" "$BUILD" developer "$VMM"
+export MOTO_IMAGE="$TEST_VM_IMAGE"
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-4096}"
+VM_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-dev-sources-runtime.XXXXXX")"
+export MOTO_CHV_RUNTIME_DIR="$VM_RUNTIME_DIR/chv"
 NATIVE_FIXTURE_DIR=/devtools/tmp/native-tests
 NATIVE_FIXTURES=(native-fstat.c native-temp.c native-temp.cpp)
 LORRY_VENDOR_ENV="TMPDIR=/devtools/tmp"
@@ -36,9 +70,9 @@ fi
 
 if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != "1" ]; then
   if [ "$BUILD" = release ]; then
-    make -C "$ROOT_DIR" dev.img BUILD=release -j"$(nproc)"
+    make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" BUILD=release -j"$(nproc)"
   else
-    make -C "$ROOT_DIR" dev.img -j"$(nproc)"
+    make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" -j"$(nproc)"
   fi
 fi
 
@@ -107,7 +141,7 @@ expect_nested_guest_mode() {
   done <<< "$paths"
 }
 
-. "$WD/vm-cleanup.sh"
+. "$WD/vm-test-boot-check.sh"
 
 fail() {
   echo "test-dev-sources: $*" >&2
@@ -115,24 +149,29 @@ fail() {
 }
 
 CONSOLE_LOG=/tmp/test-dev-sources.log
+runner_args=()
+if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
+  # Keep the suite's existing QEMU-only argument splitting.
+  runner_args+=(${FULL_TEST_QEMU_ARGS})
+fi
 VMM_PID=""
 cleanup() {
+  local status=$?
   set +e
-  stop_vm "$VMM_PID"
-  VMM_PID=""
+  trap - EXIT
+  if [ -n "$VMM_PID" ]; then
+    stop_test_vm_owned "$VMM" "$TEST_VM_LABEL" || {
+      [ "$status" -ne 0 ] || status=1
+    }
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 
-echo "test-dev-sources: starting a $BUILD developer VM; console log in $CONSOLE_LOG"
-"$IMG_DIR/run-qemu.sh" > "$CONSOLE_LOG" 2>&1 &
-VMM_PID="$!"
-until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
-  if ! kill -0 "$VMM_PID" 2>/dev/null; then
-    fail "QEMU exited before SSH became ready (log: $CONSOLE_LOG)"
-  fi
-  sleep 1
-done
+echo "test-dev-sources: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE image=$MOTO_IMAGE"
+echo "test-dev-sources: console log in $CONSOLE_LOG; runtime in $VM_RUNTIME_DIR"
+start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
+  "${runner_args[@]}"
 
 echo "-- Developer source trees --"
 for package in red gears lorry; do
@@ -251,6 +290,8 @@ vm_ssh "cd /devtools/src/motor-os/bin/lorry && TMPDIR=/devtools/tmp /devtools/bi
 vm_ssh "/system/bin/cp /devtools/src/motor-os/bin/lorry/target/lorry/debug/lorry /devtools/tmp/native-lorry"
 vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/lorry/target"
 
-stop_vm "$VMM_PID"
-VMM_PID=""
+kill -0 "$VMM_PID" 2>/dev/null ||
+  fail "owned $TEST_VM_LABEL exited before final teardown"
+stop_test_vm_owned "$VMM" "$TEST_VM_LABEL" ||
+  fail "owned $TEST_VM_LABEL teardown failed"
 echo "-------- TEST-DEV-SOURCES PASS ---------"

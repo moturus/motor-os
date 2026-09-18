@@ -11,8 +11,38 @@ mod virtio_blk;
 mod virtio_device;
 pub mod virtio_net;
 mod virtio_queue;
+mod virtio_vsock;
+pub mod vsock {
+    pub use crate::virtio_vsock::{
+        DecodeError, DecodeErrorKind, Event, EventError, Operation, PacketHeader, RawHeader,
+        SHUTDOWN_RECEIVE, SHUTDOWN_SEND, SocketType, VsockDevice,
+    };
+}
 #[cfg(feature = "test-support")]
-pub use virtio_queue::tests::{test_descriptor_waiters, test_premature_completion_drop};
+pub use virtio_queue::tests::{
+    test_descriptor_waiters, test_header_layout_rejection, test_ordered_completion_rejection,
+    test_premature_completion_drop, test_premature_rx_pool_drop, test_used_id_rejection,
+};
+#[cfg(feature = "test-support")]
+pub mod virtio_test_support {
+    pub use crate::pci::{checked_virtio_notify_offset, valid_virtio_cap_access};
+    pub use crate::virtio_device::{
+        msix_region_lengths, supported_virtio_cap, valid_msix_cap_offset, valid_virtio_cap_bar,
+    };
+}
+#[cfg(feature = "test-support")]
+pub mod vsock_test_support {
+    use crate::virtio_device::VirtioDeviceKind;
+
+    pub use crate::virtio_vsock::{
+        DecodeErrorKind, EVENT_LEN, Event, EventError, HEADER_LEN, Operation, PacketHeader,
+        RawHeader, SocketType, decode_event, decode_packet, select_features, validate_guest_cid,
+    };
+
+    pub fn classify_device_id(device_id: u16) -> VirtioDeviceKind {
+        VirtioDeviceKind::from_device_id(device_id)
+    }
+}
 // mod virtio_rng;
 
 use moto_sys::SysHandle;

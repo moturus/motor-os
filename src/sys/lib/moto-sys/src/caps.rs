@@ -39,6 +39,11 @@ pub const CAP_SPAWN_DETACHED: u64 = 1 << 5;
 /// imply this bit.
 pub const CAP_INTERACTIVE: u64 = 1 << 6;
 
+/// The process may create and listen on native virtio-vsock streams. It is
+/// inherited by default when held; an explicit mask that omits it denies it,
+/// and [`CAP_SYS`] does not allow a parent to grant it without holding it.
+pub const CAP_VSOCK: u64 = 1 << 7;
+
 /// Filesystem-facing process privilege role.
 ///
 /// The discriminants match `async_fs::Role` and the process-stats encoding.
@@ -77,6 +82,9 @@ pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
         ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
         ProcessRole::None => {}
     }
+    if parent_caps & CAP_VSOCK != 0 {
+        child_caps |= CAP_VSOCK;
+    }
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
     }
@@ -114,11 +122,14 @@ mod tests {
     #[test]
     fn default_child_caps_keep_logging_grantor_controlled() {
         let system_default = CAP_SPAWN | CAP_LOG;
-        assert_eq!(system_default, default_child_capabilities(u64::MAX));
+        assert_eq!(
+            system_default | CAP_VSOCK,
+            default_child_capabilities(u64::MAX)
+        );
         assert_eq!(system_default, default_child_capabilities(CAP_SYS));
         assert_eq!(
-            CAP_SPAWN | CAP_INTERACTIVE,
-            default_child_capabilities(CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE)
+            CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK,
+            default_child_capabilities(CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK)
         );
         assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN | CAP_LOG));
         assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN));

@@ -10,9 +10,19 @@
 
 pub mod channel;
 pub(crate) mod inner_rx_stream;
+mod pending_stream_tx;
 pub mod readiness;
 pub mod tcp;
 pub mod udp;
+pub mod vsock;
 mod wait;
 
 pub use channel::{NetClient, NetDriver, Reservation, ReserveError, connect};
+
+/// Which half of a native byte stream to shut down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}

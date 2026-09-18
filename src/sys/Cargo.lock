@@ -1948,6 +1948,8 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "moto-async",
+ "moto-rt",
+ "virtio-async",
 ]
 
 [[package]]
