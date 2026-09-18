@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, diff, fetch, init, merge, network, recover, refs,
-    repository, restore, status, switch, unstage,
+    Result, add, cancellation, clone, commit, diff, fetch, init, merge, network, push, recover,
+    refs, repository, restore, status, switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -152,6 +152,27 @@ fn run() -> Result {
                         .value_name("REMOTE"),
                 ),
         )
+        .subcommand(
+            Command::new("push")
+                .about("Push one explicit branch or tag to an SSH remote")
+                .arg(
+                    Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("lease")
+                        .long("force-with-lease")
+                        .require_equals(true)
+                        .value_name("DESTINATION:OID"),
+                )
+                .arg(Arg::new("remote").required(true).value_name("REMOTE"))
+                .arg(
+                    Arg::new("refspec")
+                        .required(true)
+                        .value_name("SOURCE:DESTINATION"),
+                ),
+        )
         .subcommand(reference_command("branch", "Manage local branches"))
         .subcommand(reference_command("tag", "Manage lightweight tags"))
         .subcommand(Command::new("log").about("Show commit history"))
@@ -275,6 +296,23 @@ fn run() -> Result {
                 &policy,
                 &cancellation,
             )
+        }
+        Some("push") => {
+            let command = matches.subcommand_matches("push").expect("matched push");
+            // Push retains confirmed publication facts across late cancellation itself.
+            return push::run(
+                &opened.repo,
+                command
+                    .get_one::<String>("remote")
+                    .expect("required remote"),
+                command
+                    .get_one::<String>("refspec")
+                    .expect("required refspec"),
+                command.get_one::<String>("lease").map(String::as_str),
+                command.get_flag("dry-run"),
+                &cancellation,
+                io::stdout().lock(),
+            );
         }
         Some("log") => log::show(&opened.repo, &cancellation),
         Some("merge") => {
