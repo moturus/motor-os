@@ -1,10 +1,12 @@
 mod deadlines;
+pub mod disabled;
 mod keep_alive;
 use crate::common::Server;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub fn check() {
+    disabled::check();
     keep_alive::check();
     deadlines::check();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -13,6 +15,7 @@ pub fn check() {
         .unwrap();
     for tls in [false, true] {
         let options = [
+            "--http2",
             "--max-active-connections",
             "1",
             "--max-header-deadline-sec",

@@ -23,6 +23,7 @@ fn connect(server: &Server, tls: bool) -> Box<dyn Io> {
 pub fn check() {
     for tls in [false, true] {
         let args = [
+            "--http2",
             "--max-active-connections",
             "1",
             "--max-header-deadline-sec",

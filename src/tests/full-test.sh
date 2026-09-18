@@ -134,6 +134,13 @@ for crate in red rmux rush russhd; do
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
 
+# Static HTTP serving, including default protocol restrictions and TLS.
+if [ "$BUILD" = "release" ]; then
+  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --release
+else
+  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh"
+fi
+
 # sys-init's dependency-free config parser is host-tested separately from its
 # Motor-only process-management binary.
 if [ "$BUILD" = "release" ]; then

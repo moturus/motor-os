@@ -117,11 +117,16 @@ impl AsyncWrite for Admitted {
 pub struct HeaderDeadline<A> {
     inner: A,
     duration: Duration,
+    http2: bool,
 }
 
 impl<A> HeaderDeadline<A> {
-    pub fn new(inner: A, duration: Duration) -> Self {
-        Self { inner, duration }
+    pub fn new(inner: A, duration: Duration, http2: bool) -> Self {
+        Self {
+            inner,
+            duration,
+            http2,
+        }
     }
 }
 
@@ -139,6 +144,7 @@ where
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         let future = self.inner.accept(stream, service);
         let duration = self.duration;
+        let http2 = self.http2;
         Box::pin(async move {
             let (stream, inner) = future.await?;
             // Start after any TLS handshake. Only a parsed request head can
@@ -149,6 +155,7 @@ where
                     stream,
                     timer: Box::pin(tokio::time::sleep(duration)),
                     received: received.clone(),
+                    h2_prefix: if http2 { None } else { Some(0) },
                 },
                 FirstRequest { inner, received },
             ))
@@ -181,6 +188,7 @@ pub struct Deadline<T> {
     stream: T,
     timer: Pin<Box<tokio::time::Sleep>>,
     received: Arc<AtomicBool>,
+    h2_prefix: Option<usize>,
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for Deadline<T> {
@@ -195,7 +203,27 @@ impl<T: AsyncRead + Unpin> AsyncRead for Deadline<T> {
                 "first HTTP request head timed out",
             )));
         }
-        Pin::new(&mut self.stream).poll_read(cx, buf)
+        let start = buf.filled().len();
+        std::task::ready!(Pin::new(&mut self.stream).poll_read(cx, buf))?;
+        // axum-server uses Hyper's upgrade path, which ignores http1_only().
+        // Reject the complete HTTP/2 preface before Hyper can select HTTP/2,
+        // including when it spans reads or arrives over TLS without ALPN.
+        if let Some(matched) = self.h2_prefix {
+            const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+            let bytes = &buf.filled()[start..];
+            let count = bytes.len().min(PREFACE.len() - matched);
+            if bytes[..count] != PREFACE[matched..matched + count] {
+                self.h2_prefix = None;
+            } else if matched + count == PREFACE.len() {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HTTP/2 is disabled; enable it with --http2",
+                )));
+            } else {
+                self.h2_prefix = Some(matched + count);
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 }
 

@@ -70,6 +70,7 @@ pub fn check() {
         HTTPS,
     );
     assert!(server.next_log().contains("HTTP redirect on 127.0.0.1:80"));
+    crate::http2::disabled::reject(&mut connect_http());
     let mut plain = BufReader::new(connect_http());
     for method in ["GET", "HEAD", "POST", "OPTIONS"] {
         for path in ["/", "/index.html?ignored=yes", "//attacker.example/%2f?q=1"] {

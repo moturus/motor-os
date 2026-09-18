@@ -15,9 +15,9 @@ image while testing debug component binaries. Motor runs include real ports
 80/443, certificate-validated TLS, HTTP/2 and listener isolation. Failed runs
 retain their build artifact list and console log under the printed `/tmp` path.
 
-`src/tests/full-test-dev.sh` runs this driver on the host and in a snapshot of
-the developer image, using the suite's selected build profile. The core
-`src/tests/full-test.sh` does not run the component gate.
+`src/tests/full-test.sh` runs this driver on the host using the suite's selected
+build profile. `src/tests/full-test-dev.sh` inherits that run and also runs the
+driver in a snapshot of the developer image.
 The filesystem workload in `src/tests/stress-soak.sh` launches httpd-axum with
 `--cache=off` to preserve its per-GET filesystem coverage.
 
@@ -43,6 +43,13 @@ Use fresh guest filenames for each build: Motor's SFTP policy rejects overwritin
 an existing executable. Keep the server and its test executable from the same build.
 
 This standalone gate does not build an OS image or invoke the full-system suite.
+
+HTTP/2 is disabled by default on all listeners, including the port-80 redirect.
+Use `--http2` to enable it alongside HTTP/1.1 on both cleartext and TLS connections.
+Without the flag, TLS advertises only `http/1.1`, and incoming HTTP/2 connection
+prefaces are rejected even over TLS without ALPN. The HTTP test checks ALPN
+fallback, rejection of clients offering only `h2`, raw preface rejection, and
+admission recovery. Existing HTTP/2 tests explicitly pass `--http2`.
 
 `--max-active-connections` defaults to 128 per listener and counts HTTP connections, idle
 keep-alive connections, and TLS handshakes. Excess connections close immediately.

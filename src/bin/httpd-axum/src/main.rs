@@ -44,6 +44,10 @@ struct Args {
     #[arg(long, requires = "ssl_cert")]
     http_redirect_url: Option<redirect::RedirectUrl>,
 
+    /// Enable HTTP/2 alongside HTTP/1.1 on all listeners (disabled by default).
+    #[arg(long)]
+    http2: bool,
+
     /// Disable request logs on stdout (enabled by default).
     #[arg(long)]
     no_request_log: bool,
@@ -114,6 +118,11 @@ async fn main() -> std::io::Result<()> {
             PathBuf::from(args.ssl_key.as_ref().unwrap()),
         )
         .await?;
+        if !args.http2 {
+            let mut inner = (*config.get_inner()).clone();
+            inner.alpn_protocols = vec![b"http/1.1".to_vec()];
+            config.reload_from_config(std::sync::Arc::new(inner));
+        }
 
         let listener = std::net::TcpListener::bind(args.addr)?;
         // Bind both sockets before reporting readiness. A required redirect
@@ -134,6 +143,7 @@ async fn main() -> std::io::Result<()> {
                         "redirect",
                     ),
                     deadline,
+                    args.http2,
                 ),
             );
             configure_timeouts(&mut server, deadline);
@@ -147,7 +157,7 @@ async fn main() -> std::io::Result<()> {
         };
         tracing::info!("listening on {}", listener.local_addr()?);
         let mut server = axum_server::from_tcp_rustls(listener, config).map(|acceptor| {
-            connections::HeaderDeadline::new(acceptor.acceptor(admission), deadline)
+            connections::HeaderDeadline::new(acceptor.acceptor(admission), deadline, args.http2)
         });
         configure_timeouts(&mut server, deadline);
         if let Some((redirect_server, redirect_app, address)) = redirect_server {
@@ -162,8 +172,9 @@ async fn main() -> std::io::Result<()> {
     } else {
         let listener = std::net::TcpListener::bind(args.addr)?;
         tracing::info!("listening on {}", listener.local_addr()?);
-        let mut server = axum_server::from_tcp(listener)
-            .acceptor(connections::HeaderDeadline::new(admission, deadline));
+        let mut server = axum_server::from_tcp(listener).acceptor(
+            connections::HeaderDeadline::new(admission, deadline, args.http2),
+        );
         configure_timeouts(&mut server, deadline);
         server.serve(app.into_make_service()).await?;
     };

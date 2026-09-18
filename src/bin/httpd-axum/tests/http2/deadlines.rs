@@ -9,6 +9,7 @@ pub fn check() {
     let partial_head = [0, 0, 3, 1, 1, 0, 0, 0, 1, 0x82];
     for tls in [false, true] {
         let args = [
+            "--http2",
             "--max-active-connections",
             "1",
             "--max-header-deadline-sec",

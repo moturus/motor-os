@@ -9,9 +9,9 @@ fn run(args: &[&str]) -> Output {
 fn main() {
     let help = run(&["--help"]);
     assert!(help.status.success());
-    assert!(String::from_utf8(help.stdout)
-        .unwrap()
-        .contains("--no-request-log"));
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--no-request-log"));
+    assert!(help.contains("--http2"));
     check_redirect_options();
     for flag in [
         "--max-active-connections",

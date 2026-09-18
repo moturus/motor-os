@@ -28,7 +28,6 @@ MOTO_MEMORY_MIB="$REPOSITORY_MEMORY_MIB" \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "$@"
 
-"$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" "$@"
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
   "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --motor "$@"
 
