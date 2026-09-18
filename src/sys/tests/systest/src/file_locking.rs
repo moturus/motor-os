@@ -154,7 +154,8 @@ fn process_cleanup_test() {
     assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
     child.kill().unwrap();
     child.wait().unwrap();
-    file.lock().unwrap();
+    file.try_lock()
+        .expect("a waited-for child must not retain its lock");
     file.unlock().unwrap();
     let _ = std::fs::remove_file(&ready);
 }

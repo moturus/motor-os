@@ -609,6 +609,39 @@ async fn on_msg(
     }
 }
 
+fn connection_is_disconnected(connection: u64) -> Result<bool> {
+    match moto_sys::SysObj::is_connected(connection.into()) {
+        Ok(connected) => Ok(!connected),
+        Err(err) if err == moto_rt::E_BAD_HANDLE => Ok(true),
+        Err(err) => Err(std::io::Error::from_raw_os_error(i32::from(err))),
+    }
+}
+
+fn evict_disconnected_connections(
+    entry: EntryId,
+    mode: lock_manager::Mode,
+    runtime: &FsRuntime,
+) -> Result<()> {
+    loop {
+        let disconnected = runtime.locks.borrow().find_connection_if_contended(
+            entry,
+            mode,
+            connection_is_disconnected,
+        )?;
+        let Some(connection) = disconnected else {
+            return Ok(());
+        };
+        let grants = runtime.locks.borrow_mut().disconnect(connection);
+        if !grants.is_empty() {
+            // A try-lock request must not wait for another client to read its grant.
+            let runtime = runtime.clone();
+            moto_async::LocalRuntime::spawn(async move {
+                send_lock_grants(grants, &runtime).await;
+            });
+        }
+    }
+}
+
 async fn on_cmd_file_lock(
     msg: moto_ipc::io_channel::Msg,
     sender: &channel_budget::ClientSender,
@@ -643,6 +676,12 @@ async fn on_cmd_file_lock(
         moto_rt::fs::TRY_LOCK_EXCLUSIVE => (Mode::Exclusive, false),
         _ => return Err(ErrorKind::InvalidInput.into()),
     };
+    evict_disconnected_connections(entry_id, mode, &runtime)?;
+    // Do not yield between checking the peer and acquiring: a late request
+    // must not recreate locks after its connection cleanup has run.
+    if connection_is_disconnected(connection_id)? {
+        return Err(ErrorKind::NotConnected.into());
+    }
     let pending = PendingLockResponse {
         entry_id,
         connection_id,
@@ -659,10 +698,21 @@ async fn on_cmd_file_lock(
         pending,
     );
     match result {
-        Acquire::Granted => sender
-            .send(api_fs::empty_resp_encode(request_id, Ok(())))
-            .await
-            .map_err(map_native_error),
+        Acquire::Granted => {
+            let response = sender
+                .send(api_fs::empty_resp_encode(request_id, Ok(())))
+                .await;
+            if let Err(err) = response {
+                let grants = runtime
+                    .locks
+                    .borrow_mut()
+                    .release(entry_id, connection_id, open_id)
+                    .expect("an immediate grant cannot have a pending acquisition");
+                send_lock_grants(grants, &runtime).await;
+                return Err(map_native_error(err));
+            }
+            Ok(())
+        }
         Acquire::Queued => Ok(()),
         Acquire::WouldBlock => Err(ErrorKind::WouldBlock.into()),
         Acquire::AlreadyOwned(_) => Err(ErrorKind::InvalidInput.into()),

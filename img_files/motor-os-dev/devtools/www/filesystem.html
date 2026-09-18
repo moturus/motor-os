@@ -570,7 +570,10 @@ not parse.</p>
 <p>Advisory file locks (<code>std::fs::File::lock</code>, <code>lock_shared</code>,
 <code>try_lock</code>, <code>unlock</code>) are served by a lock manager in sys-io,
 keyed by connection, with at most 64 queued waiters per connection. A lock is released
-when the file is closed or when its owner's connection to sys-io goes away. Under memory pressure, releasing
+when the file is closed or when its owner's connection to sys-io goes away.
+After <code>wait()</code> or <code>try_wait()</code> reports process completion, its locks
+no longer block other clients: acquisition checks disconnected owners even if the
+connection cleanup task has not run yet. Under memory pressure, releasing
 a lock is the one filesystem request that is still served, so that waiters queued before
 an episode are not stranded.</p>
 <nav class="pager">

@@ -126,6 +126,39 @@ impl<T> LockManager<T> {
         })
     }
 
+    pub(super) fn find_connection_if_contended<E>(
+        &self,
+        entry: EntryId,
+        mode: Mode,
+        mut predicate: impl FnMut(ConnectionId) -> Result<bool, E>,
+    ) -> Result<Option<ConnectionId>, E> {
+        let Some(file) = self.files.get(&entry) else {
+            return Ok(None);
+        };
+        let contended = !file.waiters.is_empty()
+            || file.exclusive.is_some()
+            || (mode == Mode::Exclusive && !file.shared.is_empty());
+        if !contended {
+            return Ok(None);
+        }
+        if let Some((connection, _)) = file.exclusive
+            && predicate(connection)?
+        {
+            return Ok(Some(connection));
+        }
+        for &(connection, _) in &file.shared {
+            if predicate(connection)? {
+                return Ok(Some(connection));
+            }
+        }
+        for waiter in &file.waiters {
+            if predicate(waiter.connection)? {
+                return Ok(Some(waiter.connection));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn release(
         &mut self,
         entry: EntryId,
@@ -266,6 +299,10 @@ pub(crate) mod self_test {
             disconnect_releases_and_cancels,
         ),
         (
+            "fs::lock_manager::finds_stale_holder_and_waiter",
+            finds_stale_holder_and_waiter,
+        ),
+        (
             "fs::lock_manager::release_rejects_queued_owner",
             release_rejects_queued_owner,
         ),
@@ -315,6 +352,53 @@ pub(crate) mod self_test {
         );
         st_assert!(m.disconnect(2).is_empty());
         st_assert_eq!(m.disconnect(1), vec![3]);
+        st_assert!(m.owns(1, 3, 3));
+        Ok(())
+    }
+
+    fn finds_stale_holder_and_waiter() -> Result<(), String> {
+        let mut m = LockManager::default();
+        st_assert_eq!(
+            m.acquire(1, 1, 1, Mode::Exclusive, true, 1),
+            Acquire::Granted
+        );
+        st_assert_eq!(
+            m.acquire(1, 2, 2, Mode::Exclusive, true, 2),
+            Acquire::Queued
+        );
+        st_assert_eq!(m.acquire(1, 3, 3, Mode::Shared, true, 3), Acquire::Queued);
+
+        st_assert_eq!(
+            m.find_connection_if_contended(1, Mode::Exclusive, |connection| {
+                Ok::<_, String>(connection == 2)
+            }),
+            Ok(Some(2))
+        );
+        st_assert!(m.disconnect(2).is_empty());
+        st_assert_eq!(
+            m.find_connection_if_contended(1, Mode::Exclusive, |connection| {
+                Ok::<_, String>(connection == 1)
+            }),
+            Ok(Some(1))
+        );
+        st_assert_eq!(m.disconnect(1), vec![3]);
+        st_assert!(m.owns(1, 3, 3));
+
+        let mut predicate_calls = 0;
+        st_assert_eq!(
+            m.find_connection_if_contended(1, Mode::Shared, |_| {
+                predicate_calls += 1;
+                Ok::<_, String>(false)
+            }),
+            Ok(None)
+        );
+        st_assert_eq!(predicate_calls, 0);
+        st_assert_eq!(
+            m.find_connection_if_contended(1, Mode::Exclusive, |_| {
+                Err::<bool, _>("liveness query failed".to_owned())
+            }),
+            Err("liveness query failed".to_owned())
+        );
         st_assert!(m.owns(1, 3, 3));
         Ok(())
     }

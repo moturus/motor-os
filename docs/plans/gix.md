@@ -1582,6 +1582,27 @@ The HTML command table links to the detailed description instead of repeating it
 Host/Motor component gates, strict Clippy, formatting and shell checks pass;
 tested sources match. Evidence is in `/tmp/motor-gix-merge-cli-9d14551e`.
 
+M2 abrupt-death recovery validation: the final lifecycle passed on the host
+but once failed on Motor because the persistent operation lock was still held.
+Two targeted diagnostic guest runs passed; this does not establish the original
+failure's exact interleaving. Source review identified a process-completion race:
+the kernel published exit before closing existing IPC endpoints, while sys-io
+released locks only when its asynchronous receiver processed disconnection.
+The approved fix moves existing endpoint closure before final process status,
+removes confirmed-disconnected lock owners before deciding contention, rejects
+late lock requests from disconnected clients, and releases failed immediate
+grants. Grant delivery runs separately so a try-lock request cannot wait for an
+unrelated client. The existing killed-child test now requires immediate
+`try_lock()` success; one lock-manager self-test covers stale owners/waiters,
+FIFO preservation and liveness-query errors. Three debug and three release
+main-image gates and `full-test-dev.sh --release` passed, including the gix
+host and guest fixtures. The fix was reviewed and approved as a separate OS
+patch. Comparison with the other PC's kernel work should also examine
+the separate existing `add_object`/`create_ipc_pair` admission gap; this patch
+only changes the ordering of cleanup for already-owned handles. Diagnosis and
+validation evidence are retained under `/tmp/motor-fs-lock-exit-fix` and
+`/tmp/motor-gix-merge-death-diagnosis`.
+
 ## 8. Discussion record
 
 All seven questions were discussed and resolved on 2026-09-14, including
