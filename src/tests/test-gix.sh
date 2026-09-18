@@ -824,6 +824,128 @@ printf 'get "%s" "%s"\n' \
   fail "cancelled native clone marker was not empty"
 stop_https_server
 
+BUILD=release
+prepare_ssh_client_host "$WD/test.key"
+ssh_bin="$SSH_CLIENT_HOST_ROOT/gix-bin"
+ssh_remote="$SSH_CLIENT_HOST_ROOT/repo name's.git"
+mkdir -p "$ssh_bin"
+clean_git clone -q --bare --no-hardlinks "$fixture" "$ssh_remote"
+ssh_initial_head="$(clean_git --git-dir="$ssh_remote" rev-parse refs/heads/main)"
+cat > "$ssh_bin/git-upload-pack" <<'SH'
+#!/bin/sh
+root=${0%/gix-bin/git-upload-pack}
+case "${1:-}" in
+"$root/repo name's.git")
+  printf 'GIX_SSH_SUCCESS_STDERR\n' >&2
+  exec /usr/bin/git-upload-pack "$@"
+  ;;
+"$root/stderr.git")
+  trap ': > "$root/stderr.closed"' EXIT
+  printf '%s\n' "$$" > "$root/stderr.pid"
+  : > "$root/stderr.ready"
+  /usr/bin/head -c 65537 /dev/zero | /usr/bin/tr '\000' E >&2
+  while IFS= read -r line; do :; done
+  ;;
+"$root/stall.git")
+  trap ': > "$root/stall.closed"' EXIT
+  printf '%s\n' "$$" > "$root/stall.pid"
+  : > "$root/stall.ready"
+  while IFS= read -r line; do :; done
+  ;;
+*)
+  printf 'unexpected upload-pack path: %s\n' "${1:-}" >&2
+  exit 97
+  ;;
+esac
+SH
+chmod 755 "$ssh_bin/git-upload-pack"
+start_ssh_client_host "$WD/test.key" 0 "$ssh_bin:/bin:/usr/bin"
+ssh_base="ssh://motor@192.168.4.1:$SSH_CLIENT_HOST_PORT$SSH_CLIENT_HOST_ROOT"
+ssh_repo_url="$ssh_base/repo%20name%27s.git"
+
+ssh_rejected="$guest_root/ssh-unknown-host"
+set +e
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix clone $ssh_repo_url $ssh_rejected" \
+  > "$temporary/ssh-unknown.stdout" 2> "$temporary/ssh-unknown.stderr"
+ssh_status=$?
+set -e
+[ "$ssh_status" -eq 1 ] || fail "unknown-host SSH clone exited $ssh_status, want 1"
+grep -F 'Unknown server key' "$temporary/ssh-unknown.stderr" >/dev/null ||
+  fail "unknown-host SSH clone lacked the host-key diagnostic: $(cat "$temporary/ssh-unknown.stderr")"
+vm_ssh "[ ! -e $SSH_CLIENT_HOST_GUEST_KNOWN ]" || fail "strict SSH clone recorded an unknown host"
+printf 'get "%s" "%s"\n' \
+  "$ssh_rejected/.git/gix-incomplete-clone" "$temporary/ssh-unknown-marker" |
+  "${sftp_command[@]}"
+[ ! -s "$temporary/ssh-unknown-marker" ] || fail "unknown-host clone marker was not empty"
+
+trust_ssh_client_host "$SSH_CLIENT_HOST_PORT"
+ssh_clone="$guest_root/ssh-clone"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix clone $ssh_repo_url $ssh_clone" \
+  > "$temporary/ssh-clone.stdout" 2> "$temporary/ssh-clone.stderr" ||
+  fail "native SSH clone failed: $(cat "$temporary/ssh-clone.stderr")"
+[ "$(grep -Fxc GIX_SSH_SUCCESS_STDERR "$temporary/ssh-clone.stderr")" -eq 1 ] ||
+  fail "successful SSH clone did not forward stderr exactly once"
+printf 'get -r "%s" "%s"\n' "$ssh_clone" "$temporary/ssh-clone-before" |
+  "${sftp_command[@]}"
+advance_remote "$ssh_remote" "$temporary/ssh-update" "SSH remote update"
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $ssh_clone fetch" \
+  > "$temporary/ssh-fetch.stdout" 2> "$temporary/ssh-fetch.stderr" ||
+  fail "native SSH fetch failed: $(cat "$temporary/ssh-fetch.stderr")"
+[ "$(grep -Fxc GIX_SSH_SUCCESS_STDERR "$temporary/ssh-fetch.stderr")" -eq 1 ] ||
+  fail "successful SSH fetch did not forward stderr exactly once"
+printf 'get -r "%s" "%s"\n' "$ssh_clone" "$temporary/ssh-clone-after" |
+  "${sftp_command[@]}"
+verify_network_clone "$temporary/ssh-clone-before" "$temporary/ssh-clone-after" \
+  "$ssh_remote" "$ssh_initial_head" SSH
+
+set +e
+vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix clone $ssh_base/stderr.git $guest_root/ssh-stderr-clone" \
+  > "$temporary/ssh-stderr.stdout" 2> "$temporary/ssh-stderr.stderr"
+ssh_status=$?
+set -e
+[ "$ssh_status" -eq 1 ] || fail "oversized-stderr SSH clone exited $ssh_status, want 1"
+grep -F 'SSH stderr exceeded the 65536-byte limit' "$temporary/ssh-stderr.stderr" >/dev/null ||
+  fail "oversized-stderr SSH clone lacked the limit diagnostic: $(cat "$temporary/ssh-stderr.stderr")"
+wait_ssh_fixture_file "$SSH_CLIENT_HOST_ROOT/stderr.ready" stderr-ready
+wait_ssh_fixture_closed stderr
+printf 'get "%s" "%s"\n' \
+  "$guest_root/ssh-stderr-clone/.git/gix-incomplete-clone" "$temporary/ssh-stderr-marker" |
+  "${sftp_command[@]}"
+[ ! -s "$temporary/ssh-stderr-marker" ] || fail "oversized-stderr clone marker was not empty"
+
+coproc GIX_PTY {
+  ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \
+    "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix clone $ssh_base/stall.git $guest_root/ssh-stalled-clone" 2>&1
+}
+gix_pty_pid="$GIX_PTY_PID"
+exec {gix_pty_out}<&"${GIX_PTY[0]}"
+exec {gix_pty_in}>&"${GIX_PTY[1]}"
+wait_ssh_fixture_file "$SSH_CLIENT_HOST_ROOT/stall.ready" stall-ready
+printf '\003' >&"$gix_pty_in"
+exec {gix_pty_in}>&-
+gix_pty_in=
+set +e
+gix_pty_output="$(cat <&"$gix_pty_out")"
+gix_pty_read_status=$?
+wait "$gix_pty_pid"
+gix_pty_status=$?
+gix_pty_pid=
+set -e
+exec {gix_pty_out}<&-
+gix_pty_out=
+[ "$gix_pty_read_status" -eq 0 ] || fail "cancelled SSH clone PTY output failed"
+[ "$gix_pty_status" -eq 130 ] ||
+  fail "cancelled SSH clone exited $gix_pty_status, want 130: $gix_pty_output"
+wait_ssh_fixture_closed stall
+printf 'get "%s" "%s"\n' \
+  "$guest_root/ssh-stalled-clone/.git/gix-incomplete-clone" "$temporary/ssh-stall-marker" |
+  "${sftp_command[@]}"
+[ ! -s "$temporary/ssh-stall-marker" ] || fail "cancelled SSH clone marker was not empty"
+kill -0 "$SSH_CLIENT_HOST_PROCESS" 2>/dev/null || fail "host russhd exited during SSH lifecycle tests"
+stop_ssh_client_host
+remove_ssh_client_host_identity || fail "failed to remove the gix SSH identity fixture"
+cleanup_ssh_client_host
+
 prepare_policy_fixture
 vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
 {

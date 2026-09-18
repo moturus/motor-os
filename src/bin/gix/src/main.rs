@@ -124,7 +124,7 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("clone")
-                .about("Clone an anonymous HTTPS repository into a new directory")
+                .about("Clone an HTTPS or SSH repository into a new directory")
                 .arg(Arg::new("url").required(true).value_name("URL"))
                 .arg(
                     Arg::new("directory")

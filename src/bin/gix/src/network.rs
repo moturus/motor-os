@@ -5,7 +5,7 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
-use crate::{cancellation::Cancellation, http::Adapter, https_url::HttpsUrl};
+use crate::{cancellation::Cancellation, http::Adapter, https_url::HttpsUrl, ssh};
 
 const MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -53,8 +53,14 @@ impl Policy {
         &self,
         url: gix::url::Url,
         staging: &Path,
-    ) -> crate::Result<gix_transport::client::blocking_io::http::Transport<Adapter>> {
+        registrar: &ssh::Registrar,
+    ) -> crate::Result<Box<dyn gix_transport::client::blocking_io::Transport + Send>> {
         self.cancellation.check()?;
+        if url.scheme == gix::url::Scheme::Ssh {
+            return Ok(Box::new(
+                ssh::Prepared::new(url)?.transport(registrar.clone()),
+            ));
+        }
         validate_url(&url)?;
         let adapter = Adapter::new(
             &self.ca_bundle,
@@ -62,20 +68,50 @@ impl Policy {
             MAX_RESPONSE_BYTES,
             self.cancellation.clone(),
         )?;
-        Ok(
+        Ok(Box::new(
             gix_transport::client::blocking_io::http::Transport::new_http(
                 adapter,
                 url,
                 gix_transport::Protocol::V2,
                 false,
             ),
-        )
+        ))
     }
 }
 
 pub fn validate_url(url: &gix::url::Url) -> crate::Result {
-    HttpsUrl::parse(url.to_bstring().to_str()?)?;
-    Ok(())
+    match &url.scheme {
+        gix::url::Scheme::Ssh => ssh::Prepared::new(url.clone()).map(|_| ()),
+        _ => {
+            HttpsUrl::parse(url.to_bstring().to_str()?)?;
+            Ok(())
+        }
+    }
+}
+
+/// Reap SSH sessions before classifying the acquisition result or cancellation.
+pub fn finish<T>(
+    operation: ssh::Operation,
+    transfer: crate::Result<T>,
+    cancellation: &Cancellation,
+) -> crate::Result<T> {
+    let disposition = if transfer.is_ok() {
+        ssh::Finish::Complete
+    } else {
+        ssh::Finish::Abort
+    };
+    complete(transfer, operation.finish(disposition))
+        .map_err(|error| cancellation.normalize_error(error))
+}
+
+fn complete<T>(transfer: crate::Result<T>, completion: crate::Result) -> crate::Result<T> {
+    match (transfer, completion) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(protocol), Err(completion)) => {
+            Err(Failure::with_secondary("SSH completion also failed", protocol, completion).into())
+        }
+    }
 }
 
 pub fn check_outcome(outcome: &gix::remote::fetch::Outcome) -> crate::Result {
@@ -154,7 +190,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_explicit_ca_override_and_anonymous_https() -> crate::Result {
+    fn completion_preserves_both_failures_and_cancellation_classification() {
+        let protocol = || Err::<(), _>(io::Error::other("protocol failed").into());
+        let completion = || Err(io::Error::other("child failed").into());
+        assert_eq!(complete(Ok(7), Ok(())).unwrap(), 7);
+        assert_eq!(
+            complete(protocol(), Ok(())).unwrap_err().to_string(),
+            "protocol failed"
+        );
+        assert_eq!(
+            complete(Ok(()), completion()).unwrap_err().to_string(),
+            "child failed"
+        );
+        let secondary = Failure::new(
+            "child cleanup failed".into(),
+            io::Error::other("pipe failed").into(),
+        );
+        let nested = complete(protocol(), Err(secondary.into())).unwrap_err();
+        assert!(
+            nested
+                .to_string()
+                .contains("child cleanup failed: pipe failed")
+        );
+        let combined = complete(protocol(), completion()).unwrap_err();
+        assert!(combined.to_string().contains("child failed"));
+        assert_eq!(combined.source().unwrap().to_string(), "protocol failed");
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let combined = cancellation.normalize_error(combined);
+        assert!(crate::cancellation::was_cancelled(combined.as_ref()));
+        assert_eq!(
+            combined.source().unwrap().source().unwrap().to_string(),
+            "protocol failed"
+        );
+    }
+
+    #[test]
+    fn only_explicit_ca_override_and_supported_acquisition_urls() -> crate::Result {
         let cancellation = Cancellation::new();
         let policy = Policy::new(
             &[
@@ -174,7 +246,9 @@ mod tests {
         ] {
             assert!(validate_url(&gix::url::parse(value.as_bytes().as_bstr())?).is_err());
         }
-        validate_url(&gix::url::parse(b"https://example.test/repo".as_bstr())?)?;
+        for value in ["https://example.test/repo", "ssh://motor@example.test/repo"] {
+            validate_url(&gix::url::parse(value.as_bytes().as_bstr())?)?;
+        }
         Ok(())
     }
 }

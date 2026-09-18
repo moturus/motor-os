@@ -1,11 +1,13 @@
 use std::{fs, path::Path};
 
+use gix::bstr::ByteSlice;
+
 use crate::{
     cancellation::Cancellation,
     checkout,
     https_url::HttpsUrl,
     mutation::{Guard, INCOMPLETE_CLONE_FILE},
-    network, repository,
+    network, repository, ssh,
 };
 
 pub fn run(
@@ -16,7 +18,11 @@ pub fn run(
     cancellation: &Cancellation,
 ) -> crate::Result {
     cancellation.check()?;
-    HttpsUrl::parse(url)?;
+    let parsed = gix::url::parse(url.as_bytes().as_bstr())?;
+    if parsed.scheme == gix::url::Scheme::Https {
+        HttpsUrl::parse(url)?;
+    }
+    network::validate_url(&parsed)?;
     let policy = network::Policy::new(overrides, cancellation)?;
     let options = repository::open_options(overrides)?;
     // This is the ownership boundary. Never adopt or remove a preexisting directory.
@@ -48,6 +54,7 @@ fn clone_created(
 ) -> crate::Result {
     let destination = destination.canonicalize()?;
     let staging = destination.join(".git");
+    let (operation, registrar) = ssh::Operation::new(cancellation);
     let mut prepare = gix::clone::PrepareFetch::new(
         url,
         &destination,
@@ -69,7 +76,7 @@ fn clone_created(
         )?;
         Ok(remote)
     })
-    .with_transport_factory(move |url, _| Ok(Box::new(policy.transport(url, &staging)?)));
+    .with_transport_factory(move |url, _| policy.transport(url, &staging, &registrar));
 
     // PrepareFetch normally deletes unsuccessful clones on drop. Preserve every
     // owned partial clone explicitly; it must remain inspectable after an error.
@@ -80,9 +87,10 @@ fn clone_created(
         let marker = repo.git_dir().join(INCOMPLETE_CLONE_FILE);
         fs::File::create_new(&marker)?;
         cancellation.check()?;
-        let fetched = prepare.fetch_only(gix::progress::Discard, cancellation.flag());
-        let (mut repo, outcome) =
-            fetched.map_err(|error| cancellation.normalize_error(error.into()))?;
+        let fetched = prepare
+            .fetch_only(gix::progress::Discard, cancellation.flag())
+            .map_err(Into::into);
+        let (mut repo, outcome) = network::finish(operation, fetched, cancellation)?;
         network::check_outcome(&outcome)?;
         cancellation.check()?;
         repo.objects.ignore_replacements = true;

@@ -63,6 +63,7 @@ commits:
 ```sh
 gix init scratch
 gix clone https://example.test/project.git project
+gix clone ssh://git@example.test/project.git ssh-project
 gix -r project status
 gix -r project diff
 gix -r project diff --staged src/main.rs
@@ -163,6 +164,14 @@ can be selected explicitly with
 `gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR`; repository configuration
 cannot disable certificate verification or replace the trust roots.
 
+SSH clone/fetch uses the existing default key
+`/user/cfg/ssh/id_ed25519` and `/user/cfg/ssh/known_hosts`. Set them up with the
+SSH tools first: gix uses batch mode, requires an already trusted host and never
+prompts. SSH URLs and scp-style `user@host:path` addresses are supported. Each
+session allows 8 MiB of discovery data, 128 MiB of total response data and
+64 KiB of stderr, with a 30-second connection timeout and a 300-second session
+limit. Cancellation terminates and reaps the SSH child.
+
 Clone creates `DIR` exclusively and never adopts an existing directory.
 A failed clone retains its owned directory for inspection; the
 `.git/gix-incomplete-clone` marker identifies unfinished fetch or checkout.
@@ -170,6 +179,6 @@ Remove that owned directory explicitly before cloning again. Repository paths
 must be UTF-8 and valid Motor file names; the current path policy also rejects
 Windows-reserved names and characters. Because Motor OS has no symbolic links,
 link entries are checked out as regular files containing their target text. This command set does
-not yet include push or SSH remotes.
+not yet include push or authenticated HTTPS.
 
 For more details, see [https://motor-os.org](https://motor-os.org).

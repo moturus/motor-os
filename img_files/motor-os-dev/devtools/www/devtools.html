@@ -496,10 +496,11 @@ how procedural macros and build scripts run on Motor OS, is on the
 
 <h2 id="gix">Git with gix</h2>
 <p><code>gix</code> initializes or clones ordinary SHA-1 worktrees, fetches from
-anonymous smart-HTTPS remotes, stages and commits local changes, switches branches,
+anonymous smart-HTTPS or SSH remotes, stages and commits local changes, switches branches,
 merges commits, and shows status, diffs and history.</p>
 <pre><code>gix init scratch
 gix clone https://example.test/project.git project
+gix clone ssh://git@example.test/project.git ssh-project
 gix -r project status
 gix -r project diff
 gix -r project diff --staged src/main.rs
@@ -589,12 +590,19 @@ current branch, index or worktree. HTTPS uses the system CA bundle. Select a tes
 CA explicitly with
 <code>gix -c http.sslCAInfo=/path/to/ca.pem clone URL DIR</code>; repository configuration
 cannot disable verification or replace the trust roots.</p>
+<p>SSH clone/fetch uses the existing default key
+<code>/user/cfg/ssh/id_ed25519</code> and <code>/user/cfg/ssh/known_hosts</code>.
+Set them up with the SSH tools first: gix uses batch mode, requires an already
+trusted host and never prompts. SSH URLs and scp-style <code>user@host:path</code>
+addresses are supported. Each session allows 8 MiB of discovery data, 128 MiB of
+total response data and 64 KiB of stderr, with a 30-second connection timeout and
+a 300-second session limit. Cancellation terminates and reaps the SSH child.</p>
 <p>Clone creates <code>DIR</code> exclusively. A failed clone retains its owned directory
 for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
 valid Motor file names; the current path policy also rejects Windows-reserved names and
 characters. Link entries become regular files containing their target text because Motor OS
-has no symbolic links. Push, SSH remotes, and authenticated HTTPS are not part of
+has no symbolic links. Push and authenticated HTTPS are not part of
 this initial command set.</p>
 
 <h2>Gears</h2>
