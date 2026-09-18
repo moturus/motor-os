@@ -237,6 +237,7 @@ gix: assembly-selected
 	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
+		cargo fetch --locked && \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_BUILD) --locked --offline
 	bash -c '. "$$1/src/toolchain-lib.sh"; . "$$1/src/toolchain-native.sh"; \
@@ -366,6 +367,7 @@ clippy: vdso
 	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
+		cargo fetch --locked && \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_CLIPPY) --locked --offline
 	cd src/bin/lorry && $(DO_CLIPPY)

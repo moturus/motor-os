@@ -88,6 +88,9 @@ toolchain script, moto-rt, moto-sys, or the shim therefore selects a new
 assembly while the host toolchain stays the same. The assembly root and each
 image overlay carry `MOTOR-ASSEMBLY-MANIFEST`; the developer image exposes it
 as `/devtools/toolchain/manifest`.
+The manifest's `motor_os_rev` and `assembly_state` record the producer's Git
+revision and source state. Committing unchanged inputs preserves the assembly
+key and reuses the assembly with its original provenance.
 
 ## 3. How everyday commands select the toolchain
 

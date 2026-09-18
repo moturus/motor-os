@@ -390,7 +390,10 @@ if [ "$mode" = --host ]; then
   metadata="$temporary/metadata.json"
   "$cargo" metadata --manifest-path "$APP_DIR/Cargo.toml" --locked --offline \
     --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$metadata"
-  fork_info="$(python3 - "$metadata" <<'PY'
+  lorry_metadata="$temporary/lorry-metadata.json"
+  "$cargo" metadata --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline \
+    --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$lorry_metadata"
+  fork_info="$(python3 - "$metadata" "$lorry_metadata" <<'PY'
 import json
 import pathlib
 import sys
@@ -400,17 +403,34 @@ root = next(package for package in data["packages"] if package["id"] == data["re
 direct = [dependency for dependency in root["dependencies"] if dependency["name"] == "gix"]
 if len(direct) != 1:
     raise SystemExit("direct gix dependency was not found exactly once")
-prefix = "git+https://github.com/moturus/gitoxide.git?rev="
+prefix = "git+https://github.com/moturus/gitoxide.git?"
 source = direct[0].get("source", "")
-revision = source.removeprefix(prefix)
-if not source.startswith(prefix) or len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision):
-    raise SystemExit("direct gix dependency is not pinned to the Motor fork")
+if source != prefix + "branch=gix-moturus-cli":
+    raise SystemExit("direct gix dependency does not use the shared Motor fork branch")
 packages = [
     package for package in data["packages"]
-    if package["name"] == "gix" and package.get("source") == source + "#" + revision
+    if package["name"] == "gix" and package.get("source", "").startswith(source + "#")
 ]
 if len(packages) != 1:
-    raise SystemExit("resolved gix revision does not match the direct pin")
+    raise SystemExit("resolved gix dependency was not found exactly once")
+revision = packages[0]["source"].removeprefix(source + "#")
+if len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision):
+    raise SystemExit("resolved gix dependency has no full commit ID")
+
+# Both applications must select one branch and resolve all fork crates at one commit.
+for metadata_path in sys.argv[1:]:
+    graph = json.loads(pathlib.Path(metadata_path).read_text())
+    application = next(package for package in graph["packages"] if package["id"] == graph["resolve"]["root"])
+    direct_sources = {
+        dependency["source"] for dependency in application["dependencies"]
+        if (dependency.get("source") or "").startswith(prefix)
+    }
+    resolved_sources = {
+        package["source"] for package in graph["packages"]
+        if (package.get("source") or "").startswith(prefix)
+    }
+    if direct_sources != {source} or resolved_sources != {source + "#" + revision}:
+        raise SystemExit(f"{application['name']} does not use the shared gitoxide branch and commit")
 print(revision)
 print(pathlib.Path(packages[0]["manifest_path"]).parent.parent / "Cargo.toml")
 PY

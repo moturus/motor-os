@@ -207,6 +207,7 @@ toolchain_validate_assembly_outputs() {
 
 toolchain_render_assembly_manifest() {
 	local producer_motor_os_rev="${1:-$MOTOR_OS_REV}"
+	local producer_assembly_state="${2:-$MOTOR_ASSEMBLY_STATE}"
 	cat <<EOF
 schema=$MOTOR_GENERATED_MANIFEST_SCHEMA
 toolchain_key=$MOTOR_TOOLCHAIN_KEY
@@ -215,7 +216,7 @@ toolchain_id=$MOTOR_TOOLCHAIN_ID
 toolchain_maturity=$MOTOR_TOOLCHAIN_MATURITY
 rustup_toolchain=$MOTOR_RUSTUP_TOOLCHAIN
 source_mode=$MOTOR_SOURCE_MODE
-assembly_state=$MOTOR_ASSEMBLY_STATE
+assembly_state=$producer_assembly_state
 compiler_channel=$MOTOR_RUST_CHANNEL
 build_host=$MOTOR_BUILD_HOST
 build_targets=$MOTOR_BUILD_TARGETS
@@ -405,7 +406,7 @@ toolchain_validate_consumed_assembly() (
 
 toolchain_validate_assembly_manifest() {
 	local manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" expected image_manifest
-	local producer_motor_os_rev
+	local producer_motor_os_rev producer_assembly_state
 	toolchain_validate_assembly_outputs || return
 	[ -f "$manifest" ] || toolchain_die "assembly manifest is missing: $manifest" || return
 	[ "$(stat -c %a "$manifest")" = 444 ] ||
@@ -415,10 +416,20 @@ toolchain_validate_assembly_manifest() {
 		toolchain_die "assembly manifest has an invalid producer Motor OS revision: $manifest"
 		return 1
 	fi
+	producer_assembly_state="$(toolchain_manifest_value "$manifest" assembly_state)" || {
+		toolchain_die "assembly manifest lacks one unique assembly_state field: $manifest"
+		return 1
+	}
+	case "$producer_assembly_state" in
+		clean|development-authoring|development-dirty) ;;
+		*) toolchain_die "assembly manifest has an invalid producer assembly state: $manifest"
+			return 1 ;;
+	esac
 	expected="$(mktemp)"
-	# The root revision is provenance, not an assembly-key input. Preserve the
-	# producer revision when an unchanged runtime closure reuses this assembly.
-	toolchain_render_assembly_manifest "$producer_motor_os_rev" > "$expected"
+	# Revision and dirty state record the producer's provenance. Committing the
+	# same runtime inputs changes neither the assembly key nor its contents.
+	toolchain_render_assembly_manifest "$producer_motor_os_rev" \
+		"$producer_assembly_state" > "$expected"
 	if ! cmp -s "$expected" "$manifest"; then
 		rm -f "$expected"
 		toolchain_die "assembly manifest does not match the selected inputs: $manifest"

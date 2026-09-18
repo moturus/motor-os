@@ -44,4 +44,43 @@ status="$(run_make -n assembly-selected mbr.bin "ASSEMBLY_SELECTOR=$selector")"
 grep -q -- "$selector\" --resolve" "$temporary/out" || fail 'dry run hides the first goal'
 grep -q 'x64.mbr' "$temporary/out" || fail 'dry run hides the second goal'
 [ ! -e "$MOTOR_MAKE_LOG" ] || fail 'dry run wrote a log'
+
+# A fresh gix cache must be populated before the offline build starts. Stub
+# Cargo so this also checks fetch failures without accessing the network.
+mkdir -p "$temporary/bin" "$temporary/assembly/images" "$temporary/assembly/sysroot"
+export MOTOR_TEST_ASSEMBLY="$temporary/assembly/images"
+export MOTOR_TEST_CARGO_LOG="$temporary/cargo.log"
+export MOTOR_TEST_FETCH_STATUS=0
+cat > "$selector" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$MOTOR_TEST_ASSEMBLY"
+EOF
+cat > "$temporary/bin/cargo" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOTOR_TEST_CARGO_LOG"
+case "$1" in
+  fetch) exit "$MOTOR_TEST_FETCH_STATUS" ;;
+  build) exit 42 ;; # Stop before ELF validation and installation.
+  *) exit 99 ;;
+esac
+EOF
+chmod +x "$temporary/bin/cargo"
+status="$(PATH="$temporary/bin:$PATH" run_make gix "ASSEMBLY_SELECTOR=$selector" \
+  "BIN_DIR=$temporary/output" "OBJ_DIR=$temporary/objects")"
+[ "$status" -ne 0 ] || fail 'stub build unexpectedly succeeded'
+printf '%s\n' 'fetch --locked' \
+  'build --target x86_64-unknown-motor --locked --offline' > "$temporary/expected-cargo.log"
+cmp -s "$temporary/expected-cargo.log" "$MOTOR_TEST_CARGO_LOG" ||
+  fail 'gix did not fetch locked sources before its offline build'
+grep -q 'gix\] Error 42' "$temporary/err" || fail 'gix did not reach the build'
+
+: > "$MOTOR_TEST_CARGO_LOG"
+export MOTOR_TEST_FETCH_STATUS=43
+status="$(PATH="$temporary/bin:$PATH" run_make gix "ASSEMBLY_SELECTOR=$selector" \
+  "BIN_DIR=$temporary/output" "OBJ_DIR=$temporary/objects")"
+[ "$status" -ne 0 ] || fail 'failed gix fetch left make successful'
+printf '%s\n' 'fetch --locked' > "$temporary/expected-cargo.log"
+cmp -s "$temporary/expected-cargo.log" "$MOTOR_TEST_CARGO_LOG" ||
+  fail 'gix started building after a failed fetch'
+grep -q 'gix\] Error 43' "$temporary/err" || fail 'gix did not report the fetch failure'
 echo 'test-make-driver PASS'

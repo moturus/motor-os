@@ -166,6 +166,35 @@ MOTOR_OS_REV=0123456789abcdef0123456789abcdef01234567
 toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] ||
 	fail "unkeyed Motor OS revision prevented assembly reuse"
+
+# Committing the exact producer inputs changes provenance, not their content.
+producer_key="$MOTOR_ASSEMBLY_KEY"
+producer_manifest_sha256="$(sha256sum "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST")"
+git -C "$root" add . && git -C "$root" commit -qm 'commit runtime inputs'
+MOTOR_ASSEMBLY_STATE=clean
+toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+[ "$MOTOR_ASSEMBLY_KEY" = "$producer_key" ] || fail "committing inputs re-keyed assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "committed inputs were not clean"
+toolchain_claim_assembly
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "committed inputs prevented reuse"
+[ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "reuse changed the current source state"
+[ "$(sha256sum "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST")" = "$producer_manifest_sha256" ] ||
+	fail "reuse rewrote producer provenance"
+
+manifest="$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST"
+cp "$manifest" "$temporary/producer-manifest"
+chmod u+w "$manifest"
+sed -i 's/^assembly_state=.*/assembly_state=invalid/' "$manifest"
+chmod 0444 "$manifest"
+if toolchain_claim_assembly 2> "$temporary/invalid-state.log"; then
+	fail "invalid producer assembly state was accepted"
+fi
+grep -q 'invalid producer assembly state' "$temporary/invalid-state.log" ||
+	fail "invalid producer assembly state was not diagnosed"
+chmod u+w "$manifest"
+cp "$temporary/producer-manifest" "$manifest"
+chmod 0444 "$manifest"
+
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"
