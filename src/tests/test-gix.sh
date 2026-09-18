@@ -329,6 +329,35 @@ verify_pack() {
   clean_git verify-pack -- "${indices[0]}"
 }
 
+verify_push_pack() {
+  local fixture="$1" receiver="$2" c0 merge
+  read -r c0 < "$fixture/C0"
+  read -r merge < "$fixture/M"
+  [[ "$c0" =~ ^[0-9a-f]{40}$ ]] || fail "push fixture has an invalid C0"
+  [[ "$merge" =~ ^[0-9a-f]{40}$ ]] || fail "push fixture has an invalid M"
+  [ "$(clean_git -C "$fixture/source" rev-parse refs/heads/main)" = "$merge" ] ||
+    fail "push source main does not name M"
+
+  clean_git init --bare -q "$receiver"
+  clean_git -C "$receiver" index-pack --strict --stdin < "$fixture/initial.pack" >/dev/null
+  clean_git -C "$receiver" cat-file -e "$c0^{commit}"
+  if clean_git -C "$receiver" cat-file -e "$merge^{commit}" 2>/dev/null; then
+    fail "initial push pack already contains M"
+  fi
+  clean_git -C "$receiver" update-ref refs/heads/main "$c0"
+  clean_git -C "$receiver" index-pack --strict --stdin < "$fixture/incremental.pack" >/dev/null
+  clean_git -C "$receiver" update-ref refs/heads/main "$merge" "$c0"
+  [ "$(clean_git -C "$receiver" show main:conflict)" = resolved ] ||
+    fail "incremental push pack has the wrong merge resolution"
+  [ "$(clean_git -C "$receiver" show main:unchanged)" = unchanged ] ||
+    fail "incremental push pack lost baseline content"
+  [ "$(clean_git -C "$receiver" show main:side-one)" = one ] ||
+    fail "incremental push pack lost the first parent content"
+  [ "$(clean_git -C "$receiver" show main:side-two)" = two ] ||
+    fail "incremental push pack lost the second parent content"
+  clean_git -C "$receiver" fsck --strict --no-dangling >/dev/null
+}
+
 cargo="$(cd "$ROOT_DIR" && rustup which cargo)"
 export RUSTC="$(cd "$ROOT_DIR" && rustup which rustc)"
 export RUSTDOC="$(cd "$ROOT_DIR" && rustup which rustdoc)"
@@ -418,6 +447,7 @@ PY
   verify_add_repository "$temporary/host-output/add-repository"
   verify_pack "$temporary/host-output/pack-roundtrip"
   verify_pack "$temporary/host-output/pack-thin"
+  verify_push_pack "$temporary/host-output/push-pack" "$temporary/host-push-receiver"
 
   "$cargo" build "${common[@]}" --bin gix
   gix_binary="$APP_DIR/target/component-test/release/gix"
@@ -735,6 +765,9 @@ verify_pack "$temporary/guest-pack"
 printf 'get -r "%s" "%s"\n' "$guest_root/output/pack-thin" "$temporary/guest-thin-pack" |
   "${sftp_command[@]}"
 verify_pack "$temporary/guest-thin-pack"
+printf 'get -r "%s" "%s"\n' "$guest_root/output/push-pack" "$temporary/guest-push-pack" |
+  "${sftp_command[@]}"
+verify_push_pack "$temporary/guest-push-pack" "$temporary/guest-push-receiver"
 
 printf 'get -r "%s" "%s"\n' "$guest_root/output/add-repository" "$temporary/guest-add" |
   "${sftp_command[@]}"
