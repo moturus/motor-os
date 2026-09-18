@@ -31,7 +31,9 @@ gix -r project commit -m 'Describe the change'
 
 Use `gix init DIR` for a new repository. It preserves existing worktree
 files, refuses reinitialization, and selects `init.defaultBranch` or `main`.
-Clone requires a new directory and records the remote as `origin`.
+Clone requires a new directory and records the remote as `origin`. Without
+`DIR`, it names the directory after the repository, as Git does:
+`gix clone https://example.test/project.git` creates `project`.
 
 `-r PATH` selects the worktree root and defaults to `.`. Paths passed to
 commands are literal and relative to that root; use `--` before names
@@ -42,7 +44,7 @@ starting with a dash. Run `gix COMMAND --help` for syntax.
 | Command | Behavior |
 | --- | --- |
 | `init [DIR]` | Initialize an ordinary worktree repository. |
-| `clone URL DIR` | Clone over anonymous HTTPS or SSH. |
+| `clone URL [DIR]` | Clone over anonymous HTTPS or SSH; DIR defaults to the repository name. |
 | `fetch [REMOTE]` | Fetch a configured remote, defaulting to `origin`; update tracking refs and tags without changing the current branch or worktree. |
 | `status`, `log` | Inspect changes, pending operations and commit history. |
 | `diff [--staged] [PATH…]` | Compare worktree to index, or index to HEAD; show text diffs, mode changes and binary summaries. |

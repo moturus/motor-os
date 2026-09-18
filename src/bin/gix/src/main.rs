@@ -128,7 +128,7 @@ fn run() -> Result {
                 .arg(Arg::new("url").required(true).value_name("URL"))
                 .arg(
                     Arg::new("directory")
-                        .required(true)
+                        .help("New directory to create [default: the repository name]")
                         .value_name("DIR")
                         .value_parser(value_parser!(PathBuf)),
                 ),
@@ -228,7 +228,7 @@ fn run() -> Result {
             command.get_one::<String>("url").expect("required URL"),
             command
                 .get_one::<PathBuf>("directory")
-                .expect("required destination"),
+                .map(PathBuf::as_path),
             &overrides,
             matches.get_flag("config-paths"),
             &cancellation,

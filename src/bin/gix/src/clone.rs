@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use gix::bstr::ByteSlice;
 
@@ -12,7 +15,7 @@ use crate::{
 
 pub fn run(
     url: &str,
-    destination: &Path,
+    destination: Option<&Path>,
     overrides: &[&str],
     report_config_paths: bool,
     cancellation: &Cancellation,
@@ -23,6 +26,15 @@ pub fn run(
         HttpsUrl::parse(url)?;
     }
     network::validate_url(&parsed)?;
+    let derived;
+    let destination = match destination {
+        Some(destination) => destination,
+        None => {
+            derived = default_destination(&parsed)?;
+            eprintln!("Cloning into '{}'...", derived.display());
+            &derived
+        }
+    };
     let policy = network::Policy::new(overrides, cancellation)?;
     let options = repository::open_options(overrides)?;
     // This is the ownership boundary. Never adopt or remove a preexisting directory.
@@ -42,6 +54,33 @@ pub fn run(
         ), source)
     })?;
     cancellation.check()
+}
+
+/// Name the destination after the repository as Git does: the last URL path
+/// component without a trailing `/.git` or `.git`, or the host if there is none.
+fn default_destination(url: &gix::url::Url) -> crate::Result<PathBuf> {
+    let path = url.path.trim_end_with(|c| c == '/');
+    let path = path.strip_suffix(b"/.git").unwrap_or(path);
+    let path = path.trim_end_with(|c| c == '/');
+    let name = path.rsplit_str("/").next().unwrap_or(path);
+    let name = name.strip_suffix(b".git").unwrap_or(name);
+    let name = match (name.to_str(), url.host()) {
+        (Ok(""), Some(host)) => host,
+        (Ok(name), _) => name,
+        (Err(_), _) => "",
+    };
+    // The name comes from the remote URL. It must stay one new entry here.
+    if matches!(name, "" | "." | "..")
+        || name.contains(['/', '\\'])
+        || name.contains(char::is_control)
+    {
+        return Err(format!(
+            "cannot derive a directory name from '{}'; pass DIR explicitly",
+            url.to_bstring()
+        )
+        .into());
+    }
+    Ok(name.into())
 }
 
 fn clone_created(
@@ -109,4 +148,49 @@ fn clone_created(
         prepare.persist();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn derive(url: &str) -> crate::Result<PathBuf> {
+        default_destination(&gix::url::parse(url.as_bytes().as_bstr())?)
+    }
+
+    #[test]
+    fn default_destination_follows_git() -> crate::Result {
+        for (url, expected) in [
+            ("https://example.test/group/project.git", "project"),
+            ("https://example.test/group/project", "project"),
+            ("https://example.test/group/project.git/", "project"),
+            ("https://example.test/group/project/.git", "project"),
+            ("https://example.test/group/.git", "group"),
+            ("https://example.test:8443/project.git", "project"),
+            ("https://example.test:8443/", "example.test"),
+            ("https://example.test", "example.test"),
+            ("ssh://git@example.test/~user/project.git", "project"),
+            ("git@example.test:group/project.git", "project"),
+            ("git@example.test:project.git", "project"),
+        ] {
+            assert_eq!(derive(url)?, Path::new(expected), "{url}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_destination_is_one_new_entry() -> crate::Result {
+        // The URL path is percent-decoded before the last component is taken.
+        assert_eq!(derive("https://example.test/group/a%2fb")?, Path::new("b"));
+        for url in [
+            "https://example.test/group/..",
+            "https://example.test/group/.",
+            "https://example.test/group/%2e%2e",
+            "https://example.test/group/a%0ab",
+            "https://example.test/group/a%5cb",
+        ] {
+            assert!(derive(url).is_err(), "{url}");
+        }
+        Ok(())
+    }
 }

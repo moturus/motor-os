@@ -615,7 +615,8 @@ Packs contain full objects without delta compression, so an initial push can sen
 data than Git. If the result is reported as unknown, inspect the remote ref before
 pushing again; gix never retries automatically. A confirmed remote acceptance remains
 reported if command completion later fails.</p>
-<p>Clone creates <code>DIR</code> exclusively. A failed clone retains its owned directory
+<p>Clone creates <code>DIR</code> exclusively; without <code>DIR</code>, it uses the
+repository name from the URL, as Git does. A failed clone retains its owned directory
 for inspection; <code>.git/gix-incomplete-clone</code> marks unfinished fetch or checkout.
 Remove that owned directory explicitly before cloning again. Paths must be UTF-8 and
 valid Motor file names; the current path policy also rejects Windows-reserved names and
