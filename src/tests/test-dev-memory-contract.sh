@@ -41,9 +41,9 @@ expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --mot
 env -u MOTO_MEMORY_MIB \
   bash "$temporary/src/tests/full-test-dev.sh" --release --vmm chv \
   >> "$temporary/wrapper.log"
-expected=$'full-test.sh 8192 --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv'
+expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
-  echo 'developer VMM selection was not forwarded to both phases' >&2; exit 1;
+  echo 'developer VMM selection was not forwarded to every phase' >&2; exit 1;
 }
 : > "$MEMORY_TEST_LOG"
 if bash "$temporary/src/tests/full-test-dev.sh" --release --vmm fc \

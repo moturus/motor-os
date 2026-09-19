@@ -5,15 +5,20 @@ COMPONENT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT_DIR="$(cd "$COMPONENT_DIR/../../.." && pwd)"
 cd "$ROOT_DIR"
 BUILD=debug
+VMM=qemu
 motor=0
 profile=()
-for arg in "$@"; do
-  case "$arg" in
-    --release) BUILD=release; profile=(--release) ;;
-    --motor) motor=1 ;;
-    *) echo "usage: $0 [--release] [--motor]" >&2; exit 2 ;;
+usage() { echo "usage: $0 [--release] [--motor [--vmm qemu|chv]]" >&2; exit 2; }
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release) BUILD=release; profile=(--release); shift ;;
+    --motor) motor=1; shift ;;
+    --vmm) [ "$#" -ge 2 ] || usage; VMM="$2"; shift 2 ;;
+    --vmm=*) VMM="${1#--vmm=}"; shift ;;
+    *) usage ;;
   esac
 done
+case "$VMM" in qemu|chv) ;; *) usage ;; esac
 if [ "$motor" = 0 ]; then
   exec cargo test --offline --manifest-path "$COMPONENT_DIR/Cargo.toml" "${profile[@]}" --tests
 fi
@@ -21,16 +26,19 @@ fi
 WD="$ROOT_DIR/src/tests"
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
+. "$WD/vm-test-selection.sh"
 . "$WD/vm-cleanup.sh"
 fail() { echo "httpd-axum component: $*" >&2; exit 1; }
 VM_BUILD="${HTTPD_AXUM_VM_BUILD:-$BUILD}"
 case "$VM_BUILD" in debug|release) ;; *) fail "invalid VM build: $VM_BUILD" ;; esac
 temporary="$(mktemp -d /tmp/httpd-axum-component.XXXXXX)"
 VMM_PID=""
+snapshot=""
 cleanup() {
   local status=$?
   trap - EXIT
   stop_vm "$VMM_PID"
+  [ -z "$snapshot" ] || rm -f "$snapshot"
   if [ "$status" = 0 ]; then
     rm -rf "$temporary"
   else
@@ -53,8 +61,24 @@ for line in open(sys.argv[1]):
 PY
 
 test_vm_configure_ssh
-export FULL_TEST_QEMU_ARGS=-snapshot
-start_test_vm "$ROOT_DIR/vm_images/$VM_BUILD" "$temporary/console.log"
+# A caller such as full-test-dev.sh names its own image; the standard one
+# applies otherwise. Either way the guest's writes are discarded.
+select_test_vm "$ROOT_DIR" "$VM_BUILD" standard "$VMM"
+image="${MOTO_IMAGE:-$TEST_VM_IMAGE}"
+runner_args=()
+if [ "$VMM" = qemu ]; then
+  runner_args=(-snapshot)
+else
+  # Cloud Hypervisor has no snapshot mode, so it boots a disposable copy. Its
+  # launcher takes a bare filename beside the original.
+  snapshot="$TEST_VM_IMG_DIR/httpd-axum-snapshot-$$.${image##*.}"
+  cp "$TEST_VM_IMG_DIR/$image" "$snapshot"
+  image="${snapshot##*/}"
+fi
+export MOTO_IMAGE="$image"
+export MOTO_CHV_RUNTIME_DIR="$temporary/chv"
+start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$temporary/console.log" \
+  "${runner_args[@]}"
 guest="/user/tmp/httpd-component-$(date +%s)-$$"
 vm_ssh /system/bin/mkdir "$guest"
 upload() {

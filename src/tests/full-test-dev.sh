@@ -64,8 +64,9 @@ MOTO_MEMORY_MIB="$REPOSITORY_MEMORY_MIB" \
   FULL_TEST_VERIFY_DEV_SOURCES=1 \
   "$WD/full-test.sh" "${ORIGINAL_ARGS[@]}"
 
+# The option loop above consumed "$@", so every phase gets the originals.
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
-  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --motor "$@"
+  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --motor "${ORIGINAL_ARGS[@]}"
 
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "${ORIGINAL_ARGS[@]}"

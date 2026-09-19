@@ -23,16 +23,20 @@ and several useful scripts:
 ## Vsock test prerequisites
 
 The vsock guest tests use local Unix-domain host peers, not host `AF_VSOCK`
-or `/dev/vhost-vsock`. QEMU requires the pinned `vhost-device-vsock` backend:
+or `/dev/vhost-vsock`. QEMU requires the pinned `vhost-device-vsock` 0.3.0
+backend, which the harness finds without any environment setup
+(`src/tests/vm-vsock-backend.sh`). It uses one installed on `PATH`; otherwise
+it builds the pinned release once into `build/host-tools`, offline, from
+Cargo's local cache. An explicit `VHOST_DEVICE_VSOCK` path still takes
+precedence. The harness checks the version, and it neither downloads
+dependencies nor skips coverage: where Cargo's cache lacks the crate, the
+build fails and prints this one-time command, which needs network access:
 
 ```sh
-cargo install --locked vhost-device-vsock --version 0.3.0
+cargo install --locked --root build/host-tools --version 0.3.0 vhost-device-vsock
 ```
 
-Install it during developer setup, not during tests. Put its binary on `PATH`
-or set `VHOST_DEVICE_VSOCK` to its path. The harness checks the version and
-fails on missing prerequisites; it does not download dependencies or skip
-coverage. QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
+QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
 the runner's hugepage policy and any `MOTO_HUGEPAGES` override.
 
 `src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]` runs outgoing stream

@@ -55,10 +55,11 @@ ROOT_DIR="$WD/../.."
 . "$WD/vm-cleanup.sh"
 . "$WD/vm-test-selection.sh"
 . "$WD/vm-test-serial.sh"
+. "$WD/vm-vsock-backend.sh"
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-vsock.XXXXXX")"
 echo "test-vsock: logs preserved in $LOG_DIR"
 
-for tool in flock rg; do
+for tool in flock; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "test-vsock: required host tool is missing: $tool" >&2
     exit 1
@@ -66,8 +67,8 @@ for tool in flock rg; do
 done
 case "$VMM" in
   qemu)
-    VHOST_DEVICE_VSOCK="${VHOST_DEVICE_VSOCK:-vhost-device-vsock}"
-    discovery_tools=(qemu-system-x86_64 "$VHOST_DEVICE_VSOCK")
+    resolve_vsock_backend "$ROOT_DIR" || exit 1
+    discovery_tools=(qemu-system-x86_64)
     ;;
   chv) discovery_tools=(cloud-hypervisor-static pgrep script) ;;
   fc) discovery_tools=(firecracker) ;;
@@ -78,14 +79,6 @@ for tool in "${discovery_tools[@]}"; do
     exit 1
   }
 done
-if [ "$VMM" = qemu ]; then
-  backend_version="$("$VHOST_DEVICE_VSOCK" --version)"
-  [ "$backend_version" = "vhost-device-vsock 0.3.0" ] || {
-    echo "test-vsock: expected vhost-device-vsock 0.3.0, got '$backend_version'" >&2
-    exit 1
-  }
-fi
-
 # Both the peer and IP-disabled serial discovery phases use the selected VMM.
 outgoing_args=(--vmm "$VMM")
 [ "$BUILD" = release ] && outgoing_args=(--release "${outgoing_args[@]}")
@@ -181,7 +174,7 @@ run_discovery() (
     local offset="$1" pattern="$2" description="$3"
     for _ in $(seq 1 120); do
       if tail -c "+$offset" "$console_log" | filter_vm_console | tr -d '\r' |
-          rg -a "$pattern" >/dev/null; then
+          grep -aE "$pattern" >/dev/null; then
         return
       fi
       serial_test_vm_alive || fail "owned $TEST_VM_LABEL exited while waiting for $description"
@@ -198,9 +191,9 @@ run_discovery() (
   wait_line "$first_byte" '^VSOCK_DISCOVERY_STATUS=[0-9]+$' 'the guest status marker'
 
   tail -c "+$first_byte" "$console_log" | filter_vm_console | tr -d '\r' |
-    rg -a '^VSOCK_DISCOVERY_STATUS=0$' >/dev/null || fail "guest test returned failure"
+    grep -aE '^VSOCK_DISCOVERY_STATUS=0$' >/dev/null || fail "guest test returned failure"
   tail -c "+$first_byte" "$console_log" | filter_vm_console | tr -d '\r' |
-    rg -a "^vsock discovery: $mode PASS$" >/dev/null || fail "guest PASS marker missing"
+    grep -aE "^vsock discovery: $mode PASS$" >/dev/null || fail "guest PASS marker missing"
   serial_test_vm_alive || fail "owned $TEST_VM_LABEL exited before the final liveness check"
   if [ "$VMM" = qemu ] && [ "$mode" = present ]; then
     kill -0 "$BACKEND_PID" 2>/dev/null || fail "owned backend exited before the final liveness check"

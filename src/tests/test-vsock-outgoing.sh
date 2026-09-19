@@ -52,6 +52,7 @@ ROOT_DIR="$(cd "$WD/../.." && pwd)"
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
 . "$WD/vm-test-selection.sh"
+. "$WD/vm-vsock-backend.sh"
 
 TEST_VM_PHASE=standard
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
@@ -83,17 +84,13 @@ fail() {
   exit 1
 }
 
-for tool in flock make mktemp nproc rg rustc sed seq sftp ssh tee; do
+for tool in flock make mktemp nproc rustc sed seq sftp ssh tee; do
   command -v "$tool" >/dev/null 2>&1 || fail "required host tool is missing: $tool"
 done
 case "$VMM" in
   qemu)
     command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "required host tool is missing: qemu-system-x86_64"
-    VHOST_DEVICE_VSOCK="${VHOST_DEVICE_VSOCK:-vhost-device-vsock}"
-    command -v "$VHOST_DEVICE_VSOCK" >/dev/null 2>&1 || fail "required host tool is missing: $VHOST_DEVICE_VSOCK"
-    backend_version="$("$VHOST_DEVICE_VSOCK" --version)"
-    [ "$backend_version" = "vhost-device-vsock 0.3.0" ] ||
-      fail "expected vhost-device-vsock 0.3.0, got '$backend_version'"
+    resolve_vsock_backend "$ROOT_DIR" || fail "no usable vhost-device-vsock backend"
     ;;
   chv)
     command -v cloud-hypervisor-static >/dev/null 2>&1 ||
@@ -245,38 +242,38 @@ run_outgoing_case() {
   "$PEER_BIN" "$VSOCK_BASE" "$action" "$@" > "$peer_log" 2>&1 &
   PEER_PID="$!"
   for _ in $(seq 1 100); do
-    rg -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null && break
+    grep -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null && break
     kill -0 "$PEER_PID" 2>/dev/null || fail "owned host peer exited before readiness"
     sleep 0.1
   done
-  rg -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null ||
+  grep -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null ||
     fail "host peer did not become ready"
 
   vm_ssh "TMPDIR=$GUEST_TMP MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
     tee "$guest_log"
-  rg -Fx "vsock outgoing: $verdict PASS" "$guest_log" >/dev/null ||
+  grep -Fx "vsock outgoing: $verdict PASS" "$guest_log" >/dev/null ||
     fail "guest PASS marker missing for $verdict"
   if [ "$verdict" = "echo 0" ]; then
-    rg -Fx "vsock connect errors: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock connect errors: PASS" "$guest_log" >/dev/null ||
       fail "guest connect-error PASS marker missing"
-    rg -Fx "vsock pending accept dispatch: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock pending accept dispatch: PASS" "$guest_log" >/dev/null ||
       fail "pending accept dispatch PASS marker missing"
   fi
   if [ "$verdict" = native-accept ]; then
-    rg -Fx "vsock accept owner disconnect: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock accept owner disconnect: PASS" "$guest_log" >/dev/null ||
       fail "accept owner disconnect PASS marker missing"
-    rg -Fx "vsock pending shutdown dispatch: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock pending shutdown dispatch: PASS" "$guest_log" >/dev/null ||
       fail "pending shutdown dispatch PASS marker missing"
-    rg -Fx "vsock accept reply disconnect: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock accept reply disconnect: PASS" "$guest_log" >/dev/null ||
       fail "accept reply disconnect PASS marker missing"
-    rg -Fx "vsock idle client cleanup: PASS" "$guest_log" >/dev/null ||
+    grep -Fx "vsock idle client cleanup: PASS" "$guest_log" >/dev/null ||
       fail "idle client cleanup PASS marker missing"
   fi
 
   wait "$PEER_PID" || peer_status=$?
   PEER_PID=""
   [ "$peer_status" -eq 0 ] || fail "host peer failed for $action (status $peer_status)"
-  rg -Fx "DONE $verdict" "$peer_log" >/dev/null || fail "host peer DONE marker missing for $verdict"
+  grep -Fx "DONE $verdict" "$peer_log" >/dev/null || fail "host peer DONE marker missing for $verdict"
   kill -0 "$VMM_PID" 2>/dev/null || fail "owned $TEST_VM_LABEL exited after $action"
   if [ -n "$BACKEND_PID" ]; then
     kill -0 "$BACKEND_PID" 2>/dev/null || fail "owned backend exited after $action"

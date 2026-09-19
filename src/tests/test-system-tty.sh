@@ -90,6 +90,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+CHECK_STDERR="$SCRATCH/check-console-stderr"
+rustc --edition=2024 -D warnings "$WD/check-console-stderr.rs" -o "$CHECK_STDERR"
+"$CHECK_STDERR" --self-test
+
 vm_ssh() {
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "$@"
 }
@@ -176,6 +180,38 @@ admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
 [ "$admission_output" = "admission::test_process_classes PASS" ] ||
   fail "admission classes did not finish: '$admission_output'"
 printf '%s\n' "$admission_output"
+
+# The checker distinguishes an unfinished live log from an ordering failure.
+# A complete prompt before the expected tail fails immediately.
+wait_console_burst() {
+  local offset="$1" burst="$2" phase="$3" status
+  for _ in $(seq 1 100); do
+    if "$CHECK_STDERR" "$CONSOLE_LOG" "$offset" "$burst" "$phase"; then
+      return
+    else
+      status=$?
+      [ "$status" -eq 2 ] || fail "stderr burst $burst failed (log: $CONSOLE_LOG)"
+    fi
+    serial_test_vm_alive || fail "$TEST_VM_LABEL exited during stderr burst $burst"
+    sleep 0.1
+  done
+  fail "stderr burst $burst did not reach $phase (log: $CONSOLE_LOG)"
+}
+
+run_console /user/tmp/stderr-burst-save-prompt 'tty_saved_ps1="$PS1"'
+for burst in $(seq 1 11); do
+  lines=24
+  [ "$burst" -ne 11 ] || lines=512 # Exceeds the old 16 KiB backlog.
+  offset="$(wc -c < "$CONSOLE_LOG")"
+  # Adjacent quoted words keep the full prompt token out of the command echo.
+  printf "PS1='[TTY-BURST-''%s] '; /user/tmp/admission-systest stderr-burst %s %s\r" \
+    "$burst" "$burst" "$lines" >&3
+  wait_console_burst "$offset" "$burst" ready
+  printf '!' >&3
+  wait_console_burst "$offset" "$burst" "$lines"
+  echo "console stderr burst $burst: $lines intact lines before the prompt"
+done
+run_console /user/tmp/stderr-burst-restore-prompt 'PS1="$tty_saved_ps1"'
 
 ps_output="$(vm_ssh /system/bin/cat /user/tmp/system-tty-ps)"
 listing="$(vm_ssh /system/bin/ls -l /user/tmp)"
