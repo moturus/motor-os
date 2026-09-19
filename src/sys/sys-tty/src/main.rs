@@ -34,21 +34,33 @@ fn is_assignment(word: &str) -> bool {
     }
 }
 
+/// Reports a startup failure and exits once the UART has the whole message.
+fn exit_with(output: &Output, args: std::fmt::Arguments<'_>) -> ! {
+    output.send_fmt(Source::Stderr, args);
+    output.drain();
+    std::process::exit(1)
+}
+
 fn read_config(output: &Output) -> String {
     let config_path = "/system/cfg/sys-tty.cfg";
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
-        Err(err) => {
-            output.send_fmt(
-                Source::Stderr,
-                format_args!("sys-tty: error reading '{config_path}': {err:?}"),
-            );
-            std::process::exit(1);
-        }
+        Err(err) => exit_with(
+            output,
+            format_args!("sys-tty: error reading '{config_path}': {err:?}"),
+        ),
     }
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--output-test-child") {
+        output::run_pipe_self_test_child();
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("--pipe-self-test") {
+        output::run_pipe_self_test();
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--self-test") {
         ansi::run_self_tests();
         config::run_self_tests();
@@ -63,13 +75,7 @@ fn main() {
     let config = read_config(&output);
     let config = match config::parse(&config) {
         Ok(config) => config,
-        Err(err) => {
-            output.send_fmt(
-                Source::Stderr,
-                format_args!("sys-tty: invalid config: {err}."),
-            );
-            std::process::exit(1);
-        }
+        Err(err) => exit_with(&output, format_args!("sys-tty: invalid config: {err}.")),
     };
     let kernel_log_mode = config.kernel_log;
     let words: Vec<_> = config.command.split_whitespace().collect();
@@ -85,8 +91,7 @@ fn main() {
     let words = &words[assignments.len()..];
 
     if words.is_empty() {
-        output.send(Source::Stderr, b"sys-tty: error: empty config.".to_vec());
-        std::process::exit(1);
+        exit_with(&output, format_args!("sys-tty: error: empty config."));
     }
 
     let fname = words[0];
@@ -226,60 +231,38 @@ fn main() {
                 SysObj::put(that_h).unwrap();
             });
 
-            // stdout
-            let mut child_stdout = child.stdout.take().unwrap();
-            let stdout_output = output.clone();
-            let stdout_thread = std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = [0_u8; 4096];
-                loop {
-                    match child_stdout.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(sz) => stdout_output.send(Source::Stdout, buf[..sz].to_vec()),
-                    }
-                }
-            });
-
-            let mut child_stderr = child.stderr.take().unwrap();
-            let stderr_output = output.clone();
-            let stderr_thread = std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = [0_u8; 4096];
-                loop {
-                    match child_stderr.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(sz) => stderr_output.send(Source::Stderr, buf[..sz].to_vec()),
-                    }
-                }
-            });
-            match child.wait() {
-                Ok(status) => {
-                    if !status.success() {
-                        match status.code() {
-                            Some(code) => output.send_fmt(
-                                Source::Stderr,
-                                format_args!("'{}' exited with status {}.\n", fname, code),
-                            ),
-                            None => output
-                                .send_fmt(Source::Stderr, format_args!("'{}' failed.\n", fname)),
-                        }
-                    }
-                }
-                Err(err) => output.send_fmt(
+            output.attach(child.stdout.take().unwrap(), child.stderr.take().unwrap());
+            let status = child.wait();
+            if let Err(err) = &status {
+                // The child may still run and hold its pipes open, so the drain
+                // below may never finish: say so first.
+                output.send_fmt(
                     Source::Stderr,
                     format_args!("Error waiting for '{}': {:?}\n", fname, err),
-                ),
-            };
+                );
+            }
             exit_notifier.store(true, Ordering::Release);
             SysCpu::wake(this_h).ok();
             SysObj::put(this_h).unwrap();
             stdin_thread.join().unwrap();
-            stdout_thread.join().unwrap();
-            stderr_thread.join().unwrap();
+            // The exit status follows everything the child wrote.
+            output.drain();
+            if let Ok(status) = status
+                && !status.success()
+            {
+                match status.code() {
+                    Some(code) => output.send_fmt(
+                        Source::Stderr,
+                        format_args!("'{}' exited with status {}.\n", fname, code),
+                    ),
+                    None => output.send_fmt(Source::Stderr, format_args!("'{}' failed.\n", fname)),
+                }
+            }
         }
         Err(err) => output.send_fmt(
             Source::Stderr,
             format_args!("Error spawning '{}': {:?}\n", fname, err),
         ),
     }
+    output.drain();
 }

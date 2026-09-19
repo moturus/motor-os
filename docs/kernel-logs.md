@@ -17,15 +17,15 @@ choice was between a guarantee and less code, less code won.
 The design has two parts:
 
 1. **Console arbitration in sys-tty.** One writer thread owns the UART.
-   Application output is written in whole relay chunks as it arrives, and a
-   chunk from one relay is never written inside an escape sequence that the
-   other relay's output began. Kernel log records prefer gaps in application
+   Application output is written in whole pipe-read chunks, and a chunk from
+   one stream is never written inside an escape sequence that the other
+   stream's output began. Kernel log records prefer gaps in application
    output, and the writer never splits one of its own chunks or records.
    Avoiding the middle of a repaint is a best-effort quiet-window policy: the
    stdio byte streams carry neither the application's original `write()`
    boundaries nor repaint boundaries. Keyboard input is never delayed by
    output. An incomplete ANSI sequence gets a 100 ms grace period when a log
-   record or the other relay's chunk is waiting; after that sys-tty cancels
+   record or the other stream's chunk is waiting; after that sys-tty cancels
    the sequence and writes what is waiting, intentionally disrupting the
    active TUI.
 2. **A file mode.** When `sys-tty.cfg` says so, sys-tty forwards every kernel
@@ -53,7 +53,7 @@ a wrap or detect that the producer had lapped sys-tty.
 
 The implementation replaces those paths with the framed ring and sole writer
 described below. It also separates the UART receive and transmit locks so a
-long write cannot delay keyboard input, and relay EOF now terminates the relay
+long write cannot delay keyboard input, and pipe EOF removes the reader
 instead of busy-looping.
 
 The UART still performs its two established wire translations
@@ -64,12 +64,12 @@ sys-tty.
 
 ## Requirements
 
-1. Bytes in one relay read reach the wire contiguously, and a chunk from one
-   relay is not written inside an escape or control sequence that the other
-   relay's output began. This is intentionally not phrased in terms of the
+1. Bytes in one pipe read reach the wire contiguously, and a chunk from one
+   stream is not written inside an escape or control sequence that the other
+   stream's output began. This is intentionally not phrased in terms of the
    application's `write()` or `flush()`: stdout and stderr are byte-stream
    pipes, so a read may split or combine writes, and the two pipes do not
-   expose one total source-write order. A relay read is the only observable
+   expose one total source-write order. A pipe read is the only observable
    unit sys-tty can keep whole without a new terminal protocol.
 2. A framed kernel log record is offered to each selected sink as one unit;
    bounded queues drop complete records rather than fragments. The in-memory
@@ -78,7 +78,7 @@ sys-tty.
    and emits one warning marker when possible.
 3. The console writer gives an incomplete application escape or control string
    up to 100 ms to reach a scanner safe point once a console log record, or a
-   chunk from the other relay, is waiting. At the deadline it emits `CAN`
+   chunk from the other stream, is waiting. At the deadline it emits `CAN`
    (`0x18`) to abort the sequence, followed by `\r\n` and the waiting output.
    Console logs are allowed to disrupt a TUI: all records use the console in
    console mode, while file mode limits this disruption to WARN and ERROR
@@ -107,24 +107,39 @@ sys-tty.
 
 ### Console arbitration
 
-The threads are the input/ring thread, the two relays, one
-**writer**, in file mode one **forwarder**, and the main thread waiting on the
-child.
+The threads are the input/ring thread, one **writer** owning both output
+pipes, in file mode one **forwarder**, and the main thread waiting on the child.
 
 - The **writer** is the only sys-tty thread that writes the UART. Kernel panic
   output, the kernel's nested-logging fallback, and the kernel's other raw
-  serial writes (such as `WDIAG` lines) still bypass it. Stdout and stderr each
-  have one bounded handoff, and console log records have a third. A full
-  stdout or stderr handoff blocks only that relay and preserves the child's
-  existing pipe back-pressure; a full log handoff drops complete records and
-  never blocks the ring drain. The writer emits each accepted chunk or record
-  whole.
-- The **relays** read into buffers of at least 4 KiB (the pipe holds 2 KiB, so a
-  read takes everything currently available) and send each read as one
-  source-tagged screen chunk. Reads from either individual stream keep their
-  order. There is no claimed total order between stdout and stderr: these are
-  the only two output streams of sys-tty's single console child, and the pipes
-  expose no write or flush boundaries beyond the chunks sys-tty reads.
+  serial writes (such as `WDIAG` lines) still bypass it. The writer reads both
+  pipes nonblocking, using native readiness polling and a registered wake
+  source for messages. Console log records have a bounded handoff of their
+  own; a full log handoff drops complete records and never blocks the ring
+  drain. Sys-tty's own few status lines queue unbounded. The writer emits each
+  queued chunk or record whole.
+- For each **screen batch**, the writer reads stdout, then stderr, into a
+  4 KiB buffer. Each read covers the pipe's entire available snapshot (the
+  ring holds 2 KiB); the pipe self-test fills a real pipe and requires one
+  read to empty it. It emits stderr before the saved stdout chunk and finishes
+  the batch before collecting another. The shell's foreground wait completes
+  after publishing its child's stderr, so sampling stderr *after* reading the
+  next stdout prompt captures that command's remaining error text. There is
+  no separate relay holding a chunk outside the queue. This does not claim a
+  total write order between concurrent streams: stderr gets precedence when
+  both have bytes available, subject to the framing rules below. Two
+  consequences are accepted. Stdout written just before stderr appears after
+  it when one batch samples both, which a busy UART makes likely. And framing
+  outranks the rule: if a child leaves stdout inside a sequence, the shell's
+  next prompt counts as that sequence's continuation and passes the child's
+  waiting stderr, unless the 100 ms grace period ends first.
+- The pipes and one bounded batch supply **back-pressure** at the UART's
+  roughly 14 KiB/s rate. An unfinished sequence can request another read only
+  from its owner, leaving the other stream's pending chunk in place. A saved
+  stdout chunk does not wait for an indefinitely replenished stderr pipe to
+  become empty. On console-child exit, sys-tty waits for both pipe tails and
+  pending UART writes before it reports the exit status and finishes. Its
+  startup failures wait for the UART the same way before exiting.
 - The **input/ring thread** no longer writes the UART. On every wake it first
   drains a validated ring snapshot (see "Framed kernel ring") and hands the
   records to the writer and, in file mode, the forwarder; then it reads the
@@ -140,17 +155,16 @@ up ... Starting <command>" message is at the end of sys-tty initialization:
 the writer is running, the kernel ring is registered, and the optional
 forwarder thread has been launched. It is then printed immediately before
 spawning the console child, so its wording and timestamp describe the actual
-milestone (`src/sys/sys-tty/src/main.rs:96-132`).
+milestone (`main()` in `src/sys/sys-tty/src/main.rs`).
 
-The writer's policy uses constants in `src/sys/sys-tty/src/output.rs:6-12`:
+The writer's policy uses constants in `src/sys/sys-tty/src/output.rs`:
 
 - A screen chunk is written immediately, unless the scanner is inside a
-  sequence that an earlier chunk from the *other* relay began (the writer
-  remembers which relay wrote the last chunk while the scanner is not at
+  sequence that an earlier chunk from the *other* stream began (the writer
+  remembers which stream wrote the last chunk while the scanner is not at
   ground). Then the chunk waits for the sequence to complete, up to the
-  **ANSI grace period** below; chunks from the relay that owns the sequence
-  keep flowing, and later chunks from the waiting relay queue behind it in
-  order.
+  **ANSI grace period** below; chunks from the stream that owns the sequence
+  keep flowing, while the other stream's pending chunk waits in the batch.
 - In console mode every log record is console-eligible. In file mode only
   structurally classified WARN and ERROR records are console-eligible. An
   eligible record is written immediately if the screen has been quiet for the
@@ -503,8 +517,20 @@ Console arbitration:
   markers;
 - native integration cases feed interleaved stdout, stderr, and log chunks
   through the production writer policy and inspect its in-memory output. No
-  log or opposite-relay byte may occur inside a complete application ANSI
+  log or opposite-stream byte may occur inside a complete application ANSI
   sequence; the deadline case must contain `CAN` before the waiting chunk;
+- controlled pipe-reader cases cover stderr arriving during the stdout read,
+  bounded batches with both streams busy, owner continuations (including a
+  prompt that passes waiting stderr that way), a full pipe emptied by one
+  read, unread EOF tails, UART completion, and a message wake sent before
+  polling;
+- `test-system-tty.sh` checks short error bursts and one larger than 16 KiB
+  against a unique next-prompt marker. A blocking stdin handshake separates
+  command echo from the checked output. The checked text must otherwise be
+  exact, except for whole log records on lines of their own: the image logs to
+  the console, and sys-tty may fit a record between any two chunks, moving to
+  a fresh line first. The host checker also tests fixed transcripts with early
+  prompts, missing lines, unexpected prefixes, and records in each position;
 - sanitizer cases cover every `ESC` position and all 32 UTF-8 C1 controls.
   The console copy contains the exact diagnostic literal and no unsafe control
   introducer, while the file copy remains byte-for-byte identical.

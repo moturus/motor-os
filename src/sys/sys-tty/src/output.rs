@@ -1,21 +1,27 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const SOURCE_COUNT: usize = 3;
 const SCREEN_COUNT: usize = 2;
+/// Covers the entire 2 KiB console pipe, including a wrapped read. The pipe
+/// self-test holds a real, full pipe to this.
+const SCREEN_CHUNK: usize = 4 * 1024;
 const QUIET_WINDOW: Duration = Duration::from_millis(30);
 const HOLD_TIME: Duration = Duration::from_millis(500);
 const HOLD_SIZE: usize = 16 * 1024;
 const ANSI_GRACE: Duration = Duration::from_millis(100);
 const LOG_CAPACITY: usize = 256 * 1024;
 
+#[path = "output_tests.rs"]
+mod tests;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Source {
     Stdout,
     Stderr,
-    Kernel,
 }
 
 impl Source {
@@ -23,7 +29,6 @@ impl Source {
         match self {
             Self::Stdout => 0,
             Self::Stderr => 1,
-            Self::Kernel => 2,
         }
     }
 
@@ -31,47 +36,123 @@ impl Source {
         match self {
             Self::Stdout => Self::Stderr,
             Self::Stderr => Self::Stdout,
-            Self::Kernel => unreachable!(),
         }
     }
 }
 
 struct State {
-    slots: [Option<Vec<u8>>; SOURCE_COUNT],
-    next_screen: usize,
+    /// Ordered screen batches, with stderr sampled after stdout but emitted first.
+    screens: VecDeque<(Source, Vec<u8>)>,
+    kernel: Option<Vec<u8>>,
+    pipes: Option<Pipes>,
+    writing: bool,
 }
 
 impl State {
     fn new() -> Self {
         Self {
-            slots: std::array::from_fn(|_| None),
-            next_screen: 0,
+            screens: VecDeque::new(),
+            kernel: None,
+            pipes: None,
+            writing: false,
         }
     }
 
+    fn has_screen(&self, source: Source) -> bool {
+        self.screens.iter().any(|(queued, _)| *queued == source)
+    }
+
+    fn push_screen(&mut self, source: Source, data: Vec<u8>) {
+        self.screens.push_back((source, data));
+    }
+
+    /// The oldest chunk of `source`, which owns an unfinished sequence.
     fn take_screen(&mut self, source: Source) -> Option<Vec<u8>> {
-        let index = source.index();
-        debug_assert!(index < SCREEN_COUNT);
-        let data = self.slots[index].take()?;
-        self.next_screen = (index + 1) % SCREEN_COUNT;
-        Some(data)
+        let index = self
+            .screens
+            .iter()
+            .position(|(queued, _)| *queued == source)?;
+        self.screens.remove(index).map(|(_, data)| data)
     }
 
     fn take_next_screen(&mut self) -> Option<(Source, Vec<u8>)> {
-        for offset in 0..SCREEN_COUNT {
-            let index = (self.next_screen + offset) % SCREEN_COUNT;
-            let Some(data) = self.slots[index].take() else {
-                continue;
-            };
-            self.next_screen = (index + 1) % SCREEN_COUNT;
-            let source = match index {
-                0 => Source::Stdout,
-                1 => Source::Stderr,
-                _ => unreachable!(),
-            };
-            return Some((source, data));
+        self.screens.pop_front()
+    }
+
+    fn fill_screens(
+        &mut self,
+        owner: Option<Source>,
+        mut read: impl FnMut(Source) -> Option<Vec<u8>>,
+    ) {
+        if self.screens.is_empty() {
+            // A foreground child's stderr is published before the next prompt.
+            // Read it AFTER capturing stdout so this snapshot includes its tail.
+            let stdout = read(Source::Stdout);
+            if let Some(stderr) = read(Source::Stderr) {
+                self.push_screen(Source::Stderr, stderr);
+            }
+            if let Some(stdout) = stdout {
+                self.push_screen(Source::Stdout, stdout);
+            }
+        } else if let Some(owner) = owner
+            && !self.has_screen(owner)
+            && let Some(data) = read(owner)
+        {
+            // An unfinished sequence may need a continuation ahead of the
+            // waiting batch; never read more of the other stream here.
+            self.push_screen(owner, data);
         }
-        None
+    }
+
+    fn drained(&self) -> bool {
+        !self.writing
+            && self.screens.is_empty()
+            && self.pipes.as_ref().is_none_or(|pipes| pipes.closed())
+    }
+}
+
+struct Pipes {
+    files: [Option<std::fs::File>; SCREEN_COUNT],
+    /// One buffer for every read: most wakes find both pipes empty.
+    buf: Vec<u8>,
+}
+
+impl Pipes {
+    fn new(
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+        poll: i32,
+    ) -> Self {
+        let files = [stdout.into_raw_fd(), stderr.into_raw_fd()].map(|fd| {
+            // Ownership moves from ChildStdout/ChildStderr into the writer.
+            let pipe = unsafe { std::fs::File::from_raw_fd(fd) };
+            moto_rt::net::set_nonblocking(fd, true).unwrap();
+            moto_rt::poll::add(poll, fd, fd as u64, moto_rt::poll::POLL_READABLE).unwrap();
+            Some(pipe)
+        });
+        Self {
+            files,
+            buf: vec![0; SCREEN_CHUNK],
+        }
+    }
+
+    fn read(&mut self, source: Source, poll: i32) -> Option<Vec<u8>> {
+        let slot = &mut self.files[source.index()];
+        let pipe = slot.as_mut()?;
+        match pipe.read(&mut self.buf) {
+            Ok(len) if len != 0 => Some(self.buf[..len].to_vec()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => None,
+            _ => {
+                // ChildStdio delivers the remote's unread tail before EOF.
+                moto_rt::poll::del(poll, pipe.as_raw_fd()).unwrap();
+                *slot = None;
+                None
+            }
+        }
+    }
+
+    fn closed(&self) -> bool {
+        self.files.iter().all(Option::is_none)
     }
 }
 
@@ -133,7 +214,7 @@ impl Arbiter {
 
     fn waiting_screen(&self, state: &State) -> Option<Source> {
         let source = self.owner?.other();
-        state.slots[source.index()].as_ref().map(|_| source)
+        state.has_screen(source).then_some(source)
     }
 
     fn take_ready(&mut self, state: &mut State, now: Instant) -> Option<Vec<u8>> {
@@ -228,9 +309,11 @@ impl Arbiter {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+    poll: OwnedFd,
+    waker: OwnedFd,
 }
 
-/// The three bounded handoffs feeding sys-tty's sole UART writer.
+/// The sole pipe reader and UART writer, plus its message handoffs.
 #[derive(Clone)]
 pub(crate) struct Output {
     shared: Arc<Shared>,
@@ -238,10 +321,22 @@ pub(crate) struct Output {
 
 impl Output {
     fn new() -> Self {
+        // Poll registries also serve as wake sources when registered in a poll.
+        let poll = unsafe { OwnedFd::from_raw_fd(moto_rt::poll::new().unwrap()) };
+        let waker = unsafe { OwnedFd::from_raw_fd(moto_rt::poll::new().unwrap()) };
+        moto_rt::poll::add(
+            poll.as_raw_fd(),
+            waker.as_raw_fd(),
+            0,
+            moto_rt::poll::POLL_READABLE,
+        )
+        .unwrap();
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::new()),
                 changed: Condvar::new(),
+                poll,
+                waker,
             }),
         }
     }
@@ -256,38 +351,43 @@ impl Output {
                 loop {
                     let data = reader.take(&mut arbiter);
                     crate::serial::write_serial_raw(&data);
+                    reader.shared.state.lock().unwrap().writing = false;
+                    reader.shared.changed.notify_all();
                 }
             })
             .unwrap();
         output
     }
 
-    fn try_send(&self, source: Source, data: Vec<u8>) -> Result<(), Vec<u8>> {
-        if data.is_empty() {
-            return Ok(());
-        }
+    pub(crate) fn attach(
+        &self,
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+    ) {
         let mut state = self.shared.state.lock().unwrap();
-        let slot = &mut state.slots[source.index()];
-        if slot.is_some() {
-            return Err(data);
+        assert!(state.pipes.is_none());
+        state.pipes = Some(Pipes::new(stdout, stderr, self.shared.poll.as_raw_fd()));
+        self.wake();
+    }
+
+    pub(crate) fn drain(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        while !state.drained() {
+            state = self.shared.changed.wait(state).unwrap();
         }
-        *slot = Some(data);
-        self.shared.changed.notify_all();
-        Ok(())
+    }
+
+    fn wake(&self) {
+        moto_rt::poll::wake(self.shared.waker.as_raw_fd()).unwrap();
     }
 
     pub(crate) fn send(&self, source: Source, data: Vec<u8>) {
-        debug_assert!(source != Source::Kernel);
         if data.is_empty() {
             return;
         }
-        let mut state = self.shared.state.lock().unwrap();
-        let index = source.index();
-        while state.slots[index].is_some() {
-            state = self.shared.changed.wait(state).unwrap();
-        }
-        state.slots[index] = Some(data);
-        self.shared.changed.notify_all();
+        // Sys-tty's own messages are a few short lines, so nothing bounds them.
+        self.shared.state.lock().unwrap().push_screen(source, data);
+        self.wake();
     }
 
     pub(crate) fn send_fmt(&self, source: Source, args: fmt::Arguments<'_>) {
@@ -299,44 +399,76 @@ impl Output {
 
     /// Kernel logging is best-effort: a full handoff drops this complete batch.
     pub(crate) fn try_send_kernel(&self, data: Vec<u8>) -> bool {
-        self.try_send(Source::Kernel, data).is_ok()
+        if data.is_empty() {
+            return true;
+        }
+        let mut state = self.shared.state.lock().unwrap();
+        if state.kernel.is_some() {
+            return false;
+        }
+        state.kernel = Some(data);
+        self.wake();
+        true
     }
 
     fn take(&self, arbiter: &mut Arbiter) -> Vec<u8> {
-        let mut state = self.shared.state.lock().unwrap();
         loop {
-            let now = Instant::now();
-            if let Some(record) = state.slots[Source::Kernel.index()].take() {
-                arbiter.hold_log(record, now);
+            let mut state = self.shared.state.lock().unwrap();
+            if let Some(mut pipes) = state.pipes.take() {
+                let owner = arbiter.owner.filter(|_| !arbiter.scanner.is_safe());
+                state.fill_screens(owner, |source| {
+                    pipes.read(source, self.shared.poll.as_raw_fd())
+                });
+                state.pipes = Some(pipes);
+                // The pipes may have closed, which drain() waits for.
                 self.shared.changed.notify_all();
+            }
+            let now = Instant::now();
+            if let Some(record) = state.kernel.take() {
+                arbiter.hold_log(record, now);
             }
             if let Some(data) = arbiter.take_ready(&mut state, now) {
-                self.shared.changed.notify_all();
+                state.writing = true;
                 return data;
             }
-            state = match arbiter.wait_duration(now) {
-                Some(duration) => self.shared.changed.wait_timeout(state, duration).unwrap().0,
-                None => self.shared.changed.wait(state).unwrap(),
-            };
+            let deadline = arbiter
+                .wait_duration(now)
+                .map(|duration| moto_rt::time::Instant::now() + duration);
+            drop(state);
+            let mut events = [moto_rt::poll::Event::default(); 3];
+            moto_rt::poll::wait(
+                self.shared.poll.as_raw_fd(),
+                events.as_mut_ptr(),
+                events.len(),
+                deadline,
+            )
+            .unwrap();
         }
     }
 }
 
+pub(crate) fn run_pipe_self_test() {
+    tests::closed_pipes_keep_their_tail();
+    println!("sys-tty pipe self-test PASS");
+}
+
+pub(crate) fn run_pipe_self_test_child() {
+    tests::child();
+}
+
 pub(crate) fn run_self_tests() {
+    tests::run();
     let output = Output::new();
 
-    assert!(output.try_send(Source::Kernel, b"kernel".to_vec()).is_ok());
-    assert!(output.try_send(Source::Stdout, b"stdout".to_vec()).is_ok());
-    assert!(output.try_send(Source::Stderr, b"stderr".to_vec()).is_ok());
-    assert_eq!(
-        output.try_send(Source::Stdout, b"blocked".to_vec()),
-        Err(b"blocked".to_vec())
-    );
+    assert!(output.try_send_kernel(b"kernel".to_vec()));
+    assert!(!output.try_send_kernel(b"dropped".to_vec()));
+    output.send(Source::Stdout, b"stdout".to_vec());
+    output.send(Source::Stderr, b"stderr".to_vec());
 
     let base = Instant::now();
     let mut arbiter = Arbiter::new();
     let mut state = output.shared.state.lock().unwrap();
-    arbiter.hold_log(state.slots[Source::Kernel.index()].take().unwrap(), base);
+    arbiter.hold_log(state.kernel.take().unwrap(), base);
     assert_eq!(
         arbiter.take_ready(&mut state, base),
         Some(b"kernel".to_vec())
@@ -350,14 +482,26 @@ pub(crate) fn run_self_tests() {
         Some(b"stderr".to_vec())
     );
 
-    state.slots[Source::Stdout.index()] = Some(b"\x1b[".to_vec());
+    // Already queued batches retain their order.
+    state.push_screen(Source::Stdout, b"echo".to_vec());
+    state.push_screen(Source::Stderr, b"error 1, ".to_vec());
+    state.push_screen(Source::Stderr, b"error 2".to_vec());
+    state.push_screen(Source::Stdout, b"prompt".to_vec());
+    for expected in [b"echo".as_slice(), b"error 1, ", b"error 2", b"prompt"] {
+        assert_eq!(
+            arbiter.take_ready(&mut state, base).as_deref(),
+            Some(expected)
+        );
+    }
+
+    state.push_screen(Source::Stdout, b"\x1b[".to_vec());
     assert_eq!(
         arbiter.take_ready(&mut state, base),
         Some(b"\x1b[".to_vec())
     );
-    state.slots[Source::Stderr.index()] = Some(b"other".to_vec());
+    state.push_screen(Source::Stderr, b"other".to_vec());
     assert_eq!(arbiter.take_ready(&mut state, base), None);
-    state.slots[Source::Stdout.index()] = Some(b"31m".to_vec());
+    state.push_screen(Source::Stdout, b"31m".to_vec());
     assert_eq!(
         arbiter.take_ready(&mut state, base + Duration::from_millis(99)),
         Some(b"31m".to_vec())
@@ -369,12 +513,12 @@ pub(crate) fn run_self_tests() {
 
     let mut arbiter = Arbiter::new();
     let mut state = State::new();
-    state.slots[Source::Stdout.index()] = Some(b"\x1b]".to_vec());
+    state.push_screen(Source::Stdout, b"\x1b]".to_vec());
     assert_eq!(
         arbiter.take_ready(&mut state, base),
         Some(b"\x1b]".to_vec())
     );
-    state.slots[Source::Stderr.index()] = Some(b"timeout".to_vec());
+    state.push_screen(Source::Stderr, b"timeout".to_vec());
     assert_eq!(arbiter.take_ready(&mut state, base), None);
     assert_eq!(
         arbiter.take_ready(&mut state, base + ANSI_GRACE + Duration::from_millis(1)),
@@ -383,11 +527,11 @@ pub(crate) fn run_self_tests() {
 
     let mut arbiter = Arbiter::new();
     let mut state = State::new();
-    state.slots[Source::Stdout.index()] = Some(vec![0xc3]);
+    state.push_screen(Source::Stdout, vec![0xc3]);
     assert_eq!(arbiter.take_ready(&mut state, base), Some(vec![0xc3]));
-    state.slots[Source::Stderr.index()] = Some(b"other".to_vec());
+    state.push_screen(Source::Stderr, b"other".to_vec());
     assert_eq!(arbiter.take_ready(&mut state, base), None);
-    state.slots[Source::Stdout.index()] = Some(vec![0xa9]);
+    state.push_screen(Source::Stdout, vec![0xa9]);
     assert_eq!(
         arbiter.take_ready(&mut state, base + Duration::from_millis(1)),
         Some(vec![0xa9])

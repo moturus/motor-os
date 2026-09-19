@@ -1159,6 +1159,9 @@ fn main() {
         wait_set::run_all_tests();
         return;
     }
+    if args.len() == 4 && args[1] == "stderr-burst" {
+        sys_tty::stderr_burst(args[2].parse().unwrap(), args[3].parse().unwrap());
+    }
     if args.len() == 2 && args[1] == "admission-class-tests" {
         admission::test_process_classes();
         return;

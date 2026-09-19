@@ -2,6 +2,9 @@ use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 
 const PREFIX: &str = "stdio-file-input-";
+/// How long a held `stdio-file-input-idle` awaits its release before it gives
+/// up. No passing run waits this long, so it is far above any spawn time.
+const IDLE_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn spawn_with_env(
     args: &[&str],
@@ -57,11 +60,8 @@ pub fn run_child(args: &[String]) -> ! {
         "stdio-file-input-nested-reader" => nested_reader(),
         "stdio-file-input-delayed-writer" => delayed_writer(args),
         "stdio-file-input-lifetime-parent" => lifetime_parent(args),
-        "stdio-file-input-long-grandchild-parent" => long_grandchild_parent(),
-        "stdio-file-input-idle" => {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            std::process::exit(0)
-        }
+        "stdio-file-input-long-grandchild-parent" => long_grandchild_parent(args),
+        "stdio-file-input-idle" => idle(args),
         "stdio-file-input-access-parent" => access_parent(),
         "stdio-file-input-null-parent" => null_parent(),
         "stdio-file-input-lifetime-suite" => {
@@ -277,9 +277,29 @@ fn lifetime_parent(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
-fn long_grandchild_parent() -> ! {
+/// Without arguments, sleeps past every caller's use of it. Given a release
+/// and an expiry path, holds its stdio until the release file appears, and
+/// leaves the expiry file if that takes longer than `IDLE_HOLD_LIMIT`.
+fn idle(args: &[String]) -> ! {
+    let Some([release, expired]) = args.get(2..4) else {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::process::exit(0)
+    };
+    let start = std::time::Instant::now();
+    while !std::path::Path::new(release).exists() {
+        if start.elapsed() >= IDLE_HOLD_LIMIT {
+            std::fs::write(expired, b"").unwrap();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_file(release);
+    std::process::exit(0)
+}
+
+fn long_grandchild_parent(args: &[String]) -> ! {
     spawn(
-        &["stdio-file-input-idle"],
+        &["stdio-file-input-idle", &args[2], &args[3]],
         moto_rt::process::STDIO_NULL,
         moto_rt::process::STDIO_INHERIT,
         moto_rt::process::STDIO_NULL,
@@ -429,16 +449,31 @@ fn lifetime_and_pipe_counter_tests() {
         moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
     )
     .unwrap();
-    let start = std::time::Instant::now();
+    let release = crate::temp_path("stdio-long-grandchild-release");
+    let expired = crate::temp_path("stdio-long-grandchild-expired");
+    let _ = std::fs::remove_file(&release);
+    let _ = std::fs::remove_file(&expired);
     let parent = spawn(
-        &["stdio-file-input-long-grandchild-parent"],
+        &[
+            "stdio-file-input-long-grandchild-parent",
+            release.to_str().unwrap(),
+            expired.to_str().unwrap(),
+        ],
         moto_rt::process::STDIO_NULL,
         output,
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
-    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    // Only the release below ends the grandchild, which still holds the
+    // inherited file output. A wait that held out for it returns after the
+    // grandchild gave up instead, and finds its expiry file. No elapsed-time
+    // bound does this: a debug build loads systest in about 0.3 s, twice here.
+    assert!(
+        !expired.exists(),
+        "wait held out for the grandchild's inherited file output"
+    );
+    std::fs::write(&release, b"").unwrap();
     moto_rt::fs::close(output).unwrap();
     std::fs::remove_file(&path).unwrap();
 
