@@ -74,6 +74,7 @@ test_vm_configure_ssh
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
+"$WD/test-build-base-vsock-backend.sh"
 "$WD/test-toolchain-assembly.sh"
 "$WD/test-toolchain-assembly-selection.sh"
 "$WD/test-toolchain-authoring-sources.sh"
@@ -98,6 +99,7 @@ test_vm_configure_ssh
 "$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
+"$WD/test-vm-vsock-backend.sh"
 "$WD/test-dev-memory-contract.sh"
 "$WD/test-rust-analyzer-size-contract.sh"
 "$WD/test-rustfmt-size-contract.sh"

@@ -90,7 +90,7 @@ done
 case "$VMM" in
   qemu)
     command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "required host tool is missing: qemu-system-x86_64"
-    resolve_vsock_backend "$ROOT_DIR" || fail "no usable vhost-device-vsock backend"
+    resolve_vsock_backend || fail "no usable vhost-device-vsock backend"
     ;;
   chv)
     command -v cloud-hypervisor-static >/dev/null 2>&1 ||

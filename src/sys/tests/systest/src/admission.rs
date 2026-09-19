@@ -291,43 +291,54 @@ fn test_lazy_fault_at_floor() {
         !status.success(),
         "the process survived lazy faults below the user floor"
     );
-    assert_floors_held();
-
-    // sys-io kept serving, and the pool is fully back.
+    // The pool is fully back, and sys-io kept serving. First, because the
+    // floor check allocates; its low-water marks are minima, so they keep.
     assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the aggressor died");
+    assert_floors_held();
     let addr = SysMem::alloc(PAGE_SIZE_SMALL, 16).unwrap();
     SysMem::free(addr).unwrap();
 
     println!("test_lazy_fault_at_floor PASS");
 }
 
-/// The post-storm recovery probe: sys-io answers an FS request and the pool
-/// returns to its pre-storm level. Both race the killed child's asynchronous
+/// The post-storm recovery probe: the pool returns to its pre-storm level and
+/// sys-io answers an FS request. Both race the killed child's asynchronous
 /// reclamation (the used_pages instant-read recurrence of 2026-08-09, the
 /// fs::metadata transient OutOfMemory of 2026-08-10), so both converge under
 /// one bound; a wedged sys-io or a real leak still fails here.
+///
+/// Until the pool is back this process cannot grow its heap, and a refused
+/// allocation aborts it (2026-09-18: the 2560-byte metric descriptor buffer
+/// of assert_floors_held). So callers allocate nothing between the child's
+/// death and this call, and the pool wait allocates nothing either:
+/// `used_pages` fills a stack struct. The FS probe, which allocates, follows.
 fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
-    let mut fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
+    const MAX_WAITS: u32 = 300;
+    let wait = || std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let mut waits = 0;
     let mut used_after = used_pages();
-    for _ in 0..300 {
-        if fs_probe.is_ok() && used_after <= used_before + tolerance {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        if fs_probe.is_err() {
-            fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
-        }
+    while used_after > used_before + tolerance && waits < MAX_WAITS {
+        wait();
+        waits += 1;
         used_after = used_pages();
+    }
+    assert!(
+        used_after <= used_before + tolerance,
+        "pool did not recover after {after_what}: {used_before} -> {used_after} pages used"
+    );
+
+    let mut fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
+    while fs_probe.is_err() && waits < MAX_WAITS {
+        wait();
+        waits += 1;
+        fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");
     }
     assert!(
         fs_probe
             .expect("sys-io stopped serving FS requests")
             .is_file(),
         "sys-io did not keep serving after {after_what}"
-    );
-    assert!(
-        used_after <= used_before + tolerance,
-        "pool did not recover after {after_what}: {used_before} -> {used_after} pages used"
     );
 }
 
@@ -383,10 +394,10 @@ fn test_all_cpu_fault_storm() {
         !status.success(),
         "the process survived an all-CPU fault storm below the user floor"
     );
-    assert_floors_held();
-
-    // sys-io kept serving, and the pool is fully back.
+    // The pool is fully back, and sys-io kept serving. First, because the
+    // floor check allocates; its low-water marks are minima, so they keep.
     assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the fault storm");
+    assert_floors_held();
     assert_reservations_drain();
 
     // The deepest points reached so far in this run. The overlap -- how far

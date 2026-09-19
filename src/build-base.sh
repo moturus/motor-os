@@ -13,6 +13,7 @@
 #   1. install host build packages via apt          [skipped if already present]
 #   2. install rustup without selecting a default    [skipped if already present]
 #   3. create the moto-tap interface + /dev/kvm access [skipped if already done]
+#   4. install the vhost-device-vsock test backend   [skipped if already present]
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
 #
@@ -43,6 +44,8 @@ else
 	MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
 fi
 export MOTORH
+# The vsock harnesses own the backend's pinned version and their lookup of it.
+. "$SCRIPT_DIR/tests/vm-vsock-backend.sh"
 
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run
 # the VM and qemu-utils so the complete build can create qcow2 images (this
@@ -180,11 +183,34 @@ setup_host_vm_prereqs() {
 	fi
 }
 
+# --- 4. the backend that the QEMU vsock tests need --------------------------
+# Tests stay off the network and only check for the backend, so it is installed
+# here. Subshells keep the lookup's VHOST_DEVICE_VSOCK out of this script.
+install_vsock_backend() {
+	if (resolve_vsock_backend) >/dev/null 2>&1; then
+		skip "vhost-device-vsock $VSOCK_BACKEND_VERSION already installed"
+		return
+	fi
+	# rustup resolves cargo to the checkout's Motor toolchain, which the first
+	# build on a new host produces only after this provisioning step.
+	if ! (cd "$MOTOR" && cargo --version) >/dev/null 2>&1; then
+		warn "no Motor toolchain yet, so the vsock test backend was not installed."
+		warn "After this build, run: ${VSOCK_BACKEND_INSTALL[*]}"
+		return
+	fi
+	log "installing vhost-device-vsock $VSOCK_BACKEND_VERSION"
+	(cd "$MOTOR" && "${VSOCK_BACKEND_INSTALL[@]}") ||
+		die "cargo could not install vhost-device-vsock $VSOCK_BACKEND_VERSION"
+	(resolve_vsock_backend) ||
+		die "vhost-device-vsock is still unusable after its installation"
+}
+
 main() {
 	log "Motor OS host provisioning starting; MOTORH = $MOTORH"
 	install_packages
 	install_rust
 	setup_host_vm_prereqs
+	install_vsock_backend
 	log "host provisioning complete"
 }
 
