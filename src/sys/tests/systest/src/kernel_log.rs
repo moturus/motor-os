@@ -19,7 +19,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn wait_for_file_records(records: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn wait_for_file_records(records: &[&[u8]]) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let mut log = std::fs::read(KERNEL_LOG_PREVIOUS_PATH).unwrap_or_default();

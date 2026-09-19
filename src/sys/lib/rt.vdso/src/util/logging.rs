@@ -79,6 +79,16 @@ impl DiagnosticGuard {
             }
         }
     }
+
+    fn write(&self, msg: &str) -> DiagnosticRoute {
+        let written = crate::stdio::stderr_pipe()
+            .ok_or(moto_rt::E_BAD_HANDLE)
+            .and_then(|pipe| pipe.write(msg.as_bytes()));
+        match written {
+            Ok(size) if size == msg.len() => DiagnosticRoute::Stderr,
+            _ => kernel_fallback(msg),
+        }
+    }
 }
 
 impl Drop for DiagnosticGuard {
@@ -99,16 +109,10 @@ fn kernel_fallback(msg: &str) -> DiagnosticRoute {
 }
 
 fn route_diagnostic(msg: &str) -> DiagnosticRoute {
-    let Ok(_guard) = DiagnosticGuard::enter() else {
+    let Ok(guard) = DiagnosticGuard::enter() else {
         return kernel_fallback(msg);
     };
-    let written = crate::stdio::stderr_pipe()
-        .ok_or(moto_rt::E_BAD_HANDLE)
-        .and_then(|pipe| pipe.write(msg.as_bytes()));
-    match written {
-        Ok(size) if size == msg.len() => DiagnosticRoute::Stderr,
-        _ => kernel_fallback(msg),
-    }
+    guard.write(msg)
 }
 
 pub(crate) fn log_diagnostic(msg: &str) {
@@ -138,16 +142,154 @@ pub(crate) fn internal_test(mode: u64) -> u64 {
                 .unwrap()
                 .as_str(),
         ),
+        4 => panic!("rt.vdso panic test marker"),
+        5 => panic!("{}", PanicsWhenShown),
+        6 => panic!("multibyte panic test marker {}", "é🦀".repeat(128)),
+        // A first panic on a thread that owns the diagnostic sink.
+        7 => {
+            let Ok(_guard) = DiagnosticGuard::enter() else {
+                return DiagnosticRoute::Dropped as u64;
+            };
+            panic!("rt.vdso guarded panic test marker")
+        }
+        // A backtrace to a descriptor from a thread that owns the sink.
+        8 => {
+            let Ok(_guard) = DiagnosticGuard::enter() else {
+                return DiagnosticRoute::Dropped as u64;
+            };
+            log_backtrace(moto_rt::FD_STDERR);
+            return 0;
+        }
         _ => return 0,
     };
     route as u64
+}
+
+/// A panic message that panics whenever the handler formats it, with a
+/// message that does the same: a report of it can never complete.
+struct PanicsWhenShown;
+
+impl core::fmt::Display for PanicsWhenShown {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        panic!("{}", PanicsWhenShown)
+    }
+}
+
+/// A small `fmt::Write` buffer in front of a diagnostic sink, for reports that
+/// must not allocate: a panic may be an allocation failure. It is flushed
+/// whenever it fills, so a report of any length costs the same small piece of
+/// stack. That matters as much as the heap: at the memory floor a fault on a
+/// fresh stack page kills the thread, and with it the report.
+struct SinkWriter {
+    sink: Sink,
+    buf: [u8; 256],
+    len: usize,
+}
+
+/// Where a [`SinkWriter`] sends its chunks.
+enum Sink {
+    /// The process diagnostic sink, owned across formatting and every chunk.
+    Diagnostic(DiagnosticGuard),
+    /// This thread already owns the diagnostic sink. The write it interrupted
+    /// may own the pipe, so only the kernel fallback is safe.
+    Reentered,
+    /// A descriptor the caller chose. It takes no part in the ownership of
+    /// the diagnostic sink: a write to it neither waits for the owner nor is
+    /// diverted because this thread is the owner.
+    Fd(moto_rt::RtFd),
+}
+
+impl SinkWriter {
+    /// As for [`log_backtrace`]: a negative `rt_fd` selects the diagnostic sink.
+    fn new(rt_fd: moto_rt::RtFd) -> Self {
+        let sink = if rt_fd >= 0 {
+            Sink::Fd(rt_fd)
+        } else {
+            match DiagnosticGuard::enter() {
+                Ok(guard) => Sink::Diagnostic(guard),
+                Err(()) => Sink::Reentered,
+            }
+        };
+        Self {
+            sink,
+            buf: [0; 256],
+            len: 0,
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        // Safety: write_str() copies only whole characters of valid strings.
+        let text = unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) };
+        match &self.sink {
+            Sink::Diagnostic(guard) => {
+                guard.write(text);
+            }
+            Sink::Reentered => {
+                kernel_fallback(text);
+            }
+            Sink::Fd(rt_fd) => {
+                let _ = crate::posix::posix_write(*rt_fd, text.as_ptr(), text.len());
+            }
+        }
+        self.len = 0;
+    }
+}
+
+impl core::fmt::Write for SinkWriter {
+    fn write_str(&mut self, mut s: &str) -> core::fmt::Result {
+        while !s.is_empty() {
+            let mut n = s.len().min(self.buf.len() - self.len);
+            while !s.is_char_boundary(n) {
+                n -= 1;
+            }
+            if n == 0 {
+                self.flush(); // No character is wider than the empty buffer.
+                continue;
+            }
+            self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.len += n;
+            s = &s[n..];
+        }
+        Ok(())
+    }
 }
 
 // This panic handler is active only for code running here in VDSO.
 #[cfg(not(test))]
 #[panic_handler]
 fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    moto_rt::error::log_panic(info);
+    use core::fmt::Write;
+
+    let mut out = SinkWriter::new(-1);
+    if let Sink::Reentered = out.sink {
+        // This thread panicked inside its own diagnostic write, or inside the
+        // report of an earlier panic. Formatting the message may be what
+        // panicked, and doing it again could go on until the stack is gone.
+        // So say only what needs no code but core's: where, and the message
+        // if it is a literal.
+        let _ = out.write_str("PANIC: panicked while reporting a diagnostic");
+        if let Some(location) = info.location() {
+            let _ = write!(out, " at {location}");
+        }
+        if let Some(message) = info.message().as_str() {
+            let _ = write!(out, ": {message}");
+        }
+        let _ = out.write_str("\n");
+        out.flush();
+        moto_sys::SysCpu::exit_process(0xbadc0de);
+    }
+
+    // Publish a marker before arbitrary Display code can panic. Keep the
+    // whole report on the stack: the original panic may be an allocation failure.
+    let _ = out.write_str("PANIC\n");
+    out.flush();
+    let _ = writeln!(out, "{info}");
+    out.flush();
+    write_backtrace(&mut out);
+    out.flush();
 
     // Sleep a bit to let the panic output propagate.
     #[cfg(debug_assertions)]
@@ -204,11 +346,20 @@ fn get_backtrace() -> [u64; BT_DEPTH] {
 /// A negative descriptor selects the process diagnostic sink: stderr first,
 /// with a kernel-log fallback only when stderr fails and the process holds
 /// `CAP_LOG`.
+///
+/// Does not allocate: panic reports end here, and the panic may be an
+/// allocation failure.
 pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
+    let mut writer = SinkWriter::new(rt_fd);
+    write_backtrace(&mut writer);
+    writer.flush();
+}
+
+fn write_backtrace(writer: &mut SinkWriter) {
     use core::fmt::Write;
-    let mut writer = alloc::string::String::with_capacity(256);
+
     let backtrace = get_backtrace();
-    write!(&mut writer, "backtrace: {}", unsafe {
+    write!(writer, "backtrace: {}", unsafe {
         crate::rt_process::ProcessData::binary()
     })
     .ok();
@@ -221,29 +372,17 @@ pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
         if addr >= moto_rt::RT_VDSO_START {
             if !in_vdso {
                 in_vdso = true;
-                write!(&mut writer, " \\\n  -- rt.vdso");
+                write!(writer, " \\\n  -- rt.vdso");
             }
-            write!(
-                &mut writer,
-                " \\\n    0x{:x}",
-                addr - moto_rt::RT_VDSO_START
-            )
-            .ok();
+            write!(writer, " \\\n    0x{:x}", addr - moto_rt::RT_VDSO_START).ok();
         } else {
             if in_vdso {
                 in_vdso = false;
-                write!(&mut writer, " \\\n  ^^^");
+                write!(writer, " \\\n  ^^^");
             }
-            write!(&mut writer, " \\\n  0x{addr:x}").ok();
+            write!(writer, " \\\n  0x{addr:x}").ok();
         }
     }
 
-    let _ = write!(&mut writer, "\n\n");
-
-    let msg = writer.as_str();
-    if rt_fd < 0 {
-        log_diagnostic(msg);
-    } else {
-        let _ = crate::posix::posix_write(rt_fd, msg.as_ptr(), msg.len());
-    }
+    let _ = write!(writer, "\n\n");
 }

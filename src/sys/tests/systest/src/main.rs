@@ -1533,6 +1533,7 @@ fn main() {
     sysbox_wc::run_test();
     sysbox_which::run_test();
     test_oom();
+    diagnostics::test_vdso_panic_at_floor();
     admission::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
