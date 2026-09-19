@@ -54,6 +54,16 @@ fn run() -> Result<(), String> {
         .parent()
         .and_then(|path| path.parent())
         .ok_or_else(|| "fixture executable has no work root".to_owned())?;
+    if post
+        && body
+            .windows(b"command=fetch".len())
+            .any(|window| window == b"command=fetch")
+        && !body
+            .windows(b"deepen 1".len())
+            .any(|window| window == b"deepen 1")
+    {
+        return Err("Git upload-pack fetch is not depth one".to_owned());
+    }
     let mut command = Command::new("/usr/bin/git");
     command
         .arg("http-backend")
@@ -129,8 +139,6 @@ fn run() -> Result<(), String> {
 fn header<'a>(headers: &'a [&str], name: &str) -> Option<&'a str> {
     headers.iter().find_map(|header| {
         let (candidate, value) = header.split_once(':')?;
-        candidate
-            .eq_ignore_ascii_case(name)
-            .then_some(value.trim())
+        candidate.eq_ignore_ascii_case(name).then_some(value.trim())
     })
 }

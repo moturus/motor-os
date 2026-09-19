@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -346,7 +347,8 @@ fn materialize_one(
     )
     .map_err(gix_error)?
     .with_revision(Some(locked.commit.clone()))
-    .map_err(gix_error)?;
+    .map_err(gix_error)?
+    .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(NonZeroU32::MIN));
     let max_response_bytes = policy.max_transaction_bytes;
     prepare = prepare.with_transport_factory(move |url, protocol| {
         let id = counter.fetch_add(1, Ordering::Relaxed);
