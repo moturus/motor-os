@@ -433,6 +433,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="rust.html">Rust on Motor OS</a></li>
     <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
     <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="gix.html">gix: the Git client</a></li>
     <li><a href="hello.html">Hello, world</a></li>
     <li><a href="profiling.html">Profiling</a></li>
   </ul>
@@ -488,7 +489,7 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
   <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
   <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
   <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
-  <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: Git for SHA-1 worktrees, with <code>init</code>, anonymous HTTPS and SSH <code>clone</code>/<code>fetch</code>, explicit single-ref SSH <code>push</code>, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, branch/tag management, <code>switch</code>, <code>merge</code>/<code>merge --abort</code>, and explicit <code>recover</code>. See <a href="devtools.html#gix">Git with gix</a> for command syntax, configuration and recovery limits.</td></tr>
+  <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
   <tr><td>lua</td><td><code>/devtools/bin</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
 </table>
 </div>

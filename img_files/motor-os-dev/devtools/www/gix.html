@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="gix, the Git client on the Motor OS developer image: cloning, branches, commits, merging, pushing over SSH, configuration, recovery after an interrupted operation, and limits.">
+<meta name="theme-color" content="#0a0a0a">
+<title>gix: the Git client | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="gix.html" class="current">gix: the Git client</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Developing</div>
+<h1>gix: the Git client</h1>
+<p class="lead">The developer image comes with <code>gix</code>, a small Git client, at
+<code>/devtools/bin/gix</code>. It works with normal Git repositories: a worktree with a
+<code>.git</code> directory, full history and SHA-1 object names. Gix reads and writes the
+same files as Git does, so you can copy a repository between Motor OS and a machine that
+has Git and keep working on either side. Just let gix finish what it is doing before you
+copy.</p>
+<p>Gix has fewer commands than Git, and some of them are stricter than Git's. The program
+is always called <code>gix</code>; there is no <code>git</code> alias.</p>
+
+<h2 id="start">Getting started</h2>
+<p>Gix has to know who you are before it can write a commit. Put your name and email into
+<code>~/.gitconfig</code>, or into the repository's <code>.git/config</code>:</p>
+<pre><code>[user]
+    name = Your Name
+    email = you@example.test</code></pre>
+<p>A first session looks like this: clone a repository, start a branch, change some files,
+and commit them.</p>
+<pre><code>gix clone https://example.test/project.git
+gix -r project checkout -b topic
+# Edit files in project, then:
+gix -r project status
+gix -r project add -A
+gix -r project diff --staged
+gix -r project commit -m 'Describe the change'</code></pre>
+<p><code>gix clone</code> makes a new directory named after the repository, as Git does, so
+the clone above ends up in <code>project</code>. You can give another name after the URL.
+The directory must not exist yet. The remote is recorded as <code>origin</code>.</p>
+<p>To start a repository of your own, run <code>gix init DIR</code>. The files already in
+DIR are left alone. The first branch is called <code>main</code>, or whatever
+<code>init.defaultBranch</code> says. Gix will not initialize a directory that is already
+a repository.</p>
+<p>Gix works on the repository in the current directory, which has to be the top directory
+of the worktree: gix does not search the parent directories. Use <code>-r PATH</code> to
+work on a repository somewhere else. File names you pass to a command are taken literally
+(no wildcards) and are relative to that top directory. Put <code>--</code> in front of a
+name that starts with a dash. <code>gix COMMAND --help</code> shows the exact syntax of a
+command.</p>
+
+<h2 id="commands">Commands</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td><code>init [DIR]</code></td><td>Create a new repository.</td></tr>
+  <tr><td><code>clone URL [DIR]</code></td><td>Clone over HTTPS or SSH. DIR defaults to the repository name.</td></tr>
+  <tr><td><code>fetch [REMOTE]</code></td><td>Download new commits and tags from a remote, <code>origin</code> by default. Your current branch and your files do not change.</td></tr>
+  <tr><td><code>status</code></td><td>Show what has changed, and whether a merge or another operation is unfinished.</td></tr>
+  <tr><td><code>log</code></td><td>Show the history of the current branch.</td></tr>
+  <tr><td><code>diff [--staged] [PATH…]</code></td><td>Show your unstaged changes, or with <code>--staged</code> what the next commit will contain. Binary files and mode changes are summarized.</td></tr>
+  <tr><td><code>add PATH…</code>, <code>add -A</code></td><td>Stage the named files, or with <code>-A</code> every new, changed and deleted file. <code>-A</code> skips new files that match an ignore rule; naming such a file yourself is an error.</td></tr>
+  <tr><td><code>unstage PATH…</code></td><td>Take files out of the next commit without touching the files themselves.</td></tr>
+  <tr><td><code>restore PATH…</code></td><td>Throw away your unstaged changes to the named files.</td></tr>
+  <tr><td><code>commit -m MSG</code></td><td>Commit what is staged to the current branch.</td></tr>
+  <tr><td><code>branch [-a] [-v]</code></td><td>List branches.</td></tr>
+  <tr><td><code>branch list</code>, <code>branch create NAME [REV]</code></td><td>Print the branch names only, or create a branch without switching to it.</td></tr>
+  <tr><td><code>tag list</code>, <code>tag create NAME [REV]</code></td><td>List tags, or create a lightweight tag.</td></tr>
+  <tr><td><code>remote [-v]</code></td><td>List the remotes.</td></tr>
+  <tr><td><code>switch BRANCH</code>, <code>checkout BRANCH</code></td><td>Move to another local branch.</td></tr>
+  <tr><td><code>checkout [--track] -b NEW [START]</code></td><td>Create a branch and move to it.</td></tr>
+  <tr><td><code>merge REV</code>, <code>merge --abort</code></td><td>Merge a commit into the current branch, or give up on a merge.</td></tr>
+  <tr><td><code>recover</code></td><td>Finish or undo an operation that was interrupted.</td></tr>
+  <tr><td><code>push [OPTIONS] REMOTE SOURCE:DESTINATION</code></td><td>Publish one branch or tag over SSH.</td></tr>
+</table>
+</div>
+<p>A few things work differently from Git:</p>
+<ul>
+  <li>There is no <code>pull</code>. Run <code>fetch</code>, then
+  <code>merge origin/BRANCH</code>.</li>
+  <li>To stage a deleted file, delete it in the shell and then run <code>add</code> on its
+  name.</li>
+  <li><code>commit</code> refuses to make an empty commit, except to conclude a merge, and
+  refuses while a merge still has unresolved conflicts.</li>
+  <li><code>unstage</code> on a branch that has no commits yet simply removes the files
+  from the index.</li>
+  <li><code>restore</code> will not touch a file that is in conflict.</li>
+  <li>Gix cannot edit configuration for you. Edit the configuration files, or pass
+  <code>-c key=value</code> as many times as you need. The only thing gix writes to
+  <code>.git/config</code> itself is the upstream of a branch made with
+  <code>checkout -b</code>, and it leaves the rest of the file as it found it.</li>
+</ul>
+
+<h3 id="branches">Branches</h3>
+<p><code>gix branch</code> prints the same list as <code>git branch</code>, with a
+<code>*</code> in front of the current branch. With <code>-a</code> it also lists the remote
+branches, such as <code>remotes/origin/main</code>. With <code>-v</code> every line also
+shows the short commit ID, the first line of the commit message, and how the branch
+compares with its upstream: <code>[ahead 2]</code>, <code>[behind 1]</code>,
+<code>[ahead 2, behind 1]</code>, or <code>[gone]</code> if the upstream branch no longer
+exists. <code>gix remote</code> prints the remote names, and <code>gix remote -v</code>
+adds the URLs used for fetching and pushing, as <code>git remote -v</code> does.</p>
+<p><code>branch create</code> and <code>tag create</code> take a name and an optional
+commit, which defaults to HEAD. They never replace a branch or tag that already exists.</p>
+<p><code>switch BRANCH</code> and <code>checkout BRANCH</code> do the same thing: they move
+you to a local branch that already exists. Both need a clean repository, meaning nothing
+staged and no changes to tracked files. <code>checkout</code> also prints what Git prints,
+for example <code>Your branch is behind 'origin/main' by 1 commit, and can be
+fast-forwarded.</code></p>
+<p><code>checkout -b NEW [START]</code> creates the branch NEW and moves you to it. START
+is where the branch begins; it defaults to HEAD.</p>
+<ul>
+  <li>If START is a remote branch such as <code>origin/main</code>, it becomes the upstream
+  of the new branch, and gix says so.</li>
+  <li>With <code>--track</code>, START may also be a local branch. <code>--track</code>
+  without START makes the current branch the upstream.</li>
+  <li>If the new branch begins at the commit you are already on, your staged and unstaged
+  changes come along, as in Git. This is the usual way to start a topic after you have
+  already begun editing.</li>
+  <li>If it begins anywhere else, the repository has to be clean first. When gix refuses,
+  it does not create the branch either.</li>
+</ul>
+
+<h2 id="configuration">Configuration</h2>
+<p>Gix reads Git's configuration files in this order: the XDG Git configuration,
+<code>~/.gitconfig</code> and the files it includes, the repository's
+<code>.git/config</code>, and finally the <code>-c key=value</code> options on the command
+line. Run a command with <code>--config-paths</code> to see which files were read.
+<code>HOME</code> and <code>XDG_CONFIG_HOME</code> say where your own configuration
+lives.</p>
+<p>Some settings are fixed and no configuration can change them: the ones that concern the
+Motor OS filesystem, and the size limits listed below. Gix does not accept the
+<code>GIT_DIR</code>, <code>GIT_WORK_TREE</code> and <code>GIT_INDEX_FILE</code> environment
+variables; use <code>-r</code> instead.</p>
+<p>Gix never runs other programs on a repository's behalf. Hooks, credential helpers,
+external filters, diff and merge drivers and signing programs are all ignored. If a
+repository cannot be handled without one of them, for example a file that needs an external
+filter, the command stops with an error instead of guessing. The only programs gix starts
+are <code>/system/bin/curl</code> for HTTPS and <code>/user/bin/ssh</code> for SSH, and
+their paths cannot be configured.</p>
+
+<h2 id="remotes">Remotes</h2>
+<h3>HTTPS</h3>
+<p>You can clone and fetch over HTTPS without logging in. The server's certificate is
+always checked against the system's trusted certificates. If your server uses a private
+certificate authority, name it on the command line:</p>
+<pre><code>gix -c http.sslCAInfo=/path/to/ca.pem clone https://git.example.test/project.git</code></pre>
+<p>A repository's own configuration cannot replace the trusted certificates or turn the
+check off. HTTPS with a login, pushing over HTTPS, plain HTTP, and cloning from a local
+path do not work.</p>
+
+<h3>SSH</h3>
+<p>SSH addresses can be written as <code>ssh://git@host/path</code> or as
+<code>git@host:path</code>. Before you use one, set up your key in
+<code>/user/cfg/ssh/id_ed25519</code> and the server's key in
+<code>/user/cfg/ssh/known_hosts</code> with the SSH tools. Gix never asks questions: if the
+key is missing or the host is unknown, the command fails.</p>
+
+<h3 id="push">Pushing</h3>
+<p>Push goes over SSH only. You name the remote, by its configured name or by its SSH URL,
+and exactly one source and destination. If the remote has a <code>pushurl</code>, gix uses
+it. For example, to publish a branch from the HTTPS clone above:</p>
+<pre><code>gix -r project push --dry-run git@example.test:project.git HEAD:refs/heads/topic
+gix -r project push git@example.test:project.git HEAD:refs/heads/topic</code></pre>
+<p><code>--dry-run</code> contacts the server and checks that the push would be allowed,
+but changes nothing.</p>
+<p>The source is a local branch or tag, <code>HEAD</code>, or a full 40-character object
+ID. The destination is a full name under <code>refs/heads/</code> or
+<code>refs/tags/</code>, and a branch has to point to a commit.</p>
+<p>Gix will create a new branch or tag, and it will fast-forward a branch. Anything else,
+such as rewriting a branch or replacing a tag, needs
+<code>--force-with-lease=DESTINATION:OID</code>, where OID is the commit the remote branch
+has right now. This protects you from overwriting work you have not seen. An empty OID
+means "only if the destination does not exist yet". A lease is checked even when there is
+nothing to push. If gix cannot tell whether your push is a fast-forward because it does not
+have the remote's commit, fetch first, or give a lease.</p>
+<p>Push has no default destination, cannot push several branches at once, cannot delete,
+and has no plain <code>--force</code>. It does not update your <code>origin/…</code>
+branches either; run <code>fetch</code> afterwards.</p>
+<p>Gix never repeats a network operation on its own. If a push ends with an unknown
+result, look at the branch on the server before you push again. If the server accepted the
+push, gix says so even when something goes wrong afterwards, for instance while cleaning
+up.</p>
+
+<h2 id="merging">Merging</h2>
+<p>Like <code>switch</code>, <code>merge</code> needs a clean repository: nothing staged
+and no changes to tracked files. Both also stop if an untracked or ignored file is in the
+way of a file they have to write.</p>
+<p>If REV is already part of your branch, there is nothing to do. Otherwise
+<code>merge REV</code> fast-forwards when it can. If both sides have new commits and they
+do not collide, gix creates a merge commit with two parents. Gix refuses to merge histories
+that have nothing in common.</p>
+<p>If the two sides changed the same lines of a text file, gix writes conflict markers into
+the file and marks it as conflicted. Fix the file, run <code>add</code> on it, and then
+<code>commit -m MSG</code>. Or run <code>merge --abort</code> to give up. Any other kind of
+conflict, for example one side deleting a file that the other changed, makes gix refuse the
+merge before it touches your files.</p>
+<p><code>merge --abort</code> discards the merge, everything staged, and the changes to the
+files the merge touched. It keeps your unstaged changes to other files, and it keeps
+untracked and ignored files. <code>restore</code> and <code>unstage</code> do not work
+while a merge is in progress.</p>
+
+<h2 id="recover">When something goes wrong</h2>
+<p>If a switch, a merge or an abort is interrupted, by an error or by Ctrl+C, the
+repository is left half-way. <code>gix status</code> tells you so but does not fix it, and
+gix refuses to change the repository any further. Fix whatever caused the problem (a full
+disk, for instance), then run <code>gix recover</code>.</p>
+<p><code>recover</code> normally puts the repository back the way it was before the
+interrupted command. If the command had already moved the branch, <code>recover</code>
+keeps that result and only finishes the cleanup. If a merge commit was not written,
+<code>recover</code> keeps your staged conflict resolutions, so you can still commit the
+merge or abort it. When it has to put files back, it discards the same things as
+<code>merge --abort</code>. If <code>recover</code> itself fails, it keeps its record of
+the interrupted command, so you can run it again. A merge that is waiting for you to
+resolve conflicts is not a job for <code>recover</code>; commit it or abort it.</p>
+<p>A few more things to know:</p>
+<ul>
+  <li><code>recover</code> does not remove Git lock files (<code>*.lock</code>) left behind
+  by a program that crashed. Remove one by hand, and only when you are sure nothing is still
+  writing to the repository.</li>
+  <li>The file <code>.git/gix-operation-lock</code> is always there. It is normal; leave
+  it.</li>
+  <li>Do not edit files while gix is switching or merging, and do not use Git on the
+  repository until gix has finished or recovered.</li>
+  <li>Gix does not promise that a repository survives a power loss in the middle of an
+  operation.</li>
+  <li>A clone that fails keeps its directory, marked with
+  <code>.git/gix-incomplete-clone</code>, so that you can look at it. Remove the directory
+  yourself before you clone again.</li>
+  <li>An interrupted <code>restore</code> can leave some of the named files changed or
+  missing. Fix the cause and run the same <code>restore</code> again.</li>
+  <li>Ctrl+C makes gix exit with status 130. When gix reports an error, do not assume that
+  nothing was changed; check with <code>gix status</code>.</li>
+</ul>
+
+<h2 id="not">What gix does not do</h2>
+<ul>
+  <li>Bare repositories and linked worktrees are not supported. Gix will not commit to,
+  merge in or push from a shallow, partial or sparse repository.</li>
+  <li>There is no rebase, stash, cherry-pick or amend, no annotated tags, no signing and no
+  LFS.</li>
+  <li>File names have to be valid UTF-8 and valid Motor OS file names. Names and characters
+  that Windows reserves are rejected as well.</li>
+  <li>Motor OS has no symbolic links. A symbolic link in a repository is checked out as a
+  small regular file that contains the link's target, and it is still committed as a
+  symbolic link.</li>
+  <li>Executable files stay writable.</li>
+  <li>Submodule entries are kept as they are, but gix does not operate on submodules and
+  refuses a switch or merge that would change one.</li>
+  <li>Text diffs use the Myers or Histogram algorithm. The <code>minimal</code> setting is
+  not supported.</li>
+  <li>Gix sends whole objects when it pushes, without Git's delta compression, so the first
+  push of a repository can be larger than Git's.</li>
+  <li>Gix never repacks or garbage-collects a repository, so loose objects pile up over
+  time.</li>
+</ul>
+
+<h2 id="limits">Limits</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>What</th><th>Limit</th></tr>
+  <tr><td>Index file</td><td>16 MiB</td></tr>
+  <tr><td>Text diff</td><td>262,144 lines on each side</td></tr>
+  <tr><td>A loose reference file</td><td>8 MiB</td></tr>
+  <tr><td>One HTTPS response, all the data of one SSH session, or one outgoing push pack</td><td>128 MiB each</td></tr>
+  <tr><td>SSH session</td><td>8 MiB for the list of references, 64 KiB of error output, 30 seconds to connect, 300 seconds in total</td></tr>
+  <tr><td>One push</td><td>65,536 objects, 65,536 commits, 131,072 parent links, and 65,536 changes between any two trees</td></tr>
+</table>
+</div>
+<p>As in Git, there is no limit on the size of a single file or object. Gix holds each one
+in memory in full while it receives, checks out, stages, diffs or pushes it. What limits
+the size of a repository are the totals: a pack file can be at most 128 MiB and hold 65,536
+objects, indexing a received pack can use 512 MiB of buffers in all, and the files of one
+commit can add up to 128 MiB.</p>
+<p>The program's source is under <code>src/bin/gix/</code> in the repository.</p>
+<nav class="pager">
+<a class="pager-prev" href="lorry.html"><span>Previous</span>Lorry: the package manager</a>
+<a class="pager-next" href="hello.html"><span>Next</span>Hello, world</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>
