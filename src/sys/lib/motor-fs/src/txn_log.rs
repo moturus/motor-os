@@ -44,7 +44,6 @@ use tokio::time::Instant;
 struct TxnBatch {
     block_map: HashMap<u64, CheckpointedBlock>,
     txn_id: u64,
-    started: Instant,
 }
 
 impl TxnBatch {
@@ -52,7 +51,6 @@ impl TxnBatch {
         Self {
             block_map: HashMap::new(),
             txn_id,
-            started: Instant::now(),
         }
     }
 
@@ -60,13 +58,10 @@ impl TxnBatch {
         let mut taken = HashMap::new();
         core::mem::swap(&mut taken, &mut self.block_map);
         self.txn_id += 1;
-        let started = self.started;
-        self.started = Instant::now();
 
         Self {
             block_map: taken,
             txn_id: self.txn_id - 1,
-            started,
         }
     }
 }
@@ -78,9 +73,9 @@ type TxnBatchHolder = Rc<RefCell<TxnBatch>>;
 /// The whole borrow lives inside this synchronous helper, so callers never
 /// hold the `RefCell` across an `.await`. That invariant is load-bearing:
 /// sys-io is single-threaded but cooperatively concurrent, and the holder is
-/// shared with the committer task and any pending timeout flushers. A borrow
-/// held across an await would double-borrow-panic (and crash sys-io) the
-/// moment one of those tasks is polled in that window.
+/// shared between the writer and the committer task. A borrow held across an
+/// await would double-borrow-panic (and crash sys-io) the moment the other
+/// one is polled in that window.
 fn take_pending_batch(holder: &TxnBatchHolder) -> Option<TxnBatch> {
     let mut lock = holder.borrow_mut();
     if lock.block_map.is_empty() {
@@ -91,7 +86,7 @@ fn take_pending_batch(holder: &TxnBatchHolder) -> Option<TxnBatch> {
 }
 
 /// Like [`take_pending_batch`], but only when the in-flight batch is still the
-/// one identified by `txn_id`. Used by the timeout flusher, which must not
+/// one identified by `txn_id`. Used for timeout flushes, which must not
 /// renew a batch that another path (a full-log flush or an explicit flush) has
 /// already committed.
 fn take_pending_batch_if_current(holder: &TxnBatchHolder, txn_id: u64) -> Option<TxnBatch> {
@@ -105,6 +100,11 @@ fn take_pending_batch_if_current(holder: &TxnBatchHolder, txn_id: u64) -> Option
 
 enum CommitterMessage {
     TxnBatch(TxnBatch),
+
+    /// The flush timer of batch `txn_id` fired. The committer, not the timer,
+    /// takes the batch: a batch taken elsewhere could queue behind a `Flush`,
+    /// which would then complete without it.
+    Timeout(u64),
 
     #[cfg(target_os = "motor")]
     Flush(moto_async::oneshot::Sender<Result<()>>),
@@ -169,12 +169,9 @@ impl TxnLogger {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
     }
 
-    fn spawn_timeout_flusher(txn_batch_holder: TxnBatchHolder, sender: TxnBatchSender) {
-        let holder_lock = txn_batch_holder.borrow();
-
-        let timeout = holder_lock.started + std::time::Duration::from_millis(MAX_FLUSH_DELAY_MS);
-        let txn_id = holder_lock.txn_id;
-        drop(holder_lock);
+    /// Called when the first txn is appended to the (empty) batch `txn_id`.
+    fn spawn_timeout_flusher(txn_id: u64, sender: TxnBatchSender) {
+        let timeout = Instant::now() + std::time::Duration::from_millis(MAX_FLUSH_DELAY_MS);
 
         let timeout_task = async move {
             #[cfg(target_os = "motor")]
@@ -183,12 +180,7 @@ impl TxnLogger {
             #[cfg(not(target_os = "motor"))]
             tokio::time::sleep_until(timeout).await;
 
-            // Note: the borrow is confined to `take_pending_batch_if_current`;
-            // it must not be held across the `send().await` below.
-            if let Some(txn_batch) = take_pending_batch_if_current(&txn_batch_holder, txn_id) {
-                log::trace!("committing batch {txn_id} on timeout");
-                let _ = sender.send(CommitterMessage::TxnBatch(txn_batch)).await;
-            }
+            let _ = sender.send(CommitterMessage::Timeout(txn_id)).await;
         };
 
         #[cfg(target_os = "motor")]
@@ -230,11 +222,30 @@ impl TxnLogger {
                             }
                         }
 
+                        CommitterMessage::Timeout(txn_id) => {
+                            if let Some(txn_batch) =
+                                take_pending_batch_if_current(&txn_batch_holder, txn_id)
+                            {
+                                log::trace!("committing batch {txn_id} on timeout");
+                                if let Err(err) = Self::commit_txn_batch(
+                                    txn_batch,
+                                    block_cache_stub.clone(),
+                                    #[cfg(test)]
+                                    error_pct,
+                                )
+                                .await
+                                {
+                                    log::error!("FS error: {err:?}.");
+                                    return;
+                                }
+                            }
+                        }
+
                         CommitterMessage::Flush(sender) => {
                             // The borrow is confined to `take_pending_batch`: we
                             // must not hold it across the awaits below, or a
-                            // concurrently-waking timeout flusher would
-                            // double-borrow and crash sys-io.
+                            // concurrently-running writer would double-borrow
+                            // and crash sys-io.
                             if let Some(txn_batch) = take_pending_batch(&txn_batch_holder)
                                 && let Err(err) = Self::commit_txn_batch(
                                     txn_batch,
@@ -412,6 +423,7 @@ impl TxnLogger {
 
         let mut txn_batch = self.txn_batch_holder.borrow_mut();
         let need_to_spawn_watcher = txn_batch.block_map.is_empty();
+        let txn_id = txn_batch.txn_id;
 
         for entry in &txn_blocks {
             let Some((block_no, block)) = entry else {
@@ -434,7 +446,7 @@ impl TxnLogger {
         drop(txn_batch);
 
         if need_to_spawn_watcher {
-            Self::spawn_timeout_flusher(self.txn_batch_holder.clone(), self.txn_batch_sink.clone());
+            Self::spawn_timeout_flusher(txn_id, self.txn_batch_sink.clone());
         }
 
         Ok(())

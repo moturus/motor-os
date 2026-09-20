@@ -108,6 +108,14 @@ fn flush_error() {
 }
 
 #[test]
+fn flush_covers_timed_out_batch() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(flush_covers_timed_out_batch_test()).unwrap();
+}
+
+#[test]
 fn move_noreplace() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -326,6 +334,41 @@ async fn flush_error_test() -> Result<()> {
 
     fail_flush.set(true);
     assert_eq!(ErrorKind::Other, fs.flush().await.unwrap_err().kind());
+    Ok(())
+}
+
+// A txn logged before a successful flush() must survive a crash right after
+// it, even when the batch's flush timer fires around the flush() call.
+async fn flush_covers_timed_out_batch_test() -> Result<()> {
+    const FS_TAG: &str = "motor_fs_flush_covers_timed_out_batch_test";
+    const SNAPSHOT_TAG: &str = "motor_fs_flush_covers_timed_out_batch_test_snapshot";
+    let root = crate::ROOT_DIR_ID;
+
+    let mut fs = create_fs(FS_TAG, 256).await?;
+    for name in ["a", "b"] {
+        fs.create_entry(
+            Role::System,
+            root,
+            EntryKind::Directory,
+            name,
+            RolePermissions::all(AccessPermissions::Rwx),
+        )
+        .await?;
+        fs.flush().await?;
+        if name == "a" {
+            // Let the flush timer of the (still empty) next batch lapse.
+            let delay = std::time::Duration::from_millis(crate::MAX_FLUSH_DELAY_MS + 10);
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    // The "crash": a synchronous copy of the image as flush() left it.
+    let tmp = std::env::temp_dir();
+    std::fs::copy(tmp.join(FS_TAG), tmp.join(SNAPSHOT_TAG))?;
+    drop(fs);
+
+    let fs = open_fs(SNAPSHOT_TAG).await?;
+    assert!(fs.stat(Role::System, root, "b").await?.is_some());
     Ok(())
 }
 
