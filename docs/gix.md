@@ -173,3 +173,45 @@ annotated-tag creation, signing and LFS are unsupported.
 The application lives in [src/bin/gix](../src/bin/gix). Its component tests
 run through [test-gix.sh](../src/tests/test-gix.sh) and the release developer
 suite, `src/tests/full-test-dev.sh --release`.
+
+### Testing changes to the Gitoxide fork
+
+The Motor OS suite tests the application and its integration with the pinned
+fork. It does not run the fork workspace's own tests: those resolve a much
+larger dependency graph than the application uses. Fetching the application's
+dependencies does not prepare that workspace for offline tests.
+
+When changing the fork, run its CI tests in the fork checkout. Its
+`.github/workflows/ci.yml` includes workspace tests. The focused port regression
+commands previously run by Motor OS are listed below; run them in the fork
+checkout before updating Motor OS's pinned revision. Prepare that checkout's
+locked dependencies separately with `cargo fetch --locked`, then run:
+
+```sh
+cargo test --release --locked --offline -p gix-motor-filetime \
+  system_times_are_normalized_and_ordered
+cargo test --release --locked --offline -p gix-index --features sha1 --test index \
+  an_index_shorter_than_its_checksum_is_rejected
+cargo test --release --locked --offline -p gix-features --test features fs::
+cargo test --release --locked --offline -p gix-worktree --features sha1 --test worktree \
+  stack::attributes::index_mappings_accept_all_regular_file_modes
+cargo test --release --locked --offline -p gix-ref --features sha1 --test refs file::store::
+cargo test --release --locked --offline -p gix-ref --features sha1 --test refs file::transaction::
+cargo test --release --locked --offline -p gix-commitgraph --lib --features sha1 native::tests::
+cargo test --release --locked --offline -p gix-pack --lib --features sha1,streaming-input
+cargo test --release --locked --offline -p gix-pack --features sha1 --test pack \
+  iter::new_from_header::
+cargo test --release --locked --offline -p gix-pack --features sha1 --test pack \
+  bundle::write_to_directory::
+cargo test --release --locked --offline -p gix --test gix \
+  --features blocking-network-client,worktree-mutation \
+  clone::blocking_io::from_shallow_allowed_by_default
+cargo test --release --locked --offline -p gix --test gix \
+  --features blocking-network-client,worktree-mutation init::
+```
+
+The application fixture retains checks for bounded reads and truncated indexes,
+and exercises initialization, references, file modes, timestamps, commit graphs,
+and pack handling on the host and Motor. The fork's private timestamp
+normalization and commit-graph reader budget tests remain fork tests; the
+application fixture does not replace those unit tests.

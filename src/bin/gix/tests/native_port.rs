@@ -69,6 +69,7 @@ fn main() -> Result {
 
     fs::create_dir(&output)?;
     check_init(&output)?;
+    check_bounded_inputs(&output)?;
     #[cfg(target_os = "motor")]
     check_loose_ref_limit(&output)?;
     check_capture(&output)?;
@@ -409,6 +410,36 @@ fn check_loose_ref_limit(output: &Path) -> Result {
     ));
     drop(file);
     fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+// Keep these input checks in the application fixture on both host and Motor.
+fn check_bounded_inputs(output: &Path) -> Result {
+    let path = output.join("bounded-input");
+    let contents = b"bounded file contents";
+    fs::write(&path, contents)?;
+    for limit in [contents.len(), contents.len() + 1] {
+        let file = fs::File::open(&path)?;
+        assert_eq!(
+            gix_features::fs::read_to_end_bounded(&file, limit)?,
+            contents
+        );
+    }
+    let file = fs::File::open(&path)?;
+    let error = gix_features::fs::read_to_end_bounded(&file, contents.len() - 1)
+        .expect_err("a file above the caller's limit must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+    fs::write(&path, b"x")?;
+    let error = File::at(&path, gix::hash::Kind::Sha1, false, Default::default())
+        .expect_err("an index shorter than its checksum must be rejected");
+    assert!(matches!(
+        error,
+        gix::index::file::init::Error::Decode(gix::index::decode::Error::UnexpectedTrailerLength {
+            expected: 20,
+            actual: 1
+        })
+    ));
     Ok(())
 }
 

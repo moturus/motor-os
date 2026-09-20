@@ -393,7 +393,7 @@ if [ "$mode" = --host ]; then
   lorry_metadata="$temporary/lorry-metadata.json"
   "$cargo" metadata --manifest-path "$ROOT_DIR/src/bin/lorry/Cargo.toml" --locked --offline \
     --format-version 1 --filter-platform x86_64-unknown-linux-gnu > "$lorry_metadata"
-  fork_info="$(python3 - "$metadata" "$lorry_metadata" <<'PY'
+  python3 - "$metadata" "$lorry_metadata" <<'PY'
 import json
 import pathlib
 import sys
@@ -431,36 +431,7 @@ for metadata_path in sys.argv[1:]:
     }
     if direct_sources != {source} or resolved_sources != {source + "#" + revision}:
         raise SystemExit(f"{application['name']} does not use the shared gitoxide branch and commit")
-print(revision)
-print(pathlib.Path(packages[0]["manifest_path"]).parent.parent / "Cargo.toml")
 PY
-)"
-  mapfile -t fork_info_lines <<< "$fork_info"
-  [ "${#fork_info_lines[@]}" -eq 2 ] || fail "invalid pinned fork metadata"
-  fork_revision="${fork_info_lines[0]}"
-  fork_manifest="${fork_info_lines[1]}"
-  external=(--manifest-path "$fork_manifest" --release --locked --offline
-    --target-dir "$APP_DIR/target/component-test/external/$fork_revision")
-  "$cargo" test "${external[@]}" -p gix-motor-filetime \
-    system_times_are_normalized_and_ordered
-  "$cargo" test "${external[@]}" -p gix-index --features sha1 --test index \
-    an_index_shorter_than_its_checksum_is_rejected
-  "$cargo" test "${external[@]}" -p gix-features --test features fs::
-  "$cargo" test "${external[@]}" -p gix-worktree --features sha1 --test worktree \
-    stack::attributes::index_mappings_accept_all_regular_file_modes
-  "$cargo" test "${external[@]}" -p gix-ref --features sha1 --test refs file::store::
-  "$cargo" test "${external[@]}" -p gix-ref --features sha1 --test refs file::transaction::
-  "$cargo" test "${external[@]}" -p gix-commitgraph --lib --features sha1 native::tests::
-  "$cargo" test "${external[@]}" -p gix-pack --lib --features sha1,streaming-input
-  "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
-    iter::new_from_header::
-  "$cargo" test "${external[@]}" -p gix-pack --features sha1 --test pack \
-    bundle::write_to_directory::
-  "$cargo" test "${external[@]}" -p gix --test gix \
-    --features blocking-network-client,worktree-mutation \
-    clone::blocking_io::from_shallow_allowed_by_default
-  "$cargo" test "${external[@]}" -p gix --test gix \
-    --features blocking-network-client,worktree-mutation init::
   "$cargo" test "${common[@]}" --features native-test-support --test native-port -- \
     "$fixture" "$temporary/host-output"
   verify_index "$temporary/host-output/written.index"
