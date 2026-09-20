@@ -340,6 +340,47 @@ verify_listings() {
     fail "gix branch -v did not report the fetched upstream commit"
 }
 
+# The checkout sequence both flows run on their HTTPS clone, whose main is one
+# commit behind origin/main: a tracked branch at another commit, back to main,
+# then a branch at the same commit that must keep a local edit to `editable`.
+# $1 is the repository as Git sees it, $2 holds the captured gix output.
+verify_checkout() {
+  local repository="$1" outputs="$2" expected
+  while IFS='|' read -r file expected; do
+    grep -Fqx -- "$expected" "$outputs/$file" ||
+      fail "gix checkout $file lacks '$expected': $(cat "$outputs/$file")"
+  done <<'EOF_EXPECTED'
+tracked.out|branch 'cli-tracked' set up to track 'origin/main'.
+tracked.err|Switched to a new branch 'cli-tracked'
+main.out|Your branch is behind 'origin/main' by 1 commit, and can be fast-forwarded.
+main.err|Switched to branch 'main'
+again.err|Already on 'main'
+local.out|branch 'cli-local' set up to track 'main'.
+local.err|Switched to a new branch 'cli-local'
+EOF_EXPECTED
+  [ "$(clean_git -C "$repository" symbolic-ref HEAD)" = refs/heads/cli-local ] ||
+    fail "gix checkout left the wrong branch checked out"
+  [ "$(clean_git -C "$repository" rev-parse cli-tracked)" = \
+    "$(clean_git -C "$repository" rev-parse origin/main)" ] ||
+    fail "gix checkout -b started at the wrong commit"
+  [ "$(clean_git -C "$repository" rev-parse cli-local)" = \
+    "$(clean_git -C "$repository" rev-parse main)" ] ||
+    fail "gix checkout --track -b started at the wrong commit"
+  expected="origin refs/heads/main . refs/heads/main"
+  [ "$(clean_git -C "$repository" config branch.cli-tracked.remote) $(
+    clean_git -C "$repository" config branch.cli-tracked.merge) $(
+    clean_git -C "$repository" config branch.cli-local.remote) $(
+    clean_git -C "$repository" config branch.cli-local.merge)" = "$expected" ] ||
+    fail "gix checkout recorded the wrong upstream"
+  # As in verify_network_clone: compare content, since stat data alone may look stale to Git.
+  [ "$(clean_git -C "$repository" -c core.symlinks=false -c core.fileMode=true \
+    diff-files -p --no-ext-diff --no-textconv --ignore-submodules=all -- |
+    grep '^diff --git')" = "diff --git a/editable b/editable" ] ||
+    fail "gix checkout -b at the same commit did not keep exactly the local edit"
+  [ ! -e "$repository/remote-only" ] || fail "gix checkout main kept a file of origin/main"
+  clean_git -C "$repository" fsck --strict --no-dangling >/dev/null
+}
+
 verify_pack() {
   local indices=("$1"/*.idx)
   [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
@@ -536,6 +577,26 @@ PY
       > "$temporary/host-listings/$(listing_file "$command")"
   done
   verify_listings "$clone" "$temporary/host-listings"
+  host_checkout() {
+    local name="$1"
+    shift
+    "${app_env[@]}" "$gix_binary" -r "$clone" checkout "$@" \
+      > "$temporary/host-checkout/$name.out" 2> "$temporary/host-checkout/$name.err"
+  }
+  mkdir "$temporary/host-checkout"
+  host_checkout tracked -b cli-tracked origin/main
+  [ -e "$clone/remote-only" ] || fail "gix checkout -b did not check out origin/main"
+  host_checkout main main
+  host_checkout again main
+  printf 'local edit\n' >> "$clone/editable"
+  if host_checkout refused -b cli-refused origin/main; then
+    fail "gix checkout -b moved to another commit over a local edit"
+  fi
+  if clean_git -C "$clone" rev-parse -q --verify refs/heads/cli-refused >/dev/null; then
+    fail "a refused gix checkout -b still created its branch"
+  fi
+  host_checkout local --track -b cli-local main
+  verify_checkout "$clone" "$temporary/host-checkout"
 
   mkdir "$temporary/preexisting"
   printf 'preserve\n' > "$temporary/preexisting/sentinel"
@@ -846,6 +907,22 @@ for command in "${listing_commands[@]}"; do
     > "$temporary/guest-listings/$(listing_file "$command")"
 done
 verify_listings "$temporary/guest-clone-after" "$temporary/guest-listings"
+guest_checkout() {
+  local name="$1"
+  shift
+  vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_clone checkout $*" \
+    > "$temporary/guest-checkout/$name.out" 2> "$temporary/guest-checkout/$name.err"
+}
+mkdir "$temporary/guest-checkout"
+guest_checkout tracked -b cli-tracked origin/main
+guest_checkout main main
+guest_checkout again main
+printf 'other\nlocal edit\n' > "$temporary/guest-editable"
+printf 'put "%s" "%s"\n' "$temporary/guest-editable" "$guest_clone/editable" | "${sftp_command[@]}"
+guest_checkout local --track -b cli-local main
+printf 'get -r "%s" "%s"\n' "$guest_clone" "$temporary/guest-clone-checkout" |
+  "${sftp_command[@]}"
+verify_checkout "$temporary/guest-clone-checkout" "$temporary/guest-checkout"
 
 coproc GIX_PTY {
   ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \

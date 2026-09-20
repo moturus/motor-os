@@ -57,6 +57,8 @@ starting with a dash. Run `gix COMMAND --help` for syntax.
 | `remote [-v]` | List configured remotes as `git remote` prints them; `-v` adds the fetch and push URLs. |
 | `tag list`, `tag create NAME [REV]` | List or create lightweight tags under the same creation rules. |
 | `switch BRANCH` | Switch to an existing local branch with a clean index and tracked worktree. |
+| `checkout BRANCH` | The same switch, with Git's messages, including how the branch relates to its upstream. |
+| `checkout [--track] -b NEW [START]` | Create NEW at START (HEAD by default) and check it out. A remote-tracking START such as `origin/main` becomes the upstream; `--track` also accepts a local branch, or the current branch without START. A branch at HEAD's own commit keeps staged and local changes; any other START needs a clean index and tracked worktree, and a refused checkout creates nothing. |
 | `merge REV`, `merge --abort` | Fast-forward or merge a commit; abort discards merge work. |
 | `recover` | Repair a recorded interrupted switch, merge or abort. |
 | `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one explicit branch or tag over SSH. |
@@ -64,7 +66,9 @@ starting with a dash. Run `gix COMMAND --help` for syntax.
 Fetch, then run `merge origin/BRANCH` to integrate remote changes. Create a
 branch, then switch to it to start a topic. To stage a deletion, delete the
 file in the shell and run `add` on its path. There is no configuration
-editor: edit configuration files or use repeated `-c key=value` options.
+editor: edit configuration files or use repeated `-c key=value` options. The
+one exception is `checkout -b`, which writes the new branch's upstream to
+`.git/config` and leaves the rest of the file as it was.
 
 ## Configuration and remote access
 

@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, branches, cancellation, clone, commit, diff, fetch, init, merge, network, push,
-    recover, refs, remotes, repository, restore, status, switch, unstage,
+    Result, add, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init, merge,
+    network, push, recover, refs, remotes, repository, restore, status, switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -190,6 +190,29 @@ fn run() -> Result {
                 )),
         )
         .subcommand(
+            Command::new("checkout")
+                .about("Check out a local branch, or create one with -b and check it out")
+                .arg(
+                    Arg::new("new-branch")
+                        .short('b')
+                        .value_name("NEW_BRANCH")
+                        .help("Create this branch at START, or at HEAD, first"),
+                )
+                .arg(
+                    Arg::new("track")
+                        .long("track")
+                        .action(ArgAction::SetTrue)
+                        .requires("new-branch")
+                        .help("Make START the upstream even if it is a local branch"),
+                )
+                .arg(
+                    Arg::new("branch")
+                        .value_name("BRANCH|START")
+                        .required_unless_present("new-branch")
+                        .help("The local branch; with -b, the start point such as origin/main"),
+                ),
+        )
+        .subcommand(
             Command::new("remote")
                 .about("List configured remotes")
                 .arg(verbose_arg("Show the fetch and push URLs")),
@@ -283,6 +306,28 @@ fn run() -> Result {
                     verbose: command.get_flag("verbose"),
                 };
                 branches::list(&opened.repo, options, io::stdout().lock(), &cancellation)
+            }
+        }
+        Some("checkout") => {
+            let command = matches
+                .subcommand_matches("checkout")
+                .expect("matched checkout");
+            let branch = command.get_one::<String>("branch").map(String::as_str);
+            match command.get_one::<String>("new-branch") {
+                Some(new_branch) => branch_checkout::create(
+                    &mut opened,
+                    new_branch,
+                    branch,
+                    command.get_flag("track"),
+                    io::stdout().lock(),
+                    &cancellation,
+                ),
+                None => branch_checkout::existing(
+                    &mut opened,
+                    branch.expect("required without -b"),
+                    io::stdout().lock(),
+                    &cancellation,
+                ),
             }
         }
         Some("commit") => commit::run(

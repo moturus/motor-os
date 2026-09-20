@@ -163,6 +163,18 @@ fn commit_detail(repo: &gix::Repository, id: &gix::oid, upstream: &str) -> crate
     ))
 }
 
+/// How a local branch relates to its configured upstream, named as Git shows it.
+pub(crate) enum UpstreamState {
+    Gone {
+        name: String,
+    },
+    Present {
+        name: String,
+        ahead: usize,
+        behind: usize,
+    },
+}
+
 /// Return `[gone] `, `[ahead N] `, `[behind N] `, `[ahead N, behind M] ` or nothing.
 fn upstream_relation(
     repo: &gix::Repository,
@@ -170,6 +182,33 @@ fn upstream_relation(
     local: &gix::oid,
     cancellation: &Cancellation,
 ) -> crate::Result<String> {
+    Ok(match upstream_state(repo, branch, local, cancellation)? {
+        None
+        | Some(UpstreamState::Present {
+            ahead: 0,
+            behind: 0,
+            ..
+        }) => String::new(),
+        Some(UpstreamState::Gone { .. }) => "[gone] ".into(),
+        Some(UpstreamState::Present {
+            ahead, behind: 0, ..
+        }) => format!("[ahead {ahead}] "),
+        Some(UpstreamState::Present {
+            ahead: 0, behind, ..
+        }) => format!("[behind {behind}] "),
+        Some(UpstreamState::Present { ahead, behind, .. }) => {
+            format!("[ahead {ahead}, behind {behind}] ")
+        }
+    })
+}
+
+/// Compare `branch` at `local` with its upstream; `None` without a configured upstream.
+pub(crate) fn upstream_state(
+    repo: &gix::Repository,
+    branch: &FullNameRef,
+    local: &gix::oid,
+    cancellation: &Cancellation,
+) -> crate::Result<Option<UpstreamState>> {
     // An upstream in this repository (`branch.<name>.remote = .`) has no refspec to map through.
     let is_local = repo
         .branch_remote_name(branch.shorten(), Direction::Fetch)
@@ -182,20 +221,18 @@ fn upstream_relation(
             .transpose()?
     };
     let Some(upstream) = upstream else {
-        return Ok(String::new());
+        return Ok(None);
     };
+    let name = display(upstream.shorten());
     let Some(mut upstream) = repo.try_find_reference(upstream.as_ref())? else {
-        return Ok("[gone] ".into());
+        return Ok(Some(UpstreamState::Gone { name }));
     };
     let upstream = upstream.peel_to_id()?.detach();
-    let ahead = count_unshared(repo, local, &upstream, cancellation)?;
-    let behind = count_unshared(repo, &upstream, local, cancellation)?;
-    Ok(match (ahead, behind) {
-        (0, 0) => String::new(),
-        (ahead, 0) => format!("[ahead {ahead}] "),
-        (0, behind) => format!("[behind {behind}] "),
-        (ahead, behind) => format!("[ahead {ahead}, behind {behind}] "),
-    })
+    Ok(Some(UpstreamState::Present {
+        name,
+        ahead: count_unshared(repo, local, &upstream, cancellation)?,
+        behind: count_unshared(repo, &upstream, local, cancellation)?,
+    }))
 }
 
 /// Count the commits reachable from `tip` but not from `other`.
