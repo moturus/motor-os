@@ -48,7 +48,7 @@ What Motor OS does differently:
   from it (System, Interactive, None) drive filesystem permissions.
 * **Configuration is part of the image.** Services, networking, and
   permissions are declared in a few files and a declarative image policy.
-* **Boot time matters.** Motor OS boots in about 200 ms.
+* **Boot time matters.** Motor OS boots in about 100 ms.
 
 ## What
 
