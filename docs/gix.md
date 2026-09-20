@@ -157,12 +157,18 @@ submodule operations and transitions that change them are unsupported.
 
 | Resource | Limit |
 | --- | --- |
-| Staged file, decoded object or native index | 16 MiB each |
-| Diff input | 16 MiB per side; text also limited to 262,144 lines per side |
+| Native index | 16 MiB |
+| Diff text | 262,144 lines per side |
 | Loose reference file | 8 MiB |
 | HTTPS response, total SSH response or outgoing push pack | 128 MiB each |
 | SSH session | 8 MiB discovery, 64 KiB stderr, 30-second connection timeout, 300-second total deadline |
 | Push selection | 65,536 outgoing objects, 65,536 reachable commits, 131,072 parent links, 65,536 changes per tree comparison |
+
+As in Git, a single object or staged file has no size limit of its own; it is
+held in memory whole while it is received, checked out, staged, diffed or
+pushed. The pack, response and tree totals still bound what a repository can
+hold: a pack file of at most 128 MiB and 65,536 objects, 512 MiB of buffers
+in total while a received pack is indexed, and 128 MiB of files per tree.
 
 Text diff supports Myers and Histogram; configured `minimal` is unsupported.
 Push packs contain full objects without delta compression, so initial pushes

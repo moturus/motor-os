@@ -11,8 +11,6 @@ use gix::{
 
 use crate::{cancellation::Cancellation, selection};
 
-pub(crate) const MAX_BLOB_BYTES: usize = 16 * 1024 * 1024;
-
 #[derive(Debug)]
 pub struct StagedBlob {
     pub id: gix::ObjectId,
@@ -20,7 +18,7 @@ pub struct StagedBlob {
     pub stat: Stat,
 }
 
-/// Convert one already-selected worktree path into a bounded blob.
+/// Convert one already-selected worktree path into a blob.
 ///
 /// The caller owns path selection, conflict handling, and filter preflight for the complete
 /// selection before calling [`stage`](Self::stage).
@@ -144,19 +142,16 @@ impl<'repo, 'index> Converter<'repo, 'index> {
         }
 
         let length = usize::try_from(metadata.len())
-            .ok()
-            .filter(|length| *length <= MAX_BLOB_BYTES)
-            .ok_or_else(|| {
-                unsupported(action, path, "the worktree file exceeds the 16 MiB limit")
-            })?;
+            .map_err(|_| unsupported(action, path, "the worktree file does not fit in memory"))?;
         let stat = Stat::from_fs(&metadata)?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(length)?;
         cancellation.check()?;
-        file.take(MAX_BLOB_BYTES as u64 + 1)
+        // One byte beyond the expected length reveals a file that grew while it was read.
+        file.take(metadata.len().saturating_add(1))
             .read_to_end(&mut bytes)?;
         cancellation.check()?;
-        if bytes.len() != length || bytes.len() > MAX_BLOB_BYTES {
+        if bytes.len() != length {
             return Err(
                 unsupported(action, path, "the worktree file changed size while reading").into(),
             );
@@ -182,11 +177,6 @@ impl<'repo, 'index> Converter<'repo, 'index> {
                 }
             }
         };
-        if converted.len() > MAX_BLOB_BYTES {
-            return Err(
-                unsupported(action, path, "converted data exceeds the 16 MiB limit").into(),
-            );
-        }
         cancellation.check()?;
         let value = consume(converted)?;
         cancellation.check()?;

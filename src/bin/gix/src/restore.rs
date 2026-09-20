@@ -16,8 +16,6 @@ use crate::{
     tracked_filters,
 };
 
-const MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-
 /// Restore selected tracked worktree paths from the locked index.
 pub fn run(
     opened: &OpenedRepository,
@@ -92,12 +90,8 @@ pub fn run(
         cancellation.check()?;
         let path = entry.path(index);
         let header = repo.objects.header(entry.id)?;
-        if header.kind() != gix::objs::Kind::Blob || header.size() > MAX_BLOB_BYTES {
-            return Err(path_error(
-                path,
-                "the index entry must reference a blob no larger than 16 MiB",
-            )
-            .into());
+        if header.kind() != gix::objs::Kind::Blob {
+            return Err(path_error(path, "the index entry must reference a blob").into());
         }
         let _ = preflight_destination(workdir, path)?;
     }

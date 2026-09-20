@@ -17,7 +17,6 @@ use crate::cancellation::Cancellation;
 const LIMITS: Limits = Limits {
     max_entries: 65_536,
     max_path_bytes: 8 * 1024 * 1024,
-    max_blob_bytes: 16 * 1024 * 1024,
     max_source_blob_bytes: 128 * 1024 * 1024,
     max_component_bytes: 255,
     max_absolute_path_bytes: 1024,
@@ -31,7 +30,6 @@ const _: () = assert!(LIMITS.max_path_bytes + LIMITS.max_entries * 70 + 32 <= 16
 struct Limits {
     max_entries: usize,
     max_path_bytes: usize,
-    max_blob_bytes: u64,
     max_source_blob_bytes: u64,
     max_component_bytes: usize,
     max_absolute_path_bytes: usize,
@@ -221,11 +219,6 @@ fn build_with_limits(
                     .ok_or_else(|| invalid(format!("blob {} is missing", entry.oid)))?;
                 if header.kind() != gix::objs::Kind::Blob {
                     return Err(invalid(format!("object {} is not a blob", entry.oid)).into());
-                }
-                if header.size() > limits.max_blob_bytes {
-                    return Err(
-                        invalid(format!("blob {} exceeds its byte limit", entry.oid)).into(),
-                    );
                 }
                 source_blob_bytes = source_blob_bytes
                     .checked_add(header.size())
@@ -417,7 +410,6 @@ mod tests {
         let limits = Limits {
             max_entries: 5,
             max_path_bytes: 28,
-            max_blob_bytes: 4,
             max_source_blob_bytes: 12,
             max_component_bytes: 255,
             max_absolute_path_bytes: 1024,
@@ -434,10 +426,9 @@ mod tests {
             build_with_limits(&repo, root, "/x", &cancellation, limits).is_err()
         };
 
-        let constraints: [fn(&mut Limits); 6] = [
+        let constraints: [fn(&mut Limits); 5] = [
             |limits| limits.max_entries = 4,
             |limits| limits.max_path_bytes = 27,
-            |limits| limits.max_blob_bytes = 3,
             |limits| limits.max_source_blob_bytes = 11,
             |limits| limits.max_component_bytes = 3,
             |limits| limits.max_absolute_path_bytes = 12,

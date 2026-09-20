@@ -39,8 +39,8 @@ pub struct PreparedText<'a> {
 
 /// Validate and compute one bounded text pair without producing output.
 ///
-/// `before` and `after` must come from the bounded [`crate::diff_input::Loader`] (at most 16 MiB
-/// per side). Callers may safely write this file's metadata only after this function succeeds.
+/// `before` and `after` must come from [`crate::diff_input::Loader`]. Callers may safely write
+/// this file's metadata only after this function succeeds.
 pub fn prepare_text<'a>(
     path: &BStr,
     before: &'a [u8],

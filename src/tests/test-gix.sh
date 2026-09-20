@@ -579,7 +579,6 @@ EOF
 
   prepare_policy_fixture
   "${app_env[@]}" "$gix_binary" -r "$fixture" -c core.abbrev=12 \
-    -c gitoxide.objects.allocLimit=0 \
     --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
   verify_log "$temporary/log.out"
   for config_path in "$temporary/xdg/git/config" "$temporary/home/.gitconfig" \
@@ -1112,7 +1111,7 @@ vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
   printf 'put "%s" "%s"\n' "$fixture/.git/info/grafts" "$guest_root/fixture/.git/info/grafts"
 } | "${sftp_command[@]}"
 vm_ssh \
-  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/fixture -c core.abbrev=12 -c gitoxide.objects.allocLimit=0 log" \
+  "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/fixture -c core.abbrev=12 log" \
   > "$temporary/guest.log"
 verify_log "$temporary/guest.log"
 vm_ssh /system/bin/mv "$guest_root/fixture/.git" "$guest_root/output/worktree/.git"

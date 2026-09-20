@@ -247,7 +247,7 @@ fn path_error(path: &BStr, message: &str) -> io::Error {
     ))
 }
 
-/// Render one pair obtained from the bounded diff loader.
+/// Render one pair obtained from the diff loader.
 ///
 /// Text validation and computation complete before this function writes the file preamble.
 pub fn render_pair(

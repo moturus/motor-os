@@ -340,6 +340,23 @@ the ruling; nothing here should be picked up without a fresh call.
   stating that this evidence is non-exhaustive; it must not depend on this
   new OS facility.
 
+- **gix: streaming for large objects, and an object size limit** (ruled by
+  U. Lasiotus, 2026-09-20). `gix clone` of `moturus/helix` failed on a
+  17.6 MiB generated parser because every object was limited to 16 MiB. Git
+  has no such limit, so the limit was removed and gix now holds each object
+  in memory whole, as Git does below `core.bigFileThreshold` (512 MiB).
+  Investigate later whether to stream large blobs instead and whether to
+  have a limit again, and at what value. Facts to start from:
+  the receive path already streams;
+  delta resolution and checkout can stream only a blob that is neither a
+  delta nor a delta base, and the server decides that (helix's large blob is
+  a base, so Git itself fails on its pack under a 16 MiB allocation limit);
+  streaming a delta base needs temporary files in the two central `gix-pack`
+  routines. Memory is still bounded by the caps that remain: 128 MiB per pack
+  file, 512 MiB of buffers in total while a received pack is indexed, and
+  128 MiB of files per tree. The 262,144-line diff limit also remains, so
+  that parser cannot be diffed.
+
 - **`channel.rs` SeqCst fence audit** (out of scope, ruled
   2026-08-15). The io_channel wake edges now carry their own ordering;
   the SeqCst fences predate that and are likely removable. Removing

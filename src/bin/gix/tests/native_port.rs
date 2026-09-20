@@ -719,15 +719,6 @@ fn check_add(output: &Path, executable_source: &Path, gitlink_id: gix::ObjectId)
         &["ignored-new".into()],
         "explicit path 'ignored-new' is ignored",
     )?;
-    let oversized = fs::File::create(repository.join("oversized"))?;
-    oversized.set_len(16 * 1024 * 1024 + 1)?;
-    drop(oversized);
-    expect_add_rejected(
-        &opened,
-        &["oversized".into()],
-        "cannot stage 'oversized': the worktree file exceeds the 16 MiB limit",
-    )?;
-    fs::remove_file(repository.join("oversized"))?;
     expect_add_rejected(
         &opened,
         &["blocked-parent".into()],

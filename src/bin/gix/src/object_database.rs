@@ -75,10 +75,7 @@ fn reject_promisor_packs(object_dir: &Path, operation: &str) -> crate::Result {
     }
 }
 
-/// Maximum decoded bytes in one application object read.
-pub const MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
-
-/// A bounded, checksummed object reader for selection and pack encoding.
+/// A checksummed object reader for selection and pack encoding.
 pub struct Reader<'repo> {
     repo: &'repo gix::Repository,
     cancellation: &'repo crate::cancellation::Cancellation,
@@ -142,9 +139,6 @@ impl<'repo> Reader<'repo> {
         header: gix::odb::find::Header,
     ) -> crate::Result<gix::Object<'repo>> {
         self.cancellation.check()?;
-        if header.size() > MAX_OBJECT_BYTES {
-            return Err(invalid(format!("object {id} exceeds the 16 MiB byte limit")).into());
-        }
         let object = self.repo.find_object(id)?;
         let size = u64::try_from(object.data.len())?;
         if header.kind() != object.kind || header.size() != size {

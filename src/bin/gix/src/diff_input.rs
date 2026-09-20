@@ -6,11 +6,7 @@ use gix::{
     prelude::Find,
 };
 
-use crate::{
-    cancellation::Cancellation,
-    repository::OpenedRepository,
-    stage_blob::{Converter, MAX_BLOB_BYTES},
-};
+use crate::{cancellation::Cancellation, repository::OpenedRepository, stage_blob::Converter};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Source {
@@ -38,7 +34,7 @@ pub struct Pair {
     pub new: Loaded,
 }
 
-/// Loads bounded canonical Git inputs while retaining no blob-content cache.
+/// Loads canonical Git inputs while retaining no blob-content cache.
 pub struct Loader<'repo, 'index> {
     repo: &'repo gix::Repository,
     index: &'index gix::index::State,
@@ -133,9 +129,7 @@ fn load_object(
         return Err(unsupported(path, "the object is not a blob").into());
     }
     let size = usize::try_from(header.size())
-        .ok()
-        .filter(|size| *size <= MAX_BLOB_BYTES)
-        .ok_or_else(|| unsupported(path, "object data exceeds the 16 MiB limit"))?;
+        .map_err(|_| unsupported(path, "object data does not fit in memory"))?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(size)?;
     cancellation.check()?;
