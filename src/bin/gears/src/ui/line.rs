@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::runtime::{Approver, Event, Observer, Permission, Runtime};
+use crate::runtime::{Approval, Approver, Event, Observer, Permission, Runtime};
 
 const POLL: Duration = Duration::from_millis(25);
 
@@ -336,7 +336,7 @@ impl Observer for Renderer {
 
 enum TurnMessage {
     Event(Event),
-    Permission(Permission, mpsc::Sender<bool>),
+    Permission(Permission, mpsc::Sender<Approval>),
     Done(Result<(), String>),
 }
 
@@ -358,10 +358,10 @@ struct ChannelApprover {
 }
 
 impl Approver for ChannelApprover {
-    fn approve(&mut self, request: &Permission) -> bool {
+    fn approve(&mut self, request: &Permission) -> Approval {
         if !self.interactive {
             eprintln!("gears: denied unattended tool call: {}", request.detail);
-            return false;
+            return Approval::Deny;
         }
         let (sender, receiver) = mpsc::channel();
         if self
@@ -369,9 +369,9 @@ impl Approver for ChannelApprover {
             .send(TurnMessage::Permission(request.clone(), sender))
             .is_err()
         {
-            return false;
+            return Approval::Deny;
         }
-        receiver.recv().unwrap_or(false)
+        receiver.recv().unwrap_or(Approval::Deny)
     }
 }
 
@@ -409,10 +409,8 @@ fn run_turn(
                             request.workspace.display(),
                             request.detail
                         );
-                        let allowed = input.read_line("[y/N] ")?.is_some_and(|answer| {
-                            matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
-                        });
-                        let _ = reply.send(allowed);
+                        let answer = input.read_line("[y/N/a = always this session] ")?;
+                        let _ = reply.send(parse_approval(answer.as_deref()));
                     }
                     Ok(TurnMessage::Done(result)) => return result,
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -426,6 +424,15 @@ fn run_turn(
             }
         }
     })
+}
+
+/// Anything but an explicit yes or always denies, including end of input.
+fn parse_approval(answer: Option<&str>) -> Approval {
+    match answer.map(str::trim) {
+        Some("y" | "Y" | "yes" | "YES") => Approval::Once,
+        Some("a" | "A" | "always" | "ALWAYS") => Approval::Session,
+        _ => Approval::Deny,
+    }
 }
 
 struct Input {
@@ -547,5 +554,20 @@ fn fold(text: &str) -> String {
             "{} bytes (use session history for the bounded result)",
             text.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_answers_grant_approval() {
+        assert_eq!(parse_approval(Some(" y ")), Approval::Once);
+        assert_eq!(parse_approval(Some("a")), Approval::Session);
+        assert_eq!(parse_approval(Some("always")), Approval::Session);
+        for answer in [None, Some(""), Some("n"), Some("all"), Some("ya")] {
+            assert_eq!(parse_approval(answer), Approval::Deny);
+        }
     }
 }

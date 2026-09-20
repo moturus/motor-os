@@ -9,7 +9,7 @@ use gears::config::{Config, ContextConfig, HookConfig};
 use gears::provider::{
     Completion, EventSink, FinishReason, Provider, ProviderError, Request, StreamEvent, ToolCall,
 };
-use gears::runtime::{Approver, Event, Permission, Runtime};
+use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
 use gears::session::Store;
 
 struct Scripted {
@@ -56,15 +56,32 @@ impl Provider for Scripted {
 struct FixedApproval(bool);
 
 impl Approver for FixedApproval {
-    fn approve(&mut self, _request: &Permission) -> bool {
-        self.0
+    fn approve(&mut self, _request: &Permission) -> Approval {
+        if self.0 {
+            Approval::Once
+        } else {
+            Approval::Deny
+        }
+    }
+}
+
+/// Gives one fixed answer and counts how often the user was asked.
+struct CountingApproval {
+    answer: Approval,
+    asked: usize,
+}
+
+impl Approver for CountingApproval {
+    fn approve(&mut self, _request: &Permission) -> Approval {
+        self.asked += 1;
+        self.answer
     }
 }
 
 struct UnexpectedApproval;
 
 impl Approver for UnexpectedApproval {
-    fn approve(&mut self, _request: &Permission) -> bool {
+    fn approve(&mut self, _request: &Permission) -> Approval {
         panic!("permission hook should have allowed the call")
     }
 }
@@ -191,6 +208,158 @@ fn an_approved_sh_call_runs_in_the_workspace() {
         std::fs::read_to_string(fixture.workspace.join("result.txt")).unwrap(),
         "made"
     );
+}
+
+#[test]
+fn always_allow_lasts_until_the_session_changes() {
+    let fixture = Fixture::new("always");
+    let touch = |name: &str| tool("sh", &format!(r#"{{"command":"touch {name}"}}"#));
+    let provider = Scripted::new(vec![
+        touch("one"),
+        touch("two"),
+        answer("done"),
+        touch("three"),
+        answer("done"),
+        touch("four"),
+        answer("done"),
+        touch("five"),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &Config::default());
+    let first = runtime.summary().id;
+    let mut always = CountingApproval {
+        answer: Approval::Session,
+        asked: 0,
+    };
+    let mut notices = Vec::new();
+    // One answer covers the rest of the turn and the following turns.
+    for prompt in ["first", "second"] {
+        runtime
+            .turn(prompt.to_string(), &mut always, &mut |event| {
+                if let Event::Notice(notice) = event {
+                    notices.push(notice);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert_eq!(always.asked, 1);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    for name in ["one", "two", "three"] {
+        assert!(fixture.workspace.join(name).exists(), "{name}");
+    }
+
+    let mut deny = CountingApproval {
+        answer: Approval::Deny,
+        asked: 0,
+    };
+    runtime.new_session(false, None).unwrap();
+    assert!(
+        runtime
+            .take_startup_notices()
+            .iter()
+            .any(|notice| notice.contains("need approval again"))
+    );
+    runtime
+        .turn("third".to_string(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    // Coming back to the session that was granted "always" asks again too.
+    runtime.resume(&first).unwrap();
+    runtime
+        .turn("fourth".to_string(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(deny.asked, 2);
+    assert!(!fixture.workspace.join("four").exists());
+    assert!(!fixture.workspace.join("five").exists());
+}
+
+#[test]
+fn always_allow_is_not_stored_with_the_session() {
+    let fixture = Fixture::new("always-restart");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let open = |session, script| {
+        let provider = Scripted::new(script);
+        Runtime::new(
+            provider,
+            store.clone(),
+            session,
+            &Config::default(),
+            "test/model".to_string(),
+        )
+        .unwrap()
+    };
+    let mut runtime = open(
+        store.create(false, None).unwrap(),
+        vec![tool("sh", r#"{"command":"touch before"}"#), answer("done")],
+    );
+    let mut always = CountingApproval {
+        answer: Approval::Session,
+        asked: 0,
+    };
+    runtime
+        .turn("first".to_string(), &mut always, &mut |_| Ok(()))
+        .unwrap();
+    let id = runtime.summary().id;
+    drop(runtime);
+
+    // A restarted binary resuming the same session starts unapproved.
+    let mut resumed = open(
+        store.open(&id).unwrap(),
+        vec![tool("sh", r#"{"command":"touch after"}"#), answer("done")],
+    );
+    let mut deny = CountingApproval {
+        answer: Approval::Deny,
+        asked: 0,
+    };
+    resumed
+        .turn("second".to_string(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(deny.asked, 1);
+    assert!(fixture.workspace.join("before").exists());
+    assert!(!fixture.workspace.join("after").exists());
+}
+
+#[test]
+fn a_hook_denial_wins_over_always_allow() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("always-deny");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        r#"#!/bin/sh
+event=$(cat)
+case "$event" in
+  *'"event":"permission"'*forbidden*) printf '%s' '{"decision":"deny"}' ;;
+  *) printf '%s' '{}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = Config::default();
+    config.hooks.push(HookConfig {
+        name: "fixture".to_string(),
+        command: vec![hook.display().to_string()],
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 64 * 1024,
+    });
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch fine"}"#),
+        tool("sh", r#"{"command":"touch forbidden"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut always = CountingApproval {
+        answer: Approval::Session,
+        asked: 0,
+    };
+    runtime
+        .turn("go".to_string(), &mut always, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(always.asked, 1);
+    assert!(fixture.workspace.join("fine").exists());
+    assert!(!fixture.workspace.join("forbidden").exists());
 }
 
 #[test]

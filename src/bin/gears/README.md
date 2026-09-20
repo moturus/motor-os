@@ -24,10 +24,13 @@ may leave the workspace. Stdout, stderr, status, timeout, cancellation, and
 truncation remain distinct.
 
 Permission hooks run before a tool call. Any deny wins; otherwise any allow
-wins; otherwise an attended UI asks about the exact command. An unattended
-run denies a call that still needs an answer. Gears does not infer safe shell
-commands. The provider credential is removed from the environment inherited
-by sh and hook processes.
+wins; otherwise an attended UI asks about the exact command. The answers are
+y (allow this call), n (deny it), and a (allow this call and every later one
+in this session without asking). The a answer is kept in memory only: it ends
+when the session changes or Gears exits, and resuming the session asks again.
+A hook deny still blocks a call after a. An unattended run denies a call that
+still needs an answer. Gears does not infer safe shell commands. The provider
+credential is removed from the environment inherited by sh and hook processes.
 
 ## Configuration
 

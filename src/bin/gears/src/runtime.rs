@@ -73,15 +73,24 @@ where
     }
 }
 
+/// The user's answer to one permission prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Deny,
+    Once,
+    /// Allow this call and stop asking until the session changes.
+    Session,
+}
+
 pub trait Approver {
-    fn approve(&mut self, request: &Permission) -> bool;
+    fn approve(&mut self, request: &Permission) -> Approval;
 }
 
 impl<F> Approver for F
 where
-    F: FnMut(&Permission) -> bool,
+    F: FnMut(&Permission) -> Approval,
 {
-    fn approve(&mut self, request: &Permission) -> bool {
+    fn approve(&mut self, request: &Permission) -> Approval {
         self(request)
     }
 }
@@ -99,6 +108,8 @@ pub struct Runtime {
     cancellation: Cancellation,
     usage: UsageMeter,
     startup_notices: Vec<String>,
+    // Never persisted: a restarted or resumed session asks again.
+    allow_all: bool,
 }
 
 impl Runtime {
@@ -160,6 +171,7 @@ impl Runtime {
             cancellation,
             usage,
             startup_notices,
+            allow_all: false,
         })
     }
 
@@ -428,6 +440,10 @@ impl Runtime {
             session.set_model(&self.model)?;
         }
         self.session = session;
+        if std::mem::take(&mut self.allow_all) {
+            self.startup_notices
+                .push("session changed; tool calls need approval again".to_string());
+        }
         self.usage = self.session.usage();
         self.hooks.notify(
             "session_start",
@@ -463,7 +479,19 @@ impl Runtime {
         let allowed = match decision {
             Decision::Deny => false,
             Decision::Allow => true,
-            Decision::Ask => approver.approve(&permission),
+            Decision::Ask if self.allow_all => true,
+            Decision::Ask => match approver.approve(&permission) {
+                Approval::Deny => false,
+                Approval::Once => true,
+                Approval::Session => {
+                    self.allow_all = true;
+                    observer.event(Event::Notice(
+                        "tool calls are allowed without asking until the session changes"
+                            .to_string(),
+                    ))?;
+                    true
+                }
+            },
         };
         observer.event(Event::ToolStart {
             name: call.name.clone(),

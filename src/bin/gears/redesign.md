@@ -114,7 +114,10 @@ permission hook that times out, crashes, or returns invalid output denies the
 call with a visible diagnostic.
 
 Gears does not parse shell strings into a policy, infer safe commands, or add a
-sandbox in v1. Approval applies to the exact displayed command. The provider
+sandbox in v1. Approval applies to the exact displayed command, unless the
+user answers `a` ("always allow this session"): Gears then stops asking until
+the session changes or the process exits. That answer lives in memory only and
+is never written to the session file; hook denials keep applying. The provider
 credential must continue to be passed only to the provider transport, never
 through the environment inherited by `sh` or hooks.
 

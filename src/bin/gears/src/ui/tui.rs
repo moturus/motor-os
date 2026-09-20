@@ -14,7 +14,7 @@ use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode};
 use crossterm::{execute, queue};
 
-use crate::runtime::{Approver, Event, Observer, Permission, Runtime, SessionSummary};
+use crate::runtime::{Approval, Approver, Event, Observer, Permission, Runtime, SessionSummary};
 use crate::ui::tui_editor::{Edit, Editor};
 
 const POLL: Duration = Duration::from_millis(50);
@@ -452,7 +452,7 @@ impl App {
                     width,
                 ),
                 clipped(&single_line(&permission.detail), width),
-                clipped("[y] allow  [n/esc] deny", width),
+                clipped("[y] allow  [a] always this session  [n/esc] deny", width),
             ];
             for (index, line) in approval.iter().take(layout.approval_rows).enumerate() {
                 frame.lines[layout.approval_start + index].push(Color::Yellow, line, width);
@@ -606,7 +606,7 @@ fn paint_line<W: Write>(
 
 enum TurnMessage {
     Event(Event),
-    Permission(Permission, mpsc::Sender<bool>),
+    Permission(Permission, mpsc::Sender<Approval>),
     Done(Result<(), String>),
 }
 
@@ -641,7 +641,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                             app.approval = Some(permission);
                             app.status = "waiting for permission".to_string();
                             app.render()?;
-                            let allowed = permission_input(&cancellation, app)?;
+                            let answer = permission_input(&cancellation, app)?;
                             app.approval = None;
                             app.status = if cancellation.cancelled() {
                                 "cancelling"
@@ -650,7 +650,7 @@ fn run_turn(runtime: &mut Runtime, prompt: String, app: &mut App) -> Result<(), 
                             }
                             .to_string();
                             app.render()?;
-                            let _ = reply.send(allowed);
+                            let _ = reply.send(answer);
                         }
                         TurnMessage::Done(result) => {
                             app.input_enabled = true;
@@ -728,7 +728,7 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
                         return result;
                     }
                     Ok(TurnMessage::Permission(_, reply)) => {
-                        let _ = reply.send(false);
+                        let _ = reply.send(Approval::Deny);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -762,23 +762,32 @@ fn run_compact(runtime: &mut Runtime, focus: Option<String>, app: &mut App) -> R
 fn permission_input(
     cancellation: &crate::process::Cancellation,
     app: &mut App,
-) -> Result<bool, String> {
+) -> Result<Approval, String> {
     loop {
         match event::read().map_err(|error| error.to_string())? {
             InputEvent::Resize(_, _) => app.render()?,
-            InputEvent::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(true);
-                }
-                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => return Ok(false),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            InputEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     cancellation.cancel();
-                    return Ok(false);
+                    return Ok(Approval::Deny);
                 }
-                _ => {}
-            },
+                if let Some(approval) = approval_key(key) {
+                    return Ok(approval);
+                }
+            }
             _ => {}
         }
+    }
+}
+
+/// Maps one key press at the permission prompt; None keeps waiting.
+fn approval_key(key: KeyEvent) -> Option<Approval> {
+    let plain = !key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('y') if plain => Some(Approval::Once),
+        KeyCode::Char('a') if plain => Some(Approval::Session),
+        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => Some(Approval::Deny),
+        _ => None,
     }
 }
 
@@ -799,16 +808,16 @@ struct ChannelApprover {
 }
 
 impl Approver for ChannelApprover {
-    fn approve(&mut self, request: &Permission) -> bool {
+    fn approve(&mut self, request: &Permission) -> Approval {
         let (sender, receiver) = mpsc::channel();
         if self
             .sender
             .send(TurnMessage::Permission(request.clone(), sender))
             .is_err()
         {
-            return false;
+            return Approval::Deny;
         }
-        receiver.recv().unwrap_or(false)
+        receiver.recv().unwrap_or(Approval::Deny)
     }
 }
 
@@ -1198,6 +1207,29 @@ mod tests {
             quit: false,
             last_frame: None,
         }
+    }
+
+    #[test]
+    fn permission_keys_map_to_once_session_and_deny() {
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            approval_key(key(KeyCode::Char('y'), none)),
+            Some(Approval::Once)
+        );
+        assert_eq!(
+            approval_key(key(KeyCode::Char('a'), none)),
+            Some(Approval::Session)
+        );
+        for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+            assert_eq!(approval_key(key(code, none)), Some(Approval::Deny));
+        }
+        // Ctrl-A is a line-editing chord, never a grant.
+        assert_eq!(
+            approval_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(approval_key(key(KeyCode::Char('x'), none)), None);
     }
 
     #[test]
