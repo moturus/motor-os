@@ -558,7 +558,7 @@ fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(
         return Ok(());
     }
     let root = root.ok_or_else(|| {
-        "image configuration requires an assembly; run src/select-toolchain-assembly.sh --resolve"
+        "image configuration requires an assembly; run src/resolve-toolchain-assembly.sh --resolve"
             .to_owned()
     })?;
     let mut components = root.components();
@@ -922,7 +922,7 @@ mod tests {
         );
         assert_eq!(
             config.assembly_dirs,
-            ["libc", "rg", "llvm", "rustc", "helix", "rust-analyzer"]
+            ["libc", "rg", "llvm", "rustc", "helix", "lua", "rust-analyzer"]
         );
         assert_eq!(config.assembly_required_executables.len(), 10);
         assert!(config

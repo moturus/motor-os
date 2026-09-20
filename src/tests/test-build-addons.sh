@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 
+# Offline checks of the userspace add-on stage of src/build-motor-os.sh: the
+# branch-following checkouts, Helix staging and ELF validation, and the rule
+# that each add-on is rebuilt alone and is no part of the assembly.
+
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$ROOT_DIR/src/build-motor-os.sh"
-fail() { echo "test-toolchain-helix: $*" >&2; exit 1; }
+fail() { echo "test-build-addons: $*" >&2; exit 1; }
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 
@@ -21,16 +25,27 @@ git -C "$seed" branch -M helix-test
 git -C "$seed" remote add origin "$remote"
 git -C "$seed" push -q origin helix-test
 
+# An add-on follows one branch of its fork: no commit is declared anywhere.
 MOTORH="$temporary/motorh"
-TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
-HELIX_REPOSITORY="$remote"
-HELIX_REF=refs/heads/helix-test
-HELIX_REV="$(git -C "$seed" rev-parse HEAD)"
-prepare_helix_source
-[ "$(git -C "$HELIX" rev-parse HEAD)" = "$HELIX_REV" ] ||
-	fail "managed checkout did not select HELIX_REV"
-[ -z "$(git -C "$HELIX" status --porcelain)" ] ||
-	fail "managed checkout is dirty"
+HELIX="$MOTORH/helix"
+mkdir -p "$MOTORH"
+log() { :; }
+skip() { :; }
+update_addon_source helix "$HELIX" "$remote" helix-test >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$(git -C "$seed" rev-parse HEAD)" ] ||
+	fail "the checkout did not select the branch head"
+printf update > "$seed/source"
+git -C "$seed" commit -qam update
+git -C "$seed" push -q origin helix-test
+update_addon_source helix "$HELIX" "$remote" helix-test >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$(git -C "$seed" rev-parse HEAD)" ] ||
+	fail "the checkout did not follow its branch"
+[ -z "$(git -C "$HELIX" status --porcelain)" ] || fail "the checkout is dirty"
+printf local > "$HELIX/source"
+if (update_addon_source helix "$HELIX" "$remote" helix-test) >/dev/null 2>&1; then
+	fail "a dirty add-on checkout was updated"
+fi
+git -C "$HELIX" checkout -q -- source
 
 ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_SYSROOT="$ASSEMBLY_ROOT/sysroot"
@@ -93,10 +108,45 @@ case "$(declare -f build_helix)" in
 *'--offline --no-default-features -p helix-term --bin hx'*) ;;
 	*) fail "Helix build is not an explicit fetch followed by an offline locked build" ;;
 esac
+# Add-ons are built for new and reused assemblies alike, outside the keyed
+# producer path, and before the build checks what make will resolve.
 case "$(declare -f main)" in
-	*'toolchain_claim_assembly'*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*\
-*'prepare_helix_source'*'build_helix'*'toolchain_complete_assembly'*) ;;
-	*) fail "Helix checkout/build is not confined to the assembly producer path" ;;
+	*'toolchain_complete_assembly'*'build_addons'*'resolve-toolchain-assembly.sh'*) ;;
+	*) fail "add-ons are not built after the assembly is complete" ;;
+esac
+case "$(declare -f main)" in
+	*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_helix*'toolchain_complete_assembly'*|\
+*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_ripgrep*'toolchain_complete_assembly'*|\
+*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_lua*'toolchain_complete_assembly'*)
+		fail "an add-on is still built inside the keyed producer path" ;;
+esac
+case "$(declare -f build_addons)" in
+	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*) ;;
+	*) fail "Lua, ripgrep, and Helix are not all add-ons" ;;
 esac
 
-echo "test-toolchain-helix PASS"
+# A changed source rebuilds that add-on alone; an unchanged one builds nothing.
+builds=0
+overlay="$ASSEMBLY_IMAGE_ROOT/addon-test"
+build_test_addon() {
+	builds=$((builds + 1))
+	mkdir -p "$overlay/bin"
+	printf '%s' "$builds" > "$overlay/bin/tool"
+	chmod 755 "$overlay/bin/tool"
+}
+ensure_addon test source-1 "$overlay" bin/tool build_test_addon
+[ "$builds" -eq 1 ] || fail "a missing add-on was not built"
+[ "$(cat "$ASSEMBLY_ROOT/ADDON-test")" = source-1 ] || fail "the add-on source was not recorded"
+ensure_addon test source-1 "$overlay" bin/tool build_test_addon
+[ "$builds" -eq 1 ] || fail "an up-to-date add-on was rebuilt"
+ensure_addon test source-2 "$overlay" bin/tool build_test_addon
+[ "$builds" -eq 2 ] || fail "a changed source did not rebuild the add-on"
+rm -f "$overlay/bin/tool"
+ensure_addon test source-2 "$overlay" bin/tool build_test_addon
+[ "$builds" -eq 3 ] || fail "a recorded source without its executable was accepted"
+build_nothing() { :; }
+if (ensure_addon test source-3 "$overlay" bin/tool build_nothing) 2>/dev/null; then
+	fail "an add-on build that staged nothing was accepted"
+fi
+
+echo "test-build-addons PASS"

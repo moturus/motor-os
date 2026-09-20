@@ -67,7 +67,7 @@ for tool in flock; do
 done
 case "$VMM" in
   qemu)
-    resolve_vsock_backend || exit 1
+    ensure_vsock_backend || exit 1
     discovery_tools=(qemu-system-x86_64)
     ;;
   chv) discovery_tools=(cloud-hypervisor-static pgrep script) ;;

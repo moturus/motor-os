@@ -39,9 +39,7 @@ toolchain_rust_analyzer_manifest_fields() (
 		fi
 		printf 'rust_analyzer_%s_version=%s\nrust_analyzer_%s_archive_sha256=%s\n' \
 			"$name" "$version" "$name" "$checksum"
-		printf 'rust_analyzer_%s_patch_sha256=%s\nrust_analyzer_%s_tree_sha256=%s\n' \
-			"$name" "$(sha256sum "$source_dir/patches/$name-$version-motor.patch" | awk '{print $1}')" \
-			"$name" "$tree"
+		printf 'rust_analyzer_%s_tree_sha256=%s\n' "$name" "$tree"
 	done
 )
 

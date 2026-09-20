@@ -133,8 +133,8 @@ anything:
 
 ## Versioning
 
-mlibc is pinned by `MOTOR_MLIBC_REV` in `src/toolchain-versions.sh`. The
-local runtime closure — `moto-rt`, `moto-sys`, `moto-rt-cabi`, and the
-workspace inputs that affect their build — enters `MOTOR_ASSEMBLY_KEY`, so a
-libc or shim change selects a new assembly rather than mutating an existing
-one. The rules and procedures are in [toolchain.md](toolchain.md).
+The mlibc commit is declared as `MOTOR_MLIBC_REV` in `src/toolchain-versions.sh`, which
+enters `MOTOR_ASSEMBLY_KEY`, so a libc change selects a new assembly rather
+than mutating an existing one. The shim's sources (`moto-rt`, `moto-sys`,
+`moto-rt-cabi`) are not keyed. The rules and procedures are in
+[toolchain.md](toolchain.md).

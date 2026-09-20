@@ -341,8 +341,9 @@ host port 70000. QEMU uses `vhost-user-vsock-pci`, shared guest memory, and the
 pinned `vhost-device-vsock` 0.3.0 backend with queue size 256. Cloud Hypervisor and
 Firecracker use their built-in UDS transports; Firecracker selects the raw
 standard image and PCI mode. Tests use local Unix-domain peers, with no
-host `AF_VSOCK` or `/dev/vhost-vsock` requirement. Missing prerequisites fail
-the gate; installing the backend is developer setup, not a test action.
+host `AF_VSOCK` or `/dev/vhost-vsock` requirement. The QEMU harnesses install
+the backend once when the host has none; any other missing prerequisite, or
+a failed install, fails the test run.
 See [tools.md](tools.md#vsock-test-prerequisites) for setup.
 
 Only vsock QEMU launches opt into `MOTO_SHARED_MEM=1`, using

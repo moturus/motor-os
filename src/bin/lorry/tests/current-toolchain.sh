@@ -17,7 +17,7 @@ lorry_manifest_value() {
 lorry_load_current_toolchain() {
     local script_dir repository_root toolchain_file toolchain_key
     local prefix prefix_manifest cargo_verbose rustc_verbose
-    local assembly_selector assembly_images
+    local assembly_resolver assembly_images
     local assembly_manifest assembly_root assembly_key
 
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return
@@ -82,18 +82,18 @@ lorry_load_current_toolchain() {
     if [ -n "${LORRY_ASSEMBLY_MANIFEST:-}" ]; then
         assembly_manifest="$LORRY_ASSEMBLY_MANIFEST"
     else
-        assembly_selector="$repository_root/src/select-toolchain-assembly.sh"
-        [ -x "$assembly_selector" ] ||
-            lorry_toolchain_fail "canonical assembly selector is absent: $assembly_selector" || return
-        assembly_images="$("$assembly_selector" --resolve)" || return
+        assembly_resolver="$repository_root/src/resolve-toolchain-assembly.sh"
+        [ -x "$assembly_resolver" ] ||
+            lorry_toolchain_fail "canonical assembly resolver is absent: $assembly_resolver" || return
+        assembly_images="$("$assembly_resolver" --resolve)" || return
         case "$assembly_images" in
             *$'\n'*)
-                lorry_toolchain_fail "canonical assembly selector returned multiple paths" || return
+                lorry_toolchain_fail "canonical assembly resolver returned multiple paths" || return
                 ;;
             /*/images) ;;
             *)
                 lorry_toolchain_fail \
-                    "canonical assembly selector returned an invalid image root: $assembly_images" || return
+                    "canonical assembly resolver returned an invalid image root: $assembly_images" || return
                 ;;
         esac
         assembly_manifest="${assembly_images%/images}/MOTOR-ASSEMBLY-MANIFEST"

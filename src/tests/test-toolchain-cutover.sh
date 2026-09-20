@@ -41,15 +41,15 @@ case "$make_release" in
   *) fail "release Cargo output is not keyed by the selected toolchain" ;;
 esac
 
-[ -x "$ROOT_DIR/src/select-toolchain-assembly.sh" ] ||
-  fail "assembly selector is not executable"
+[ -x "$ROOT_DIR/src/resolve-toolchain-assembly.sh" ] ||
+  fail "assembly resolver is not executable"
 make_base="$(make -n -C "$ROOT_DIR" base.img BUILD=release)"
 case "$make_base" in
-  *select-toolchain-assembly*) fail "base image unnecessarily selects an assembly" ;;
+  *resolve-toolchain-assembly*) fail "base image unnecessarily resolves an assembly" ;;
 esac
 make_main="$(make -n -C "$ROOT_DIR" main.img BUILD=release)"
 case "$make_main" in
-  *select-toolchain-assembly.sh*--resolve*'rm -f'*motor-os.qcow2*) ;;
+  *resolve-toolchain-assembly.sh*--resolve*'rm -f'*motor-os.qcow2*) ;;
   *) fail "standard image does not resolve its assembly before replacement" ;;
 esac
 

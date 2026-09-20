@@ -18,7 +18,7 @@ EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
 MOTOR_LLVM_TREE_STATE=clean
 standalone_key="$(toolchain_standalone_llvm_key)"
 elf_tools="$development_root/build/toolchain/standalone-llvm/$standalone_key/bin"
-assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
+assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
 assembly_root="${assembly_images%/images}"
 assembly_sysroot="$assembly_root/sysroot"
 

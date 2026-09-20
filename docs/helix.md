@@ -122,14 +122,18 @@ and hardlinks.
 
 ## Build and regression coverage
 
-[`src/toolchain-versions.sh`](../src/toolchain-versions.sh) declares the
-Helix repository, ref, and exact revision; dependency patches and grammar
-pins live in that fork. The [toolchain producer](build-motor-os.md) obtains
-a managed checkout, explicitly fetches locked Cargo dependencies, then builds
-with the selected Motor compiler using `--locked`, `--offline`, and
-`--no-default-features`. Assembly identity includes Helix and validates the
-staged binary and runtime content. The image contains only the binary,
-queries, themes, and tutor; raw and stripped binaries undergo ELF checks.
+Helix is a userspace add-on, not a part of the toolchain.
+[`src/build-motor-os.sh`](../src/build-motor-os.sh) declares the Helix fork
+and the branch to follow; no commit is declared. Dependency patches and
+grammar revisions live in that fork. After the toolchain and its assembly are
+complete, the [producer](build-motor-os.md) updates the checkout in
+`$MOTORH/helix`, explicitly fetches locked Cargo dependencies, then builds
+with the Motor compiler using `--locked`, `--offline`, and
+`--no-default-features`. The built commit is recorded in the assembly's
+`ADDON-helix` file, and Helix is rebuilt alone when the branch head differs;
+it is no part of the assembly's key, manifest, or validation. The image
+contains only the binary, queries, themes, and tutor; raw and stripped
+binaries undergo ELF checks.
 
 The Motor `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.
 Its generic fallback used to spin, causing editor and file-picker latency.

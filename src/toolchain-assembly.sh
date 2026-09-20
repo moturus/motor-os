@@ -1,46 +1,7 @@
 #!/usr/bin/env bash
-# Canonical Motor runtime closure and C/native assembly identity.
+# C/native assembly identity: external sources and declared values only.
 
 . "$(dirname "${BASH_SOURCE[0]}")/toolchain-native-rust-analyzer.sh"
-
-toolchain_runtime_closure() {
-	local cargo="$1" root="$2" output packages expected
-	output="$(mktemp)"
-	if ! "$cargo" tree --locked --offline --edges normal --prefix none \
-		--format '{p}' --manifest-path \
-		"$root/src/sys/lib/moto-rt-cabi/Cargo.toml" > "$output"; then
-		rm -f "$output"
-		toolchain_die "cannot read the locked src/sys dependency tree offline" \
-			"(src/build-motor-os.sh fetches its sources)"
-		return 1
-	fi
-	packages="$(sed -n 's/^\([^ ]*\) v.*/\1/p' "$output" | LC_ALL=C sort -u)"
-	rm -f "$output"
-	expected='moto-rt
-moto-rt-cabi
-moto-sys'
-	[ "$packages" = "$expected" ] ||
-		toolchain_die "moto-rt-cabi resolved closure changed; review it explicitly: ${packages//$'\n'/,}"
-	printf '%s\n' "$packages"
-}
-
-toolchain_selected_lock_digest() {
-	local lock="$1" package block record
-	record="$(mktemp)"
-	toolchain_serialize_pairs schema motor-runtime-lock-v1 > "$record"
-	for package in moto-rt moto-rt-cabi moto-sys; do
-		block="$(awk -v wanted="$package" 'BEGIN { RS="" }
-			$0 ~ "(^|\n)name = \"" wanted "\"(\n|$)" { print; n++ }
-			END { if (n != 1) exit 1 }' "$lock")" || {
-			rm -f "$record"
-			toolchain_die "Cargo.lock lacks one unique $package block"
-			return 1
-		}
-		toolchain_serialize_pairs package "$package" block "$block" >> "$record"
-	done
-	sha256sum "$record" | awk '{print $1}'
-	rm -f "$record"
-}
 
 toolchain_content_tree_digest() (
 	set -euo pipefail
@@ -98,12 +59,11 @@ toolchain_content_tree_digest() (
 )
 
 toolchain_native_configuration_digest() {
-	toolchain_hash_pairs schema motor-native-config-v4 target x86_64-unknown-motor \
+	toolchain_hash_pairs schema motor-native-config-v5 target x86_64-unknown-motor \
 		rust_analyzer_recipe motor-native-rust-analyzer-v3-std \
 		rustfmt_recipe motor-native-rustfmt-v1 \
 		build_type Release llvm_projects 'clang;lld' llvm_targets X86 \
 		llvm_assertions true libc_subdir devtools/llvm libc_config system/cfg/libc \
-		lua_version "$MOTOR_LUA_VERSION" \
 		llvm_config_adapter motor-native-llvm-config-v2 \
 		cc /MOTOR_SYSROOT/bin/motor-clang \
 		cxx /MOTOR_SYSROOT/bin/motor-clang++ \
@@ -114,42 +74,23 @@ toolchain_assembly_key() {
 	toolchain_hash_pairs schema "$MOTOR_ASSEMBLY_KEY_SCHEMA" \
 		toolchain_key "$MOTOR_TOOLCHAIN_KEY" mlibc_rev "$MOTOR_MLIBC_REV" \
 		mlibc_tree_state "$MOTOR_MLIBC_TREE_STATE" \
-		motor_os_runtime_tree "$MOTOR_OS_RUNTIME_TREE" \
-		local_moto_rt_version "$LOCAL_MOTO_RT_VERSION" \
-		local_moto_sys_version "$LOCAL_MOTO_SYS_VERSION" \
-		helix_rev "$HELIX_REV" \
 		native_configuration_digest "$NATIVE_CONFIGURATION_DIGEST"
 }
 
-toolchain_derive_runtime_identity() {
-	local root="$1" cargo="$2" closure content lock_state local_moto_sys_version
-	local_moto_sys_version="$(toolchain_manifest_package_version \
-		"$root/src/sys/lib/moto-sys/Cargo.toml")" || {
-		toolchain_die "cannot read the local moto-sys package version"
-		return 1
-	}
-	[ "$local_moto_sys_version" = "$LOCAL_MOTO_SYS_VERSION" ] || {
-		toolchain_die "local moto-sys version differs from the declared tuple"
-		return 1
-	}
-	closure="$(toolchain_runtime_closure "$cargo" "$root")" || return
-	content="$(toolchain_content_tree_digest "$root" \
-		"${MOTOR_OS_RUNTIME_INPUTS[@]}")" || return
-	lock_state="$(toolchain_selected_lock_digest "$root/src/sys/Cargo.lock")" || return
-	MOTOR_OS_RUNTIME_TREE="$(toolchain_hash_pairs schema motor-os-runtime-v1 \
-		closure "$closure" content "$content" selected_lock "$lock_state")"
-}
+# The C ABI shim is built from this checkout. Its sources stay out of the key;
+# uncommitted changes to them only mark the producer as development-dirty.
+MOTOR_SHIM_SOURCES=(src/sys/Cargo.toml src/sys/Cargo.lock src/sys/lib/moto-rt
+	src/sys/lib/moto-sys src/sys/lib/moto-rt-cabi)
 
 toolchain_derive_assembly_identity() {
-	local root="$1" mlibc="$2" cargo="$3"
+	local root="$1" mlibc="$2"
 	STANDALONE_LLVM_CONFIG_DIGEST="$(
 		toolchain_standalone_llvm_config_digest
 	)" || return
-	toolchain_derive_runtime_identity "$root" "$cargo" || return
 	MOTOR_OS_REV="$(git -C "$root" rev-parse HEAD)" || return
 	MOTOR_MLIBC_TREE_STATE="$(toolchain_worktree_digest "$mlibc" mlibc)" || return
 	if [ -n "$(git -C "$root" status --porcelain=v1 -- \
-		"${MOTOR_OS_RUNTIME_INPUTS[@]}" src/sys/Cargo.lock)" ] ||
+		"${MOTOR_SHIM_SOURCES[@]}")" ] ||
 		[ "$MOTOR_MLIBC_TREE_STATE" != clean ]; then
 		MOTOR_ASSEMBLY_STATE=development-dirty
 	fi
@@ -165,13 +106,11 @@ toolchain_derive_assembly_identity() {
 # mlibc inputs are immutable at the declared revision; a dirty mlibc checkout
 # is accepted only by the producer path above and never by a later consumer.
 toolchain_derive_consumed_assembly_identity() {
-	local root="$1" cargo="$2" toolchain_key="$3"
-	MOTOR_TOOLCHAIN_KEY="$toolchain_key"
+	MOTOR_TOOLCHAIN_KEY="$1"
 	MOTOR_MLIBC_TREE_STATE=clean
 	STANDALONE_LLVM_CONFIG_DIGEST="$(
 		toolchain_standalone_llvm_config_digest
 	)" || return
-	toolchain_derive_runtime_identity "$root" "$cargo" || return
 	NATIVE_CONFIGURATION_DIGEST="$(toolchain_native_configuration_digest)"
 	MOTOR_ASSEMBLY_KEY="$(toolchain_assembly_key)"
 }
@@ -196,8 +135,6 @@ toolchain_validate_assembly_outputs() {
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc" \
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" \
-		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" \
-		"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx" \
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer" \
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src/lib.rs" \
 		"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"; do
@@ -212,14 +149,10 @@ toolchain_render_assembly_manifest() {
 schema=$MOTOR_GENERATED_MANIFEST_SCHEMA
 toolchain_key=$MOTOR_TOOLCHAIN_KEY
 assembly_key=$MOTOR_ASSEMBLY_KEY
-toolchain_id=$MOTOR_TOOLCHAIN_ID
-toolchain_maturity=$MOTOR_TOOLCHAIN_MATURITY
 rustup_toolchain=$MOTOR_RUSTUP_TOOLCHAIN
 source_mode=$MOTOR_SOURCE_MODE
 assembly_state=$producer_assembly_state
 compiler_channel=$MOTOR_RUST_CHANNEL
-build_host=$MOTOR_BUILD_HOST
-build_targets=$MOTOR_BUILD_TARGETS
 selected_description=$SELECTED_TOOLCHAIN_DESCRIPTION
 selected_upstream_rust_version=$SELECTED_RUST_VERSION
 selected_upstream_rust_rev=$SELECTED_UPSTREAM_RUST_REV
@@ -227,10 +160,8 @@ selected_stage0_rev=$SELECTED_STAGE0_REV
 selected_rust_llvm_base_rev=$SELECTED_RUST_LLVM_BASE_REV
 selected_cargo_version=$SELECTED_MOTOR_CARGO_VERSION
 selected_cargo_rev=$SELECTED_MOTOR_CARGO_REV
-declared_rust_rev=$MOTOR_RUST_REV
 effective_rust_rev=$EFFECTIVE_MOTOR_RUST_REV
 rust_tree_state=$MOTOR_RUST_TREE_STATE
-declared_llvm_rev=$MOTOR_LLVM_REV
 effective_llvm_rev=$EFFECTIVE_MOTOR_LLVM_REV
 llvm_tree_state=$MOTOR_LLVM_TREE_STATE
 authoring_source_digest=$AUTHORING_SOURCE_DIGEST
@@ -242,17 +173,9 @@ bootstrap_config_digest=$BOOTSTRAP_CONFIG_DIGEST
 standalone_llvm_config_digest=$STANDALONE_LLVM_CONFIG_DIGEST
 stdlib_moto_rt_version=$LOCKED_MOTO_RT_VERSION
 stdlib_moto_rt_checksum=$LOCKED_MOTO_RT_CHECKSUM
-stdlib_moto_rt_package_comparison=$MOTO_RT_PACKAGE_COMPARISON
-local_moto_rt_version=$LOCAL_MOTO_RT_VERSION
-local_moto_sys_version=$LOCAL_MOTO_SYS_VERSION
 motor_os_rev=$producer_motor_os_rev
-motor_os_runtime_tree=$MOTOR_OS_RUNTIME_TREE
 mlibc_rev=$MOTOR_MLIBC_REV
 mlibc_tree_state=$MOTOR_MLIBC_TREE_STATE
-helix_repository=$HELIX_REPOSITORY
-helix_ref=$HELIX_REF
-helix_rev=$HELIX_REV
-helix_tree_sha256=$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" devtools/helix)
 native_configuration_digest=$NATIVE_CONFIGURATION_DIGEST
 native_rust_analyzer_recipe=motor-native-rust-analyzer-v3-std
 native_rust_analyzer_expected_version_base64=$(printf '%s' "$VALIDATED_RUST_ANALYZER_VERSION" | base64 -w0)
@@ -265,7 +188,6 @@ native_rustc_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/ru
 native_rustfmt_expected_version_base64=$(printf '%s' "$VALIDATED_RUSTFMT_VERSION" | base64 -w0)
 native_rustfmt_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt" | awk '{print $1}')
 native_llvm_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm" | awk '{print $1}')
-ripgrep_sha256=$(sha256sum "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg" | awk '{print $1}')
 libc_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a" | awk '{print $1}')
 libcxx_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a" | awk '{print $1}')
 moto_rt_cabi_sha256=$(sha256sum "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a" | awk '{print $1}')
@@ -275,7 +197,7 @@ EOF
 
 toolchain_generated_manifest_paths() {
 	local root
-	for root in llvm rustc rg libc helix rust-analyzer; do
+	for root in llvm rustc libc rust-analyzer; do
 		printf '%s/%s\n' "$ASSEMBLY_IMAGE_ROOT/$root" devtools/toolchain/manifest
 	done
 }
@@ -327,13 +249,11 @@ toolchain_validate_consumed_assembly() (
 	analyzer_inputs="$(toolchain_rust_analyzer_inputs_digest)" || exit
 	analyzer_sources="$(toolchain_rust_analyzer_manifest_fields)" || exit
 	fields=(schema toolchain_key assembly_key standalone_llvm_config_digest
-		motor_os_runtime_tree mlibc_rev mlibc_tree_state local_moto_rt_version
-		local_moto_sys_version helix_repository helix_ref helix_rev
+		mlibc_rev mlibc_tree_state
 		native_configuration_digest rust_analyzer_inputs_digest native_rust_analyzer_recipe)
 	expected_values=("$MOTOR_GENERATED_MANIFEST_SCHEMA" "$MOTOR_TOOLCHAIN_KEY"
 		"$MOTOR_ASSEMBLY_KEY" "$STANDALONE_LLVM_CONFIG_DIGEST"
-		"$MOTOR_OS_RUNTIME_TREE" "$MOTOR_MLIBC_REV" clean "$LOCAL_MOTO_RT_VERSION"
-		"$LOCAL_MOTO_SYS_VERSION" "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV"
+		"$MOTOR_MLIBC_REV" clean
 		"$NATIVE_CONFIGURATION_DIGEST" "$analyzer_inputs" motor-native-rust-analyzer-v3-std)
 	for ((field = 0; field < ${#fields[@]}; field++)); do
 		expected="${expected_values[$field]}"
@@ -357,25 +277,14 @@ toolchain_validate_consumed_assembly() (
 	actual="$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/rust-analyzer" \
 		devtools/rust/lib/rustlib/src/rust/library)" || exit
 	[ "$actual" = "$expected" ] || { toolchain_die 'assembly rust-src digest differs'; exit 1; }
-	expected="$(toolchain_manifest_value "$manifest" helix_tree_sha256)" || {
-		toolchain_die "assembly manifest lacks one unique helix_tree_sha256 field"
-		exit 1
-	}
-	actual="$(toolchain_content_tree_digest "$ASSEMBLY_IMAGE_ROOT/helix" \
-		devtools/helix)" || exit
-	[ "$actual" = "$expected" ] || {
-		toolchain_die "assembly Helix tree digest does not match"
-		exit 1
-	}
 	hash_fields=(native_rust_analyzer_sha256 native_rustc_sha256 native_rustfmt_sha256
-		native_llvm_sha256 ripgrep_sha256
+		native_llvm_sha256
 		libc_sha256 libcxx_sha256 moto_rt_cabi_sha256 libc_config_sha256)
 	hash_paths=(
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
 		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
-		"$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc.a"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libc++.a"
 		"$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
@@ -426,8 +335,7 @@ toolchain_validate_assembly_manifest() {
 			return 1 ;;
 	esac
 	expected="$(mktemp)"
-	# Revision and dirty state record the producer's provenance. Committing the
-	# same runtime inputs changes neither the assembly key nor its contents.
+	# Revision and dirty state record the producer's provenance; neither is keyed.
 	toolchain_render_assembly_manifest "$producer_motor_os_rev" \
 		"$producer_assembly_state" > "$expected"
 	if ! cmp -s "$expected" "$manifest"; then

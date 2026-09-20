@@ -72,6 +72,7 @@ assembly_dirs:
   - "llvm"
   - "rustc"
   - "helix"
+  - "lua"
   - "rust-analyzer"
 assembly_required_executables:
   - "rg/system/bin/rg"

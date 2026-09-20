@@ -358,26 +358,27 @@ selection are rejected. Direct URL pushes never invent a remote name.
 
 ## 6. Packaging, tests and gates (both tools)
 
-- `src/toolchain-versions.sh` gains `GIX_REPOSITORY/REF/REV` and
-  `JJ_REPOSITORY/REF/REV`, validated in `src/toolchain-lib.sh`; the REV is the
-  identity and the REF a fetch hint. Assembly inputs also carry the lockfile
-  digest, feature recipe and profile.
-- `src/toolchain-gix.sh` and `src/toolchain-jj.sh`, sourced by
-  `src/build-motor-os.sh` like the rust-analyzer helper: `toolchain_managed_checkout`,
-  a keyed target directory, an explicit dependency fetch, then a
+- gix and jj are userspace add-ons, not parts of the toolchain (see
+  [toolchain.md](../toolchain.md)). `src/build-motor-os.sh` declares each
+  fork and the branch to follow next to Lua, ripgrep, and Helix; nothing is
+  added to `src/toolchain-versions.sh`, to a key, or to the assembly
+  manifest, and no key schema changes.
+- `build_addons` builds them after the assembly is complete: the
+  branch-following checkout, an explicit dependency fetch, then a
   `--locked --offline` build of `-p gitoxide --bin gix` and `-p jj-cli --bin jj`
   with the assembly linker; host build scripts and proc macros stay on the
   host target. Version metadata is deterministic and runs no guest Git or jj.
+  Each records its built commit in `ADDON-gix` and `ADDON-jj` and is rebuilt
+  alone when its branch head changes. If the feature recipe or profile must
+  also force a rebuild, record it next to the commit.
 - Stage only the executable, licences and a short version/feature/limits
-  record under `gix/devtools` and `jj/devtools`. `src/toolchain-assembly.sh`
-  gains the key fields and content-tree digests; bump the assembly key schema
-  so an older assembly cannot be reused. Add `gix` and `jj` to `assembly_dirs`
-  and `gix/devtools/bin/gix` and `jj/devtools/bin/jj` to
+  record in the overlays `images/gix` and `images/jj`. Add `gix` and `jj` to
+  `assembly_dirs` and `gix/devtools/bin/gix` and `jj/devtools/bin/jj` to
   `assembly_required_executables` in `motor-os-dev.yaml`; base and main
   manifests are unchanged.
-- Host contracts `src/tests/test-toolchain-gix.sh` and `test-toolchain-jj.sh`
-  (source selection, exact revision, flags, staging, permissions, tamper
-  detection, key invalidation) join the toolchain list in `full-test.sh`.
+- The host contract `src/tests/test-build-addons.sh` gains their cases
+  (branch selection, flags, staging, permissions, rebuild on a changed
+  source).
   Guest drivers `test-gix.sh`, `test-jj.sh` and `test-git-workflows.sh` run
   from the `FULL_TEST_VERIFY_DEV_SOURCES=1` branch after SSH is up, each with
   a mode for an already running VM.

@@ -177,17 +177,17 @@ Helix VM coverage pass with the fix.
 
 ## Stage 3 implementation
 
-Motor assembly identity is now schema `motor-assembly-key-v3`. It includes the
-exact `HELIX_REV`, repository, ref, and a content-tree digest covering the
-staged binary, runtime files, symlinks, and executable modes. Producer and
-consumer validation require the Helix root and reject binary or runtime
-tampering.
+Helix was first part of the assembly identity (schema `motor-assembly-key-v3`
+hashed a declared `HELIX_REV`, and the manifest carried a Helix tree digest),
+so every Helix update rebuilt native LLVM and rustc. Since 2026-09-19 Helix
+is a userspace add-on: no commit is declared, the producer follows the
+`HELIX_BRANCH` of the fork declared in `src/build-motor-os.sh`, records the
+built commit in the assembly's `ADDON-helix` file, and rebuilds
+`images/helix` alone when the branch head differs.
 
-A new assembly producer uses `toolchain_managed_checkout` to obtain the exact
-GitHub revision. On a fresh producer path, Cargo performs `fetch --locked` as
-the explicit online dependency-acquisition step, then builds Helix with
-`--locked --offline --no-default-features`. A validated reusable assembly
-skips the checkout, fetch, build, and staging work entirely.
+Cargo performs `fetch --locked` as the explicit online dependency-acquisition
+step, then builds Helix with `--locked --offline --no-default-features`. An
+up-to-date Helix skips the fetch, build, and staging work entirely.
 
 Only these paths are staged:
 

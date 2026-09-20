@@ -126,7 +126,14 @@ HELIX="$MOTORH/helix"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
-LUA_VER="$MOTOR_LUA_VERSION"
+
+# Userspace add-ons. They are built with the finished toolchain and are no part
+# of its identity: Lua is a release, ripgrep and Helix follow a fork branch.
+LUA_VER=5.4.8
+RIPGREP_REPOSITORY=https://github.com/moturus/ripgrep.git
+RIPGREP_BRANCH=master
+HELIX_REPOSITORY=https://github.com/moturus/helix.git
+HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
@@ -199,6 +206,7 @@ activate_exact_assembly_paths() {
 	RUSTC_IMG="$ASSEMBLY_IMAGE_ROOT/rustc"
 	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
 	HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
+	LUA_IMG="$ASSEMBLY_IMAGE_ROOT/lua"
 	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
 	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
 	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
@@ -207,7 +215,7 @@ activate_exact_assembly_paths() {
 	MLIBC_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc"
 	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
 	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
-	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua"
+	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua-$LUA_VER"
 	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
 	HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
 	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
@@ -261,33 +269,29 @@ ensure_meson() {
 	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install meson
 }
 
-# --- ancillary source checkout ---------------------------------------------
-update_ripgrep_source() {
-	local url="https://github.com/moturus/ripgrep.git" branch="master"
-	if [ ! -e "$RIPGREP" ]; then
-		log "cloning ripgrep ($branch)"
-		git clone --branch "$branch" --single-branch "$url" "$RIPGREP"
+# --- add-on source checkout: follow one branch of a fork ----------------------
+update_addon_source() {
+	local name="$1" checkout="$2" url="$3" branch="$4" head remote
+	if [ ! -e "$checkout" ]; then
+		log "cloning $name ($branch)"
+		git clone --branch "$branch" --single-branch "$url" "$checkout"
 		return
 	fi
-	git -C "$RIPGREP" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
-		die "$RIPGREP exists but is not a Git checkout"
-	[ "$(git -C "$RIPGREP" branch --show-current)" = "$branch" ] ||
-		die "ripgrep checkout must be on branch $branch: $RIPGREP"
-	[ -z "$(git -C "$RIPGREP" status --porcelain)" ] ||
-		die "ripgrep checkout is dirty — preserve its changes and re-run: $RIPGREP"
+	git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+		die "$checkout exists but is not a Git checkout"
+	[ "$(git -C "$checkout" branch --show-current)" = "$branch" ] ||
+		die "$name checkout must be on branch $branch: $checkout"
+	[ -z "$(git -C "$checkout" status --porcelain)" ] ||
+		die "$name checkout is dirty — preserve its changes and re-run: $checkout"
 
-	log "updating ripgrep ($branch)"
-	git -C "$RIPGREP" fetch "$url" "$branch"
-	local head remote
-	head="$(git -C "$RIPGREP" rev-parse HEAD)"
-	remote="$(git -C "$RIPGREP" rev-parse FETCH_HEAD)"
-	if [ "$head" = "$remote" ]; then
-		skip "ripgrep already current"
-		return
-	fi
-	git -C "$RIPGREP" merge-base --is-ancestor "$head" "$remote" ||
-		die "ripgrep checkout has local or diverged commits — update it manually: $RIPGREP"
-	git -C "$RIPGREP" merge --ff-only "$remote"
+	git -C "$checkout" fetch "$url" "$branch"
+	head="$(git -C "$checkout" rev-parse HEAD)"
+	remote="$(git -C "$checkout" rev-parse FETCH_HEAD)"
+	[ "$head" != "$remote" ] || return 0
+	git -C "$checkout" merge-base --is-ancestor "$head" "$remote" ||
+		die "$name checkout has local or diverged commits — update it manually: $checkout"
+	log "updating $name ($branch)"
+	git -C "$checkout" merge --ff-only "$remote"
 }
 
 # --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
@@ -542,9 +546,9 @@ build_native_llvm() {
 	ninja -C "$NATIVE_LLVM_BUILD" llvm-driver
 }
 
-# --- stage 7: Lua -----------------------------------------------------------
+# --- add-on: Lua, an end-to-end native C application -------------------------
 build_lua() {
-	log "stage 7: building Lua $LUA_VER"
+	log "building Lua $LUA_VER and staging it as /devtools/bin/lua"
 	( cd "$MOTORH"
 		[ -f "lua-$LUA_VER.tar.gz" ] || curl -LO "https://www.lua.org/ftp/lua-$LUA_VER.tar.gz"
 		[ -d "lua-$LUA_VER" ] || tar xf "lua-$LUA_VER.tar.gz" )
@@ -577,11 +581,13 @@ build_lua() {
 			"$SYSROOT/$TOOLS/lib/libc.a" \
 			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" \
 			-Wl,--end-group -o "$LUA_BUILD/lua" )
+	mkdir -p "$LUA_IMG/devtools/bin"
+	"$B/llvm-strip" -o "$LUA_IMG/devtools/bin/lua" "$LUA_BUILD/lua"
 }
 
-# --- stage 8: stage the C/C++ toolchain into the image ----------------------
+# --- stage 7: stage the C/C++ toolchain into the image ----------------------
 llvm_stage_image() {
-	log "stage 8: staging the toolchain, sysroot, and Lua into the assembly image root"
+	log "stage 7: staging the toolchain and sysroot into the assembly image root"
 	local img="$LLVM_IMG"
 	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
 		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
@@ -610,10 +616,8 @@ llvm_stage_image() {
 	# Rust toolchain at /devtools/rust/bin (build-rustc.md). Its clang config and
 	# resource dir are pinned by absolute path (the /devtools/cfg/llvm .cfg + the baked
 	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
-	# exe's own path, so the binary works wherever it is placed. Lua is a direct
-	# development executable under /devtools/bin.
+	# exe's own path, so the binary works wherever it is placed.
 	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
-	"$B/llvm-strip" -o "$img/devtools/bin/lua" "$LUA_BUILD/lua"
 
 	# /devtools/bin/cc — the C compiler / linker driver: a Rush script (not
 	# a compiled binary) over the llvm multicall's clang. rustc's default linker
@@ -771,7 +775,7 @@ EOF
 
 }
 
-# --- build and stage ripgrep -------------------------------------------------
+# --- add-on: ripgrep ------------------------------------------------------------
 build_ripgrep() {
 	log "building ripgrep and staging it as /system/bin/rg"
 	( cd "$RIPGREP" && \
@@ -781,17 +785,9 @@ build_ripgrep() {
 
 	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
 	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
-	[ ! -e "$RG_IMG" ] ||
-		die "ripgrep image staging already exists without validated reuse: $RG_IMG"
 	mkdir -p "$RG_IMG/system/bin"
 	"$B/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
 	chmod 755 "$RG_IMG/system/bin/rg"
-}
-
-prepare_helix_source() {
-	HELIX="$TOOLCHAIN_SRC_ROOT/helix"
-	toolchain_managed_checkout "$HELIX_REPOSITORY" "$HELIX_REF" "$HELIX_REV" \
-		"$HELIX" "$MOTORH/helix"
 }
 
 validate_helix_elf() {
@@ -821,8 +817,6 @@ validate_helix_elf() {
 stage_helix() {
 	local binary="$HELIX_TARGET_DIR/$TARGET/release/hx" component
 	[ -x "$binary" ] || die "Helix binary was not produced: $binary"
-	[ ! -e "$HELIX_IMG" ] ||
-		die "Helix image staging already exists without validated reuse: $HELIX_IMG"
 	validate_helix_elf "$binary"
 	mkdir -p "$HELIX_IMG/devtools/helix/runtime"
 	"$B/llvm-strip" -o "$HELIX_IMG/devtools/helix/hx" "$binary"
@@ -835,8 +829,37 @@ stage_helix() {
 	done
 }
 
+# --- add-ons -------------------------------------------------------------------
+# Add-ons link against this assembly's sysroot and are staged beside its
+# overlays, but are no part of its identity. Each records the source it was
+# built from and is rebuilt alone when that source changes.
+ensure_addon() {
+	local name="$1" source="$2" overlay="$3" executable="$4" build="$5"
+	local stamp="$ASSEMBLY_ROOT/ADDON-$name"
+	if [ -x "$overlay/$executable" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$source" ]; then
+		skip "$name $source"
+		return
+	fi
+	rm -f "$stamp"
+	rm -rf "$overlay"
+	"$build"
+	[ -x "$overlay/$executable" ] || die "$name was not staged: $overlay/$executable"
+	printf '%s\n' "$source" > "$stamp"
+}
+
+build_addons() {
+	configure_exact_cross_driver
+	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
+	update_addon_source ripgrep "$RIPGREP" "$RIPGREP_REPOSITORY" "$RIPGREP_BRANCH"
+	ensure_addon ripgrep "$(git -C "$RIPGREP" rev-parse HEAD)" \
+		"$RG_IMG" system/bin/rg build_ripgrep
+	update_addon_source helix "$HELIX" "$HELIX_REPOSITORY" "$HELIX_BRANCH"
+	ensure_addon helix "$(git -C "$HELIX" rev-parse HEAD)" \
+		"$HELIX_IMG" devtools/helix/hx build_helix
+}
+
 build_helix() {
-	log "fetching, building, and staging Helix"
+	log "fetching, building, and staging Helix as /devtools/helix/hx"
 	(
 		cd "$HELIX"
 		RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" \
@@ -857,17 +880,6 @@ build_helix() {
 				--offline --no-default-features -p helix-term --bin hx
 	)
 	stage_helix
-}
-
-# --- fetch the locked workspace sources --------------------------------------
-# The src/sys lock pins git forks (crossterm, mio, tokio) and registry crates
-# that the Rust bootstrap never fetches; the assembly identity reads that
-# workspace with `cargo tree --offline`, so a fresh Cargo home is filled first.
-fetch_workspace_sources() {
-	log "fetching the locked src/sys workspace sources"
-	RUSTC="$TOOLCHAIN_PREFIX/bin/rustc" "$TOOLCHAIN_PREFIX/bin/cargo" fetch \
-		--locked --manifest-path "$MOTOR/src/sys/Cargo.toml" ||
-		die "cannot fetch the locked src/sys workspace sources"
 }
 
 # --- rebuild the OS and all three images -------------------------------------
@@ -921,9 +933,8 @@ main() {
 	export PYTHONDONTWRITEBYTECODE=1
 	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
 
-	fetch_workspace_sources
 	toolchain_fetch_rust_analyzer "$RUST" "$TOOLCHAIN_PREFIX"
-	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC" "$TOOLCHAIN_PREFIX/bin/cargo"
+	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC"
 	activate_exact_assembly_paths
 	toolchain_claim_assembly
 	if [ "$TOOLCHAIN_ASSEMBLY_REUSED" = false ]; then
@@ -936,15 +947,10 @@ main() {
 		build_mlibc
 		build_cxx_runtimes
 		build_native_llvm
-		build_lua
 		llvm_stage_image
 		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE" \
 			"$TOOLCHAIN_SRC_ROOT/rust/build/cache"
 		rustc_stage_image
-		update_ripgrep_source
-		build_ripgrep
-		prepare_helix_source
-		build_helix
 		if ! toolchain_build_native_rust_analyzer "$RUST" "${CARGO_HOME:-$HOME/.cargo}" "$AUTHORING_BASE"; then
 			toolchain_reject_assembly "native rust-analyzer build or validation failed"
 			return 1
@@ -953,7 +959,10 @@ main() {
 	else
 		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
 	fi
-	"$MOTOR/src/select-toolchain-assembly.sh" --pin "$ASSEMBLY_ROOT"
+	build_addons
+	# make must find exactly what was just produced.
+	[ "$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)" = "$ASSEMBLY_IMAGE_ROOT" ] ||
+		die "ordinary builds would not select the produced assembly: $ASSEMBLY_ROOT"
 
 	# The tracked selector is deliberately added only by the separately gated
 	# cutover patch after a clean managed provision and the full core test gate.

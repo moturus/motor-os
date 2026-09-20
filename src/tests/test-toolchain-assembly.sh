@@ -16,7 +16,6 @@ for repo in "$root" "$mlibc"; do
 done
 for package in moto-rt moto-rt-cabi moto-sys; do
 	version=0.1.0
-	[ "$package" != moto-sys ] || version="$LOCAL_MOTO_SYS_VERSION"
 	printf '[package]\nname = "%s"\nversion = "%s"\n' "$package" "$version" > \
 		"$root/src/sys/lib/$package/Cargo.toml"
 	printf '%s source\n' "$package" > "$root/src/sys/lib/$package/src/lib.rs"
@@ -35,7 +34,7 @@ version = "0.1.0"
 
 [[package]]
 name = "moto-sys"
-version = "$LOCAL_MOTO_SYS_VERSION"
+version = "0.1.0"
 
 [[package]]
 name = "unrelated"
@@ -45,64 +44,42 @@ printf 'mlibc\n' > "$mlibc/source"
 git -C "$root" add . && git -C "$root" commit -qm motor
 git -C "$mlibc" add . && git -C "$mlibc" commit -qm mlibc
 
-MOTOR_OS_RUNTIME_INPUTS=(src/sys/Cargo.toml src/sys/lib/moto-rt \
-	src/sys/lib/moto-rt-cabi src/sys/lib/moto-sys)
 MOTOR_TOOLCHAIN_KEY="$(printf toolchain | sha256sum | awk '{print $1}')"
 MOTOR_ASSEMBLY_STATE=clean
 export MOTORH="$temporary/output"
-fake_cargo="$temporary/cargo"
-cat > "$fake_cargo" <<EOF
-#!/usr/bin/env bash
-printf '%s\n' 'moto-rt-cabi v0.1.0 (/source)' \
-  'moto-rt v0.1.0 (/source)' 'moto-sys v$LOCAL_MOTO_SYS_VERSION (/source)' \
-  'moto-rt v0.1.0 (/source) (*)'
-EOF
-chmod +x "$fake_cargo"
 
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
-first_key="$MOTOR_ASSEMBLY_KEY"; first_tree="$MOTOR_OS_RUNTIME_TREE"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+toolchain_derive_assembly_identity "$root" "$mlibc"
+first_key="$MOTOR_ASSEMBLY_KEY"
+toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "assembly key is unstable"
-sed -i "s/version = \"$LOCAL_MOTO_SYS_VERSION\"/version = \"9.9.9\"/" \
-	"$root/src/sys/lib/moto-sys/Cargo.toml"
-if toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo" 2>/dev/null; then
-	fail "undeclared moto-sys version was accepted"
-fi
-sed -i "s/version = \"9.9.9\"/version = \"$LOCAL_MOTO_SYS_VERSION\"/" \
-	"$root/src/sys/lib/moto-sys/Cargo.toml"
+# Local runtime versions are no key input: a version bump keeps the assembly.
+sed -i 's/version = "0.1.0"/version = "9.9.9"/' "$root/src/sys/lib/moto-sys/Cargo.toml"
+git -C "$root" commit -qam 'bump moto-sys'
+toolchain_derive_assembly_identity "$root" "$mlibc"
+[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "a moto-sys version bump re-keyed the assembly"
 original_toolchain_key="$MOTOR_TOOLCHAIN_KEY"
 MOTOR_TOOLCHAIN_KEY="$(printf changed-toolchain | sha256sum | awk '{print $1}')"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] ||
 	fail "toolchain key did not re-key the assembly"
 MOTOR_TOOLCHAIN_KEY="$original_toolchain_key"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] ||
 	fail "restored toolchain key did not restore the assembly key"
-original_helix_rev="$HELIX_REV"
-HELIX_REV=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
-[ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] ||
-	fail "Helix revision did not re-key the assembly"
-HELIX_REV="$original_helix_rev"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
-[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] ||
-	fail "restored Helix revision did not restore the assembly key"
 printf 'unrelated\n' > "$root/README"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "unrelated source changed assembly"
 
-sed -i 's/version = "1.0.0"/version = "2.0.0"/' "$root/src/sys/Cargo.lock"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
-[ "$MOTOR_OS_RUNTIME_TREE" = "$first_tree" ] || fail "unrelated lock entry changed runtime"
-[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "unrelated lock entry re-keyed assembly"
-
+# No file of this checkout is keyed. A shim edit only marks the producer dirty.
+printf 'script edit\n' > "$root/src/build-motor-os.sh"
+git -C "$root" add src/build-motor-os.sh
+toolchain_derive_assembly_identity "$root" "$mlibc"
+[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "build script edit re-keyed assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "build script edit was marked dirty"
 printf 'runtime edit\n' >> "$root/src/sys/lib/moto-rt/src/lib.rs"
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
-[ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] || fail "runtime edit did not re-key assembly"
-[ "$MOTOR_TOOLCHAIN_KEY" = "$(printf toolchain | sha256sum | awk '{print $1}')" ] ||
-	fail "runtime edit changed the toolchain key"
-[ "$MOTOR_ASSEMBLY_STATE" = development-dirty ] || fail "runtime edit was not marked dirty"
+toolchain_derive_assembly_identity "$root" "$mlibc"
+[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "shim source edit re-keyed assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = development-dirty ] || fail "shim source edit was not marked dirty"
 
 # A complete keyed assembly is reusable; partial or changed staging is not.
 MOTOR_RUSTUP_TOOLCHAIN=motor-test
@@ -124,9 +101,8 @@ START_RUST_LIBRARY_LOCK_SHA256="$MOTOR_RUST_LIBRARY_LOCK_SHA256"
 START_RUST_ANALYZER_LOCK_SHA256="$MOTOR_RUST_ANALYZER_LOCK_SHA256"
 RUST_ANALYZER_INPUTS_DIGEST="$(toolchain_rust_analyzer_inputs_digest)"
 BOOTSTRAP_CONFIG_DIGEST=test-bootstrap
-LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
-LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
-MOTO_RT_PACKAGE_COMPARISON=exact
+LOCKED_MOTO_RT_VERSION=0.17.6
+LOCKED_MOTO_RT_CHECKSUM="$(printf moto-rt | sha256sum | awk '{print $1}')"
 VALIDATED_RUSTC_VERBOSE='rustc test verbose'
 VALIDATED_CARGO_VERBOSE='cargo test verbose'
 VALIDATED_RUSTFMT_VERSION='rustfmt test version'
@@ -134,8 +110,6 @@ VALIDATED_RUST_ANALYZER_VERSION='rust-analyzer test version'
 mkdir -p "$ASSEMBLY_SYSROOT/devtools/llvm/lib" \
 	"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin" \
-	"$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
-	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust" \
 	"$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc"
 mkdir -p "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin" \
 	"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library/std/src"
@@ -147,14 +121,10 @@ printf shim > "$ASSEMBLY_SYSROOT/devtools/llvm/lib/libmoto_rt_cabi.a"
 printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf rustc > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
 printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
-printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
-printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
-chmod 755 "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
-printf query > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
 printf shells > "$ASSEMBLY_IMAGE_ROOT/libc/system/cfg/libc/shells"
 mkdir "${ASSEMBLY_ROOT}.building"
 toolchain_complete_assembly
-for generated in llvm rustc rg libc helix rust-analyzer; do
+for generated in llvm rustc libc rust-analyzer; do
 	manifest="$ASSEMBLY_IMAGE_ROOT/$generated/devtools/toolchain/manifest"
 	[ -f "$manifest" ] || fail "$generated generated root lacks a manifest"
 	cmp -s "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST" "$manifest" ||
@@ -167,12 +137,12 @@ toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] ||
 	fail "unkeyed Motor OS revision prevented assembly reuse"
 
-# Committing the exact producer inputs changes provenance, not their content.
+# Committing the shim sources changes the current state, not the producer's record.
 producer_key="$MOTOR_ASSEMBLY_KEY"
 producer_manifest_sha256="$(sha256sum "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST")"
-git -C "$root" add . && git -C "$root" commit -qm 'commit runtime inputs'
+git -C "$root" add . && git -C "$root" commit -qm 'commit shim sources'
 MOTOR_ASSEMBLY_STATE=clean
-toolchain_derive_assembly_identity "$root" "$mlibc" "$fake_cargo"
+toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$producer_key" ] || fail "committing inputs re-keyed assembly"
 [ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "committed inputs were not clean"
 toolchain_claim_assembly
@@ -195,11 +165,11 @@ chmod u+w "$manifest"
 cp "$temporary/producer-manifest" "$manifest"
 chmod 0444 "$manifest"
 
-printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with changed staging was accepted"
 fi
-printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf llvm > "$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 if toolchain_claim_assembly 2>/dev/null; then fail "changed analyzer was accepted"; fi
 printf analyzer > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
@@ -209,18 +179,17 @@ printf rust-src > "$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/lib/rustlib/
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 if toolchain_claim_assembly 2>/dev/null; then fail "changed rustfmt was accepted"; fi
 printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
-printf changed >> "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
-if toolchain_claim_assembly 2>/dev/null; then
-	fail "assembly with changed Helix binary was accepted"
-fi
+# Add-on overlays are refreshed in place and are not assembly outputs.
+mkdir -p "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix" "$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
+	"$ASSEMBLY_IMAGE_ROOT/lua/devtools/bin"
 printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
-printf changed >> \
-	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
-if toolchain_claim_assembly 2>/dev/null; then
-	fail "assembly with changed Helix runtime was accepted"
-fi
-printf query > \
-	"$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/runtime/queries/rust/highlights.scm"
+printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+printf lua > "$ASSEMBLY_IMAGE_ROOT/lua/devtools/bin/lua"
+toolchain_claim_assembly
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "an add-on overlay prevented assembly reuse"
+printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
+toolchain_claim_assembly
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "a rebuilt add-on prevented assembly reuse"
 chmod u+w "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/libc/devtools/toolchain/manifest"
 if toolchain_claim_assembly 2>/dev/null; then

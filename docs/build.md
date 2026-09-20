@@ -34,6 +34,8 @@ the parent of the Motor OS checkout contains:
 toolchain-src/   exact managed Rust/LLVM and mlibc sources
 toolchains/      immutable key-qualified host toolchain prefixes
 assemblies/      keyed C sysroots, native tools, and generated image roots
+ripgrep/ helix/ lua-<version>/
+                 sources of the userspace add-ons, built last
 ```
 
 Re-running `src/build-motor-os.sh` validates and reuses a complete matching
@@ -43,8 +45,8 @@ For the source layout, authoring mode, generated manifests, and update policy,
 see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and
 native Rust components are described in [build-llvm.md](build-llvm.md) and
 [build-rustc.md](build-rustc.md); they are not separate build entry points.
-Persistent host selection and recovery commands are documented in
-[Selecting a toolchain assembly](assembly-selection.md).
+How ordinary builds find the assembly is documented in
+[Resolving the toolchain assembly](assembly-resolution.md).
 
 ## Run Motor OS
 

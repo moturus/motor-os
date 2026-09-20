@@ -481,7 +481,7 @@ src/build-motor-os.sh</code></pre>
   <li>checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
   <code>src/toolchain-versions.sh</code>. A checkout that does not match the declaration,
   including one with a modified or untracked file, is an error; the build never advances a
-  branch or runs <code>cargo update</code>;</li>
+  toolchain branch or runs <code>cargo update</code>;</li>
   <li>builds a Linux-host Clang and LLD from the LLVM fork;</li>
   <li>runs Rust's bootstrap once and installs the result as an immutable toolchain: rustc,
   rustdoc, Cargo, the standard library for Linux and for <code>x86_64-unknown-motor</code>,
@@ -490,8 +490,12 @@ src/build-motor-os.sh</code></pre>
   by component;</li>
   <li>builds the native side, called an assembly: the C-ABI shim over <code>rt.vdso</code>,
   compiler-rt, mlibc, libunwind, libc++abi, and libc++, the native LLVM multicall binary,
-  Lua, native rustc, and ripgrep. An assembly is keyed by its inputs too, so a change to
-  <code>moto-rt</code> or mlibc produces a new assembly without a new compiler;</li>
+  and native rustc. An assembly is keyed by its inputs too, so a change to mlibc produces
+  a new assembly without a new compiler. Edits to this repository, <code>moto-rt</code>
+  included, never change a key;</li>
+  <li>builds the userspace add-ons with that toolchain: Lua, ripgrep, and Helix. They are no
+  part of the toolchain's identity. Lua is a release, ripgrep and Helix follow one branch of
+  their fork, and each is rebuilt alone when its source changes;</li>
   <li>writes the toolchain and assembly manifests, then builds the base, standard, and
   developer images into <code>vm_images/release/</code>.</li>
 </ol>
@@ -503,12 +507,15 @@ run to put them elsewhere):</p>
   <tr><th>Directory</th><th>Contents</th></tr>
   <tr><td><code>toolchain-src/</code></td><td>The managed Rust checkout, with LLVM and Cargo
     as submodules, and the mlibc checkout.</td></tr>
+  <tr><td><code>ripgrep/</code>, <code>helix/</code>, <code>lua-&lt;version&gt;/</code></td><td>The
+    add-on sources.</td></tr>
   <tr><td><code>toolchains/&lt;name&gt;/</code></td><td>One immutable host toolchain per key:
     the rustup toolchain the repository selects.</td></tr>
   <tr><td><code>assemblies/&lt;key&gt;/</code></td><td>One assembly per key: <code>build/</code>
     (component build trees), <code>sysroot/</code> (the C/C++ cross sysroot and the
-    <code>motor-clang</code> linker wrappers), and <code>images/</code> (the libc, ripgrep,
-    LLVM, and rustc files the imager places into the images).</td></tr>
+    <code>motor-clang</code> linker wrappers), and <code>images/</code> (the libc, LLVM,
+    rustc, and rust-analyzer files the imager places into the images, plus the Lua,
+    ripgrep, and Helix add-ons built against this sysroot).</td></tr>
 </table>
 </div>
 <p>The build is incremental and safe to rerun: after a failure, run the same command
@@ -533,14 +540,12 @@ for upstream Rust 1.99.0. The sysroot contains <code>MOTOR-TOOLCHAIN-MANIFEST</c
 <code>/devtools/toolchain/manifest</code>, contains <code>MOTOR-ASSEMBLY-MANIFEST</code>. The
 manifests record the revisions, keys, and hashes everything was built from, and
 <code>make</code> refuses to run with a toolchain that has no key.</p>
-<p>The build also records which assembly this checkout uses, in the ignored directory
-<code>.motor-os/</code>. <code>make clean</code> keeps that record, and a second clone under
-the same <code>MOTORH</code> makes its own. When the runtime sources change and no assembly
-matches any more, run <code>src/build-motor-os.sh</code> again: it derives the new key and
-builds only what is missing. To inspect or change the selection by hand:</p>
-<pre><code>src/select-toolchain-assembly.sh --show
-src/select-toolchain-assembly.sh --list
-src/select-toolchain-assembly.sh --pin ASSEMBLY_KEY</code></pre>
+<p>Nothing records which assembly a checkout uses. Its key follows from the selected
+toolchain and the declared toolchain inputs, and it lives beside that toolchain under
+<code>MOTORH</code>, so every clone finds it on its own. When a declared input changes and no
+assembly matches any more, run <code>src/build-motor-os.sh</code> again: it derives the new
+key and builds only what is missing. To see the assembly in use:</p>
+<pre><code>src/resolve-toolchain-assembly.sh --show</code></pre>
 
 <h2>Building with make</h2>
 <p>With the toolchain in place, the Makefile in the repository root builds the system, the
@@ -566,7 +571,7 @@ needs, to <code>build/obj/&lt;toolchain-key&gt;/&lt;profile&gt;/&lt;component&gt
 <p>The imager (<code>src/imager</code>) assembles each image from a YAML description and
 the permission policy; see <a href="filesystem.html">Filesystem</a>. The standard and
 developer images additionally take the libc, ripgrep, LLVM, and rustc files from the
-selected assembly, so they cannot be built without one; the base image needs none.</p>
+assembly, so they cannot be built without one; the base image needs none.</p>
 
 <h2>Running the tests</h2>
 <pre><code>src/tests/full-test.sh              # debug
@@ -608,8 +613,8 @@ changing its revision in <code>src/toolchain-versions.sh</code>.</p>
 and
 <a href="https://github.com/moturus/motor-os/blob/main/docs/build-rustc.md"><code>docs/build-rustc.md</code></a>
 (the C/C++ and Rust components and their layout on the developer image), and
-<a href="https://github.com/moturus/motor-os/blob/main/docs/assembly-selection.md"><code>docs/assembly-selection.md</code></a>
-(how an assembly is chosen and validated, and how to recover a stale selection). What the
+<a href="https://github.com/moturus/motor-os/blob/main/docs/assembly-resolution.md"><code>docs/assembly-resolution.md</code></a>
+(how ordinary builds find the assembly and how it is validated). What the
 toolchains contain and how programs are compiled with them is on the
 <a href="toolchain.html">Toolchains</a> page.</p>
 <p>Once you have images, <a href="running.html">Running Motor OS</a> describes the VM

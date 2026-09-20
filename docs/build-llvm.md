@@ -48,7 +48,9 @@ The unified workflow builds this closure in dependency order:
 4. mlibc headers, `crt1.o`, `libc.a`, and companion libraries.
 5. libunwind, libc++abi, and libc++, with exceptions enabled.
 6. Native Motor LLVM/Clang/LLD as one multicall `llvm` executable.
-7. Lua as an end-to-end native C application.
+
+Lua is then built with the finished toolchain as an end-to-end native C
+application. It is an add-on, not a part of the assembly's identity.
 
 All reusable products live under the selected assembly key:
 
@@ -64,8 +66,8 @@ $MOTORH/assemblies/<assembly-key>/
 No component writes the old shared `$MOTORH/motor-sysroot`, sibling LLVM build
 directory, `src/sys/target`, or tracked `img_files` trees. A complete assembly
 is reused only after its manifest and required artifacts validate. A change to
-LLVM, mlibc, the local runtime closure, or native configuration selects a new
-key rather than deleting the old tree.
+LLVM, mlibc, or native configuration selects a new key rather than deleting
+the old tree.
 
 ## Development-image layout
 

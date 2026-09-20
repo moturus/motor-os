@@ -49,8 +49,10 @@ $MOTORH/toolchain-src/mlibc/
 
 Managed inputs must exactly match the declaration. A wrong remote, missing or
 unreachable commit, incorrect gitlink, dirty file, or untracked file is an
-error. The build never advances a branch, runs `cargo update`, or silently
-changes a dependency selection.
+error. The build never advances a toolchain branch, runs `cargo update`, or
+silently changes a dependency selection. The userspace add-ons are the
+exception by design: ripgrep and Helix follow one branch of their fork, in
+`$MOTORH/ripgrep` and `$MOTORH/helix`.
 
 Rust and LLVM development uses explicit authoring mode instead of editing the
 managed checkout:
@@ -88,10 +90,11 @@ The workflow performs these stages:
 5. Register that prefix under its exact rustup name and validate every
    component, source commit, sysroot, lock hash, and both host/target compile
    probes.
-6. Fetch the locked `src/sys` workspace dependencies, derive an assembly key,
-   and build the C-ABI shim, compiler-rt builtins, mlibc,
-   libc++/libc++abi/libunwind, native LLVM, Lua, native rustc, and ripgrep in
-   that assembly's private directories.
+6. Derive an assembly key and build the C-ABI shim, compiler-rt builtins, mlibc,
+   libc++/libc++abi/libunwind, native LLVM, and native rustc in that
+   assembly's private directories. Then build the userspace add-ons (Lua,
+   ripgrep, Helix) with that toolchain; they are no part of its identity and
+   are rebuilt alone when their source changes.
 7. Write immutable host and assembly manifests, then build the base, standard,
    and development images with the exact generated roots.
 
@@ -104,12 +107,17 @@ $MOTORH/toolchains/<exact-rustup-name>/
 $MOTORH/assemblies/<assembly-key>/
     build/       component build trees
     sysroot/     C/C++ cross sysroot and linker wrappers
-    images/      generated libc, rg, LLVM, and rustc image overlays
+    images/      toolchain overlays (libc, LLVM, rustc, rust-analyzer) and
+                 add-on overlays (lua, rg, helix)
+    ADDON-*      the source each add-on was built from
 ```
 
-A local `moto-rt` or mlibc change selects a new assembly without pretending to
-be a different compiler lineage. A Rust, LLVM, Cargo, bootstrap configuration,
-or Rust lock selection change selects a new host toolchain prefix as well.
+An mlibc change selects a new assembly without pretending to be a different
+compiler lineage. Edits to this repository, build scripts and local runtime
+crates included, select nothing new. A changed add-on source rebuilds that
+add-on alone inside that assembly. A Rust or LLVM commit, bootstrap
+configuration, or host LLVM configuration change selects a new host toolchain
+prefix as well; Cargo and the Rust lockfiles change only with the Rust commit.
 Motor OS component outputs are further isolated under
 `build/obj/<toolchain-key>/<profile>/<component>`.
 
@@ -160,29 +168,30 @@ lib/rustlib/MOTOR-TOOLCHAIN-KEY
 ```
 
 Each completed assembly contains `MOTOR-ASSEMBLY-MANIFEST`; the same content is
-copied into every generated overlay. To list local assemblies without guessing
-a key:
+copied into every toolchain overlay. Add-on overlays carry none. To list local
+assemblies without guessing a key:
 
 ```sh
 find "$MOTORH/assemblies" -mindepth 2 -maxdepth 2 \
   -name MOTOR-ASSEMBLY-MANIFEST -print
 ```
 
-The manifests record declared and effective Rust/LLVM revisions, Cargo
-identity, Stage 0, lock hashes, runtime identities, source state, both keys,
-and hashes of the native compiler and sysroot products.
+The manifests record the effective Rust/LLVM revisions, Cargo identity,
+Stage 0, lock hashes, the `moto-rt` crate that std links, source state, both
+keys, and hashes of the native compiler and sysroot products. Every recorded
+value follows from the keys, so an equal key means an equal manifest.
 
-The build also pins its validated assembly for later commands in this checkout.
-Inspect or change that host-local selection with:
+Later commands find the assembly on their own: its key follows from the
+selected toolchain and the declared inputs, and it lives beside that
+toolchain. Nothing is stored in the checkout. To see which assembly a
+checkout uses:
 
 ```sh
-src/select-toolchain-assembly.sh --show
-src/select-toolchain-assembly.sh --list
-src/select-toolchain-assembly.sh --pin ASSEMBLY_KEY
+src/resolve-toolchain-assembly.sh --show
 ```
 
-See [Selecting a toolchain assembly](assembly-selection.md) for discovery,
-validation, noninteractive behavior, and recovery details.
+See [Resolving the toolchain assembly](assembly-resolution.md) for the
+validation and troubleshooting details.
 
 ## Re-running and failures
 

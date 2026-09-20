@@ -584,8 +584,6 @@ finish_pty 130 "nested ssh non-pty Ctrl+C"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   echo "-- Helix editor --"
-  . "$ROOT_DIR/src/toolchain-versions.sh"
-  [ -n "${HELIX_REV:-}" ] || fail "HELIX_REV is not configured"
 
   helix_bin=/devtools/helix/hx
   # Exercise the shipped configuration before the isolated editor-only cases.
@@ -593,7 +591,6 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /devtools/rust/bin/rust-analyzer' ||
     fail "default Rust health did not find the native server: '$out'"
 
-  helix_short_rev="${HELIX_REV:0:8}"
   GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
   helix_cache="$GUEST_HELIX_ROOT/cache"
   helix_tmp="$GUEST_HELIX_ROOT/tmp"
@@ -604,10 +601,8 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   done
 
   out="$(vm_ssh "$helix_env $helix_bin --version")"
-  case "$out" in
-    *"helix 25.07.1 ($helix_short_rev)"*) ;;
-    *) fail "Helix version does not identify the pinned fork: '$out'" ;;
-  esac
+  printf '%s\n' "$out" | grep -Eq '^helix 25\.07\.1 \([0-9a-f]{8}\)' ||
+    fail "Helix version does not identify its fork commit: '$out'"
   out="$(vm_ssh "$helix_health_env $helix_bin --health")"
   printf '%s\n' "$out" | grep -Fq '/devtools/helix/runtime' ||
     fail "Helix health omitted the compiled runtime path: '$out'"

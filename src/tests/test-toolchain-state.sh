@@ -77,12 +77,16 @@ grep -q "$START_RUST_LIBRARY_LOCK_SHA256.*$POST_RUST_LIBRARY_LOCK_SHA256" \
 	"$prefix/MOTOR-TOOLCHAIN-REJECTED" || fail "rejection omits lock identities"
 [ ! -e "$temporary/rustup-link" ] || fail "rejected prefix was linked"
 
-# The next run starts with the new lock and therefore selects a fresh key.
+# Lockfiles are no key input: the Rust commit fixes them, and a rewritten one
+# leaves a dirty worktree whose tree state selects a fresh key.
 next_prefix="$temporary/next-prefix"
 mkdir "$next_prefix"
 toolchain_capture_starting_locks "$rust"
 toolchain_derive_identity
-[ "$MOTOR_TOOLCHAIN_KEY" != "$first_key" ] || fail "rewritten lock did not re-key"
+[ "$MOTOR_TOOLCHAIN_KEY" = "$first_key" ] || fail "a lockfile hash entered the key"
+MOTOR_RUST_TREE_STATE="$(printf 'dirty lock' | sha256sum | awk '{print $1}')"
+toolchain_derive_identity
+[ "$MOTOR_TOOLCHAIN_KEY" != "$first_key" ] || fail "dirty tree state did not re-key"
 toolchain_check_postbuild_locks "$rust" "$next_prefix" ||
 	fail "unchanged post-build locks were rejected"
 [ ! -e "$next_prefix/MOTOR-TOOLCHAIN-REJECTED" ] ||
@@ -97,7 +101,7 @@ grep -q "$START_RUST_ANALYZER_LOCK_SHA256.*$POST_RUST_ANALYZER_LOCK_SHA256" \
 	"$next_prefix/MOTOR-TOOLCHAIN-REJECTED" || fail "rejection omits analyzer lock identities"
 toolchain_capture_starting_locks "$rust"
 toolchain_derive_identity
-[ "$MOTOR_TOOLCHAIN_KEY" != "$analyzer_key" ] || fail "analyzer lock did not re-key"
+[ "$MOTOR_TOOLCHAIN_KEY" = "$analyzer_key" ] || fail "the analyzer lock hash entered the key"
 RUST_ANALYZER_INPUTS_DIGEST="$(printf changed | sha256sum | awk '{print $1}')"
 [ "$MOTOR_TOOLCHAIN_KEY" != "$(toolchain_key)" ] || fail "prepared sources did not re-key"
 

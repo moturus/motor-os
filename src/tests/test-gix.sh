@@ -683,7 +683,7 @@ fi
 
 . "$WD/vm-test-boot.sh"
 test_vm_configure_ssh
-assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
+assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
 linker="${assembly_images%/images}/sysroot/bin/motor-clang"
 messages="$temporary/cargo-messages.json"
 native_env=(

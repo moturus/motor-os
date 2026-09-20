@@ -17,7 +17,7 @@ measure_rustfmt() {
   local root assembly key imager evidence without_assembly variant variant_assembly
   local binary launcher bytes_without bytes_with growth
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  assembly="$("$root/src/select-toolchain-assembly.sh" --resolve)"
+  assembly="$("$root/src/resolve-toolchain-assembly.sh" --resolve)"
   key="$(<"$(rustc --print sysroot)/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
   imager="$root/build/obj/$key/release/imager/release/imager"
   [ -x "$imager" ] || {

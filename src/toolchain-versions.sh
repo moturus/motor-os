@@ -5,8 +5,8 @@
 # worktree state belong in generated manifests.
 
 MOTOR_GENERATED_MANIFEST_SCHEMA="motor-toolchain-manifest-v1"
-MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v3"
-MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v3"
+MOTOR_TOOLCHAIN_KEY_SCHEMA="motor-toolchain-key-v4"
+MOTOR_ASSEMBLY_KEY_SCHEMA="motor-assembly-key-v6"
 
 MOTOR_TOOLCHAIN_ID="1.99.0-beta-f47d5bb-motor.dev.2"
 MOTOR_RUSTUP_TOOLCHAIN_BASE="motor-1.99.0-beta-f47d5bb-dev.2"
@@ -46,27 +46,7 @@ MOTOR_MLIBC_REPOSITORY="https://github.com/moturus/mlibc.git"
 MOTOR_MLIBC_REF="refs/heads/motor-os-rustc"
 MOTOR_MLIBC_REV="0cece7e5cfbd7f43ffb5968ced80056a655cb70f"
 
-HELIX_REPOSITORY="https://github.com/moturus/helix.git"
-HELIX_REF="refs/heads/helix-motor-25.7.1_2026-08-31"
-HELIX_REV="af99cdcece46ac897672dd2d2b2238be835d2018"
-
-STDLIB_MOTO_RT_VERSION="0.17.6"
-STDLIB_MOTO_RT_CHECKSUM="f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
-LOCAL_MOTO_RT_VERSION="0.17.6"
-LOCAL_MOTO_SYS_VERSION="0.3.0"
-MOTOR_LUA_VERSION="5.4.8"
-
-MOTOR_BUILD_HOST="x86_64-unknown-linux-gnu"
-MOTOR_BUILD_TARGETS="x86_64-unknown-linux-gnu,x86_64-unknown-motor"
-MOTOR_BUILD_TOOLS="cargo,clippy,rust-analyzer,rustdoc,rustfmt,src"
 MOTOR_LLVM_TARGETS="X86"
-MOTOR_BUILD_EXTENDED="true"
-MOTOR_BUILD_DOCS="false"
-MOTOR_BUILD_SUBMODULES="false"
-MOTOR_BUILD_LOCKED_DEPS="false"
-MOTOR_OPTIMIZED_COMPILER_BUILTINS="false"
-MOTOR_DOWNLOAD_CI_LLVM="false"
-MOTOR_OMIT_GIT_HASH="false"
 
 MOTOR_STANDALONE_LLVM_GENERATOR="Ninja"
 MOTOR_STANDALONE_LLVM_BUILD_TYPE="Release"
@@ -84,34 +64,7 @@ MOTOR_STANDALONE_LLVM_NINJA_TARGETS=(
   "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[@]}"
 )
 
-# Reviewed inputs to the local runtime/sysroot content digest. Directories are
-# traversed canonically by the assembly implementation.
-MOTOR_OS_RUNTIME_INPUTS=(
-  "src/sys/Cargo.toml"
-  "src/sys/lib/moto-rt"
-  "src/sys/lib/moto-sys"
-  "src/sys/lib/moto-rt-cabi"
-  "src/build-motor-os.sh"
-  "src/toolchain-rust-analyzer.sh"
-  "src/toolchain-rust-analyzer-identity.sh"
-  "src/toolchain-patched-crates.sh"
-  "src/toolchain-native-rust-analyzer.sh"
-)
-
-MOTOR_TOOLCHAIN_KEY_FIELDS=(
-  toolchain_id rustup_base source_mode selected_rustup_base selected_description
-  upstream_rust_version upstream_rust_rev stage0_rev rust_llvm_base_rev
-  upstream_cargo_rev cargo_version cargo_rev effective_rust_rev effective_llvm_rev
-  rust_tree_state llvm_tree_state authoring_source_digest
-  rust_root_lock_sha256 rust_library_lock_sha256 rust_analyzer_lock_sha256
-  rust_analyzer_inputs_digest bootstrap_config_digest
-  standalone_llvm_config_digest rust_channel build_host
-  build_targets build_tools build_extended build_docs build_submodules
-  build_locked_deps optimized_compiler_builtins download_ci_llvm llvm_targets
-  omit_git_hash declared_rust_rev declared_llvm_rev
-)
-
-MOTOR_ASSEMBLY_KEY_FIELDS=(
-  toolchain_key mlibc_rev mlibc_tree_state motor_os_runtime_tree
-  local_moto_rt_version local_moto_sys_version helix_rev native_configuration_digest
-)
+# Keys name the C, C++, and Rust toolchain only: its external sources and its
+# build configuration (toolchain_key in toolchain-lib.sh, toolchain_assembly_key
+# in toolchain-assembly.sh). No file of this repository is hashed into a key,
+# and userspace add-ons (Lua, ripgrep, Helix) are declared in build-motor-os.sh.

@@ -31,7 +31,7 @@ toolchain_reject_incomplete_prefix() {
 
 toolchain_accept_new_prefix() {
 	local rust="$1" authoring_base="$2" expected_digest="$3"
-	local prefix="$4" local_moto_rt="$5" cargo_home="$6"
+	local prefix="$4" cargo_home="$5"
 	if ! (cd "$rust" && PYTHONDONTWRITEBYTECODE=1 \
 		PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache" \
 		MOTOR_RUST_ANALYZER_CARGO_CONFIG="$RUST_ANALYZER_CARGO_CONFIG" \
@@ -57,11 +57,6 @@ toolchain_accept_new_prefix() {
 		toolchain_reject_incomplete_prefix "$prefix" "installed prefix validation failed"
 		return 1
 	}
-	toolchain_verify_moto_rt_package "$rust" "$local_moto_rt" \
-		"$prefix/bin/cargo" "$cargo_home" || {
-		toolchain_reject_incomplete_prefix "$prefix" "moto-rt package validation failed"
-		return 1
-	}
 	toolchain_write_prefix_manifest "$prefix" || return
 	toolchain_complete_prefix "$prefix"
 }
@@ -78,8 +73,8 @@ toolchain_build_selected_host() {
 
 	toolchain_reverify_selected_sources \
 		"$rust" "$authoring_base" "$expected_digest" || return
-	# A stale local runtime fails here, before the LLVM and Rust builds.
-	toolchain_precheck_moto_rt_package "$rust" "$local_moto_rt" "$cargo_home" || return
+	# An incompatible local runtime fails here, before the LLVM and Rust builds.
+	toolchain_check_moto_rt_compat "$rust" "$local_moto_rt" || return
 	toolchain_prepare_rust_analyzer "$MOTOR" "$rust" "$MOTORH" "$cargo_home" \
 		"$TOOLCHAIN_STATE_ROOT" true || return
 	toolchain_build_standalone_llvm "$rust/src/llvm-project" "$build_root" || return
@@ -92,12 +87,10 @@ toolchain_build_selected_host() {
 	toolchain_claim_prefix "$TOOLCHAIN_PREFIX" || return
 	if [ "$TOOLCHAIN_PREFIX_REUSED" = true ]; then
 		toolchain_validate_prefix "$TOOLCHAIN_PREFIX" || return
-		toolchain_verify_moto_rt_package "$rust" "$local_moto_rt" \
-			"$TOOLCHAIN_PREFIX/bin/cargo" "$cargo_home" || return
 		toolchain_validate_prefix_manifest "$TOOLCHAIN_PREFIX" || return
 	else
 		toolchain_accept_new_prefix "$rust" "$authoring_base" "$expected_digest" \
-			"$TOOLCHAIN_PREFIX" "$local_moto_rt" "$cargo_home" || return
+			"$TOOLCHAIN_PREFIX" "$cargo_home" || return
 	fi
 	toolchain_register_prefix "$rustup" "$TOOLCHAIN_PREFIX"
 }

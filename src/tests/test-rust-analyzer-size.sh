@@ -13,7 +13,7 @@ check_size() {
 measure() {
   local root assembly key imager evidence binary sources variant bytes_without bytes_with
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  assembly="$("$root/src/select-toolchain-assembly.sh" --resolve)"
+  assembly="$("$root/src/resolve-toolchain-assembly.sh" --resolve)"
   key="$(<"$(rustc --print sysroot)/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
   imager="$root/build/obj/$key/release/imager/release/imager"
   [ -x "$imager" ] || { echo 'build a release image before measuring analyzer size' >&2; return 1; }

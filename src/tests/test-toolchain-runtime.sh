@@ -13,101 +13,47 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 rust="$temporary/rust"
 local_package="$temporary/local"
-archive_root="$temporary/archive/moto-rt-$STDLIB_MOTO_RT_VERSION"
-cargo_home="$temporary/cargo-home"
-mkdir -p "$rust/library" "$local_package/src" "$archive_root/src" \
-	"$cargo_home/registry/cache/test-index"
-cat > "$rust/library/Cargo.lock" <<EOF
-version = 4
+mkdir -p "$rust/library" "$local_package/src"
+write_lock() {
+	printf 'version = 4\n\n[[package]]\nname = "moto-rt"\nversion = "%s"\nsource = "%s"\nchecksum = "%s"\n' \
+		"$1" "$2" "$3" > "$rust/library/Cargo.lock"
+}
+set_local_version() {
+	printf '[package]\nname = "moto-rt"\nversion = "%s"\n' "$1" > "$local_package/Cargo.toml"
+}
+registry=registry+https://github.com/rust-lang/crates.io-index
+std_version=0.17.6
+std_checksum="$(printf moto-rt | sha256sum | awk '{print $1}')"
+write_lock "$std_version" "$registry" "$std_checksum"
+compat="$(toolchain_compat_version "$std_version")"
 
-[[package]]
-name = "moto-rt"
-version = "$STDLIB_MOTO_RT_VERSION"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "$STDLIB_MOTO_RT_CHECKSUM"
-EOF
-cat > "$local_package/Cargo.toml" <<EOF
-[package]
-name = "moto-rt"
-version = "$LOCAL_MOTO_RT_VERSION"
-EOF
-printf 'runtime source\n' > "$local_package/src/lib.rs"
-cp "$local_package/Cargo.toml" "$archive_root/Cargo.toml.orig"
-printf 'normalized manifest\n' > "$archive_root/Cargo.toml"
-printf 'generated lock\n' > "$archive_root/Cargo.lock"
-printf '{}\n' > "$archive_root/.cargo_vcs_info.json"
-cp "$local_package/src/lib.rs" "$archive_root/src/lib.rs"
-archive="$cargo_home/registry/cache/test-index/moto-rt-$STDLIB_MOTO_RT_VERSION.crate"
-tar -czf "$archive" -C "$temporary/archive" "moto-rt-$STDLIB_MOTO_RT_VERSION"
-STDLIB_MOTO_RT_CHECKSUM="$(sha256sum "$archive" | awk '{print $1}')"
-sed -i 's/^checksum = .*/checksum = "'"$STDLIB_MOTO_RT_CHECKSUM"'"/' \
-	"$rust/library/Cargo.lock"
+[ "$(toolchain_compat_version 0.17.6)" = 0.17 ] || fail "0.x major version is wrong"
+[ "$(toolchain_compat_version 2.3.1)" = 2 ] || fail "major version is wrong"
+if toolchain_compat_version seventeen 2>/dev/null; then fail "a non-version was accepted"; fi
 
-fake_cargo="$temporary/cargo"
-cat > "$fake_cargo" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' .cargo_vcs_info.json Cargo.lock Cargo.toml Cargo.toml.orig src/lib.rs
-EOF
-chmod +x "$fake_cargo"
+# The local runtime may differ from std's below the major version, and its
+# content is never compared with the published crate.
+for version in "$std_version" "$compat.0" "$compat.999"; do
+	set_local_version "$version"
+	printf 'local edit %s\n' "$version" > "$local_package/src/lib.rs"
+	toolchain_check_moto_rt_compat "$rust" "$local_package" ||
+		fail "compatible local moto-rt $version was rejected"
+done
+[ "$LOCKED_MOTO_RT_VERSION" = "$std_version" ] || fail "std moto-rt version was not recorded"
+[ "$LOCKED_MOTO_RT_CHECKSUM" = "$std_checksum" ] || fail "std moto-rt checksum was not recorded"
 
-MOTOR_ASSEMBLY_STATE=clean
-toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home"
-toolchain_verify_moto_rt_package "$rust" "$local_package" "$fake_cargo" "$cargo_home"
-[ "$MOTO_RT_PACKAGE_COMPARISON" = exact ] || fail "equal packages do not compare exact"
-
-# An unpublished local file is visible only through Cargo's package listing.
-adding_cargo="$temporary/cargo-adding"
-cat > "$adding_cargo" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' .cargo_vcs_info.json Cargo.lock Cargo.toml Cargo.toml.orig src/extra.rs src/lib.rs
-EOF
-chmod +x "$adding_cargo"
-printf 'unpublished\n' > "$local_package/src/extra.rs"
-toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home"
-if toolchain_verify_moto_rt_package \
-	"$rust" "$local_package" "$adding_cargo" "$cargo_home" 2> "$temporary/stderr"; then
-	fail "clean assembly accepted an unpublished local file"
+set_local_version 0.0.1
+if toolchain_check_moto_rt_compat "$rust" "$local_package" 2> "$temporary/stderr"; then
+	fail "a local moto-rt of another major version was accepted"
 fi
-grep -q 'adds unpublished file: src/extra.rs' "$temporary/stderr" ||
-	fail "unpublished local file was not named"
-rm "$local_package/src/extra.rs"
+grep -q 'differ in their major version' "$temporary/stderr" ||
+	fail "the major version mismatch was not named"
+set_local_version "$std_version"
 
-printf 'local edit\n' >> "$local_package/src/lib.rs"
-if toolchain_precheck_moto_rt_package \
-	"$rust" "$local_package" "$cargo_home" 2> "$temporary/stderr"; then
-	fail "clean precheck accepted differing local runtime content"
-fi
-grep -q 'moto-rt src/lib.rs differs' "$temporary/stderr" ||
-	fail "precheck did not name the differing file"
-if toolchain_verify_moto_rt_package \
-	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null; then
-	fail "clean assembly accepted differing local runtime content"
-fi
-MOTOR_ASSEMBLY_STATE=development-dirty
-toolchain_precheck_moto_rt_package "$rust" "$local_package" "$cargo_home" 2>/dev/null
-toolchain_verify_moto_rt_package \
-	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null
-[ "$MOTO_RT_PACKAGE_COMPARISON" = development-dirty ] ||
-	fail "dirty package difference was not recorded"
-
-# Before the first bootstrap fetches the crate, the precheck can only defer.
-MOTOR_ASSEMBLY_STATE=clean
-mv "$archive" "$archive.absent"
-toolchain_precheck_moto_rt_package \
-	"$rust" "$local_package" "$cargo_home" 2> "$temporary/stderr" ||
-	fail "uncached crate was not deferred to the full check"
-grep -q 'not cached yet' "$temporary/stderr" || fail "deferred precheck was silent"
-mv "$archive.absent" "$archive"
-
-MOTOR_ASSEMBLY_STATE=development-dirty
-sed -i 's/^version = .*/version = "0.0.0"/' "$local_package/Cargo.toml"
-if toolchain_precheck_moto_rt_package \
-	"$rust" "$local_package" "$cargo_home" 2>/dev/null; then
-	fail "dirty precheck accepted a moto-rt version mismatch"
-fi
-if toolchain_verify_moto_rt_package \
-	"$rust" "$local_package" "$fake_cargo" "$cargo_home" 2>/dev/null; then
-	fail "dirty assembly accepted a moto-rt version mismatch"
+# The Rust fork must still take its moto-rt from crates.io.
+write_lock "$std_version" git+https://example.com/moto-rt "$std_checksum"
+if toolchain_check_moto_rt_compat "$rust" "$local_package" 2>/dev/null; then
+	fail "a std moto-rt from outside crates.io was accepted"
 fi
 
 echo "test-toolchain-runtime PASS"

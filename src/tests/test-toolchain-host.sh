@@ -49,14 +49,11 @@ toolchain_prepare_rust_analyzer() {
 	printf '[patch.crates-io]\n' > "$RUST_ANALYZER_CARGO_CONFIG"
 }
 toolchain_reverify_rust_analyzer() { printf v >> "$temporary/analyzer-verifications"; }
-toolchain_verify_moto_rt_package() {
-	LOCKED_MOTO_RT_VERSION="$STDLIB_MOTO_RT_VERSION"
-	LOCKED_MOTO_RT_CHECKSUM="$STDLIB_MOTO_RT_CHECKSUM"
-	MOTO_RT_PACKAGE_COMPARISON=exact
-}
-toolchain_precheck_moto_rt_package() {
+toolchain_check_moto_rt_compat() {
 	printf p >> "$temporary/precheck-runs"
-	[ "${FAIL_PRECHECK:-0}" != 1 ] || toolchain_die "package precheck failed"
+	LOCKED_MOTO_RT_VERSION=0.17.6
+	LOCKED_MOTO_RT_CHECKSUM="$(printf moto-rt | sha256sum | awk '{print $1}')"
+	[ "${FAIL_PRECHECK:-0}" != 1 ] || toolchain_die "runtime compatibility check failed"
 }
 fake_cmake="$temporary/cmake"
 printf '%s\n' '#!/usr/bin/env bash' \
@@ -177,14 +174,15 @@ FAIL_PRECHECK=1
 if toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \
 	"$temporary/bootstrap-cache" 2>/dev/null; then
-	fail "failed package precheck was accepted"
+	fail "failed runtime compatibility check was accepted"
 fi
 FAIL_PRECHECK=0
-[ "$(cat "$temporary/xpy-runs")" = x ] || fail "failed package precheck reached bootstrap"
+[ "$(cat "$temporary/xpy-runs")" = x ] || fail "failed runtime compatibility check reached bootstrap"
 [ "$(cat "$temporary/precheck-runs")" = ppp ] ||
-	fail "package precheck did not run before each host build"
+	fail "runtime compatibility was not checked before each host build"
 
-printf 'new starting lock\n' > "$rust/Cargo.lock"
+# A changed source state selects a fresh key and therefore a new bootstrap.
+MOTOR_RUST_TREE_STATE="$(printf dirty | sha256sum | awk '{print $1}')"
 export FAIL_XPY=1
 if toolchain_build_selected_host "$rust" '' "$MOTORH/build" \
 	"$fake_rustup" "$temporary/cargo-home" "$temporary/local-moto" \

@@ -219,10 +219,12 @@ written, and the interpreter's own smoke tests passing.
 
 ### 6.1 Build layout
 
-Mirror Lua (`src/build-motor-os.sh` stage 7): sources under `$MOTORH`
-(`../cpython`), a keyed build directory under the assembly build root, and
-the result staged into the assembly image root under
-`/devtools/python/{bin,lib/python3.14}`. The imager copies the tree through
+Mirror Lua, a userspace add-on in `src/build-motor-os.sh` (`build_addons`):
+sources under `$MOTORH` (`../cpython`), a versioned build directory under the
+assembly build root, and the result staged into its own overlay in the
+assembly image root under `/devtools/python/{bin,lib/python3.14}`. Like every
+add-on it is no part of the toolchain's identity and is rebuilt alone when
+its version changes. The imager copies the tree through
 `assembly_dirs` (`src/imager/motor-os-dev.yaml`); the data partition is
 4096 MB and the standard library without `test` is under 20 MB.
 

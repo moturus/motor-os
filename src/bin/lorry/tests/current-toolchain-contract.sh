@@ -75,13 +75,13 @@ effective_llvm_rev=$MOTOR_LLVM_REV
 EOF
 printf '#!/bin/sh\nexit 0\n' > "$assembly/sysroot/bin/motor-clang"
 chmod +x "$assembly/sysroot/bin/motor-clang"
-cat > "$repository/src/select-toolchain-assembly.sh" <<EOF
+cat > "$repository/src/resolve-toolchain-assembly.sh" <<EOF
 #!/usr/bin/env bash
 [ "\$#" -eq 1 ] && [ "\$1" = --resolve ] || exit 2
-printf '%s\n' resolve >> '$temporary/selector-invocations'
+printf '%s\n' resolve >> '$temporary/resolver-invocations'
 printf '%s\n' '$assembly/images'
 EOF
-chmod +x "$repository/src/select-toolchain-assembly.sh"
+chmod +x "$repository/src/resolve-toolchain-assembly.sh"
 
 export PATH="$temporary/bin:$PATH"
 export LORRY_REPOSITORY_ROOT="$repository"
@@ -92,7 +92,7 @@ lorry_load_current_toolchain >"$temporary/output" 2>"$temporary/log"
 [ "$LORRY_TEST_CARGO" = "$prefix/bin/cargo" ]
 [ "$LORRY_MOTOR_LINKER" = "$assembly/sysroot/bin/motor-clang" ]
 [ "$LORRY_ASSEMBLY_MANIFEST" = "$assembly/MOTOR-ASSEMBLY-MANIFEST" ]
-[ "$(wc -l < "$temporary/selector-invocations")" -eq 1 ]
+[ "$(wc -l < "$temporary/resolver-invocations")" -eq 1 ]
 grep -Fqx "commit-hash: $MOTOR_CARGO_REV" "$temporary/log"
 
 if ! (LORRY_ASSEMBLY_MANIFEST="$assembly/MOTOR-ASSEMBLY-MANIFEST" \
@@ -100,8 +100,8 @@ if ! (LORRY_ASSEMBLY_MANIFEST="$assembly/MOTOR-ASSEMBLY-MANIFEST" \
     echo "current-toolchain-contract: explicit assembly manifest was rejected" >&2
     exit 1
 fi
-[ "$(wc -l < "$temporary/selector-invocations")" -eq 1 ] || {
-    echo "current-toolchain-contract: explicit assembly manifest did not bypass selection" >&2
+[ "$(wc -l < "$temporary/resolver-invocations")" -eq 1 ] || {
+    echo "current-toolchain-contract: explicit assembly manifest did not bypass resolution" >&2
     exit 1
 }
 

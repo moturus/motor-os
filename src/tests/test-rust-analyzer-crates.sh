@@ -30,7 +30,7 @@ temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 cargo="$(rustup which cargo)"
 export RUSTC="$(rustup which rustc)"
-assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
+assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
 linker="${assembly_images%/images}/sysroot/bin/motor-clang"
 
 # Cargo's runner receives the artifact path, avoiding assumptions about the

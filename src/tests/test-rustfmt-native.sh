@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-assembly_images="$("$ROOT_DIR/src/select-toolchain-assembly.sh" --resolve)"
+assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
 manifest="$assembly_images/rustc/devtools/toolchain/manifest"
 revision="$(sed -n 's/^effective_rust_rev=//p' "$manifest")"
 version_base64="$(sed -n 's/^native_rustfmt_expected_version_base64=//p' "$manifest")"

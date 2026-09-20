@@ -13,16 +13,15 @@ fail() {
 }
 
 toolchain_validate_versions
-[ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v3 ] ||
+[ "$MOTOR_TOOLCHAIN_KEY_SCHEMA" = motor-toolchain-key-v4 ] ||
   fail "unexpected toolchain key schema"
-[ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v3 ] ||
+[ "$MOTOR_ASSEMBLY_KEY_SCHEMA" = motor-assembly-key-v6 ] ||
   fail "unexpected assembly key schema"
-[ "$HELIX_REPOSITORY" = https://github.com/moturus/helix.git ] ||
-  fail "unexpected Helix repository"
-[ "$HELIX_REF" = refs/heads/helix-motor-25.7.1_2026-08-31 ] ||
-  fail "unexpected Helix ref"
-[ "$HELIX_REV" = af99cdcece46ac897672dd2d2b2238be835d2018 ] ||
-  fail "unexpected Helix revision"
+# Userspace add-ons are no part of the toolchain declaration.
+for name in HELIX_REPOSITORY HELIX_REF HELIX_REV MOTOR_LUA_VERSION \
+  LOCAL_MOTO_RT_VERSION LOCAL_MOTO_SYS_VERSION; do
+  [ -z "${!name:-}" ] || fail "$name is declared as a toolchain input"
+done
 expected_llvm_tools='llvm-cov llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-size llvm-strip llvm-ar llvm-as llvm-dis llvm-link llc opt'
 [ "${MOTOR_RUST_BOOTSTRAP_LLVM_TOOLS[*]}" = "$expected_llvm_tools" ] ||
   fail "Rust bootstrap LLVM tool contract differs"
@@ -33,20 +32,28 @@ key="$(toolchain_clean_key)"
 [ "$(toolchain_clean_name)" = "$MOTOR_RUSTUP_TOOLCHAIN_BASE-$key" ] ||
   fail "rustup name does not contain the complete clean key"
 
-original_cargo_rev="$MOTOR_CARGO_REV"
-MOTOR_CARGO_REV="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-[ "$key" != "$(toolchain_clean_key)" ] || fail "Cargo revision did not change the key"
-MOTOR_CARGO_REV="$original_cargo_rev"
-
-original_analyzer_lock="$MOTOR_RUST_ANALYZER_LOCK_SHA256"
-MOTOR_RUST_ANALYZER_LOCK_SHA256="$(printf changed | sha256sum | awk '{print $1}')"
-[ "$key" != "$(toolchain_clean_key)" ] || fail "analyzer lock did not change the key"
-MOTOR_RUST_ANALYZER_LOCK_SHA256="$original_analyzer_lock"
-
-original_build_tools="$MOTOR_BUILD_TOOLS"
-MOTOR_BUILD_TOOLS="cargo,clippy,rustdoc,rustfmt,src"
-[ "$key" != "$(toolchain_clean_key)" ] || fail "build tools did not change the key"
-MOTOR_BUILD_TOOLS="$original_build_tools"
+# The key names what is compiled, how, and where it installs.
+for name in MOTOR_RUST_REV MOTOR_LLVM_REV MOTOR_TOOLCHAIN_ID MOTOR_RUSTUP_TOOLCHAIN_BASE \
+  MOTOR_RUST_CHANNEL; do
+  original="${!name}"
+  printf -v "$name" '%s' "${original%?}x"
+  [ "$key" != "$(toolchain_clean_key)" ] || fail "$name did not change the key"
+  printf -v "$name" '%s' "$original"
+done
+# Values that follow from the Rust commit, and plain labels, are no key input.
+for name in UPSTREAM_RUST_VERSION UPSTREAM_RUST_REV UPSTREAM_STAGE0_REV RUST_LLVM_BASE_REV \
+  MOTOR_CARGO_VERSION MOTOR_CARGO_REV UPSTREAM_CARGO_REV MOTOR_RUST_ROOT_LOCK_SHA256 \
+  MOTOR_RUST_LIBRARY_LOCK_SHA256 MOTOR_RUST_ANALYZER_LOCK_SHA256 MOTOR_TOOLCHAIN_MATURITY; do
+  original="${!name}"
+  printf -v "$name" '%s' "${original%?}x"
+  [ "$key" = "$(toolchain_clean_key)" ] || fail "$name is a redundant key input"
+  printf -v "$name" '%s' "$original"
+done
+for name in MOTOR_BUILD_HOST MOTOR_BUILD_TARGETS MOTOR_BUILD_TOOLS MOTOR_BUILD_EXTENDED \
+  MOTOR_BUILD_DOCS MOTOR_BUILD_SUBMODULES MOTOR_BUILD_LOCKED_DEPS \
+  MOTOR_OPTIMIZED_COMPILER_BUILTINS MOTOR_DOWNLOAD_CI_LLVM MOTOR_OMIT_GIT_HASH; do
+  [ -z "${!name:-}" ] || fail "$name is declared but configures nothing"
+done
 
 original_assertions="$MOTOR_STANDALONE_LLVM_ASSERTIONS"
 MOTOR_STANDALONE_LLVM_ASSERTIONS=ON

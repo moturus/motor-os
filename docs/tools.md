@@ -24,21 +24,19 @@ and several useful scripts:
 
 The vsock guest tests use local Unix-domain host peers, not host `AF_VSOCK`
 or `/dev/vhost-vsock`. QEMU requires the pinned `vhost-device-vsock` 0.3.0
-backend. Installing it is host provisioning, not a test action:
-`src/build-motor-os.sh` installs it when it is absent, which is the same as
-running this once, with network access, from the checkout:
+backend. It is a test dependency, so the toolchain build does not install
+it. The vsock harnesses do, once, when the host has none, which is the same
+as running this from the checkout with network access:
 
 ```sh
 cargo install --locked --version 0.3.0 vhost-device-vsock
 ```
 
-Provisioning precedes the toolchain build, so the first build on a new host
-cannot install it yet; it says so, and the command above or any later
-`src/build-motor-os.sh` run does. The harness (`src/tests/vm-vsock-backend.sh`)
-only looks the backend up: an explicit `VHOST_DEVICE_VSOCK` path wins, then
-`PATH`, where `cargo install` puts it beside `cargo` itself. It checks the
-version and never builds, downloads, or skips coverage; a missing or mismatched
-backend fails the gate and prints both remedies.
+The lookup (`src/tests/vm-vsock-backend.sh`) takes an explicit
+`VHOST_DEVICE_VSOCK` path first, then `PATH`, where `cargo install` puts the
+backend beside `cargo` itself. It checks the version and never skips
+coverage. An explicit path is only checked, never replaced; a failed install
+or a mismatched explicit backend fails the test and prints the command.
 
 QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
 the runner's hugepage policy and any `MOTO_HUGEPAGES` override.

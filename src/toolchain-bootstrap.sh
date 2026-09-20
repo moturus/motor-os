@@ -44,7 +44,7 @@ prefix = "$prefix"
 sysconfdir = "etc"
 
 [rust]
-channel = "dev"
+channel = "$MOTOR_RUST_CHANNEL"
 omit-git-hash = false
 deny-warnings = false
 incremental = false

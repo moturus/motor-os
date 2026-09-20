@@ -3,8 +3,8 @@
 This document explains how the Motor OS compiler toolchain is declared,
 built, identified, selected by everyday commands, and changed. It describes
 what the scripts do today. The quick start is in [build.md](build.md), the
-producer's stages in [build-motor-os.md](build-motor-os.md), the assembly pin
-commands in [assembly-selection.md](assembly-selection.md), and the LLVM and
+producer's stages in [build-motor-os.md](build-motor-os.md), how ordinary builds
+find the assembly in [assembly-resolution.md](assembly-resolution.md), and the LLVM and
 native Rust components in [build-llvm.md](build-llvm.md) and
 [build-rustc.md](build-rustc.md).
 
@@ -15,11 +15,11 @@ native Rust components in [build-llvm.md](build-llvm.md) and
 | Declaration of the source tuple | `src/toolchain-versions.sh` | yes |
 | Root selector naming the exact host toolchain | `rust-toolchain.toml` | yes |
 | Managed source checkouts | `$MOTORH/toolchain-src/{rust,mlibc}` | no |
+| Add-on sources (follow a fork branch; Lua is a release) | `$MOTORH/{ripgrep,helix,lua-<version>}` | no |
 | Host toolchain prefixes | `$MOTORH/toolchains/<rustup name>` | no |
 | Standalone LLVM/Clang builds | `$MOTORH/build/toolchain/standalone-llvm/<llvm key>` | no |
 | Assemblies (C sysroot, native tools, image overlays) | `$MOTORH/assemblies/<assembly key>` | no |
 | Generated bootstrap state per toolchain key | `$MOTORH/toolchain-state/<toolchain key>` | no |
-| Assembly pin per toolchain key | `.motor-os/assembly-pins/<toolchain key>` | no, checkout-local |
 | Motor OS build outputs | `build/obj/<toolchain key>/<profile>/…` | no |
 | Images | `vm_images/<profile>/` | no |
 
@@ -37,18 +37,25 @@ The declaration is data only. The values that matter most:
   declared so that a wrong gitlink is an error, not a surprise.
 - `UPSTREAM_RUST_REV`, `UPSTREAM_STAGE0_REV`, `RUST_LLVM_BASE_REV`: the
   upstream Rust base, its Stage 0 bootstrap compiler, and the upstream LLVM
-  commit that the Motor LLVM patches sit on. Recorded for lineage and keys.
+  commit that the Motor LLVM patches sit on. Recorded for lineage; the
+  producer checks them against the fork, and they are no key input.
 - `MOTOR_RUST_ROOT_LOCK_SHA256`, `MOTOR_RUST_LIBRARY_LOCK_SHA256`,
   `MOTOR_RUST_ANALYZER_LOCK_SHA256`: hashes of the three Cargo lockfiles at
-  `MOTOR_RUST_REV`. A bootstrap run that rewrites a lockfile is rejected.
-- `MOTOR_MLIBC_REV`, `HELIX_REV`, `STDLIB_MOTO_RT_VERSION`,
-  `LOCAL_MOTO_RT_VERSION`, `LOCAL_MOTO_SYS_VERSION`: the runtime side.
+  `MOTOR_RUST_REV`. A checkout whose lockfiles differ, or a bootstrap run
+  that rewrites one, is rejected. They are checks, not key inputs.
+- `MOTOR_MLIBC_REV`: the libc commit.
+- No runtime crate version is declared. Rust std links the `moto-rt` that the
+  Rust fork's library lock selects, which the lock hash above covers. The
+  local `moto-rt` only has to share its major version (`0.17` for `0.17.6`);
+  its content and lower version parts are never compared, and `moto-sys` is
+  not checked at all.
 - `MOTOR_TOOLCHAIN_ID` and `MOTOR_RUSTUP_TOOLCHAIN_BASE`: the human-readable
   lineage (`1.99.0-beta-f47d5bb-motor.dev.2`) and the prefix of the rustup
   name (`motor-1.99.0-beta-f47d5bb-dev.2`).
-- `MOTOR_OS_RUNTIME_INPUTS`: the repository paths whose content enters the
-  assembly key (`src/sys/Cargo.toml`, `moto-rt`, `moto-sys`, `moto-rt-cabi`,
-  the producer script, and the toolchain scripts that shape the assembly).
+
+The declaration covers the C, C++, and Rust toolchain only. Userspace add-ons
+(Lua, ripgrep, Helix) are declared in `src/build-motor-os.sh`, and the vsock
+test backend belongs to the test harness.
 
 ## 2. Identities
 
@@ -56,15 +63,28 @@ Every product is named by a SHA-256 key over its inputs, so different inputs
 never overwrite each other and a product can be validated against the inputs
 that should have produced it.
 
-**Toolchain key.** Hash of the source mode, toolchain id and rustup base, the
-upstream Rust version, commit, Stage 0, and LLVM base, the Cargo version and
-commit, the effective Rust and LLVM commits and their tree states, the
-authoring digest (`none` for managed builds), the three lockfile hashes as
-they were before bootstrap ran, a digest of the rust-analyzer patch inputs,
-the normalized bootstrap configuration, the standalone LLVM configuration,
-the bootstrap options (`build_tools`, targets, and so on), and the declared
-Rust and LLVM commits. Changing any declared value, any lockfile, the
-generated bootstrap configuration, or a rust-analyzer patch changes the key.
+Keys name the C, C++, and Rust toolchain only: its external sources (commits,
+lockfile hashes, crate checksums) and its declared configuration. No file of
+this repository is hashed into a key, so editing a build script, a patch
+file, or the local runtime never forces a rebuild. Userspace add-ons are no
+key input either.
+
+**Toolchain key.** Hash of what is compiled, how, and where it installs: the
+effective Rust and LLVM commits and their tree states, the authoring digest
+(`none` for managed builds), the declared versions, archive checksums, and
+prepared-tree digests of the patched rust-analyzer crates
+(`src/patches/crates.sh`), the normalized bootstrap configuration (which
+carries the compiler description, the channel, and every bootstrap option),
+the standalone LLVM configuration, and the rustup base, because the prefix
+path is named after it. A patch that changes a crate does so through its
+declared tree digest, which the producer checks against the prepared crate.
+
+Everything else about a toolchain follows from those inputs and is no key
+input: the Rust commit fixes its upstream base, Stage 0, Cargo, and
+lockfiles, so the declared lineage values and lockfile hashes are checks of
+the fork, not identity. The toolchain id and maturity are labels. Manifests
+record only values that follow from the key, so an equal key always means an
+equal manifest.
 
 **Rustup name.** `<rustup base>-<toolchain key>`, for example
 `motor-1.99.0-beta-f47d5bb-dev.2-774c61a5…`. Authoring builds use
@@ -79,18 +99,25 @@ from `src/toolchain-versions.sh` alone (`toolchain_clean_key` in
 selector names the declared tuple without building anything.
 
 **Assembly key.** Hash of the toolchain key, the mlibc commit and tree state,
-the Motor OS runtime tree (the dependency closure of the C ABI shim, the
-content of `MOTOR_OS_RUNTIME_INPUTS`, and the selected entries of
-`src/sys/Cargo.lock`), the local `moto-rt` and `moto-sys` versions, the Helix
-commit, and the native configuration digest (the recipes for native rustc,
-rustfmt, and rust-analyzer). Editing `src/build-motor-os.sh`, a listed
-toolchain script, moto-rt, moto-sys, or the shim therefore selects a new
-assembly while the host toolchain stays the same. The assembly root and each
-image overlay carry `MOTOR-ASSEMBLY-MANIFEST`; the developer image exposes it
-as `/devtools/toolchain/manifest`.
+and the native configuration digest (the recipes for native LLVM, rustc,
+rustfmt, and rust-analyzer). Editing `src/build-motor-os.sh`, a toolchain
+script, moto-rt, moto-sys, or the shim keeps the same assembly, and so does a
+version bump of the local runtime crates. The C ABI shim inside an assembly
+is the one built when the assembly was produced; to rebuild it, remove
+`$MOTORH/assemblies/<assembly key>` and run the producer. The assembly root
+and each toolchain overlay carry `MOTOR-ASSEMBLY-MANIFEST`; the developer
+image exposes it as `/devtools/toolchain/manifest`.
+
+**Add-ons.** Lua, ripgrep, and Helix are userspace programs built with the
+finished toolchain. They are staged beside the assembly's overlays
+(`images/lua`, `images/rg`, `images/helix`) because they link against its
+sysroot, but they are no part of its key, manifest, or validation. Lua is a
+release version; ripgrep and Helix follow one branch of their fork. Each
+records the source it was built from in `ADDON-<name>` inside the assembly,
+and the producer rebuilds that add-on alone when the source differs.
 The manifest's `motor_os_rev` and `assembly_state` record the producer's Git
-revision and source state. Committing unchanged inputs preserves the assembly
-key and reuses the assembly with its original provenance.
+revision and whether the shim sources had uncommitted changes. Neither is
+keyed, so a later checkout reuses the assembly with its original provenance.
 
 ## 3. How everyday commands select the toolchain
 
@@ -103,14 +130,13 @@ key and reuses the assembly with its original provenance.
    `build/obj/<toolchain key>/<profile>`, so two toolchains never share
    incremental state.
 3. Targets that need the C sysroot or the image overlays (`lorry`, `curl`,
-   `main.img`, `dev.img`) run `src/select-toolchain-assembly.sh --resolve`.
-   The selector reads the stamp, recomputes the assembly key that the current
-   checkout expects, and reads the pin for this toolchain key. The pin must
-   name that key, and the root it names must validate (read-only manifest,
-   identical manifests in every overlay, required outputs present, recorded
-   digests matching). Without a pin it looks for completed assemblies of this
-   toolchain under `$MOTORH/assemblies`: one is pinned automatically, several
-   are offered interactively, none is an error naming the producer.
+   `main.img`, `dev.img`) run `src/resolve-toolchain-assembly.sh --resolve`.
+   The script reads the stamp, derives the assembly key that the current
+   checkout expects, and looks for that assembly beside the toolchain, in
+   the `assemblies` directory next to `toolchains`. The root must validate
+   (read-only manifest, identical manifests in every toolchain overlay,
+   required outputs present, recorded digests matching). A missing assembly
+   is an error naming the key and the producer. Nothing is chosen or stored.
 4. The imager receives the validated overlay root as
    `MOTOR_ASSEMBLY_IMAGE_ROOT`; the image YAML lists what it takes from there
    (`assembly_dirs`, `assembly_required_executables`). The base image takes
@@ -122,7 +148,7 @@ key and reuses the assembly with its original provenance.
    offline contract tests of the individual helpers.
 
 The chain is therefore: tracked selector → rustup name → prefix and stamp →
-toolchain key → assembly pin → assembly key → overlays and sysroot.
+toolchain key → assembly key → overlays and sysroot.
 
 ## 4. What the producer does
 
@@ -147,9 +173,12 @@ toolchain key → assembly pin → assembly key → overlays and sysroot.
    read-only. The prefix is then linked into rustup.
 6. Derives the assembly key and claims the assembly. A completed assembly is
    reused after validation; otherwise it builds the C ABI shim, compiler-rt,
-   mlibc, libc++, native LLVM, Lua, native rustc and rustfmt, ripgrep, Helix,
-   and native rust-analyzer, and writes the manifest.
-7. Pins the assembly for the selected toolchain key in this checkout.
+   mlibc, libc++, native LLVM, native rustc and rustfmt, and native
+   rust-analyzer, and writes the manifest. For a new or a reused assembly
+   alike, it then updates the add-on checkouts and rebuilds the add-ons
+   whose source changed.
+7. Checks that `src/resolve-toolchain-assembly.sh --resolve` returns the
+   assembly it just produced, so `make` will use exactly that one.
 8. If `rust-toolchain.toml` exists, exports `RUSTUP_TOOLCHAIN=<new name>` and
    runs `make images BUILD=release`, so the images come from the toolchain it
    just built even when the tracked selector still names an older one. It
@@ -229,16 +258,17 @@ commits, modified files, and untracked files; all of them enter a content
 digest that becomes part of the toolchain key, and the effective commits are
 the two `HEAD`s. The base commit must be an ancestor of the Rust `HEAD`, and
 the LLVM and Cargo gitlinks derived from the base must be ancestors of what
-the checkout uses. The result gets the `motor-authoring-…` name. It can be
-pinned and used by `make` from a checkout whose `rust-toolchain.toml` names
-it, which is how candidates are tested, but the cutover test rejects it by
-design, so candidates are validated with direct test commands rather than
-with `full-test.sh`.
+the checkout uses. The result gets the `motor-authoring-…` name. It can be used
+by `make` from a checkout whose `rust-toolchain.toml` names it, which is how
+candidates are tested, but the cutover test rejects it by design, so candidates
+are validated with direct test commands rather than with `full-test.sh`.
 
 ## 5. Changing the toolchain
 
-A build never advances a branch or refreshes a dependency; every change to
-the tuple is an edit of `src/toolchain-versions.sh`. The current procedure:
+A build never advances a toolchain branch or refreshes a toolchain
+dependency; every change to the tuple is an edit of
+`src/toolchain-versions.sh`. Only the userspace add-ons follow a branch. The
+current procedure:
 
 1. Push the fork branches so the new commits are reachable from the declared
    refs (LLVM first when its patches changed, then Rust with the updated
@@ -247,12 +277,14 @@ the tuple is an edit of `src/toolchain-versions.sh`. The current procedure:
    `MOTOR_CARGO_REV` when the gitlinks moved; the upstream base, Stage 0, and
    LLVM base when the fork was rebased; the lockfile hashes when a lockfile
    changed; and `MOTOR_TOOLCHAIN_ID` with `MOTOR_RUSTUP_TOOLCHAIN_BASE` for a
-   new lineage step. `test-toolchain-versions.sh` checks the file's shape.
+   new lineage step. Only the commits, the id, and the rustup base change the
+   key; the other values are checks that the fork is what was declared.
+   `test-toolchain-versions.sh` checks the file's shape.
 3. Run `src/build-motor-os.sh`. It builds and links the new prefix, builds
-   and pins the new assembly, rebuilds the images, and prints
+   the new assembly, rebuilds the images, and prints
    `host toolchain: <name>`.
 4. Put that name into `rust-toolchain.toml`. Until this is done, `make` still
-   selects the previous toolchain, whose pin no longer matches, and fails.
+   selects the previous toolchain and its assembly.
 5. Because the standard library of every OS binary changes, run the core
    gate from AGENTS.md on the new tuple: three debug and three release runs
    of `src/tests/full-test.sh`, then `src/tests/full-test-dev.sh --release`.
@@ -260,9 +292,10 @@ the tuple is an edit of `src/toolchain-versions.sh`. The current procedure:
    push. A clean checkout then reproduces the same key and name, so its
    tracked selector matches what its own producer run installs.
 
-A `moto-rt` update between compiler steps follows the same shape: publish the
-crate, select it in the fork's `library/Cargo.lock`, commit that on the fork
-branch, and declare the new Rust commit, lock hash, and local runtime version.
+Rust std moves to a newer `moto-rt` the same way: publish the crate, select
+it in the fork's `library/Cargo.lock`, commit that on the fork branch, and
+declare the new Rust commit and lock hash. The local `moto-rt` may run ahead
+of std within one major version without any of this.
 
 The stable release converts `MOTOR_TOOLCHAIN_MATURITY` to `stable`,
 `UPSTREAM_RUST_REF` to the `1.99.0` tag, and the id to `1.99.0-motor.1`,
@@ -276,12 +309,11 @@ exists. Only source refs are published; no binary toolchain is.
   `rust-toolchain.toml` names a toolchain that is not installed here. Run the
   producer; if the name it prints differs, the selector is behind the
   declaration.
-- `pinned assembly is stale for the current runtime inputs`: a runtime input
-  changed after the assembly was built (a toolchain script, the producer,
-  moto-rt, moto-sys, the shim, or `src/sys/Cargo.toml`). Run the producer;
-  it builds or reuses the matching assembly and repins.
-- `no completed assembly exists for toolchain …`: this toolchain has never
-  had an assembly on this host. Run the producer.
+- `no assembly <key> exists for toolchain <key>`: this toolchain has no
+  assembly for the declared inputs. Either none was built on this host, or a
+  declared assembly input changed since (the mlibc commit or the native
+  configuration). Run the producer; it builds or reuses the matching
+  assembly.
 - `<commit> is not reachable from <ref>`: the declaration names a commit that
   is not on the pushed fork branch.
 - `toolchain prefix has an active or abandoned producer lock` or `installed
@@ -302,9 +334,10 @@ exists. Only source refs are published; no binary toolchain is.
 | `src/toolchain-host.sh`, `src/toolchain-bootstrap.sh` | host prefix build, bootstrap configuration |
 | `src/toolchain-llvm.sh` | standalone LLVM/Clang |
 | `src/toolchain-prefix.sh`, `src/toolchain-state.sh` | prefix claim, validation, stamp, rustup link, lockfile capture |
-| `src/toolchain-runtime.sh`, `src/toolchain-assembly.sh` | runtime identity, assembly key, manifest, claim |
+| `src/toolchain-runtime.sh`, `src/toolchain-assembly.sh` | moto-rt package check, assembly key, manifest, claim |
 | `src/toolchain-native.sh`, `src/toolchain-native-rust-analyzer.sh` | native rustc, rustfmt, rust-analyzer builds and ELF validation |
 | `src/toolchain-rust-analyzer*.sh`, `src/toolchain-patched-crates.sh` | rust-analyzer provisioning and its pinned patched crates |
-| `src/select-toolchain-assembly.sh` | pin resolution for `make` and the imager |
+| `src/resolve-toolchain-assembly.sh` | assembly resolution for `make` and the imager |
 | `src/build-motor-os.sh`, `src/build-base.sh` | the producer and host provisioning |
 | `src/tests/test-toolchain-*.sh` | offline contract tests of the above; `test-toolchain-cutover.sh` ties the selector to the declaration |
+| `src/tests/test-build-addons.sh` | offline contract test of the add-on stage of the producer |

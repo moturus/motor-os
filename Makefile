@@ -31,7 +31,7 @@ endif
 
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
 IMAGER_TARGET_DIR := $(OBJ_DIR)/imager
-ASSEMBLY_SELECTOR := $(ROOT_DIR)/src/select-toolchain-assembly.sh
+ASSEMBLY_RESOLVER := $(ROOT_DIR)/src/resolve-toolchain-assembly.sh
 DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
@@ -68,10 +68,10 @@ user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbenc
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-mock-provider
 .PHONY: gix lorry curl
 .PHONY: mdbg rnetbench crossbench
-.PHONY: clean clippy assembly-selected
+.PHONY: clean clippy assembly-resolved
 
-assembly-selected:
-	@"$(ASSEMBLY_SELECTOR)" --resolve >/dev/null
+assembly-resolved:
+	@"$(ASSEMBLY_RESOLVER)" --resolve >/dev/null
 
 mbr.bin:
 	mkdir -p $(BIN_DIR)
@@ -223,18 +223,18 @@ gears-mock-provider:
 	strip -o "$(BIN_DIR)/gears-mock-provider" \
 		"$(OBJ_DIR)/gears-mock-provider/$(SUB_DIR)/gears-mock-provider"
 
-lorry: assembly-selected
+lorry: assembly-resolved
 	mkdir -p $(BIN_DIR)
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/lorry && \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
-gix: assembly-selected
+gix: assembly-resolved
 	mkdir -p $(BIN_DIR)
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
 		cargo fetch --locked && \
@@ -250,9 +250,9 @@ gix: assembly-selected
 
 # ring's Git checkout generates packaged assembly on the Linux host. Curl is
 # therefore cross-built by Cargo and is not part of the native Lorry surface.
-curl: assembly-selected
+curl: assembly-resolved
 	mkdir -p $(BIN_DIR)
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/curl" \
@@ -268,8 +268,8 @@ define INSTALL_VM_SCRIPTS
 endef
 
 # The standard image adds production networking and user programs to base.
-main.img: assembly-selected boot core sys user
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+main.img: assembly-resolved boot core sys user
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
 	cd src/imager && \
@@ -282,8 +282,8 @@ main.img: assembly-selected boot core sys user
 
 # The standard image in the raw format required by Firecracker. This remains
 # explicit: default and aggregate image targets do not depend on it.
-raw.img: assembly-selected boot core sys user
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+raw.img: assembly-resolved boot core sys user
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" && \
 	cd src/imager && \
@@ -328,8 +328,8 @@ base.img: boot core sys-base user-base
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 # The dev image adds diagnostics, tests, sources, and native toolchains.
-dev.img: assembly-selected boot core sys user-dev
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+dev.img: assembly-resolved boot core sys user-dev
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
@@ -364,7 +364,7 @@ clippy: vdso
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/bin/gears && $(DO_CLIPPY)
 	cd src/bin/gears-mock-provider && $(DO_CLIPPY)
-	assembly_image_root="$$($(ASSEMBLY_SELECTOR) --resolve)" && \
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
 		cargo fetch --locked && \
