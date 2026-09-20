@@ -1,32 +1,8 @@
 #!/bin/bash
 
-if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
-  export FULL_TEST_TIMEOUT_ACTIVE=1
-  # Let bash put timeout's process group in the foreground. Without job control,
-  # timeout moves the suite into a background process group; a terminal
-  # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
-  # Keeping timeout's separate group preserves its whole-process-tree timeout.
-  # Debug builds and developer-image checks need the larger overall budget.
-  TIMEOUT=1500
-  for argument in "$@"; do
-    if [ "$argument" = "--release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
-      TIMEOUT=900
-    fi
-  done
-  set -m
-  timeout "${TIMEOUT}s" "$0" "$@" < /dev/null
-  status=$?
-  set +m
-  if [ "$status" -eq 124 ]; then
-    echo "full-test: timed out after $TIMEOUT seconds" >&2
-  fi
-  exit "$status"
-fi
-
-# abort on error
-set -e
-
 WD="$(dirname "$0")"
+# The option loop below consumes "$@", which the timed run still needs.
+ORIGINAL_ARGS=("$@")
 
 BUILD="debug"
 VMM=qemu
@@ -61,6 +37,48 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
   echo "full-test: Firecracker does not support developer images" >&2
   exit 2
 fi
+
+if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
+  export FULL_TEST_TIMEOUT_ACTIVE=1
+  # Debug builds and developer-image checks need the larger overall budget.
+  TIMEOUT=1500
+  if [ "$BUILD" = "release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+    TIMEOUT=900
+  fi
+
+  minutes() {
+    awk -v seconds="$1" 'BEGIN { printf "%.1f", seconds / 60 }'
+  }
+
+  # Building the artifacts is not testing: the first run after
+  # src/build-motor-os.sh compiles the whole tree, which alone outlasts the
+  # budget above. Prepare first, outside the timeout, and time the two apart.
+  preparation_started="$SECONDS"
+  "$WD/full-test-prepare.sh" "$BUILD" "$VMM" || exit "$?"
+  preparation_seconds=$((SECONDS - preparation_started))
+
+  # Let bash put timeout's process group in the foreground. Without job control,
+  # timeout moves the suite into a background process group; a terminal
+  # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
+  # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  testing_started="$SECONDS"
+  set -m
+  timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
+  status=$?
+  set +m
+  testing_seconds=$((SECONDS - testing_started))
+  if [ "$status" -eq 124 ]; then
+    echo "full-test: timed out after $TIMEOUT seconds of testing" >&2
+  elif [ "$status" -eq 0 ]; then
+    printf 'FULL TEST PASS: preparation steps: %s minutes, testing: %s minutes\n' \
+      "$(minutes "$preparation_seconds")" "$(minutes "$testing_seconds")"
+  fi
+  exit "$status"
+fi
+
+# abort on error
+set -e
+
 # The repo root is two levels up from src/tests/.
 ROOT_DIR="$WD/../.."
 . "$WD/vm-console-filter.sh"
