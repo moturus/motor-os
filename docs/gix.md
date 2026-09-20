@@ -52,7 +52,9 @@ starting with a dash. Run `gix COMMAND --help` for syntax.
 | `unstage PATH…` | Restore index entries from HEAD without changing files; on an unborn branch, remove them from the index. |
 | `restore PATH…` | Discard selected tracked worktree changes using the index; refuse conflicts. |
 | `commit -m MSG` | Commit the index to the attached local branch; reject unresolved conflicts and ordinary empty commits. |
-| `branch list`, `branch create NAME [REV]` | List or create branches; REV defaults to HEAD and existing names are never replaced. |
+| `branch [-a] [-v]` | List branches as `git branch` prints them: `*` marks the current one; `-a` adds remote-tracking branches; `-v` adds the abbreviated commit, `[ahead N, behind M]` or `[gone]` against the upstream, and the subject. |
+| `branch list`, `branch create NAME [REV]` | List bare names, or create a branch; REV defaults to HEAD and existing names are never replaced. |
+| `remote [-v]` | List configured remotes as `git remote` prints them; `-v` adds the fetch and push URLs. |
 | `tag list`, `tag create NAME [REV]` | List or create lightweight tags under the same creation rules. |
 | `switch BRANCH` | Switch to an existing local branch with a clean index and tracked worktree. |
 | `merge REV`, `merge --abort` | Fast-forward or merge a commit; abort discards merge work. |

@@ -322,6 +322,24 @@ verify_refs_cli() {
     fail "gix tag list output differs from expected names"
 }
 
+# Branch and remote listings must print exactly what Git prints for the same
+# repository. $2 holds one gix output file per command, named by listing_file.
+# clean_git ignores the user configuration that gix reads, so both sides get
+# the same explicit abbreviation length.
+listing_commands=("branch" "branch -a" "branch -v" "branch -a -v" "remote" "remote -v")
+listing_file() { printf '%s' "${1// /_}"; }
+verify_listings() {
+  local repository="$1" outputs="$2" command
+  for command in "${listing_commands[@]}"; do
+    # shellcheck disable=SC2086 # the command is a fixed word list
+    clean_git -C "$repository" -c core.abbrev=12 $command > "$temporary/expected-listing"
+    cmp "$temporary/expected-listing" "$outputs/$(listing_file "$command")" >/dev/null ||
+      fail "gix $command differs from git: $(cat "$outputs/$(listing_file "$command")")"
+  done
+  grep -Fq '[behind 1]' "$outputs/$(listing_file "branch -v")" ||
+    fail "gix branch -v did not report the fetched upstream commit"
+}
+
 verify_pack() {
   local indices=("$1"/*.idx)
   [ "${#indices[@]}" -eq 1 ] && [ -f "${indices[0]}" ] ||
@@ -511,6 +529,13 @@ PY
   advance_remote "$https_remote" "$temporary/https-update" "remote update"
   "${app_env[@]}" "$gix_binary" -r "$clone" -c "http.sslCAInfo=$ca" fetch
   verify_network_clone "$temporary/https-clone-before" "$clone" "$https_remote" "$https_initial_head" HTTPS
+  mkdir "$temporary/host-listings"
+  for command in "${listing_commands[@]}"; do
+    # shellcheck disable=SC2086
+    "${app_env[@]}" "$gix_binary" -r "$clone" -c core.abbrev=12 $command \
+      > "$temporary/host-listings/$(listing_file "$command")"
+  done
+  verify_listings "$clone" "$temporary/host-listings"
 
   mkdir "$temporary/preexisting"
   printf 'preserve\n' > "$temporary/preexisting/sentinel"
@@ -815,6 +840,12 @@ vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $gue
 printf 'get -r "%s" "%s"\n' "$guest_clone" "$temporary/guest-clone-after" |
   "${sftp_command[@]}"
 verify_network_clone "$temporary/guest-clone-before" "$temporary/guest-clone-after" "$https_remote" "$https_initial_head" HTTPS
+mkdir "$temporary/guest-listings"
+for command in "${listing_commands[@]}"; do
+  vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_clone -c core.abbrev=12 $command" \
+    > "$temporary/guest-listings/$(listing_file "$command")"
+done
+verify_listings "$temporary/guest-clone-after" "$temporary/guest-listings"
 
 coproc GIX_PTY {
   ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \

@@ -1,4 +1,5 @@
 pub mod add;
+pub mod branches;
 pub mod cancellation;
 pub mod checkout;
 pub mod clone;
@@ -31,6 +32,7 @@ pub mod push_protocol;
 pub mod push_report;
 pub mod recover;
 pub mod refs;
+pub mod remotes;
 pub mod repository;
 pub mod restore;
 pub mod selection;

@@ -9,8 +9,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, cancellation, clone, commit, diff, fetch, init, merge, network, push, recover,
-    refs, repository, restore, status, switch, unstage,
+    Result, add, branches, cancellation, clone, commit, diff, fetch, init, merge, network, push,
+    recover, refs, remotes, repository, restore, status, switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -173,7 +173,27 @@ fn run() -> Result {
                         .value_name("SOURCE:DESTINATION"),
                 ),
         )
-        .subcommand(reference_command("branch", "Manage local branches"))
+        .subcommand(
+            // Without a subcommand this lists branches as `git branch` does.
+            reference_command("branch", "List or create branches")
+                .subcommand_required(false)
+                .args_conflicts_with_subcommands(true)
+                .arg(
+                    Arg::new("all")
+                        .short('a')
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .help("Also list remote-tracking branches"),
+                )
+                .arg(verbose_arg(
+                    "Show each branch's commit and its relation to the upstream",
+                )),
+        )
+        .subcommand(
+            Command::new("remote")
+                .about("List configured remotes")
+                .arg(verbose_arg("Show the fetch and push URLs")),
+        )
         .subcommand(reference_command("tag", "Manage lightweight tags"))
         .subcommand(Command::new("log").about("Show commit history"))
         .subcommand(
@@ -251,14 +271,20 @@ fn run() -> Result {
                 .collect::<Vec<_>>();
             add::run(&opened, command.get_flag("all"), &paths, &cancellation)
         }
-        Some("branch") => reference_run(
-            &mut opened,
-            matches
+        Some("branch") => {
+            let command = matches
                 .subcommand_matches("branch")
-                .expect("matched branch"),
-            refs::Kind::Branch,
-            &cancellation,
-        ),
+                .expect("matched branch");
+            if command.subcommand().is_some() {
+                reference_run(&mut opened, command, refs::Kind::Branch, &cancellation)
+            } else {
+                let options = branches::Options {
+                    all: command.get_flag("all"),
+                    verbose: command.get_flag("verbose"),
+                };
+                branches::list(&opened.repo, options, io::stdout().lock(), &cancellation)
+            }
+        }
         Some("commit") => commit::run(
             &opened,
             matches
@@ -315,6 +341,15 @@ fn run() -> Result {
             );
         }
         Some("log") => log::show(&opened.repo, &cancellation),
+        Some("remote") => remotes::list(
+            &opened.repo,
+            matches
+                .subcommand_matches("remote")
+                .expect("matched remote")
+                .get_flag("verbose"),
+            io::stdout().lock(),
+            &cancellation,
+        ),
         Some("merge") => {
             let command = matches.subcommand_matches("merge").expect("matched merge");
             if command.get_flag("abort") {
@@ -379,6 +414,14 @@ fn run() -> Result {
     };
     result?;
     cancellation.check()
+}
+
+fn verbose_arg(help: &'static str) -> Arg {
+    Arg::new("verbose")
+        .short('v')
+        .long("verbose")
+        .action(ArgAction::SetTrue)
+        .help(help)
 }
 
 fn reference_command(name: &'static str, about: &'static str) -> Command {
