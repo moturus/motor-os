@@ -99,6 +99,24 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             .await
     }
 
+    /// Give `entry_id` the permissions, timestamps and user extensions of
+    /// `source` (an entry of another filesystem); kind and size are kept.
+    #[cfg(all(feature = "image-admin", target_os = "linux"))]
+    pub async fn copy_metadata_image_admin(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        source: &async_fs::Metadata,
+    ) -> Result<()> {
+        self.check_err()?;
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
+        Txn::do_copy_metadata_image_admin_txn(self, caller, entry_id.into(), source).await
+    }
+
     /// Mode-E access enforcement: require that `role` holds the `need`
     /// permission on `entry_id`, keyed off the entry's own per-role permission
     /// byte. `r` gates `w` and `x`, so a write/execute check also implies read.

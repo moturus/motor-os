@@ -986,6 +986,42 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         txn.commit().await
     }
+
+    /// Make `entry_id` carry the permissions, timestamps and user extensions
+    /// of `source`; its own kind and size stay. Host image tools copy entries
+    /// between filesystems with this.
+    #[cfg(all(feature = "image-admin", target_os = "linux"))]
+    pub async fn do_copy_metadata_image_admin_txn(
+        fs: &'a mut MotorFs<BD>,
+        caller: Role,
+        entry_id: EntryIdInternal,
+        source: &async_fs::Metadata,
+    ) -> Result<()> {
+        let permissions = source.permissions()?;
+        if caller != Role::System || !async_fs::perms_monotonic(permissions) {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+
+        let mut txn = Self {
+            fs: FsHandle::Exclusive(fs),
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        let mut entry_block = txn.get_block(entry_id.block_no).await?;
+        dir_entry!(entry_block).validate_entry(entry_id)?;
+        {
+            let mut entry_ref = entry_block.block_mut();
+            let metadata = DirEntryBlock::from_block_mut(&mut entry_ref).metadata_mut();
+            metadata.set_permissions(permissions);
+            metadata.created = source.created;
+            metadata.modified = source.modified;
+            metadata.accessed = source.accessed;
+            metadata.user_extensions = source.user_extensions;
+        }
+
+        txn.commit().await
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -4,6 +4,7 @@ use camino::Utf8Path;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
 pub fn parse_mode(value: &str) -> Option<RolePermissions> {
@@ -35,7 +36,7 @@ pub fn parse_mode(value: &str) -> Option<RolePermissions> {
     Some(permissions)
 }
 
-fn motor_fs_region(image: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn motor_fs_region(image: &Path) -> io::Result<(u64, u64)> {
     let mut file = File::open(image)?;
     let mbr = mbrman::MBR::read_from(&mut file, super::SECTOR_SIZE).map_err(|err| {
         io::Error::new(ErrorKind::InvalidData, format!("failed to read MBR: {err}"))
@@ -61,7 +62,7 @@ fn motor_fs_region(image: &Path) -> io::Result<(u64, u64)> {
     result.ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "image has no Motor FS partition"))
 }
 
-async fn resolve_path(
+pub(crate) async fn resolve_path(
     fs: &motor_fs::MotorFs<AsyncFileBlockDevice>,
     path: &Path,
 ) -> io::Result<EntryId> {
@@ -97,23 +98,33 @@ fn chmod_raw(image: &Path, path: &Path, permissions: RolePermissions) -> io::Res
     })
 }
 
-struct TemporaryImage(Option<PathBuf>);
+/// A reserved image path, private to the owner, that is removed on drop
+/// unless published.
+pub(crate) struct TemporaryImage(Option<PathBuf>);
 
 impl TemporaryImage {
-    fn create_next_to(image: &Path, extension: &str) -> io::Result<Self> {
+    pub(crate) fn create_next_to(image: &Path, extension: &str) -> io::Result<Self> {
         let parent = image.parent().unwrap_or_else(|| Path::new("."));
+        Self::create_in(parent, image, extension)
+    }
+
+    /// Reserve a name derived from `image`'s file name in `directory`.
+    pub(crate) fn create_in(directory: &Path, image: &Path, extension: &str) -> io::Result<Self> {
         let filename = image
             .file_name()
             .ok_or_else(|| io::Error::from(ErrorKind::InvalidInput))?;
         for counter in 0..1000_u32 {
             let mut name = OsString::from(".");
             name.push(filename);
-            name.push(format!(
-                ".chmod-{}-{counter}.{extension}",
-                std::process::id()
-            ));
-            let path = parent.join(name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            name.push(format!(".tmp-{}-{counter}.{extension}", std::process::id()));
+            let path = directory.join(name);
+            // Image contents may be private, whatever the umask says.
+            let reserved = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path);
+            match reserved {
                 Ok(_) => return Ok(Self(Some(path))),
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
                 Err(err) => return Err(err),
@@ -125,11 +136,11 @@ impl TemporaryImage {
         ))
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.0.as_deref().unwrap()
     }
 
-    fn publish(mut self, destination: &Path) -> io::Result<()> {
+    pub(crate) fn publish(mut self, destination: &Path) -> io::Result<()> {
         fs::rename(self.path(), destination)?;
         self.0 = None;
         Ok(())
@@ -144,7 +155,7 @@ impl Drop for TemporaryImage {
     }
 }
 
-fn is_qcow2(image: &Path) -> io::Result<bool> {
+pub(crate) fn is_qcow2(image: &Path) -> io::Result<bool> {
     let mut magic = [0_u8; 4];
     File::open(image)?.read_exact(&mut magic)?;
     Ok(magic == *b"QFI\xfb")

@@ -324,8 +324,10 @@ name = "imager"
 version = "0.1.0"
 dependencies = [
  "async-fs",
+ "async-trait",
  "camino",
  "env_logger",
+ "fittings",
  "mbrman",
  "motor-fs",
  "serde",

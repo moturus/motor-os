@@ -24,6 +24,7 @@ use std::io::{self, Seek, SeekFrom};
 
 mod chmod;
 mod permissions;
+mod resize;
 mod util;
 
 const SECTOR_SIZE: u32 = 512;
@@ -612,6 +613,10 @@ Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml>
     imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
+    imager resize -i INPUT_IMG -o OUTPUT_IMG --size X[M|G]
+
+resize copies INPUT_IMG into a new OUTPUT_IMG (qcow2 or raw, by its .qcow2,
+.img or .raw suffix) whose data partition is X MB or GB large.
 "
     );
     std::process::exit(1);
@@ -655,6 +660,17 @@ fn main() {
         if let Err(err) = chmod::chmod_image(Path::new(&args[3]), Path::new(&args[4]), permissions)
         {
             eprintln!("imager chmod: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "resize") {
+        let request = resize::parse_args(&args[2..]).unwrap_or_else(|err| {
+            eprintln!("imager resize: {err}");
+            print_usage_and_exit();
+        });
+        if let Err(err) = resize::resize_image(&request) {
+            eprintln!("imager resize: {err}");
             std::process::exit(1);
         }
         return;

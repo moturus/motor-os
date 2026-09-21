@@ -189,6 +189,12 @@ else
 fi
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  # The imager tests that only the developer-image suite runs are #[ignore]d.
+  if [ "$BUILD" = "release" ]; then
+    (cd "$ROOT_DIR/src/imager" && cargo test --release resize -- --ignored)
+  else
+    (cd "$ROOT_DIR/src/imager" && cargo test resize -- --ignored)
+  fi
   "$WD/test-rust-analyzer-size.sh"
   "$WD/test-rustfmt-size.sh"
   "$WD/test-gix.sh" --host
