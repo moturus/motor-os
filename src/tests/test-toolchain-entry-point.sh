@@ -23,10 +23,17 @@ case "$help" in
   *) fail "public entry point did not provide usage" ;;
 esac
 
+# Only host provisioning, which runs first, may ask for a password.
+if grep -nE '^[[:space:]]*(if[[:space:]]+(![[:space:]]+)?)?sudo[[:space:]]' \
+  "$ROOT_DIR/src/build-motor-os.sh" "$ROOT_DIR"/src/toolchain-*.sh; then
+  fail "sudo is used after host provisioning"
+fi
+
 # Sourcing the private helper remains valid for its function-level offline
 # tests and must not execute provisioning.
 . "$ROOT_DIR/src/build-base.sh"
 declare -F host_networking_ready >/dev/null || fail "private helper was not sourceable"
+[[ " ${PACKAGES[*]} " == *" meson "* ]] || fail "meson is not provisioned up front"
 declare -F build_rust_toolchain >/dev/null && fail "private helper still builds Rust"
 case "$(declare -f install_rust)" in
   *'rustup default'*|*'rustup component add'*) fail "host helper changes the Rust selection" ;;

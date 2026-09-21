@@ -115,9 +115,20 @@ toolchain_build_standalone_llvm "$llvm" "$root"
 
 blocked_root="$temporary/blocked"
 blocked_key="$(toolchain_standalone_llvm_key)"
-mkdir -p "$blocked_root/standalone-llvm/$blocked_key.building"
+blocked_build="$blocked_root/standalone-llvm/$blocked_key"
+mkdir -p "$blocked_build.building"
+printf '%s\n' "$$" > "$blocked_build.building/pid"
 if toolchain_build_standalone_llvm "$llvm" "$blocked_root" 2>/dev/null; then
-	fail "abandoned LLVM producer lock was ignored"
+	fail "live LLVM producer lock was ignored"
 fi
+
+# A lock whose producer is gone marks an interrupted build: it is rebuilt.
+rm "$blocked_build.building/pid"
+mkdir "$blocked_build"
+touch "$blocked_build/partial"
+toolchain_build_standalone_llvm "$llvm" "$blocked_root" 2>/dev/null
+[ "$TOOLCHAIN_LLVM_REUSED" = false ] && [ ! -e "$blocked_build/partial" ] &&
+	[ ! -e "$blocked_build.building" ] ||
+	fail "interrupted LLVM build was not discarded and rebuilt"
 
 echo "test-toolchain-llvm PASS"

@@ -11,8 +11,10 @@
 #
 # WHAT IT DOES, mirroring docs/build.md:
 #   1. install host build packages via apt          [skipped if already present]
-#   2. install rustup without selecting a default    [skipped if already present]
-#   3. create the moto-tap interface + /dev/kvm access [skipped if already done]
+#   2. create the moto-tap interface + /dev/kvm access [skipped if already done]
+#   3. install rustup without selecting a default    [skipped if already present]
+#
+#   Steps 1 and 2 are the only ones in the complete build that use sudo.
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
 #
@@ -55,7 +57,10 @@ export MOTORH
 # re-run — did `apt-get update` plus a full `apt-get -y upgrade`, needing sudo
 # and defeating this script's own "skipped if already present" promise (and any
 # unattended re-run). Naming the real package makes the probe work.
-PACKAGES=(git build-essential nasm clang cmake ninja-build \
+#
+# Everything the complete build installs with sudo is listed here: provisioning
+# runs first, so an unattended build never stops later at a password prompt.
+PACKAGES=(git build-essential nasm clang cmake ninja-build meson \
           zlib1g-dev libssl-dev pkg-config curl qemu-system qemu-utils)
 
 # --- 1. host packages -------------------------------------------------------
@@ -86,22 +91,7 @@ install_packages() {
 	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install "${PACKAGES[@]}"
 }
 
-# --- 2. rustup, deliberately without a default toolchain --------------------
-install_rust() {
-	# Bring cargo/rustup onto PATH if a previous run (or the user) installed it.
-	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-
-	if command -v rustup >/dev/null 2>&1; then
-		skip "rustup already installed"
-	else
-		log "installing rustup without a default toolchain"
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
-			sh -s -- -y --default-toolchain none
-		. "$HOME/.cargo/env"
-	fi
-}
-
-# --- 3. host VM prerequisites (tap + kvm), but NOT running the VM -----------
+# --- 2. host VM prerequisites (tap + kvm), but NOT running the VM -----------
 host_networking_ready() {
 	[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
 	ip -o link show dev moto-tap 2>/dev/null | grep -q '<[^>]*UP[,>]' || return 1
@@ -180,11 +170,27 @@ setup_host_vm_prereqs() {
 	fi
 }
 
+# --- 3. rustup, deliberately without a default toolchain --------------------
+install_rust() {
+	# Bring cargo/rustup onto PATH if a previous run (or the user) installed it.
+	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+	if command -v rustup >/dev/null 2>&1; then
+		skip "rustup already installed"
+	else
+		log "installing rustup without a default toolchain"
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+			sh -s -- -y --default-toolchain none
+		. "$HOME/.cargo/env"
+	fi
+}
+
 main() {
 	log "Motor OS host provisioning starting; MOTORH = $MOTORH"
+	# The sudo steps run back to back, while the credentials are fresh.
 	install_packages
-	install_rust
 	setup_host_vm_prereqs
+	install_rust
 	log "host provisioning complete"
 }
 

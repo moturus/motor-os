@@ -8,6 +8,41 @@ toolchain_die() {
   return 1
 }
 
+# A producer lock is a `.building` directory beside a keyed output; it records
+# the producer's pid. A lock whose producer is gone marks an interrupted build:
+# its incomplete output is discarded, so a re-run builds it again. A rejected
+# output is kept for diagnosis.
+toolchain_recover_lock() {
+  local what="$1" output="$2" rejected="${3:-}" lock="${2}.building" pid
+  [ -e "$lock" ] || return 0
+  case "$output" in
+    /?*) ;;
+    *) toolchain_die "$what path is not absolute: $output"; return 1 ;;
+  esac
+  pid="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && [ -e "/proc/$pid" ]; then
+    toolchain_die "$what is being built by process $pid; wait for it to finish." \
+      "If process $pid is not a Motor OS build, remove $lock and re-run"
+    return 1
+  fi
+  if [ -n "$rejected" ] && [ -e "$output/$rejected" ]; then
+    toolchain_die "$what was rejected: $(head -1 "$output/$rejected");" \
+      "fix the cause, remove $output and $lock, and re-run"
+    return 1
+  fi
+  echo "toolchain: discarding the interrupted build of $what: $output" >&2
+  rm -rf -- "$output" "$lock"
+}
+
+toolchain_take_lock() {
+  mkdir "$1" 2>/dev/null && printf '%s\n' "$$" > "$1/pid"
+}
+
+toolchain_release_lock() {
+  rm -f "$1/pid"
+  rmdir "$1"
+}
+
 toolchain_manifest_package_version() {
   local manifest="$1"
   awk '

@@ -60,8 +60,8 @@ Managed mode is the default. Authoring mode never fetches, switches, resets,
 stashes, cleans, or updates the supplied Rust and LLVM worktrees.
 
 The build is incremental and safe to rerun. It downloads managed sources and packages,
-uses sudo for missing Ubuntu packages and host VM setup, and does not start the
-VM.
+uses sudo only at the start, for missing Ubuntu packages and host VM setup, and
+does not start the VM. A re-run discards an interrupted build and builds it again.
 EOF
 }
 
@@ -253,21 +253,6 @@ CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
 # (mlibc + libc++ stack), and Lua, staged into the assembly image root.
 # See docs/build-llvm.md for the prose walkthrough behind each numbered stage.
 # ============================================================================
-
-# --- meson (the one extra host package build-base does not install) ----------
-ensure_meson() {
-	if command -v meson >/dev/null 2>&1; then
-		skip "meson already installed"
-		return
-	fi
-	if ! command -v apt-get >/dev/null 2>&1; then
-		warn "apt-get not found; install meson manually."
-		return
-	fi
-	log "installing meson"
-	sudo apt-get update
-	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install meson
-}
 
 # --- add-on source checkout: follow one branch of a fork ----------------------
 update_addon_source() {
@@ -941,7 +926,6 @@ main() {
 		log "building assembly $MOTOR_ASSEMBLY_KEY"
 		toolchain_generate_cross_wrappers "$SYSROOT" "$B"
 		configure_exact_cross_driver
-		ensure_meson
 		build_shim
 		build_builtins
 		build_mlibc

@@ -229,16 +229,15 @@ toolchain_register_prefix() {
 toolchain_claim_prefix() {
 	local prefix="$1" lock
 	lock="${prefix}.building"
+	toolchain_recover_lock "toolchain prefix" "$prefix" MOTOR-TOOLCHAIN-REJECTED || return
 	if [ -d "$prefix" ]; then
 		TOOLCHAIN_PREFIX_REUSED=true
 		return 0
 	fi
 	[ ! -e "$prefix" ] || toolchain_die "toolchain prefix path is not a directory: $prefix" || return
 	mkdir -p "$(dirname "$prefix")"
-	if ! mkdir "$lock" 2>/dev/null; then
-		toolchain_die "toolchain prefix has an active or abandoned producer lock: $lock"
-		return 1
-	fi
+	toolchain_take_lock "$lock" ||
+		toolchain_die "toolchain prefix producer lock cannot be taken: $lock" || return
 	TOOLCHAIN_PREFIX_REUSED=false
 }
 
@@ -246,5 +245,5 @@ toolchain_complete_prefix() {
 	local prefix="$1" lock
 	lock="${prefix}.building"
 	[ -d "$lock" ] || toolchain_die "toolchain producer lock is missing: $lock" || return
-	rmdir "$lock"
+	toolchain_release_lock "$lock"
 }

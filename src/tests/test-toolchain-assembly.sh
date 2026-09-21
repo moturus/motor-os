@@ -203,4 +203,16 @@ if toolchain_claim_assembly 2>/dev/null; then
 	fail "assembly with a changed Cargo identity was accepted"
 fi
 
+# A producer that died after claiming is started over by a re-run.
+saved_root="$ASSEMBLY_ROOT"
+ASSEMBLY_ROOT="$temporary/interrupted-assembly"
+mkdir "$ASSEMBLY_ROOT" "$ASSEMBLY_ROOT.building"
+touch "$ASSEMBLY_ROOT/partial"
+toolchain_claim_assembly 2>/dev/null
+[ "$TOOLCHAIN_ASSEMBLY_REUSED" = false ] && [ ! -e "$ASSEMBLY_ROOT/partial" ] &&
+	[ "$(cat "$ASSEMBLY_ROOT.building/pid")" = "$$" ] ||
+	fail "interrupted assembly was not discarded and reclaimed"
+if toolchain_claim_assembly 2>/dev/null; then fail "live assembly producer lock was ignored"; fi
+ASSEMBLY_ROOT="$saved_root"
+
 echo "test-toolchain-assembly PASS"

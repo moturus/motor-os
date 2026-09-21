@@ -221,7 +221,8 @@ toolchain_validate_consumed_assembly() (
 		exit 1
 	}
 	[ ! -e "${root}.building" ] || {
-		toolchain_die "assembly has an active or abandoned producer lock: ${root}.building"
+		toolchain_die "assembly is being built, or its build was interrupted: ${root}.building;" \
+			"run src/build-motor-os.sh to finish it"
 		exit 1
 	}
 	[ ! -e "$root/MOTOR-ASSEMBLY-REJECTED" ] || {
@@ -354,17 +355,15 @@ toolchain_validate_assembly_manifest() {
 
 toolchain_claim_assembly() {
 	local lock="${ASSEMBLY_ROOT}.building"
-	if [ -e "$lock" ]; then
-		toolchain_die "assembly has an active or abandoned producer lock: $lock"
-		return 1
-	fi
+	toolchain_recover_lock assembly "$ASSEMBLY_ROOT" MOTOR-ASSEMBLY-REJECTED || return
 	if [ -d "$ASSEMBLY_ROOT" ]; then
 		toolchain_validate_assembly_manifest || return
 		TOOLCHAIN_ASSEMBLY_REUSED=true
 		return 0
 	fi
 	mkdir -p "$(dirname "$ASSEMBLY_ROOT")"
-	mkdir "$lock" || return
+	toolchain_take_lock "$lock" ||
+		toolchain_die "assembly producer lock cannot be taken: $lock" || return
 	mkdir "$ASSEMBLY_ROOT" || return
 	TOOLCHAIN_ASSEMBLY_REUSED=false
 }
@@ -385,5 +384,5 @@ toolchain_complete_assembly() {
 		chmod 0444 "$image_manifest"
 	done < <(toolchain_generated_manifest_paths)
 	toolchain_validate_assembly_manifest || return
-	rmdir "$lock"
+	toolchain_release_lock "$lock"
 }

@@ -31,7 +31,9 @@ src/build-motor-os.sh --source-mode managed
 ```
 
 The script installs missing host packages and rustup, so initial provisioning
-uses `sudo` and the network. It also configures TAP/KVM prerequisites. Set
+uses `sudo` and the network. It also configures TAP/KVM prerequisites. Every
+`sudo` command runs in this first step, before anything is built; the long
+build that follows never asks for a password. Set
 `MOTOR_SKIP_HOST_NETWORK_SETUP=1` only after independently verifying that the
 required VM networking is already configured.
 
@@ -200,10 +202,16 @@ assembly is reused only after full manifest and artifact validation. Older
 keys are retained so invalidation mistakes remain visible; the workflow does
 not broadly clear Cargo, LLVM, mlibc, or image build directories.
 
-An adjacent `.building` directory means a producer is active or a previous run
-was interrupted. A `MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED`
-marker preserves an invalid result for diagnosis. Resolve the underlying
-source, lockfile, or build defect before removing any marker or output.
+An adjacent `.building` directory is a producer lock; its `pid` file names the
+build that holds it. When that process is gone, the previous run was
+interrupted or failed: the next run discards the incomplete standalone LLVM,
+prefix, or assembly and builds it again. While the process is alive the run
+stops and names it.
+
+A `MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED` marker preserves an
+invalid result for diagnosis, and a re-run does not discard it. The error
+prints the recorded reason and the two paths to remove. Resolve the underlying
+source, lockfile, or build defect before removing them.
 
 If Rust bootstrap rewrites a lockfile, that run's prefix is rejected because
 its starting key no longer describes the produced artifact. Review and commit

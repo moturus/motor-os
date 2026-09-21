@@ -164,6 +164,32 @@ toolchain_complete_prefix "$new_prefix"
 toolchain_claim_prefix "$new_prefix"
 [ "$TOOLCHAIN_PREFIX_REUSED" = true ] || fail "existing prefix was not selected for reuse"
 
+# An interrupted producer is recovered; a live one and a rejected prefix are not.
+stale_prefix="$temporary/stale-prefix"
+toolchain_claim_prefix "$stale_prefix"
+[ "$(cat "$stale_prefix.building/pid")" = "$$" ] || fail "producer lock lacks its pid"
+if toolchain_claim_prefix "$stale_prefix" 2>/dev/null; then
+	fail "live producer lock was ignored"
+fi
+dead_pid="$(sh -c 'echo $$')"
+printf '%s\n' "$dead_pid" > "$stale_prefix.building/pid"
+mkdir "$stale_prefix"
+touch "$stale_prefix/partial"
+toolchain_claim_prefix "$stale_prefix" 2>/dev/null
+[ "$TOOLCHAIN_PREFIX_REUSED" = false ] && [ ! -e "$stale_prefix" ] ||
+	fail "interrupted prefix was not discarded"
+printf '%s\n' "$dead_pid" > "$stale_prefix.building/pid"
+mkdir "$stale_prefix"
+printf 'test reason\n' > "$stale_prefix/MOTOR-TOOLCHAIN-REJECTED"
+if diagnostic="$(toolchain_claim_prefix "$stale_prefix" 2>&1)"; then
+	fail "rejected prefix was reclaimed"
+fi
+case "$diagnostic" in
+	*"test reason"*"remove $stale_prefix"*) ;;
+	*) fail "rejected prefix diagnostic lacks the reason or the fix: $diagnostic" ;;
+esac
+[ -f "$stale_prefix/MOTOR-TOOLCHAIN-REJECTED" ] || fail "rejected prefix was discarded"
+
 touch "$prefix/MOTOR-TOOLCHAIN-REJECTED"
 if toolchain_validate_prefix "$prefix" 2>/dev/null; then
 	fail "rejected prefix was accepted"

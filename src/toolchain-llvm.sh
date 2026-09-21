@@ -67,20 +67,15 @@ toolchain_build_standalone_llvm() {
 	STANDALONE_LLVM_BUILD="$root/standalone-llvm/$STANDALONE_LLVM_KEY"
 	STANDALONE_LLVM_BIN="$STANDALONE_LLVM_BUILD/bin"
 	lock="${STANDALONE_LLVM_BUILD}.building"
-	if [ -e "$lock" ]; then
-		toolchain_die "standalone LLVM has an active or abandoned producer lock: $lock"
-		return 1
-	fi
+	toolchain_recover_lock "standalone LLVM" "$STANDALONE_LLVM_BUILD" || return
 	if [ -d "$STANDALONE_LLVM_BUILD" ]; then
 		toolchain_validate_standalone_llvm "$STANDALONE_LLVM_BUILD" || return
 		TOOLCHAIN_LLVM_REUSED=true
 		return 0
 	fi
 	mkdir -p "$(dirname "$STANDALONE_LLVM_BUILD")"
-	if ! mkdir "$lock" 2>/dev/null; then
-		toolchain_die "standalone LLVM has an active or abandoned producer lock: $lock"
-		return 1
-	fi
+	toolchain_take_lock "$lock" ||
+		toolchain_die "standalone LLVM producer lock cannot be taken: $lock" || return
 	TOOLCHAIN_LLVM_REUSED=false
 	toolchain_verify_llvm_selection "$llvm" || return
 	"$cmake" -S "$llvm/llvm" -B "$STANDALONE_LLVM_BUILD" \
@@ -101,5 +96,5 @@ toolchain_build_standalone_llvm() {
 	chmod 0444 "$temporary"
 	mv "$temporary" "$manifest"
 	toolchain_validate_standalone_llvm "$STANDALONE_LLVM_BUILD" || return
-	rmdir "$lock"
+	toolchain_release_lock "$lock"
 }

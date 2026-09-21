@@ -184,10 +184,13 @@ toolchain key → assembly key → overlays and sysroot.
    just built even when the tracked selector still names an older one. It
    never edits `rust-toolchain.toml`.
 
-Both claims use a sibling `.building` directory as the lock and leave a
-`MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED` marker when
-validation fails, so a bad product is kept for diagnosis instead of being
-silently rebuilt. Older keyed products are never deleted by a build.
+Both claims use a sibling `.building` directory as the lock; it records the
+producer's pid. A lock whose producer is gone marks an interrupted build, and
+the next run discards that incomplete product and builds it again. When
+validation fails, the producer leaves a `MOTOR-TOOLCHAIN-REJECTED` or
+`MOTOR-ASSEMBLY-REJECTED` marker, so a bad product is kept for diagnosis
+instead of being silently rebuilt. Complete older keyed products are never
+deleted by a build.
 
 ### Rust runtime and native formatting
 
@@ -316,9 +319,13 @@ exists. Only source refs are published; no binary toolchain is.
   assembly.
 - `<commit> is not reachable from <ref>`: the declaration names a commit that
   is not on the pushed fork branch.
-- `toolchain prefix has an active or abandoned producer lock` or `installed
-  toolchain lacks rustc`: an interrupted producer left a `.building` sibling
-  or an empty prefix. Confirm nothing is running, remove both, and rerun.
+- `<product> is being built by process <pid>`: another build holds the
+  `.building` lock. Wait for it. If that pid belongs to an unrelated process
+  (the pid was reused after a reboot), remove the `.building` directory.
+- `<product> was rejected: <reason>`: see the next item; the message names the
+  product and lock directories to remove once the cause is fixed.
+- `assembly is being built, or its build was interrupted` from `make`: run
+  `src/build-motor-os.sh`; it finishes or restarts that assembly.
 - `MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED` present: validation
   failed after a build; the manifest next to it says which check.
 - `make` ends every failed build with a `BUILD FAILED` summary naming the
