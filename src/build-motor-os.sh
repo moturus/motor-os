@@ -900,6 +900,9 @@ main() {
 	log "provisioning host packages, rustup, and VM prerequisites"
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "required build stage is not executable: $base"
+	# The caller's shell keeps its PATH; note whether it can already see rustup.
+	local caller_has_rustup=true
+	command -v rustup >/dev/null 2>&1 || caller_has_rustup=false
 	MOTOR_BUILD_ORCHESTRATOR=1 "$base"
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 	command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
@@ -972,6 +975,8 @@ main() {
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
 	log "base, standard, and dev release images built successfully"
+	[ "$caller_has_rustup" = true ] ||
+		warn "this shell's PATH lacks rustup: open a new shell or run '. \"\$HOME/.cargo/env\"' before make or the tests"
 	return 0
 }
 

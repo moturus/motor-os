@@ -5,6 +5,10 @@ BUILD ?= debug
 ROOT_DIR := $(CURDIR)
 # Cleaning does not require a Rust toolchain.
 ifneq ($(sort $(MAKECMDGOALS)),clean)
+# rustup installed by the build script reaches PATH only in a new shell.
+ifeq ($(shell command -v rustc 2>/dev/null),)
+$(error rustc is not on PATH; open a new shell or run: . "$$HOME/.cargo/env")
+endif
 TOOLCHAIN_SYSROOT := $(shell rustc --print sysroot 2>/dev/null)
 MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
 	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \

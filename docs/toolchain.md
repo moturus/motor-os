@@ -308,6 +308,9 @@ exists. Only source refs are published; no binary toolchain is.
 
 ## 6. Failures you will see, and what they mean
 
+- `rustc is not on PATH` (Makefile): the build script installed rustup, and
+  the shell it was started from still has the old `PATH`. Open a new shell or
+  run `. "$HOME/.cargo/env"`.
 - `selected Rust toolchain is not a stamped Motor toolchain` (Makefile):
   `rust-toolchain.toml` names a toolchain that is not installed here. Run the
   producer; if the name it prints differs, the selector is behind the
