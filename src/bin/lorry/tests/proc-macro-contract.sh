@@ -114,11 +114,12 @@ printf '%s\n' \
 
 (
     cd "$WORK/project"
-    "$LORRY" vendor --accept-all >/dev/null
+    # Every selector-free call names its rustc: rustup may have no default.
+    RUSTC="$NATIVE_RUSTC" "$LORRY" vendor --accept-all >/dev/null
     RUSTC="$NATIVE_RUSTC" "$LORRY" build >"$WORK/proc-macro.stdout" 2>&1
     grep -F "proc-macro stdout is preserved" "$WORK/proc-macro.stdout" >/dev/null
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
-    "$LORRY" clean
+    RUSTC="$NATIVE_RUSTC" "$LORRY" clean
     RUSTC="$NATIVE_RUSTC" "$LORRY" build
     [ "$(RUSTC="$NATIVE_RUSTC" "$LORRY" run)" = 84 ]
     "$LORRY" +"$MOTOR_TOOLCHAIN" build --target "$MOTOR_TARGET"
