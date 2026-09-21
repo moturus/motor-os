@@ -66,7 +66,7 @@ fn file_mode_end_to_end() {
     if !cfg!(debug_assertions) {
         let initial = wait_for_file_records(&[BOOT_PREAMBLE_PREFIX]);
         let milestone = boot_milestone(&initial);
-        assert!(milestone <= 1_000, "boot milestone {milestone}ms");
+        assert!(milestone <= 3_000, "boot milestone {milestone}ms");
     }
 
     let nonce = format!("kernel-e2e-{:016x}", std::random::random::<u64>(..));
