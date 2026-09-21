@@ -79,3 +79,9 @@ Run the full debug or release integration suite from the repository root:
 src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
+
+The suite runs under QEMU, which the build installs. It also boots the image
+once under Cloud Hypervisor and once under Firecracker when
+`cloud-hypervisor-static` and `firecracker` are on `PATH`. Without them those
+two boot checks are skipped, and the suite says so after its final `PASS` line.
+Selecting one of them with `--vmm chv` or `--vmm fc` requires its binary.

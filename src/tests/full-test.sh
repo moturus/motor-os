@@ -38,6 +38,37 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
   exit 2
 fi
 
+vmm_host_tool() {
+  case "$1" in
+    qemu) echo qemu-system-x86_64 ;;
+    chv) echo cloud-hypervisor-static ;;
+    fc) echo firecracker ;;
+  esac
+}
+
+vmm_label() {
+  case "$1" in
+    qemu) echo QEMU ;;
+    chv) echo "Cloud Hypervisor" ;;
+    fc) echo Firecracker ;;
+  esac
+}
+
+# The selected VMM is required. The standard suite also boots the other VMMs;
+# a host without one of them skips that boot check and says so at the very end.
+command -v "$(vmm_host_tool "$VMM")" >/dev/null 2>&1 || {
+  echo "full-test: required host tool is missing: $(vmm_host_tool "$VMM")" >&2
+  exit 1
+}
+SKIPPED_BOOT_VMMS=()
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ]; then
+  for boot_vmm in qemu chv fc; do
+    [ "$boot_vmm" = "$VMM" ] ||
+      command -v "$(vmm_host_tool "$boot_vmm")" >/dev/null 2>&1 ||
+      SKIPPED_BOOT_VMMS+=("$boot_vmm")
+  done
+fi
+
 if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export FULL_TEST_TIMEOUT_ACTIVE=1
   # Debug builds and developer-image checks need the larger overall budget.
@@ -72,6 +103,10 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   elif [ "$status" -eq 0 ]; then
     printf 'FULL TEST PASS: preparation steps: %s minutes, testing: %s minutes\n' \
       "$(minutes "$preparation_seconds")" "$(minutes "$testing_seconds")"
+    for boot_vmm in "${SKIPPED_BOOT_VMMS[@]}"; do
+      echo "NOTE: the $(vmm_label "$boot_vmm") boot check was skipped:" \
+        "$(vmm_host_tool "$boot_vmm") was not found"
+    done
   fi
   exit "$status"
 fi
@@ -159,19 +194,6 @@ if [ "$TEST_VM_PHASE" = standard ]; then
   done
 fi
 echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TARGET image=$MOTO_IMAGE"
-if [ "$TEST_VM_PHASE" = standard ]; then
-  required_vmm_tools=(qemu-system-x86_64 cloud-hypervisor-static firecracker)
-elif [ "$VMM" = qemu ]; then
-  required_vmm_tools=(qemu-system-x86_64)
-else
-  required_vmm_tools=(cloud-hypervisor-static)
-fi
-for required_tool in "${required_vmm_tools[@]}"; do
-  command -v "$required_tool" >/dev/null 2>&1 || {
-    echo "full-test: required host tool is missing: $required_tool" >&2
-    exit 1
-  }
-done
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
@@ -500,8 +522,15 @@ echo "Starting Motor OS test."
 echo "Console output is streamed below and saved to /tmp/full-test.log."
 if [ "$TEST_VM_PHASE" = standard ]; then
   for boot_vmm in qemu chv fc; do
-    [ "$boot_vmm" = "$VMM" ] ||
-      run_test_vm_boot_check "$ROOT_DIR" "$BUILD" "$boot_vmm"
+    [ "$boot_vmm" != "$VMM" ] || continue
+    case " ${SKIPPED_BOOT_VMMS[*]} " in
+      *" $boot_vmm "*)
+        echo "full-test: skipping the $(vmm_label "$boot_vmm") boot check:" \
+          "$(vmm_host_tool "$boot_vmm") was not found"
+        continue
+        ;;
+    esac
+    run_test_vm_boot_check "$ROOT_DIR" "$BUILD" "$boot_vmm"
   done
 fi
 
