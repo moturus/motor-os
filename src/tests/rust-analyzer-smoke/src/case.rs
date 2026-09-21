@@ -91,34 +91,20 @@ impl SemanticCase {
         }
     }
 
+    // Wait until `expected` flychecks began and ended since the notification log
+    // was last cleared, and none is running.
     pub fn wait_for_flychecks(&mut self, expected: usize) -> io::Result<()> {
         loop {
-            let mut begun = HashSet::new();
-            let mut ended = HashSet::new();
-            for notification in self.session.notifications() {
+            let events = self.session.notifications().filter_map(|notification| {
                 if notification.method != "$/progress" {
-                    continue;
+                    return None;
                 }
-                let Some(token) = notification.params["token"].as_str() else {
-                    continue;
-                };
-                if !token.starts_with("rust-analyzer/flycheck/") {
-                    continue;
-                }
-                match notification.params["value"]["kind"].as_str() {
-                    Some("begin") => _ = begun.insert(token.to_owned()),
-                    Some("end") => _ = ended.insert(token.to_owned()),
-                    _ => {}
-                }
-            }
-            if begun.len() > expected || ended.len() > expected {
-                return Err(invalid("rust-analyzer ran too many flychecks"));
-            }
-            if ended.len() == expected {
-                if begun == ended {
-                    return Ok(());
-                }
-                return Err(invalid("flycheck ended without a matching begin"));
+                let token = notification.params["token"].as_str()?;
+                let id = token.strip_prefix("rust-analyzer/flycheck/")?;
+                Some((notification.params["value"]["kind"].as_str()?, id))
+            });
+            if flychecks_done(events, expected)? {
+                return Ok(());
             }
             self.session.pump(self.deadline)?;
         }
@@ -267,6 +253,73 @@ fn definition_uri(result: Value) -> io::Result<String> {
         .ok_or_else(|| invalid("rust-analyzer returned no definition"))
 }
 
+// rust-analyzer also restarts flycheck by itself, when cache priming ends and
+// whenever the workspace becomes quiescent, and a restart ends the running
+// check. An `end` without a `begin` closes a check that began before the log
+// was cleared: it is no event of this wait.
+fn flychecks_done<'a>(
+    events: impl Iterator<Item = (&'a str, &'a str)>,
+    expected: usize,
+) -> io::Result<bool> {
+    let mut running = HashSet::new();
+    let mut finished = HashSet::new();
+    let mut sequence = Vec::new();
+    for (kind, id) in events {
+        match kind {
+            "begin" => _ = running.insert(id),
+            "end" if running.remove(id) => _ = finished.insert(id),
+            "end" => {}
+            _ => continue,
+        }
+        sequence.push(format!("{kind}:{id}"));
+    }
+    if running.union(&finished).count() > expected {
+        return Err(invalid(format!(
+            "rust-analyzer ran too many flychecks, expected {expected}: {sequence:?}"
+        )));
+    }
+    Ok(finished.len() == expected && running.is_empty())
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flychecks_done;
+
+    fn done(events: &[(&str, &str)], expected: usize) -> std::io::Result<bool> {
+        flychecks_done(events.iter().copied(), expected)
+    }
+
+    #[test]
+    fn a_restarted_flycheck_is_awaited_again() {
+        let mut events = vec![("begin", "1"), ("begin", "0"), ("end", "0"), ("end", "1")];
+        assert!(done(&events, 2).unwrap());
+        // A second automatic restart: the first round was only cancelled.
+        events.extend([("begin", "0"), ("begin", "1")]);
+        assert!(!done(&events, 2).unwrap());
+        events.extend([("report", "0"), ("end", "1"), ("end", "0")]);
+        assert!(done(&events, 2).unwrap());
+    }
+
+    #[test]
+    fn a_save_outlives_a_check_begun_before_it() {
+        // The save cancels a check whose `begin` was cleared from the log.
+        assert!(!done(&[("end", "0")], 1).unwrap());
+        assert!(!done(&[("end", "0"), ("begin", "0"), ("end", "1")], 1).unwrap());
+        assert!(
+            done(
+                &[("end", "0"), ("begin", "0"), ("end", "1"), ("end", "0")],
+                1
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_save_checks_one_workspace() {
+        assert!(done(&[("begin", "0"), ("begin", "1")], 1).is_err());
+    }
 }
