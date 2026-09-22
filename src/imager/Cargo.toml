@@ -16,4 +16,5 @@ camino     = "1.1.10"
 mbrman     = "0.5.2"
 serde      = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+sha2       = "=0.10.8"
 tokio      = { version = "1.44.2", default-features = false, features = ["rt"] }

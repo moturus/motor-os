@@ -25,6 +25,7 @@ use std::io::{self, Seek, SeekFrom};
 mod chmod;
 mod permissions;
 mod resize;
+mod set;
 mod util;
 
 const SECTOR_SIZE: u32 = 512;
@@ -614,9 +615,26 @@ Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
     imager resize -i INPUT_IMG -o OUTPUT_IMG --size X[M|G]
+    imager set ssh-password <PWD> <IMG FILE>
+    imager set ssh-key <PUBLIC KEY FILE> <IMG FILE>
+    imager set ssh-server-key <KEY FILE> <IMG FILE>
+    imager set ssl keys <DIR> <IMG FILE>
 
 resize copies INPUT_IMG into a new OUTPUT_IMG (qcow2 or raw, by its .qcow2,
 .img or .raw suffix) whose data partition is X MB or GB large.
+
+set updates a stopped VM's raw or qcow2 image using a staged copy. Allow space
+for the image copy and a raw intermediate; qcow2 snapshots are not preserved.
+No other process may modify the image while set runs. Guest permissions and
+the host image's permission mode are preserved. This is not secure erasure
+of old credentials from filesystem blocks, snapshots, or backups.
+ssh-password sets motor's password from one literal argument (no CR/LF/BOM).
+The password may appear in shell history and process arguments.
+ssh-key reads motor's OpenSSH public login key from a file.
+ssh-server-key reads an unencrypted OpenSSH private host key from a file.
+ssl keys reads ssl-cert.pem and ssl-key.pem from DIR, preserving the CA store.
+Key and certificate contents are copied without cryptographic validation.
+Each command replaces only its selected credentials.
 "
     );
     std::process::exit(1);
@@ -644,6 +662,14 @@ fn clear_dir_or_exit(dir: &PathBuf) {
 fn main() {
     env_logger::init();
 
+    let os_args: Vec<_> = std::env::args_os().collect();
+    if os_args.get(1).is_some_and(|arg| arg == "set") {
+        if let Err(err) = set::run(&os_args[2..]) {
+            eprintln!("imager set: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "chmod") {
         if args.len() != 5 {
@@ -938,7 +964,15 @@ mod tests {
         );
         assert_eq!(
             config.assembly_dirs,
-            ["libc", "rg", "llvm", "rustc", "helix", "lua", "rust-analyzer"]
+            [
+                "libc",
+                "rg",
+                "llvm",
+                "rustc",
+                "helix",
+                "lua",
+                "rust-analyzer"
+            ]
         );
         assert_eq!(config.assembly_required_executables.len(), 10);
         assert!(config
