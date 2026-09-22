@@ -401,6 +401,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html" class="current">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
+    <li><a href="imager.html">Imager: image tools</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -621,6 +622,11 @@ toolchains contain and how programs are compiled with them is on the
 <p>Once you have images, <a href="running.html">Running Motor OS</a> describes the VM
 scripts, and <a href="hello.html">Hello Motor OS</a> walks through running your own
 program.</p>
+<h2>Image construction and customization</h2>
+<p>The Make image targets invoke the host-side <a href="imager.html">imager</a>.
+Its reference covers image YAML, raw output, permission changes, resizing, and
+SSH/TLS credential replacement. Use those editing commands on a stopped VM's image;
+rebuilding the named image replaces its customizations.</p>
 <nav class="pager">
 <a class="pager-prev" href="why.html"><span>Previous</span>Why Motor OS</a>
 <a class="pager-next" href="running.html"><span>Next</span>Running a VM</a>

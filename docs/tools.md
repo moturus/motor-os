@@ -20,6 +20,9 @@ and several useful scripts:
   `make raw.img` (or `make raw.img BUILD=release`) explicitly builds
   `motor-os.img`, the standard image in raw format; ordinary `make` does not.
 
+For host-side image creation, permission changes, resizing, and SSH/TLS
+credential replacement, see the [imager command reference](imager.md).
+
 ## Vsock test prerequisites
 
 The vsock guest tests use local Unix-domain host peers, not host `AF_VSOCK`

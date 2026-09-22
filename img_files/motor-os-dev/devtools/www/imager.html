@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="The complete imager command reference: create Motor OS images, change permissions, resize data partitions, and replace SSH and TLS credentials.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Imager | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+    <li><a href="imager.html" class="current">Imager: image tools</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="gix.html">gix: the Git client</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Getting started</div>
+<h1 id="imager-command-reference">Imager command reference</h1>
+
+<p class="lead"><code>imager</code> is the host tool in <code>src/imager</code> for creating Motor
+OS disk images, changing guest permissions, resizing the data partition, and replacing SSH or TLS
+credentials. It operates on image files while the VM is stopped.</p>
+
+<h2 id="invocation">Invocation</h2>
+
+<pre><code>imager &lt;REPO ROOT&gt; debug|release &lt;CONFIG YAML&gt;
+imager &lt;REPO ROOT&gt; debug|release &lt;CONFIG YAML&gt; --raw-output &lt;FILENAME&gt;
+imager chmod &lt;MODE&gt; &lt;IMAGE&gt; &lt;GUEST PATH&gt;
+imager resize -i &lt;INPUT IMAGE&gt; -o &lt;OUTPUT IMAGE&gt; --size &lt;SIZE&gt;
+imager set ssh-password &lt;PASSWORD&gt; &lt;IMAGE&gt;
+imager set ssh-key &lt;PUBLIC KEY FILE&gt; &lt;IMAGE&gt;
+imager set ssh-server-key &lt;PRIVATE KEY FILE&gt; &lt;IMAGE&gt;
+imager set ssl keys &lt;DIRECTORY&gt; &lt;IMAGE&gt;</code></pre>
+
+<p>Examples below use <code>imager</code> for the host executable. To invoke it through Cargo, use
+the repository-selected toolchain, change to <code>src/imager</code>, and run <code>cargo run
+--release -- &lt;arguments&gt;</code>. That directory&#x27;s Cargo configuration supplies the
+required build flags. Cargo&#x27;s <code>--release</code> selects the host tool&#x27;s build
+profile; the separate <code>debug|release</code> argument selects guest build inputs.</p>
+
+<p>Host paths are relative to the current working directory unless absolute; quote arguments
+containing spaces. Guest paths name entries inside the image. Editing commands detect raw versus
+qcow2 input by its contents, not its suffix. <code>qemu-img</code> must be on <code>PATH</code> for
+operations involving qcow2. No VM, mount, or guest service needs to run. Stop the VM and prevent
+concurrent image writers before using these commands.</p>
+
+<p>Successful commands exit with status 0; errors exit nonzero and report a diagnostic. Running
+without arguments prints usage and exits nonzero.</p>
+
+<h2 id="create-an-image">Create an image</h2>
+
+<pre><code>imager /path/to/motor-os release /path/to/motor-os/src/imager/motor-os-base.yaml
+imager /path/to/motor-os release /path/to/motor-os/src/imager/motor-os-base.yaml \
+  --raw-output custom-base.img</code></pre>
+
+<p><code>REPO ROOT</code> is the Motor OS checkout containing <code>build/bin/</code>,
+<code>img_files/</code>, and <code>vm_images/</code>. The built-in usage calls this argument
+<code>$MOTORH</code>; it is the checkout itself, whereas the build scripts normally use the
+<code>MOTORH</code> environment variable for the checkout&#x27;s parent development directory.</p>
+
+<p>Creation packages already-built binaries from <code>REPO ROOT/build/bin/PROFILE/</code> and the
+configured file trees. It assembles the MBR, boot loader, initrd, and Motor FS data partition. It
+does not compile the guest binaries. <code>REPO ROOT/vm_images/PROFILE/</code> must already exist.
+The image is written there under <code>img_name</code>, alongside <code>initrd</code> and
+<code>kloader</code> boot artifacts. An existing output can be replaced. Scratch files under
+<code>REPO ROOT/build/vm_images/PROFILE/</code> are cleared; direct image builds using the same
+profile must not run concurrently.</p>
+
+<p><code>--raw-output</code> overrides both <code>img_name</code> and <code>image_format</code>. Its
+argument must be a filename ending in <code>.img</code> or <code>.raw</code>, with no directory
+components. It still writes into <code>vm_images/PROFILE/</code>. Place this option after the YAML
+argument, exactly as shown.</p>
+
+<p>For ordinary builds, use the <a href="build.html">build workflow</a> and Make targets, which
+prepare binaries, output directories, assembly inputs, and serialize image construction:</p>
+
+<pre><code>make base.img BUILD=release
+make main.img BUILD=release
+make raw.img BUILD=release
+make dev.img BUILD=release</code></pre>
+
+<p>These produce <code>motor-os-base.img</code>, <code>motor-os.qcow2</code>,
+<code>motor-os.img</code> (the raw standard image), and <code>motor-os-dev.qcow2</code>,
+respectively. Later rebuilding an image replaces any customizations made directly to that output
+file.</p>
+
+<h3 id="image-configuration">Image configuration</h3>
+
+<p>The YAML file is read from the supplied host path. Start from the image descriptions in <a
+href="https://github.com/moturus/motor-os/tree/main/src/imager"><code>src/imager</code></a>, such as
+<code>motor-os-base.yaml</code>, <code>motor-os.yaml</code>, and <code>motor-os-dev.yaml</code>.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>permission_policy</code></td><td>Required permission-policy file, resolved relative
+to the YAML file.</td></tr>
+  <tr><td><code>input_files</code></td><td>Required list of absolute guest destinations. Each source
+is <code>build/bin/PROFILE/</code> plus the destination&#x27;s basename.</td></tr>
+  <tr><td><code>directories</code></td><td>Required list of guest directories, using normalized
+absolute paths. Parent directories are created as needed.</td></tr>
+  <tr><td><code>static_dirs</code></td><td>Required list of host trees to overlay at guest
+<code>/</code>. Relative source paths are resolved against <code>REPO ROOT</code>. Later overlays
+replace earlier files at the same destination.</td></tr>
+  <tr><td><code>filesystem</code></td><td>Required; currently <code>motor-fs</code>.</td></tr>
+  <tr><td><code>data_partition_size_mb</code></td><td>Required data-partition size in MiB (1,048,576
+bytes), excluding the preceding boot partitions.</td></tr>
+  <tr><td><code>img_name</code></td><td>Required output path, resolved against
+<code>vm_images/PROFILE/</code>; normally a filename.</td></tr>
+  <tr><td><code>image_format</code></td><td>Required; <code>raw</code> or <code>qcow2</code>,
+independent of the image name&#x27;s suffix.</td></tr>
+  <tr><td><code>required_executables</code></td><td>Optional list of host files that must exist and
+have an execute bit. Relative paths use <code>REPO ROOT</code>. Defaults to an empty list.</td></tr>
+  <tr><td><code>assembly_dirs</code></td><td>Optional list of overlay directories relative to
+<code>MOTOR_ASSEMBLY_IMAGE_ROOT</code>. Appended after <code>static_dirs</code>. Defaults to
+empty.</td></tr>
+  <tr><td><code>assembly_required_executables</code></td><td>Optional executable checks relative to
+the same assembly root. Defaults to empty.</td></tr>
+  <tr><td><code>source_dirs</code></td><td>Optional list of <code>{source, destination}</code>
+mappings. Relative host sources use <code>REPO ROOT</code>; destinations are absolute guest
+directories. Defaults to empty.</td></tr>
+</table>
+</div>
+
+<p>Source snapshots are added after static overlays and exclude <code>.git</code>,
+<code>.lorry</code>, <code>__pycache__</code>, and <code>target</code> directories. Static overlays
+omit <code>devtools</code> directories unless the configuration declares <code>/devtools</code> or a
+directory below it. File modes come from the <a href="filesystem.html">permission policy</a>, not
+host ownership or host read/write permissions.</p>
+
+<p>Configurations with assembly inputs require <code>MOTOR_ASSEMBLY_IMAGE_ROOT</code> to name a
+normalized absolute host directory. Assembly paths in YAML must be normalized relative paths. The
+Make recipes obtain the root from <code>src/resolve-toolchain-assembly.sh --resolve</code>; see <a
+href="toolchain.html">assembly resolution</a> for the build workflow.</p>
+
+<h2 id="change-guest-permissions">Change guest permissions</h2>
+
+<pre><code>imager chmod rw-r----- image.img /system/cfg/sshd.toml
+imager chmod r-xr-xr-x image.qcow2 /user/bin/program</code></pre>
+
+<p><code>chmod</code> changes the permissions of one existing file or directory. It is not
+recursive. <code>GUEST PATH</code> must be normalized and absolute: no <code>.</code> or
+<code>..</code> components, repeated slashes, or trailing slash except for <code>/</code>
+itself.</p>
+
+<p><code>MODE</code> is exactly nine characters: three permission triplets in <strong>System,
+Interactive, None</strong> role order. These are Motor OS roles, not Unix owner/group/other classes.
+Each triplet must be one of:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Triplet</th><th>Access</th></tr>
+  <tr><td><code>rwx</code></td><td>Read, write, execute/traverse</td></tr>
+  <tr><td><code>rw-</code></td><td>Read and write</td></tr>
+  <tr><td><code>r-x</code></td><td>Read and execute/traverse</td></tr>
+  <tr><td><code>r--</code></td><td>Read only</td></tr>
+  <tr><td><code>---</code></td><td>No access</td></tr>
+</table>
+</div>
+
+<p>Interactive access must be a subset of System access, and None access a subset of Interactive
+access. Thus <code>rw-r-----</code> grants System read/write, Interactive read, and None no access.
+Octal modes and expressions such as <code>u+x</code> are not accepted. For directories, execute
+means traversal.</p>
+
+<p>This offline command can change sealed entries through the image administration API. Raw images
+are edited directly. Qcow2 images are converted to a temporary raw image, edited, converted back,
+and replaced at the original path. The qcow2 result retains the host file&#x27;s permission mode.
+See <a href="filesystem.html">filesystem permissions</a> for runtime permission rules.</p>
+
+<h2 id="resize-the-data-partition">Resize the data partition</h2>
+
+<pre><code>imager resize -i original.qcow2 -o larger.qcow2 --size 4G
+imager resize -i original.qcow2 -o smaller.img --size 512M</code></pre>
+
+<p><code>resize</code> copies the input into an output whose <strong>Motor FS data
+partition</strong> has the requested size. <code>SIZE</code> is a positive decimal integer followed
+by uppercase <code>M</code> or <code>G</code>: <code>M</code> means MiB and <code>G</code> means
+GiB. This is not the total image size or its allocated host disk space. Fractions, lowercase
+suffixes, and a bare number are not accepted. <code>-i</code>, <code>-o</code>, and
+<code>--size</code> may appear in any order, exactly once each.</p>
+
+<p>The output suffix chooses its format: <code>.qcow2</code> for qcow2; <code>.img</code> or
+<code>.raw</code> for raw. Format conversion can accompany resizing. Input and output must refer to
+different files, including through hard links or symlinks. An existing output is replaced only after
+the new image is complete.</p>
+
+<p>The input must contain exactly one Motor FS partition, and that partition must be last. Both
+growth and shrinking are supported; shrinking fails if the contents and filesystem metadata do not
+fit. Guest files and their metadata are copied to a newly formatted filesystem. Earlier boot
+contents are preserved, and the MBR data-partition size is updated. The input is only read; the
+output inherits the input file&#x27;s host permission mode.</p>
+
+<p>Raw intermediates use the host temporary directory; the final staged image is created beside the
+output. Allow space in both locations. Qcow2 conversion does not preserve container snapshots.</p>
+
+<h2 id="replace-credentials">Replace credentials</h2>
+
+<p>All <code>set</code> commands replace the supplied image at the same path, preserving its
+raw/qcow2 format, virtual disk size, guest permissions, and host permission mode. They edit a
+private staged copy and publish it only after the update and content checks succeed. A failure
+before publication leaves the original image unchanged, including a failure during the second TLS
+file write. Allow space beside the image for a copy and, with qcow2, its raw intermediate.</p>
+
+<p>The image must be a regular file, not a symlink. Destination files must already exist, and their
+contents and each input artifact are limited to 1 MiB. Artifact input files must be nonempty regular
+files. Secret destinations (<code>sshd.toml</code> and <code>ssl-key.pem</code>) must have
+permissions no broader than <code>rw-r-----</code>; use <code>chmod</code> to correct a permissive
+image before installing secrets. All command arguments must be UTF-8.</p>
+
+<p>SSH edits require version 1 <code>/system/cfg/sshd.toml</code>, using the shipped layout with
+bare table names and existing scalar fields. Unsupported layouts, such as inline tables or dotted
+assignments, duplicate fields, and missing targets are rejected. Other fields and comments are
+preserved. Key strings are escaped when inserted into TOML. Imager does not validate SSH keys, parse
+TLS certificates, or check that a TLS key matches its certificate; the caller supplies artifacts
+that the guest services can use.</p>
+
+<h3 id="set-the-login-password">Set the login password</h3>
+
+<pre><code>imager set ssh-password &#x27;your-new-password&#x27; image.qcow2</code></pre>
+
+<p>The password is one literal argument for the existing <code>motor</code> account. It must be
+nonempty, at most 1 MiB, and contain no CR, LF, or U+FEFF byte-order mark. Spaces and other Unicode
+characters are preserved. It is never read as a filename. The argument may appear in shell history
+or process listings.</p>
+
+<p>Imager generates a fresh 32-byte salt from the host&#x27;s <code>/dev/urandom</code> and sets
+<code>users.motor.salt</code> and <code>users.motor.password_hash</code> to hexadecimal values for
+<code>SHA-256(salt_bytes || password_utf8_bytes)</code>, matching russhd&#x27;s login check. The
+plaintext password is not stored in the image.</p>
+
+<h3 id="set-the-login-public-key">Set the login public key</h3>
+
+<pre><code>imager set ssh-key /path/to/id_ed25519.pub image.qcow2</code></pre>
+
+<p>Reads one UTF-8 public-key line, strips its final LF/CRLF line ending if present, and replaces
+<code>users.motor.authorized_key</code>. An optional key comment is retained. Multiple lines are
+rejected. The field contains a single key; the command does not append to an
+<code>authorized_keys</code> file. The user&#x27;s private login key stays on the client.</p>
+
+<h3 id="set-the-ssh-server-private-key">Set the SSH server private key</h3>
+
+<pre><code>imager set ssh-server-key /path/to/ssh_host_ed25519_key image.qcow2</code></pre>
+
+<p>Reads the private-key file as UTF-8 and replaces <code>host_key</code> in <code>sshd.toml</code>.
+Supply an unencrypted OpenSSH private key that russhd can load. No separate public-key file is
+needed: the private-key object contains the server&#x27;s public identity. Existing clients must
+verify and trust the replacement host identity when connecting again.</p>
+
+<h3 id="set-the-tls-certificate-and-private-key">Set the TLS certificate and private key</h3>
+
+<pre><code>imager set ssl keys /path/to/tls image.qcow2</code></pre>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Host input</th><th>Guest destination</th></tr>
+  <tr><td><code>DIRECTORY/ssl-cert.pem</code></td><td><code>/system/cfg/ssl/ssl-cert.pem</code></td></tr>
+  <tr><td><code>DIRECTORY/ssl-key.pem</code></td><td><code>/system/cfg/ssl/ssl-key.pem</code></td></tr>
+</table>
+</div>
+
+<p>Both files are required and copied byte-for-byte in one image update. Supply a PEM certificate
+chain (leaf first) and its matching unencrypted private key. Extra files are ignored;
+<code>ca-certificates.crt</code> is not replaced.</p>
+
+<p>Each setter changes only its selected credentials. Changing the password leaves the login public
+key and server host key unchanged. To replace all bundled credentials, set the password, login key,
+server key, and TLS pair. These operations do not erase old secrets from freed filesystem blocks,
+snapshots, or backups, and do not change other accounts or disable unused authentication
+methods.</p>
+<nav class="pager">
+<a class="pager-prev" href="running.html"><span>Previous</span>Running a VM</a>
+<a class="pager-next" href="architecture.html"><span>Next</span>Architecture</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

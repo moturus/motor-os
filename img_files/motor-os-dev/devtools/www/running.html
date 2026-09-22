@@ -401,6 +401,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html" class="current">Running a VM</a></li>
+    <li><a href="imager.html">Imager: image tools</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -468,7 +469,7 @@ This page describes what is in the images and how to start and reach a VM.</p>
     <code>src/tests/test-system-tty.sh</code>.</td></tr>
 </table>
 </div>
-<p>Every image is built by the imager from a YAML description in <code>src/imager/</code>
+<p>Every image is built by <a href="imager.html">imager</a> from a YAML description in <code>src/imager/</code>
 and a declarative permission policy; see <a href="filesystem.html">Filesystem</a> for the
 layout and permissions, and <a href="build.html">Building Motor OS</a> for how the images
 are produced. QEMU and Cloud Hypervisor accept both formats; Firecracker supports only the
@@ -537,6 +538,9 @@ scp -P 2222 -o IdentitiesOnly=yes -i test.key ./hello motor@192.168.4.2:/user/bi
 <p>The shipped <code>sshd.toml</code> contains a test host key, a test user, and a test
 password; regenerate all of them before any deployment that is reachable from a network
 you do not control.</p>
+<p>Use <a href="imager.html#replace-credentials">imager's credential commands</a>
+on the host to replace the password, login public key, and server private host key
+in a stopped VM's image. The same interface can install a TLS certificate and key.</p>
 
 <h2>Networking from the VM</h2>
 <p>Every image configures its network from <code>/system/cfg/sys-net.toml</code>;
@@ -555,7 +559,7 @@ QEMU) or kill the hypervisor process. Motor FS is journaled and is designed to s
 power-off.</p>
 <nav class="pager">
 <a class="pager-prev" href="build.html"><span>Previous</span>Building from source</a>
-<a class="pager-next" href="architecture.html"><span>Next</span>Architecture</a>
+<a class="pager-next" href="imager.html"><span>Next</span>Imager: image tools</a>
 </nav>
 </article>
 </main>

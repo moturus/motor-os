@@ -401,6 +401,7 @@ a.card h3 { color: var(--accent); }
     <li><a href="why.html">Why Motor OS</a></li>
     <li><a href="build.html">Building from source</a></li>
     <li><a href="running.html">Running a VM</a></li>
+    <li><a href="imager.html">Imager: image tools</a></li>
   </ul>
 </div>
 <div class="nav-group">
@@ -533,7 +534,7 @@ None. With the initial modes, Interactive cannot create a new top-level director
 replace <code>/system</code>; it can edit a launcher script in <code>/devtools/bin</code>
 in place but not add or remove entries there; only System can create or rotate files in
 <code>/system/logs</code>.</p>
-<p>The imager classifies each source file by its host execute bit (a host-executable file
+<p>The <a href="imager.html">imager</a> classifies each source file by its host execute bit (a host-executable file
 must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
 every mode before it creates the image, and creates non-writable files through a
 staging step so that a shipped ELF is never writable and executable at the same time
@@ -566,6 +567,10 @@ not parse.</p>
   <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
   Interactive, None order; <code>cp</code> preserves file permissions.</li>
 </ul>
+
+<p>For offline changes, see <a href="imager.html#change-guest-permissions">imager chmod</a>
+and <a href="imager.html#resize-the-data-partition">imager resize</a>. These host commands
+edit an image's permissions or copy it into an image with a different data-partition size.</p>
 
 <h2>Locks</h2>
 <p>Advisory file locks (<code>std::fs::File::lock</code>, <code>lock_shared</code>,
