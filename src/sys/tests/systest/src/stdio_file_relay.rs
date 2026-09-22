@@ -247,12 +247,13 @@ fn output_parent() -> ! {
     for waiter in waiters {
         assert_eq!(waiter.join().unwrap(), 0);
     }
+    moto_rt::alloc::release_handle(first.handle).unwrap();
     expect_busy(moto_rt::fs::seek(
         moto_rt::FD_STDOUT,
         0,
         moto_rt::fs::SEEK_CUR,
     ));
-    assert_eq!(moto_rt::process::wait(second.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(second.handle).unwrap(), 0);
     assert_eq!(
         moto_rt::fs::seek(moto_rt::FD_STDOUT, 0, moto_rt::fs::SEEK_CUR).unwrap(),
         1048576 + 256
@@ -316,7 +317,7 @@ fn conflict_parent() -> ! {
         ),
         moto_rt::E_ALREADY_IN_USE
     );
-    assert_eq!(moto_rt::process::wait(input.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(input.handle).unwrap(), 0);
 
     let output = spawn(
         &["stdio-file-relay-writer", "66", "1", "300"],
@@ -334,7 +335,7 @@ fn conflict_parent() -> ! {
         ),
         moto_rt::E_ALREADY_IN_USE
     );
-    assert_eq!(moto_rt::process::wait(output.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(output.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -353,8 +354,8 @@ fn independent_parent() -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(output.handle).unwrap(), 0);
-    assert_eq!(moto_rt::process::wait(input.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(output.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(input.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -383,7 +384,7 @@ fn lock_parent() -> ! {
             .into();
     assert_eq!(error, moto_rt::E_NOT_ALLOWED);
     moto_rt::fs::close(moto_rt::FD_STDOUT).unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -429,7 +430,7 @@ fn failure_parent() -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -450,7 +451,7 @@ pub fn run_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     let bytes = std::fs::read(&output_path).unwrap();
     assert_eq!(bytes.len(), 1048576 + 256);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'A').count(), 1048576);
@@ -480,7 +481,7 @@ fn concurrent_stdout_stderr_test() {
         alias,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8192);
     assert_eq!(bytes.iter().filter(|byte| **byte == b'O').count(), 2048);
@@ -508,6 +509,9 @@ fn exit_flush_test() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
+    // The writer outlives its parent by design; the parent's handle stays
+    // open until the writer has reported, since dropping the parent's
+    // process would kill it.
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     moto_rt::fs::close(output).unwrap();
 
@@ -525,21 +529,33 @@ fn exit_flush_test() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
 
-    let bytes = std::fs::read(&path).unwrap();
-    assert!(bytes.iter().all(|byte| *byte == b'X'));
+    // The file can run to tens of MiB; verify it in chunks rather than
+    // loading it, which a small guest cannot afford.
+    let mut file = std::fs::File::open(&path).unwrap();
+    let mut chunk = vec![0_u8; 64 * 1024];
+    let mut len = 0_u64;
+    loop {
+        let read = std::io::Read::read(&mut file, &mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        assert!(chunk[..read].iter().all(|byte| *byte == b'X'));
+        len += read as u64;
+    }
     assert!(accepted > 0, "the relay never carried anything");
     // Every accepted byte reached the file. The relay may hold slightly more
     // than the writer counts -- a publish racing the final drain is disowned
     // by the writer even when the reader took it -- but never fewer.
     assert!(
-        bytes.len() as u64 >= accepted,
+        len >= accepted,
         "exit dropped {} accepted bytes",
-        accepted - bytes.len() as u64
+        accepted - len
     );
     assert!(
-        bytes.len() as u64 - accepted <= 64 * 1024,
+        len - accepted <= 64 * 1024,
         "file ran ahead of the writer by more than one relay chunk"
     );
+    moto_rt::alloc::release_handle(parent.handle).unwrap();
 
     std::fs::remove_file(&path).unwrap();
     std::fs::remove_file(&count).unwrap();
@@ -565,7 +581,7 @@ fn conflict_and_cleanup_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     moto_rt::fs::close(shared).unwrap();
     moto_rt::fs::close(duplicate).unwrap();
 
@@ -578,7 +594,7 @@ fn conflict_and_cleanup_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
     moto_rt::fs::close(output).unwrap();
 
@@ -595,7 +611,7 @@ fn conflict_and_cleanup_tests() {
             moto_rt::process::STDIO_NULL,
         )
         .unwrap();
-        assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+        assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
         assert_eq!(std::fs::read(&path).unwrap(), vec![byte; len]);
         moto_rt::fs::close(fd).unwrap();
     }

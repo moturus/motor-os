@@ -604,7 +604,7 @@ fn run_file_relay_input_parent() -> ! {
     };
     let overlap: moto_rt::ErrorCode = overlap.into();
     assert_eq!(overlap, moto_rt::E_ALREADY_IN_USE);
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
 
     let mut next = [0_u8; 3];
     assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut next).unwrap(), 3);
@@ -617,7 +617,7 @@ fn run_file_relay_input_parent() -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(idle.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(idle.handle).unwrap(), 0);
     assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut next).unwrap(), 3);
     assert_eq!(&next, b"ijk");
     std::process::exit(0)
@@ -806,7 +806,7 @@ fn test_positive_file_stdio() {
     assert_eq!(result.stderr, moto_rt::process::STDIO_NULL);
     moto_rt::fs::get_file_attr(input_fd).unwrap();
     moto_rt::fs::get_file_attr(output_fd).unwrap();
-    assert_eq!(moto_rt::process::wait(result.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(result.handle).unwrap(), 0);
     let output = std::fs::read(&output_path).unwrap();
     assert!(
         output.ends_with(b"out1err1out2err2"),
@@ -855,7 +855,7 @@ fn test_inherited_file_relays() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(output_parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(output_parent.handle).unwrap(), 0);
     let output = std::fs::read(&output_path).unwrap();
     assert_eq!(output.len(), 1024 * 1024);
     assert!(output[..512 * 1024].iter().all(|byte| *byte == b'A'));
@@ -871,7 +871,7 @@ fn test_inherited_file_relays() {
         moto_rt::process::STDIO_INHERIT,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(input_parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(input_parent.handle).unwrap(), 0);
     moto_rt::fs::close(input_fd).unwrap();
     std::fs::remove_file(&input_path).unwrap();
     std::fs::remove_file(&output_path).unwrap();
@@ -912,7 +912,7 @@ fn test_std_file_and_parent_stream_stdio() {
         stderr_fd,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     assert_eq!(std::fs::read(&stdout_path).unwrap(), b"AAC");
     let stderr_markers: Vec<_> = std::fs::read(&stderr_path)
         .unwrap()
@@ -945,7 +945,7 @@ fn test_std_file_and_parent_stream_stdio() {
     let mut output = unsafe { std::fs::File::from_raw_fd(close_child.stdout) };
     let mut bytes = Vec::new();
     output.read_to_end(&mut bytes).unwrap();
-    assert_eq!(moto_rt::process::wait(close_child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(close_child.handle).unwrap(), 0);
     assert_eq!(bytes, b"duplicate-still-open");
 
     for path in [&direct_path, &stdout_path, &stderr_path] {

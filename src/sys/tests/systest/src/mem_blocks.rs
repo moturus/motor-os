@@ -56,15 +56,16 @@ impl Drop for Mapping {
 
 // Eight 1 MiB pieces: ideal packing needs four blocks. The allocator drains
 // every split block that boot left partially free before splitting a whole
-// one: the page-zero block, the kloader page-table block, up to two initrd
-// boundary blocks and the list-state table block, at most six. Each CPU adds
-// the block its cursor was filling plus one more when a piece straddles two
-// fresh blocks. The budget is asserted only on a fresh boot (the focused
-// subcommand); the full suite reports placement.
+// one, so each split block present at the start may take a piece; how many
+// there are depends on the guest size and the boot, so the count comes from
+// the kernel's own metric (a split block that is already full only loosens
+// the bound). Each CPU adds the block its cursor was filling plus one more
+// when a piece straddles two fresh blocks. The budget is asserted only on a
+// fresh boot (the focused subcommand); the full suite reports placement.
 const IDEAL_BLOCKS: usize = 4;
-const BOOT_SPLIT_BLOCKS: usize = 6;
 
 fn placement(assert_budget: bool) {
+    let split_at_start = BlockMetrics::read().split as usize;
     let mut blocks = Vec::with_capacity(8 * 256);
     let pieces: [Mapping; 8] = core::array::from_fn(|_| Mapping::alloc(256));
     for (idx, piece) in pieces.iter().enumerate() {
@@ -76,9 +77,9 @@ fn placement(assert_budget: bool) {
     }
     blocks.sort_unstable();
     blocks.dedup();
-    let budget = IDEAL_BLOCKS + BOOT_SPLIT_BLOCKS + 2 * moto_sys::num_cpus() as usize;
+    let budget = IDEAL_BLOCKS + split_at_start + 2 * moto_sys::num_cpus() as usize;
     println!(
-        "mem_blocks: 8 MiB of fresh pages in {} distinct 2 MiB blocks (budget {budget})",
+        "mem_blocks: 8 MiB of fresh pages in {} distinct 2 MiB blocks (budget {budget}: {split_at_start} split at start)",
         blocks.len()
     );
     if assert_budget {
@@ -109,17 +110,62 @@ impl Prng {
 // nobody: on one CPU a producer can run for many iterations while its
 // neighbor is descheduled, so unbounded mailboxes would hold most of a small
 // guest's memory. A full mailbox releases the mapping locally instead.
+//
+// The live set is sized from the memory free when the test starts: every
+// slot (retained, in hand, or in a mailbox) may hold the largest mapping, and
+// all slots together take at most half of that memory. A small guest first
+// loses retained and mailbox slots, then halves the size range, which still
+// reaches past the 1 MiB huge-eligible threshold.
+const CHURN_THREADS: usize = 4;
+const CHURN_MAX_PAGES: u64 = 1024;
+const CHURN_RETAINED: usize = 8;
+const CHURN_MAILBOX: usize = 4;
+
+struct ChurnShape {
+    max_pages: u64,
+    retained: usize,
+    mailbox: usize,
+}
+
+fn churn_shape(free_pages: u64) -> ChurnShape {
+    let budget = free_pages / 2;
+    let mut max_pages = CHURN_MAX_PAGES;
+    loop {
+        // Slots per thread: retained + the one in hand + its outgoing mailbox.
+        let slots = (budget / (CHURN_THREADS as u64 * max_pages)) as usize;
+        if slots >= 2 + CHURN_MAILBOX || max_pages <= CHURN_MAX_PAGES / 2 {
+            let retained = slots.saturating_sub(2).clamp(1, CHURN_RETAINED);
+            let mailbox = slots.saturating_sub(1 + retained).clamp(1, CHURN_MAILBOX);
+            return ChurnShape {
+                max_pages,
+                retained,
+                mailbox,
+            };
+        }
+        max_pages /= 2;
+    }
+}
+
 fn churn() {
-    const THREADS: usize = 4;
+    const THREADS: usize = CHURN_THREADS;
     const ITERATIONS: u32 = 512;
-    const MAILBOX: usize = 4;
+    let stats = moto_sys::stats::MemoryStats::get().unwrap();
+    let shape = churn_shape((stats.available - stats.used()) / PAGE_SIZE_SMALL);
+    println!(
+        "mem_blocks: churn with {} MiB free: sizes up to {} pages, {} retained, mailbox {}",
+        (stats.available - stats.used()) >> 20,
+        shape.max_pages,
+        shape.retained,
+        shape.mailbox
+    );
     let mut senders = Vec::new();
     let mut receivers = VecDeque::new();
     for _ in 0..THREADS {
-        let (tx, rx) = mpsc::sync_channel::<(Mapping, u64)>(MAILBOX);
+        let (tx, rx) = mpsc::sync_channel::<(Mapping, u64)>(shape.mailbox);
         senders.push(tx);
         receivers.push_back(rx);
     }
+    let (max_pages, retained_limit) = (shape.max_pages, shape.retained);
     let handles: Vec<_> = (0..THREADS)
         .map(|thread| {
             let rx = receivers.pop_front().unwrap();
@@ -128,12 +174,12 @@ fn churn() {
                 let mut prng = Prng(0x9e37_79b9_7f4a_7c15_u64.wrapping_mul(thread as u64 + 1));
                 let mut retained = VecDeque::new();
                 for iteration in 0..ITERATIONS {
-                    let pages = 1 + prng.next(1024);
+                    let pages = 1 + prng.next(max_pages);
                     let seed = (thread as u64) << 32 | u64::from(iteration);
                     let mapping = Mapping::alloc(pages);
                     mapping.fill(seed);
                     retained.push_back((mapping, seed));
-                    if retained.len() > 8 {
+                    if retained.len() > retained_limit {
                         let (old, seed) = retained.pop_front().unwrap();
                         old.verify(seed);
                         if iteration % 2 == 1 {

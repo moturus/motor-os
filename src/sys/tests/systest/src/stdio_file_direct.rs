@@ -262,7 +262,7 @@ pub fn run_tests() {
     let mut stderr = unsafe { std::fs::File::from_raw_fd(child.stderr) };
     let mut message = Vec::new();
     stderr.read_to_end(&mut message).unwrap();
-    let status = moto_rt::process::wait(child.handle).unwrap();
+    let status = crate::wait_child(child.handle).unwrap();
     assert_eq!(
         status,
         0,
@@ -295,7 +295,7 @@ pub fn run_tests() {
         read_only,
         moto_rt::process::STDIO_NULL,
     );
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     moto_rt::fs::close(write_only).unwrap();
     moto_rt::fs::close(read_only).unwrap();
 
@@ -321,7 +321,7 @@ fn alias_position_tests() {
         fd,
         alias,
     );
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8192);
     let (chunks, remainder) = bytes.as_chunks::<8>();
@@ -351,7 +351,7 @@ fn rename_and_lock_tests() {
     );
     moto_rt::fs::rename(old_str, new_str).unwrap();
     std::fs::write(&old, b"replacement").unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     assert_eq!(std::fs::read(&new).unwrap(), b"child");
     assert_eq!(std::fs::read(&old).unwrap(), b"replacement");
 
@@ -362,7 +362,7 @@ fn rename_and_lock_tests() {
         fd,
         moto_rt::process::STDIO_NULL,
     );
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     let probe = moto_rt::fs::open(new_str, moto_rt::fs::O_READ).unwrap();
     assert!(moto_rt::fs::file_lock(probe, moto_rt::fs::TRY_LOCK_EXCLUSIVE).is_err());
     moto_rt::fs::file_lock(fd, moto_rt::fs::UNLOCK).unwrap();

@@ -103,7 +103,7 @@ fn read_all_parent(args: &[String]) -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -143,7 +143,7 @@ fn growth_parent(args: &[String]) -> ! {
     )
     .unwrap();
     append_after_ready(&child, &args[2]);
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -155,7 +155,7 @@ fn source_error_parent(args: &[String]) -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     let consumed = moto_rt::fs::seek(moto_rt::FD_STDIN, 0, moto_rt::fs::SEEK_CUR).unwrap();
     assert!(
         consumed > 0 && consumed < 1024 * 1024,
@@ -189,7 +189,7 @@ fn nested_parent() -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     let pos = moto_rt::fs::seek(moto_rt::FD_STDIN, 0, moto_rt::fs::SEEK_CUR).unwrap();
     assert!(
         pos > 5,
@@ -206,7 +206,7 @@ fn nested_bridge() -> ! {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::process::exit(0)
 }
 
@@ -352,7 +352,7 @@ fn null_parent() -> ! {
         moto_rt::process::STDIO_INHERIT,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     std::io::stdout().write_all(b"discarded stdout").unwrap();
     std::io::stderr().write_all(b"discarded stderr").unwrap();
     std::io::stdout().flush().unwrap();
@@ -381,7 +381,7 @@ fn eof_and_growth_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
     std::fs::write(&path, b"a").unwrap();
@@ -394,7 +394,7 @@ fn eof_and_growth_tests() {
     )
     .unwrap();
     append_after_ready(&child, path_str);
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
     std::fs::write(&path, b"complete").unwrap();
@@ -406,7 +406,7 @@ fn eof_and_growth_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
     std::fs::remove_file(&path).unwrap();
 }
@@ -423,7 +423,7 @@ fn source_error_and_nested_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
 
     let nested = crate::temp_path("stdio-input-nested");
@@ -437,7 +437,7 @@ fn source_error_and_nested_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     moto_rt::fs::close(input).unwrap();
     std::fs::remove_file(&nested).unwrap();
 }
@@ -464,6 +464,8 @@ fn lifetime_and_pipe_counter_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
+    // The parent's handle stays open until the grandchild is released:
+    // dropping the parent's process kills its children.
     assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
     // Only the release below ends the grandchild, which still holds the
     // inherited file output. A wait that held out for it returns after the
@@ -474,6 +476,7 @@ fn lifetime_and_pipe_counter_tests() {
         "wait held out for the grandchild's inherited file output"
     );
     std::fs::write(&release, b"").unwrap();
+    moto_rt::alloc::release_handle(parent.handle).unwrap();
     moto_rt::fs::close(output).unwrap();
     std::fs::remove_file(&path).unwrap();
 
@@ -502,7 +505,7 @@ pub fn post_publish_error_progress_test() {
     .unwrap();
     let writer = unsafe { moto_ipc::stdio_pipe::StdioPipe::new_writer(local) };
     moto_rt::process::kill(child.handle).unwrap();
-    assert_eq!(moto_rt::process::wait(child.handle).unwrap(), -1);
+    assert_eq!(crate::wait_child(child.handle).unwrap(), -1);
 
     let payload = b"published-on-peer-loss";
     let (published, result) = writer.nonblocking_write_progress(payload);
@@ -574,7 +577,7 @@ fn privileged_lifetime_tests() {
             &[(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, &caps)],
         )
         .unwrap();
-        assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+        assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
 
         // The child holds completion before its parent reports readiness, so
         // this unlock-then-lock sequence cannot race past the child.
@@ -614,7 +617,7 @@ fn access_and_null_tests() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    assert_eq!(moto_rt::process::wait(parent.handle).unwrap(), 0);
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), 0);
     moto_rt::fs::close(write_only).unwrap();
     moto_rt::fs::close(read_only).unwrap();
     let null = spawn(
@@ -628,7 +631,7 @@ fn access_and_null_tests() {
     let mut message = Vec::new();
     stderr.read_to_end(&mut message).unwrap();
     assert_eq!(
-        moto_rt::process::wait(null.handle).unwrap(),
+        crate::wait_child(null.handle).unwrap(),
         0,
         "null-inheritance stderr: {}",
         String::from_utf8_lossy(&message)

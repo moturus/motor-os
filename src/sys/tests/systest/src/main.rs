@@ -1094,6 +1094,15 @@ pub(crate) fn under_load() -> bool {
     UNDER_LOAD.load(Ordering::Relaxed)
 }
 
+/// Waits for a child spawned through the raw runtime API and releases its
+/// process handle, as std's `Child` does on drop: a dead child keeps its
+/// memory until its last handle closes.
+pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
+    let status = moto_rt::process::wait(handle);
+    moto_rt::alloc::release_handle(handle).unwrap();
+    status
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {

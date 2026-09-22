@@ -602,11 +602,18 @@ pub fn is_spawn_read_child(args: &[String]) -> bool {
 
 fn test_concurrent_spawn_reads() {
     let exe = std::env::current_exe().unwrap();
-    const CONCURRENT_SPAWNS: usize = 8;
+    // A live systest child takes about 9 MiB; a small guest cannot hold
+    // eight at once, so the fan-out stays within half of free memory.
+    const MAX_CONCURRENT_SPAWNS: usize = 8;
+    const CHILD_BYTES: u64 = 12 << 20;
+    let stats = moto_sys::stats::MemoryStats::get().unwrap();
+    let concurrent = (((stats.available - stats.used()) / 2 / CHILD_BYTES) as usize)
+        .clamp(2, MAX_CONCURRENT_SPAWNS);
+    println!("      io_channel::test_concurrent_spawn_reads: {concurrent} concurrent spawns");
     for _ in 0..2 {
-        let barrier = std::sync::Barrier::new(CONCURRENT_SPAWNS);
+        let barrier = std::sync::Barrier::new(concurrent);
         std::thread::scope(|scope| {
-            for _ in 0..CONCURRENT_SPAWNS {
+            for _ in 0..concurrent {
                 scope.spawn(|| {
                     barrier.wait();
                     assert!(
