@@ -1,0 +1,192 @@
+# Process capabilities
+
+Each Motor OS process has an immutable `u64` capability mask, assigned when
+the process is created. Set bits authorize operations in the kernel and
+userspace services. The definitions and default child policy live in
+[`moto_sys::caps`](../src/sys/lib/moto-sys/src/caps.rs).
+
+A process cannot change its own capabilities. It can request a capability
+mask for a new child, subject to the kernel's grant rules. Environment
+variables used to request a child mask do not confer authority on the caller.
+
+## Defined capabilities
+
+Combine capabilities with bitwise OR (`|`).
+
+| Capability | Bit | Hex mask | Authority |
+| --- | --- | --- | --- |
+| `CAP_SYS` | 0 | `0x01` | System role, protection from ordinary userspace process killing, and broad authority to grant child capabilities. |
+| `CAP_IO_MANAGER` | 1 | `0x02` | IO-manager operations, including access to the serial console (COM1) and MMIO. |
+| `CAP_SPAWN` | 2 | `0x04` | Spawn processes; the kernel checks this when creating a child address space. |
+| `CAP_LOG` | 3 | `0x08` | Submit records to the kernel log and strobe's record channel. |
+| `CAP_SHUTDOWN` | 4 | `0x10` | Shut down the system. |
+| `CAP_SPAWN_DETACHED` | 5 | `0x20` | Spawn detached children whose lifetime is independent of the spawner. |
+| `CAP_INTERACTIVE` | 6 | `0x40` | Act with the logged-in user's authority, selecting the Interactive role unless `CAP_SYS` is also set. |
+| `CAP_VSOCK` | 7 | `0x80` | Create and listen on native virtio-vsock streams. |
+
+`CAP_SYS` does not imply that the other bits are set. Operations that check
+a particular bit still require it: for example, a System process needs
+`CAP_SPAWN` to create a child address space and `CAP_SHUTDOWN` to shut down.
+Its broader authority applies to granting capabilities at spawn, with the
+`CAP_VSOCK` exception described below.
+
+`CAP_LOG` does not grant direct filesystem access to `/system/logs`.
+That access is governed by filesystem permissions. Logging through the
+kernel or strobe and ordinary stdout/stderr output are separate mechanisms.
+See [kernel logs](kernel-logs.md) and the [native vsock API](vsock.md) for
+details of those services.
+
+## Process roles and filesystem permissions
+
+`ProcessRole::from_caps(mask)` derives the filesystem-facing role from two
+bits, in this order:
+
+| Condition | Role | Encoded value |
+| --- | --- | --- |
+| `CAP_SYS` is set | `System` | 2 |
+| Otherwise, `CAP_INTERACTIVE` is set | `Interactive` | 1 |
+| Neither bit is set | `None` | 0 |
+
+Both bits may be present; `CAP_SYS` takes precedence without changing the
+mask. A None-role process can still hold individual capabilities such as
+`CAP_LOG` or `CAP_SPAWN`. Conversely, the Interactive role alone does not
+grant logging, spawning, or shutdown authority.
+
+Sys-io obtains a filesystem client's capabilities from the kernel through
+the client's IPC connection and uses the derived role for permission checks.
+The role selects the corresponding filesystem permission set; it is not
+supplied by the client. See [process roles](process-roles.md) for the design
+and [filesystem permissions](fs-permissions.md) for the image policy.
+
+## Child capability grants
+
+The kernel validates the requested child mask in
+[`Process::new_child`](../src/sys/kernel/src/uspace/process.rs).
+
+- A parent without `CAP_SYS` may grant only capabilities it already holds.
+  It may never grant `CAP_SYS` or `CAP_IO_MANAGER`.
+- A None-role parent may not grant `CAP_LOG`, even if it holds that bit.
+  An Interactive parent can explicitly pass on `CAP_LOG` when it holds it.
+- A System parent may grant capabilities it does not itself hold, except
+  `CAP_VSOCK`. Every parent must hold `CAP_VSOCK` to grant it.
+- Spawning a detached child additionally requires the **parent** to hold
+  `CAP_SPAWN_DETACHED`, including when the parent is System.
+
+An unauthorized request fails with `E_NOT_ALLOWED`; the kernel does not
+silently remove the forbidden bits. Below System, a child cannot receive a
+higher role than its parent.
+
+### Default mask
+
+When no explicit mask is provided, the
+[`rt.vdso` spawn path](../src/sys/lib/rt.vdso/src/rt_process.rs) uses
+`default_child_capabilities(parent_caps)`:
+
+| Parent's derived role | Default child mask |
+| --- | --- |
+| `System` | `CAP_SPAWN` and `CAP_LOG`, plus `CAP_VSOCK` if the parent holds it. |
+| `Interactive` | `CAP_INTERACTIVE`, plus `CAP_SPAWN` and `CAP_VSOCK` when the parent holds those bits. |
+| `None` | Only the parent's `CAP_SPAWN` and `CAP_VSOCK` bits. |
+
+Defaults from non-System parents are always restricted to bits the parent
+holds. Computing a default mask does not bypass the parent's own spawn
+authorization.
+
+`CAP_SYS`, `CAP_IO_MANAGER`, `CAP_SHUTDOWN`, and `CAP_SPAWN_DETACHED` never
+propagate by default. `CAP_LOG` is included by default only for children of
+System parents. A System parent's default child has the None role, even if
+the parent also holds `CAP_INTERACTIVE`.
+
+These are runtime defaults. Launchers can select explicit masks: sys-init
+does so for configured services, and Rush explicitly preserves System
+authority for ordinary commands launched by a System shell. Rush also has a
+`spawn-detached` policy for passing detach authority to trusted programs.
+
+### Explicit mask with `std::process::Command`
+
+Set `MOTOR_OS_CAPS_ENV_KEY` (`"MOTOR_OS_CAPS"`) in the child's command
+environment to replace the entire default mask. The value is hexadecimal,
+with an optional lowercase `0x` prefix. For example, `"44"` and `"0x44"`
+both mean `CAP_SPAWN | CAP_INTERACTIVE`; `"0"` requests no capabilities.
+Invalid hexadecimal or a value that does not fit in `u64` fails with
+`E_INVALID_ARGUMENT`.
+
+This helper launches a None-role child that can spawn further children,
+assuming the caller is authorized to spawn and grant `CAP_SPAWN`:
+
+```rust
+use moto_sys::caps::{CAP_SPAWN, MOTOR_OS_CAPS_ENV_KEY};
+use std::process::{Child, Command};
+
+fn spawn_worker(program: &str) -> std::io::Result<Child> {
+    Command::new(program)
+        .env(MOTOR_OS_CAPS_ENV_KEY, format!("{CAP_SPAWN:#x}"))
+        .spawn()
+}
+```
+
+An explicit mask is a replacement, not an addition: omitting
+`CAP_INTERACTIVE` drops Interactive authority; omitting `CAP_VSOCK` denies
+vsock access even if the parent holds it. The runtime consumes
+`MOTOR_OS_CAPS`, so the child does not receive this environment variable.
+The child's later spawns use their own defaults or explicit masks.
+
+## Detached children
+
+To request a detached child, set `MOTOR_OS_DETACHED_ENV_KEY`
+(`"MOTOR_OS_DETACHED"`) to exactly `"true"` or `"TRUE"` in its command
+environment. Other values do not request detachment. The runtime consumes
+the variable regardless of its value; the child does not receive it.
+
+The kernel owns a detached child, allowing it to survive the spawner's exit
+and reaping. Ordinary non-System children are killed when their parent is
+reaped. Detachment is separate from the child's capability mask:
+
+- The spawner must hold `CAP_SPAWN_DETACHED` to request detachment.
+- The child does not need that bit merely to be detached.
+- Giving a child `CAP_SPAWN_DETACHED` permits it to detach its own children;
+  it does not detach that child automatically.
+
+For example, a caller with `CAP_SPAWN | CAP_SPAWN_DETACHED` can launch a
+detached worker with no capabilities:
+
+```rust
+use moto_sys::caps::{MOTOR_OS_CAPS_ENV_KEY, MOTOR_OS_DETACHED_ENV_KEY};
+use std::process::{Child, Command, Stdio};
+
+fn spawn_detached_worker(program: &str) -> std::io::Result<Child> {
+    Command::new(program)
+        .env(MOTOR_OS_CAPS_ENV_KEY, "0x0")
+        .env(MOTOR_OS_DETACHED_ENV_KEY, "true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+```
+
+The null standard streams avoid depending on the launching process for IO.
+Grant detach authority explicitly only when the child must be able to
+create further detached processes; it is absent from every default mask.
+
+## Querying capabilities
+
+A process can read its own mask without a syscall from the read-only
+[`ProcessStaticPage`](../src/sys/lib/moto-sys/src/shared_mem.rs):
+
+```rust
+let caps = moto_sys::ProcessStaticPage::get().capabilities;
+let role = moto_sys::caps::ProcessRole::from_caps(caps);
+let can_spawn = caps & moto_sys::caps::CAP_SPAWN != 0;
+```
+
+For a connected peer, use
+[`SysObj::get_capabilities(handle)`](../src/sys/lib/moto-sys/src/sys_obj.rs).
+This syscall returns the mask of the process owning the peer endpoint of
+the shared object. Servers should authorize the actual connected peer using
+this kernel-supplied value, as sys-io and strobe do.
+
+Process statistics expose the derived role through
+`ProcessInfoV1.process_role`, not the full capability mask. Statistics are
+for observation; use the connection-bound capability query for peer
+authorization.
