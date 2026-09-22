@@ -381,7 +381,7 @@ src/tests/test-vsock.sh --vmm fc
 src/tests/test-vsock.sh --release --vmm fc
 ```
 
-`src/tests/full-test.sh [--release] [--vmm qemu|chv|fc]` includes this phase.
+`src/tests/full-test.sh [--release] [--vmm qemu|chv|fc] [--cpus N] [--memory MIB]` includes this phase.
 Core changes follow [AGENTS.md](../AGENTS.md): fresh builds and at least three
 passing main-image full tests in each profile before committing. Non-Lorry
 developer-image validation uses `src/tests/full-test-dev.sh --release` only.

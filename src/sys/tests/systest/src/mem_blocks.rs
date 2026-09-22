@@ -105,14 +105,18 @@ impl Prng {
 // oldest before releasing it, and hands every other release to its neighbor
 // so frees cross CPUs and cursors. Sizes up to 4 MiB cover huge-eligible
 // mappings; every constituent small page carries its own pattern, so an
-// aliased huge page cannot pass as a touched one.
+// aliased huge page cannot pass as a touched one. A hand-off waits for
+// nobody: on one CPU a producer can run for many iterations while its
+// neighbor is descheduled, so unbounded mailboxes would hold most of a small
+// guest's memory. A full mailbox releases the mapping locally instead.
 fn churn() {
     const THREADS: usize = 4;
     const ITERATIONS: u32 = 512;
+    const MAILBOX: usize = 4;
     let mut senders = Vec::new();
     let mut receivers = VecDeque::new();
     for _ in 0..THREADS {
-        let (tx, rx) = mpsc::channel::<(Mapping, u64)>();
+        let (tx, rx) = mpsc::sync_channel::<(Mapping, u64)>(MAILBOX);
         senders.push(tx);
         receivers.push_back(rx);
     }
@@ -133,7 +137,9 @@ fn churn() {
                         let (old, seed) = retained.pop_front().unwrap();
                         old.verify(seed);
                         if iteration % 2 == 1 {
-                            tx.send((old, seed)).unwrap();
+                            // A full mailbox hands the mapping back in the
+                            // error, which releases it here.
+                            let _ = tx.try_send((old, seed));
                         }
                     }
                     while let Ok((mapping, seed)) = rx.try_recv() {

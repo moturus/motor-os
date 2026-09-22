@@ -6,8 +6,16 @@ ORIGINAL_ARGS=("$@")
 
 BUILD="debug"
 VMM=qemu
+# Guest size. The defaults match the VM launchers; --cpus and --memory pick a
+# smaller guest, e.g. the 1 vCPU / 256 MiB shape cloud providers sell.
+CPUS="${MOTO_SMP:-4}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 SEEN_RELEASE=0
 SEEN_VMM=0
+SEEN_CPUS=0
+SEEN_MEMORY=0
+usage() { echo "usage: $0 [--release] [--vmm qemu|chv|fc] [--cpus N] [--memory MIB]" >&2; exit 2; }
+positive_integer() { case "$1" in "" | *[!0-9]* | 0*) return 1 ;; esac; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --release)
@@ -15,6 +23,26 @@ while [ "$#" -gt 0 ]; do
       BUILD=release
       SEEN_RELEASE=1
       shift
+      ;;
+    --cpus | --cpus=*)
+      [ "$SEEN_CPUS" = 0 ] || { echo "full-test: duplicate --cpus" >&2; exit 2; }
+      case "$1" in
+        --cpus=*) CPUS="${1#--cpus=}"; shift ;;
+        *) [ "$#" -ge 2 ] || { echo "full-test: --cpus requires a vCPU count" >&2; exit 2; }
+           CPUS="$2"; shift 2 ;;
+      esac
+      positive_integer "$CPUS" || { echo "full-test: --cpus must be a positive integer" >&2; exit 2; }
+      SEEN_CPUS=1
+      ;;
+    --memory | --memory=*)
+      [ "$SEEN_MEMORY" = 0 ] || { echo "full-test: duplicate --memory" >&2; exit 2; }
+      case "$1" in
+        --memory=*) MEMORY_MIB="${1#--memory=}"; shift ;;
+        *) [ "$#" -ge 2 ] || { echo "full-test: --memory requires a size in MiB" >&2; exit 2; }
+           MEMORY_MIB="$2"; shift 2 ;;
+      esac
+      positive_integer "$MEMORY_MIB" || { echo "full-test: --memory must be a positive integer (MiB)" >&2; exit 2; }
+      SEEN_MEMORY=1
       ;;
     --vmm)
       [ "$SEEN_VMM" = 0 ] || { echo "full-test: duplicate --vmm" >&2; exit 2; }
@@ -29,9 +57,11 @@ while [ "$#" -gt 0 ]; do
       SEEN_VMM=1
       shift
       ;;
-    *) echo "usage: $0 [--release] [--vmm qemu|chv|fc]" >&2; exit 2 ;;
+    *) usage ;;
   esac
 done
+export MOTO_SMP="$CPUS"
+export MOTO_MEMORY_MIB="$MEMORY_MIB"
 case "$VMM" in qemu|chv|fc) ;; *) echo "full-test: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
   echo "full-test: Firecracker does not support developer images" >&2
@@ -72,10 +102,13 @@ fi
 if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export FULL_TEST_TIMEOUT_ACTIVE=1
   # Debug builds and developer-image checks need the larger overall budget.
+  # A single vCPU serializes everything the guest does, so it gets twice the
+  # time: 30 minutes for the release suite instead of 15.
   TIMEOUT=1500
   if [ "$BUILD" = "release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     TIMEOUT=900
   fi
+  [ "$CPUS" -ge 2 ] || TIMEOUT=$((TIMEOUT * 2))
 
   minutes() {
     awk -v seconds="$1" 'BEGIN { printf "%.1f", seconds / 60 }'
@@ -180,8 +213,6 @@ fi
 select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
 export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
-export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
-export MOTO_SMP="${MOTO_SMP:-4}"
 case "$VMM:$MOTO_IMAGE" in
   fc:*.img|fc:*.raw|qemu:*.qcow2|qemu:*.img|qemu:*.raw|chv:*.qcow2|chv:*.img|chv:*.raw) ;;
   fc:*) echo "full-test: Firecracker requires a raw image, not '$MOTO_IMAGE'" >&2; exit 2 ;;
@@ -193,7 +224,7 @@ if [ "$TEST_VM_PHASE" = standard ]; then
     [ "$IMG_TARGET" = "$required_target" ] || IMAGE_TARGETS+=("$required_target")
   done
 fi
-echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TARGET image=$MOTO_IMAGE"
+echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TARGET image=$MOTO_IMAGE cpus=$MOTO_SMP memory=${MOTO_MEMORY_MIB}MiB"
 
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then

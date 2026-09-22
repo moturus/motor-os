@@ -636,10 +636,10 @@ async fn run_native_accept(
         Poll::Pending => shutdown.as_mut().await,
     };
     drop(shutdown);
-    assert!(matches!(
-        shutdown_result,
-        Ok(()) | Err(moto_rt::E_NOT_CONNECTED)
-    ));
+    assert!(
+        matches!(shutdown_result, Ok(()) | Err(moto_rt::E_NOT_CONNECTED)),
+        "simultaneous shutdown returned {shutdown_result:?}"
+    );
     read_eof(&simultaneous).await;
     assert_eq!(
         simultaneous.try_write(&[b"after simultaneous close"]),

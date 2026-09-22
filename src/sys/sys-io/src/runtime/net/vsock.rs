@@ -1335,6 +1335,31 @@ impl NetRuntime {
         }
     }
 
+    fn owns_vsock_stream(&self, local_cid: u32, raw: RawHeader) -> bool {
+        let (Ok(dst_cid), Ok(src_cid)) = (u32::try_from(raw.dst_cid), u32::try_from(raw.src_cid))
+        else {
+            return false;
+        };
+        let tuple = ConnectionTuple {
+            local: VsockAddr {
+                cid: dst_cid,
+                port: raw.dst_port,
+            },
+            peer: VsockAddr {
+                cid: src_cid,
+                port: raw.src_port,
+            },
+        };
+        dst_cid == local_cid
+            && self
+                .inner
+                .borrow()
+                .vsock
+                .tuples
+                .stream_socket(tuple)
+                .is_some()
+    }
+
     fn handle_vsock_packet(
         &self,
         local_cid: u32,
@@ -1349,12 +1374,22 @@ impl NetRuntime {
         let header = match decoded {
             Ok(header) => header,
             Err(err) => {
-                if let Some(raw) = err.raw.and_then(|raw| RawHeader::refusal(local_cid, raw)) {
+                // A device can hand over a header it never finished: rust-vmm's
+                // vhost-device-vsock leaves the operation zero when a credit
+                // update coincides with pending RX on the same connection.
+                // Refusing that header would reset a live connection under
+                // the application, so an unreadable packet addressed to an
+                // owned stream is dropped, as Linux does; only an unowned
+                // tuple is refused.
+                if let Some(raw) = err.raw
+                    && !self.owns_vsock_stream(local_cid, raw)
+                    && let Some(refusal) = RawHeader::refusal(local_cid, raw)
+                {
                     let _ = self
                         .inner
                         .borrow_mut()
                         .vsock
-                        .queue_control(PendingControl::Refusal(raw));
+                        .queue_control(PendingControl::Refusal(refusal));
                 }
                 return Err(err);
             }
