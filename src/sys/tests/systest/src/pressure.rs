@@ -166,7 +166,7 @@ impl Tally {
 /// Drive free-for-admission into the pressure band and hold it there:
 /// returns the squeeze child once the kernel has raised the flag. Released
 /// with `release_squeeze`.
-fn squeeze_to_pressure() -> crate::subcommand::Subcommand {
+pub(crate) fn squeeze_to_pressure() -> crate::subcommand::Subcommand {
     let adm = AdmissionStats::get().unwrap();
 
     // The squeeze must land between the kernel's user floor (or unrelated
@@ -204,7 +204,7 @@ fn squeeze_to_pressure() -> crate::subcommand::Subcommand {
 /// Release the squeeze. A dead process owns its pages until the last handle
 /// closes; the kernel's free path then clears the flag with no help from
 /// anyone.
-fn release_squeeze(mut child: crate::subcommand::Subcommand) {
+pub(crate) fn release_squeeze(mut child: crate::subcommand::Subcommand) {
     child.do_exit(0);
     assert!(child.wait().unwrap().success());
     drop(child);

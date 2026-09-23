@@ -599,6 +599,12 @@ rm -f "$ssh_split_stdout" "$ssh_split_stderr"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
+  # An earlier run's leftover test root would fail the mkdir below.
+  if vm_ssh "[ -e $MOTOR_TEST_ROOT ]"; then
+    echo "removing the leftover $MOTOR_TEST_ROOT"
+    vm_ssh "/system/bin/rm -r $MOTOR_TEST_ROOT" ||
+      fail "cannot remove the leftover $MOTOR_TEST_ROOT"
+  fi
   printf '%s\n' \
     "mkdir $MOTOR_TEST_ROOT" \
     "mkdir $TEST_BIN" \
@@ -730,6 +736,9 @@ test_ssh_client_host
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   bash "$WD/test-gears-http-vm.sh" "${profile_args[@]}"
 fi
+
+echo "-- Strobe I/O regressions --"
+vm_ssh /system/services/strobe --self-test
 
 echo "-- DNS resolver integration --"
 vm_ssh /system/services/dns-resolver --self-test

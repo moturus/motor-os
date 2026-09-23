@@ -204,6 +204,12 @@ done
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
+  # An earlier run's leftover test root would fail the mkdir below.
+  if ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "[ -e $MOTOR_TEST_ROOT ]"; then
+    echo "removing the leftover $MOTOR_TEST_ROOT"
+    ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "/system/bin/rm -r $MOTOR_TEST_ROOT" ||
+      fail "cannot remove the leftover $MOTOR_TEST_ROOT"
+  fi
   TEST_ROOT_CREATED=1
   ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
     "/system/bin/mkdir $MOTOR_TEST_ROOT; /system/bin/mkdir $TEST_TMP"

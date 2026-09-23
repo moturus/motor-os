@@ -412,6 +412,198 @@ fn basic(slot: &str) {
     println!("logging::basic test PASS");
 }
 
+/// Records submitted while the memory-pressure flag is up reach the file once
+/// the flag clears: sys-io refuses strobe's writes meanwhile, so strobe holds
+/// up to 64 KiB per connection and reports what did not fit. Before this,
+/// one refused write ended the file for the rest of the boot. The file is
+/// brought close to the rotation size first, so the drain that writes the
+/// held records out also rotates the file partway through.
+fn records_under_pressure(slot: &str) {
+    const HELD: usize = 64;
+    let tag = derived_tag(slot, "pressure");
+    let path = log_path(&tag);
+    let previous_path = format!("{path}.prev");
+    let (mut conn, tag_id) = connected_tag(&tag);
+    // A separate sender keeps this tag busy while the main thread reads
+    // the files; those reads must not create an idle interval for strobe.
+    let (mut busy, busy_id) = connected_tag(&derived_tag(slot, "pressure-busy"));
+    let nonce = format!("pressure-{:016x}", std::random::random::<u64>(..));
+
+    let before = format!("{nonce} before");
+    prepare_log(&mut conn, tag_id, before.as_bytes());
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    wait_for_records(&path, std::slice::from_ref(&before));
+
+    // Strobe writes "<24-char UTC stamp>:I - <message>\n": 30 bytes around
+    // each message. Fill to 32 KiB below the rotation size, checked against
+    // the file, so that the held records below take it past that size.
+    let filler = format!("{nonce} filler {}", "x".repeat(3000));
+    let file_len = || std::fs::metadata(&path).unwrap().len();
+    let room = LOG_FILE_MAX_BYTES - 32 * 1024 - file_len();
+    for _ in 0..room / (filler.len() as u64 + 30) {
+        prepare_log(&mut conn, tag_id, filler.as_bytes());
+        assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    }
+    let filled = format!("{nonce} filled");
+    prepare_log(&mut conn, tag_id, filled.as_bytes());
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    wait_for_records(&path, std::slice::from_ref(&filled));
+    let len = file_len();
+    assert!(
+        len < LOG_FILE_MAX_BYTES && LOG_FILE_MAX_BYTES - len < 64 * 1024,
+        "file at {len} bytes before the episode"
+    );
+    let kernel_before = format!("{nonce} kernel before\n");
+    moto_sys::SysRay::log(&kernel_before).unwrap();
+    crate::kernel_log::wait_for_file_records(&[kernel_before.as_bytes()]);
+
+    // Everything the episode sends is built now: 64 records of 3 KiB are
+    // three times the backlog, so most of them can only be dropped. Kernel
+    // records go through sys-tty's own queue first; a few is enough.
+    let held: Vec<String> = (0..HELD)
+        .map(|i| {
+            let prefix = format!("{nonce} held {i:03} ");
+            format!("{prefix}{}", "x".repeat(3072 - prefix.len()))
+        })
+        .collect();
+    let kernel_held: Vec<String> = (0..4)
+        .map(|i| format!("{nonce} kernel held {i}\n"))
+        .collect();
+
+    let child = crate::pressure::squeeze_to_pressure();
+    let mut dips = 0;
+    for record in &held {
+        if !moto_sys::memory_pressure() {
+            dips += 1;
+        }
+        prepare_log(&mut conn, tag_id, record.as_bytes());
+        assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    }
+    for record in &kernel_held {
+        if !moto_sys::memory_pressure() {
+            dips += 1;
+        }
+        moto_sys::SysRay::log(record).unwrap();
+    }
+    crate::pressure::release_squeeze(child);
+
+    // Strobe's timer drains the held records with nothing else sent on this
+    // tag; each is written once, to either file, or counted in a notice.
+    // Only what follows this run's `filled` marker is counted.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let sending = std::sync::atomic::AtomicBool::new(true);
+    struct StopSending<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for StopSending<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let (present, dropped) = std::thread::scope(|scope| {
+        let _stop = StopSending(&sending);
+        scope.spawn(|| {
+            while sending.load(std::sync::atomic::Ordering::Acquire) {
+                prepare_log(&mut busy, busy_id, b"busy");
+                assert_eq!(moto_rt::E_OK, rpc_result(&mut busy));
+            }
+        });
+        loop {
+            let mut log = std::fs::read_to_string(&previous_path).unwrap_or_default();
+            log.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            // Without the marker the two reads straddled the rotation.
+            if let Some((_, episode)) = log.split_once(&filled) {
+                let mut counts = [0; HELD];
+                for line in episode.lines() {
+                    if let Some(i) = held.iter().position(|record| line.ends_with(record)) {
+                        counts[i] += 1;
+                    }
+                }
+                assert!(
+                    counts.iter().all(|count| *count <= 1),
+                    "a held record was written twice"
+                );
+                let present = counts.iter().filter(|count| **count == 1).count();
+                let dropped = dropped_messages(episode);
+                assert!(
+                    present + dropped <= HELD,
+                    "{present} written, {dropped} reported dropped"
+                );
+                if present + dropped == HELD {
+                    break (present, dropped);
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "held records not all written or reported dropped"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    assert!(
+        dropped > 0 || dips > 0,
+        "{HELD} records under pressure all fit a 64 KiB backlog"
+    );
+
+    let after = format!("{nonce} after");
+    prepare_log(&mut conn, tag_id, after.as_bytes());
+    assert_eq!(moto_rt::E_OK, rpc_result(&mut conn));
+    let current = wait_for_records(&path, std::slice::from_ref(&after));
+    // The drain rotated: the old content is in `.prev`, within the size
+    // cap, and the new file starts with its header.
+    assert!(!current.contains(&before), "{path} was not rotated");
+    assert!(
+        current
+            .lines()
+            .next()
+            .is_some_and(|line| line.ends_with(&format!("started log for '{tag}'"))),
+        "{path} does not start with its header"
+    );
+    let previous_len = std::fs::metadata(&previous_path).unwrap().len();
+    assert!(
+        previous_len <= LOG_FILE_MAX_BYTES && previous_len > len,
+        "{previous_path} at {previous_len} bytes"
+    );
+
+    let kernel_after = format!("{nonce} kernel after\n");
+    moto_sys::SysRay::log(&kernel_after).unwrap();
+    // Both markers come from one read of the files.
+    let kernel_log = crate::kernel_log::wait_for_file_records(&[
+        kernel_before.as_bytes(),
+        kernel_after.as_bytes(),
+    ]);
+    let kernel_log = String::from_utf8_lossy(&kernel_log);
+    let episode = &kernel_log[kernel_log.find(&kernel_before).unwrap()..];
+    let kernel_present = kernel_held
+        .iter()
+        .filter(|record| episode.contains(record.as_str()))
+        .count();
+    // A debug build's DEBUG-record volume can overrun the backlogs on the
+    // kernel path; then the drop must at least be accounted for.
+    let kernel_accounted = cfg!(debug_assertions)
+        && (episode.contains("messages dropped due to memory pressure")
+            || episode.contains("records dropped: file backlog"));
+    assert!(
+        kernel_present == kernel_held.len() || kernel_accounted,
+        "{kernel_present} of {} kernel records written under pressure reached kernel.log",
+        kernel_held.len()
+    );
+
+    println!(
+        "logging::records_under_pressure PASS: {present} held, {dropped} dropped, \
+         {kernel_present} kernel held, {dips} flag dips"
+    );
+}
+
+/// The total of every "N messages dropped due to memory pressure" record.
+fn dropped_messages(log: &str) -> usize {
+    log.lines()
+        .filter_map(|line| {
+            let (_, rest) = line.split_once(":W - ")?;
+            let count = rest.strip_suffix(" messages dropped due to memory pressure")?;
+            Some(count.parse::<usize>().unwrap())
+        })
+        .sum()
+}
+
 pub fn run_all_tests() {
     if !crate::has_cap_log() {
         crate::skip_without_cap_log("logging::protocol_hardening");
@@ -424,4 +616,5 @@ pub fn run_all_tests() {
     drop(claim);
     basic(slot);
     rotation_and_space_cleanup(slot);
+    records_under_pressure(slot);
 }
