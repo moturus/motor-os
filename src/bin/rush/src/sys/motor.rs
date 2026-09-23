@@ -77,7 +77,7 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
 ///
 /// The runtime deliberately does not propagate System by default. Rush is the
 /// session boundary that does so; the caller skips this grant when the command
-/// supplied its own replacement mask.
+/// or the exported environment supplies its own replacement mask.
 pub fn ordinary_child_cap_grant() -> Option<(&'static str, String)> {
     let own = moto_sys::ProcessStaticPage::get().capabilities;
     if !matches!(
