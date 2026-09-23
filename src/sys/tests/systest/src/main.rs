@@ -1205,6 +1205,10 @@ fn main() {
         admission::test_process_classes();
         return;
     }
+    if args.len() == 2 && args[1] == "system-caps-tests" {
+        spawn_wait_kill::test_system_parent_cannot_grant_unheld();
+        return;
+    }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
         test_caps();
         return;
@@ -1379,6 +1383,12 @@ fn main() {
     }
     if spawn_wait_kill::is_denied_vsock_child(&args) {
         spawn_wait_kill::run_denied_vsock_child();
+    }
+    if spawn_wait_kill::is_denied_io_child(&args) {
+        spawn_wait_kill::run_denied_io_child(&args);
+    }
+    if spawn_wait_kill::is_regain_probe_child(&args) {
+        spawn_wait_kill::run_regain_probe_child(&args);
     }
     if spawn_wait_kill::is_spawn_result_pid_child(&args) {
         spawn_wait_kill::run_spawn_result_pid_child();
