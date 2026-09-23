@@ -308,9 +308,8 @@ impl Process {
 
         let parent = parent_thread.owner();
         let parent_caps = parent.capabilities();
-        if capabilities & moto_sys::caps::CAP_VSOCK != 0
-            && parent_caps & moto_sys::caps::CAP_VSOCK == 0
-        {
+        // Every parent, System included, must hold these bits to grant them.
+        if capabilities & !parent_caps & moto_sys::caps::PARENT_OWNED_CAPS != 0 {
             return Err(moto_rt::E_NOT_ALLOWED);
         }
         // This subset rule also makes ProcessRole monotone below CAP_SYS; see

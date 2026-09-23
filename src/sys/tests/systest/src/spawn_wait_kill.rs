@@ -7,6 +7,8 @@ const SHARED_LISTENER_URL: &str = "systest-shared-listener-restart";
 const PEER_CAPS_QUERY_CHILD: &str = "peer-caps-query-child";
 const CAPS_POLICY_CHILD: &str = "caps-policy-child";
 const DENIED_VSOCK_CHILD: &str = "denied-vsock-child";
+const DENIED_IO_CHILD: &str = "denied-io-child";
+const REGAIN_PROBE_CHILD: &str = "caps-regain-probe-child";
 const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
 const EMPTY_ARGS_CHILD: &str = "empty-args-child";
 const THREAD_EXIT_RACE_CHILD: &str = "thread-exit-race-child";
@@ -312,8 +314,65 @@ pub fn run_denied_vsock_child() -> ! {
     std::process::exit(0)
 }
 
+pub fn is_regain_probe_child(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == REGAIN_PROBE_CHILD
+}
+
+/// Records that it started; a denied spawn must never get this far.
+pub fn run_regain_probe_child(args: &[String]) -> ! {
+    std::fs::write(&args[2], b"started").unwrap();
+    std::process::exit(0)
+}
+
+/// Asserts that a spawn requesting `caps` fails with `E_NOT_ALLOWED` without
+/// ever starting the child.
+fn assert_regain_denied(caps: u64) {
+    let marker = crate::temp_path(&format!(
+        "caps-regain-{:016x}",
+        std::random::random::<u64>(..)
+    ));
+    let error = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([REGAIN_PROBE_CHILD, marker.to_str().unwrap()])
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
+        .status()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
+    assert!(!marker.exists());
+}
+
+pub fn is_denied_io_child(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == DENIED_IO_CHILD
+}
+
+/// Spawned without the `CAP_NET` or `CAP_FS_WRITE` bit in `args[2]` (hex):
+/// neither the default nor an explicit mask gives it back.
+pub fn run_denied_io_child(args: &[String]) -> ! {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SPAWN, CAP_VSOCK};
+
+    let missing = u64::from_str_radix(&args[2], 16).unwrap();
+    let own = CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK | (crate::IO_CAPS & !missing);
+    assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
+    assert_eq!(own, probe_child_capabilities(None).unwrap());
+    assert_regain_denied(own | missing);
+    std::process::exit(0)
+}
+
+/// Run from the System console without `CAP_NET`: `CAP_SYS` does not let a
+/// parent grant it.
+pub fn test_system_parent_cannot_grant_unheld() {
+    use moto_sys::caps::{CAP_FS_WRITE, CAP_NET, CAP_SPAWN, CAP_SYS};
+
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_ne!(0, own & CAP_SYS);
+    assert_eq!(CAP_FS_WRITE, own & crate::IO_CAPS);
+    assert_regain_denied(CAP_SYS | CAP_SPAWN | CAP_FS_WRITE | CAP_NET);
+    println!("spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS");
+}
+
 pub fn test_default_capability_policy() {
-    use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK, ProcessRole};
+    use moto_sys::caps::{
+        CAP_FS_WRITE, CAP_INTERACTIVE, CAP_LOG, CAP_NET, CAP_SPAWN, CAP_VSOCK, ProcessRole,
+    };
 
     if crate::skip_without_cap_log("test_default_capability_policy") {
         return;
@@ -363,6 +422,21 @@ pub fn test_default_capability_policy() {
         .status()
         .unwrap();
     assert_eq!(Some(0), status.code());
+
+    for missing in [CAP_NET, CAP_FS_WRITE] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([DENIED_IO_CHILD, &format!("{missing:x}")])
+            .env(
+                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+                format!(
+                    "0x{:x}",
+                    CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK | (crate::IO_CAPS & !missing)
+                ),
+            )
+            .status()
+            .unwrap();
+        assert_eq!(Some(0), status.code());
+    }
 
     // Keep the role bit named here: the None-role child explicitly proves it
     // cannot grant Interactive authority.
