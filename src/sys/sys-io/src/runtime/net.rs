@@ -49,7 +49,8 @@ struct ClientConnection {
     tcp_listeners: HashSet<u64>,
     shutting_down: bool,
     pid: u64,
-    capabilities: Option<core::result::Result<u64, moto_rt::ErrorCode>>,
+    /// The peer's capabilities, queried once at admission; they are immutable.
+    capabilities: u64,
 }
 
 impl Drop for ClientConnection {
@@ -60,14 +61,14 @@ impl Drop for ClientConnection {
 }
 
 impl ClientConnection {
-    fn new(sender: channel_budget::ClientSender) -> Self {
+    fn new(sender: channel_budget::ClientSender, capabilities: u64) -> Self {
         Self {
             sender,
             sockets: HashSet::new(),
             tcp_listeners: HashSet::new(),
             shutting_down: false,
             pid: 0,
-            capabilities: None,
+            capabilities,
         }
     }
 }
@@ -171,24 +172,16 @@ impl NetRuntime {
         handle: SysHandle,
         msg: &moto_ipc::io_channel::Msg,
     ) -> moto_rt::ErrorCode {
-        let mut inner = self.inner.borrow_mut();
-        let client = inner.clients.get_mut(&handle).unwrap();
-        let capabilities = *client
-            .capabilities
-            .get_or_insert_with(|| moto_sys::SysObj::get_capabilities(handle));
-
-        match capabilities {
-            Err(err) => err,
-            Ok(capabilities) if capabilities & moto_sys::caps::CAP_VSOCK == 0 => {
-                moto_rt::E_NOT_ALLOWED
-            }
-            Ok(_) if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] => {
-                moto_rt::E_INVALID_ARGUMENT
-            }
-            Ok(_) => match inner.vsock.availability() {
+        let inner = self.inner.borrow();
+        if inner.clients.get(&handle).unwrap().capabilities & moto_sys::caps::CAP_VSOCK == 0 {
+            moto_rt::E_NOT_ALLOWED
+        } else if msg.handle != 0 || msg.flags != 0 || msg.payload.args_64() != &[0; 3] {
+            moto_rt::E_INVALID_ARGUMENT
+        } else {
+            match inner.vsock.availability() {
                 Ok(()) => moto_rt::E_OK,
                 Err(error) => error.into(),
-            },
+            }
         }
     }
 
@@ -438,6 +431,24 @@ impl NetRuntime {
             return Err(ErrorKind::OutOfMemory.into());
         }
 
+        // Network admission, after sys-io's own protection above: only a peer
+        // holding CAP_NET is served. A denial is not a resource failure, so
+        // it must not keep this slot in spawn_new_listener's backoff:
+        // replenish the pool as for a served client, drop the channel before
+        // it holds any budget, client entry, or socket, and return Ok.
+        let capabilities = match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
+            Ok(capabilities) if capabilities & moto_sys::caps::CAP_NET != 0 => capabilities,
+            result => {
+                log::debug!(
+                    "NET: dropping client 0x{:x}: capabilities {result:x?}",
+                    sender.remote_handle().as_u64()
+                );
+                self.spawn_new_listener().await;
+                drop((sender, receiver));
+                return Ok(());
+            }
+        };
+
         // The wait-handle budget: past it, serving this channel would
         // eventually make the runtime thread's SysCpu::wait exceed the
         // kernel's handle cap, which is fatal (see channel_budget).
@@ -454,7 +465,7 @@ impl NetRuntime {
 
         self.inner.borrow_mut().clients.insert(
             sender.remote_handle(),
-            ClientConnection::new(sender.clone()),
+            ClientConnection::new(sender.clone(), capabilities),
         );
 
         self.stats
