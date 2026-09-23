@@ -199,6 +199,13 @@ impl ConnectionHandler {
                 log::info!("shutdown initiated");
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
+                // The kernel stops at once, so persist what sys-io still holds.
+                if let Err(err) = moto_async::LocalRuntime::new()
+                    .block_on(async { moto_io::fs::FsClient::connect()?.flush().await })
+                {
+                    log::error!("shutdown: filesystem flush failed: {err:?}");
+                }
+
                 if moto_sys::SysCpu::kill(moto_sys::SysHandle::KERNEL).is_err() {
                     log::error!("shutdown failed");
                 } else {
