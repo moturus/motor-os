@@ -29,6 +29,7 @@ mod net_driver;
 mod net_harness;
 mod poll;
 mod pressure;
+mod rush_caps;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -1127,6 +1128,13 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if rush_caps::is_print_caps_child(&args) {
+        rush_caps::run_print_caps_child(&args);
+    }
+    if args.len() == 2 && args[1] == "rush-caps-precedence" {
+        rush_caps::test_detach_grant_precedence();
+        return;
+    }
     if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {
         virtio_task_tests::test_premature_reply_drop();
         return;

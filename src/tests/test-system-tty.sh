@@ -181,6 +181,15 @@ admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
   fail "admission classes did not finish: '$admission_output'"
 printf '%s\n' "$admission_output"
 
+# An exported mask wins over Rush's ordinary System grant, even when it omits
+# CAP_NET; without one, the grant keeps the console's own bits.
+run_console /user/tmp/rush-caps-done \
+  'export MOTOR_OS_CAPS=0x205; /user/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log; unset MOTOR_OS_CAPS; /user/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
+rush_caps="$(vm_ssh /system/bin/cat /user/tmp/rush-caps.log)"
+[ "$rush_caps" = $'exported=0x205\nordinary=0x38d' ] ||
+  fail "System Rush capability precedence: '$rush_caps'"
+printf 'System Rush capability precedence: %s\n' "${rush_caps//$'\n'/ }"
+
 # The checker distinguishes an unfinished live log from an ordering failure.
 # A complete prompt before the expected tail fails immediately.
 wait_console_burst() {
