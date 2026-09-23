@@ -463,3 +463,206 @@ pub fn run_all_tests() {
 
     println!("fs_permissions::run_all_tests PASS");
 }
+
+const WRITE_CAP_CHILD: &str = "fs-write-cap-child";
+const WRITE_CAP_DATA: &[u8] = b"fs-write-cap fixture";
+
+pub fn is_write_cap_child(args: &[String]) -> bool {
+    args.len() == 4 && args[1] == WRITE_CAP_CHILD
+}
+
+async fn stat_file(client: &std::rc::Rc<FsClient>, path: &str) -> EntryId {
+    let (id, EntryKind::File) = client.stat(path).await.unwrap() else {
+        panic!("{path} is not a file")
+    };
+    id
+}
+
+/// Checks one request's outcome, then shows the connection still serves reads.
+async fn expect_outcome(
+    client: &std::rc::Rc<FsClient>,
+    data: EntryId,
+    allowed: bool,
+    result: moto_rt::Result<()>,
+) {
+    if allowed {
+        result.unwrap();
+    } else {
+        expect_denied(result);
+    }
+    let mut buf = [0_u8; 4];
+    assert_eq!(4, client.read(data, 0, &mut buf).await.unwrap());
+}
+
+/// Every known request outside sys-io's read allowlist. Role permissions allow
+/// all of them, so with `allowed` they are the positive control.
+async fn write_requests(client: &std::rc::Rc<FsClient>, root: &str, allowed: bool) {
+    use moto_rt::fs::{LOCK_EXCLUSIVE, LOCK_SHARED, TRY_LOCK_EXCLUSIVE, TRY_LOCK_SHARED, UNLOCK};
+
+    let (root_id, _) = client.stat(root).await.unwrap();
+    let data = stat_file(client, &format!("{root}/data")).await;
+    let victim = stat_file(client, &format!("{root}/victim")).await;
+    let copy_dst = stat_file(client, &format!("{root}/copy-dst")).await;
+    let permissions = client.metadata(data).await.unwrap().permissions().unwrap();
+    let first = client.get_first_entry(root_id).await.unwrap().unwrap();
+    client.name(first).await.unwrap();
+    client.get_next_entry(first).await.unwrap();
+
+    let multi_page = [0x55_u8; 2 * moto_sys::sys_mem::PAGE_SIZE_SMALL as usize];
+    let role =
+        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities);
+    let role_access = permissions.get(match role {
+        moto_sys::caps::ProcessRole::None => Role::None,
+        moto_sys::caps::ProcessRole::Interactive => Role::Interactive,
+        moto_sys::caps::ProcessRole::System => Role::System,
+    });
+    // Each request is followed by a read on the same connection.
+    macro_rules! request {
+        ($call:expr) => {
+            let result = $call.await.map(drop);
+            expect_outcome(client, data, allowed, result).await;
+        };
+    }
+    request!(client.write(data, 0, b"x"));
+    request!(client.write(data, 0, &multi_page));
+    request!(client.resize(data, WRITE_CAP_DATA.len() as u64));
+    request!(client.create_entry(root_id, EntryKind::File, "created"));
+    request!(client.create_entry(root_id, EntryKind::Directory, "created-dir"));
+    request!(client.create_entry_with_permissions(
+        root_id,
+        EntryKind::File,
+        "created-p",
+        permissions
+    ));
+    request!(client.copy_file_range(data, copy_dst, 0, 4));
+    request!(client.set_permissions(data, role_access));
+    request!(client.set_all_permissions(data, permissions));
+    request!(client.move_entry(victim, root_id, "moved"));
+    request!(client.move_noreplace(victim, root_id, "moved-again"));
+    request!(client.delete_entry(victim));
+    request!(client.flush());
+    for operation in [
+        LOCK_SHARED,
+        LOCK_EXCLUSIVE,
+        TRY_LOCK_SHARED,
+        TRY_LOCK_EXCLUSIVE,
+    ] {
+        request!(client.file_lock(data, 1, operation));
+        request!(client.file_lock(data, 1, UNLOCK));
+    }
+}
+
+/// Denied page-carrying requests must release their donated pages: more of
+/// them than the channel holds, then a valid request, all under a deadline,
+/// since a leaked page makes the next allocation wait forever.
+async fn donated_pages_released(client: &std::rc::Rc<FsClient>, root: &str) {
+    use futures::FutureExt;
+    use moto_ipc::io_channel::CHANNEL_PAGE_COUNT;
+    use moto_sys_io::api_fs::{WRITE_MAX_BYTES, WRITE_MAX_PAGES};
+
+    let requests = async {
+        let (root_id, _) = client.stat(root).await.unwrap();
+        let data = stat_file(client, &format!("{root}/data")).await;
+        let permissions = client.metadata(data).await.unwrap().permissions().unwrap();
+        for _ in 0..=CHANNEL_PAGE_COUNT {
+            expect_denied(client.write(data, 0, b"x").await);
+            expect_denied(client.create_entry(root_id, EntryKind::File, "p").await);
+            expect_denied(
+                client
+                    .create_entry(root_id, EntryKind::Directory, "p")
+                    .await,
+            );
+            expect_denied(
+                client
+                    .create_entry_with_permissions(root_id, EntryKind::File, "p", permissions)
+                    .await,
+            );
+            expect_denied(client.move_entry(data, root_id, "p").await);
+            expect_denied(client.move_noreplace(data, root_id, "p").await);
+        }
+        let fill = [0x55_u8; WRITE_MAX_BYTES];
+        for _ in 0..=CHANNEL_PAGE_COUNT / WRITE_MAX_PAGES {
+            expect_denied(client.write(data, 0, &fill).await);
+        }
+        client.stat(root).await.unwrap();
+    };
+    let mut requests = core::pin::pin!(requests.fuse());
+    let mut deadline =
+        core::pin::pin!(moto_async::sleep(std::time::Duration::from_secs(10)).fuse());
+    futures::select! {
+        () = requests => {}
+        () = deadline => panic!("denied requests leaked donated pages"),
+    }
+}
+
+pub fn run_write_cap_child(args: &[String]) -> ! {
+    let allowed = args[2] == "allow";
+    assert_eq!(
+        allowed,
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_FS_WRITE != 0
+    );
+    let root = &args[3];
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        write_requests(&client, root, allowed).await;
+        if !allowed {
+            donated_pages_released(&client, root).await;
+        }
+    });
+    std::process::exit(0)
+}
+
+/// Names, contents, and permissions of the fixture's entries.
+fn write_cap_snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>, RolePermissions)> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    moto_async::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let mut snapshot = Vec::new();
+        for name in names {
+            let path = root.join(&name);
+            let id = stat_file(&client, path.to_str().unwrap()).await;
+            let permissions = client.metadata(id).await.unwrap().permissions().unwrap();
+            snapshot.push((name, std::fs::read(&path).unwrap(), permissions));
+        }
+        snapshot
+    })
+}
+
+/// Without `CAP_FS_WRITE`, sys-io refuses every request that is not a read,
+/// whatever `role_caps` add, and leaves the fixture unchanged.
+pub fn test_write_capability(role_caps: u64) {
+    use moto_sys::caps::{CAP_FS_WRITE, CAP_SPAWN, MOTOR_OS_CAPS_ENV_KEY, ProcessRole};
+
+    let root = crate::temp_path(&format!(
+        "systest-fs-write-cap-{:016x}",
+        std::random::random::<u64>(..)
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("data"), WRITE_CAP_DATA).unwrap();
+    std::fs::write(root.join("victim"), b"victim").unwrap();
+    std::fs::write(root.join("copy-dst"), b"copy-destination").unwrap();
+    let before = write_cap_snapshot(&root);
+
+    let restricted = role_caps | CAP_SPAWN;
+    for (caps, mode) in [(restricted, "deny"), (restricted | CAP_FS_WRITE, "allow")] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([WRITE_CAP_CHILD, mode, root.to_str().unwrap()])
+            .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
+            .status()
+            .unwrap();
+        assert_eq!(Some(0), status.code(), "{mode} child");
+        if mode == "deny" {
+            assert_eq!(before, write_cap_snapshot(&root));
+        }
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+    println!(
+        "fs_permissions::test_write_capability({:?}) PASS",
+        ProcessRole::from_caps(role_caps)
+    );
+}

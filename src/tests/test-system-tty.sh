@@ -182,14 +182,15 @@ admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
 printf '%s\n' "$admission_output"
 
 # CAP_SYS does not substitute for the sys-io bits: a System parent without
-# CAP_NET cannot grant it.
+# CAP_NET cannot grant it, and a System child without CAP_FS_WRITE is refused
+# writes.
 run_console /user/tmp/system-caps-done \
   'MOTOR_OS_CAPS=0x20d /user/tmp/admission-systest system-caps-tests > /user/tmp/system-caps.log 2>&1; echo $? > /user/tmp/system-caps.status'
 system_caps_status="$(vm_ssh /system/bin/cat /user/tmp/system-caps.status)"
 system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 [ "$system_caps_status" = "0" ] ||
   fail "System capability tests exited $system_caps_status: '$system_caps_output'"
-[ "$system_caps_output" = "spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS" ] ||
+[ "$system_caps_output" = $'spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS' ] ||
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
 
