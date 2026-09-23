@@ -89,7 +89,8 @@ fn main() {
         | moto_sys::caps::CAP_SPAWN
         | moto_sys::caps::CAP_LOG
         | moto_sys::caps::CAP_SPAWN_DETACHED
-        | (own_caps & moto_sys::caps::CAP_VSOCK)
+        | (own_caps
+            & (moto_sys::caps::CAP_VSOCK | moto_sys::caps::CAP_NET | moto_sys::caps::CAP_FS_WRITE))
         | role_cap;
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(
@@ -104,11 +105,15 @@ fn main() {
 
     if let Some(strobe) = &config.strobe {
         // We just spawn strobe, don't track/wait. Should we?
+        // It writes log files and uses no network.
+        let strobe_caps = moto_sys::caps::CAP_SYS
+            | moto_sys::caps::CAP_LOG
+            | (own_caps & moto_sys::caps::CAP_FS_WRITE);
         #[allow(clippy::zombie_processes)]
         let _ = std::process::Command::new(strobe.as_str())
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{:x}", moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_LOG),
+                format!("0x{strobe_caps:x}"),
             )
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

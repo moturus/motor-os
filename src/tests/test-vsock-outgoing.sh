@@ -249,7 +249,7 @@ run_outgoing_case() {
   grep -Fx "READY ${VSOCK_BASE}_70000" "$peer_log" >/dev/null ||
     fail "host peer did not become ready"
 
-  vm_ssh "TMPDIR=$GUEST_TMP MOTOR_OS_CAPS=0xcc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
+  vm_ssh "TMPDIR=$GUEST_TMP MOTOR_OS_CAPS=0x3cc $GUEST_BIN test-vsock-outgoing 2 70000 $absent_peer_behavior $action $*" |
     tee "$guest_log"
   grep -Fx "vsock outgoing: $verdict PASS" "$guest_log" >/dev/null ||
     fail "guest PASS marker missing for $verdict"

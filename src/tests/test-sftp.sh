@@ -219,7 +219,7 @@ readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(base
     fail "executable upload has Motor mode $exec_motor_mode"
 [ "$readonly_motor_mode" = -rwxr----- ] ||
     fail "read-only upload has Motor mode $readonly_motor_mode"
-if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_plain_permission_file" >/dev/null 2>&1; then
+if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_plain_permission_file" >/dev/null 2>&1; then
     fail "None-role child read a private SFTP upload"
 fi
 echo "  ok: SFTP permission updates preserved owner/public role distinctions"
@@ -250,7 +250,7 @@ if [ "$abandoned_created" != 1 ]; then
     cat "$WORK/abandoned.err" >&2
     fail "throttled SFTP upload did not create its destination"
 fi
-if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
     kill "$abandoned_pid" 2>/dev/null || true
     wait "$abandoned_pid" 2>/dev/null || true
     fail "None-role child read an in-progress SFTP upload"
@@ -261,7 +261,7 @@ ABANDONED_PID=""
 abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
 [ "$abandoned_motor_mode" = -rwxrw---- ] ||
     fail "abandoned upload has Motor mode $abandoned_motor_mode"
-if run_ssh "MOTOR_OS_CAPS=0x4 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
+if run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $remote_abandoned_file" >/dev/null 2>&1; then
     fail "None-role child read an abandoned SFTP upload"
 fi
 echo "  ok: in-progress and abandoned uploads stayed private"

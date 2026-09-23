@@ -49,9 +49,10 @@ pub fn test_process_classes() {
 
     let own = moto_sys::ProcessStaticPage::get().capabilities;
     assert_ne!(own & CAP_SYS, 0);
-    assert_eq!(0, own & CAP_VSOCK);
+    assert_eq!(0, own & (CAP_VSOCK | CAP_NET));
+    assert_ne!(0, own & CAP_FS_WRITE);
 
-    let system_default = CAP_SPAWN | CAP_LOG;
+    let system_default = CAP_SPAWN | CAP_LOG | CAP_FS_WRITE;
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "admission-class-child",
@@ -78,7 +79,7 @@ pub fn test_process_classes() {
     assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED.into()));
 
     for (caps, privileged) in [
-        (CAP_SYS | CAP_LOG, true),
+        (CAP_SYS | CAP_LOG | CAP_FS_WRITE, true),
         (CAP_IO_MANAGER | CAP_INTERACTIVE, true),
         (CAP_SYS | CAP_IO_MANAGER, true),
         (CAP_INTERACTIVE, false),

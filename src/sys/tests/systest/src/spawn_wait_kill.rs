@@ -270,11 +270,11 @@ pub fn is_caps_policy_child(args: &[String]) -> bool {
 pub fn run_caps_policy_child() -> ! {
     use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK, ProcessRole};
 
-    let own = CAP_SPAWN | CAP_LOG | CAP_VSOCK;
+    let own = CAP_SPAWN | CAP_LOG | CAP_VSOCK | crate::IO_CAPS;
     assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
     assert_eq!(ProcessRole::None, ProcessRole::from_caps(own));
 
-    let none_default = CAP_SPAWN | CAP_VSOCK;
+    let none_default = CAP_SPAWN | CAP_VSOCK | crate::IO_CAPS;
     assert_eq!(
         none_default,
         moto_sys::caps::default_child_capabilities(own)
@@ -300,11 +300,11 @@ pub fn is_denied_vsock_child(args: &[String]) -> bool {
 pub fn run_denied_vsock_child() -> ! {
     use moto_sys::caps::{CAP_INTERACTIVE, CAP_LOG, CAP_SPAWN, CAP_VSOCK};
 
-    let own = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
-    assert_eq!(0x4c, own);
+    let own = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | crate::IO_CAPS;
+    assert_eq!(0x34c, own);
     assert_eq!(own, moto_sys::ProcessStaticPage::get().capabilities);
 
-    let denied_default = CAP_SPAWN | CAP_INTERACTIVE;
+    let denied_default = CAP_SPAWN | CAP_INTERACTIVE | crate::IO_CAPS;
     assert_eq!(denied_default, probe_child_capabilities(None).unwrap());
 
     let error = probe_child_capabilities(Some(&format!("0x{:x}", own | CAP_VSOCK))).unwrap_err();
@@ -322,7 +322,7 @@ pub fn test_default_capability_policy() {
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
     assert_eq!(crate::FULL_RUN_CAPS, own & crate::FULL_RUN_CAPS);
 
-    let interactive_default = CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK;
+    let interactive_default = CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK | crate::IO_CAPS;
     assert_eq!(
         interactive_default,
         moto_sys::caps::default_child_capabilities(own)
@@ -330,14 +330,14 @@ pub fn test_default_capability_policy() {
     assert_eq!(interactive_default, probe_child_capabilities(None).unwrap());
     assert_eq!(0, interactive_default & CAP_LOG);
 
-    let explicit = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK;
+    let explicit = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK | crate::IO_CAPS;
     assert_eq!(
         explicit,
         probe_child_capabilities(Some(&format!("0x{explicit:x}"))).unwrap()
     );
 
-    let denied_mask = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE;
-    assert_eq!(0x4c, denied_mask);
+    let denied_mask = CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | crate::IO_CAPS;
+    assert_eq!(0x34c, denied_mask);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg(DENIED_VSOCK_CHILD)
         .env(
@@ -358,7 +358,7 @@ pub fn test_default_capability_policy() {
         .arg(CAPS_POLICY_CHILD)
         .env(
             moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-            format!("0x{:x}", CAP_SPAWN | CAP_LOG | CAP_VSOCK),
+            format!("0x{:x}", CAP_SPAWN | CAP_LOG | CAP_VSOCK | crate::IO_CAPS),
         )
         .status()
         .unwrap();

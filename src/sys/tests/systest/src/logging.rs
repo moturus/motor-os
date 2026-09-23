@@ -148,7 +148,7 @@ fn child_output(mode: &str, caps: u64, args: &[&str]) -> std::process::Output {
 }
 
 fn protocol_hardening(slot: &str) {
-    let interactive = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
+    let interactive = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE | crate::IO_CAPS;
     let unauthorized = derived_tag(slot, "unauthorized");
     let output = child_output(UNAUTHORIZED_CHILD, interactive, &[&unauthorized]);
     assert!(output.status.success(), "{output:?}");
@@ -400,13 +400,13 @@ fn basic(slot: &str) {
     let none_marker = format!("none-role nonce={:016x}", std::random::random::<u64>(..));
     let output = child_output(
         NONE_LOG_CHILD,
-        moto_sys::caps::CAP_LOG,
+        moto_sys::caps::CAP_LOG | crate::IO_CAPS,
         &[&none_tag, &none_marker],
     );
     assert!(output.status.success(), "{output:?}");
     let none_path = log_path(&none_tag);
     wait_for_records(&none_path, std::slice::from_ref(&none_marker));
-    let output = child_output(NONE_ACCESS_CHILD, 0, &[&none_path]);
+    let output = child_output(NONE_ACCESS_CHILD, crate::IO_CAPS, &[&none_path]);
     assert!(output.status.success(), "{output:?}");
 
     println!("logging::basic test PASS");

@@ -173,7 +173,7 @@ scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
 run_console /user/tmp/admission-mode-done \
   'chmod r-xr-xr-x /user/tmp/admission-systest'
 run_console /user/tmp/admission-class-done \
-  'MOTOR_OS_CAPS=0xd /user/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
+  'MOTOR_OS_CAPS=0x20d /user/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
 admission_status="$(vm_ssh /system/bin/cat /user/tmp/admission-class.status)"
 admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
 [ "$admission_status" = "0" ] || fail "admission classes exited $admission_status: '$admission_output'"
@@ -223,7 +223,7 @@ printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
   fail "an ordinary external command did not retain System: '$ps_output'"
 
 # Only a System parent may grant CAP_IO_MANAGER. The ordinary SSH shell
-# deliberately cannot launch this test with its required 0x4e mask.
+# deliberately cannot launch this test with its required 0x24e mask.
 scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
   -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
@@ -232,7 +232,7 @@ scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
 # that role, not just by the System shell creating the redirection.
 vm_ssh 'echo -n > /user/tmp/mmio-validation.log'
 run_console /user/tmp/mmio-validation-done \
-  'MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
+  'MOTOR_OS_CAPS=0x24e /user/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
 mmio_status="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.status)"
 mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
 [ "$mmio_status" = "0" ] || fail "MMIO validation exited $mmio_status: '$mmio_output'"
@@ -243,7 +243,7 @@ printf '%s\n' "$mmio_output"
 for mmio_case in mmio-unmap-suite mmio-unmap-fault; do
   vm_ssh "echo -n > /user/tmp/$mmio_case.log"
   run_console "/user/tmp/$mmio_case-done" \
-    "MOTOR_OS_CAPS=0x4e /user/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
+    "MOTOR_OS_CAPS=0x24e /user/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
   mmio_status="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.status)"
   mmio_output="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.log)"
   if [ "$mmio_case" = mmio-unmap-suite ]; then

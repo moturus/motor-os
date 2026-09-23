@@ -522,9 +522,10 @@ included so that children can have children.</p>
 that includes <code>CAP_INTERACTIVE</code>; sys-tty starts the console shell with the
 same role it has itself; russhd gives each authenticated session shell the Interactive
 bit; and from there the default rule carries Interactive down to every command. The
-shipped <code>sys-init.cfg</code> gives russhd the mask 124
-(<code>CAP_SPAWN | CAP_LOG | CAP_SHUTDOWN | CAP_SPAWN_DETACHED | CAP_INTERACTIVE</code>)
-and the DNS resolver the mask 8 (<code>CAP_LOG</code> only). A test image variant runs the
+shipped <code>sys-init.cfg</code> gives russhd the mask 1020
+(<code>CAP_SPAWN | CAP_LOG | CAP_SHUTDOWN | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
+CAP_VSOCK | CAP_NET | CAP_FS_WRITE</code>) and the DNS resolver the mask 264
+(<code>CAP_LOG | CAP_NET</code>). A test image variant runs the
 serial console as System instead, using <code>tty:system:</code> in the configuration.</p>
 <p>russhd itself runs as Interactive, including its pre-authentication code and its
 in-process SFTP implementation. This is an explicit interim choice: a non-System parent
