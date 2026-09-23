@@ -559,7 +559,7 @@ and <code>sys_cpu_wakes</code>; read them before and after a run and take the di
   first-touch page fault), <code>test_liveness</code> (scheduling latency p50/p99/max in ms with
   busy background threads), <code>io_channel::test_ping_pong</code> (ns per io_channel round
   trip) and <code>test_udp_large_packets</code> (usec per UDP round trip). Run the suite the way
-  <code>full-test.sh</code> does (<code>TMPDIR=/user/tmp MOTOR_OS_CAPS=0x4c systest</code>) and
+  <code>full-test.sh</code> does (<code>TMPDIR=/user/tmp MOTOR_OS_CAPS=0x3cc systest</code>) and
   grep them out.</li>
   <li>Reproducers and probes, also <code>systest</code> subcommands:
   <code>listener-exhaustion-probe [cap]</code> floods listeners and prints sys-io's page counts

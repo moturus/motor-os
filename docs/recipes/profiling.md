@@ -130,7 +130,7 @@ take the difference.
   in ms with busy background threads), `io_channel::test_ping_pong` (ns
   per io_channel round trip) and `test_udp_large_packets` (usec per UDP
   round trip). Run the suite the way `full-test.sh` does
-  (`TMPDIR=/user/tmp MOTOR_OS_CAPS=0x4c systest`) and grep them out.
+  (`TMPDIR=/user/tmp MOTOR_OS_CAPS=0x3cc systest`) and grep them out.
 * Reproducers and probes, also `systest` subcommands: `listener-exhaustion-probe [cap]`
   floods listeners and prints sys-io's page counts stage by stage;
   `test-tcp-shutdown-repro`, `mio-accept-pump-repro`, `stdio-poll-stress`

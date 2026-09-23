@@ -758,7 +758,7 @@ vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+"${SSH[@]}" MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
   >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
@@ -779,8 +779,9 @@ systest_status=0
 set -o pipefail
 # The SSH shell is Interactive, whose unadorned children no longer receive
 # CAP_LOG. The complete suite exercises logging, so grant
-# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK explicitly.
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xcc $TEST_BIN/systest" 2>&1 |
+# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET | CAP_FS_WRITE
+# explicitly.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
@@ -793,12 +794,12 @@ systest_output="$(cat "$SYSTEST_LOG")"
 
 # The SSH login shell consumes russhd's one-time capability environment.
 # Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
-# CAP_VSOCK
+# CAP_VSOCK | CAP_NET | CAP_FS_WRITE
 # from that shell to the focused lifetime coordinator so it can create the
 # detached Interactive child this test requires. Do not interpose another rush:
 # it deliberately would not pass detach to an untrusted program.
 lifetime_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xec $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
   lifetime_status="$?"
 [ "$lifetime_status" -eq 0 ] ||
   fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"

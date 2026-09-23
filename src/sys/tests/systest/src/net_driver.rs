@@ -728,7 +728,7 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
 
 pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
     assert_eq!(
-        0x4c,
+        0x34c,
         moto_sys::ProcessStaticPage::get().capabilities,
         "discovery child unexpectedly has CAP_VSOCK"
     );
@@ -1003,7 +1003,7 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg(VSOCK_DISCOVERY_DENIED_CHILD)
         .args(with_ip.then_some("with-ip"))
-        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0x4c")
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0x34c")
         .status()
         .unwrap();
     assert_eq!(Some(0), status.code());

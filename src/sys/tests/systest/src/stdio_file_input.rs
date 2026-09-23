@@ -535,6 +535,7 @@ fn privileged_lifetime_tests() {
             | moto_sys::caps::CAP_LOG
             | moto_sys::caps::CAP_SPAWN_DETACHED
             | moto_sys::caps::CAP_INTERACTIVE
+            | crate::IO_CAPS
     );
     for route in ["direct", "relay"] {
         let output_path = crate::temp_path(&format!("stdio-lifetime-{route}"));

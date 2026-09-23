@@ -155,7 +155,10 @@ fn main() {
             moto_sys::caps::CAP_SPAWN
                 | moto_sys::caps::CAP_LOG
                 | moto_sys::caps::CAP_SPAWN_DETACHED
-                | (own_caps & moto_sys::caps::CAP_VSOCK)
+                | (own_caps
+                    & (moto_sys::caps::CAP_VSOCK
+                        | moto_sys::caps::CAP_NET
+                        | moto_sys::caps::CAP_FS_WRITE))
                 | role_cap
         ),
     );

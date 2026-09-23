@@ -369,7 +369,7 @@ gate_ssh 30 "stop DNS resolver" "/system/bin/rush -c 'kill $resolver_pid'"
 gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+  MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
   >>"$GATE_LOG" 2>&1 &
 DNS_RESOLVER_SSH_PID=$!
 resolver_restarted=0
@@ -388,7 +388,7 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0xcc /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "TMPDIR=/devtools/tmp MOTOR_OS_CAPS=0x3cc /devtools/tests/systest" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||

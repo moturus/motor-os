@@ -455,7 +455,7 @@ pub fn run_all_tests() {
     command
         .arg(NONE_CHILD)
         .arg(root.to_str().unwrap())
-        .env(MOTOR_OS_CAPS_ENV_KEY, "0x0");
+        .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{:x}", crate::IO_CAPS));
     for id in ids {
         command.arg(id.to_string());
     }

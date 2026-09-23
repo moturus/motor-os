@@ -185,7 +185,7 @@ run_discovery() (
 
   wait_line 1 '/user\$' 'the System console prompt'
   first_byte=$(( $(wc -c < "$console_log") + 1 ))
-  printf 'MOTOR_OS_CAPS=0xcc /user/bin/systest test-vsock-discovery %s; echo VSOCK_DISCOVERY_STATUS=$?' \
+  printf 'MOTOR_OS_CAPS=0x3cc /user/bin/systest test-vsock-discovery %s; echo VSOCK_DISCOVERY_STATUS=$?' \
     "$mode" >&3
   printf '\r' >&3
   wait_line "$first_byte" '^VSOCK_DISCOVERY_STATUS=[0-9]+$' 'the guest status marker'

@@ -88,14 +88,19 @@ pub(crate) fn ensure_temp_dir() {
     }
 }
 
+/// Sys-io access that explicit test masks keep unless its absence is the
+/// subject of the test.
+pub(crate) const IO_CAPS: u64 = moto_sys::caps::CAP_NET | moto_sys::caps::CAP_FS_WRITE;
+
 /// The capabilities a complete run needs; `full-test.sh` grants this set.
 /// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK`
-/// and cannot delegate `CAP_LOG`, so the tests that spawn logging children
-/// skip themselves instead of failing on their first spawn.
+/// and [`IO_CAPS`], and cannot delegate `CAP_LOG`, so the tests that spawn
+/// logging children skip themselves instead of failing on their first spawn.
 pub(crate) const FULL_RUN_CAPS: u64 = moto_sys::caps::CAP_SPAWN
     | moto_sys::caps::CAP_LOG
     | moto_sys::caps::CAP_INTERACTIVE
-    | moto_sys::caps::CAP_VSOCK;
+    | moto_sys::caps::CAP_VSOCK
+    | IO_CAPS;
 
 pub(crate) fn has_cap_log() -> bool {
     moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0

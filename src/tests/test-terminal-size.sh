@@ -545,9 +545,9 @@ rmux_at="$(wc -c < "$CONSOLE_LOG")"
 # Keep the outer client's runtime diagnostics out of the screen measurement,
 # using the same inherited stderr pipe as start_red above. Preserve the
 # console rmux grant (CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE,
-# CAP_VSOCK) in the wrapper.
+# CAP_VSOCK, CAP_NET, CAP_FS_WRITE) in the wrapper.
 RMUX_CONSOLE_STARTED=1
-printf 'TMPDIR=%s MOTOR_OS_CAPS=0xec /system/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
+printf 'TMPDIR=%s MOTOR_OS_CAPS=0x3ec /system/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
 wait_console_since "$rmux_at" $'\033\\[?2048h'
 answered_rmux_at="$(wc -c < "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3

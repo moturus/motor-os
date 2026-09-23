@@ -7,7 +7,8 @@ const PANIC_MARKER: &str = "complete piped diagnostic panic";
 const BACKTRACE_THREADS: usize = 4;
 const BACKTRACES_PER_THREAD: usize = 8;
 
-const WITHOUT_LOG: u64 = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
+const WITHOUT_LOG: u64 =
+    moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE | crate::IO_CAPS;
 const WITH_LOG: u64 = WITHOUT_LOG | moto_sys::caps::CAP_LOG;
 
 pub fn is_child(args: &[String]) -> bool {

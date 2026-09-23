@@ -318,7 +318,7 @@ vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" MOTOR_OS_CAPS=0x8 /system/services/dns-resolver \
+"${SSH[@]}" MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
   >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
@@ -344,7 +344,7 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0xcc $TEST_BIN/systest" 2>&1 |
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
