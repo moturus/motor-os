@@ -595,6 +595,46 @@ async fn donated_pages_released(client: &std::rc::Rc<FsClient>, root: &str) {
     }
 }
 
+/// Write-intent opens fail in rt.vdso before any lookup, create, or truncate;
+/// a read-only open still works.
+fn open_requests(root: &str, allowed: bool) {
+    use std::fs::OpenOptions;
+    use std::io::Read;
+
+    let data = format!("{root}/data");
+    let missing = format!("{root}/missing");
+    let mut contents = Vec::new();
+    std::fs::File::open(&data)
+        .unwrap()
+        .read_to_end(&mut contents)
+        .unwrap();
+    assert!(!contents.is_empty());
+
+    for (options, path) in [
+        (OpenOptions::new().write(true).clone(), &data),
+        (OpenOptions::new().append(true).clone(), &data),
+        (OpenOptions::new().write(true).truncate(true).clone(), &data),
+        (
+            OpenOptions::new().write(true).create(true).clone(),
+            &missing,
+        ),
+        (
+            OpenOptions::new().write(true).create_new(true).clone(),
+            &missing,
+        ),
+    ] {
+        let result = options.open(path);
+        if allowed {
+            result.unwrap();
+            let _ = std::fs::remove_file(&missing);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(std::io::ErrorKind::PermissionDenied, error.kind());
+            assert_eq!(Some(moto_rt::E_NOT_ALLOWED.into()), error.raw_os_error());
+        }
+    }
+}
+
 pub fn run_write_cap_child(args: &[String]) -> ! {
     let allowed = args[2] == "allow";
     assert_eq!(
@@ -609,6 +649,7 @@ pub fn run_write_cap_child(args: &[String]) -> ! {
             donated_pages_released(&client, root).await;
         }
     });
+    open_requests(root, allowed);
     std::process::exit(0)
 }
 
@@ -665,4 +706,93 @@ pub fn test_write_capability(role_caps: u64) {
         "fs_permissions::test_write_capability({:?}) PASS",
         ProcessRole::from_caps(role_caps)
     );
+}
+
+const STDOUT_WRITER_CHILD: &str = "fs-write-cap-stdout-writer";
+const STDOUT_RELAY_HELPER: &str = "fs-write-cap-stdout-relay-helper";
+const STDOUT_DENIED_EXIT: i32 = 13;
+
+pub fn is_stdout_writer_child(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == STDOUT_WRITER_CHILD
+}
+
+/// Writes `args[2]` to stdout; a denied write exits with `STDOUT_DENIED_EXIT`.
+/// It bypasses `std::io::Stdout`, which reports every write error on this
+/// platform as success.
+pub fn run_stdout_writer_child(args: &[String]) -> ! {
+    let bytes = args[2].as_bytes();
+    match moto_rt::fs::write(moto_rt::FD_STDOUT, bytes) {
+        Ok(written) => {
+            assert_eq!(bytes.len(), written);
+            std::process::exit(0)
+        }
+        Err(moto_rt::Error::NotAllowed) => std::process::exit(STDOUT_DENIED_EXIT),
+        Err(err) => panic!("stdout write failed: {err:?}"),
+    }
+}
+
+pub fn is_stdout_relay_helper(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == STDOUT_RELAY_HELPER
+}
+
+/// Holds `CAP_FS_WRITE` and a file-backed stdout, which its child, spawned with
+/// the mask in `args[2]`, inherits through this process's relay.
+pub fn run_stdout_relay_helper(args: &[String]) -> ! {
+    assert_ne!(
+        0,
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_FS_WRITE
+    );
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([STDOUT_WRITER_CHILD, "relayed\n"])
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, &args[2])
+        .stdout(std::process::Stdio::inherit())
+        .status()
+        .unwrap();
+    std::process::exit(status.code().unwrap())
+}
+
+/// An explicit file given as stdout is written by the child's own connection,
+/// so a restricted child cannot write it; an inherited file-backed stream is
+/// written by the authorized parent's relay.
+pub fn test_write_capability_stdio() {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_NET, CAP_SPAWN, MOTOR_OS_CAPS_ENV_KEY};
+    use std::process::{Command, Stdio};
+
+    let restricted = format!("0x{:x}", CAP_SPAWN | CAP_INTERACTIVE | CAP_NET);
+    let dir = crate::temp_path(&format!(
+        "systest-fs-write-cap-stdio-{:016x}",
+        std::random::random::<u64>(..)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let exe = std::env::current_exe().unwrap();
+
+    let direct = dir.join("direct");
+    let status = Command::new(&exe)
+        .args([STDOUT_WRITER_CHILD, "direct\n"])
+        .env(MOTOR_OS_CAPS_ENV_KEY, &restricted)
+        .stdout(Stdio::from(std::fs::File::create(&direct).unwrap()))
+        .status()
+        .unwrap();
+    assert_eq!(Some(STDOUT_DENIED_EXIT), status.code());
+    assert!(std::fs::read(&direct).unwrap().is_empty());
+
+    let output = Command::new(&exe)
+        .args([STDOUT_WRITER_CHILD, "piped\n"])
+        .env(MOTOR_OS_CAPS_ENV_KEY, &restricted)
+        .output()
+        .unwrap();
+    assert_eq!(Some(0), output.status.code());
+    assert_eq!(b"piped\n", output.stdout.as_slice());
+
+    let relayed = dir.join("relayed");
+    let status = Command::new(&exe)
+        .args([STDOUT_RELAY_HELPER, &restricted])
+        .stdout(Stdio::from(std::fs::File::create(&relayed).unwrap()))
+        .status()
+        .unwrap();
+    assert_eq!(Some(0), status.code());
+    assert_eq!(b"relayed\n", std::fs::read(&relayed).unwrap().as_slice());
+
+    std::fs::remove_dir_all(dir).unwrap();
+    println!("fs_permissions::test_write_capability_stdio PASS");
 }

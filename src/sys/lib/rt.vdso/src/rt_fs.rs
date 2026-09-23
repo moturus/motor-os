@@ -308,6 +308,19 @@ impl AsyncFsClient {
             return Err(moto_rt::Error::InvalidArgument);
         }
 
+        // Sys-io refuses modifications without CAP_FS_WRITE; refuse the intent
+        // up front, even for an existing file, before any create or truncate.
+        const WRITE_INTENT: u32 = moto_rt::fs::O_WRITE
+            | moto_rt::fs::O_APPEND
+            | moto_rt::fs::O_TRUNCATE
+            | moto_rt::fs::O_CREATE
+            | moto_rt::fs::O_CREATE_NEW;
+        if (opts & WRITE_INTENT) != 0
+            && (moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_FS_WRITE) == 0
+        {
+            return Err(moto_rt::Error::NotAllowed);
+        }
+
         let path = CanonicalPath::parse(path)?;
 
         let maybe_entry_id = match self.stat_internal(path.clone()) {

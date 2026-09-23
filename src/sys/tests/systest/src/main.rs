@@ -1457,6 +1457,12 @@ fn main() {
     if fs_permissions::is_write_cap_child(&args) {
         fs_permissions::run_write_cap_child(&args);
     }
+    if fs_permissions::is_stdout_writer_child(&args) {
+        fs_permissions::run_stdout_writer_child(&args);
+    }
+    if fs_permissions::is_stdout_relay_helper(&args) {
+        fs_permissions::run_stdout_relay_helper(&args);
+    }
     if fs_permissions::is_none_child(&args) {
         fs_permissions::run_none_child(&args);
     }
@@ -1534,6 +1540,7 @@ fn main() {
     fs_permissions::test_write_capability(
         moto_sys::caps::CAP_INTERACTIVE | moto_sys::caps::CAP_NET,
     );
+    fs_permissions::test_write_capability_stdio();
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
