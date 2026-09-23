@@ -371,16 +371,12 @@ pub(super) fn on_listener_drop(base: &mut SocketBase, listener: &mut ListenerSta
 
 impl NetRuntime {
     fn check_vsock_capability(&self, client_handle: SysHandle) -> Result<(), moto_rt::Error> {
-        let mut inner = self.inner.borrow_mut();
+        let inner = self.inner.borrow();
         let client = inner
             .clients
-            .get_mut(&client_handle)
+            .get(&client_handle)
             .ok_or(moto_rt::Error::NotFound)?;
-        let capabilities = *client
-            .capabilities
-            .get_or_insert_with(|| moto_sys::SysObj::get_capabilities(client_handle));
-        let capabilities = capabilities.map_err(moto_rt::Error::from)?;
-        if capabilities & moto_sys::caps::CAP_VSOCK == 0 {
+        if client.capabilities & moto_sys::caps::CAP_VSOCK == 0 {
             return Err(moto_rt::Error::NotAllowed);
         }
         Ok(())

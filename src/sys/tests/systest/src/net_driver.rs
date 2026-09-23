@@ -2295,4 +2295,5 @@ pub fn run_all_tests() {
     test_sys_io_unavailable_fails_all();
     test_channel_allocation_failure();
     test_pool_runtime_allocation_failure();
+    crate::net_caps::test_admission();
 }

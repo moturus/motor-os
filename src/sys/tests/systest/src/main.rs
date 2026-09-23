@@ -25,6 +25,7 @@ mod mem_blocks;
 mod mmio;
 mod moto_async;
 mod mpmc;
+mod net_caps;
 mod net_driver;
 mod net_harness;
 mod poll;
@@ -1208,6 +1209,8 @@ fn main() {
     if args.len() == 2 && args[1] == "system-caps-tests" {
         spawn_wait_kill::test_system_parent_cannot_grant_unheld();
         fs_permissions::test_write_capability(moto_sys::caps::CAP_SYS);
+        // Nothing listens: an admitted client would see a refusal instead.
+        net_caps::check_denied(9);
         return;
     }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
@@ -1248,6 +1251,12 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "pool-cold-start-child" {
         net_driver::pool_cold_start_child();
+    }
+    if net_caps::is_denied_child(&args) {
+        net_caps::run_denied_child(&args);
+    }
+    if net_caps::is_without_vsock_child(&args) {
+        net_caps::run_without_vsock_child(&args);
     }
     if net_driver::is_vsock_discovery_denied_child(&args) {
         net_driver::run_vsock_discovery_denied_child(args.len() == 3);
