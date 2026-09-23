@@ -806,6 +806,16 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest std
 [ "$out" = "stdio_file_input privileged lifetime tests PASS" ] ||
   fail "privileged stdio lifetime tests: '$out'"
 
+# Rush's explicit-mask precedence over its detach grant needs the same
+# detach-capable mask; the full systest run lacks CAP_SPAWN_DETACHED.
+rush_caps_status=0
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest rush-caps-precedence")" ||
+  rush_caps_status="$?"
+[ "$rush_caps_status" -eq 0 ] ||
+  fail "Rush capability precedence exited with status $rush_caps_status: '$out'"
+[ "$out" = "rush_caps::test_detach_grant_precedence PASS" ] ||
+  fail "Rush capability precedence: '$out'"
+
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
