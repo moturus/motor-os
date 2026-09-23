@@ -533,11 +533,11 @@ rather than parse time, so <code>alias e=echo; e hi</code> works in a single
 <h2>Motor OS specifics</h2>
 <p>A System-role console shell explicitly grants <code>CAP_SYS</code> to the commands it
 runs, because the default spawn rule never propagates System; an Interactive shell's
-commands inherit Interactive by the default rule. A per-command
-<code>MOTOR_OS_CAPS=... command</code> assignment replaces that grant and can narrow the
-child. Programs on rush's detached-spawn list, such as rmux, are started with
-<code>CAP_SPAWN_DETACHED</code> so that they can leave a server running after the session
-ends. Background jobs are started without the terminal input stream, since Motor has no
+commands inherit Interactive by the default rule. Programs on rush's detached-spawn
+list, such as rmux, are started with <code>CAP_SPAWN_DETACHED</code> so that they can leave
+a server running after the session ends. An explicit <code>MOTOR_OS_CAPS</code>, either
+a <code>MOTOR_OS_CAPS=... command</code> assignment or an exported variable, replaces both
+grants unchanged and can narrow the child; the assignment wins over the export. Background jobs are started without the terminal input stream, since Motor has no
 <code>SIGTTIN</code> to stop them from stealing keystrokes, and for the same reason there is
 no interactive job control (<kbd>^Z</kbd>, <code>bg</code>): a foreground command runs until
 it exits or is interrupted. rush re-exports

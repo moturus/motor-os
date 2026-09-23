@@ -1,8 +1,8 @@
 # Network and filesystem-write capabilities
 
-Status: design with review decisions incorporated and an implementation plan
-for review. This document describes the proposed behavior, code boundaries,
-patch sequence, and validation. Implementation has not started.
+Status: implemented, following the plan below. This document describes the
+behavior, code boundaries, patch sequence, and validation as reviewed; see
+[process capabilities](../caps.md) for the resulting policy.
 
 Decisions and instructions incorporated from U. Lasiotus's inline review
 are attributed at the relevant sections below.

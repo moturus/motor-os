@@ -4,9 +4,10 @@ Motor OS exposes virtio-vsock streams through `moto_io::net::vsock`. This is
 a native Rust API. It does not provide libc, Rust `std::net`, mio, or Tokio
 vsock sockets.
 
-The process must have `CAP_VSOCK` (bit 7), granted by an authorized parent.
-Even a System parent must own the capability to grant it. Default inheritance
-and explicit service/shell/application launch masks preserve that restriction.
+The process must have both `CAP_VSOCK` (bit 7) and `CAP_NET` (bit 8), granted
+by an authorized parent. Even a System parent must own each capability to
+grant it. Default inheritance and explicit service/shell/application launch
+masks preserve that restriction. See [process capabilities](caps.md).
 Device failure is permanent; snapshots and reset recovery are unsupported.
 Component fixtures cover terminal failure and ownership, not live VMM reset
 injection.
@@ -95,7 +96,10 @@ to return.
 Errors are native `moto_rt::Error`/`ErrorCode` values; there is no TCP errno
 translation layer.
 
-- Missing `CAP_VSOCK` is `NotAllowed`, checked before device presence.
+- Missing `CAP_NET` means sys-io drops the channel when it accepts it, so
+  every operation fails with `NotConnected`; `connect()` itself may still
+  succeed. With `CAP_NET`, missing `CAP_VSOCK` is `NotAllowed`, checked
+  before device presence.
   No discovered device is `NotFound`, and a syntactically valid non-host
   destination is `NotImplemented`.
 - Invalid CIDs, ports, flags, and request shapes are `InvalidArgument`.
@@ -209,7 +213,8 @@ single-block-device restriction is separate.
 The runtime retains the first discovered vsock device and logs/ignores any
 additional devices without initializing them. Its states are absent, dormant,
 ready, and permanently failed. Authorization precedes activation; trusted peer
-capabilities are queried/cached on first vsock use, with query errors preserved.
+capabilities are queried once when sys-io admits the connection, and a failed
+query drops it.
 Availability validates zero handle, flags, and payload after authorization
 and before presence. It succeeds for dormant/ready, without reading the CID.
 First activation is synchronous on the existing `LocalRuntime`, with no host

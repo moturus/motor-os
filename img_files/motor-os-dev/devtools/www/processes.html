@@ -462,12 +462,17 @@ the kernel maps into every process). The defined bits:</p>
   <tr><td><code>CAP_SHUTDOWN</code></td><td>May halt the machine.</td></tr>
   <tr><td><code>CAP_SPAWN_DETACHED</code></td><td>May create detached children that outlive the parent.</td></tr>
   <tr><td><code>CAP_INTERACTIVE</code></td><td>Acts with the authority of the logged-in user.</td></tr>
+  <tr><td><code>CAP_VSOCK</code></td><td>May use native virtio-vsock streams (with <code>CAP_NET</code>).</td></tr>
+  <tr><td><code>CAP_NET</code></td><td>May use sys-io's network API; without it sys-io drops the connection.</td></tr>
+  <tr><td><code>CAP_FS_WRITE</code></td><td>May modify the filesystem and use file locks; without it, read only.</td></tr>
 </table>
 </div>
 <p>The kernel enforces one rule at spawn: a parent without <code>CAP_SYS</code> may only
 grant a subset of its own capabilities, and never <code>CAP_SYS</code> or
-<code>CAP_IO_MANAGER</code>. A <code>CAP_SYS</code> parent may grant anything. Because a
-capability can never be gained after creation, a process cannot escalate.</p>
+<code>CAP_IO_MANAGER</code>. A <code>CAP_SYS</code> parent may grant anything except
+<code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code>, which every
+parent must hold to pass on. Because a capability can never be gained after creation,
+a process cannot escalate.</p>
 
 <h2>The three roles</h2>
 <p>A role is derived from the capability word: <code>CAP_SYS</code> means
@@ -515,7 +520,9 @@ Interactive parent gets an Interactive child (a shell and the commands it runs),
 system service must say explicitly when it is creating a user session, so that a
 logged-in session cannot appear by accident. A None parent gets a None child. In every
 case the default is intersected with what the parent holds, and <code>CAP_SPAWN</code> is
-included so that children can have children.</p>
+included so that children can have children. <code>CAP_VSOCK</code>, <code>CAP_NET</code>,
+and <code>CAP_FS_WRITE</code> follow whenever the parent holds them, so a restriction
+applies to all descendants.</p>
 
 <h3>How a session gets its role</h3>
 <p>The chain is explicit at every step. sys-init starts sys-tty and russhd with a mask
