@@ -22,19 +22,54 @@ Combine capabilities with bitwise OR (`|`).
 | `CAP_SHUTDOWN` | 4 | `0x10` | Shut down the system. |
 | `CAP_SPAWN_DETACHED` | 5 | `0x20` | Spawn detached children whose lifetime is independent of the spawner. |
 | `CAP_INTERACTIVE` | 6 | `0x40` | Act with the logged-in user's authority, selecting the Interactive role unless `CAP_SYS` is also set. |
-| `CAP_VSOCK` | 7 | `0x80` | Create and listen on native virtio-vsock streams. |
+| `CAP_VSOCK` | 7 | `0x80` | Create and listen on native virtio-vsock streams; also needs `CAP_NET`. |
+| `CAP_NET` | 8 | `0x100` | Use sys-io's network API. |
+| `CAP_FS_WRITE` | 9 | `0x200` | Modify the filesystem and use file locks through sys-io. |
 
 `CAP_SYS` does not imply that the other bits are set. Operations that check
 a particular bit still require it: for example, a System process needs
 `CAP_SPAWN` to create a child address space and `CAP_SHUTDOWN` to shut down.
 Its broader authority applies to granting capabilities at spawn, with the
-`CAP_VSOCK` exception described below.
+`CAP_VSOCK`, `CAP_NET`, and `CAP_FS_WRITE` exceptions described below. It
+does not substitute for `CAP_NET` or `CAP_FS_WRITE` at sys-io either.
 
 `CAP_LOG` does not grant direct filesystem access to `/system/logs`.
 That access is governed by filesystem permissions. Logging through the
 kernel or strobe and ordinary stdout/stderr output are separate mechanisms.
 See [kernel logs](kernel-logs.md) and the [native vsock API](vsock.md) for
 details of those services.
+
+## Network and filesystem-write access
+
+Sys-io authorizes the actual connected peer, using the capability word the
+kernel reports for the connection; nothing a client sends can widen it.
+
+Without `CAP_NET`, sys-io drops a network connection when it accepts it,
+before serving any request. This covers TCP, UDP, ICMP, loopback, and vsock,
+including discovery. The IPC connect itself can succeed, so the denial shows
+up as a disconnected channel rather than `NotAllowed`: native network RPCs
+fail with `NotConnected`, and a raw `io_channel` client sees its channel
+close, even if it never sends a request. `CAP_VSOCK` alone therefore grants
+nothing; vsock needs both bits.
+
+Without `CAP_FS_WRITE`, a process still connects to the filesystem and reads
+under its role's permissions: stat, read, metadata, and directory listing.
+Every other request fails with `NotAllowed` (`PermissionDenied` in `std`),
+and the connection stays usable. That includes creating, writing, resizing,
+copying into, deleting, moving, and changing permissions of entries,
+flushing the filesystem, and all file-lock operations, including unlock.
+Denying lock operations is a provisional policy, fixed for now. The runtime
+also refuses opens with write, append, create, or truncate intent, even of an
+existing file. `CAP_FS_WRITE` does not override filesystem permissions: a
+modification needs both the capability and the role's permission.
+
+These checks follow the process that talks to sys-io. A file handed to a child
+as a standard stream with `Stdio::from(file)` is used through the child's own
+connection, so a child without `CAP_FS_WRITE` cannot write to it; `std`'s
+`Stdout` and `Stderr` report every write error as success on Motor OS, so
+such output is silently lost rather than failing. A child that
+inherits a file-backed standard stream writes through its parent's relay,
+with the parent's authority. Pipes carry no filesystem authority at all.
 
 ## Process roles and filesystem permissions
 
@@ -68,7 +103,8 @@ The kernel validates the requested child mask in
 - A None-role parent may not grant `CAP_LOG`, even if it holds that bit.
   An Interactive parent can explicitly pass on `CAP_LOG` when it holds it.
 - A System parent may grant capabilities it does not itself hold, except
-  `CAP_VSOCK`. Every parent must hold `CAP_VSOCK` to grant it.
+  `CAP_VSOCK`, `CAP_NET`, and `CAP_FS_WRITE`. Every parent must hold each of
+  these to grant it, so a process can only narrow them for its descendants.
 - Spawning a detached child additionally requires the **parent** to hold
   `CAP_SPAWN_DETACHED`, including when the parent is System.
 
@@ -84,9 +120,9 @@ When no explicit mask is provided, the
 
 | Parent's derived role | Default child mask |
 | --- | --- |
-| `System` | `CAP_SPAWN` and `CAP_LOG`, plus `CAP_VSOCK` if the parent holds it. |
-| `Interactive` | `CAP_INTERACTIVE`, plus `CAP_SPAWN` and `CAP_VSOCK` when the parent holds those bits. |
-| `None` | Only the parent's `CAP_SPAWN` and `CAP_VSOCK` bits. |
+| `System` | `CAP_SPAWN` and `CAP_LOG`, plus each of `CAP_VSOCK`, `CAP_NET`, and `CAP_FS_WRITE` the parent holds. |
+| `Interactive` | `CAP_INTERACTIVE`, plus each of `CAP_SPAWN`, `CAP_VSOCK`, `CAP_NET`, and `CAP_FS_WRITE` the parent holds. |
+| `None` | Only the parent's `CAP_SPAWN`, `CAP_VSOCK`, `CAP_NET`, and `CAP_FS_WRITE` bits. |
 
 Defaults from non-System parents are always restricted to bits the parent
 holds. Computing a default mask does not bypass the parent's own spawn
@@ -101,6 +137,15 @@ These are runtime defaults. Launchers can select explicit masks: sys-init
 does so for configured services, and Rush explicitly preserves System
 authority for ordinary commands launched by a System shell. Rush also has a
 `spawn-detached` policy for passing detach authority to trusted programs.
+These launch chains pass on `CAP_NET` and `CAP_FS_WRITE` where they hold
+them. Services get only what they need: the shipped configuration gives the
+DNS resolver `CAP_NET` but not `CAP_FS_WRITE`, and strobe the reverse.
+
+An explicit `MOTOR_OS_CAPS` for a Rush command, as a command assignment or
+an exported variable, suppresses both of Rush's automatic grants and reaches
+the runtime unchanged. A command assignment wins over an exported value. For
+example, `MOTOR_OS_CAPS=0x2ec rmux` runs rmux without `CAP_NET` and without
+Rush's detach grant being applied on top.
 
 ### Explicit mask with `std::process::Command`
 
@@ -126,8 +171,10 @@ fn spawn_worker(program: &str) -> std::io::Result<Child> {
 ```
 
 An explicit mask is a replacement, not an addition: omitting
-`CAP_INTERACTIVE` drops Interactive authority; omitting `CAP_VSOCK` denies
-vsock access even if the parent holds it. The runtime consumes
+`CAP_INTERACTIVE` drops Interactive authority; omitting `CAP_VSOCK`,
+`CAP_NET`, or `CAP_FS_WRITE` denies that access even if the parent holds it.
+The worker above therefore can read files but neither write them nor use
+the network. The runtime consumes
 `MOTOR_OS_CAPS`, so the child does not receive this environment variable.
 The child's later spawns use their own defaults or explicit masks.
 

@@ -325,12 +325,17 @@ pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
         ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
         ProcessRole::None => {}
     }
+    child_caps |= parent_caps & PARENT_OWNED_CAPS;
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
     }
     child_caps
 }
 ```
+
+`PARENT_OWNED_CAPS` is `CAP_VSOCK | CAP_NET | CAP_FS_WRITE`: these follow by
+default whenever the parent holds them, whatever its role, and the kernel lets
+no parent, System included, grant one it lacks (see [caps](caps.md)).
 
 Semantics:
 
@@ -466,45 +471,53 @@ ordinary descendants of an Interactive process, but every explicit
 1. **sys-init → sys-tty** (`sys-init/src/main.rs`, the tty spawn): accepts
    legacy `tty:COMMAND` as Interactive and `tty:ROLE:COMMAND` for `system`,
    `interactive`, or `none`. Its explicit replacement mask is the fixed
-   `CAP_IO_MANAGER | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED` operational set
-   plus the selected role bit. The config cannot omit an operational bit or
-   provide a numeric mask.
+   `CAP_IO_MANAGER | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED` operational set,
+   sys-init's own `CAP_VSOCK | CAP_NET | CAP_FS_WRITE` bits, and the selected
+   role bit. The config cannot omit an operational bit or provide a numeric
+   mask.
 2. **sys-tty → console rush** (`sys-tty/src/main.rs`): derives its own role and
    passes the matching role bit with `CAP_SPAWN | CAP_LOG |
-   CAP_SPAWN_DETACHED`. It does not pass `CAP_IO_MANAGER`; the console manager
-   and command have the same role but distinct operational authority.
+   CAP_SPAWN_DETACHED` and its own `CAP_VSOCK | CAP_NET | CAP_FS_WRITE` bits.
+   It does not pass `CAP_IO_MANAGER`; the console manager and command have the
+   same role but distinct operational authority.
 3. **russhd → ssh session shell** (`russhd/src/local_session.rs:200–217`):
    includes `CAP_INTERACTIVE` in the intersection mask
-   (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE}` ∩ own caps).
+   (`{CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_VSOCK, CAP_NET,
+   CAP_FS_WRITE, CAP_INTERACTIVE}` ∩ own caps).
    Because russhd is not `CAP_SYS`, the subset rule means **russhd itself must
    hold each bit** to pass it on. This explicit trust-boundary grant is why the
    shell holds `CAP_LOG`; its unadorned commands do not inherit that bit:
 4. **Both shipped sys-init configs**:
    `img_files/motor-os/system/cfg/sys-init.cfg` and
    `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
-   `124` (`60 | 64`). dns-resolver (`svc:8`) stays role None. sys-init launches
-   strobe separately with `CAP_SYS | CAP_LOG`; this makes strobe the only
-   process that writes and rotates `/system/logs` while leaving its public
-   stats-registry channel available to lower roles.
+   `1020` (`252 | CAP_NET | CAP_FS_WRITE`): it serves SSH and writes files for
+   SFTP. dns-resolver (`svc:264`, `CAP_LOG | CAP_NET`) stays role None and
+   cannot modify the filesystem. sys-init launches strobe separately with
+   `CAP_SYS | CAP_LOG | CAP_FS_WRITE` and no network access; this makes strobe
+   the only process that writes and rotates `/system/logs` while leaving its
+   public stats-registry channel available to lower roles.
 5. **sys-init zero-mask semantics** (`sys-init/src/main.rs`, `spawn_service`):
    because the documented `svc:<caps>:<cmd>` grammar requires a mask, sys-init
    always sets `MOTOR_OS_CAPS` for a parsed service, including `0`, and rejects
    a missing or malformed mask rather than silently selecting the vdso default.
    This corrects the pre-implementation mismatch noted in §2.
 6. **rush command policy** (`rush/src/sys/motor.rs`): a System rush explicitly
-   grants `CAP_SYS | CAP_SPAWN | CAP_LOG` from its own mask to ordinary external
-   commands, because the global spawn default intentionally does not propagate
-   System. An explicit per-command `MOTOR_OS_CAPS` assignment replaces that
-   ordinary grant and may narrow the child. Rush-compatible shebang scripts run
-   in-process and retain the shell's role. **Rush trusted detached spawn**
-   (`detach_cap_grant`) sets `MOTOR_OS_CAPS`, so it does *not* receive
-   the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE` according
-   to the shell's derived role while adding `CAP_SPAWN_DETACHED`; otherwise a
-   trusted session daemon would be silently demoted.
+   grants `CAP_SYS | CAP_SPAWN | CAP_LOG | CAP_VSOCK | CAP_NET | CAP_FS_WRITE`
+   from its own mask to ordinary external commands, because the global spawn
+   default intentionally does not propagate System. Rush-compatible shebang
+   scripts run in-process and retain the shell's role. **Rush trusted detached
+   spawn** (`detach_cap_grant`) sets `MOTOR_OS_CAPS`, so it does *not* receive
+   the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE`
+   according to the shell's derived role while adding `CAP_SPAWN_DETACHED`;
+   otherwise a trusted session daemon would be silently demoted. An explicit
+   `MOTOR_OS_CAPS`, from a command assignment or the exported environment,
+   suppresses both grants and passes through unchanged, so it may narrow the
+   child; a command assignment wins over an exported value (`jobs::spawn`).
 7. **Tests and scripts with literal masks**: full systest and soak invocations
-   use `0x4c` (`CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE`) because the suite tests
-   the logging service. The focused lifetime path in `src/tests/full-test.sh`
-   keeps `0x6c` to add detached-spawn authority. Explicit test masks preserve
+   use `0x3cc` (`CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET |
+   CAP_FS_WRITE`) because the suite tests the logging service. The focused
+   lifetime and Rush-precedence paths in `src/tests/full-test.sh` use `0x3ec`
+   to add detached-spawn authority. Explicit test masks preserve
    the caller's Interactive bit when testing inheritance, or omit it with a
    comment when deliberate demotion is part of the test. The existing
    `CAP_SYS` escalation test deliberately remains unchanged.
