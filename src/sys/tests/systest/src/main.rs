@@ -1207,6 +1207,7 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "system-caps-tests" {
         spawn_wait_kill::test_system_parent_cannot_grant_unheld();
+        fs_permissions::test_write_capability(moto_sys::caps::CAP_SYS);
         return;
     }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
@@ -1453,6 +1454,9 @@ fn main() {
         fs::verify_pattern_file(&args[2], args[3].parse().unwrap(), &args[4]);
         return;
     }
+    if fs_permissions::is_write_cap_child(&args) {
+        fs_permissions::run_write_cap_child(&args);
+    }
     if fs_permissions::is_none_child(&args) {
         fs_permissions::run_none_child(&args);
     }
@@ -1527,6 +1531,9 @@ fn main() {
     virtio::run_tests();
     virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();
+    fs_permissions::test_write_capability(
+        moto_sys::caps::CAP_INTERACTIVE | moto_sys::caps::CAP_NET,
+    );
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     execute_permissions::run_all_tests();
