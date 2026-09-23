@@ -44,6 +44,25 @@ pub const CAP_INTERACTIVE: u64 = 1 << 6;
 /// and [`CAP_SYS`] does not allow a parent to grant it without holding it.
 pub const CAP_VSOCK: u64 = 1 << 7;
 
+/// The process may use sys-io's network API; sys-io drops a peer without it.
+/// Native vsock access needs both this bit and [`CAP_VSOCK`].
+///
+/// Inherited by default when held. Like [`CAP_VSOCK`], every parent, including
+/// a [`CAP_SYS`] one, must hold it to grant it.
+pub const CAP_NET: u64 = 1 << 8;
+
+/// The process may modify the filesystem and use file locks through sys-io.
+/// Without it, sys-io serves only reads, and the runtime refuses write-intent
+/// opens. It does not override filesystem permissions.
+///
+/// Inherited by default when held. Like [`CAP_VSOCK`], every parent, including
+/// a [`CAP_SYS`] one, must hold it to grant it.
+pub const CAP_FS_WRITE: u64 = 1 << 9;
+
+/// Capabilities a child may receive only from a parent that holds them,
+/// whatever the parent's role. They are inherited by default when held.
+pub const PARENT_OWNED_CAPS: u64 = CAP_VSOCK | CAP_NET | CAP_FS_WRITE;
+
 /// Filesystem-facing process privilege role.
 ///
 /// The discriminants match `async_fs::Role` and the process-stats encoding.
@@ -72,8 +91,9 @@ impl ProcessRole {
 ///
 /// Interactive authority follows an Interactive parent. System authority never
 /// follows implicitly. System grants logging authority by default; lower roles
-/// do not. Defaults from non-System parents are restricted to capabilities the
-/// parent actually holds.
+/// do not. [`PARENT_OWNED_CAPS`] follow when the parent holds them. Defaults
+/// from non-System parents are restricted to capabilities the parent actually
+/// holds.
 pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
     let role = ProcessRole::from_caps(parent_caps);
     let mut child_caps = CAP_SPAWN;
@@ -82,9 +102,7 @@ pub const fn default_child_capabilities(parent_caps: u64) -> u64 {
         ProcessRole::Interactive => child_caps |= CAP_INTERACTIVE,
         ProcessRole::None => {}
     }
-    if parent_caps & CAP_VSOCK != 0 {
-        child_caps |= CAP_VSOCK;
-    }
+    child_caps |= parent_caps & PARENT_OWNED_CAPS;
     if !matches!(role, ProcessRole::System) {
         child_caps &= parent_caps;
     }
@@ -123,7 +141,7 @@ mod tests {
     fn default_child_caps_keep_logging_grantor_controlled() {
         let system_default = CAP_SPAWN | CAP_LOG;
         assert_eq!(
-            system_default | CAP_VSOCK,
+            system_default | PARENT_OWNED_CAPS,
             default_child_capabilities(u64::MAX)
         );
         assert_eq!(system_default, default_child_capabilities(CAP_SYS));
@@ -134,5 +152,30 @@ mod tests {
         assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN | CAP_LOG));
         assert_eq!(CAP_SPAWN, default_child_capabilities(CAP_SPAWN));
         assert_eq!(0, default_child_capabilities(0));
+    }
+
+    #[test]
+    fn default_child_caps_inherit_net_and_fs_write_only_when_held() {
+        let system = CAP_SYS | CAP_SPAWN | CAP_SPAWN_DETACHED | CAP_INTERACTIVE;
+        let system_default = CAP_SPAWN | CAP_LOG;
+        for bits in [0, CAP_NET, CAP_FS_WRITE, CAP_NET | CAP_FS_WRITE] {
+            let child = default_child_capabilities(system | bits);
+            assert_eq!(system_default | bits, child);
+            assert_eq!(ProcessRole::None, ProcessRole::from_caps(child));
+
+            let interactive = CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE;
+            let child = default_child_capabilities(interactive | CAP_VSOCK | bits);
+            assert_eq!(CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK | bits, child);
+            assert_eq!(
+                CAP_SPAWN | CAP_INTERACTIVE | bits,
+                default_child_capabilities(interactive | bits)
+            );
+
+            assert_eq!(bits, default_child_capabilities(CAP_LOG | bits));
+            assert_eq!(
+                CAP_SPAWN | CAP_VSOCK | bits,
+                default_child_capabilities(CAP_SPAWN | CAP_LOG | CAP_VSOCK | bits)
+            );
+        }
     }
 }
