@@ -73,6 +73,21 @@ fn detach_grant_for(program: &str) -> Option<(&'static str, String)> {
     }
 }
 
+/// `grant`, unless the command assigns its key or the shell exports it.
+///
+/// An explicit mask is the complete request: it passes through unchanged, even
+/// zero or malformed (the runtime and kernel validate it), and suppresses the
+/// automatic grant rather than merging with it. A command assignment reaches
+/// the child over an exported value through `Command::env`.
+fn unless_explicit(
+    grant: Option<(&'static str, String)>,
+    env: &[(String, String)],
+) -> Option<(&'static str, String)> {
+    let (key, val) = grant?;
+    let explicit = env.iter().any(|(name, _)| name == key) || std::env::var_os(key).is_some();
+    (!explicit).then_some((key, val))
+}
+
 // ---- child stdio ------------------------------------------------------------
 
 /// A child's standard input: inherited, empty, or piped and fed by us.
@@ -138,16 +153,10 @@ pub fn spawn(
         cmd.env(k, v);
     }
 
-    if let Some((key, val)) = sys::ordinary_child_cap_grant()
-        && !env.iter().any(|(name, _)| name == key)
-    {
-        cmd.env(key, val);
-    }
-
-    // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED.
-    // Set after the env loop so a stray MOTOR_OS_CAPS in the shell environment
-    // cannot override the grant.
-    if let Some((key, val)) = detach_grant_for(program) {
+    // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED;
+    // otherwise a System shell's ordinary grant applies.
+    let grant = detach_grant_for(program).or_else(sys::ordinary_child_cap_grant);
+    if let Some((key, val)) = unless_explicit(grant, env) {
         cmd.env(key, val);
     }
 
@@ -561,5 +570,29 @@ impl Jobs {
         (0..self.jobs.len())
             .filter(|&i| self.jobs[i].done().is_none())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unless_explicit;
+
+    #[test]
+    fn explicit_caps_suppress_the_automatic_grant() {
+        const KEY: &str = "RUSH_TEST_UNLESS_EXPLICIT_CAPS";
+        let grant = || Some((KEY, "0x3ec".to_string()));
+        assert_eq!(unless_explicit(grant(), &[]), grant());
+        assert_eq!(unless_explicit(None, &[]), None);
+
+        for val in ["0x44", "0", "not-hex"] {
+            let assigned = [(KEY.to_string(), val.to_string())];
+            assert_eq!(unless_explicit(grant(), &assigned), None);
+        }
+
+        // SAFETY: KEY is private to this test.
+        unsafe { std::env::set_var(KEY, "0x4") };
+        assert_eq!(unless_explicit(grant(), &[]), None);
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(unless_explicit(grant(), &[]), grant());
     }
 }
