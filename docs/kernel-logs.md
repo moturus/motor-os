@@ -88,8 +88,13 @@ sys-tty.
 4. Keyboard input is never delayed by output.
 5. Logging remains best-effort. Losses sys-tty detects are marked when
    possible, but a successful UART write or strobe RPC is not a durability
-   guarantee, and no logging path retries, re-routes queued records, or waits
-   to avoid a loss.
+   guarantee. Queued records are never re-routed. Under memory pressure,
+   sys-io refuses strobe's writes for the whole episode by design, so strobe
+   holds a bounded backlog per connection until the kernel clears the flag,
+   then writes it out and counts what did not fit. Other write and flush
+   failures lose the record on ordinary tags and switch `kernel.log` off. A
+   failed file creation or rotation step is retried once a second: forever
+   for `kernel.log`, ten times for other files, which are then switched off.
 6. In file mode, every kernel record sys-tty receives is offered byte-for-byte
    to `/system/logs/kernel.log`, readable by an Interactive ssh session.
    Classification never filters or rewrites the file copy. Only structurally
@@ -297,7 +302,7 @@ sys-tty does not write `/system/logs` itself, for three reasons:
   (`docs/tools.md`, `docs/process-roles.md` section 5) and asserted by
   systest (`src/sys/tests/systest/src/logging.rs:378-380`);
 - strobe already has the file creation with the right permissions
-  (`src/sys/strobe/src/io_thread.rs:10-82`); a second copy is a second thing
+  (`src/sys/strobe/src/io_thread.rs:14-94`); a second copy is a second thing
   to keep right.
 
 So in file mode sys-tty is a strobe client with the reserved tag `kernel`,
@@ -321,12 +326,31 @@ the RPCs; nothing else blocks on strobe.
   validation stay unchanged.
 - **Success semantics.** A successful raw RPC means strobe accepted the bytes
   into its bounded in-process I/O queue; it does not promise that a later
-  write, flush, or rotation reached storage. Strobe writes and flushes each
-  raw request best-effort. On its first file I/O failure it disables that
-  connection's file and emits one best-effort diagnostic rather than creating
-  a feedback loop. The existing flush policy for ordinary strobe records is
-  unchanged;
-  this feature defines only the raw kernel path.
+  write, flush, or rotation reached storage. Strobe keeps every connection's
+  records in order in a 64 KiB backlog and drains it after each record, at a
+  100 ms deadline while anything is held or the file is not open yet (one
+  deadline for all connections, so a busy one cannot postpone a quiet one),
+  and once more when the connection closes. What that last drain cannot
+  write is discarded, and one kernel-log line says how many records of which
+  tag were lost; the "stopped log" line is written only when nothing was
+  lost. A drain is not attempted while the kernel's memory-pressure flag is
+  up, because sys-io refuses every request then; a full backlog keeps what
+  it has and counts the newcomers, and the count is written after the
+  backlog as `[kernel log: N messages dropped due to memory pressure]` (a
+  WARN record with the same text for ordinary tags). A write that fails
+  leaves its unwritten bytes at the front for the next drain, so nothing is
+  written twice, and the flush is repeated on its own when it was refused.
+  Empty raw requests are no-ops. Ordinary ERROR and WARN records request a
+  flush; INFO, DEBUG and TRACE records do not. Raw records and lifecycle
+  headers request a flush. Holding a record preserves its flush request.
+  Any other write error loses the record on an ordinary tag, and a flush
+  error is not repeated; the file stays in use, as before the backlog. On
+  `kernel.log` such an error switches the file off: its pending records are
+  discarded, one kernel-log diagnostic counts them, and later submissions do
+  not attempt file I/O. A failed rotation step keeps its phase and is
+  retried by the first drain at least one second later; the first failure
+  is reported once. `kernel.log` retries without limit; any other tag's
+  file is switched off the same way after ten failed retries.
 - **File.** The fixed name is `/system/logs/kernel.log`, with the permissions
   of every strobe log: Interactive may read it. Strobe's "started log" header
   carries UTC; sys-tty's first raw request records the boot-relative timestamp
@@ -340,9 +364,14 @@ the RPCs; nothing else blocks on strobe.
   renamed to `.prev`, replacing the previous generation, and a new file is
   created. This adds to rotate-on-reconnect and keeps roughly 8 MiB across the
   current and previous generations of each tag
-  (`src/sys/strobe/src/io_thread.rs:112-215`).
-  Rotation failure keeps the current file when possible, disables further
-  rotation for that connection, and reports one best-effort diagnostic. Cost:
+  (`src/sys/strobe/src/io_thread.rs:371-413`).
+  Rotation is three steps, rename, create with the log permissions (over a
+  fresh sys-io connection), and open, and strobe records how far it got: a
+  step that fails is repeated later (see the retry rule above) and nothing is
+  rolled back. No record is written while a rotation is under way, so the
+  old file never passes the size limit; records wait in the backlog until
+  the replacement is open. The first open of a tag runs the same steps,
+  moving a previous file of the tag aside. Cost:
   one rename and one create per 4 MiB. Without a cap, a debug build under
   network load writes `kernel.log` at roughly 200 KiB/s per thousand TCP
   segments per second (sys-io logs two or three DEBUG lines per data segment,
@@ -352,7 +381,7 @@ the RPCs; nothing else blocks on strobe.
 - **Disk-space rule.** Whenever strobe creates a log file -- at connection start
   and at rotation -- it first reads the filesystem's available bytes the way
   `df` does: sys-io's `fs.available_bytes` metric through
-  `moto_stats::Collector` (`src/sys/strobe/src/io_thread.rs:20-57`). If fewer
+  `moto_stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
   than 50 MiB are available, strobe deletes `.prev` files in
   `/system/logs`, oldest first by the `modified` time `FsClient::metadata`
   reports, until 50 MiB are available or none remain. A live `.log` is never
@@ -384,9 +413,11 @@ the RPCs; nothing else blocks on strobe.
   mode, drops its queue (counted), prints one notice with the count through
   the writer, and does not reconnect. All later records use console mode.
   There are no automatic retries.
-- **A write fails after strobe accepted it.** The record may be absent from
-  the file and cannot be recovered by sys-tty; this is part of the chosen
-  best-effort logging contract. Strobe's one diagnostic is the only notice.
+- **A write fails after strobe accepted it.** A pressure refusal keeps the
+  unwritten bytes for the next drain; records that arrive while the backlog
+  is full are counted as dropped. Any other write or flush failure switches
+  `kernel.log` off and discards its pending records, with one diagnostic. No
+  later record on that connection re-enables the file.
 - **Kernel panic.** Unchanged: the kernel writes raw serial.
 - **sys-tty exit.** Shutdown does not wait indefinitely for a blocked
   forwarder or claim that its queue was flushed. Process teardown drops the
@@ -550,6 +581,28 @@ File mode, using the shipped `kernel-log:strobe` configuration:
 - rotation: native systest pushes `kernel.log` past 4 MiB and leaves
   `kernel.log.prev` plus a bounded `kernel.log`; it separately floods an
   ordinary tag past the same boundary and checks both files;
+- memory pressure: native systest fills its own tag to 32 KiB below the
+  rotation size, holds the pressure flag with the squeeze child of the
+  pressure tests, sends 64 records of 3 KiB and a few kernel records
+  meanwhile, and after recovery watches strobe's own drain while logging
+  continuously on a second tag from a separate thread: each held record is
+  written exactly once, to the rotated-out or the new file, or counted in
+  the dropped-messages line;
+  the drain rotated the file within the cap; the kernel records land after
+  this episode's first marker in `kernel.log`; and both files keep working. A
+  rotation interrupted between its steps needs the flag to rise between two
+  requests, which no test can arrange without an injection point, so that
+  path is covered by inspection only;
+- strobe's native I/O self-test covers empty raw records, short writes and
+  pressure refusals without replay, the flush levels, and draining a
+  backlog before the disconnect record. A permanent write failure switches
+  `kernel.log` off even when the failure happens in a drain with no new
+  submission, while an ordinary tag loses only the refused record. A
+  rotation whose first step fails (a non-empty directory in place of
+  `.prev`) writes nothing more into the full file, waits a second between
+  retries, and switches an ordinary tag off after ten of them while
+  `kernel.log` keeps retrying; a file that is not open yet keeps the drain
+  deadline armed;
 - disk-space rule: a focused native systest fills the data partition with one
   temporary file until `fs.available_bytes` is below 50 MiB, floods its own
   tag past 4 MiB, checks that the oldest `.prev` is gone, and removes the
