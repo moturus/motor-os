@@ -233,9 +233,7 @@ pub async fn spawn(
                 & (moto_sys::caps::CAP_SPAWN
                     | moto_sys::caps::CAP_LOG
                     | moto_sys::caps::CAP_SPAWN_DETACHED
-                    | moto_sys::caps::CAP_VSOCK
-                    | moto_sys::caps::CAP_NET
-                    | moto_sys::caps::CAP_FS_WRITE
+                    | moto_sys::caps::PARENT_OWNED_CAPS
                     | moto_sys::caps::CAP_INTERACTIVE)
         ),
     );

@@ -52,6 +52,11 @@ fail with `NotConnected`, and a raw `io_channel` client sees its channel
 close, even if it never sends a request. `CAP_VSOCK` alone therefore grants
 nothing; vsock needs both bits.
 
+The DNS resolver independently checks its IPC peer for `CAP_NET`, returning
+`NotAllowed` (`PermissionDenied` through `std`) when it is absent. A caller
+cannot borrow the resolver's network authority. Numeric address parsing and
+the runtime's local `localhost` mapping do not require this capability.
+
 Without `CAP_FS_WRITE`, a process still connects to the filesystem and reads
 under its role's permissions: stat, read, metadata, and directory listing.
 Every other request fails with `NotAllowed` (`PermissionDenied` in `std`),
@@ -62,6 +67,9 @@ Denying lock operations is a provisional policy, fixed for now. The runtime
 also refuses opens with write, append, create, or truncate intent, even of an
 existing file. `CAP_FS_WRITE` does not override filesystem permissions: a
 modification needs both the capability and the role's permission.
+Without `CAP_FS_WRITE`, `Write::flush` on a read-only `File` is a no-op;
+flushing a writable file is denied. Processes with `CAP_FS_WRITE` retain the
+native global filesystem flush, including through read-only file handles.
 
 These checks follow the process that talks to sys-io. A file handed to a child
 as a standard stream with `Stdio::from(file)` is used through the child's own

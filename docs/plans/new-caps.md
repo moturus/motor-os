@@ -161,6 +161,13 @@ setup and command-line expansion behavior.
 
 ## Network API admission
 
+Follow-up: the DNS resolver is another network service boundary. It must check
+the kernel-reported capabilities of its sync IPC peer before resolving a
+request, since its own sockets are authorized with its own `CAP_NET`.
+Unauthorized requests return `NotAllowed`; numeric/localhost parsing that
+does not contact the resolver remains available. The resolver self-test covers
+raw IPC and `std::net::ToSocketAddrs` denial without issuing network queries.
+
 The network endpoint is `"sys-io"`. Its server is `NetRuntime::net_listener`
 in [`runtime/net.rs`](../../src/sys/sys-io/src/runtime/net.rs). Currently,
 the listener admits a channel into `clients` after resource checks, while
@@ -341,8 +348,12 @@ stream instead goes through `prepare_inherited_stdio`, which creates a
 parent-side relay using the parent's FS connection and capabilities.
 
 Rush passes a solely-used redirect target as an explicit file. Thus
-`restricted_cmd > out.txt` fails at the child's writes with
-`PermissionDenied` once the FS gate lands. The shell can still create or
+`restricted_cmd > out.txt` is denied at the child's filesystem writes with
+`NotAllowed` (`PermissionDenied`). The current Motor stdlib suppresses stdout
+and stderr errors, so Rust printing can silently lose output and exit zero;
+this is an error-reporting defect, not permission to write. Native write-error
+checks cover the actual denial while the external stdlib fix is tracked
+separately. The shell can still create or
 truncate `out.txt` before spawning the child; those are the shell's own
 operations. `restricted_cmd < in.txt` remains readable under the usual
 permissions, and pipe-backed output remains usable. An inherited file relay

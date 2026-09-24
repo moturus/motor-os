@@ -109,6 +109,14 @@ fn process(server: &mut LocalServer, waker: SysHandle) {
     }
 
     let request_id = conn.req::<LookupRequest>().request_id;
+    // The resolver uses its own sockets, so sys-io cannot authorize its caller.
+    if !moto_sys::SysObj::get_capabilities(conn.handle())
+        .is_ok_and(|caps| caps & moto_sys::caps::CAP_NET != 0)
+    {
+        write_response(conn, request_id, moto_rt::E_NOT_ALLOWED, None);
+        let _ = conn.finish_rpc();
+        return;
+    }
     let request = conn.req::<LookupRequest>();
     let validated = validate_request(request).map(|(name, family)| (name.to_vec(), family));
     match validated {
@@ -471,6 +479,53 @@ fn ipc_self_test(mut client: Client) {
     println!("dns-resolver self-test PASS");
 }
 
+fn capability_test_child() {
+    use std::net::ToSocketAddrs;
+
+    let allowed = moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_NET != 0;
+    let direct = Client::connect()
+        .unwrap()
+        .lookup("127.0.0.1", AddressFamily::V4);
+    // The trailing dot forces std through IPC, then the resolver recognizes the
+    // numeric address locally. Neither the allowed nor denied case sends DNS.
+    let through_std = ("127.0.0.1.", 80).to_socket_addrs();
+    if allowed {
+        assert_eq!(direct.unwrap().addresses.len(), 1);
+        assert_eq!(
+            through_std.unwrap().next().unwrap(),
+            "127.0.0.1:80".parse().unwrap()
+        );
+    } else {
+        assert!(
+            matches!(direct, Err(ClientError::Transport(moto_rt::E_NOT_ALLOWED))),
+            "denied DNS lookup: {direct:?}"
+        );
+        assert_eq!(
+            through_std.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    // Local numeric/localhost parsing does not need the service or CAP_NET.
+    for host in ["127.0.0.1", "localhost"] {
+        assert_eq!(
+            (host, 80).to_socket_addrs().unwrap().next().unwrap(),
+            "127.0.0.1:80".parse().unwrap()
+        );
+    }
+}
+
+fn capability_self_test() {
+    for caps in [0, moto_sys::caps::CAP_NET] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--test-capability-child")
+            .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("{caps:#x}"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "DNS capability child {caps:#x}: {status}");
+    }
+    println!("dns-resolver capability test PASS");
+}
+
 fn main() {
     let mut args = std::env::args();
     let _program = args.next();
@@ -479,10 +534,13 @@ fn main() {
         Some("--self-test") if args.next().is_none() => {
             // Wait only for service discovery, never retry failed assertions.
             let client = connect_with_retry();
+            capability_self_test();
             resolver_policy_self_test();
             bridge_self_test();
             ipc_self_test(client);
         }
+        Some("--test-capabilities") if args.next().is_none() => capability_self_test(),
+        Some("--test-capability-child") if args.next().is_none() => capability_test_child(),
         _ => {
             eprintln!("usage: dns-resolver [--self-test]");
             std::process::exit(2);

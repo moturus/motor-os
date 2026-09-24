@@ -93,9 +93,7 @@ pub fn ordinary_child_cap_grant() -> Option<(&'static str, String)> {
         & (moto_sys::caps::CAP_SYS
             | moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_LOG
-            | moto_sys::caps::CAP_VSOCK
-            | moto_sys::caps::CAP_NET
-            | moto_sys::caps::CAP_FS_WRITE);
+            | moto_sys::caps::PARENT_OWNED_CAPS);
     Some((
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!("0x{child:x}"),
@@ -123,9 +121,7 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
         & (moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_LOG
             | moto_sys::caps::CAP_SPAWN_DETACHED
-            | moto_sys::caps::CAP_VSOCK
-            | moto_sys::caps::CAP_NET
-            | moto_sys::caps::CAP_FS_WRITE
+            | moto_sys::caps::PARENT_OWNED_CAPS
             | role_cap);
     Some((
         moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,

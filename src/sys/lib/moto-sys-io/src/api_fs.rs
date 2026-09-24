@@ -40,6 +40,21 @@ pub fn known_cmd(cmd: u16) -> bool {
     (CMD_STAT..=CMD_STAT_PATH).contains(&cmd)
 }
 
+/// Commands allowed without CAP_FS_WRITE. New commands require it unless
+/// explicitly added here; keep authorization beside the protocol definitions.
+pub fn is_read_command(cmd: u16) -> bool {
+    matches!(
+        cmd,
+        CMD_STAT
+            | CMD_STAT_PATH
+            | CMD_READ
+            | CMD_METADATA
+            | CMD_GET_FIRST_ENTRY
+            | CMD_GET_NEXT_ENTRY
+            | CMD_GET_NAME
+    )
+}
+
 /// The `shared_pages` slot in which a single-page request or response
 /// carries its io_page index. One name across every encoder, decoder, and
 /// `release_donated_pages`, so the layout cannot drift between them.

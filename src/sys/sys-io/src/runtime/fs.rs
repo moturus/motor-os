@@ -547,21 +547,6 @@ fn served_under_pressure(msg: &moto_ipc::io_channel::Msg) -> bool {
             .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK)
 }
 
-/// The commands a client without `CAP_FS_WRITE` may issue. An allowlist, so a
-/// new command stays denied to such clients until deliberately classified.
-fn is_read_command(cmd: u16) -> bool {
-    matches!(
-        cmd,
-        api_fs::CMD_STAT
-            | api_fs::CMD_STAT_PATH
-            | api_fs::CMD_READ
-            | api_fs::CMD_METADATA
-            | api_fs::CMD_GET_FIRST_ENTRY
-            | api_fs::CMD_GET_NEXT_ENTRY
-            | api_fs::CMD_GET_NAME
-    )
-}
-
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: channel_budget::ClientSender,
@@ -572,7 +557,7 @@ async fn on_msg(
     // The capability gate, ahead of the pressure gate so that a forbidden
     // request is reported as such. It covers every lock operation and flush,
     // and frees donated pages for the same reason the pressure gate does.
-    if !can_write && api_fs::known_cmd(msg.command) && !is_read_command(msg.command) {
+    if !can_write && api_fs::known_cmd(msg.command) && !api_fs::is_read_command(msg.command) {
         api_fs::release_donated_pages(&msg, &sender);
         let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::NotAllowed));
         let _ = sender.send(resp).await;
