@@ -599,15 +599,14 @@ async fn donated_pages_released(client: &std::rc::Rc<FsClient>, root: &str) {
 /// a read-only open still works.
 fn open_requests(root: &str, allowed: bool) {
     use std::fs::OpenOptions;
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     let data = format!("{root}/data");
     let missing = format!("{root}/missing");
     let mut contents = Vec::new();
-    std::fs::File::open(&data)
-        .unwrap()
-        .read_to_end(&mut contents)
-        .unwrap();
+    let mut file = std::fs::File::open(&data).unwrap();
+    file.read_to_end(&mut contents).unwrap();
+    file.flush().unwrap();
     assert!(!contents.is_empty());
 
     for (options, path) in [
@@ -726,7 +725,10 @@ pub fn run_stdout_writer_child(args: &[String]) -> ! {
             assert_eq!(bytes.len(), written);
             std::process::exit(0)
         }
-        Err(moto_rt::Error::NotAllowed) => std::process::exit(STDOUT_DENIED_EXIT),
+        Err(moto_rt::Error::NotAllowed) => {
+            expect_denied(moto_rt::fs::flush(moto_rt::FD_STDOUT));
+            std::process::exit(STDOUT_DENIED_EXIT)
+        }
         Err(err) => panic!("stdout write failed: {err:?}"),
     }
 }

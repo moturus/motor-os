@@ -970,6 +970,12 @@ impl PosixFile for File {
     }
 
     fn flush(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
+        // Preserve the native global flush for authorized read-only handles.
+        if !self.writable
+            && (moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_FS_WRITE) == 0
+        {
+            return Ok(());
+        }
         AsyncFsClient::get()
             .unwrap()
             .flush()

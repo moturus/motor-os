@@ -89,8 +89,7 @@ fn main() {
         | moto_sys::caps::CAP_SPAWN
         | moto_sys::caps::CAP_LOG
         | moto_sys::caps::CAP_SPAWN_DETACHED
-        | (own_caps
-            & (moto_sys::caps::CAP_VSOCK | moto_sys::caps::CAP_NET | moto_sys::caps::CAP_FS_WRITE))
+        | (own_caps & moto_sys::caps::PARENT_OWNED_CAPS)
         | role_cap;
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(

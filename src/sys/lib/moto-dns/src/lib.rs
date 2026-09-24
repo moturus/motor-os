@@ -274,6 +274,9 @@ impl Client {
             })?;
 
         let response = self.connection.resp::<LookupResponse>();
+        if response.header.result == moto_rt::E_NOT_ALLOWED {
+            return Err(ClientError::Transport(moto_rt::E_NOT_ALLOWED));
+        }
         if response.header.result != moto_rt::E_OK {
             return Err(ClientError::Protocol(ProtocolError::Header));
         }
