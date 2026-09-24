@@ -209,6 +209,9 @@ impl MotoSocket {
                 }
             }
 
+            // Wake the RX task parked on this socket so it can see the socket
+            // gone and exit: removal alone drops the waker unwoken.
+            inner.devices[device_idx].sockets.udp_close(netstack_handle);
             inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
             if let Some(port) = state.ephemeral_port {
                 inner.devices[device_idx].free_ephemeral_udp_port(port);
