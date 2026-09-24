@@ -815,6 +815,8 @@ fn run_file_relay_output_parent() -> ! {
         for waiter in waiters {
             assert_eq!(waiter.join().unwrap(), 0);
         }
+        // An exited child keeps its memory until its last handle closes.
+        moto_rt::alloc::release_handle(child.handle).unwrap();
     }
     std::process::exit(0)
 }

@@ -530,7 +530,17 @@ const LISTENER_FLOOD_TOLERANCE_PAGES: u64 = 8192; // 32M.
 fn test_aggregate_listener_exhaustion() {
     let used_before = used_pages();
 
-    let mut children: Vec<_> = (0..4).map(|_| crate::subcommand::spawn()).collect();
+    // A spawn briefly holds the executable twice (the parent's read buffer and
+    // the child's image), so a small guest floods with fewer children; any
+    // two still reach exhaustion.
+    let exe_pages = std::fs::metadata(std::env::current_exe().unwrap())
+        .unwrap()
+        .len()
+        .div_ceil(moto_sys::sys_mem::PAGE_SIZE_SMALL);
+    let num_children = (crate::spare_pages() / (3 * exe_pages)).clamp(2, 4) as usize;
+    let mut children: Vec<_> = (0..num_children)
+        .map(|_| crate::subcommand::spawn())
+        .collect();
     // Everything the exhaustion window needs, allocated before it opens:
     // at the floor this process cannot grow its heap either (the first run
     // of this test died on BufReader::new's 8 KiB mid-flood).
@@ -538,7 +548,7 @@ fn test_aggregate_listener_exhaustion() {
         .iter_mut()
         .map(|child| std::io::BufReader::new(child.std_child().stdout.take().unwrap()))
         .collect();
-    let mut lines = vec![String::with_capacity(256); 4];
+    let mut lines = vec![String::with_capacity(256); num_children];
 
     for child in children.iter_mut() {
         child.listener_flood(2048);

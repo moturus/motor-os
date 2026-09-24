@@ -1,5 +1,10 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Memory usage optimizations
+
+1. double-copy during process spawn
+2. process text not shared across process copies
+
 ## Deferred PCI BAR-boundary hardening (2026-09-15)
 
 Additional defenses against buggy or malicious VMMs are outside the

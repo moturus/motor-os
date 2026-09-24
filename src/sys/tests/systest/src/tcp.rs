@@ -3432,7 +3432,11 @@ fn test_half_open_accounting() {
 fn test_backlog_growth_and_shrink() {
     use std::os::fd::AsRawFd;
 
-    const BURST: usize = 24;
+    // A connection costs ~120 pages here: default client rings, the client
+    // runtime's per-stream pages and the pool's floor rings. A small guest
+    // bursts fewer, still three times the four-deep pool.
+    const CONNECTION_PAGES: u64 = 128;
+    let burst = (crate::spare_pages() / (2 * CONNECTION_PAGES)).clamp(12, 24) as usize;
     // Retransmits carry the requests the burst's first poll could not take: one
     // second, then two. Generous, and only so that a lost connection fails this
     // test instead of hanging it.
@@ -3449,19 +3453,22 @@ fn test_backlog_growth_and_shrink() {
     let addr = listener.local_addr().unwrap();
     // bind() returns with the pool created, so this is the base to come back to.
     let bound = read_sys_io_metric("net.tcp_listening_sockets");
+    // The sockets the pool grows are built with the listener's sizes.
+    moto_rt::net::set_recv_buffer_size(listener.as_raw_fd(), 16 * 1024).unwrap();
+    moto_rt::net::set_send_buffer_size(listener.as_raw_fd(), 16 * 1024).unwrap();
 
     // Every connect issued before any is collected, which is the arrival shape
     // the pool is the backlog for. The default pool is four deep.
-    let start = Arc::new(std::sync::Barrier::new(BURST));
-    let mut threads = Vec::with_capacity(BURST);
-    for _ in 0..BURST {
+    let start = Arc::new(std::sync::Barrier::new(burst));
+    let mut threads = Vec::with_capacity(burst);
+    for _ in 0..burst {
         let start = start.clone();
         threads.push(std::thread::spawn(move || {
             start.wait();
             std::net::TcpStream::connect_timeout(&addr, CONNECT_DEADLINE)
         }));
     }
-    let mut connected = Vec::with_capacity(BURST);
+    let mut connected = Vec::with_capacity(burst);
     let mut failures = Vec::new();
     for thread in threads {
         match thread.join().unwrap() {
@@ -3471,7 +3478,7 @@ fn test_backlog_growth_and_shrink() {
     }
     assert!(
         failures.is_empty(),
-        "a burst of {BURST} lost {} connections, the first with {:?}",
+        "a burst of {burst} lost {} connections, the first with {:?}",
         failures.len(),
         failures[0].kind()
     );
@@ -3483,12 +3490,12 @@ fn test_backlog_growth_and_shrink() {
     assert_eq!(
         read_sys_io_metric("net.tcp.syn_rst_unmatched"),
         reset_before,
-        "a burst of {BURST} against a four-deep pool was met with a reset \
+        "a burst of {burst} against a four-deep pool was met with a reset \
          ({dropped} requests dropped, backlog_extra {grown})"
     );
     assert!(
         grown > baseline,
-        "a burst of {BURST} against a four-deep pool added no listening sockets \
+        "a burst of {burst} against a four-deep pool added no listening sockets \
          ({dropped} requests dropped, backlog_extra {grown}, baseline {baseline})"
     );
 
