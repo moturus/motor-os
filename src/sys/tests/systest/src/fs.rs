@@ -575,9 +575,33 @@ pub fn smoke_test() {
     println!("    ---- FS: smoke_test PASS");
 }
 
-/// Repeatedly reads a file that fits entirely in sys-io's block cache
-/// (512 blocks = 2MB): the same per-message pipeline as `smoke_test`'s
-/// streaming read, but with zero device reads and no readahead. Comparing
+/// sys-io sizes its block cache from the guest's memory: 1 MiB per 32 MiB of
+/// RAM, at least 1 MiB, and 16 MiB from 256 MiB up. The kernel reports less
+/// than the configured RAM, so the sizing adds 10 MiB to what it reports.
+fn block_cache_capacity_test() {
+    const MIB: u64 = 1 << 20;
+    let total = moto_sys::stats::MemoryStats::get().unwrap().available + 10 * MIB;
+    let expected = if total >= 256 * MIB {
+        16 * MIB
+    } else {
+        (total / (32 * MIB)).max(1) * MIB
+    };
+    assert_eq!(
+        crate::tcp::read_sys_io_metric("fs.cache.capacity_bytes"),
+        expected,
+        "block cache capacity for {} MiB of reported memory",
+        (total - 10 * MIB) / MIB
+    );
+    println!(
+        "    ---- FS: block_cache_capacity_test PASS ({} MiB)",
+        expected / MIB
+    );
+}
+
+/// Repeatedly reads a file that fits entirely in sys-io's block cache (at
+/// least 2 MiB from 64 MiB of RAM up): the same per-message pipeline as
+/// `smoke_test`'s streaming read, but with zero device reads and no
+/// readahead. Comparing
 /// its MB/s and sys-io CPU/block against the streaming benchmark splits
 /// per-message CPU costs from per-device-miss CPU costs.
 pub fn hot_cache_read_test() {
@@ -1216,6 +1240,7 @@ fn path_resolution_test() {
 
 pub fn run_tests() {
     println!("running FS tests ...");
+    block_cache_capacity_test();
     scattered_writes_test();
     permissions_vdso_test();
     concurrent_flush_stress_test();

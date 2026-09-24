@@ -37,6 +37,23 @@ const MAX_IN_FLIGHT: usize = 64;
 /// blocks). See `maybe_readahead` and `on_cmd_read_multi`.
 const READAHEAD_BLOCKS: u64 = 32;
 
+/// The block cache follows the guest's memory: 1 MiB per 32 MiB, at least
+/// 1 MiB, and 16 MiB from 256 MiB up. The kernel reports less than the
+/// configured RAM (firmware and boot reservations), so 10 MiB is added to it.
+fn block_cache_blocks() -> usize {
+    const MIB: u64 = 1 << 20;
+    let total = moto_sys::stats::MemoryStats::get()
+        .expect("the memory-stats query cannot fail on a live kernel")
+        .available
+        + 10 * MIB;
+    let cache_bytes = if total >= 256 * MIB {
+        16 * MIB
+    } else {
+        (total / (32 * MIB)).max(1) * MIB
+    };
+    (cache_bytes / async_fs::BLOCK_SIZE as u64) as usize
+}
+
 const _: () = {
     assert!(ProcessRole::None as u8 == Role::None as u8);
     assert!(ProcessRole::Interactive as u8 == Role::Interactive as u8);
@@ -362,10 +379,12 @@ pub(super) async fn init(
                     })?,
                 );
                 fs = Some(Rc::new(LocalRwLock::new(FS::MotorFs(
-                    motor_fs::MotorFs::open(partition).await.map_err(|err| {
-                        log::error!("Mbr::parse() failed: {err:?}.");
-                        std::io::Error::from(ErrorKind::InvalidData)
-                    })?,
+                    motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks())
+                        .await
+                        .map_err(|err| {
+                            log::error!("Mbr::parse() failed: {err:?}.");
+                            std::io::Error::from(ErrorKind::InvalidData)
+                        })?,
                 ))));
             }
             _ => continue,

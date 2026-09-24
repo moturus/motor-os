@@ -350,6 +350,11 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     }
 
     pub async fn open(dev: Box<BD>) -> Result<Self> {
+        Self::open_with_cache_size(dev, CACHE_SIZE).await
+    }
+
+    /// [`Self::open`] with a block cache of `cache_blocks` blocks.
+    pub async fn open_with_cache_size(dev: Box<BD>, cache_blocks: usize) -> Result<Self> {
         let num_blocks = dev.num_blocks();
         if num_blocks <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
@@ -362,7 +367,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 
         let mut block_cache = BlockCache::new(
             dev,
-            CACHE_SIZE,
+            cache_blocks,
             num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64,
             MAX_BLOCKS_IN_TXN_LOG,
         )

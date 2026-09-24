@@ -204,8 +204,9 @@ added to the refusal set. Entering pressure mode or reporting
 `E_OUT_OF_MEMORY` must not allocate.
 
 Measurement decides which of the three applies, and it has surprised us
-once. The FS block cache looked like the dominant grower — a 16 MiB ceiling
-is ~4096 pages, far more than the band between the low watermark and the
+once. The FS block cache looked like the dominant grower — its ceiling of up
+to 16 MiB (~4096 pages; sized from RAM, see sys-io's `block_cache_blocks`)
+is far more than the band between the low watermark and the
 sys-io floor — but it grows sys-io by **0 pages** under a 16 MiB write
 hammer: it is capacity-bounded *and* filled by boot-time binary loads, after
 which every miss recycles an evicted buffer. The actual unbounded grower was

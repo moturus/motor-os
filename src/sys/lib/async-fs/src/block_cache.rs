@@ -408,7 +408,6 @@ struct PendingRead {
 /// `pending_reads`.
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
-    #[allow(unused)]
     cache_size: usize,
 
     // The main cache.
@@ -443,6 +442,8 @@ pub struct BlockCacheStats {
     pub misses: u64,
     /// Waited for another task's in-flight device read of the same block.
     pub dedup_waits: u64,
+    /// How many blocks the cache holds at most, besides the pinned ones.
+    pub capacity: u64,
 }
 
 /// Cancel-safety for pending-read deduplication: whatever happens to the
@@ -728,6 +729,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             hits: self.cache_hits.get(),
             misses: self.cache_misses.get(),
             dedup_waits: self.dedup_waits.get(),
+            capacity: self.cache_size as u64,
         }
     }
 

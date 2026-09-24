@@ -107,6 +107,7 @@ mod ids {
     pub const FS_PRESSURE_REFUSED: u32 = 1014;
     pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
     pub const FS_CHANNELS: u32 = 1016;
+    pub const FS_CACHE_CAPACITY_BYTES: u32 = 1017;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
@@ -144,6 +145,7 @@ async fn entries(fs: &FS, stats: &FsStats, channels: u64) -> Vec<MetricEntry> {
             stats.pressure_refused_clients.get(),
         ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
+        MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache_stats.capacity * 4096),
     ]
 }
 
@@ -172,6 +174,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             "fs.pressure_refused_clients",
         ),
         MetricDescWire::new(ids::FS_CHANNELS, "fs.channels"),
+        MetricDescWire::new(ids::FS_CACHE_CAPACITY_BYTES, "fs.cache.capacity_bytes"),
     ]
 }
 
