@@ -84,8 +84,39 @@ fn unless_explicit(
     env: &[(String, String)],
 ) -> Option<(&'static str, String)> {
     let (key, val) = grant?;
-    let explicit = env.iter().any(|(name, _)| name == key) || std::env::var_os(key).is_some();
-    (!explicit).then_some((key, val))
+    (!has_explicit_env(key, env)).then_some((key, val))
+}
+
+/// Whether a command assignment or the exported environment supplies `key`.
+pub fn has_explicit_env(key: &str, env: &[(String, String)]) -> bool {
+    env.iter().any(|(name, _)| name == key) || std::env::var_os(key).is_some()
+}
+
+// ---- capability ceiling -----------------------------------------------------
+
+/// The mask a command explicitly requests through `key`: `None` without one,
+/// `Some(None)` for a value the runtime would reject. The runtime reads hex
+/// with an optional `0x`; a command assignment wins over the exported value.
+fn requested_mask(key: &str, env: &[(String, String)]) -> Option<Option<u64>> {
+    let parse = |value: &str| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok();
+    if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
+        return Some(parse(value));
+    }
+    std::env::var_os(key).map(|value| value.to_str().and_then(parse))
+}
+
+/// The ceiling for a function call: `outer`, narrowed by the call's explicit
+/// mask. Every child the call starts stays within it, however the body changes
+/// `MOTOR_OS_CAPS`. `Err` for a malformed mask, under which nothing could start.
+pub fn call_cap_ceiling(env: &[(String, String)], outer: Option<u64>) -> Result<Option<u64>, ()> {
+    let Some(key) = sys::CAPS_ENV_KEY else {
+        return Ok(outer);
+    };
+    match requested_mask(key, env) {
+        None => Ok(outer),
+        Some(Some(mask)) => Ok(Some(outer.map_or(mask, |ceiling| ceiling & mask))),
+        Some(None) => Err(()),
+    }
 }
 
 // ---- child stdio ------------------------------------------------------------
@@ -143,6 +174,7 @@ pub fn spawn(
     program: &str,
     args: &[String],
     env: &[(String, String)],
+    cap_ceiling: Option<u64>,
     stdin: ChildIn,
     stdout: ChildOut,
     stderr: ChildOut,
@@ -153,11 +185,23 @@ pub fn spawn(
         cmd.env(k, v);
     }
 
-    // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED;
-    // otherwise a System shell's ordinary grant applies.
-    let grant = detach_grant_for(program).or_else(sys::ordinary_child_cap_grant);
-    if let Some((key, val)) = unless_explicit(grant, env) {
-        cmd.env(key, val);
+    if let (Some(ceiling), Some(key)) = (cap_ceiling, sys::CAPS_ENV_KEY) {
+        // A child's own mask can only narrow the ceiling. A malformed one is
+        // left in place for the runtime to reject.
+        match requested_mask(key, env) {
+            Some(None) => {}
+            requested => {
+                let mask = ceiling & requested.flatten().unwrap_or(ceiling);
+                cmd.env(key, format!("0x{mask:x}"));
+            }
+        }
+    } else {
+        // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED;
+        // otherwise a System shell's ordinary grant applies.
+        let grant = detach_grant_for(program).or_else(sys::ordinary_child_cap_grant);
+        if let Some((key, val)) = unless_explicit(grant, env) {
+            cmd.env(key, val);
+        }
     }
 
     // Read file-backed input up front: FS access must stay on this thread.

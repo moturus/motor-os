@@ -505,7 +505,9 @@ ordinary descendants of an Interactive process, but every explicit
    grants `CAP_SYS | CAP_SPAWN | CAP_LOG | CAP_VSOCK | CAP_NET | CAP_FS_WRITE`
    from its own mask to ordinary external commands, because the global spawn
    default intentionally does not propagate System. Rush-compatible shebang
-   scripts run in-process and retain the shell's role. **Rush trusted detached
+   scripts run in-process and retain the shell's role unless an explicit
+   `MOTOR_OS_CAPS`, or the bound from an enclosing function call with one,
+   requires a new process. **Rush trusted detached
    spawn** (`detach_cap_grant`) sets `MOTOR_OS_CAPS`, so it does *not* receive
    the vdso default. It preserves either `CAP_SYS` or `CAP_INTERACTIVE`
    according to the shell's derived role while adding `CAP_SPAWN_DETACHED`;

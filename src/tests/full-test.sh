@@ -400,6 +400,7 @@ vm_rmux() {
 
 . "$WD/test-udp-fragmentation.sh"
 . "$WD/test-ssh-client-host.sh"
+. "$WD/test-rush-script-caps.sh"
 
 # Some environments (e.g. a dev host behind qemu user-mode networking) cannot
 # send external ICMP echo at all; probe once so external pings can tolerate it.
@@ -815,6 +816,10 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest rus
   fail "Rush capability precedence exited with status $rush_caps_status: '$out'"
 [ "$out" = "rush_caps::test_detach_grant_precedence PASS" ] ||
   fail "Rush capability precedence: '$out'"
+
+test_rush_script_caps rush
+test_rush_script_caps sh
+test_rush_function_caps
 
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks

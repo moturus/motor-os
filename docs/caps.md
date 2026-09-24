@@ -145,7 +145,22 @@ An explicit `MOTOR_OS_CAPS` for a Rush command, as a command assignment or
 an exported variable, suppresses both of Rush's automatic grants and reaches
 the runtime unchanged. A command assignment wins over an exported value. For
 example, `MOTOR_OS_CAPS=0x2ec rmux` runs rmux without `CAP_NET` and without
-Rush's detach grant being applied on top.
+Rush's detach grant being applied on top. Assignments before `command` and
+`exec` reach the program they run in the same way.
+
+Foreground Rush-compatible scripts with an explicit mask also run in a new
+Rush process. Their builtins use the requested capabilities, and unsetting
+`MOTOR_OS_CAPS` cannot restore omitted network or filesystem-write authority
+to their descendants. Scripts without an explicit mask retain Rush's usual
+in-process execution and the shell's capabilities.
+
+A function called with an explicit mask runs in the shell's process, so Rush
+bounds every child the call starts by that mask, including children of nested
+functions and scripts. A child's own mask can only narrow the bound, and
+unsetting or raising `MOTOR_OS_CAPS` in the body has no effect. A malformed
+mask refuses the call with status 126. The body's builtins, such as
+redirections, still act with the shell's capabilities, and traps it sets run
+later without the bound.
 
 ### Explicit mask with `std::process::Command`
 

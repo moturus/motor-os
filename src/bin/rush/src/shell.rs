@@ -139,6 +139,9 @@ pub struct Shell {
     /// A non-zero value is an exit boundary: `exit`, `exec`, and fatal errors
     /// unwind to the caller instead of terminating the hosting rush process.
     inproc_script_depth: u32,
+    /// The capability mask bounding every child while a function called with
+    /// an explicit `MOTOR_OS_CAPS` runs. See [`crate::jobs::call_cap_ceiling`].
+    cap_ceiling: Option<u64>,
     /// Depth of nested word expansions currently in flight — see
     /// [`Shell::enter_expansion`].
     expansion_depth: u32,
@@ -170,6 +173,7 @@ impl Shell {
             cmdsub_status: None,
             subshell_depth: 0,
             inproc_script_depth: 0,
+            cap_ceiling: None,
             expansion_depth: 0,
         }
     }
@@ -486,6 +490,14 @@ impl Shell {
 
     pub fn inproc_script_depth(&self) -> u32 {
         self.inproc_script_depth
+    }
+
+    pub fn cap_ceiling(&self) -> Option<u64> {
+        self.cap_ceiling
+    }
+
+    pub fn set_cap_ceiling(&mut self, ceiling: Option<u64>) {
+        self.cap_ceiling = ceiling;
     }
 
     pub fn at_emulated_exit_boundary(&self) -> bool {

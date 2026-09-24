@@ -73,6 +73,9 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
 
 // ---- detached spawn --------------------------------------------------------
 
+/// The env key through which a spawn requests its child's capability mask.
+pub const CAPS_ENV_KEY: Option<&str> = Some(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY);
+
 /// The explicit grant used for an ordinary child of a System shell.
 ///
 /// The runtime deliberately does not propagate System by default. Rush is the
