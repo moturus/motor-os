@@ -488,9 +488,12 @@ pub fn smoke_test() {
     let bytes = std::fs::read(&source_path).expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
-    const LEN: usize = 1024 * 1024 * 19 + 1001;
+    // The read-back holds a second copy, so a small guest gets a quarter of
+    // its spare memory per copy.
+    let spare_bytes = crate::spare_pages() as usize * moto_sys::sys_mem::PAGE_SIZE_SMALL as usize;
+    let len = (1024 * 1024 * 19).min(spare_bytes / 4) + 1001;
 
-    let mut bytes = vec![0; LEN];
+    let mut bytes = vec![0; len];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }

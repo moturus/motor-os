@@ -789,6 +789,34 @@ pub fn udp_rebind_after_close_test() {
     println!("-- udp_rebind_after_close_test() PASS");
 }
 
+/// Closing a UDP socket releases everything sys-io holds for it. Each socket's
+/// RX task waits on the socket's receive waker, and removing the socket used to
+/// drop that waker unwoken: the task, and the socket allocation it pointed to,
+/// stayed parked for the rest of the boot.
+fn udp_close_releases_sys_io_memory() {
+    const SOCKETS: usize = 4000;
+    // Parked tasks took ~1 KiB per socket; allocator slabs move by ~160 pages.
+    const MAX_GROWTH_PAGES: u64 = 512;
+
+    let sockets_before = crate::tcp::read_sys_io_metric("net.udp_sockets");
+    let churn = || {
+        for _ in 0..SOCKETS {
+            drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+        }
+        crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |value| value == sockets_before);
+        crate::kernel_metric("pages_user", moto_sys::stats::PID_SYS_IO)
+    };
+
+    // The first round grows sys-io's allocator to this workload.
+    let before = churn();
+    let grown = churn().saturating_sub(before);
+    assert!(
+        grown < MAX_GROWTH_PAGES,
+        "{SOCKETS} closed UDP sockets grew sys-io by {grown} pages"
+    );
+    println!("-- udp_close_releases_sys_io_memory() PASS ({grown} pages)");
+}
+
 /// A close must not overtake the datagrams its socket already handed to the
 /// channel.
 ///
@@ -958,6 +986,9 @@ fn malformed_udp_fragments_only_kill_the_client() {
 }
 
 pub fn run_all_tests() {
+    // First: its socket-count baseline must not include another test's
+    // sockets that are still closing.
+    udp_close_releases_sys_io_memory();
     test_udp_basic();
     test_udp_wildcard_bind_selects_address();
     test_native_udp_ttl();

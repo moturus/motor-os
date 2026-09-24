@@ -585,13 +585,23 @@ fn test_lazy_memory_map_write() {
     println!("test_lazy_memory_map_write: done");
 }
 
+// Pages admission would still grant above the user floor. Tests that touch
+// memory in bulk size themselves from it: a refused lazy first touch kills
+// the process, and small guests have less to spare than the full sizes.
+pub fn spare_pages() -> u64 {
+    let stats = moto_sys::stats::AdmissionStats::get().unwrap();
+    stats
+        .free_for_admission()
+        .saturating_sub(stats.user_floor_pages)
+}
+
 fn test_concurrent_lazy_memory_map_write() {
     use moto_sys::*;
 
     const NUM_THREADS: usize = 8;
-    const NUM_PAGES: usize = 8192;
     const PAGE_SIZE: usize = sys_mem::PAGE_SIZE_SMALL as usize;
     const CHUNK_SIZE: usize = PAGE_SIZE / NUM_THREADS;
+    let num_pages = (spare_pages() / 2).min(8192) as usize;
 
     let addr = SysMem::map(
         SysHandle::SELF,
@@ -599,7 +609,7 @@ fn test_concurrent_lazy_memory_map_write() {
         u64::MAX,
         u64::MAX,
         sys_mem::PAGE_SIZE_SMALL,
-        NUM_PAGES as u64,
+        num_pages as u64,
     )
     .unwrap();
 
@@ -608,7 +618,7 @@ fn test_concurrent_lazy_memory_map_write() {
     for thread_idx in 0..NUM_THREADS {
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
-            for page_idx in 0..NUM_PAGES {
+            for page_idx in 0..num_pages {
                 barrier.wait();
                 let offset = page_idx * PAGE_SIZE + thread_idx * CHUNK_SIZE;
                 unsafe {
@@ -624,8 +634,8 @@ fn test_concurrent_lazy_memory_map_write() {
     }
 
     let pages =
-        unsafe { core::slice::from_raw_parts(addr as usize as *const u8, NUM_PAGES * PAGE_SIZE) };
-    for page_idx in 0..NUM_PAGES {
+        unsafe { core::slice::from_raw_parts(addr as usize as *const u8, num_pages * PAGE_SIZE) };
+    for page_idx in 0..num_pages {
         for thread_idx in 0..NUM_THREADS {
             let start = page_idx * PAGE_SIZE + thread_idx * CHUNK_SIZE;
             let expected = (thread_idx + 1) as u8;
@@ -685,19 +695,19 @@ fn test_invalid_memory_map_options() {
 fn bench_page_faults() {
     use moto_sys::*;
 
-    const NUM_PAGES: u64 = 8192; // 32 MiB.
+    let num_pages = (spare_pages() / 2).min(8192); // 32 MiB on larger guests.
     let addr = SysMem::map(
         SysHandle::SELF,
         SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
         u64::MAX,
         u64::MAX,
         sys_mem::PAGE_SIZE_SMALL,
-        NUM_PAGES,
+        num_pages,
     )
     .unwrap();
 
     let start = std::time::Instant::now();
-    for page in 0..NUM_PAGES {
+    for page in 0..num_pages {
         let ptr = (addr + page * sys_mem::PAGE_SIZE_SMALL) as *mut u64;
         unsafe { ptr.write_volatile(page) };
     }
@@ -705,9 +715,9 @@ fn bench_page_faults() {
     SysMem::free(addr).unwrap();
 
     println!(
-        "bench_page_faults: {NUM_PAGES} first-touch faults: {:.0} ns/fault, {:.0} faults/s",
-        elapsed.as_nanos() as f64 / NUM_PAGES as f64,
-        NUM_PAGES as f64 / elapsed.as_secs_f64()
+        "bench_page_faults: {num_pages} first-touch faults: {:.0} ns/fault, {:.0} faults/s",
+        elapsed.as_nanos() as f64 / num_pages as f64,
+        num_pages as f64 / elapsed.as_secs_f64()
     );
 }
 

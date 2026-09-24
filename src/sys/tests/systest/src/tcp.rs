@@ -4015,22 +4015,30 @@ fn test_completed_accept_backlog_is_bounded() {
     let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
+    // The bound counts sockets, not bytes: the smallest encodable rings on
+    // both ends keep the connections within a small guest's memory. A std
+    // stream would take the default rings, so the held clients are raw.
+    const RING_CODE: u8 = api_net::tcp_buf_size_to_code(32 * 1024);
+    let small_rings = |msg: &mut moto_ipc::io_channel::Msg| {
+        msg.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_RX] = RING_CODE;
+        msg.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_TX] = RING_CODE;
+    };
+
     let bind_addr = "127.0.0.1:0".parse().unwrap();
-    listener_connection
-        .send(api_net::bind_tcp_listener_request(
-            &bind_addr,
-            Some(PER_LISTENER_CAP as u8),
-        ))
-        .unwrap();
+    let mut bind = api_net::bind_tcp_listener_request(&bind_addr, Some(PER_LISTENER_CAP as u8));
+    small_rings(&mut bind);
+    listener_connection.send(bind).unwrap();
     let bind_resp = recv_raw_net_response(&listener_connection);
     bind_resp.status().unwrap();
     let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
 
-    let mut held = Vec::with_capacity(PER_LISTENER_CAP);
     for _ in 0..PER_LISTENER_CAP {
-        held.push(
-            std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2)).unwrap(),
-        );
+        let mut connect = api_net::tcp_stream_connect_request(&listener_addr, 0);
+        small_rings(&mut connect);
+        listener_connection.send(connect).unwrap();
+        recv_raw_net_response(&listener_connection)
+            .status()
+            .unwrap();
     }
     wait_for_sys_io_metric("net.tcp.accept_backlog", |value| {
         value == backlog_before + PER_LISTENER_CAP as u64
@@ -4062,7 +4070,6 @@ fn test_completed_accept_backlog_is_bounded() {
         }
     }
 
-    drop(held);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
     wait_for_sys_io_metric("net.tcp.accept_backlog", |value| value == backlog_before);
