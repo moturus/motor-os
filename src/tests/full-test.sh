@@ -8,8 +8,8 @@ BUILD="debug"
 VMM=qemu
 # Guest size. The defaults match the VM launchers; --cpus and --memory pick a
 # smaller guest, e.g. the 1 vCPU / 256 MiB shape cloud providers sell.
-CPUS="${MOTO_SMP:-4}"
-MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+CPUS="${MOTO_SMP-4}"
+MEMORY_MIB="${MOTO_MEMORY_MIB-1024}"
 SEEN_RELEASE=0
 SEEN_VMM=0
 SEEN_CPUS=0
@@ -31,7 +31,6 @@ while [ "$#" -gt 0 ]; do
         *) [ "$#" -ge 2 ] || { echo "full-test: --cpus requires a vCPU count" >&2; exit 2; }
            CPUS="$2"; shift 2 ;;
       esac
-      positive_integer "$CPUS" || { echo "full-test: --cpus must be a positive integer" >&2; exit 2; }
       SEEN_CPUS=1
       ;;
     --memory | --memory=*)
@@ -41,7 +40,6 @@ while [ "$#" -gt 0 ]; do
         *) [ "$#" -ge 2 ] || { echo "full-test: --memory requires a size in MiB" >&2; exit 2; }
            MEMORY_MIB="$2"; shift 2 ;;
       esac
-      positive_integer "$MEMORY_MIB" || { echo "full-test: --memory must be a positive integer (MiB)" >&2; exit 2; }
       SEEN_MEMORY=1
       ;;
     --vmm)
@@ -60,6 +58,8 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
+positive_integer "$CPUS" || { echo "full-test: CPU count must be a positive integer" >&2; exit 2; }
+positive_integer "$MEMORY_MIB" || { echo "full-test: memory must be a positive integer (MiB)" >&2; exit 2; }
 export MOTO_SMP="$CPUS"
 export MOTO_MEMORY_MIB="$MEMORY_MIB"
 case "$VMM" in qemu|chv|fc) ;; *) echo "full-test: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
@@ -161,6 +161,7 @@ test_vm_configure_ssh
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
 "$WD/test-build-addons.sh"
+"$WD/test-full-test-size.sh"
 "$WD/test-toolchain-assembly.sh"
 "$WD/test-toolchain-assembly-resolution.sh"
 "$WD/test-toolchain-authoring-sources.sh"
