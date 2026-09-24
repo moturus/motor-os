@@ -198,7 +198,7 @@ printf '%s\n' "$system_caps_output"
 # An exported mask wins over Rush's ordinary System grant, even when it omits
 # CAP_NET; without one, the grant keeps the console's own bits.
 run_console /user/tmp/rush-caps-done \
-  'export MOTOR_OS_CAPS=0x205; /user/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log; unset MOTOR_OS_CAPS; /user/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
+  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /user/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log"; /user/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
 rush_caps="$(vm_ssh /system/bin/cat /user/tmp/rush-caps.log)"
 [ "$rush_caps" = $'exported=0x205\nordinary=0x38d' ] ||
   fail "System Rush capability precedence: '$rush_caps'"

@@ -392,6 +392,56 @@ enum Background {
 
 const NO_SOLE_USE: [bool; 3] = [false; 3];
 
+/// Follow launch wrappers without running their builtins or opening any fds.
+/// `command` bypasses functions; special builtins always precede functions.
+fn launches_child(mut argv: &[String], shell: &Shell) -> bool {
+    let mut check_function = true;
+    while let Some(name) = argv.first() {
+        let builtin = builtins::lookup(name);
+        if check_function
+            && builtin.is_none_or(|b| !builtins::is_special(b))
+            && shell.get_function(name).is_some()
+        {
+            return false;
+        }
+        match builtin {
+            None => return true,
+            Some(Builtin::Exec) => return argv.len() > 1,
+            Some(Builtin::Command) => {
+                let Ok(options) = command_options(&argv[1..]) else {
+                    return false;
+                };
+                if options.describe {
+                    return false;
+                }
+                argv = options.args;
+                check_function = false;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn refuse_inproc_caps(
+    argv: &[String],
+    assigns: &[(String, String)],
+    shell: &Shell,
+    io: &IoEnv,
+) -> bool {
+    if !crate::sys::CAPS_ENV_KEY.is_some_and(|key| jobs::has_explicit_env(key, assigns))
+        || launches_child(argv, shell)
+    {
+        return false;
+    }
+    let name = argv.first().map_or("in-process command", String::as_str);
+    let _ = writeln!(
+        io.fds[2].err_writer(),
+        "rush: {name}: MOTOR_OS_CAPS requires a child process"
+    );
+    true
+}
+
 fn exec_simple(
     simple: &SimpleCommand,
     shell: &mut Shell,
@@ -420,6 +470,9 @@ fn exec_simple(
     }
 
     if argv.is_empty() {
+        if !simple.redirects.is_empty() && refuse_inproc_caps(&argv, &assigns, shell, io) {
+            return 126;
+        }
         let mut status = shell.cmdsub_status().unwrap_or(0);
         trace(shell, &assigns, &[]);
         // Assignment-only command: assignments persist in the shell.
@@ -448,6 +501,10 @@ fn exec_simple(
     // re-expansion, and a name is expanded at most once to avoid loops).
     expand_aliases(&mut argv, shell);
 
+    if refuse_inproc_caps(&argv, &assigns, shell, io) {
+        return 126;
+    }
+
     // Redirections apply to every command, builtin or external; build them once
     // (this also gives the file-creation side effect for output-less builtins).
     let (fds, sole_use) = match build_fds_for_simple(io, &simple.redirects, shell) {
@@ -460,6 +517,14 @@ fn exec_simple(
     // functions, so a like-named function shadows it.
     if let Some(b) = builtins::lookup(&argv[0]) {
         if builtins::is_special(b) {
+            // Emulated exec can return to a background/substitution boundary.
+            // Its child environment must not become the caller's environment.
+            let saved = matches!(b, Builtin::Exec).then(|| {
+                assigns
+                    .iter()
+                    .map(|(k, _)| (k.clone(), shell.get(k), shell.is_exported(k)))
+                    .collect()
+            });
             // A prefix assignment on a special builtin persists in the shell; an
             // assignment error there is fatal to a non-interactive shell.
             for (k, v) in &assigns {
@@ -470,6 +535,9 @@ fn exec_simple(
             }
             maybe_die_fatal(shell);
             let status = exec_builtin(b, &argv, &assigns, &fds, shell);
+            if let Some(saved) = saved {
+                restore_temp_assigns(saved, shell);
+            }
             maybe_die_fatal(shell);
             return status;
         }
@@ -531,7 +599,6 @@ fn spawn_background(
         program,
         &argv[1..],
         &env,
-        shell.cap_ceiling(),
         child_in(&fds[0], true, sole_use[0]),
         child_out(&fds[1], sole_use[1]),
         child_out(&fds[2], sole_use[2]),
@@ -787,14 +854,13 @@ fn builtin_exec(
     }
 }
 
-/// `command [-v|-V] [-p] name [args…]` — run `name` ignoring shell functions, or
-/// (with `-v`/`-V`) describe it.
-fn builtin_command(
-    args: &[String],
-    assigns: &[(String, String)],
-    fds: &[FdSource; 3],
-    shell: &mut Shell,
-) -> i32 {
+struct CommandOptions<'a> {
+    args: &'a [String],
+    describe: bool,
+    verbose: bool,
+}
+
+fn command_options(args: &[String]) -> Result<CommandOptions<'_>, &str> {
     let mut verbose = false;
     let mut describe = false;
     let mut i = 0;
@@ -811,28 +877,48 @@ fn builtin_command(
                 break;
             }
             s if s.starts_with('-') && s.len() > 1 => {
-                let mut err = fds[2].err_writer();
-                let _ = writeln!(err, "rush: command: {s}: invalid option");
-                return 2;
+                return Err(s);
             }
             _ => break,
         }
         i += 1;
     }
-    let rest = &args[i..];
-    if describe {
+    Ok(CommandOptions {
+        args: &args[i..],
+        describe,
+        verbose,
+    })
+}
+
+/// `command [-v|-V] [-p] name [args…]` — run `name` ignoring shell functions, or
+/// (with `-v`/`-V`) describe it.
+fn builtin_command(
+    args: &[String],
+    assigns: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) -> i32 {
+    let options = match command_options(args) {
+        Ok(options) => options,
+        Err(flag) => {
+            let _ = writeln!(fds[2].err_writer(), "rush: command: {flag}: invalid option");
+            return 2;
+        }
+    };
+    let rest = options.args;
+    if options.describe {
         let mut out = fds[1].out_writer();
         let mut err = fds[2].err_writer();
         let mut status = 0;
         for name in rest {
-            let (line, found) = builtins::command_describe(name, shell, verbose);
+            let (line, found) = builtins::command_describe(name, shell, options.verbose);
             if let Some(l) = line {
                 let _ = writeln!(out, "{l}");
             }
             if !found {
                 // dash returns 127 for an unresolved name.
                 status = 127;
-                if verbose {
+                if options.verbose {
                     let _ = writeln!(err, "rush: {name}: not found");
                 }
             }
@@ -911,9 +997,6 @@ fn resolve_program(name: &str, shell: &Shell) -> Option<String> {
 /// arguments (`$0` is unchanged), apply the definition's own redirections over
 /// the call-site fds, run the body, then restore the parameters. `return`
 /// terminates the function; `break`/`continue` do not cross the boundary.
-///
-/// An explicit `MOTOR_OS_CAPS` bounds every child the body starts, since the
-/// body runs in this process and could otherwise unset the mask.
 fn exec_function_call(
     body: &FunctionBody,
     argv: &[String],
@@ -921,13 +1004,6 @@ fn exec_function_call(
     fds: &[FdSource; 3],
     shell: &mut Shell,
 ) -> i32 {
-    let saved_ceiling = shell.cap_ceiling();
-    let Ok(ceiling) = jobs::call_cap_ceiling(assigns, saved_ceiling) else {
-        let mut err = fds[2].err_writer();
-        let _ = writeln!(err, "rush: {}: invalid MOTOR_OS_CAPS", argv[0]);
-        return 126;
-    };
-
     // Prefix assignments (`VAR=x func`) persist in the shell — proper per-call
     // scoping arrives with the builtin/options work of later phases.
     for (k, v) in assigns {
@@ -942,12 +1018,10 @@ fn exec_function_call(
     // defined within it, not the caller's.
     let saved_loop_depth = shell.take_loop_depth();
 
-    shell.set_cap_ceiling(ceiling);
     let status = match build_fds(&IoEnv { fds: fds.clone() }, &body.redirects, shell) {
         Ok(f) => exec_compound(&body.body, shell, &IoEnv { fds: f }),
         Err(code) => code,
     };
-    shell.set_cap_ceiling(saved_ceiling);
     shell.set_loop_depth(saved_loop_depth);
 
     let status = match shell.flow() {
@@ -1115,10 +1189,10 @@ fn is_executable_file(path: &Path) -> bool {
     })
 }
 
-/// Read an executable whose shebang names `rush` or `sh`. The 256-byte probe
+/// Open an executable whose shebang names `rush` or `sh`. The 256-byte probe
 /// matches rt.vdso's bounded interpreter-line read without pulling an ELF file
 /// into memory merely to discover that it is not a script.
-fn read_shell_script(program: &str) -> Option<String> {
+fn open_shell_script(program: &str) -> Option<File> {
     let path = Path::new(program);
     if !is_executable_file(path) {
         return None;
@@ -1137,9 +1211,7 @@ fn read_shell_script(program: &str) -> Option<String> {
         return None;
     }
     file.rewind().ok()?;
-    let mut source = String::new();
-    file.read_to_string(&mut source).ok()?;
-    Some(source)
+    Some(file)
 }
 
 /// Execute a rush-compatible script over a fresh shell state, using a child
@@ -1155,20 +1227,19 @@ fn run_shell_script(
     if parent.inproc_script_depth() >= MAX_INPROC_SCRIPT_DEPTH {
         return None;
     }
-    let source = read_shell_script(program)?;
-    // A capability mask or ceiling needs a real child: environment changes
+    let mut file = open_shell_script(program)?;
+    // A capability mask needs a real child: environment changes
     // cannot reduce this process's immutable capabilities. Run Rush directly,
     // since the native loader cannot use the /system/bin/sh script as an ELF
     // interpreter.
     #[cfg(not(unix))]
-    if parent.cap_ceiling().is_some()
-        || jobs::has_explicit_env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, env)
-    {
+    if jobs::has_explicit_env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, env) {
         let mut child_args = Vec::with_capacity(args.len() + 1);
         child_args.push(program.to_string());
         child_args.extend_from_slice(args);
         return Some(spawn_child(
             "/system/bin/rush",
+            program,
             &child_args,
             env,
             fds,
@@ -1176,6 +1247,8 @@ fn run_shell_script(
             parent,
         ));
     }
+    let mut source = String::new();
+    file.read_to_string(&mut source).ok()?;
     let _process_state = ProcessState::capture();
     // These are child-environment assignments in the spawn path. Install them
     // before constructing the fresh shell so they are exported there, then the
@@ -1226,11 +1299,12 @@ fn spawn_external(
     if let Some(status) = run_shell_script(program, args, env, fds, sole_use, shell) {
         return status;
     }
-    spawn_child(program, args, env, fds, sole_use, shell)
+    spawn_child(program, program, args, env, fds, sole_use, shell)
 }
 
 fn spawn_child(
     program: &str,
+    name: &str,
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
@@ -1241,13 +1315,12 @@ fn spawn_child(
         program,
         args,
         env,
-        shell.cap_ceiling(),
         child_in(&fds[0], false, sole_use[0]),
         child_out(&fds[1], sole_use[1]),
         child_out(&fds[2], sole_use[2]),
     ) {
         Ok(child) => child,
-        Err(e) => return report_spawn_error(program, e, &fds[2]),
+        Err(e) => return report_spawn_error(name, e, &fds[2]),
     };
     let status = loop {
         match child.wait() {
@@ -1461,7 +1534,7 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
         let is_last = i == n - 1;
         let taken = std::mem::replace(&mut prev, StageInput::Ambient);
 
-        let (status, next) = match command {
+        let stage = match command {
             AstCommand::Simple(simple) => {
                 let assigns: Vec<(String, String)> = simple
                     .assigns
@@ -1509,6 +1582,13 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
                 exec_command(command, shell, sio)
             }),
         };
+        let (status, next) = match stage {
+            Ok(stage) => stage,
+            Err(err) => {
+                let _ = writeln!(io.fds[2].err_writer(), "rush: pipeline: {err}");
+                return 2;
+            }
+        };
 
         if shell.flow() == Flow::Interrupt {
             return status;
@@ -1537,6 +1617,11 @@ fn run_simple_inproc(
     sio: &IoEnv,
     shell: &mut Shell,
 ) -> i32 {
+    if (!argv.is_empty() || !simple.redirects.is_empty())
+        && refuse_inproc_caps(argv, assigns, shell, sio)
+    {
+        return 126;
+    }
     if argv.is_empty() {
         // Assignment-only stage (subshell: discarded by the caller's restore).
         for (k, v) in assigns {
@@ -1594,31 +1679,42 @@ fn run_builtin_pipeline_safe(
 /// temp file (a real file so successive `read`s share an advancing offset),
 /// capture its stdout for the next stage (or send it to the real fd 1 when
 /// last), and run `body` in an emulated subshell (state snapshot/restore so the
-/// stage cannot leak). Returns (status, input-for-next-stage).
+/// stage cannot leak). Staging errors abort the entire pipeline.
 fn run_inproc_stage(
     input: StageInput,
     is_last: bool,
     io: &IoEnv,
     shell: &mut Shell,
     body: impl FnOnce(&mut Shell, &IoEnv) -> i32,
-) -> (i32, StageInput) {
+) -> std::io::Result<(i32, StageInput)> {
     // Standard input: the ambient fd for the first stage, else the upstream
     // bytes staged through a temp file.
-    let (stdin_fd, in_path) = match input {
-        StageInput::Ambient => (io.fds[0].clone(), None),
-        StageInput::Buffer(bytes) => bytes_to_fd(bytes),
-    };
-    // Standard output: the real fd 1 when last, else a capture temp file.
-    let (stdout_fd, out_path) = if is_last {
-        (io.fds[1].clone(), None)
-    } else {
-        match temp_capture_file() {
-            Some((fd, path)) => (fd, Some(path)),
-            None => (io.fds[1].clone(), None),
+    let input_file = match input {
+        StageInput::Ambient => None,
+        StageInput::Buffer(bytes) => {
+            let file = TempFile::new("pin")?;
+            let mut handle = &*file.file;
+            handle.write_all(&bytes)?;
+            handle.rewind()?;
+            Some(file)
         }
     };
+    // Standard output: the real fd 1 when last, else a capture temp file.
+    let output_file = if is_last {
+        None
+    } else {
+        Some(TempFile::new("pout")?)
+    };
     let sio = IoEnv {
-        fds: [stdin_fd, stdout_fd, io.fds[2].clone()],
+        fds: [
+            input_file
+                .as_ref()
+                .map_or_else(|| io.fds[0].clone(), TempFile::fd),
+            output_file
+                .as_ref()
+                .map_or_else(|| io.fds[1].clone(), TempFile::fd),
+            io.fds[2].clone(),
+        ],
     };
 
     let snapshot = shell.snapshot();
@@ -1634,42 +1730,13 @@ fn run_inproc_stage(
     } else {
         saved_flow
     });
-    drop(sio); // close the temp-file handles before reading/removing them
+    drop(sio);
 
-    if let Some(p) = in_path {
-        let _ = std::fs::remove_file(&p);
-    }
-    let next = match out_path {
-        Some(p) => {
-            let bytes = std::fs::read(&p).unwrap_or_default();
-            let _ = std::fs::remove_file(&p);
-            StageInput::Buffer(bytes)
-        }
+    let next = match output_file {
+        Some(file) => StageInput::Buffer(std::fs::read(&file.path)?),
         None => StageInput::Ambient,
     };
-    (status, next)
-}
-
-/// Stage `bytes` through a temp file opened for reading. Returns a file-backed
-/// [`FdSource`] (whose successive `try_clone`s share the read offset) and the
-/// path to clean up. Falls back to an empty here-doc reader on failure.
-fn bytes_to_fd(bytes: Vec<u8>) -> (FdSource, Option<PathBuf>) {
-    let path = temp_path("pin");
-    if std::fs::write(&path, &bytes).is_ok()
-        && let Ok(f) = File::open(&path)
-    {
-        return (FdSource::File(Arc::new(f)), Some(path));
-    }
-    (FdSource::Heredoc(Arc::new(String::new())), None)
-}
-
-/// Create a temp file to capture a stage's stdout, returning a writable
-/// [`FdSource`] and its path.
-fn temp_capture_file() -> Option<(FdSource, PathBuf)> {
-    let path = temp_path("pout");
-    File::create(&path)
-        .ok()
-        .map(|f| (FdSource::File(Arc::new(f)), path))
+    Ok((status, next))
 }
 
 // ---- compound commands ------------------------------------------------------
@@ -1682,6 +1749,9 @@ fn exec_compound_cmd(
     shell: &mut Shell,
     io: &IoEnv,
 ) -> i32 {
+    if refuse_inproc_caps(&[], &[], shell, io) {
+        return 126;
+    }
     let fds = match build_fds(io, redirects, shell) {
         Ok(fds) => fds,
         Err(code) => return code,
@@ -1895,6 +1965,11 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
         // the substitution reports.
         shell.set_status(code);
     }
+    let output = output.unwrap_or_else(|err| {
+        eprintln!("rush: command substitution: {err}");
+        shell.set_status(2);
+        String::new()
+    });
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the substitution subshell
     shell.restore(snapshot);
@@ -1910,41 +1985,64 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     trimmed.to_string()
 }
 
-fn capture(src: &str, shell: &mut Shell) -> String {
+fn capture(src: &str, shell: &mut Shell) -> std::io::Result<String> {
     let list = match parser::parse_source(src) {
         Parsed::Complete(list) => list,
-        Parsed::Empty => return String::new(),
+        Parsed::Empty => {
+            shell.set_status(0);
+            return Ok(String::new());
+        }
         Parsed::Incomplete => {
             eprintln!("rush: command substitution: unexpected end of input");
-            return String::new();
+            shell.set_status(2);
+            return Ok(String::new());
         }
         Parsed::Error(msg) => {
             eprintln!("rush: {msg}");
-            return String::new();
+            shell.set_status(2);
+            return Ok(String::new());
         }
     };
 
-    let path = temp_path("cmdsub");
-    let file = match File::create(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("rush: command substitution: {e}");
-            return String::new();
-        }
-    };
+    let file = TempFile::new("cmdsub")?;
     let io = IoEnv {
-        fds: [
-            FdSource::Inherit,
-            FdSource::File(Arc::new(file)),
-            FdSource::Inherit,
-        ],
+        fds: [FdSource::Inherit, file.fd(), FdSource::Inherit],
     };
     exec_list(&list, shell, &io);
     fire_subshell_exit_trap(shell, &io);
     // All stages have exited; re-read the captured output from the start.
-    let output = std::fs::read_to_string(&path).unwrap_or_default();
-    let _ = std::fs::remove_file(&path);
-    output
+    std::fs::read_to_string(&file.path)
+}
+
+// Keep cleanup on error paths as well as successful captures.
+struct TempFile {
+    path: PathBuf,
+    file: Arc<File>,
+}
+
+impl TempFile {
+    fn new(tag: &str) -> std::io::Result<Self> {
+        let path = temp_path(tag);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            file: Arc::new(file),
+        })
+    }
+
+    fn fd(&self) -> FdSource {
+        FdSource::File(Arc::clone(&self.file))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

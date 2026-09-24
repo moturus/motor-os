@@ -819,7 +819,7 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest rus
 
 test_rush_script_caps rush
 test_rush_script_caps sh
-test_rush_function_caps
+test_rush_inproc_caps
 
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
