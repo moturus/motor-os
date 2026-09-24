@@ -291,8 +291,8 @@ impl SelfStdio {
         moto_rt::futex_wake_all(&self.claim_generation);
     }
 
-    /// Whether a read would return now: what a relay handed back, or what the
-    /// pipe holds — and nothing while a relay owns the reader, because until
+    /// Whether a read would return now: what a relay handed back, what the pipe
+    /// holds, or EOF — and nothing while a relay owns the reader, because until
     /// it gives the claim back those bytes belong to the child.
     fn readable(&self) -> bool {
         !self.relayed.load(Ordering::Acquire)
@@ -1620,6 +1620,17 @@ impl PosixFile for ChildStdio {
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
         self.event_source.on_closed_locally(rt_fd);
         Ok(())
+    }
+
+    fn wants_last_close(&self) -> bool {
+        !self.inner.is_reader()
+    }
+
+    /// Closing the child's stdin is the end of its input. Without the mark the
+    /// child learns of the close only as the pipe's loss, which its reads
+    /// report as an error, not EOF.
+    fn on_last_close(&self) {
+        let _ = self.inner.close_writer();
     }
 
     fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {

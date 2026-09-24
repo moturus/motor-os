@@ -859,6 +859,14 @@ out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TES
   fail "ripgrep searched its own output file: got '$out'"
 echo "ripgrep file-stdio regression PASS"
 
+# A C program sees a pipeline's input end as EOF, not as an error: mlibc reports
+# what the runtime returns, whereas Rust's std turns any stdin error into EOF.
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  out="$(vm_ssh_stdout "/system/bin/rush -c 'printf \"a\nb\n\" | /devtools/bin/lua -e \"for l in io.lines() do print(l) end\"; echo RC=\$?'")"
+  [ "$out" = $'a\nb\nRC=0' ] || fail "Lua did not read piped stdin to EOF: '$out'"
+  echo "C piped-stdin EOF PASS"
+fi
+
 # A background job's `$!` is the kernel's own pid for that child, so it is
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
 # docs/plans/pid-refactoring-design.md). The sleep is long enough that only a

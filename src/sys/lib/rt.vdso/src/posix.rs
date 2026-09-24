@@ -296,6 +296,26 @@ impl Descriptors {
             .any(|entry| Arc::ptr_eq(&entry.object, file))
     }
 
+    /// Notify each open description once before the process destroys its fd
+    /// table. Normal exit closes every descriptor even though it does not call
+    /// [`posix_close`] for them one by one.
+    fn notify_process_exit(&self) {
+        let descriptors = core::mem::take(&mut *self.descriptors.lock());
+        for (idx, entry) in descriptors.iter().enumerate() {
+            let Some(entry) = entry else {
+                continue;
+            };
+            if entry.object.wants_last_close()
+                && !descriptors[..idx]
+                    .iter()
+                    .flatten()
+                    .any(|other| Arc::ptr_eq(&other.object, &entry.object))
+            {
+                entry.object.on_last_close();
+            }
+        }
+    }
+
     fn get_free_fd(&self) -> RtFd {
         if let Some(fd) = self.freelist.lock().pop() {
             return fd;
@@ -364,4 +384,8 @@ pub(crate) fn get_entry(fd: RtFd) -> Option<DescriptorEntry> {
 
 pub fn pop_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
     DESCRIPTORS.pop(fd).map(|entry| entry.object)
+}
+
+pub(crate) fn notify_process_exit() {
+    DESCRIPTORS.notify_process_exit();
 }

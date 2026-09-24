@@ -602,6 +602,8 @@ fn privileged_lifetime_tests() {
         std::fs::remove_file(completion_path).unwrap();
         std::fs::remove_file(ready_path).unwrap();
     }
+
+    crate::stdio::test_child_stdin_eof_on_process_exit();
 }
 
 fn access_and_null_tests() {

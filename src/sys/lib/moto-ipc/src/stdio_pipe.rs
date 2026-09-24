@@ -124,6 +124,14 @@ impl PipeBuffer {
         Self::writer_closed_at(self.buf_addr).load(Ordering::Acquire) != 0
     }
 
+    /// What the ring still holds once the writer has closed (0 at the end of
+    /// input), or `None` while it is open. The writer publishes its last bytes
+    /// before the flag, so a caller that found the ring empty before it saw
+    /// the flag must look again, or it would report EOF over unread bytes.
+    fn read_after_close(&mut self, dst: &mut [u8]) -> Option<usize> {
+        self.writer_closed().then(|| self.read(dst))
+    }
+
     /// The reader is shutting this pipe down but has not gone yet: it will
     /// still drain what the ring holds, so bytes already published are
     /// delivered and no further ones may be added. Distinct from the reader
@@ -443,6 +451,7 @@ impl Counters {
     fn can_read(&self) -> bool {
         PipeBuffer::reader_counter_at(self.buf_addr).load(Ordering::Relaxed)
             < PipeBuffer::writer_counter_at(self.buf_addr).load(Ordering::Relaxed)
+            || self.writer_closed()
     }
 
     fn can_write(&self) -> bool {
@@ -457,6 +466,10 @@ impl Counters {
 
     fn close_writer(&self) {
         PipeBuffer::writer_closed_at(self.buf_addr).store(1, Ordering::Release);
+    }
+
+    fn writer_closed(&self) -> bool {
+        PipeBuffer::writer_closed_at(self.buf_addr).load(Ordering::Acquire) != 0
     }
 
     fn close_reader(&self) {
@@ -578,8 +591,8 @@ impl StdioPipe {
         // after the buffer has been drained. read_timeout_impl() does the same.
         let sz = buffer.read(buf);
         if sz == 0 {
-            if buffer.writer_closed() {
-                return Ok(0);
+            if let Some(sz) = buffer.read_after_close(buf) {
+                return Ok(sz);
             }
             if buffer.error_code != moto_rt::E_OK {
                 return Err(buffer.error_code);
@@ -874,8 +887,8 @@ impl StdioPipe {
         // we should complete reading bytes left in the buffer.
         'outer: loop {
             while !buffer.can_read() {
-                if buffer.writer_closed() {
-                    return Ok(0);
+                if let Some(read) = buffer.read_after_close(buf) {
+                    return Ok(read);
                 }
                 if buffer.error_code != moto_rt::E_OK {
                     break 'outer;
@@ -913,8 +926,8 @@ impl StdioPipe {
             return Ok(read);
         }
 
-        if buffer.writer_closed() {
-            return Ok(0);
+        if let Some(read) = buffer.read_after_close(buf) {
+            return Ok(read);
         }
 
         if buffer.error_code == moto_rt::E_TIMED_OUT {
@@ -1087,7 +1100,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_handler_survives_forward_route_teardown() {
-        let mapping = TestMapping::new();
+        let (mapping, _buffer) = test_buffer();
         let header = ctrl_c_header(&mapping);
         let route = header.install_forward();
         let before_handler = header.state().load(Ordering::SeqCst);
@@ -1182,6 +1195,24 @@ mod tests {
             .writer_counter()
             .store(buffer.work_buf_len + 1, Ordering::SeqCst);
         assert_eq!(buffer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
+    }
+
+    #[test]
+    fn close_rechecks_after_an_empty_read() {
+        let (_mapping, mut buffer) = test_buffer();
+        let counters = Counters {
+            buf_addr: buffer.buf_addr,
+            work_buf_len: buffer.work_buf_len,
+        };
+        let mut read = [0; 3];
+
+        assert_eq!(buffer.read(&mut read), 0);
+        assert_eq!(buffer.write(b"end"), 3);
+        counters.close_writer();
+
+        assert_eq!(buffer.read_after_close(&mut read), Some(3));
+        assert_eq!(&read, b"end");
+        assert_eq!(buffer.read_after_close(&mut read), Some(0));
     }
 }
 

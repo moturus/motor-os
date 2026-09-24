@@ -8,6 +8,13 @@ const INPUT_RECLAIM_PARENT: &str = "stdio-input-reclaim-parent";
 const INPUT_RECLAIM_IDLE: &str = "stdio-input-reclaim-idle";
 const INPUT_RECLAIM_BYTES: usize = 8 * 1024 + 37;
 const INPUT_CLAIM_WAIT_PARENT: &str = "stdio-input-claim-wait-parent";
+const STDIN_EOF_CHILD: &str = "stdio-stdin-eof-child";
+const STDIN_POLL_EOF_CHILD: &str = "stdio-stdin-poll-eof-child";
+const STDIN_EXIT_PARENT: &str = "stdio-stdin-exit-parent";
+const STDIN_EXIT_CHILD: &str = "stdio-stdin-exit-child";
+const STDIN_EOF_FIRST: &[u8] = b"first\n";
+// More than the ring holds, so delivery crosses multiple ring fills.
+const STDIN_EOF_REST_BYTES: usize = 5000;
 
 pub fn is_inherited_relay_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
@@ -221,6 +228,243 @@ fn test_stdio_pipe_fd() {
     println!("test_stdio_pipe_fd PASS");
 }
 
+/// Reads stdin through the runtime rather than std, whose `Stdin` reports any
+/// error as EOF (`is_ebadf`) and so hides how the input actually ended.
+fn run_stdin_eof_child(args: &[String]) -> ! {
+    use std::io::Write;
+
+    let mut first = [0; STDIN_EOF_FIRST.len()];
+    let mut read = 0;
+    while read < first.len() {
+        let sz = moto_rt::fs::read(moto_rt::FD_STDIN, &mut first[read..]).unwrap();
+        assert_ne!(sz, 0, "stdin ended before the first message");
+        read += sz;
+    }
+    assert_eq!(first, STDIN_EOF_FIRST);
+    std::io::stdout().write_all(b"ack").unwrap();
+    std::io::stdout().flush().unwrap();
+
+    let release = std::path::Path::new(&args[2]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !release.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "parent did not release the first-close probe"
+        );
+        std::thread::yield_now();
+    }
+    moto_rt::net::set_nonblocking(moto_rt::FD_STDIN, true).unwrap();
+    let mut probe = [0];
+    assert_eq!(
+        moto_rt::fs::read(moto_rt::FD_STDIN, &mut probe)
+            .err()
+            .unwrap(),
+        moto_rt::Error::NotReady,
+        "closing one duplicate ended stdin"
+    );
+    moto_rt::net::set_nonblocking(moto_rt::FD_STDIN, false).unwrap();
+    std::io::stdout().write_all(b"open").unwrap();
+    std::io::stdout().flush().unwrap();
+
+    let mut rest = Vec::new();
+    let mut buf = [0; 512];
+    loop {
+        match moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf) {
+            Ok(0) => break,
+            Ok(sz) => rest.extend_from_slice(&buf[..sz]),
+            Err(err) => panic!("stdin read failed instead of reaching EOF: {err:?}"),
+        }
+    }
+    assert_eq!(rest.len(), STDIN_EOF_REST_BYTES);
+    assert!(rest.iter().all(|byte| *byte == b'r'));
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf).unwrap(), 0);
+    std::process::exit(0)
+}
+
+fn run_stdin_poll_eof_child() -> ! {
+    use std::io::Write;
+
+    const STDIN: u64 = 1;
+    let registry = moto_rt::poll::new().unwrap();
+    moto_rt::poll::add(
+        registry,
+        moto_rt::FD_STDIN,
+        STDIN,
+        moto_rt::poll::POLL_READABLE,
+    )
+    .unwrap();
+    std::io::stdout().write_all(b"ready").unwrap();
+    std::io::stdout().flush().unwrap();
+
+    let mut events = [moto_rt::poll::Event::default(); 1];
+    assert_eq!(
+        moto_rt::poll::wait(
+            registry,
+            events.as_mut_ptr(),
+            events.len(),
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_secs(5)),
+        )
+        .unwrap(),
+        1,
+        "stdin close did not wake poll"
+    );
+    assert_eq!(events[0].token, STDIN);
+    assert_ne!(
+        events[0].events & (moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED),
+        0
+    );
+    let mut byte = [0];
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte).unwrap(), 0);
+    moto_rt::fs::close(registry).unwrap();
+    std::process::exit(0)
+}
+
+fn run_stdin_exit_parent(args: &[String]) -> ! {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(STDIN_EXIT_CHILD)
+        .arg(&args[2])
+        .arg(&args[3])
+        .env(moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY, "true")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(child.stdin.is_some());
+
+    let ready = std::path::Path::new(&args[3]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "detached stdin child did not start"
+        );
+        std::thread::yield_now();
+    }
+    std::process::exit(0)
+}
+
+fn run_stdin_exit_child(args: &[String]) -> ! {
+    std::fs::write(&args[3], b"").unwrap();
+    let mut byte = [0];
+    assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte).unwrap(), 0);
+    std::fs::write(&args[2], b"ok").unwrap();
+    std::process::exit(0)
+}
+
+fn wait_for_child(child: &mut std::process::Child, name: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{name} failed: {status}");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("{name} did not exit");
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// Closing a child's piped stdin is the end of its input, not a lost peer; and
+/// only the last descriptor's close ends it.
+fn test_child_stdin_eof() {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let release = crate::temp_path("stdio-stdin-eof-release");
+    let _ = std::fs::remove_file(&release);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(STDIN_EOF_CHILD)
+        .arg(&release)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let duplicate = moto_rt::fs::duplicate(stdin.as_raw_fd()).unwrap();
+
+    stdin.write_all(STDIN_EOF_FIRST).unwrap();
+    let mut ack = [0; 3];
+    stdout.read_exact(&mut ack).unwrap();
+    assert_eq!(&ack, b"ack");
+    drop(stdin);
+    std::fs::write(&release, b"").unwrap();
+    let mut open = [0; 4];
+    stdout.read_exact(&mut open).unwrap();
+    assert_eq!(&open, b"open");
+    std::fs::remove_file(&release).unwrap();
+
+    let rest = vec![b'r'; STDIN_EOF_REST_BYTES];
+    let mut written = 0;
+    while written < rest.len() {
+        written += moto_rt::fs::write(duplicate, &rest[written..]).unwrap();
+    }
+    moto_rt::fs::close(duplicate).unwrap();
+
+    wait_for_child(&mut child, "stdin EOF child");
+    println!("test_child_stdin_eof PASS");
+}
+
+fn test_child_stdin_poll_eof() {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(STDIN_POLL_EOF_CHILD)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut ready = [0; 5];
+    stdout.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"ready");
+    drop(child.stdin.take());
+    wait_for_child(&mut child, "stdin poll-EOF child");
+    println!("test_child_stdin_poll_eof PASS");
+}
+
+/// Requires detached-spawn authority: ordinary children are intentionally
+/// killed with their parent, before they could observe its stdin closing.
+pub fn test_child_stdin_eof_on_process_exit() {
+    let result = crate::temp_path("stdio-stdin-exit-eof");
+    let ready = crate::temp_path("stdio-stdin-exit-ready");
+    let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_file(&ready);
+    let caps = format!(
+        "0x{:x}",
+        moto_sys::caps::CAP_SPAWN
+            | moto_sys::caps::CAP_SPAWN_DETACHED
+            | moto_sys::caps::CAP_INTERACTIVE
+    );
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(STDIN_EXIT_PARENT)
+        .arg(&result)
+        .arg(&ready)
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, caps)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !result.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "child did not receive EOF when its parent exited"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(std::fs::read(&result).unwrap(), b"ok");
+    std::fs::remove_file(result).unwrap();
+    std::fs::remove_file(ready).unwrap();
+}
+
 fn test_child_stdout_reader_drop() {
     use std::io::{Read, Write};
 
@@ -297,6 +541,10 @@ pub fn is_stdio_child(args: &[String]) -> bool {
                 | INPUT_RECLAIM_PARENT
                 | INPUT_RECLAIM_IDLE
                 | INPUT_CLAIM_WAIT_PARENT
+                | STDIN_EOF_CHILD
+                | STDIN_POLL_EOF_CHILD
+                | STDIN_EXIT_PARENT
+                | STDIN_EXIT_CHILD
         )
     })
 }
@@ -314,6 +562,10 @@ pub fn run_stdio_child(args: &[String]) -> ! {
         "self-stdio-close-child" => run_self_stdio_close_child(),
         INPUT_RECLAIM_PARENT => run_input_reclaim_parent(),
         INPUT_CLAIM_WAIT_PARENT => run_input_claim_wait_parent(),
+        STDIN_EOF_CHILD => run_stdin_eof_child(args),
+        STDIN_POLL_EOF_CHILD => run_stdin_poll_eof_child(),
+        STDIN_EXIT_PARENT => run_stdin_exit_parent(args),
+        STDIN_EXIT_CHILD => run_stdin_exit_child(args),
         INPUT_RECLAIM_IDLE => {
             std::thread::sleep(std::time::Duration::from_millis(50));
             std::process::exit(0)
@@ -1492,6 +1744,8 @@ pub fn run_all_tests() {
     test_stdio_pipe_ctrl_c_scan();
     test_stdio_pipe_fd();
     test_child_stdout_reader_drop();
+    test_child_stdin_eof();
+    test_child_stdin_poll_eof();
     test_pipe_stdio_vectored();
     test_positive_file_stdio();
     test_inherited_file_relays();
