@@ -15,7 +15,7 @@ native Rust components in [build-llvm.md](build-llvm.md) and
 | Declaration of the source tuple | `src/toolchain-versions.sh` | yes |
 | Root selector naming the exact host toolchain | `rust-toolchain.toml` | yes |
 | Managed source checkouts | `$MOTORH/toolchain-src/{rust,mlibc}` | no |
-| Add-on sources (follow a fork branch; Lua is a release) | `$MOTORH/{ripgrep,helix,lua-<version>}` | no |
+| Add-on sources (follow a fork branch; Lua is a release) | `$MOTORH/{ripgrep,helix,sed,lua-<version>}` | no |
 | Host toolchain prefixes | `$MOTORH/toolchains/<rustup name>` | no |
 | Standalone LLVM/Clang builds | `$MOTORH/build/toolchain/standalone-llvm/<llvm key>` | no |
 | Assemblies (C sysroot, native tools, image overlays) | `$MOTORH/assemblies/<assembly key>` | no |
@@ -54,7 +54,7 @@ The declaration is data only. The values that matter most:
   name (`motor-1.99.0-beta-f47d5bb-dev.2`).
 
 The declaration covers the C, C++, and Rust toolchain only. Userspace add-ons
-(Lua, ripgrep, Helix) are declared in `src/build-motor-os.sh`, and the vsock
+(Lua, ripgrep, Helix, sed) are declared in `src/build-motor-os.sh`, and the vsock
 test backend belongs to the test harness.
 
 ## 2. Identities
@@ -108,11 +108,12 @@ is the one built when the assembly was produced; to rebuild it, remove
 and each toolchain overlay carry `MOTOR-ASSEMBLY-MANIFEST`; the developer
 image exposes it as `/devtools/toolchain/manifest`.
 
-**Add-ons.** Lua, ripgrep, and Helix are userspace programs built with the
-finished toolchain. They are staged beside the assembly's overlays
-(`images/lua`, `images/rg`, `images/helix`) because they link against its
-sysroot, but they are no part of its key, manifest, or validation. Lua is a
-release version; ripgrep and Helix follow one branch of their fork. Each
+**Add-ons.** Lua, ripgrep, Helix, and sed are userspace programs built with
+the finished toolchain. They are staged beside the assembly's overlays
+(`images/lua`, `images/rg`, `images/helix`, `images/sed`) because they link
+against its sysroot, but they are no part of its key, manifest, or validation.
+Lua is a release version; ripgrep, Helix, and sed follow one branch of their
+fork (sed is uutils sed, from `moturus/sed`). Each
 records the source it was built from in `ADDON-<name>` inside the assembly,
 and the producer rebuilds that add-on alone when the source differs.
 The manifest's `motor_os_rev` and `assembly_state` record the producer's Git

@@ -492,6 +492,7 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
   <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
   <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
   <tr><td>lua</td><td><code>/devtools/bin</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
+  <tr><td>sed</td><td><code>/devtools/bin</code></td><td>Developer image: the stream editor, uutils sed (GNU-compatible, in Rust). <code>sed -i</code> edits a file in place: the file keeps its permissions, and so must be writable.</td></tr>
 </table>
 </div>
 <p>The developer image adds gix, Lorry, Gears, mdbg, the native compilers, and the test

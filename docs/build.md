@@ -36,7 +36,7 @@ the parent of the Motor OS checkout contains:
 toolchain-src/   exact managed Rust/LLVM and mlibc sources
 toolchains/      immutable key-qualified host toolchain prefixes
 assemblies/      keyed C sysroots, native tools, and generated image roots
-ripgrep/ helix/ lua-<version>/
+ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
 ```
 

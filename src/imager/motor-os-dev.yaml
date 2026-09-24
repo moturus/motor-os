@@ -73,6 +73,7 @@ assembly_dirs:
   - "rustc"
   - "helix"
   - "lua"
+  - "sed"
   - "rust-analyzer"
 assembly_required_executables:
   - "rg/system/bin/rg"
@@ -84,6 +85,7 @@ assembly_required_executables:
   - "rustc/devtools/bin/rustfmt"
   - "rustc/devtools/rust/bin/rustfmt"
   - "helix/devtools/helix/hx"
+  - "sed/devtools/bin/sed"
   - "rust-analyzer/devtools/rust/bin/rust-analyzer"
 source_dirs:
   - source: "src/bin/red"

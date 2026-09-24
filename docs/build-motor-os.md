@@ -53,8 +53,8 @@ Managed inputs must exactly match the declaration. A wrong remote, missing or
 unreachable commit, incorrect gitlink, dirty file, or untracked file is an
 error. The build never advances a toolchain branch, runs `cargo update`, or
 silently changes a dependency selection. The userspace add-ons are the
-exception by design: ripgrep and Helix follow one branch of their fork, in
-`$MOTORH/ripgrep` and `$MOTORH/helix`.
+exception by design: ripgrep, Helix, and sed follow one branch of their fork,
+in `$MOTORH/ripgrep`, `$MOTORH/helix`, and `$MOTORH/sed`.
 
 Rust and LLVM development uses explicit authoring mode instead of editing the
 managed checkout:
@@ -95,8 +95,8 @@ The workflow performs these stages:
 6. Derive an assembly key and build the C-ABI shim, compiler-rt builtins, mlibc,
    libc++/libc++abi/libunwind, native LLVM, and native rustc in that
    assembly's private directories. Then build the userspace add-ons (Lua,
-   ripgrep, Helix) with that toolchain; they are no part of its identity and
-   are rebuilt alone when their source changes.
+   ripgrep, Helix, sed) with that toolchain; they are no part of its identity
+   and are rebuilt alone when their source changes.
 7. Write immutable host and assembly manifests, then build the base, standard,
    and development images with the exact generated roots.
 
@@ -110,7 +110,7 @@ $MOTORH/assemblies/<assembly-key>/
     build/       component build trees
     sysroot/     C/C++ cross sysroot and linker wrappers
     images/      toolchain overlays (libc, LLVM, rustc, rust-analyzer) and
-                 add-on overlays (lua, rg, helix)
+                 add-on overlays (lua, rg, helix, sed)
     ADDON-*      the source each add-on was built from
 ```
 

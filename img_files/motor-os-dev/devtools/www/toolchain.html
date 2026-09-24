@@ -460,7 +460,7 @@ mlibc.</p>
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
   <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. It sits on <code>moto-rt-cabi</code>, a C ABI over the Motor runtime (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
   <tr><td>Small crate forks</td><td><code>moturus/libc</code>, <code>moturus/stacker</code>, <code>moturus/rust_libloading</code>, <code>moturus/rust-ctrlc</code></td><td>Patched into the Rust fork's own dependency graph; Cargo fetches them, nothing is cloned by hand.</td></tr>
-  <tr><td>Lua, ripgrep, Helix</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code>; <code>moturus/helix</code></td><td>Userspace add-ons, not parts of the toolchain: built with the finished toolchain and rebuilt alone when their source changes. Lua was the first real C program and ripgrep the first large Rust program; they ship as <code>/devtools/bin/lua</code>, <code>/system/bin/rg</code>, and <code>/devtools/helix/hx</code>.</td></tr>
+  <tr><td>Lua, ripgrep, Helix, sed</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code>; <code>moturus/helix</code>; <code>moturus/sed</code> (uutils sed)</td><td>Userspace add-ons, not parts of the toolchain: built with the finished toolchain and rebuilt alone when their source changes. Lua was the first real C program and ripgrep the first large Rust program; they ship as <code>/devtools/bin/lua</code>, <code>/system/bin/rg</code>, <code>/devtools/helix/hx</code>, and <code>/devtools/bin/sed</code>.</td></tr>
 </table>
 </div>
 
@@ -599,7 +599,7 @@ lorry build --release
 lorry run</code></pre>
 
 <h3>Also on the image</h3>
-<p><code>/devtools/bin/lua</code> (Lua 5.4.8), <code>/system/bin/curl</code> (the HTTPS
+<p><code>/devtools/bin/lua</code> (Lua 5.4.8), <code>/devtools/bin/sed</code> (uutils sed), <code>/system/bin/curl</code> (the HTTPS
 client Lorry fetches with), <code>/devtools/bin/mdbg</code>, the test suites under
 <code>/devtools/tests</code>, and source snapshots under <code>/devtools/src</code>; see
 <a href="devtools.html">Developer image</a>.</p>
@@ -628,7 +628,7 @@ the one before it:</p>
   the manifest, from which the imager places them into the developer image.</li>
   <li>The userspace add-ons are built last, with the finished toolchain: Lua is
   cross-compiled against the sysroot as a check that a real C program links and runs, and
-  ripgrep and Helix are built from one branch of their fork. They are staged beside the
+  ripgrep, Helix, and sed are built from one branch of their fork. They are staged beside the
   toolchain's files but are no part of its key or manifest.</li>
 </ol>
 <p>The steps are listed so the relationships are clear; the procedure, the directory

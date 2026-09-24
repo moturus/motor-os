@@ -971,10 +971,11 @@ mod tests {
                 "rustc",
                 "helix",
                 "lua",
+                "sed",
                 "rust-analyzer"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 10);
+        assert_eq!(config.assembly_required_executables.len(), 11);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1004,6 +1005,10 @@ mod tests {
             .assembly_required_executables
             .iter()
             .any(|path| path == "helix/devtools/helix/hx"));
+        assert!(config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path == "sed/devtools/bin/sed"));
         assert!(config
             .directories
             .iter()

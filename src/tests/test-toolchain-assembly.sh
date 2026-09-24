@@ -181,10 +181,11 @@ if toolchain_claim_assembly 2>/dev/null; then fail "changed rustfmt was accepted
 printf rustfmt > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
 # Add-on overlays are refreshed in place and are not assembly outputs.
 mkdir -p "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix" "$ASSEMBLY_IMAGE_ROOT/rg/system/bin" \
-	"$ASSEMBLY_IMAGE_ROOT/lua/devtools/bin"
+	"$ASSEMBLY_IMAGE_ROOT/lua/devtools/bin" "$ASSEMBLY_IMAGE_ROOT/sed/devtools/bin"
 printf hx > "$ASSEMBLY_IMAGE_ROOT/helix/devtools/helix/hx"
 printf rg > "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"
 printf lua > "$ASSEMBLY_IMAGE_ROOT/lua/devtools/bin/lua"
+printf sed > "$ASSEMBLY_IMAGE_ROOT/sed/devtools/bin/sed"
 toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] || fail "an add-on overlay prevented assembly reuse"
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rg/system/bin/rg"

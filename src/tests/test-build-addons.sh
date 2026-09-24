@@ -117,12 +117,22 @@ esac
 case "$(declare -f main)" in
 	*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_helix*'toolchain_complete_assembly'*|\
 *'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_ripgrep*'toolchain_complete_assembly'*|\
-*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_lua*'toolchain_complete_assembly'*)
+*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_lua*'toolchain_complete_assembly'*|\
+*'TOOLCHAIN_ASSEMBLY_REUSED" = false'*build_sed*'toolchain_complete_assembly'*)
 		fail "an add-on is still built inside the keyed producer path" ;;
 esac
 case "$(declare -f build_addons)" in
-	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*) ;;
-	*) fail "Lua, ripgrep, and Helix are not all add-ons" ;;
+	*'ensure_addon lua'*'ensure_addon ripgrep'*'ensure_addon helix'*'ensure_addon sed'*) ;;
+	*) fail "Lua, ripgrep, Helix, and sed are not all add-ons" ;;
+esac
+case "$(declare -f build_addons)" in
+	*'update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"'*'ensure_addon sed'*) ;;
+	*) fail "sed does not follow its fork branch" ;;
+esac
+case "$(declare -f build_sed)" in
+	*'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1'*'build --target "$TARGET" --release --locked'*\
+*'"$SED_IMG/devtools/bin/sed"'*) ;;
+	*) fail "sed is not a single-codegen-unit locked release build staged as /devtools/bin/sed" ;;
 esac
 
 # A changed source rebuilds that add-on alone; an unchanged one builds nothing.

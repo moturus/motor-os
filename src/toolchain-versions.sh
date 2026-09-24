@@ -67,4 +67,5 @@ MOTOR_STANDALONE_LLVM_NINJA_TARGETS=(
 # Keys name the C, C++, and Rust toolchain only: its external sources and its
 # build configuration (toolchain_key in toolchain-lib.sh, toolchain_assembly_key
 # in toolchain-assembly.sh). No file of this repository is hashed into a key,
-# and userspace add-ons (Lua, ripgrep, Helix) are declared in build-motor-os.sh.
+# and userspace add-ons (Lua, ripgrep, Helix, sed) are declared in
+# build-motor-os.sh.

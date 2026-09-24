@@ -446,14 +446,14 @@ a.card h3 { color: var(--accent); }
 <h1>Developer image</h1>
 <p class="lead"><code>motor-os-dev.qcow2</code> is the standard image plus everything
 needed to build and test programs inside the VM: native C, C++, and Rust compilers, gix,
-Lorry, Gears, curl, Lua, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
+Lorry, Gears, curl, Lua, sed, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
 started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 
 <h2>Layout</h2>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, <code>sed</code>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
   <tr><td><code>/devtools/rust</code></td><td>Native rustc with a full <code>x86_64-unknown-motor</code> sysroot. There is no cargo on the image; Lorry is the build driver.</td></tr>
   <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and snapshots of red, lorry, gears, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>

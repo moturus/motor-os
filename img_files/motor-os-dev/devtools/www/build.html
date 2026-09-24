@@ -495,9 +495,9 @@ src/build-motor-os.sh</code></pre>
   and native rustc. An assembly is keyed by its inputs too, so a change to mlibc produces
   a new assembly without a new compiler. Edits to this repository, <code>moto-rt</code>
   included, never change a key;</li>
-  <li>builds the userspace add-ons with that toolchain: Lua, ripgrep, and Helix. They are no
-  part of the toolchain's identity. Lua is a release, ripgrep and Helix follow one branch of
-  their fork, and each is rebuilt alone when its source changes;</li>
+  <li>builds the userspace add-ons with that toolchain: Lua, ripgrep, Helix, and sed. They
+  are no part of the toolchain's identity. Lua is a release, ripgrep, Helix, and sed follow
+  one branch of their fork, and each is rebuilt alone when its source changes;</li>
   <li>writes the toolchain and assembly manifests, then builds the base, standard, and
   developer images into <code>vm_images/release/</code>.</li>
 </ol>
@@ -509,7 +509,7 @@ run to put them elsewhere):</p>
   <tr><th>Directory</th><th>Contents</th></tr>
   <tr><td><code>toolchain-src/</code></td><td>The managed Rust checkout, with LLVM and Cargo
     as submodules, and the mlibc checkout.</td></tr>
-  <tr><td><code>ripgrep/</code>, <code>helix/</code>, <code>lua-&lt;version&gt;/</code></td><td>The
+  <tr><td><code>ripgrep/</code>, <code>helix/</code>, <code>sed/</code>, <code>lua-&lt;version&gt;/</code></td><td>The
     add-on sources.</td></tr>
   <tr><td><code>toolchains/&lt;name&gt;/</code></td><td>One immutable host toolchain per key:
     the rustup toolchain the repository selects.</td></tr>
@@ -517,7 +517,7 @@ run to put them elsewhere):</p>
     (component build trees), <code>sysroot/</code> (the C/C++ cross sysroot and the
     <code>motor-clang</code> linker wrappers), and <code>images/</code> (the libc, LLVM,
     rustc, and rust-analyzer files the imager places into the images, plus the Lua,
-    ripgrep, and Helix add-ons built against this sysroot).</td></tr>
+    ripgrep, Helix, and sed add-ons built against this sysroot).</td></tr>
 </table>
 </div>
 <p>The build is incremental and safe to rerun: after a failure, run the same command

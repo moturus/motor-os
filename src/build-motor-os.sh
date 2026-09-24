@@ -8,14 +8,15 @@
 # key-qualified host toolchain, then assembles the matching native development
 # toolchain and images.
 #
-# Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, ripgrep, sysroot,
-# and Lua sources/builds live under $MOTORH (the checkout's parent by default).
+# Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, ripgrep, sed,
+# sysroot, and Lua sources/builds live under $MOTORH (the checkout's parent by
+# default).
 #
 # Generated image inputs are staged beneath a key-qualified assembly directory.
 #
 # The tracked img_files directories remain source-only. The standard imager
 # consumes the libc and rg roots; the development imager additionally consumes
-# the LLVM, rustc, Helix, and rust-analyzer/rust-src roots.
+# the LLVM, rustc, Helix, Lua, sed, and rust-analyzer/rust-src roots.
 #
 # On-image layout (see docs/libc.md): C/C++ headers + libraries
 # live under /devtools/llvm, the clang driver config under /devtools/cfg/llvm,
@@ -45,6 +46,7 @@ Build the complete Motor OS release environment and all three images, including:
   - native Motor OS LLVM/Clang, Lua, and rustc;
   - ripgrep as /system/bin/rg;
   - Helix as /devtools/helix/hx in the development image;
+  - uutils sed as /devtools/bin/sed in the development image;
   - native rust-analyzer and matching rust-src in the development image;
   - all standard and dev-image Motor OS binaries;
   - base, standard, and dev images under vm_images/release.
@@ -123,17 +125,20 @@ RUST="$MOTORH/rust"
 TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
 RIPGREP="$MOTORH/ripgrep"
 HELIX="$MOTORH/helix"
+SED="$MOTORH/sed"
 B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
 SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
 
 # Userspace add-ons. They are built with the finished toolchain and are no part
-# of its identity: Lua is a release, ripgrep and Helix follow a fork branch.
+# of its identity: Lua is a release, ripgrep, Helix, and sed follow a fork branch.
 LUA_VER=5.4.8
 RIPGREP_REPOSITORY=https://github.com/moturus/ripgrep.git
 RIPGREP_BRANCH=master
 HELIX_REPOSITORY=https://github.com/moturus/helix.git
 HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
+SED_REPOSITORY=https://github.com/moturus/sed.git
+SED_BRANCH=main
 CLANG_MAJOR=""                      # detected after the host toolchain is built
 
 HOST=x86_64-unknown-linux-gnu
@@ -207,6 +212,7 @@ activate_exact_assembly_paths() {
 	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
 	HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
 	LUA_IMG="$ASSEMBLY_IMAGE_ROOT/lua"
+	SED_IMG="$ASSEMBLY_IMAGE_ROOT/sed"
 	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
 	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
 	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
@@ -218,6 +224,7 @@ activate_exact_assembly_paths() {
 	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua-$LUA_VER"
 	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
 	HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
+	SED_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/sed"
 	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
 	MOTOR_RUSTC="$TOOLCHAIN_PREFIX/bin/rustc"
 	MOTOR_RUSTDOC="$TOOLCHAIN_PREFIX/bin/rustdoc"
@@ -775,6 +782,23 @@ build_ripgrep() {
 	chmod 755 "$RG_IMG/system/bin/rg"
 }
 
+# --- add-on: sed (uutils) ------------------------------------------------------
+build_sed() {
+	log "building sed and staging it as /devtools/bin/sed"
+	# One codegen unit, as sed's Cargo.toml suggests: smaller, and no slower.
+	( cd "$SED" && \
+		CARGO_TARGET_DIR="$SED_TARGET_DIR" \
+		CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+			run_motor_cargo build \
+				--target "$TARGET" --release --locked )
+
+	local binary="$SED_TARGET_DIR/$TARGET/release/sed"
+	[ -x "$binary" ] || die "sed binary was not produced: $binary"
+	mkdir -p "$SED_IMG/devtools/bin"
+	"$B/llvm-strip" -o "$SED_IMG/devtools/bin/sed" "$binary"
+	chmod 755 "$SED_IMG/devtools/bin/sed"
+}
+
 validate_helix_elf() {
 	local binary="$1" stack
 	"$B/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
@@ -841,6 +865,9 @@ build_addons() {
 	update_addon_source helix "$HELIX" "$HELIX_REPOSITORY" "$HELIX_BRANCH"
 	ensure_addon helix "$(git -C "$HELIX" rev-parse HEAD)" \
 		"$HELIX_IMG" devtools/helix/hx build_helix
+	update_addon_source sed "$SED" "$SED_REPOSITORY" "$SED_BRANCH"
+	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
+		"$SED_IMG" devtools/bin/sed build_sed
 }
 
 build_helix() {
@@ -966,6 +993,7 @@ main() {
 		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
 		"$RG_IMG/system/bin/rg"
 		"$HELIX_IMG/devtools/helix/hx"
+		"$SED_IMG/devtools/bin/sed"
 		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"

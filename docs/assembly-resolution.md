@@ -51,7 +51,7 @@ Resolution is offline and read-only. Before a root is returned, the script:
 
 It never fetches source, creates a managed checkout, modifies an assembly, or
 falls back to an unkeyed staging location. Add-on overlays (Lua, ripgrep,
-Helix) are no part of this validation.
+Helix, sed) are no part of this validation.
 
 ## Image configuration
 

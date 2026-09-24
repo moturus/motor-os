@@ -24,6 +24,10 @@ activate_exact_assembly_paths
 	fail "Helix staging is not assembly-keyed"
 [ "$HELIX_TARGET_DIR" = "$ASSEMBLY_ROOT/build/helix" ] ||
 	fail "Helix Cargo output is not assembly-keyed"
+[ "$SED_IMG" = "$ASSEMBLY_ROOT/images/sed" ] ||
+	fail "sed staging is not assembly-keyed"
+[ "$SED_TARGET_DIR" = "$ASSEMBLY_ROOT/build/sed" ] ||
+	fail "sed Cargo output is not assembly-keyed"
 [ "$MOTOR_CARGO" = "$TOOLCHAIN_PREFIX/bin/cargo" ] ||
 	fail "shim does not select the installed Cargo"
 [ "$MOTOR_RUSTC" = "$TOOLCHAIN_PREFIX/bin/rustc" ] ||
@@ -71,7 +75,7 @@ esac
 [ "$LUA_IMG" = "$ASSEMBLY_ROOT/images/lua" ] || fail "Lua has no overlay of its own"
 [ "$LUA_BUILD" = "$ASSEMBLY_ROOT/build/lua-$LUA_VER" ] ||
 	fail "Lua objects of different releases share a build directory"
-case "$(declare -f rebuild_shim rustc_stage_image build_ripgrep build_helix build_images)" in
+case "$(declare -f rebuild_shim rustc_stage_image build_ripgrep build_helix build_sed build_images)" in
 	*'cargo +dev-x86_64-unknown-motor'*|*'rm -rf'*|*'src/sys/target'*|*'build/native-toolchain'*)
 		fail "later producers still wipe or consume legacy Cargo output" ;;
 esac

@@ -865,6 +865,25 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   out="$(vm_ssh_stdout "/system/bin/rush -c 'printf \"a\nb\n\" | /devtools/bin/lua -e \"for l in io.lines() do print(l) end\"; echo RC=\$?'")"
   [ "$out" = $'a\nb\nRC=0' ] || fail "Lua did not read piped stdin to EOF: '$out'"
   echo "C piped-stdin EOF PASS"
+
+  # The packaged sed: a pipeline, then in-place edits in both GNU forms, a
+  # script after a bare -i and an attached backup suffix. An in-place edit
+  # keeps the file's permissions, here narrower than the default.
+  sed_dir="$TEST_TMP/sed-e2e"
+  out="$(vm_ssh_stdout "/system/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /devtools/bin/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /devtools/bin/sed -i s/one/ONE/ f; /devtools/bin/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
+  [ "$out" = $'BETA\nRC=0\nONE\nTWO\nONE\ntwo\n-rwxrw---- 8 f' ] ||
+    fail "sed pipeline or in-place edit: '$out'"
+  # A writable script in a directory where no file can be created: the edit
+  # is staged in memory, and the script keeps its permissions and contents.
+  www=/devtools/bin/www
+  www_before="$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")"
+  out="$(vm_ssh_stdout "/system/bin/rush -c '/devtools/bin/sed -i 1s/^/#sed-probe/ $www; /devtools/bin/sed -n 1p $www; /devtools/bin/sed -i 1s/^#sed-probe// $www; ls -l $www'")"
+  [ "$(printf '%s\n' "$out" | head -1)" = "#sed-probe$(printf '%s\n' "$www_before" | head -1)" ] &&
+    [ "$(printf '%s\n' "$out" | sed -n 2p | awk '{ print $1 }')" = "-rwxrwxr-x" ] ||
+    fail "sed did not edit $www in place: '$out'"
+  [ "$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")" = "$www_before" ] ||
+    fail "sed did not restore $www"
+  echo "sed PASS"
 fi
 
 # A background job's `$!` is the kernel's own pid for that child, so it is
