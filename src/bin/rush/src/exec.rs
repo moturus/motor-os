@@ -469,7 +469,7 @@ fn exec_simple(
                 }
             }
             maybe_die_fatal(shell);
-            let status = exec_builtin(b, &argv, &fds, shell);
+            let status = exec_builtin(b, &argv, &assigns, &fds, shell);
             maybe_die_fatal(shell);
             return status;
         }
@@ -479,7 +479,7 @@ fn exec_simple(
         // A regular builtin's prefix assignments are transient: visible to the
         // builtin, then restored.
         let saved = apply_temp_assigns(&assigns, shell);
-        let status = exec_builtin(b, &argv, &fds, shell);
+        let status = exec_builtin(b, &argv, &assigns, &fds, shell);
         restore_temp_assigns(saved, shell);
         return status;
     }
@@ -531,6 +531,7 @@ fn spawn_background(
         program,
         &argv[1..],
         &env,
+        shell.cap_ceiling(),
         child_in(&fds[0], true, sole_use[0]),
         child_out(&fds[1], sole_use[1]),
         child_out(&fds[2], sole_use[2]),
@@ -647,7 +648,17 @@ fn restore_temp_assigns(saved: Vec<(String, Option<String>, bool)>, shell: &mut 
 /// The execution-coupled builtins (`.`, `eval`, `exec`, `command`, `read`) and
 /// the divergent ones (`exit`) are handled here; the rest go to
 /// [`builtins::dispatch`] with writers wired to fd 1 / fd 2.
-fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+///
+/// `assigns` are the command's prefix assignments. The shell variables already
+/// hold them; `exec` and `command` also pass them to the program they run, as
+/// they would reach any other external command (POSIX §2.9.1).
+fn exec_builtin(
+    b: Builtin,
+    argv: &[String],
+    assigns: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) -> i32 {
     let args = &argv[1..];
     match b {
         Builtin::Exit => {
@@ -664,8 +675,8 @@ fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Sh
         Builtin::Continue => builtin_continue(args, shell),
         Builtin::Dot => builtin_dot(args, fds, shell),
         Builtin::Eval => builtin_eval(args, fds, shell),
-        Builtin::Exec => builtin_exec(args, fds, shell),
-        Builtin::Command => builtin_command(args, fds, shell),
+        Builtin::Exec => builtin_exec(args, assigns, fds, shell),
+        Builtin::Command => builtin_command(args, assigns, fds, shell),
         Builtin::Read => {
             let mut out = fds[1].out_writer();
             let mut err = fds[2].err_writer();
@@ -746,14 +757,21 @@ fn builtin_eval(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 
 /// `execve`, so this spawns the command with the current fds and exits with its
 /// status (a documented emulation). With only redirections, the fds were already
 /// opened by `build_fds`; persistent redirection of the shell is not supported.
-fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+fn builtin_exec(
+    args: &[String],
+    assigns: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) -> i32 {
     let status = if args.is_empty() {
         // Redirection-only exec: no persistent effect (no dup2). The file
         // side-effects already happened when the redirects were built.
         shell.status()
     } else {
         match resolve_program(&args[0], shell) {
-            Some(program) => spawn_external(&program, &args[1..], &[], fds, &NO_SOLE_USE, shell),
+            Some(program) => {
+                spawn_external(&program, &args[1..], assigns, fds, &NO_SOLE_USE, shell)
+            }
             None => {
                 let mut err = fds[2].err_writer();
                 let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
@@ -771,7 +789,12 @@ fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 
 
 /// `command [-v|-V] [-p] name [args…]` — run `name` ignoring shell functions, or
 /// (with `-v`/`-V`) describe it.
-fn builtin_command(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+fn builtin_command(
+    args: &[String],
+    assigns: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) -> i32 {
     let mut verbose = false;
     let mut describe = false;
     let mut i = 0;
@@ -822,10 +845,10 @@ fn builtin_command(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i
     }
     // Run `name`: a builtin (bypassing functions) or an external program.
     if let Some(b) = builtins::lookup(&rest[0]) {
-        return exec_builtin(b, rest, fds, shell);
+        return exec_builtin(b, rest, assigns, fds, shell);
     }
     match resolve_program(&rest[0], shell) {
-        Some(program) => spawn_external(&program, &rest[1..], &[], fds, &NO_SOLE_USE, shell),
+        Some(program) => spawn_external(&program, &rest[1..], assigns, fds, &NO_SOLE_USE, shell),
         None => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: {}: command not found", rest[0]);
@@ -888,6 +911,9 @@ fn resolve_program(name: &str, shell: &Shell) -> Option<String> {
 /// arguments (`$0` is unchanged), apply the definition's own redirections over
 /// the call-site fds, run the body, then restore the parameters. `return`
 /// terminates the function; `break`/`continue` do not cross the boundary.
+///
+/// An explicit `MOTOR_OS_CAPS` bounds every child the body starts, since the
+/// body runs in this process and could otherwise unset the mask.
 fn exec_function_call(
     body: &FunctionBody,
     argv: &[String],
@@ -895,6 +921,13 @@ fn exec_function_call(
     fds: &[FdSource; 3],
     shell: &mut Shell,
 ) -> i32 {
+    let saved_ceiling = shell.cap_ceiling();
+    let Ok(ceiling) = jobs::call_cap_ceiling(assigns, saved_ceiling) else {
+        let mut err = fds[2].err_writer();
+        let _ = writeln!(err, "rush: {}: invalid MOTOR_OS_CAPS", argv[0]);
+        return 126;
+    };
+
     // Prefix assignments (`VAR=x func`) persist in the shell — proper per-call
     // scoping arrives with the builtin/options work of later phases.
     for (k, v) in assigns {
@@ -909,10 +942,12 @@ fn exec_function_call(
     // defined within it, not the caller's.
     let saved_loop_depth = shell.take_loop_depth();
 
+    shell.set_cap_ceiling(ceiling);
     let status = match build_fds(&IoEnv { fds: fds.clone() }, &body.redirects, shell) {
         Ok(f) => exec_compound(&body.body, shell, &IoEnv { fds: f }),
         Err(code) => code,
     };
+    shell.set_cap_ceiling(saved_ceiling);
     shell.set_loop_depth(saved_loop_depth);
 
     let status = match shell.flow() {
@@ -1107,19 +1142,40 @@ fn read_shell_script(program: &str) -> Option<String> {
     Some(source)
 }
 
-/// Execute a rush-compatible script over a fresh shell state while retaining
-/// this process. `None` means normal spawning should handle the program.
+/// Execute a rush-compatible script over a fresh shell state, using a child
+/// process when a capability mask requires it. `None` selects normal spawning.
 fn run_shell_script(
     program: &str,
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
+    _sole_use: &[bool; 3],
     parent: &mut Shell,
 ) -> Option<i32> {
     if parent.inproc_script_depth() >= MAX_INPROC_SCRIPT_DEPTH {
         return None;
     }
     let source = read_shell_script(program)?;
+    // A capability mask or ceiling needs a real child: environment changes
+    // cannot reduce this process's immutable capabilities. Run Rush directly,
+    // since the native loader cannot use the /system/bin/sh script as an ELF
+    // interpreter.
+    #[cfg(not(unix))]
+    if parent.cap_ceiling().is_some()
+        || jobs::has_explicit_env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, env)
+    {
+        let mut child_args = Vec::with_capacity(args.len() + 1);
+        child_args.push(program.to_string());
+        child_args.extend_from_slice(args);
+        return Some(spawn_child(
+            "/system/bin/rush",
+            &child_args,
+            env,
+            fds,
+            _sole_use,
+            parent,
+        ));
+    }
     let _process_state = ProcessState::capture();
     // These are child-environment assignments in the spawn path. Install them
     // before constructing the fresh shell so they are exported there, then the
@@ -1167,13 +1223,25 @@ fn spawn_external(
     shell: &mut Shell,
 ) -> i32 {
     let _title = crate::pane_title::ForegroundTitle::new(program, shell);
-    if let Some(status) = run_shell_script(program, args, env, fds, shell) {
+    if let Some(status) = run_shell_script(program, args, env, fds, sole_use, shell) {
         return status;
     }
+    spawn_child(program, args, env, fds, sole_use, shell)
+}
+
+fn spawn_child(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    fds: &[FdSource; 3],
+    sole_use: &[bool; 3],
+    shell: &mut Shell,
+) -> i32 {
     let mut child = match jobs::spawn(
         program,
         args,
         env,
+        shell.cap_ceiling(),
         child_in(&fds[0], false, sole_use[0]),
         child_out(&fds[1], sole_use[1]),
         child_out(&fds[2], sole_use[2]),
@@ -1515,7 +1583,7 @@ fn run_builtin_pipeline_safe(
         }
         _ => {
             let saved = apply_temp_assigns(assigns, shell);
-            let status = exec_builtin(b, argv, fds, shell);
+            let status = exec_builtin(b, argv, assigns, fds, shell);
             restore_temp_assigns(saved, shell);
             status
         }

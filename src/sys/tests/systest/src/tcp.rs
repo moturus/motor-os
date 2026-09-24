@@ -1672,6 +1672,10 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     const MIN_MESSAGES: u64 = 4_096;
     const MIN_FULL_OBSERVATIONS: u64 = 128;
 
+    // The std sockets live on a vdso pool channel that shuts down only after
+    // its last socket closes; the next test's baseline must not include it.
+    // An older channel may still be shutting down, hence `<=` at the end.
+    let clients_at_start = read_sys_io_metric("net.active_clients");
     let flood_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let flood_addr = flood_listener.local_addr().unwrap();
     let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1782,9 +1786,7 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     drop((flood_peer, flood_listener));
     drop(probe_connection);
     drop(flood_connection);
-    wait_for_sys_io_metric("net.active_clients", |value| {
-        value <= clients_with_raw_connections - 2
-    });
+    wait_for_sys_io_metric("net.active_clients", |value| value <= clients_at_start);
 
     assert!(
         probe_error.is_none(),
