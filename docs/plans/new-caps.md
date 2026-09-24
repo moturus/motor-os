@@ -151,6 +151,14 @@ rt.vdso and the kernel already validate them. Use a presence check, with no
 mask parser or merging. An explicit mask that omits detach authority also
 forgoes the automatic detach grant.
 
+Rush follow-up: a mask supplied by an assignment or export requires a real
+child process. Executable shell scripts use a child Rush; functions, `eval`,
+source, and other in-process commands are refused with status 126 before their
+bodies or redirections run. `command` and `exec` may forward a mask to an
+external program. This remains a presence-only check; no function capability
+ceiling, mask parser, or intersection is needed. See `docs/caps.md` for shell
+setup and command-line expansion behavior.
+
 ## Network API admission
 
 The network endpoint is `"sys-io"`. Its server is `NetRuntime::net_listener`

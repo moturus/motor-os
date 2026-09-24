@@ -141,7 +141,7 @@ These launch chains pass on `CAP_NET` and `CAP_FS_WRITE` where they hold
 them. Services get only what they need: the shipped configuration gives the
 DNS resolver `CAP_NET` but not `CAP_FS_WRITE`, and strobe the reverse.
 
-An explicit `MOTOR_OS_CAPS` for a Rush command, as a command assignment or
+An explicit `MOTOR_OS_CAPS` for a Rush process launch, as a command assignment or
 an exported variable, suppresses both of Rush's automatic grants and reaches
 the runtime unchanged. A command assignment wins over an exported value. For
 example, `MOTOR_OS_CAPS=0x2ec rmux` runs rmux without `CAP_NET` and without
@@ -154,13 +154,44 @@ Rush process. Their builtins use the requested capabilities, and unsetting
 to their descendants. Scripts without an explicit mask retain Rush's usual
 in-process execution and the shell's capabilities.
 
-A function called with an explicit mask runs in the shell's process, so Rush
-bounds every child the call starts by that mask, including children of nested
-functions and scripts. A child's own mask can only narrow the bound, and
-unsetting or raising `MOTOR_OS_CAPS` in the body has no effect. A malformed
-mask refuses the call with status 126. The body's builtins, such as
-redirections, still act with the shell's capabilities, and traps it sets run
-later without the bound.
+A mask requires a real child process. Rush refuses masked functions, `eval`,
+`.` (source), other builtins, compound commands, and redirection-only commands
+with status 126, before executing their bodies or opening their redirections.
+`command` and `exec` can forward a mask to an external program; they cannot make an
+in-process builtin honor it. Rush checks for the variable's presence without
+parsing or intersecting masks, including empty, zero, and malformed values.
+
+| Invocation | Behavior |
+| --- | --- |
+| `MOTOR_OS_CAPS=0x44 sh` | Start a shell with the requested capabilities. |
+| `MOTOR_OS_CAPS=0x44 ./script.sh` | Run the executable script in a restricted child shell. |
+| `MOTOR_OS_CAPS=0x44 eval '...'` | Refuse with status 126. |
+| `MOTOR_OS_CAPS=0x44 . ./script.sh` | Refuse with status 126. |
+| `MOTOR_OS_CAPS=0x44 function_name` | Refuse with status 126. |
+
+The same rule applies to exported masks. All builtins, including `exit`,
+`return`, `break`, `continue`, `wait`, `unset`, and `trap`, are refused while a
+mask is exported; `if`, loops, and other compounds are refused too. A refusal
+returns 126 and follows ordinary shell error handling: without `set -e`,
+execution can continue past a refused `exit`, and a refused `wait` does not
+wait. In-process commands in EXIT traps are subject to the same rule.
+Prefer a command assignment. Rush's emulated subshells do not isolate general
+exported-variable changes; use a separate shell process when an export must
+not affect the caller. An assignment before `exec` is temporary even when
+Rush emulates that invocation inside a background job or substitution.
+Bare variable assignments without redirections remain ordinary shell setup.
+The runtime consumes the mask when creating the child, so the refusal rule no
+longer blocks functions, sourcing, and builtins inside the restricted shell.
+Their operations still require the appropriate capabilities. Rush currently
+stages pipelines and command substitutions through temporary files, requiring
+`CAP_FS_WRITE`. If staging fails, the pipeline or substitution returns status 2;
+it does not fall back to the shell's stdin/stdout or report an empty success.
+For example, `MOTOR_OS_CAPS=0x44 sh -c 'x=$(printf hi)'` fails with status 2.
+
+Refusal occurs when Rush reaches the offending invocation; it does not scan
+an entire script in advance. Command-line expansions and the redirections of
+permitted child launches still run with the calling shell's authority. To
+restrict a whole shell body, put it inside `MOTOR_OS_CAPS=0x44 sh -c '...'`.
 
 ### Explicit mask with `std::process::Command`
 

@@ -61,6 +61,40 @@ fn inline_assignment_scopes_to_the_command() {
 }
 
 #[test]
+fn exec_assignments_do_not_escape_emulated_children() {
+    for command in [
+        "(RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE')",
+        "RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE' & wait %1",
+        "x=$(RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE'); echo $x",
+    ] {
+        let run = run_c(&format!(
+            "export RUSH_EXEC_SCOPE=parent; {command}; echo $RUSH_EXEC_SCOPE"
+        ));
+        assert_eq!(run.stdout, "child\nparent\n", "{command}");
+        assert_eq!(run.code, 0, "{command}");
+    }
+}
+
+#[test]
+fn staging_failure_aborts_pipelines_and_substitutions() {
+    let missing = tmp("missing_staging").join("absent");
+    for script in [
+        "printf secret | /bin/sh -c 'echo downstream-ran'",
+        "x=$(printf secret)",
+        "set -e; x=$(printf secret); echo continued",
+    ] {
+        let out = Command::new(RUSH)
+            .env("TMPDIR", &missing)
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{script}: {out:?}");
+        assert!(out.stdout.is_empty(), "{script}: {out:?}");
+        assert!(!out.stderr.is_empty(), "{script}");
+    }
+}
+
+#[test]
 fn command_resolved_via_unexported_shell_path() {
     // Regression (Motor OS): command search must use the shell's own PATH
     // variable, even when PATH is not exported to the process environment

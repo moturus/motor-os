@@ -102,7 +102,7 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
     None
 }
 
-/// No capability mask exists here, so no function call sets a ceiling.
+/// The host has no Motor capability launch policy.
 pub const CAPS_ENV_KEY: Option<&str> = None;
 
 pub fn exit_status_code(status: std::process::ExitStatus) -> i32 {
