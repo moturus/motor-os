@@ -1,5 +1,6 @@
 #![feature(addr_parse_ascii)]
 #![feature(motor_ext)]
+#![feature(local_waker)]
 #![feature(random)]
 
 mod admission;

@@ -530,6 +530,12 @@ async fn relay_in(
 
     // Safety: the pair was made for this process; see make_pair().
     let dest = unsafe { StdioPipe::new_writer(to) };
+    // One future per handle for the task's lifetime, re-armed before each
+    // wait: a relay that wakes and parks again then allocates nothing, which
+    // it must not while the pool is at the memory floor (the child may be
+    // the one holding it there), since a refused allocation aborts this
+    // process.
+    let mut dest_signal = dest.handle().as_future();
 
     // Only one child may consume stdin at a time; relays used to
     // serialize on the stdio spinlock, now on the claim itself. The
@@ -548,8 +554,8 @@ async fn relay_in(
             break owned;
         }
         let nap = core::pin::pin!(moto_async::sleep(core::time::Duration::from_millis(1)));
-        if let Either::Right((result, _)) =
-            futures::future::select(nap, dest.handle().as_future()).await
+        dest_signal.rearm();
+        if let Either::Right((result, _)) = futures::future::select(nap, &mut dest_signal).await
             && result.is_err()
         {
             return;
@@ -562,6 +568,7 @@ async fn relay_in(
     }
 
     let mut ctrl_c = ctrl_c_process.map(|process| CtrlCRelay::new(owned.pipe.clone(), process));
+    let mut source_signal = owned.pipe.handle().as_future();
     let mut source_alive = true;
     let mut buf = [0_u8; 80];
     let end = 'relay: loop {
@@ -586,10 +593,12 @@ async fn relay_in(
                             moto_sys::SysCpu::sched_yield();
                         }
                         Err(moto_rt::E_NOT_READY) if published == 0 => {
+                            dest_signal.rearm();
                             if source_alive && ctrl_c.is_some() {
-                                let dest_ready = dest.handle().as_future();
-                                let source_ready = owned.pipe.handle().as_future();
-                                match futures::future::select(dest_ready, source_ready).await {
+                                source_signal.rearm();
+                                match futures::future::select(&mut dest_signal, &mut source_signal)
+                                    .await
+                                {
                                     Either::Left((result, _)) if result.is_err() => {
                                         break 'relay RelayEnd::DestinationGone(chunk.to_vec());
                                     }
@@ -598,7 +607,7 @@ async fn relay_in(
                                     }
                                     _ => {}
                                 }
-                            } else if dest.handle().as_future().await.is_err() {
+                            } else if (&mut dest_signal).await.is_err() {
                                 break 'relay RelayEnd::DestinationGone(chunk.to_vec());
                             }
                         }
@@ -611,9 +620,9 @@ async fn relay_in(
             Err(moto_rt::E_NOT_READY) => {
                 // Wait for parent stdin data or for the child to go
                 // away; a spurious child-side signal just re-loops.
-                let stdin_ready = owned.pipe.handle().as_future();
-                let dest_alive = dest.handle().as_future();
-                match futures::future::select(stdin_ready, dest_alive).await {
+                source_signal.rearm();
+                dest_signal.rearm();
+                match futures::future::select(&mut source_signal, &mut dest_signal).await {
                     Either::Left((result, _)) => {
                         if result.is_err() {
                             break 'relay RelayEnd::SourceDone;
@@ -664,10 +673,19 @@ async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
 
     let mut buf = [0_u8; 80];
     let mut dest_dead = false;
+    // See relay_in: one future per handle, re-armed before each wait. The
+    // one on this process's own pipe is registered now, so that a write
+    // that must wait for room allocates nothing either, but disarmed, so
+    // that the relay parks on that pipe only while a write waits. Armed
+    // while idle, it would outlive a silent child's relay until the pipe
+    // signals, and could take the drain wake that a thread of this process
+    // is about to wait for in a blocking write: wakes are per process.
+    let mut dest_signal = dest.handle().as_future();
+    let mut room = moto_async::SysHandleFuture::new_disarmed(stdio.pipe.handle());
     loop {
         match dest.nonblocking_read(&mut buf) {
             Ok(sz) => {
-                if sz > 0 && !relay_write(&stdio, &buf[..sz]).await {
+                if sz > 0 && !relay_write(&stdio, &mut room, &buf[..sz]).await {
                     return;
                 }
             }
@@ -675,18 +693,22 @@ async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
                 if dest_dead {
                     return;
                 }
-                dest_dead = dest.handle().as_future().await.is_err();
+                dest_signal.rearm();
+                dest_dead = (&mut dest_signal).await.is_err();
             }
             Err(_) => return,
         }
     }
 }
 
-/// Writes all of `buf` into this process's own stdio pipe, awaiting
-/// pipe room. Returns false if the pipe is gone.
-async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
-    use moto_async::AsFuture;
-
+/// Writes all of `buf` into this process's own stdio pipe, awaiting pipe
+/// room through `room`, the caller's future on that pipe's handle. Returns
+/// false if the pipe is gone.
+async fn relay_write(
+    stdio: &SelfStdio,
+    room: &mut moto_async::SysHandleFuture,
+    mut buf: &[u8],
+) -> bool {
     // Claim per write instead of using with_impl: a user thread may
     // hold the claim across a blocking write, and this runtime must
     // sleep through that wait, not spin through it.
@@ -698,7 +720,6 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
             moto_async::sleep(core::time::Duration::from_millis(1)).await;
         };
         let result = owned.pipe.nonblocking_write(buf);
-        let handle = owned.pipe.handle();
         stdio.return_impl(owned);
         match result {
             Ok(written) => {
@@ -708,7 +729,8 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
                 moto_sys::SysCpu::sched_yield();
             }
             Err(moto_rt::E_NOT_READY) => {
-                if handle.as_future().await.is_err() {
+                room.rearm();
+                if (&mut *room).await.is_err() {
                     return false;
                 }
             }
@@ -754,17 +776,19 @@ enum PeerWait {
 ///
 /// A relay waits on its *peer's* handle, which only the peer can signal, so
 /// exit cannot reach it that way; the shutdown signal is the second arm.
+/// `peer` is the future on the pipe's handle, kept by the relay for its
+/// lifetime (see relay_in) and re-armed here.
 async fn wait_for_peer(
-    pipe: &StdioPipe,
+    peer: &mut moto_async::SysHandleFuture,
     shutdown: &mut moto_async::oneshot::Receiver<()>,
 ) -> PeerWait {
     use futures::future::Either;
-    use moto_async::AsFuture;
 
     if crate::stdio_relay::shutting_down() {
         return PeerWait::Exiting;
     }
-    match futures::future::select(pipe.handle().as_future(), &mut *shutdown).await {
+    peer.rearm();
+    match futures::future::select(&mut *peer, &mut *shutdown).await {
         Either::Left((result, _)) if result.is_err() => PeerWait::Gone,
         Either::Left(_) => PeerWait::Signalled,
         Either::Right(_) => PeerWait::Exiting,
@@ -790,7 +814,10 @@ async fn transfer_file_output(
     pipe: &StdioPipe,
     shutdown: &mut moto_async::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
+    use moto_async::AsFuture;
+
     let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
+    let mut peer = pipe.handle().as_future();
     // Set once no further bytes can arrive -- the child died, or this process
     // is exiting and told it to stop. Either way: drain the ring, then finish.
     let mut input_closed = false;
@@ -820,7 +847,7 @@ async fn transfer_file_output(
                 }
             }
             Err(moto_rt::E_NOT_READY) if !input_closed => {
-                match wait_for_peer(pipe, shutdown).await {
+                match wait_for_peer(&mut peer, shutdown).await {
                     PeerWait::Signalled => {}
                     PeerWait::Gone => input_closed = true,
                     PeerWait::Exiting => {
@@ -864,7 +891,10 @@ async fn transfer_file_input(
     start: u64,
     shutdown: &mut moto_async::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
+    use moto_async::AsFuture;
+
     let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
+    let mut peer = pipe.handle().as_future();
     let mut offset = start;
     loop {
         // Nothing is headed for the filesystem in this direction, so exit does
@@ -887,12 +917,12 @@ async fn transfer_file_input(
                 // The pipe protocol cannot carry the error itself, so the
                 // writer is dropped rather than closed: the child's next read
                 // fails instead of reporting a clean end of input.
-                wait_for_input_drain(pipe, shutdown).await?;
+                wait_for_input_drain(pipe, &mut peer, shutdown).await?;
                 return Err(err as ErrorCode);
             }
         };
         if read == 0 {
-            wait_for_input_drain(pipe, shutdown).await?;
+            wait_for_input_drain(pipe, &mut peer, shutdown).await?;
             return pipe.close_writer();
         }
         offset = offset
@@ -903,7 +933,7 @@ async fn transfer_file_input(
         while sent < read {
             match pipe.nonblocking_write(&buf[sent..read]) {
                 Ok(written) => sent += written,
-                Err(moto_rt::E_NOT_READY) => match wait_for_peer(pipe, shutdown).await {
+                Err(moto_rt::E_NOT_READY) => match wait_for_peer(&mut peer, shutdown).await {
                     PeerWait::Signalled => {}
                     PeerWait::Gone => return Ok(()),
                     PeerWait::Exiting => return pipe.close_writer(),
@@ -916,12 +946,13 @@ async fn transfer_file_input(
 
 async fn wait_for_input_drain(
     pipe: &StdioPipe,
+    peer: &mut moto_async::SysHandleFuture,
     shutdown: &mut moto_async::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
     loop {
         match pipe.flush_nonblocking() {
             Ok(()) => return Ok(()),
-            Err(moto_rt::E_NOT_READY) => match wait_for_peer(pipe, shutdown).await {
+            Err(moto_rt::E_NOT_READY) => match wait_for_peer(peer, shutdown).await {
                 PeerWait::Signalled => {}
                 // Exit does not wait for a child to finish reading its stdin:
                 // nothing here is headed for the filesystem.

@@ -12,6 +12,8 @@ use moto_async::AsFuture;
 use moto_rt::time::Instant;
 use moto_sys::{SysCpu, SysHandle};
 
+mod allocations;
+
 fn test_basic() {
     assert_eq!(42, moto_async::LocalRuntime::new().block_on(async { 42 }));
     println!("----- moto_async::test_basic PASS");
@@ -1098,6 +1100,114 @@ fn test_yield_to_io_services_system_handle() {
     println!("----- moto_async::test_yield_to_io_services_system_handle PASS");
 }
 
+/// One future, re-armed with `rearm()`, waits for signal after signal without
+/// a new registration: the stdio relays keep one per handle, so that a relay
+/// which wakes and parks again allocates nothing at the memory floor.
+fn test_handle_future_rearm() {
+    use futures::future::Either;
+
+    // A wait bounded so that a lost signal fails instead of hanging.
+    async fn bounded(signal: &mut moto_async::SysHandleFuture) -> Option<moto_rt::Result<()>> {
+        let timeout = std::pin::pin!(moto_async::sleep(Duration::from_secs(2)));
+        match futures::future::select(&mut *signal, timeout).await {
+            Either::Left((result, _)) => Some(result),
+            Either::Right(_) => None,
+        }
+    }
+
+    let (wake, wait) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+
+    // Signals from another thread, each acknowledged before the next so that
+    // no two of them coalesce into one wait.
+    let signaller = std::thread::spawn(move || {
+        for _ in 0..3 {
+            SysCpu::wake(wake).unwrap();
+            let mut handles = [wake];
+            SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        }
+        wake
+    });
+    moto_async::LocalRuntime::new().block_on(async {
+        let mut signal = wait.as_future();
+        for _ in 0..3 {
+            signal.rearm();
+            (&mut signal).await.unwrap();
+            SysCpu::wake(wait).unwrap();
+        }
+    });
+    let wake = signaller.join().unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let mut signal = wait.as_future();
+
+        // A signal sent between a completion and the re-arm is kept by the
+        // kernel until the next wait.
+        SysCpu::wake(wake).unwrap();
+        (&mut signal).await.unwrap();
+        SysCpu::wake(wake).unwrap();
+        signal.rearm();
+        assert_eq!(
+            bounded(&mut signal).await,
+            Some(Ok(())),
+            "a signal sent before rearm() was lost"
+        );
+
+        // rearm() keeps a reported result that has not been polled yet.
+        signal.rearm();
+        SysCpu::wake(wake).unwrap();
+        moto_async::yield_to_io().await;
+        signal.rearm();
+        assert_eq!(
+            bounded(&mut signal).await,
+            Some(Ok(())),
+            "rearm() discarded a reported signal"
+        );
+
+        // A completed future can be re-armed after the runtime parks with
+        // nothing armed on its handle.
+        moto_async::sleep(Duration::from_millis(5)).await;
+        signal.rearm();
+        SysCpu::wake(wake).unwrap();
+        assert_eq!(bounded(&mut signal).await, Some(Ok(())));
+
+        // Several futures on one handle complete together, before and after
+        // a re-arm.
+        let mut other = wait.as_future();
+        signal.rearm();
+        SysCpu::wake(wake).unwrap();
+        (&mut other).await.unwrap();
+        assert_eq!(bounded(&mut signal).await, Some(Ok(())));
+        signal.rearm();
+        other.rearm();
+        SysCpu::wake(wake).unwrap();
+        (&mut signal).await.unwrap();
+        assert_eq!(bounded(&mut other).await, Some(Ok(())));
+    });
+
+    // A handle that went bad says so on every re-armed wait; none hangs.
+    let (peer, bad) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let results = moto_async::LocalRuntime::new().block_on(async {
+        let mut signal = bad.as_future();
+        SysCpu::wake(peer).unwrap();
+        (&mut signal).await.unwrap();
+        moto_sys::SysObj::put(peer).unwrap();
+        signal.rearm();
+        let first = bounded(&mut signal).await;
+        signal.rearm();
+        let second = bounded(&mut signal).await;
+        (first, second)
+    });
+    let gone = Some(Err(moto_rt::Error::BadHandle));
+    assert_eq!(results, (gone, gone));
+
+    moto_sys::SysObj::put(bad).unwrap();
+    moto_sys::SysObj::put(wake).unwrap();
+    moto_sys::SysObj::put(wait).unwrap();
+    println!("----- moto_async::test_handle_future_rearm PASS");
+}
+
 fn test_yield_to_io_services_timer() {
     use std::{cell::Cell, rc::Rc};
 
@@ -1358,6 +1468,8 @@ pub fn run_all_tests() {
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
     test_yield_to_io_services_system_handle();
+    test_handle_future_rearm();
+    allocations::run();
     test_yield_to_io_services_timer();
     test_yield_to_io_flushes_deferred_wake();
     test_cancelled_timers_do_not_accumulate();

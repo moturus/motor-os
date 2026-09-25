@@ -384,8 +384,18 @@ struct LocalRuntimeInner {
     // The main (local) runqueue. Runnable tasks live there.
     runqueue: RefCell<LocalQueue>,
 
-    // SysHandle futures.
+    // Registrations stay while their futures live, including between waits.
+    // Only armed futures contribute to the kernel wait list. Dropped futures
+    // are removed after their last armed wait completes.
     sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<Rc<RefCell<SysHandleFutureInner>>>>>,
+    sys_handle_future_count: core::cell::Cell<usize>,
+
+    // The wait list handed to the kernel, and the wakers of the futures it
+    // reports. Reserved on registration and kept across parks, including the
+    // first completion: at the memory floor, a refused allocation in a
+    // process's stdio relay or IO runtime thread would abort that process.
+    wait_handles: RefCell<Vec<SysHandle>>,
+    reported_wakers: RefCell<VecDeque<LocalWaker>>,
 
     // Timers. Can be added to at runtime. Hold wakers, not task IDs:
     // a timer registered under a nested combinator (FuturesUnordered)
@@ -435,6 +445,9 @@ impl LocalRuntimeInner {
         Ok(Self {
             runqueue: Default::default(),
             sys_handle_futures: Default::default(),
+            sys_handle_future_count: Default::default(),
+            wait_handles: Default::default(),
+            reported_wakers: Default::default(),
             timeq: RefCell::new(timeq),
             incoming: Default::default(),
             tasks: Default::default(),
@@ -553,11 +566,17 @@ impl LocalRuntimeInner {
     fn add_sys_handle_future(&self, future: Rc<RefCell<SysHandleFutureInner>>) {
         let sys_handle = future.borrow().handle;
 
-        self.sys_handle_futures
-            .borrow_mut()
-            .entry(sys_handle)
-            .or_default()
-            .push_back(future);
+        let mut futures = self.sys_handle_futures.borrow_mut();
+        futures.entry(sys_handle).or_default().push_back(future);
+        let count = self.sys_handle_future_count.get() + 1;
+        self.sys_handle_future_count.set(count);
+
+        let mut handles = self.wait_handles.borrow_mut();
+        let additional = futures.len().saturating_sub(handles.len());
+        handles.reserve(additional);
+        let mut wakers = self.reported_wakers.borrow_mut();
+        let additional = count.saturating_sub(wakers.len());
+        wakers.reserve(additional);
     }
 
     fn try_current<'a>() -> Option<&'a Self> {
@@ -646,23 +665,14 @@ impl LocalRuntimeInner {
     }
 
     fn wait(&self, mut timeo: Option<Instant>, mut wake_target: SysHandle) {
-        let mut wait_handles = Vec::new();
         loop {
-            let sys_waiters = self.sys_handle_futures.borrow();
-            if sys_waiters.is_empty() {
-                core::mem::drop(sys_waiters);
+            if !self.build_wait_list() {
                 let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, wake_target, timeo);
                 return;
             }
 
-            // Retain this allocation when invalid handles require another pass.
-            wait_handles.clear();
-            wait_handles.reserve(sys_waiters.len());
-            wait_handles.extend(sys_waiters.keys().copied());
-            core::mem::drop(sys_waiters);
-
             let result = moto_sys::SysCpu::wait(
-                wait_handles.as_mut_slice(),
+                self.wait_handles.borrow_mut().as_mut_slice(),
                 SysHandle::NONE,
                 wake_target,
                 timeo,
@@ -670,91 +680,110 @@ impl LocalRuntimeInner {
 
             match result {
                 Ok(()) | Err(moto_rt::E_TIMED_OUT) => {
-                    for handle in &wait_handles {
-                        if handle.is_none() {
-                            break;
-                        }
-                        // The kernel queues wakers for signals arriving while
-                        // this thread is awake, so a wait may report a handle
-                        // no future waits on anymore. The signal stays latched
-                        // on the object; there is nothing to deliver.
-                        let Some(done_futures) =
-                            self.sys_handle_futures.borrow_mut().remove(handle)
-                        else {
-                            continue;
-                        };
-                        let mut to_wake = Vec::new();
-                        for future in done_futures {
-                            let mut inner_future = future.borrow_mut();
-                            if inner_future.dropped {
-                                continue;
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                if inner_future.debug_log {
-                                    log::debug!("{}: woke ok", inner_future.name());
-                                }
-                            }
-                            inner_future.result = Some(Ok(()));
-                            to_wake.extend(inner_future.waker.take());
-                        }
-                        for waker in to_wake {
-                            waker.wake();
-                        }
-                    }
+                    self.complete_reported(Ok(()));
                     return;
                 }
                 Err(moto_rt::E_BAD_HANDLE) => {
-                    let mut removed = false;
-                    for handle in &wait_handles {
-                        if handle.is_none() {
-                            break;
-                        }
-
-                        // See above: a stale queued waker may name a handle
-                        // with no remaining waiters.
-                        let Some(done_futures) =
-                            self.sys_handle_futures.borrow_mut().remove(handle)
-                        else {
-                            continue;
-                        };
-                        removed = true;
-                        let mut to_wake = Vec::new();
-                        for future in done_futures {
-                            let mut inner_future = future.borrow_mut();
-                            if inner_future.dropped {
-                                continue;
-                            }
-                            #[cfg(debug_assertions)]
-                            {
-                                if inner_future.debug_log {
-                                    log::debug!("{}: woke BAD_HANDLE", inner_future.name());
-                                }
-                            }
-                            inner_future.result = Some(Err(moto_rt::Error::BadHandle));
-                            to_wake.extend(inner_future.waker.take());
-                        }
-                        for waker in to_wake {
-                            waker.wake();
-                        }
-                    }
                     // Preserve the old behavior for an unrelated bad wake
                     // target or a stale returned handle.
-                    if !removed {
+                    if !self.complete_reported(Err(moto_rt::Error::BadHandle)) {
                         return;
                     }
                     // The wake target was processed before wait-set validation.
-                    // Each failed pass removes an entry, so this is finite.
-                    // Error waiters are runnable now: subsequent passes must not sleep.
+                    // Each failed pass disarms a handle's futures, and the
+                    // next list leaves it out, so this is finite. Error waiters
+                    // are runnable now: subsequent passes must not sleep.
                     wake_target = SysHandle::NONE;
                     timeo = Some(Instant::nan());
                 }
                 Err(moto_rt::E_STORAGE_FULL) => {
-                    panic!("SysCpu::wait(): too many handles: {}", wait_handles.len());
+                    panic!(
+                        "SysCpu::wait(): too many handles: {}",
+                        self.wait_handles.borrow().len()
+                    );
                 }
                 Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
             }
         }
+    }
+
+    /// Rebuilds the wait list from armed futures and reclaims registrations
+    /// whose futures were dropped and whose last wait completed.
+    fn build_wait_list(&self) -> bool {
+        let mut waiters = self.sys_handle_futures.borrow_mut();
+        let mut wait_handles = self.wait_handles.borrow_mut();
+        wait_handles.clear();
+        let mut count = 0;
+        waiters.retain(|handle, futures| {
+            let mut armed = false;
+            futures.retain(|future| {
+                let inner = future.borrow();
+                if inner.dropped && !inner.armed {
+                    return false;
+                }
+                count += 1;
+                armed |= inner.armed;
+                true
+            });
+            if armed {
+                wait_handles.push(*handle);
+            }
+            !futures.is_empty()
+        });
+        self.sys_handle_future_count.set(count);
+        !wait_handles.is_empty()
+    }
+
+    /// Completes, with `result`, every future armed on a handle the kernel
+    /// reported in the wait list. Registrations stay for later re-arming.
+    /// Returns whether any reported handle had an armed future.
+    fn complete_reported(&self, result: Result<()>) -> bool {
+        let mut any = false;
+        {
+            let wait_handles = self.wait_handles.borrow();
+            let mut waiters = self.sys_handle_futures.borrow_mut();
+            let mut wakers = self.reported_wakers.borrow_mut();
+            for handle in wait_handles.iter() {
+                if handle.is_none() {
+                    break;
+                }
+                // The kernel queues wakers for signals arriving while this
+                // thread is awake, so a wait may report a handle no future
+                // waits on anymore. The signal stays latched on the object;
+                // there is nothing to deliver.
+                let Some(futures) = waiters.get_mut(handle) else {
+                    continue;
+                };
+                for future in futures.iter() {
+                    let mut inner = future.borrow_mut();
+                    if !inner.armed {
+                        continue;
+                    }
+                    any = true;
+                    inner.armed = false;
+                    if inner.dropped {
+                        continue;
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        if inner.debug_log {
+                            log::debug!("{}: woke {:?}", inner.name(), result);
+                        }
+                    }
+                    inner.result = Some(result);
+                    wakers.extend(inner.waker.take());
+                }
+            }
+        }
+        // Wake with no borrows held: a foreign (combinator) waker runs
+        // arbitrary code.
+        loop {
+            let Some(waker) = self.reported_wakers.borrow_mut().pop_front() else {
+                break;
+            };
+            waker.wake();
+        }
+        any
     }
 
     fn enqueue_expired_timers(&self) {
@@ -1084,6 +1113,9 @@ struct SysHandleFutureInner {
     // the first poll: a completion then waits to be polled.
     waker: Option<LocalWaker>,
     result: Option<Result<()>>,
+    // Set by as_future() or rearm(), cleared when the kernel reports the
+    // handle. The registration itself stays until the future is dropped.
+    armed: bool,
     dropped: bool,
 
     #[cfg(debug_assertions)]
@@ -1103,7 +1135,10 @@ impl SysHandleFutureInner {
     }
 }
 
-// #[derive(Clone)]
+/// A wait for the next signal on a system handle, or for the handle to go
+/// bad. Registered with the runtime on creation and completed once; a loop
+/// that waits on the same handle repeatedly keeps one of these and calls
+/// [`SysHandleFuture::rearm`] before each wait instead of creating a new one.
 pub struct SysHandleFuture {
     inner: Rc<RefCell<SysHandleFutureInner>>,
 }
@@ -1124,8 +1159,8 @@ impl Drop for SysHandleFuture {
             }
         }
         inner.dropped = true;
-        // The registration lingers until the kernel reports the handle; do
-        // not keep the task header alive with it.
+        // Reclaim the registration on a later park, after its armed wait (if
+        // any) completes. Do not keep the task header alive with it.
         inner.waker = None;
     }
 }
@@ -1140,6 +1175,7 @@ impl AsFuture for SysHandle {
             handle: *self,
             waker: None,
             result: None,
+            armed: true,
             dropped: false,
 
             #[cfg(debug_assertions)]
@@ -1155,10 +1191,42 @@ impl AsFuture for SysHandle {
 }
 
 impl SysHandleFuture {
+    /// Registers a future on `handle` without arming it, for a loop that
+    /// waits on the handle only now and then but must not allocate when it
+    /// does: the handle is not waited on until [`Self::rearm`], which must
+    /// precede every wait, the first included. An armed future that is
+    /// never awaited would instead stay registered, even once dropped,
+    /// until the handle signals.
+    pub fn new_disarmed(handle: SysHandle) -> Self {
+        let future = handle.as_future();
+        future.inner.borrow_mut().armed = false;
+        future
+    }
+
     #[cfg(debug_assertions)]
     pub fn set_debug_log(&self, debug_log: bool) {
         self.inner.borrow_mut().debug_log = debug_log;
         log::debug!("debugging future {}", self.inner.borrow().name());
+    }
+
+    /// Arms the future after it completed, or after [`Self::new_disarmed`], so
+    /// that the next poll waits for the next signal on the handle. A no-op
+    /// while the future is still armed or holds a result not yet polled, so
+    /// calling it before every wait loses nothing; nor does a signal that
+    /// lands while it is disarmed, which the kernel keeps latched until the
+    /// next wait.
+    /// Allocates nothing, including after the runtime parks on other handles.
+    /// Must be called within the LocalRuntime context that created the future.
+    pub fn rearm(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.armed || inner.result.is_some() {
+            return;
+        }
+        inner.armed = true;
+        #[cfg(debug_assertions)]
+        {
+            inner.debug_ready_done = false;
+        }
     }
 
     pub fn do_poll(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
@@ -1168,6 +1236,10 @@ impl SysHandleFuture {
         }
 
         let mut inner = self.inner.borrow_mut();
+        debug_assert!(
+            inner.armed || inner.result.is_some(),
+            "SysHandleFuture polled while disarmed: rearm() it first."
+        );
 
         if let Some(result) = inner.result.take() {
             #[cfg(debug_assertions)]
