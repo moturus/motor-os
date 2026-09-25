@@ -42,15 +42,18 @@ details of those services.
 ## Network and filesystem-write access
 
 Sys-io authorizes the actual connected peer, using the capability word the
-kernel reports for the connection; nothing a client sends can widen it.
+kernel reports for the connection; nothing a client sends can widen it. If
+sys-io cannot obtain that word, it drops the connection rather than treating
+the peer as unprivileged.
 
 Without `CAP_NET`, sys-io drops a network connection when it accepts it,
 before serving any request. This covers TCP, UDP, ICMP, loopback, and vsock,
-including discovery. The IPC connect itself can succeed, so the denial shows
-up as a disconnected channel rather than `NotAllowed`: native network RPCs
-fail with `NotConnected`, and a raw `io_channel` client sees its channel
-close, even if it never sends a request. `CAP_VSOCK` alone therefore grants
-nothing; vsock needs both bits.
+including discovery. Admission is sys-io's policy, not the kernel's, so the
+IPC connect itself can succeed and the denial shows up as a disconnected
+channel rather than `NotAllowed`: native network RPCs fail with
+`NotConnected`, and a raw `io_channel` client sees its channel close, even if
+it never sends a request. `CAP_VSOCK` alone therefore grants nothing; vsock
+needs both bits.
 
 The DNS resolver independently checks its IPC peer for `CAP_NET`, returning
 `NotAllowed` (`PermissionDenied` through `std`) when it is absent. A caller
@@ -65,16 +68,21 @@ copying into, deleting, moving, and changing permissions of entries,
 flushing the filesystem, and all file-lock operations, including unlock.
 Denying lock operations is a provisional policy, fixed for now. The runtime
 also refuses opens with write, append, create, or truncate intent, even of an
-existing file. `CAP_FS_WRITE` does not override filesystem permissions: a
-modification needs both the capability and the role's permission.
+existing file; this only reports the error early, and sys-io enforces the rule
+for clients that bypass the runtime. `CAP_FS_WRITE` does not override
+filesystem permissions: a modification needs both the capability and the
+role's permission.
 Without `CAP_FS_WRITE`, `Write::flush` on a read-only `File` is a no-op;
 flushing a writable file is denied. Processes with `CAP_FS_WRITE` retain the
 native global filesystem flush, including through read-only file handles.
 
 These checks follow the process that talks to sys-io. A file handed to a child
 as a standard stream with `Stdio::from(file)` is used through the child's own
-connection, so a child without `CAP_FS_WRITE` cannot write to it. Rust's
-standard streams propagate these errors as `PermissionDenied`;
+connection, so a child without `CAP_FS_WRITE` cannot write to it. Rush does
+the same with a redirect target used by a single external command: with
+`MOTOR_OS_CAPS=0x44 prog > out`, the shell creates or truncates `out`, but
+`prog`'s writes to it are denied. Rust's standard streams propagate these
+errors as `PermissionDenied`;
 `println!` and `eprintln!` panic when writing fails. For a closed standard
 stream, reads still return EOF and writes are discarded successfully.
 A child that inherits a file-backed standard stream writes through its parent's
