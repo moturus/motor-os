@@ -402,17 +402,20 @@ impl Process {
 
     // TODO: put_object should not remove live threads, as they can self-ref.
     pub(super) fn put_object(&self, handle: &SysHandle) -> Result<(), ()> {
-        if let Some(obj) = self.wait_objects.lock(line!()).remove(handle) {
-            if obj.sys_object.remove_process_handle() {
-                // A process handle, not an incidental kernel Arc, owns a
-                // shared endpoint's lifetime.
-                super::shared::on_drop(&obj.sys_object);
-            }
-            drop(obj);
-            Ok(())
-        } else {
-            Err(())
+        // Release wait_objects before endpoint cleanup: shared::on_drop takes
+        // LISTENERS, which is held while process status locks are taken, and
+        // spawn_thread holds status while adding to wait_objects.
+        let removed = self.wait_objects.lock(line!()).remove(handle);
+        let Some(obj) = removed else {
+            return Err(());
+        };
+        if obj.sys_object.remove_process_handle() {
+            // A process handle, not an incidental kernel Arc, owns a
+            // shared endpoint's lifetime.
+            super::shared::on_drop(&obj.sys_object);
         }
+        drop(obj);
+        Ok(())
     }
 
     // Note: we only mark the process as PausedDebuggee and don't

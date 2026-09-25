@@ -19,6 +19,7 @@ mod fs_permissions;
 mod fsbench;
 mod icmp;
 mod io_channel;
+mod ipc_service;
 mod kernel_log;
 mod logging;
 mod mem_blocks;
@@ -1371,6 +1372,9 @@ fn main() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if ipc_service::run_command(&args) {
+        return;
+    }
     if args.len() == 2 && args[1] == "test-thread-creation-exit-rollback" {
         spawn_wait_kill::test_thread_creation_exit_rollback();
         return;
@@ -1596,6 +1600,7 @@ fn main() {
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     spawn_wait_kill::test_shared_listener_restart();
+    ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
     ctrl_c::run_tests();
     command_output::run_test();
