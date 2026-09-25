@@ -576,26 +576,20 @@ pub fn smoke_test() {
 }
 
 /// sys-io sizes its block cache from the guest's memory: 1 MiB per 32 MiB of
-/// RAM, at least 1 MiB, and 16 MiB from 256 MiB up. The kernel reports less
-/// than the configured RAM, so the sizing adds 10 MiB to what it reports.
+/// RAM, at least 1 MiB, and 16 MiB from 256 MiB up.
 fn block_cache_capacity_test() {
-    const MIB: u64 = 1 << 20;
-    let total = moto_sys::stats::MemoryStats::get().unwrap().available + 10 * MIB;
-    let expected = if total >= 256 * MIB {
-        16 * MIB
+    let ram_mib = crate::guest_ram_mib();
+    let expected_mib = if ram_mib >= 256 {
+        16
     } else {
-        (total / (32 * MIB)).max(1) * MIB
+        (ram_mib / 32).max(1)
     };
     assert_eq!(
         crate::tcp::read_sys_io_metric("fs.cache.capacity_bytes"),
-        expected,
-        "block cache capacity for {} MiB of reported memory",
-        (total - 10 * MIB) / MIB
+        expected_mib << 20,
+        "block cache capacity for {ram_mib} MiB of RAM"
     );
-    println!(
-        "    ---- FS: block_cache_capacity_test PASS ({} MiB)",
-        expected / MIB
-    );
+    println!("    ---- FS: block_cache_capacity_test PASS ({expected_mib} MiB)");
 }
 
 /// Repeatedly reads a file that fits entirely in sys-io's block cache (at

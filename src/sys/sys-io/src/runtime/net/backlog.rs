@@ -10,9 +10,9 @@
 //! into whatever the pool has grown to by then -- a port nothing listens on
 //! keeps its reset.
 //!
-//! Sizing the pool for bursts up front is what costs: the rings are committed
-//! when the socket is created, so a pool of 32 is 8 MiB standing idle on a
-//! listener that never sees a second connection. Instead the pool starts at what
+//! Sizing the pool for bursts up front is what costs: the floor rings are
+//! committed when the socket is created, so a pool of 32 is 1 MiB standing
+//! idle on a listener that never sees a second connection. Instead the pool starts at what
 //! the client asked for and doubles whenever a burst drains it, up to a cap --
 //! demand pays for the memory, and only the first burst of a given depth is
 //! refused.
@@ -47,13 +47,15 @@ use super::stats::NetStats;
 /// memory does not outlast the traffic by much.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
-/// At 256 KiB per listening socket, 32 MiB of growth across all listeners.
-/// `max_backlog_global` in `/system/cfg/sys-net.toml` overrides it.
+/// At 32 KiB of floor rings per listening socket, 4 MiB of growth across all
+/// listeners. Guests below 256 MiB of RAM get a quarter (see
+/// [`super::config::ram_scaled`]). `max_backlog_global` in
+/// `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_BACKLOG_GLOBAL: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// Growth stops where an explicit request would have been refused: this matches
-/// `MAX_NUM_LISTENING_SOCKETS`, 8 MiB per address. `max_backlog_per_listener` in
-/// `/system/cfg/sys-net.toml` overrides it.
+/// `MAX_NUM_LISTENING_SOCKETS`, 1 MiB per address. Scaled like the global cap;
+/// `max_backlog_per_listener` in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_BACKLOG_PER_LISTENER: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// A listener binds one pool per address, so the address is part of the key.

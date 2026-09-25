@@ -187,20 +187,29 @@ impl NetConfig {
     }
 }
 
+/// A connection-count limit for this guest: guests below
+/// [`crate::runtime::SMALL_GUEST_MIB`] of RAM get a quarter of `limit`.
+pub(super) fn ram_scaled(limit: NonZeroUsize) -> NonZeroUsize {
+    if crate::runtime::guest_ram_mib() >= crate::runtime::SMALL_GUEST_MIB {
+        return limit;
+    }
+    NonZeroUsize::new(limit.get() / 4).unwrap_or(NonZeroUsize::MIN)
+}
+
 fn default_max_half_open_global() -> NonZeroUsize {
-    DEFAULT_MAX_HALF_OPEN_GLOBAL
+    ram_scaled(DEFAULT_MAX_HALF_OPEN_GLOBAL)
 }
 
 fn default_max_half_open_per_listener() -> NonZeroUsize {
-    DEFAULT_MAX_HALF_OPEN_PER_LISTENER
+    ram_scaled(DEFAULT_MAX_HALF_OPEN_PER_LISTENER)
 }
 
 fn default_max_backlog_global() -> NonZeroUsize {
-    DEFAULT_MAX_BACKLOG_GLOBAL
+    ram_scaled(DEFAULT_MAX_BACKLOG_GLOBAL)
 }
 
 fn default_max_backlog_per_listener() -> NonZeroUsize {
-    DEFAULT_MAX_BACKLOG_PER_LISTENER
+    ram_scaled(DEFAULT_MAX_BACKLOG_PER_LISTENER)
 }
 
 fn default_max_icmp_error_rate() -> NonZeroU32 {
@@ -773,10 +782,13 @@ pub(crate) mod self_test {
     /// A config predating the caps must still load, on the defaults.
     fn defaults_the_half_open_caps() -> Result<(), String> {
         let config = parse(MINIMAL)?;
-        st_assert_eq!(config.max_half_open_global, DEFAULT_MAX_HALF_OPEN_GLOBAL);
+        st_assert_eq!(
+            config.max_half_open_global,
+            ram_scaled(DEFAULT_MAX_HALF_OPEN_GLOBAL)
+        );
         st_assert_eq!(
             config.max_half_open_per_listener,
-            DEFAULT_MAX_HALF_OPEN_PER_LISTENER
+            ram_scaled(DEFAULT_MAX_HALF_OPEN_PER_LISTENER)
         );
         Ok(())
     }
@@ -797,10 +809,13 @@ pub(crate) mod self_test {
 
     fn defaults_the_backlog_caps() -> Result<(), String> {
         let config = parse(MINIMAL)?;
-        st_assert_eq!(config.max_backlog_global, DEFAULT_MAX_BACKLOG_GLOBAL);
+        st_assert_eq!(
+            config.max_backlog_global,
+            ram_scaled(DEFAULT_MAX_BACKLOG_GLOBAL)
+        );
         st_assert_eq!(
             config.max_backlog_per_listener,
-            DEFAULT_MAX_BACKLOG_PER_LISTENER
+            ram_scaled(DEFAULT_MAX_BACKLOG_PER_LISTENER)
         );
         Ok(())
     }

@@ -585,6 +585,12 @@ fn test_lazy_memory_map_write() {
     println!("test_lazy_memory_map_write: done");
 }
 
+/// The guest's RAM in MiB as sys-io's sizing sees it: the kernel reports less
+/// than the configured RAM, so sys-io adds 10 MiB to its figure.
+pub fn guest_ram_mib() -> u64 {
+    (moto_sys::stats::MemoryStats::get().unwrap().available >> 20) + 10
+}
+
 // Pages admission would still grant above the user floor. Tests that touch
 // memory in bulk size themselves from it: a refused lazy first touch kills
 // the process, and small guests have less to spare than the full sizes.

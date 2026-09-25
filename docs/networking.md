@@ -60,7 +60,10 @@ when the old address is no longer usable.
 SYN-RECEIVED. `max_backlog_global` and `max_backlog_per_listener` bound the
 demand-grown pools behind listeners. All four values must be nonzero; each
 socket reserves receive and transmit rings, so large values have a direct
-memory cost.
+memory cost. They default to 128 globally and 32 per listener, as does the
+limit on connections waiting to be accepted; below 256 MiB of RAM each is a
+quarter of that. TCP buffers default to 128 KiB per direction, 64 KiB below
+256 MiB of RAM and 32 KiB below 128 MiB.
 
 `max_icmp_error_rate`, `max_rst_rate`, and `max_syn_cookie_rate` are per-device
 responses-per-second limits with a one-second burst. They limit traffic whose

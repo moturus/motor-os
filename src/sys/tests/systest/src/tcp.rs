@@ -11,6 +11,22 @@ use moto_io::net::tcp::{
     Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
 };
 
+/// sys-io's default TCP ring size for this guest: 128 KiB from 256 MiB of
+/// RAM, 64 KiB from 128 MiB, 32 KiB below.
+fn default_tcp_ring() -> usize {
+    match crate::guest_ram_mib() {
+        ram if ram >= 256 => 128 * 1024,
+        ram if ram >= 128 => 64 * 1024,
+        _ => 32 * 1024,
+    }
+}
+
+/// sys-io's per-listener limit on established connections waiting to be
+/// accepted: 32, a quarter of that below 256 MiB of RAM.
+fn completed_backlog_cap() -> usize {
+    if crate::guest_ram_mib() >= 256 { 32 } else { 8 }
+}
+
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
     let provider = moto_stats::Collector::provider_by_name("sys-io")
         .expect("sys-io stats provider is not registered");
@@ -1367,7 +1383,7 @@ fn test_client_death_reclaims_tcp_sockets() {
 fn test_positive_linger_timeout_discards_stalled_tx() {
     use std::os::fd::AsRawFd;
 
-    const SEND_RING_SIZE: usize = 128 * 1024;
+    let send_ring_size = default_tcp_ring();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
@@ -1399,8 +1415,8 @@ fn test_positive_linger_timeout_discards_stalled_tx() {
     }
     assert!(hit_timeout, "write never timed out against a stalled peer");
     assert!(
-        sent > SEND_RING_SIZE,
-        "writer stalled before filling the {SEND_RING_SIZE}-byte send ring: {sent} bytes"
+        sent > send_ring_size,
+        "writer stalled before filling the {send_ring_size}-byte send ring: {sent} bytes"
     );
 
     drop(client);
@@ -2603,36 +2619,38 @@ fn test_unconnected_native_options_return_errors() {
 fn test_tcp_buffer_sizes() {
     use std::os::fd::AsRawFd;
 
-    const DEFAULT: u64 = 128 * 1024;
+    let default = default_tcp_ring() as u64;
+    // The receive window scale a ring of this size announces.
+    let scale = (u64::BITS - default.leading_zeros()).saturating_sub(16);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let lfd = listener.as_raw_fd();
 
     // The listener reports its accepted-socket configuration.
-    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), DEFAULT);
-    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::recv_buffer_size(lfd).unwrap(), default);
+    assert_eq!(moto_rt::net::send_buffer_size(lfd).unwrap(), default);
 
     // A connected stream starts at the defaults.
     let client = std::net::TcpStream::connect(addr).unwrap();
     let (peer, _) = listener.accept().unwrap();
     let cfd = client.as_raw_fd();
-    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), DEFAULT);
-    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), DEFAULT);
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), default);
+    assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), default);
 
     // SNDBUF grows and reads back effective.
     moto_rt::net::set_send_buffer_size(cfd, 512 * 1024).unwrap();
     assert_eq!(moto_rt::net::send_buffer_size(cfd).unwrap(), 512 * 1024);
 
     // RCVBUF growth clamps at what the announced window scale can express:
-    // a 128 KiB socket announced scale 2, so the ceiling is 65535 << 2 --
+    // a 128 KiB socket announced scale 2, so its ceiling is 65535 << 2 --
     // and the getter must report the clamp, not the request.
     moto_rt::net::set_recv_buffer_size(cfd, 1024 * 1024).unwrap();
-    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << scale);
 
     // Shrinking is not supported: a smaller request leaves the size as is.
     moto_rt::net::set_recv_buffer_size(cfd, 16 * 1024).unwrap();
-    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << 2);
+    assert_eq!(moto_rt::net::recv_buffer_size(cfd).unwrap(), 65535 << scale);
 
     drop(client);
     drop(peer);
@@ -2660,8 +2678,8 @@ fn test_tcp_buffer_sizes() {
             break;
         }
         // Until then only the old configuration may appear.
-        assert_eq!(rx, DEFAULT);
-        assert_eq!(tx, DEFAULT);
+        assert_eq!(rx, default);
+        assert_eq!(tx, default);
     }
     assert!(
         inherited,
@@ -3434,9 +3452,13 @@ fn test_backlog_growth_and_shrink() {
 
     // A connection costs ~120 pages here: default client rings, the client
     // runtime's per-stream pages and the pool's floor rings. A small guest
-    // bursts fewer, still three times the four-deep pool.
+    // bursts fewer, still twice the four-deep pool. The burst must not
+    // exceed the limit on unaccepted connections: sys-io resets the excess,
+    // and the accepts below would wait for them forever.
     const CONNECTION_PAGES: u64 = 128;
-    let burst = (crate::spare_pages() / (2 * CONNECTION_PAGES)).clamp(12, 24) as usize;
+    let burst = ((crate::spare_pages() / (2 * CONNECTION_PAGES)) as usize)
+        .clamp(12, 24)
+        .min(completed_backlog_cap());
     // Retransmits carry the requests the burst's first poll could not take: one
     // second, then two. Generous, and only so that a lost connection fails this
     // test instead of hanging it.
@@ -4014,7 +4036,7 @@ fn test_backlog_saturation_liveness() {
 fn test_completed_accept_backlog_is_bounded() {
     use moto_sys_io::api_net;
 
-    const PER_LISTENER_CAP: usize = 32;
+    let per_listener_cap = completed_backlog_cap();
 
     let backlog_before = read_sys_io_metric("net.tcp.accept_backlog");
     let overflow_before = read_sys_io_metric("net.tcp.accept_overflow");
@@ -4032,14 +4054,14 @@ fn test_completed_accept_backlog_is_bounded() {
     };
 
     let bind_addr = "127.0.0.1:0".parse().unwrap();
-    let mut bind = api_net::bind_tcp_listener_request(&bind_addr, Some(PER_LISTENER_CAP as u8));
+    let mut bind = api_net::bind_tcp_listener_request(&bind_addr, Some(per_listener_cap as u8));
     small_rings(&mut bind);
     listener_connection.send(bind).unwrap();
     let bind_resp = recv_raw_net_response(&listener_connection);
     bind_resp.status().unwrap();
     let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
 
-    for _ in 0..PER_LISTENER_CAP {
+    for _ in 0..per_listener_cap {
         let mut connect = api_net::tcp_stream_connect_request(&listener_addr, 0);
         small_rings(&mut connect);
         listener_connection.send(connect).unwrap();
@@ -4048,14 +4070,14 @@ fn test_completed_accept_backlog_is_bounded() {
             .unwrap();
     }
     wait_for_sys_io_metric("net.tcp.accept_backlog", |value| {
-        value == backlog_before + PER_LISTENER_CAP as u64
+        value == backlog_before + per_listener_cap as u64
     });
 
     let overflow = std::net::TcpStream::connect_timeout(&listener_addr, Duration::from_secs(2));
     wait_for_sys_io_metric("net.tcp.accept_overflow", |value| value > overflow_before);
     assert_eq!(
         read_sys_io_metric("net.tcp.accept_backlog"),
-        backlog_before + PER_LISTENER_CAP as u64
+        backlog_before + per_listener_cap as u64
     );
     match overflow {
         Err(err) => assert!(matches!(

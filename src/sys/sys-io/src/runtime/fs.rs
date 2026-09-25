@@ -37,21 +37,16 @@ const MAX_IN_FLIGHT: usize = 64;
 /// blocks). See `maybe_readahead` and `on_cmd_read_multi`.
 const READAHEAD_BLOCKS: u64 = 32;
 
-/// The block cache follows the guest's memory: 1 MiB per 32 MiB, at least
-/// 1 MiB, and 16 MiB from 256 MiB up. The kernel reports less than the
-/// configured RAM (firmware and boot reservations), so 10 MiB is added to it.
+/// The block cache follows the guest's memory: 1 MiB per 32 MiB of RAM, at
+/// least 1 MiB, and 16 MiB from 256 MiB up.
 fn block_cache_blocks() -> usize {
-    const MIB: u64 = 1 << 20;
-    let total = moto_sys::stats::MemoryStats::get()
-        .expect("the memory-stats query cannot fail on a live kernel")
-        .available
-        + 10 * MIB;
-    let cache_bytes = if total >= 256 * MIB {
-        16 * MIB
+    let ram_mib = super::guest_ram_mib();
+    let cache_mib = if ram_mib >= super::SMALL_GUEST_MIB {
+        16
     } else {
-        (total / (32 * MIB)).max(1) * MIB
+        (ram_mib / 32).max(1)
     };
-    (cache_bytes / async_fs::BLOCK_SIZE as u64) as usize
+    ((cache_mib << 20) / async_fs::BLOCK_SIZE as u64) as usize
 }
 
 const _: () = {

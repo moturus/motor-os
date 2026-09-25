@@ -497,12 +497,14 @@ is no longer usable.</p>
 <p><code>max_half_open_global</code> and <code>max_half_open_per_listener</code> (defaults
 128 and 32) bound sockets in SYN-RECEIVED. <code>max_backlog_global</code> and
 <code>max_backlog_per_listener</code> (defaults 128 and 32) bound the pools of listening
-sockets behind listeners: a pool starts at the size the program asked for, 4 by default,
-and doubles whenever a burst of simultaneous connections empties it, because a
-connection that finds no listening socket is refused rather than queued. All four must be
-nonzero. Each socket reserves receive and transmit rings, so large values have a direct
-memory cost; lower them on a small VM, raise them for a server that meets large
-connection bursts or many slow, distant clients.</p>
+sockets behind listeners. Below 256 MiB of RAM each default is a quarter of that, and so
+is the limit on connections waiting to be accepted (128, and 32 per listener). A pool
+starts at the size the program asked for, 4 by default, and doubles whenever a burst of
+simultaneous connections empties it, because a connection that finds no listening
+socket is refused rather than queued. All four must be nonzero. Each socket reserves
+receive and transmit rings, so large values have a direct memory cost; lower them on a
+small VM, raise them for a server that meets large connection bursts or many slow,
+distant clients.</p>
 
 <h3>Response rate limits</h3>
 <p><code>max_icmp_error_rate</code>, <code>max_rst_rate</code>, and
@@ -528,7 +530,8 @@ rejected; omit a key to keep its default.</p>
 </div>
 <p>Socket options exposed to programs: <code>TCP_NODELAY</code>, TTL, <code>SO_LINGER</code>,
 receive and send buffer sizes, <code>IPV6_V6ONLY</code>, and shutdown of either direction.
-TCP buffers default to 128 KiB per direction and can be set between 16 KiB and 8 MiB. A
+TCP buffers default to 128 KiB per direction (64 KiB below 256 MiB of RAM, 32 KiB below
+128 MiB) and can be set between 16 KiB and 8 MiB. A
 graceful close of a connection that never sent a byte is reset rather than FIN-closed;
 this is an accepted non-POSIX exception.</p>
 

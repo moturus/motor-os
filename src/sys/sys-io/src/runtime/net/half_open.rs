@@ -1,9 +1,9 @@
 //! How many listening sockets may sit in SYN-RECEIVED at once.
 //!
-//! A listening socket that has taken a peer's SYN holds its full 128 KiB
+//! A listening socket that has taken a peer's SYN holds its 16 KiB floor
 //! receive and transmit rings until the handshake finishes or the 15-second
 //! timeout fires, and sys-io refills the listening pool as soon as a socket
-//! leaves `Listen`. Unbounded, that is `SYN_rate * 15 s * 256 KiB` of memory
+//! leaves `Listen`. Unbounded, that is `SYN_rate * 15 s * 32 KiB` of memory
 //! that unanswered SYNs command.
 //!
 //! What is capped is replenishment, not the SYN: by the time sys-io observes
@@ -23,13 +23,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 
-/// At 256 KiB per half-open socket, 32 MiB. `max_half_open_global` in
-/// `/system/cfg/sys-net.toml` overrides it.
+/// At 32 KiB of floor rings per half-open socket, 4 MiB. Guests below 256 MiB
+/// of RAM get a quarter (see [`super::config::ram_scaled`]).
+/// `max_half_open_global` in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_HALF_OPEN_GLOBAL: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// One listener cannot hold more sockets half-open than it may keep listening:
-/// this matches `MAX_NUM_LISTENING_SOCKETS`, 8 MiB. `max_half_open_per_listener`
-/// in `/system/cfg/sys-net.toml` overrides it.
+/// this matches `MAX_NUM_LISTENING_SOCKETS`, 1 MiB. Scaled like the global cap;
+/// `max_half_open_per_listener` in `/system/cfg/sys-net.toml` overrides it.
 pub(super) const DEFAULT_MAX_HALF_OPEN_PER_LISTENER: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 /// Half-open slots in use, and the replenishments the cap is holding back.

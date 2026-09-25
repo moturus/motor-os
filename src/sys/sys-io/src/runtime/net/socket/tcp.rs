@@ -124,11 +124,22 @@ pub(in crate::runtime::net) struct TcpBufferSizes {
 }
 
 impl TcpBufferSizes {
-    /// 128 KiB buffers: the receive buffer caps the advertised TCP window
-    /// and the send buffer caps unacked bytes in flight; 32 KiB sat exactly
-    /// at the measured 321 MiB/s * ~100 us BDP. Raising the default further
-    /// is a decision gate in docs/plans/networking-remaining-steps.md.
-    const DEFAULT: usize = 128 * 1024;
+    /// The default size of each ring. The receive buffer caps the advertised
+    /// TCP window and the send buffer caps unacked bytes in flight; 32 KiB
+    /// sat exactly at the measured 321 MiB/s * ~100 us BDP. Guests from 256
+    /// MiB up get 128 KiB; smaller ones trade throughput for memory: 64 KiB
+    /// from 128 MiB, 32 KiB below. Raising the default further is a decision
+    /// gate in docs/plans/networking-remaining-steps.md.
+    fn default_size() -> usize {
+        let ram_mib = crate::runtime::guest_ram_mib();
+        if ram_mib >= crate::runtime::SMALL_GUEST_MIB {
+            128 * 1024
+        } else if ram_mib >= 128 {
+            64 * 1024
+        } else {
+            32 * 1024
+        }
+    }
     /// Below 16 KiB the TSO/page interplay wastes more than it saves. Also
     /// the ring a lazily-built backlog socket starts with, and therefore the
     /// window a cookie SYN|ACK advertises.
@@ -139,7 +150,7 @@ impl TcpBufferSizes {
 
     pub(in crate::runtime::net) fn from_payload(payload: &moto_ipc::io_channel::Payload) -> Self {
         let size = |pos: usize| match api_net::tcp_buf_size_from_code(payload.args_8()[pos]) {
-            None => Self::DEFAULT,
+            None => Self::default_size(),
             Some(bytes) => (bytes as usize).clamp(Self::FLOOR, Self::CAP),
         };
         Self {
@@ -152,7 +163,7 @@ impl TcpBufferSizes {
     /// else clamps to the floor and cap.
     pub(in crate::runtime::net) fn normalize(bytes: u64) -> usize {
         if bytes == 0 {
-            Self::DEFAULT
+            Self::default_size()
         } else {
             (bytes as usize).clamp(Self::FLOOR, Self::CAP)
         }

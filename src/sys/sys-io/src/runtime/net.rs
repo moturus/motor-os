@@ -993,7 +993,11 @@ pub(super) async fn init(
             config.max_backlog_global,
             config.max_backlog_per_listener,
         )),
-        completed: Rc::new(completed::CompletedBacklog::new(net_stats.clone())),
+        completed: Rc::new(completed::CompletedBacklog::new(
+            net_stats.clone(),
+            config::ram_scaled(completed::DEFAULT_MAX_GLOBAL),
+            config::ram_scaled(completed::DEFAULT_MAX_PER_LISTENER),
+        )),
         pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
         orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.clone(),

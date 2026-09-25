@@ -4,24 +4,34 @@ use super::stats::NetStats;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    num::NonZeroUsize,
     rc::Rc,
 };
 
-/// 128 sockets at the default 256 KiB of rings: 32 MiB globally.
-const MAX_GLOBAL: usize = 128;
+/// 128 sockets at 256 KiB of default-sized rings: 32 MiB globally. Guests
+/// below 256 MiB of RAM get a quarter (see [`super::config::ram_scaled`]).
+pub(super) const DEFAULT_MAX_GLOBAL: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 /// One listener may hold at most 8 MiB of default-sized completed sockets.
-const MAX_PER_LISTENER: usize = 32;
+pub(super) const DEFAULT_MAX_PER_LISTENER: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 
 pub(super) struct CompletedBacklog {
     stats: Rc<NetStats>,
+    max_global: usize,
+    max_per_listener: usize,
     global: Cell<usize>,
     per_listener: RefCell<HashMap<u64, usize>>,
 }
 
 impl CompletedBacklog {
-    pub(super) fn new(stats: Rc<NetStats>) -> Self {
+    pub(super) fn new(
+        stats: Rc<NetStats>,
+        max_global: NonZeroUsize,
+        max_per_listener: NonZeroUsize,
+    ) -> Self {
         Self {
             stats,
+            max_global: max_global.get(),
+            max_per_listener: max_per_listener.get(),
             global: Cell::new(0),
             per_listener: RefCell::new(HashMap::new()),
         }
@@ -35,7 +45,7 @@ impl CompletedBacklog {
             .get(&listener_id)
             .copied()
             .unwrap_or(0);
-        if self.global.get() >= MAX_GLOBAL || per_listener >= MAX_PER_LISTENER {
+        if self.global.get() >= self.max_global || per_listener >= self.max_per_listener {
             self.stats
                 .tcp_accept_overflow
                 .set(self.stats.tcp_accept_overflow.get() + 1);
@@ -81,9 +91,13 @@ pub(crate) mod self_test {
         ),
     ];
 
+    const MAX_GLOBAL: usize = DEFAULT_MAX_GLOBAL.get();
+    const MAX_PER_LISTENER: usize = DEFAULT_MAX_PER_LISTENER.get();
+
     fn budget() -> (Rc<NetStats>, CompletedBacklog) {
         let stats = Rc::new(NetStats::default());
-        let budget = CompletedBacklog::new(stats.clone());
+        let budget =
+            CompletedBacklog::new(stats.clone(), DEFAULT_MAX_GLOBAL, DEFAULT_MAX_PER_LISTENER);
         (stats, budget)
     }
 

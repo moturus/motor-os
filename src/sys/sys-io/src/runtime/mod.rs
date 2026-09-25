@@ -20,6 +20,23 @@ pub(crate) mod net;
 mod virtio_capacity;
 pub(crate) mod vsock;
 
+/// The guest's RAM in MiB as sizing policy sees it. The kernel reports less
+/// than the configured RAM (firmware and boot reservations), so 10 MiB is
+/// added to its figure.
+pub(crate) fn guest_ram_mib() -> u64 {
+    static RAM_MIB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *RAM_MIB.get_or_init(|| {
+        let available = moto_sys::stats::MemoryStats::get()
+            .expect("the memory-stats query cannot fail on a live kernel")
+            .available;
+        (available >> 20) + 10
+    })
+}
+
+/// Guests with less RAM get a smaller block cache, smaller default TCP
+/// buffers, and lower connection limits.
+pub(crate) const SMALL_GUEST_MIB: u64 = 256;
+
 // A single 2M page used for VirtIO/MMIO.
 // It's a hack, but we don't need anything more complicated for now.
 pub static MMIO_PAGE: AtomicU64 = AtomicU64::new(0);
