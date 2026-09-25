@@ -1,6 +1,11 @@
 #!/bin/sh
 
 WD="$(dirname "$0")"
+SMP="${MOTO_SMP:-4}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+. "$WD/vm-options.sh"
+vm_parse_options "$@"
+shift "$VM_ARGS_SHIFT"
 
 # Use the same host-wide lock as QEMU: both launchers use moto-tap and the
 # standard guest address, so concurrent runs could observe each other's VM.
@@ -12,8 +17,6 @@ if ! flock -n 9; then
 fi
 
 IMAGE="${MOTO_IMAGE:-motor-os.qcow2}"
-SMP="${MOTO_SMP:-4}"
-MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 RUNTIME_DIR="${MOTO_CHV_RUNTIME_DIR:-/tmp}"
 case "$IMAGE" in
   "" | *[!A-Za-z0-9._-]*)

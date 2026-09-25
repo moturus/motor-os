@@ -211,4 +211,95 @@ fi
 grep -Fq "expected qemu or chv" "$ERROR_LOG" ||
   fail "run-dev did not report its supported VMMs"
 
+# Exercise all public launchers with fake VMMs, isolated from host resources.
+(
+  export PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG"
+  export MOTO_QEMU_LOCK="$TEST_ROOT/options.lock" MOTO_HUGEPAGES=0
+  export MOTO_CHV_RUNTIME_DIR="$TEST_ROOT/chv" MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc"
+  unset MOTO_IMAGE MOTO_CPU_AFFINITY MOTO_SHARED_MEM MOTO_FC_VSOCK_UDS
+
+  run_options() {
+    local script="$runner"
+    if [ "$runner" = dev-chv ]; then
+      script=dev
+      set -- --vmm chv "$@"
+    fi
+    "$VM_DIR/run-$script.sh" "$@" > /dev/null 2> "$ERROR_LOG"
+  }
+
+  assert_resources() {
+    local cpus="$1" memory="$2"
+    case "$runner" in
+      fc)
+        grep -Fxq "    \"vcpu_count\": $cpus," "$TEST_ROOT/fc/fc-config.json" ||
+          fail "wrong Firecracker CPU count"
+        grep -Fxq "    \"mem_size_mib\": $memory" "$TEST_ROOT/fc/fc-config.json" ||
+          fail "wrong Firecracker memory size"
+        ;;
+      chv | dev-chv) assert_arg "boot=$cpus"; assert_arg "size=${memory}M" ;;
+      *) assert_arg "-smp"; assert_arg "$cpus"; assert_arg "${memory}M" ;;
+    esac
+  }
+
+  for runner in qemu qemu-echr chv fc dev dev-chv; do
+    unset MOTO_SMP MOTO_MEMORY_MIB
+    run_options
+    case "$runner" in
+      fc) assert_resources 2 64 ;;
+      dev*) assert_resources 8 8192 ;;
+      *) assert_resources 4 1024 ;;
+    esac
+    export MOTO_SMP=6 MOTO_MEMORY_MIB=768
+    run_options
+    assert_resources 6 768
+    run_options --cpus 3 --memory 512M
+    assert_resources 3 512
+    run_options --memory=2G --cpus=5 -- 'argument with spaces' --cpus=passthrough
+    assert_resources 5 2048
+    assert_arg 'argument with spaces'
+    assert_arg --cpus=passthrough
+    assert_no_arg --cpus=5
+    assert_no_arg --memory=2G
+    if [ "$runner" = qemu-echr ]; then
+      assert_arg -echr
+      assert_arg 0x14
+    fi
+
+    for option in --cpus --memory; do
+      for value in '' 0 -1 1.5 01 invalid; do
+        rm -f "$ARG_LOG"
+        if run_options "$option=$value"; then
+          fail "$runner accepted $option=$value"
+        fi
+        [ ! -e "$ARG_LOG" ] || fail "$runner launched with invalid options"
+      done
+      if run_options "$option"; then
+        fail "$runner accepted a missing $option value"
+      fi
+    done
+    for value in 512 0M 01G 1m 1g 1MB 1.5G 9000000000G 99999999999999999999M; do
+      if run_options --memory "$value"; then
+        fail "$runner accepted --memory $value"
+      fi
+    done
+    rm -f "$ARG_LOG"
+    run_options --help
+    [ ! -e "$ARG_LOG" ] || fail "$runner launched for --help"
+  done
+
+  runner=dev
+  run_options --cpus 3 --vmm chv --memory 1G
+  assert_arg boot=3
+  assert_arg size=1024M
+  run_options --vmm chv -- --cpus boot=7 --memory size=3G
+  assert_arg boot=7
+  assert_arg size=3G
+
+  runner=qemu
+  MOTO_SHARED_MEM=1 run_options --memory 2G -monitor 'unix:monitor path,server'
+  assert_arg 'memory-backend-memfd,id=mem0,size=2048M,share=on'
+  assert_arg -monitor
+  assert_arg 'unix:monitor path,server'
+)
+
 echo "test-vm-image-format: PASS"

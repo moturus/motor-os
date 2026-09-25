@@ -1,6 +1,11 @@
 #!/bin/sh
 
 WD="$(dirname "$0")"
+SMP="${MOTO_SMP:-2}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-64}"
+. "$WD/vm-options.sh"
+vm_parse_options "$@"
+shift "$VM_ARGS_SHIFT"
 
 # Firecracker shares moto-tap and the standard guest address with QEMU and
 # Cloud Hypervisor, so all three runners use the same host-wide lock.
@@ -12,8 +17,6 @@ if ! flock -n 9; then
 fi
 
 IMAGE="${MOTO_IMAGE:-motor-os-base.img}"
-SMP="${MOTO_SMP:-2}"
-MEMORY_MIB="${MOTO_MEMORY_MIB:-64}"
 RUNTIME_DIR="${MOTO_FC_RUNTIME_DIR:-/tmp}"
 VSOCK_UDS="${MOTO_FC_VSOCK_UDS:-}"
 case "$IMAGE" in

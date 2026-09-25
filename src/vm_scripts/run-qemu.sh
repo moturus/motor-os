@@ -1,6 +1,11 @@
 #!/bin/sh
 
 WD="$(dirname "$0")"
+SMP="${MOTO_SMP:-4}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+. "$WD/vm-options.sh"
+vm_parse_options "$@"
+shift "$VM_ARGS_SHIFT"
 
 # Every standard harness uses the same tap, guest address, MAC, and SSH port.
 # Without host-side exclusion, SSH can reach another run's already-booted guest
@@ -35,8 +40,6 @@ esac
 # MOTO_SMP above the pinned set's size forces the host to multiplex vCPUs --
 # widening the scheduling windows that lost-wake and io_channel client/server
 # races depend on.
-SMP="${MOTO_SMP:-4}"
-MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 if [ -n "${MOTO_CPU_AFFINITY:-}" ]; then
   TASKSET="taskset -c ${MOTO_CPU_AFFINITY}"
 else

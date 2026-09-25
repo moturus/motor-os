@@ -11,5 +11,11 @@
 # Everything else is run-qemu.sh's; extra args still pass through to qemu.
 
 WD="$(dirname "$0")"
+SMP="${MOTO_SMP:-4}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
+. "$WD/vm-options.sh"
+vm_parse_options "$@"
+shift "$VM_ARGS_SHIFT"
+export MOTO_SMP="$SMP" MOTO_MEMORY_MIB="$MEMORY_MIB"
 
-exec "$WD/run-qemu.sh" -echr 0x14 "$@"
+exec "$WD/run-qemu.sh" -- -echr 0x14 "$@"

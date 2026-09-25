@@ -1,12 +1,19 @@
 #!/bin/sh
 set -eu
 
+WD="$(dirname "$0")"
+SMP="${MOTO_SMP:-8}"
+MEMORY_MIB="${MOTO_MEMORY_MIB:-8192}"
+. "$WD/vm-options.sh"
+
 usage() {
   cat <<'EOF'
-usage: run-dev.sh [--vmm qemu|chv] [-- VMM-ARGUMENTS...]
+usage: run-dev.sh [--vmm qemu|chv] [--cpus N] [--memory SIZE] [-- VMM-ARGUMENTS...]
 
 Runs motor-os-dev.qcow2 with QEMU by default. The development defaults are
 8 vCPUs and 8192 MiB of RAM. MOTO_SMP and MOTO_MEMORY_MIB override them.
+--cpus and --memory override the environment. SIZE must be a positive integer
+with M (MiB) or G (GiB) suffix, for example 512M or 8G.
 The RAM comes from the host's hugetlbfs pool when it holds enough free
 pages (vm.nr_hugepages = 4096 for 8192 MiB of 2 MiB pages); see run-qemu.sh
 and run-chv.sh.
@@ -16,6 +23,10 @@ EOF
 VMM=qemu
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --cpus | --cpus=* | --memory | --memory=*)
+      vm_option "$@"
+      shift "$VM_OPTION_SHIFT"
+      ;;
     --vmm)
       [ "$#" -ge 2 ] || {
         echo "run-dev: --vmm requires qemu or chv" >&2
@@ -52,12 +63,11 @@ case "$VMM" in
     ;;
 esac
 
-WD="$(dirname "$0")"
 export MOTO_IMAGE=motor-os-dev.qcow2
-export MOTO_SMP="${MOTO_SMP:-8}"
-export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-8192}"
+export MOTO_SMP="$SMP"
+export MOTO_MEMORY_MIB="$MEMORY_MIB"
 
 case "$VMM" in
-  qemu) exec "$WD/run-qemu.sh" "$@" ;;
-  chv) exec "$WD/run-chv.sh" "$@" ;;
+  qemu) exec "$WD/run-qemu.sh" -- "$@" ;;
+  chv) exec "$WD/run-chv.sh" -- "$@" ;;
 esac
