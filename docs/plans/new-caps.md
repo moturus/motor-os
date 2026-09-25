@@ -349,13 +349,13 @@ parent-side relay using the parent's FS connection and capabilities.
 
 Rush passes a solely-used redirect target as an explicit file. Thus
 `restricted_cmd > out.txt` is denied at the child's filesystem writes with
-`NotAllowed` (`PermissionDenied`). The current Motor stdlib suppresses stdout
-and stderr errors, so Rust printing can silently lose output and exit zero;
-this is an error-reporting defect, not permission to write. Native write-error
-checks cover the actual denial while the external stdlib fix is tracked
-separately. The shell can still create or
-truncate `out.txt` before spawning the child; those are the shell's own
-operations. `restricted_cmd < in.txt` remains readable under the usual
+`NotAllowed` (`PermissionDenied`). Rust's standard streams propagate the
+denial, and printing macros panic when writing fails. Only `BadHandle` is
+treated as a closed standard stream, preserving successful discarded writes
+and EOF on reads. Native regressions cover both permission denial and the
+closed-stream behavior. The shell can still create or truncate `out.txt`
+before spawning the child; those are the shell's own operations.
+`restricted_cmd < in.txt` remains readable under the usual
 permissions, and pipe-backed output remains usable. An inherited file relay
 can write when its parent has the necessary authority even if the child
 lacks `CAP_FS_WRITE`. These outcomes follow authorization of the actual

@@ -73,11 +73,12 @@ native global filesystem flush, including through read-only file handles.
 
 These checks follow the process that talks to sys-io. A file handed to a child
 as a standard stream with `Stdio::from(file)` is used through the child's own
-connection, so a child without `CAP_FS_WRITE` cannot write to it; `std`'s
-`Stdout` and `Stderr` report every write error as success on Motor OS, so
-such output is silently lost rather than failing. A child that
-inherits a file-backed standard stream writes through its parent's relay,
-with the parent's authority. Pipes carry no filesystem authority at all.
+connection, so a child without `CAP_FS_WRITE` cannot write to it. Rust's
+standard streams propagate these errors as `PermissionDenied`;
+`println!` and `eprintln!` panic when writing fails. For a closed standard
+stream, reads still return EOF and writes are discarded successfully.
+A child that inherits a file-backed standard stream writes through its parent's
+relay, with the parent's authority. Pipes carry no filesystem authority at all.
 
 ## Process roles and filesystem permissions
 
