@@ -64,7 +64,7 @@ pub extern "C" fn motor_runtime_start() {
 }
 
 fn main() {
-    runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
+    runtime::init();
     runtime::spawn_async();
 
     let mut cmd = std::process::Command::new("/system/services/sys-init");

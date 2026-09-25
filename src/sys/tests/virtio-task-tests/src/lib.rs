@@ -1400,64 +1400,7 @@ fn test_vsock_listener() {
 }
 
 fn test_virtio_capacity() {
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-    let bump = AtomicU64::new(0);
-    assert_eq!(
-        virtio_capacity::reserve_mmio(&bump, 4097).unwrap(),
-        (0, 8192)
-    );
-    assert_eq!(bump.load(Ordering::Relaxed), 8192);
-
-    let exact_end = AtomicU64::new(virtio_capacity::MMIO_POOL_SIZE - 4096);
-    assert_eq!(
-        virtio_capacity::reserve_mmio(&exact_end, 1).unwrap(),
-        (virtio_capacity::MMIO_POOL_SIZE - 4096, 4096)
-    );
-    assert_eq!(
-        exact_end.load(Ordering::Relaxed),
-        virtio_capacity::MMIO_POOL_SIZE
-    );
-    for size in [1, virtio_capacity::MMIO_POOL_SIZE + 1] {
-        assert_eq!(
-            virtio_capacity::reserve_mmio(&exact_end, size)
-                .unwrap_err()
-                .kind(),
-            ErrorKind::OutOfMemory
-        );
-        assert_eq!(
-            exact_end.load(Ordering::Relaxed),
-            virtio_capacity::MMIO_POOL_SIZE
-        );
-    }
-
-    let rejected = AtomicU64::new(4096);
-    for size in [0, u64::MAX] {
-        assert_eq!(
-            virtio_capacity::reserve_mmio(&rejected, size)
-                .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidInput
-        );
-        assert_eq!(rejected.load(Ordering::Relaxed), 4096);
-    }
-    let overflow = AtomicU64::new(u64::MAX - 4095);
-    assert_eq!(
-        virtio_capacity::reserve_mmio(&overflow, 4096)
-            .unwrap_err()
-            .kind(),
-        ErrorKind::OutOfMemory
-    );
-    assert_eq!(overflow.load(Ordering::Relaxed), u64::MAX - 4095);
-
-    let topology = AtomicU64::new(0);
-    // One block queue, two two-queue NICs, and the future three-queue vsock.
-    for queues in [1, 2, 2, 3] {
-        for _ in 0..queues {
-            virtio_capacity::reserve_mmio(&topology, 12_804).unwrap();
-        }
-    }
-    assert_eq!(topology.load(Ordering::Relaxed), 8 * 16_384);
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     let irqs = AtomicU8::new(virtio_capacity::IRQ_START);
     for expected in 64..80 {

@@ -37,9 +37,9 @@ fn sys_mmio_map(
 fn map_charge(flags: u32, phys_addr: u64, page_size: u64, num_pages: u64) -> u64 {
     const MMIO: u32 = SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO;
 
-    let (data_pages, descriptor_pages) = if flags == MMIO || page_size == sys_mem::PAGE_SIZE_MID {
-        // Device memory, and mid-page data, come from outside the small-page
-        // pool; only descriptors and page tables are charged.
+    let (data_pages, descriptor_pages) = if flags == MMIO {
+        // Device memory comes from outside the small-page pool; only
+        // descriptors and page tables are charged.
         (0, num_pages)
     } else if flags == 0 || (flags & SysMem::F_LAZY) != 0 {
         // No physical pages yet: each lazy fault is charged when it happens.
@@ -86,7 +86,7 @@ fn sys_map(
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
     // Held until this operation returns; the io-manager-only paths (MMIO,
-    // mid-page, contiguous) participate too, at the sys-io floor.
+    // contiguous) participate too, at the sys-io floor.
     let _admission = match crate::mm::admission::admit(
         address_space.mem_class(),
         map_charge(flags, phys_addr, page_size, num_pages),
@@ -110,25 +110,6 @@ fn sys_map(
             return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
-    }
-
-    if page_size == sys_mem::PAGE_SIZE_MID {
-        if !io_manager {
-            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
-        }
-        if flags != (SysMem::F_READABLE | SysMem::F_WRITABLE) || num_pages != 1 {
-            log::debug!("sys_map: bad flags: 0x{flags:x} or num_pages: {num_pages}");
-            return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT);
-        }
-        if phys_addr != u64::MAX || virt_addr != u64::MAX {
-            log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
-        }
-
-        return match address_space.alloc_user_mid_pages(num_pages) {
-            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
-        };
     }
 
     if page_size != sys_mem::PAGE_SIZE_SMALL {

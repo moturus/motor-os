@@ -39,20 +39,15 @@ pub(super) fn run() {
     let layout = standard(&available, seg(38 * M + 100, 39 * M + 100), &raw).unwrap();
     assert_eq!(
         layout.managed,
-        [
-            pages(0, 640 * K),
-            pages(M, 2 * M),
-            pages(10 * M, 34 * M),
-            pages(38 * M, 64 * M)
-        ]
+        [pages(0, 640 * K), pages(M, 34 * M), pages(38 * M, 64 * M)]
     );
     assert_eq!(layout.reserved, from_ref(&pages(0, 34 * M)));
     assert_eq!(layout.initrd, pages(38 * M, 39 * M + 4 * K));
     assert_eq!(layout.ram, from_ref(&(0..32)));
     assert_eq!(layout.blocks, 32);
 
-    // Inward page rounding, adjacency coalescing before the fixed-mid check,
-    // outward reservation rounding, and empty or trimmed-empty segments.
+    // Inward page rounding, adjacency coalescing, outward reservation
+    // rounding, and empty or trimmed-empty segments.
     let raw = [seg(0, 64 * M), seg(64 * M, 65 * M)];
     let available = [
         seg(0x1003, 0x5000),
@@ -65,10 +60,7 @@ pub(super) fn run() {
     ];
     let reserved = [seg(0x800, 0x1800), seg(0x1800, 34 * M)];
     let layout = Layout::new(&available, &reserved, NONE, &raw).unwrap();
-    assert_eq!(
-        layout.managed,
-        [2..8, 9..512, 2560..8704, pages(38 * M, 64 * M)]
-    );
+    assert_eq!(layout.managed, [2..8, 9..8704, pages(38 * M, 64 * M)]);
     assert_eq!(layout.reserved, from_ref(&(0..8704)));
     assert_eq!(layout.initrd, 0..0);
     assert_eq!(layout.ram, from_ref(&(0..33)));
@@ -87,7 +79,7 @@ pub(super) fn run() {
         seg(100 * M + 4 * K, 102 * M),
     ];
     let layout = standard(&available, NONE, &raw).unwrap();
-    assert_eq!(layout.managed[3], pages(100 * M + 4 * K, 102 * M));
+    assert_eq!(layout.managed[2], pages(100 * M + 4 * K, 102 * M));
     assert_eq!(layout.ram, [0..32, 50..51, 100..101]);
     assert_eq!(layout.blocks, 101);
     let raw = [seg(0, 64 * G)];
@@ -124,19 +116,6 @@ pub(super) fn run() {
         Layout::new(&available, &[seg(M, 2 * M), seg(0, 34 * M)], NONE, &raw).err(),
         Some(LayoutError::Order)
     );
-    for available in [
-        [seg(0, 2 * M), seg(10 * M, 34 * M), seg(38 * M, 64 * M)],
-        [
-            seg(0, 6 * M),
-            seg(6 * M + 4 * K, 34 * M),
-            seg(38 * M, 64 * M),
-        ],
-    ] {
-        assert_eq!(
-            standard(&available, NONE, &raw).err(),
-            Some(LayoutError::FixedMid)
-        );
-    }
     assert_eq!(
         standard(&[seg(0, 34 * M), seg(38 * M, 64 * M + 4 * K)], NONE, &raw).err(),
         Some(LayoutError::Raw)
@@ -238,19 +217,19 @@ fn span() {
     }
     // Independent expectations: the smaller run beside each reserved page is
     // discarded, and low RAM is entirely reserved.
-    let low_reserved = 13 * 512;
+    let low_reserved = 17 * 512;
     let (mut per_block_reserved, mut per_block_discarded) = (0, 0);
     for block in (22..299u64).filter(|block| *block != 30) {
         let smaller = block.min(511 - block);
         per_block_reserved += 1 + smaller;
         per_block_discarded += smaller;
     }
-    assert_eq!(managed, 294 * 512);
+    assert_eq!(managed, 298 * 512);
     assert_eq!(reserved, low_reserved + per_block_reserved);
     assert_eq!(discarded, per_block_discarded);
-    assert_eq!(states, [57, 2, 292]);
-    // 276 blocks with a reserved page, plus the 13 fully reserved low blocks.
-    assert_eq!(mixed, 289);
+    assert_eq!(states, [53, 2, 296]);
+    // 276 blocks with a reserved page, plus the 17 fully reserved low blocks.
+    assert_eq!(mixed, 293);
 
     let low = RAM | SMALL_ONLY;
     expect(
@@ -263,11 +242,11 @@ fn span() {
     );
     expect(
         &layout.block(3).unwrap(),
-        ABSENT,
+        SPLIT,
         low,
         0..0,
         0..0,
-        (0, 0, 0, 512),
+        (512, 512, 0, 512),
     );
     expect(
         &layout.block(17).unwrap(),
@@ -414,6 +393,6 @@ fn storage() {
     assert_eq!(layout.carve_table(3), Ok(None));
     let mut shape = layout.block(0).unwrap().shape;
     assert_eq!(shape.carve(1), Err(ShapeError::Bounds));
-    let mut shape = layout.block(3).unwrap().shape;
+    let mut shape = layout.block(17).unwrap().shape;
     assert_eq!(shape.carve(1), Err(ShapeError::Bounds));
 }

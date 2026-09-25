@@ -7,8 +7,7 @@ this document covers what they sit on.
 
 All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. "Huge" means an ordinary allocation
-backed by a level-2 page-table entry; sys-io's fixed mid-page segment is a
-separate thing and is named as such.
+backed by a level-2 page-table entry.
 
 One rule governs the code: the kernel stays as simple as the design allows,
 and tests adapt to the kernel. No counter, hook, failure-injection point or
@@ -23,7 +22,7 @@ is redesigned or its case is recorded as untested.
 | `mm/mod.rs` | Constants (direct map at 1 << 46, kernel at 34 MiB physical), page sizes, the raw slab page supplier. |
 | `mm/kheap.rs` | The kernel heap: `frusa` ([frusa.md](frusa.md)) with a per-CPU stage (private blocks and a magazine of freed slots) over a page supplier that bumps from the boot heap until memory is initialized, then allocates from the kernel heap region. |
 | `mm/slab.rs` | Fixed-size slabs with intrusive refcounts (`SlabArc`); used for `Frame`, `Page` and segment descriptors, never deallocated. |
-| `mm/phys.rs` | The physical allocator facade: `Frame` ownership, the fixed mid-page segment, stage-2 release, metrics and statistics. |
+| `mm/phys.rs` | The physical allocator facade: `Frame` ownership, stage-2 release, metrics and statistics. |
 | `mm/phys_blocks/` | The block pool: descriptors, free lists, search, boot shaping and the production instance. |
 | `mm/virt.rs` | The kernel address space, its fixed virtual layout, mapping primitives, kernel self-tests. |
 | `mm/virt_intrusive.rs` | Segment trees and per-page descriptors built on intrusive collections, so virtual allocation never recurses into the heap. |
@@ -36,16 +35,12 @@ is redesigned or its case is recorded as untested.
 
 ### Memory outside the pool
 
-Three physical regions are never managed by the block pool:
+Two physical regions are never managed by the block pool:
 
 - The kernel image and its boot heap, loaded at 34 MiB. The boot heap
   (2 to 4 MiB) is a bump allocator with checked, aligned reservation; if it
   cannot hold a startup allocation the kernel panics with the failing layout
   and the remaining bytes. That panic is the check; no budget is computed.
-- The fixed mid-page segment, [2 MiB, 10 MiB): four 2 MiB pages tracked by
-  one bitmap, used only by the kernel and sys-io through a privileged
-  explicit path with separate accounting. `PhysStats` counts the whole
-  segment unavailable.
 - MMIO, which is not RAM. Validation refuses any block carrying the RAM flag
   or a non-absent state, so RAM is refused at 2 MiB granularity, and rejects
   addresses beyond the x86 PTE's 52-bit address field. Outside-RAM addresses
@@ -155,8 +150,8 @@ production panics with the reason and the physical address.
 ### Accounting and indexes
 
 `total_pages = free_pages + used_pages` in small-page units. `total_pages` is
-normalized managed RAM, excluding the kernel heap and the fixed mid segment,
-and is constant after init. `used_pages` is allocated plus reserved RAM; a
+normalized managed RAM, excluding the kernel heap, and is constant after
+init. `used_pages` is allocated plus reserved RAM; a
 taken block contributes 512; initrd and the list-state table count as
 allocated. `reserved_pages` is the reserved subset: boot reservations before
 stage 2, then permanent reservations and discarded free runs, constant after
@@ -256,7 +251,7 @@ RAM with no hole. Shaping touches no free data page:
 
 | Layout | Initial shape |
 |---|---|
-| No managed RAM, or the fixed mid segment | Absent; RAM flag retained where applicable. |
+| No managed RAM | Absent; RAM flag retained where applicable. |
 | Managed RAM below 34 MiB | Split, fully reserved, empty list, intervals [0, 0). |
 | Entirely free managed RAM | Whole; SMALL_ONLY below 128 MiB. |
 | Other layout, no initrd | Split; the largest free run is both the allocatable and the unused interval. |
@@ -341,8 +336,8 @@ remove or replace the reservation in between.
 ### User heaps and huge pages
 
 Only `alloc_user_heap` requests above 256 small pages are huge-eligible.
-Lazy, guard, shared, fixed-address, contiguous, MMIO, fixed-mid and kernel
-allocations stay small-only. `HeapSizing` decides the shape:
+Lazy, guard, shared, fixed-address, contiguous, MMIO and kernel allocations
+stay small-only. `HeapSizing` decides the shape:
 
 ```text
 whole = p / 512

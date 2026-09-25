@@ -1,8 +1,6 @@
 use super::phys_blocks::{BlockPool, BootInputs};
 use super::slab::*;
 use super::*;
-use core::marker::PhantomData;
-use core::sync::atomic::*;
 use moto_sys::ErrorCode;
 
 pub fn init(available: &[MemorySegment], initrd: MemorySegment, raw_ram: Vec<MemorySegment>) {
@@ -212,62 +210,6 @@ pub fn block_metrics() -> BlockMetrics {
     }
 }
 
-// sys-io's fixed mid-page segment: [2 MiB, 10 MiB), outside small-page management.
-pub(super) const FIXED_MID_SEGMENT: MemorySegment = MemorySegment {
-    start: super::ONE_MB * 2,
-    size: (PhysicalMemory::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
-};
-
-// The fixed mid-page segment: a bitmap of at most 64 pages.
-struct DesignatedSegment<S: PageSize> {
-    segment: MemorySegment,
-    used_bitmap: AtomicU64,
-    num_pages: u8,
-    _unused: PhantomData<S>,
-}
-
-impl<S: PageSize> DesignatedSegment<S> {
-    fn new(segment: &MemorySegment) -> Self {
-        DesignatedSegment {
-            segment: *segment,
-            used_bitmap: AtomicU64::new(0),
-            num_pages: (segment.size >> S::SIZE_LOG2) as u8,
-            _unused: PhantomData {},
-        }
-    }
-
-    fn allocate_frame(&self) -> Result<u64, ErrorCode> {
-        let mut iters = 0_u64;
-        loop {
-            iters += 1;
-            if iters > 10000 {
-                panic!("allocate_frame looping");
-            }
-            let prev = self.used_bitmap.load(Ordering::Relaxed);
-            if prev == u64::MAX {
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
-
-            let ones = prev.trailing_ones() as u8;
-            if ones == self.num_pages {
-                return Err(moto_rt::E_OUT_OF_MEMORY);
-            }
-            debug_assert!(ones < self.num_pages);
-
-            let bit = 1u64 << ones;
-            assert_eq!(0, prev & bit);
-            if self
-                .used_bitmap
-                .compare_exchange_weak(prev, prev | bit, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                let start = ((ones as u64) << S::SIZE_LOG2) + self.segment.start;
-                return Ok(start);
-            }
-        }
-    }
-}
-
 // Contains everything. Has a single instantiation.
 struct PhysicalMemory {
     total_size: u64, // does not change once initialized
@@ -276,18 +218,12 @@ struct PhysicalMemory {
 
     blocks: BlockPool,
     boot: BootInputs,
-
-    mid_pages: DesignatedSegment<PageSizeMid>,
 }
 
 // A pointer to the one and only instance of struct PhysicalMemory.
 static mut PHYS_MEM: usize = 0;
 
 impl PhysicalMemory {
-    // The number of MID pages we reserve. At the moment only the kernel
-    // and, maybe, sys-io are allowed to use MID pages, so the number is small.
-    const MID_PAGES: usize = 4;
-
     fn inst() -> &'static Self {
         let addr = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM)) };
         assert_ne!(addr, 0);
@@ -319,7 +255,6 @@ impl PhysicalMemory {
                 );
                 moto_rt::E_OUT_OF_MEMORY
             }),
-            PageType::MidPage => self.mid_pages.allocate_frame(),
             _ => panic!(),
         }
     }
@@ -338,8 +273,7 @@ impl PhysicalMemory {
         crate::mm::admission::note_pages_freed();
     }
 
-    // Huge frames come only from the dual-purpose pool; the fixed mid
-    // segment has no frames and is never returned.
+    // Huge frames come only from the dual-purpose pool.
     fn free_huge(&self, phys_addr: u64) {
         self.blocks.free_huge(phys_addr);
         crate::mm::admission::note_pages_freed();
@@ -401,7 +335,7 @@ impl PhysicalMemory {
             raw: raw_ram,
         };
         let blocks = BlockPool::build(&boot);
-        let total_size = (blocks.total_pages() << PAGE_SIZE_SMALL_LOG2) + FIXED_MID_SEGMENT.size;
+        let total_size = blocks.total_pages() << PAGE_SIZE_SMALL_LOG2;
 
         use alloc::boxed::Box;
         let self_ = Box::leak(Box::new(PhysicalMemory {
@@ -409,7 +343,6 @@ impl PhysicalMemory {
             slab: MMSlab::<Frame>::new(true),
             blocks,
             boot,
-            mid_pages: DesignatedSegment::new(&FIXED_MID_SEGMENT),
         }));
 
         let ptr = self_ as *mut PhysicalMemory;
@@ -431,10 +364,7 @@ pub struct PhysStats {
     pub total_size: u64,
 
     pub small_pages: u64,
-    pub mid_pages: u64,
-
     pub small_pages_used: u64,
-    pub mid_pages_used: u64,
 
     pub pages_reserved: u64,
     pub pages_discarded: u64,
@@ -453,14 +383,7 @@ impl PhysStats {
             total_size: inst.total_size,
 
             small_pages: inst.blocks.total_pages(),
-            mid_pages: inst.mid_pages.num_pages as u64,
-
             small_pages_used: inst.blocks.used_pages(),
-            mid_pages_used: inst
-                .mid_pages
-                .used_bitmap
-                .load(Ordering::Relaxed)
-                .count_ones() as u64,
 
             pages_reserved: inst.blocks.reserved_pages(),
             pages_discarded: inst.blocks.discarded_pages(),
@@ -474,9 +397,7 @@ impl PhysStats {
     }
 
     pub fn used(&self) -> u64 {
-        (self.small_pages_used << PAGE_SIZE_SMALL_LOG2)
-            // Note: we don't count MID pages as available.
-            + (self.mid_pages << PAGE_SIZE_MID_LOG2)
+        self.small_pages_used << PAGE_SIZE_SMALL_LOG2
     }
 
     pub fn available(&self) -> u64 {

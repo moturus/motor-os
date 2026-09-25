@@ -3,7 +3,7 @@ use core::sync::atomic::*;
 use alloc::sync::Arc;
 
 use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
-use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID};
+use crate::mm::{MappingOptions, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
 
@@ -432,35 +432,6 @@ impl UserAddressSpace {
                 log::error!("failed to allocate {mapped} pages");
                 self.stats_user_sub(mapped << PAGE_SIZE_SMALL_LOG2);
             })
-    }
-
-    pub fn alloc_user_mid_pages(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
-        self.stats_user_add(num_pages << super::PAGE_SIZE_MID_LOG2)?;
-
-        assert_eq!(num_pages, 1);
-        let phys_addr = super::phys::phys_allocate_frameless(crate::mm::PageType::MidPage)?;
-        assert_eq!(phys_addr, 2 * super::ONE_MB); // For now, a single MID page can be allocated globally.
-
-        // Not zeroed here: zeroing all 2 MB touches 512 fresh pages (~5 ms
-        // at boot under a hypervisor) while the I/O manager uses a fraction
-        // of it, and it zeroes what it hands out (sys-io alloc_mmio_region).
-        // The stale contents are boot-time leftovers the I/O manager could
-        // read anyway through an MMIO mapping.
-        let virt_addr = super::virt::STATIC_SYS_IO_MID_PAGE;
-        self.inner.page_table_ref().map_page(
-            phys_addr,
-            virt_addr,
-            crate::mm::PageType::MidPage,
-            MappingOptions::READABLE
-                | MappingOptions::WRITABLE
-                | MappingOptions::USER_ACCESSIBLE
-                | MappingOptions::DONT_ZERO,
-        )?;
-
-        Ok(MemorySegment {
-            start: virt_addr,
-            size: PAGE_SIZE_MID,
-        })
     }
 
     /// Reserves `num_pages` at `vaddr` (no frames) and lets `fill` map

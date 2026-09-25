@@ -88,9 +88,8 @@ pass; refusing early is the accepted bias.
 
 Participants: eager, fixed, shared, and contiguous mappings, lazy faults,
 stacks, address-space/process/thread creation, sys-objects, IPC, and the
-io-manager-only paths (mid-page, contiguous, MMIO — mid-page data lives in a
-separate pool, but its descriptors and page tables are charged against the
-small pool). A remote operation is charged against the *target* address
+io-manager-only paths (contiguous, MMIO — MMIO is not RAM, but its
+descriptors and page tables are charged against the small pool). A remote operation is charged against the *target* address
 space's class, so sys-io loading an ordinary process never widens that
 process's guard band. Small per-syscall bookkeeping (wait-object
 registration, URL strings) is not individually admitted; it belongs to the
@@ -294,8 +293,8 @@ which only FS traffic was refused shows up solely as `fs.pressure_*`
 deltas). The `F_QUERY_ADMISSION_STATS` syscall
 (`moto_sys::stats::AdmissionStats`) reports availability, reservations,
 floors, and watermarks in one call, for tests and observability —
-`MemoryStats` counts the mid-page region the small pool does not own, and
-the metrics RPC allocates and is unavailable at sys-io startup.
+`MemoryStats` has no reservation or floor figures, and the metrics RPC
+allocates and is unavailable at sys-io startup.
 
 ## Regression coverage
 

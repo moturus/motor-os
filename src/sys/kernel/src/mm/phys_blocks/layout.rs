@@ -2,7 +2,6 @@
 
 use super::shaping::{Shape, ShapeError};
 use super::{BLOCK_SHIFT, MAX_BLOCKS, PAGES, PAGE_SHIFT, RAM, SMALL_ONLY, SPLIT, WHOLE};
-use crate::mm::phys::FIXED_MID_SEGMENT;
 use crate::mm::MemorySegment;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -12,7 +11,6 @@ pub(super) enum LayoutError {
     Arithmetic,
     Order,
     Span,
-    FixedMid,
     Raw,
     Initrd,
 }
@@ -41,8 +39,8 @@ impl Budget {
     }
 }
 
-// Sorted, disjoint page-number intervals. `managed` is coalesced and excludes
-// the fixed mid segment; the caller already removed the kernel and boot heap.
+// Sorted, disjoint page-number intervals. `managed` is coalesced; the caller
+// already removed the kernel and boot heap.
 // `ram` lists block indexes touching raw RAM, before any page trimming.
 pub(super) struct Layout {
     pub managed: Vec<Range<u64>>,
@@ -129,21 +127,6 @@ fn covered(inner: &[Range<u64>], outer: &[Range<u64>]) -> bool {
     })
 }
 
-fn exclude(ranges: &[Range<u64>], hole: &Range<u64>) -> Vec<Range<u64>> {
-    let mut out = Vec::with_capacity(ranges.len() + 1);
-    for range in ranges {
-        for part in [
-            range.start..range.end.min(hole.start),
-            range.start.max(hole.end)..range.end,
-        ] {
-            if !part.is_empty() {
-                out.push(part);
-            }
-        }
-    }
-    out
-}
-
 impl Layout {
     pub(super) fn new(
         available: &[MemorySegment],
@@ -165,11 +148,6 @@ impl Layout {
         if !covered(&managed, &convert(raw, |range| inward(range, PAGE))?) {
             return Err(LayoutError::Raw);
         }
-        let mid = inward(&bytes(&FIXED_MID_SEGMENT)?, PAGE);
-        if !managed.iter().any(|range| contains(range, &mid)) {
-            return Err(LayoutError::FixedMid);
-        }
-        let managed = exclude(&managed, &mid);
 
         let reserved = convert(reserved, |range| outward(range, PAGE))?;
         let initrd = match initrd.size {

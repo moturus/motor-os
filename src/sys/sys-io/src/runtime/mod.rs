@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -37,43 +37,10 @@ pub(crate) fn guest_ram_mib() -> u64 {
 /// buffers, and lower connection limits.
 pub(crate) const SMALL_GUEST_MIB: u64 = 256;
 
-// A single 2M page used for VirtIO/MMIO.
-// It's a hack, but we don't need anything more complicated for now.
-pub static MMIO_PAGE: AtomicU64 = AtomicU64::new(0);
-
 pub fn init() {
     // Route io_channel peer-misbehavior (e.g. a client double-freeing a TX
     // page) to on_channel_error instead of letting the library panic sys-io.
     io_channel::set_error_handler(on_channel_error);
-
-    assert_eq!(0, MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed));
-    MMIO_PAGE.store(
-        moto_sys::SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_MID, 1)
-            .expect("Failed to allocate a 2M page."),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-}
-
-// Return (phys_addr, virt_addr).
-pub fn alloc_mmio_region(size: u64) -> IoResult<(u64, u64)> {
-    use moto_sys::sys_mem;
-
-    static BUMP: AtomicU64 = AtomicU64::new(0);
-
-    const _: () = {
-        assert!(virtio_capacity::MMIO_PAGE_SIZE == sys_mem::PAGE_SIZE_SMALL);
-        assert!(virtio_capacity::MMIO_POOL_SIZE == sys_mem::PAGE_SIZE_MID);
-    };
-    let (start, size) = virtio_capacity::reserve_mmio(&BUMP, size)?;
-
-    let virt_addr = MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed) + start;
-    let phys_addr = moto_sys::SysMem::virt_to_phys(virt_addr).unwrap();
-
-    // The kernel maps the 2M page without zeroing it (see
-    // alloc_user_mid_pages); virtqueues expect zeroed rings.
-    unsafe { core::ptr::write_bytes(virt_addr as usize as *mut u8, 0, size as usize) };
-
-    Ok((phys_addr, virt_addr))
 }
 
 fn conn_name(handle: SysHandle) -> String {
@@ -127,9 +94,11 @@ impl virtio_async::KernelAdapter for Mapper {
         Ok(moto_sys::SysMem::mmio_map(phys_addr, sz).unwrap())
     }
 
+    // Virtqueue rings: they live as long as their device, so they are never
+    // freed. The kernel zeroes the pages, as virtqueues expect.
     fn alloc_contiguous_pages(&self, sz: u64) -> IoResult<u64> {
-        let (_, addr) = crate::runtime::alloc_mmio_region(sz)?;
-        Ok(addr)
+        moto_sys::SysMem::alloc_contiguous_pages(sz)
+            .map_err(|code| std::io::Error::from_raw_os_error(code as i32))
     }
 
     // Register a custom IRQ and an associated wait handle; the library will then use
