@@ -822,6 +822,9 @@ test_rush_script_caps rush
 test_rush_script_caps sh
 test_rush_inproc_caps
 
+. "$WD/test-stdio-errors.sh"
+test_stdio_errors
+
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
