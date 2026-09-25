@@ -253,6 +253,11 @@ impl ClientConnection {
         self.status == ClientConnectionStatus::Connected
     }
 
+    /// Borrow the connection handle for kernel-authenticated peer queries.
+    pub fn handle(&self) -> SysHandle {
+        self.handle
+    }
+
     pub fn data(&self) -> &[u8] {
         unsafe {
             slice::from_raw_parts(

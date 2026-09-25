@@ -95,29 +95,45 @@ impl Shared {
     }
 
     fn on_drop(&self, child: &SysObject) {
-        if let Some(sharer) = self.sharer.upgrade() {
-            if sharer.id() == child.id() {
-                self.on_sharer_dropped();
-            } else {
-                sharer.on_sibling_dropped(); // Wakes the peer.
-            }
-        } else if self
-            .sharee
-            .lock(line!())
-            .upgrade()
-            .is_none_or(|sharee| sharee.id() != child.id())
-        {
-            // This is called from sharer's on_drop.
+        // Pointer identity still works during Drop, when Weak::upgrade fails.
+        if core::ptr::eq(self.sharer.as_ptr(), child) {
+            self.release_name();
             self.on_sharer_dropped();
+        } else if let Some(sharer) = self.sharer.upgrade() {
+            sharer.on_sibling_dropped(); // Wakes the peer.
+        }
+    }
+
+    fn release_name(&self) {
+        // Unnamed IPC pairs do not participate in service discovery.
+        if self.owner.ptr_eq(&Weak::new()) {
+            return;
+        }
+        let mut listeners = LISTENERS.lock(line!());
+        let Some(service) = listeners.get_mut(&self.url) else {
+            return;
+        };
+        // An exited owner's remaining handles must not affect its successor.
+        if !service.owner.ptr_eq(&self.owner) {
+            return;
+        }
+        service.endpoints -= 1;
+        if service.endpoints == 0 {
+            listeners.remove(&self.url);
         }
     }
 }
 
+struct Service {
+    owner: Weak<Process>,
+    // Listening and connected server endpoints both reserve the service name.
+    endpoints: usize,
+    pending: LinkedList<Arc<Shared>>,
+}
+
 // It would have been better to use a HashMap, but it is unavailable in [no-std].
 // TODO: use a HashMap instead of BTreeMap.
-#[allow(clippy::type_complexity)]
-static LISTENERS: StaticRef<SpinLock<BTreeMap<Arc<String>, LinkedList<Arc<Shared>>>>> =
-    StaticRef::default_const();
+static LISTENERS: StaticRef<SpinLock<BTreeMap<Arc<String>, Service>>> = StaticRef::default_const();
 
 static IPC_PAIR_URL: StaticRef<Arc<String>> = StaticRef::default_const();
 
@@ -140,12 +156,35 @@ pub(super) fn create(
     }
 
     let url = Arc::new(url);
+    let process_owner = Arc::downgrade(&owner);
+    let mut listeners = LISTENERS.lock(line!());
+    let service = listeners.entry(url.clone()).or_insert_with(|| Service {
+        owner: process_owner.clone(),
+        endpoints: 0,
+        pending: LinkedList::new(),
+    });
+    if !service.owner.ptr_eq(&process_owner) {
+        if service
+            .owner
+            .upgrade()
+            .is_some_and(|proc| proc.status().is_alive())
+        {
+            log::debug!("User error: Shared URL '{url}' exists with a different owner.");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        // Process handles can retain an exited owner; they do not reserve URLs.
+        service.owner = process_owner.clone();
+        service.endpoints = 0;
+        service.pending.clear();
+    }
+
+    // Only registered endpoints may run service-name cleanup on drop.
     let self_ = Arc::new(Shared {
         page_type,
         page_num,
         owner_addr,
         url: url.clone(),
-        owner: Arc::downgrade(&owner),
+        owner: process_owner,
         sharer: Weak::default(),
         sharee: SpinLock::new(Weak::default()),
     });
@@ -157,43 +196,9 @@ pub(super) fn create(
         (*ptr).sharer = Arc::downgrade(&sharer);
     }
 
-    let mut listeners = LISTENERS.lock(line!());
-    if let Some(list) = listeners.get_mut(&url) {
-        // Don't allow different processes to create same listener URLs.
-        loop {
-            // A killed process can remain allocated while another process
-            // retains its handle. It must not keep its listener URL reserved.
-            let shared = list.front();
-            if shared.is_none() {
-                // Removed all dead entries below.
-                list.push_back(self_);
-                return Ok(sharer);
-            }
-
-            let Some(proc) = shared.unwrap().owner.upgrade() else {
-                list.pop_front();
-                continue;
-            };
-            if !proc.status().is_alive() {
-                list.pop_front();
-                continue;
-            }
-
-            let pid = proc.pid();
-            if pid != owner.pid() {
-                log::debug!("User error: Shared URL '{url}' exists with a different owner.");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-
-            list.push_back(self_);
-            return Ok(sharer);
-        }
-    } else {
-        let mut list = LinkedList::new();
-        list.push_back(self_);
-        listeners.insert(url, list);
-        Ok(sharer)
-    }
+    service.endpoints += 1;
+    service.pending.push_back(self_);
+    Ok(sharer)
 }
 
 pub(super) fn get(
@@ -205,20 +210,22 @@ pub(super) fn get(
 ) -> Result<Arc<SysObject>, ErrorCode> {
     let (listener, owner_process) = {
         let mut listeners = LISTENERS.lock(line!());
-        if let Some(list) = listeners.get_mut(&url) {
+        if let Some(service) = listeners.get_mut(&url) {
+            let Some(proc) = service
+                .owner
+                .upgrade()
+                .filter(|proc| proc.status().is_alive())
+            else {
+                listeners.remove(&url);
+                return Err(moto_rt::E_NOT_FOUND);
+            };
             loop {
-                // We must loop here to clear orphan listeners.
-                let Some(shared) = list.front() else {
-                    listeners.remove(&url);
+                let Some(shared) = service.pending.front() else {
+                    // Exhausting the listener pool does not release ownership.
                     return Err(moto_rt::E_NOT_FOUND);
                 };
-
-                let Some(proc) = shared.owner.upgrade() else {
-                    list.pop_front();
-                    continue;
-                };
-                if !proc.status().is_alive() {
-                    list.pop_front();
+                if shared.sharer.upgrade().is_none_or(|sharer| sharer.closed()) {
+                    service.pending.pop_front();
                     continue;
                 }
 
@@ -226,15 +233,7 @@ pub(super) fn get(
                     log::debug!("shared: get: '{url}': pages don't match.");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
-                let listener = list.pop_front().unwrap();
-
-                if listener.sharer.strong_count() == 0 {
-                    continue;
-                }
-
-                if list.is_empty() {
-                    listeners.remove(&url);
-                }
+                let listener = service.pending.pop_front().unwrap();
                 log::debug!("shared: got '{url}'.");
                 break (listener, proc);
             }
@@ -259,7 +258,10 @@ pub(super) fn get(
     if mapping_result.is_err() {
         log::warn!("consider re-adding listener to LISTENERS.");
         log::debug!("shared: get: failed to map.");
-        SysObject::wake(listener.sharer.upgrade().as_ref().unwrap(), false);
+        // The server may have closed the listener after LISTENERS was released.
+        if let Some(sharer) = listener.sharer.upgrade() {
+            sharer.wake(false);
+        }
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let sharee = SysObject::new_owned(
@@ -382,7 +384,7 @@ pub(super) fn create_ipc_pair(
         page_num: 0,
         owner_addr: 0,
         url: url.clone(),
-        owner: Weak::new(), // Not needed here: used only for memory mapping.
+        owner: Weak::new(), // Unnamed pairs have no service owner.
         sharer: Weak::new(),
         sharee: SpinLock::new(Weak::new()),
     });
