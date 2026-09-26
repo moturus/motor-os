@@ -429,6 +429,7 @@ fn test_child_stdin_poll_eof() {
 
 /// Requires detached-spawn authority: ordinary children are intentionally
 /// killed with their parent, before they could observe its stdin closing.
+/// The detached child reports through files, so it needs CAP_FS_WRITE.
 pub fn test_child_stdin_eof_on_process_exit() {
     let result = crate::temp_path("stdio-stdin-exit-eof");
     let ready = crate::temp_path("stdio-stdin-exit-ready");
@@ -439,6 +440,7 @@ pub fn test_child_stdin_eof_on_process_exit() {
         moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_SPAWN_DETACHED
             | moto_sys::caps::CAP_INTERACTIVE
+            | moto_sys::caps::CAP_FS_WRITE
     );
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg(STDIN_EXIT_PARENT)
