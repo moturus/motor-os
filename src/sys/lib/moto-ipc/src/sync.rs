@@ -635,10 +635,15 @@ impl LocalServer {
         }
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        let result = SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, timeout);
-        if result == Err(moto_rt::E_TIMED_OUT) {
-            return Ok(Vec::new());
-        }
+        let result =
+            SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, timeout).or_else(|err| {
+                match err {
+                    // A timeout can accompany ready handles whose wake counters
+                    // the kernel already acknowledged. Deliver those handles too.
+                    moto_rt::E_TIMED_OUT => Ok(()),
+                    _ => Err(err),
+                }
+            });
         result.map_err(|err| {
             assert_eq!(err, moto_rt::E_BAD_HANDLE);
             let mut bad_handles = Vec::new();
