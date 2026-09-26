@@ -44,13 +44,19 @@ fn run_child(url: &str) {
     std::io::stdout().flush().unwrap();
     for command in std::io::stdin().lock().lines() {
         match command.unwrap().as_str() {
-            "rpc" => {
+            command @ ("rpc" | "retry") => {
                 let server = server.as_mut().unwrap();
+                let mut report_retry = command == "retry";
                 // While refills are refused, wait() also returns empty.
                 let ready = loop {
                     let ready = server.wait(SysHandle::NONE, &[]).unwrap();
                     if !ready.is_empty() {
                         break ready;
+                    }
+                    if report_retry {
+                        println!("retrying");
+                        std::io::stdout().flush().unwrap();
+                        report_retry = false;
                     }
                 };
                 assert_eq!(ready.len(), 1);
@@ -452,11 +458,18 @@ fn test_refused_refill_retries() {
     client.req::<RequestHeader>().cmd = 1;
     client.do_rpc(None).unwrap();
     assert_eq!(client.resp::<ResponseHeader>().result, moto_rt::E_OK);
-    peer.send("rpc"); // The server now waits, retrying the refill.
+    let mut ok = [0_u8; 3];
+    peer.stdout.read_exact(&mut ok).unwrap();
+    assert_eq!(&ok, b"ok\n");
+    peer.send("retry");
+    // Keep the pressure until the server has actually returned from a wait
+    // without a request, rather than merely queuing its next command.
+    let mut retrying = [0_u8; 9];
+    peer.stdout.read_exact(&mut retrying).unwrap();
+    assert_eq!(&retrying, b"retrying\n");
     drop(hoarder.child.stdin.take());
     assert!(hoarder.child.wait().unwrap().success());
     drop(hoarder); // A dead process keeps its memory until its last handle closes.
-    peer.expect("ok\n");
 
     // Only the retry timer can add the listener this client needs.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

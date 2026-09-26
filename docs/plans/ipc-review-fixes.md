@@ -1,6 +1,6 @@
 # IPC review fixes
 
-Status: approved; implementation in progress.
+Status: complete. All five fixes and the final three-debug / three-release gate passed.
 
 Scope: the five findings from the review of commits `54dab16b` through
 `3b830f14`, excluding merge `a7b901bc`. Make one commit per finding, with a
@@ -84,3 +84,9 @@ outside the sandbox. Diagnose any failure and preserve its original log;
 do not count a later unexplained pass as resolution. No developer-image gate
 is planned. No runtime/stdlib changes, outside-repository code changes, or
 additional boot-time work are planned.
+
+Final validation: all six sequential runs passed, including the new host and
+native IPC regressions. Per-run logs and timestamps are in
+`/tmp/ipc-fixes-gates/`. The validated `src` tree is
+`33dd4e76a2020d591635175651cb1027bf01696b`; the post-gate amendment only
+updates this plan.

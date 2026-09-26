@@ -251,3 +251,28 @@ fn a_live_endpoint_releases_the_retired_handle_during_refusal() {
         assert!(!kernel.lost_name);
     });
 }
+
+#[test]
+fn refused_refill_arms_a_timer_until_memory_recovers() {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 2, 1).unwrap();
+    reply(&[1], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    KERNEL.with_borrow_mut(|kernel| kernel.refuse = true);
+    reply(&[], Err(E_TIMED_OUT));
+    assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![]));
+    KERNEL.with_borrow(|kernel| {
+        assert!(
+            kernel.timeout.is_some(),
+            "refused refill did not arm a timer"
+        );
+        assert_eq!(kernel.handles, BTreeSet::from([SysHandle(1)]));
+    });
+
+    KERNEL.with_borrow_mut(|kernel| kernel.refuse = false);
+    // The timer returned us to the caller without an existing client's wake.
+    // Its next wait refills the pool, so a new client can then wake handle 2.
+    reply(&[2], Ok(()));
+    assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![SysHandle(2)]));
+    assert!(server.get_connection(SysHandle(2)).unwrap().connected());
+    assert!(KERNEL.with_borrow(|kernel| kernel.timeout.is_none()));
+}
