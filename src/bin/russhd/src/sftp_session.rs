@@ -603,25 +603,30 @@ impl russh_sftp::server::Handler for SftpSession {
                     };
                     let attrs = match entry.metadata().await {
                         Ok(metadata) => match entry.path().to_str() {
-                            Some(path) => match file_attributes(path, &metadata) {
-                                Ok(attrs) => attrs,
-                                Err(_) => continue,
-                            },
+                            Some(path) => file_attributes(path, &metadata),
                             None => continue,
                         },
-                        Err(err) => {
-                            log::warn!(
-                                "readdir {handle}: metadata for '{filename}' failed: {err:?}"
-                            );
-                            continue;
-                        }
+                        Err(err) => Err(io_status(&err)),
                     };
-                    files.push(File::new(filename, attrs));
+                    match attrs {
+                        Ok(attrs) => files.push(File::new(filename, attrs)),
+                        // Removed since it was listed, as OpenSSH's sftp-server
+                        // assumes of any lstat failure.
+                        Err(StatusCode::NoSuchFile) => continue,
+                        // Anything else (e.g. refused under memory pressure) is
+                        // an error, not a silently shorter listing.
+                        Err(status) => {
+                            log::warn!(
+                                "readdir {handle}: attributes of '{filename}' failed: {status:?}"
+                            );
+                            return Err(status);
+                        }
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => {
                     log::warn!("readdir {handle}: next_entry failed: {err:?}");
-                    break;
+                    return Err(io_status(&err));
                 }
             }
         }
