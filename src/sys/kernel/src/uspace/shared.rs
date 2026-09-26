@@ -97,14 +97,14 @@ impl Shared {
     fn on_drop(&self, child: &SysObject) {
         // Pointer identity still works during Drop, when Weak::upgrade fails.
         if core::ptr::eq(self.sharer.as_ptr(), child) {
-            self.release_name();
+            self.release_name(child.id());
             self.on_sharer_dropped();
         } else if let Some(sharer) = self.sharer.upgrade() {
             sharer.on_sibling_dropped(); // Wakes the peer.
         }
     }
 
-    fn release_name(&self) {
+    fn release_name(&self, sharer_id: u64) {
         // Unnamed IPC pairs do not participate in service discovery.
         if self.owner.ptr_eq(&Weak::new()) {
             return;
@@ -117,10 +117,9 @@ impl Shared {
         if !service.owner.ptr_eq(&self.owner) {
             return;
         }
-        // A closed listener must not stay pooled while the name lives on.
-        service
-            .pending
-            .retain(|_, listener| !core::ptr::eq(Arc::as_ptr(listener), self));
+        // Connected endpoints are already absent; a listener is removed by ID
+        // without scanning other endpoints under the global registry lock.
+        service.pending.remove(&sharer_id);
         service.endpoints -= 1;
         if service.endpoints == 0 {
             listeners.remove(&self.url);

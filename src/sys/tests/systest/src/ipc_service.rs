@@ -261,6 +261,7 @@ pub fn run_tests() {
     test_closed_listeners_freed();
     test_closed_endpoints_keep_name();
     test_dup_races_close();
+    test_listener_pool_closes();
     test_listener_pool_growth();
     test_refused_refill_retries();
 }
@@ -273,13 +274,40 @@ fn test_listener_pool_growth() {
     peer.stdout.read_exact(&mut grown).unwrap();
     assert_eq!(&grown, b"grown\n");
     moto_sys::SysCpu::kill_pid(u64::from(peer.child.id())).unwrap();
-    // Take over before waiting for cleanup, exercising a large pending pool
-    // and avoiding the still-quadratic close path addressed separately.
-    let replacement = SysObj::create(SysHandle::SELF, 0, &object).unwrap();
-    SysObj::put(replacement).unwrap();
+    // Let exit cleanup close the entire pool before taking its name again.
     assert_eq!(peer.child.wait().unwrap().code(), Some(-1));
     drop(peer);
+    let replacement = SysObj::create(SysHandle::SELF, 0, &object).unwrap();
+    SysObj::put(replacement).unwrap();
     println!("test_listener_pool_growth PASS");
+}
+
+fn test_listener_pool_closes() {
+    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
+
+    let url = format!("systest-ipc-pool-closes-{}", std::process::id());
+    let page = SysMem::map(SysHandle::SELF, 0, u64::MAX, u64::MAX, PAGE_SIZE_SMALL, 1).unwrap();
+    let object = format!("shared:url={url};address={page};page_type=small;page_num=1");
+    let listeners: Vec<_> = (0..4_096)
+        .map(|_| SysObj::create(SysHandle::SELF, 0, &object).unwrap())
+        .collect();
+    for handle in listeners.iter().step_by(2) {
+        SysObj::put(*handle).unwrap();
+    }
+
+    let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
+    for handle in listeners.into_iter().skip(1).step_by(2) {
+        assert_eq!(connect_unmapped(&url), Err(moto_rt::E_INVALID_ARGUMENT));
+        client.connect(&url).unwrap();
+        assert_eq!(SysObj::is_connected(handle), Ok(true));
+        // Closing an accepted endpoint must leave the other listeners alone.
+        SysObj::put(handle).unwrap();
+        client.disconnect();
+    }
+    assert_eq!(client.connect(&url), Err(moto_rt::E_NOT_FOUND));
+    SysMem::unmap(SysHandle::SELF, 0, u64::MAX, page).unwrap();
+    drop(listen(&url).unwrap());
+    println!("test_listener_pool_closes PASS");
 }
 
 // Closed listeners must not accumulate in the kernel while another endpoint
