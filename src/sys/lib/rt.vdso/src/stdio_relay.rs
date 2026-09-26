@@ -1,8 +1,8 @@
 //! The stdio relay runtime (design sections 4, 7.2): a dedicated
 //! sibling of the core IO runtime, so a child's interactive output
 //! never queues behind FS work. At most one thread per process,
-//! created when an inherited-stdio child appears; it exits with the
-//! last relay task and is recreated on demand.
+//! created when an inherited-stdio child appears; it exits once no relay
+//! has run for `IDLE_LINGER`, and is recreated on demand.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -38,6 +38,15 @@ static STATE: SpinLock<RelayState> = SpinLock::new(RelayState {
     tasks_tx: None,
     live: 0,
 });
+
+// How long an idle relay thread waits for the next relay before exiting. A
+// shell running children back to back then reuses one thread instead of
+// starting one per command; an idle process still drops it soon after.
+const IDLE_LINGER: core::time::Duration = core::time::Duration::from_secs(1);
+
+// Bumped by spawn() after it queues a relay for a running thread, which may
+// be lingering on this word outside its runtime.
+static IDLE_WAKE: AtomicU32 = AtomicU32::new(0);
 
 /// File relays, tracked apart from `STATE` because process exit treats them
 /// differently: their sink is the filesystem, so pending bytes cannot be
@@ -239,6 +248,8 @@ where
     moto_async::block_on_sync(async move {
         let _ = tasks_tx.send(RelayMsg::Spawn(ctor)).await;
     });
+    IDLE_WAKE.fetch_add(1, Ordering::Release);
+    moto_rt::futex_wake(&IDLE_WAKE);
     while !started.0.load(Ordering::Acquire) {
         started.1.wait(None);
     }
@@ -280,49 +291,82 @@ pub fn drain_for_exit() {
     }
 }
 
-extern "C" fn runtime_thread(param: u64) {
-    type Channel = (
-        moto_async::channel::Receiver<RelayMsg>,
-        moto_async::channel::Sender<RelayMsg>,
-    );
-    // Safety: uniquely owned; see spawn().
-    let (mut tasks_rx, tasks_tx) = *unsafe { Box::from_raw(param as usize as *mut Channel) };
-    moto_sys::set_current_thread_name("rt::stdio_relay").unwrap();
-
-    moto_async::LocalRuntime::new().block_on(async move {
-        loop {
-            match tasks_rx.recv().await.unwrap() {
-                RelayMsg::Spawn(ctor) => {
-                    let tasks_tx = tasks_tx.clone();
-                    core::mem::drop(moto_async::LocalRuntime::spawn(async move {
-                        ctor().await;
-                        let last = {
-                            let mut state = STATE.lock();
-                            state.live -= 1;
-                            state.live == 0
-                        };
-                        if last {
-                            let _ = tasks_tx.send(RelayMsg::ExitCheck).await;
-                        }
-                    }));
-                }
-                RelayMsg::ExitCheck => {
-                    let mut state = STATE.lock();
-                    if state.live == 0 {
-                        // A racing spawn() either saw tasks_tx and made
-                        // live nonzero (we would not be here), or sees
-                        // None and starts a fresh thread.
-                        state.tasks_tx = None;
-                        return;
-                    }
-                }
+// Waits up to IDLE_LINGER for the next relay. Returns true once one is
+// counted (its Spawn is queued or about to be); returns false, with
+// tasks_tx cleared, if none came, so the next spawn() starts a new thread.
+// Parks on a futex rather than a runtime timer: this can run while the
+// process cannot allocate (a dying child still pins the memory floor).
+fn linger() -> bool {
+    let deadline = moto_rt::time::Instant::now() + IDLE_LINGER;
+    loop {
+        let seen = IDLE_WAKE.load(Ordering::Acquire);
+        let now = {
+            let mut state = STATE.lock();
+            if state.live > 0 {
+                return true;
             }
-        }
-    });
+            let now = moto_rt::time::Instant::now();
+            if now >= deadline {
+                state.tasks_tx = None;
+                return false;
+            }
+            now
+        };
+        moto_rt::futex_wait(&IDLE_WAKE, seen, Some(deadline.duration_since(now)));
+    }
+}
+
+type Channel = (
+    moto_async::channel::Receiver<RelayMsg>,
+    moto_async::channel::Sender<RelayMsg>,
+);
+
+extern "C" fn runtime_thread(param: u64) {
+    // Safety: uniquely owned; see spawn().
+    let channel = *unsafe { Box::from_raw(param as usize as *mut Channel) };
+    moto_sys::set_current_thread_name("rt::stdio_relay").unwrap();
+    run_relays(channel);
 
     // A raw thread does not exit through the runtime's trampoline: release
     // its TLS and allocator cache here, or every relay thread strands them.
     unsafe { crate::rt_tls::on_thread_exiting() };
     let _ = moto_sys::SysObj::put(SysHandle::SELF);
     unreachable!()
+}
+
+// Owns the runtime and the channel so they are freed when it returns:
+// SysObj::put(SELF) ends the thread without dropping its caller's locals.
+fn run_relays((mut tasks_rx, tasks_tx): Channel) {
+    let mut runtime = moto_async::LocalRuntime::new();
+    loop {
+        // Run relays until none is live.
+        runtime.block_on(async {
+            loop {
+                match tasks_rx.recv().await.unwrap() {
+                    RelayMsg::Spawn(ctor) => {
+                        let tasks_tx = tasks_tx.clone();
+                        core::mem::drop(moto_async::LocalRuntime::spawn(async move {
+                            ctor().await;
+                            let last = {
+                                let mut state = STATE.lock();
+                                state.live -= 1;
+                                state.live == 0
+                            };
+                            if last {
+                                let _ = tasks_tx.send(RelayMsg::ExitCheck).await;
+                            }
+                        }));
+                    }
+                    RelayMsg::ExitCheck => {
+                        if STATE.lock().live == 0 {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        if !linger() {
+            return;
+        }
+    }
 }
