@@ -1,124 +1,116 @@
-use alloc::collections::BTreeMap;
-use alloc::collections::btree_set::BTreeSet;
-use alloc::collections::vec_deque::VecDeque;
-use alloc::sync::Arc;
+//! Futexes that never allocate: while it sleeps, a waiter links a node on
+//! its own stack into a fixed hash bucket. A process must be able to wait
+//! even when its heap cannot grow, e.g. while the machine is at the user
+//! memory floor.
+//!
+//! A waiter unlinks its node, or sees that a waker already did, under the
+//! bucket lock before it returns. A thread dies only with its whole process,
+//! so no dead thread's node stays linked.
+
+use core::ptr::null_mut;
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 use moto_rt::spinlock::SpinLock;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 
-// The challenge here is that we want to keep first-in, first-out,
-// which calls for VecDeque, and fast access by value. We maintain
-// this by having both a VecDeque and a BTreeSet.
-struct WaitQueue {
-    id: u64, // Needed to differentiate individual queues.
-    entries: SpinLock<(VecDeque<u64>, BTreeSet<u64>)>,
+struct Waiter {
+    key: usize,
+    thread: u64,
+    prev: *mut Waiter,
+    next: *mut Waiter,
+    // Cleared by whoever unlinks the node.
+    linked: bool,
 }
 
-#[cfg(debug_assertions)]
-impl Drop for WaitQueue {
-    fn drop(&mut self) {
-        let guard = self.entries.lock();
-        assert!(guard.0.is_empty());
-        assert!(guard.1.is_empty());
-    }
+// Waiters in arrival order: each futex wakes its waiters first in, first out.
+struct Bucket {
+    head: *mut Waiter,
+    tail: *mut Waiter,
 }
 
-impl WaitQueue {
-    fn new() -> Arc<Self> {
-        static ID: AtomicU64 = AtomicU64::new(0);
-        Arc::new(Self {
-            id: ID.fetch_add(1, Ordering::Relaxed),
-            entries: SpinLock::new((VecDeque::new(), BTreeSet::new())),
-        })
-    }
+// SAFETY: the nodes are only accessed under their bucket's lock.
+unsafe impl Send for Bucket {}
 
-    fn add_waiter(&self) {
-        let wake_handle = moto_sys::current_thread().as_u64();
-
-        let mut entries = self.entries.lock();
-        entries.0.push_back(wake_handle);
-        assert!(entries.1.insert(wake_handle));
-    }
-
-    // Returns true if the queue is empty.
-    fn remove_waiter(&self) -> bool {
-        let wake_handle = moto_sys::current_thread().as_u64();
-
-        let mut entries = self.entries.lock();
-        assert!(entries.1.remove(&wake_handle));
-
-        // Don't search for _this_ entry, it will be cleared during wake.
-        if entries.1.is_empty() {
-            entries.0.clear();
-            true
-        } else {
-            false
-        }
-    }
-
-    // Returns true if timed out.
-    fn wait(&self, timeout: &Option<moto_rt::time::Instant>) -> bool {
-        // crate::moto_log!("futex will wait");
-        match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
-            Ok(()) => false,
-            Err(err) => {
-                assert_eq!(err, moto_rt::E_TIMED_OUT);
-                true
+impl Bucket {
+    // SAFETY: called under the lock, with `waiter` valid and not linked.
+    unsafe fn push_back(&mut self, waiter: *mut Waiter) {
+        unsafe {
+            (*waiter).prev = self.tail;
+            (*waiter).next = null_mut();
+            if self.tail.is_null() {
+                self.head = waiter;
+            } else {
+                (*self.tail).next = waiter;
             }
         }
+        self.tail = waiter;
     }
 
-    fn wake_one(&self) -> bool {
-        let wake_handle: u64 = {
-            let mut entries = self.entries.lock();
-            loop {
-                let Some(handle) = entries.0.pop_front() else {
-                    return false;
-                };
+    // SAFETY: called under the lock, with `waiter` linked into this bucket.
+    unsafe fn unlink(&mut self, waiter: *mut Waiter) {
+        unsafe {
+            debug_assert!((*waiter).linked);
+            let (prev, next) = ((*waiter).prev, (*waiter).next);
+            if prev.is_null() {
+                self.head = next;
+            } else {
+                (*prev).next = next;
+            }
+            if next.is_null() {
+                self.tail = prev;
+            } else {
+                (*next).prev = prev;
+            }
+            (*waiter).linked = false;
+        }
+    }
 
-                if entries.1.contains(&handle) {
-                    break handle;
+    // Unlinks the longest waiting waiter on `key` and returns its thread.
+    fn pop(&mut self, key: usize) -> Option<u64> {
+        let mut waiter = self.head;
+        // SAFETY: linked nodes stay valid while the lock is held.
+        unsafe {
+            while !waiter.is_null() {
+                if (*waiter).key == key {
+                    self.unlink(waiter);
+                    return Some((*waiter).thread);
                 }
+                waiter = (*waiter).next;
             }
-        };
-
-        let _ = SysCpu::wake(moto_sys::SysHandle::from_u64(wake_handle)); // Ignore errors: the wake could have raced with wait.
-        true
-    }
-
-    fn wake_all(&self) {
-        while self.wake_one() {}
-    }
-}
-
-static FUTEX_WAIT_QUEUES: SpinLock<BTreeMap<usize, Arc<WaitQueue>>> =
-    SpinLock::new(BTreeMap::new());
-
-fn add_waiter_to_queue(key: usize) -> Arc<WaitQueue> {
-    let mut queues_lock = FUTEX_WAIT_QUEUES.lock();
-    let queue = match queues_lock.get(&key) {
-        Some(q) => q.clone(),
-        None => {
-            let q = WaitQueue::new();
-            assert!(queues_lock.insert(key, q.clone()).is_none());
-            q
         }
-    };
-    queue.add_waiter(); // Must happen under the global lock.
-    queue
+        None
+    }
+
+    fn count(&self, key: usize) -> usize {
+        let mut count = 0;
+        let mut waiter = self.head;
+        // SAFETY: linked nodes stay valid while the lock is held.
+        unsafe {
+            while !waiter.is_null() {
+                if (*waiter).key == key {
+                    count += 1;
+                }
+                waiter = (*waiter).next;
+            }
+        }
+        count
+    }
 }
 
-fn remove_waiter_from_queue(key: usize, queue: Arc<WaitQueue>) {
-    let mut queues_lock = FUTEX_WAIT_QUEUES.lock();
-    let empty = queue.remove_waiter(); // Must happen under the global lock.
-    if empty {
-        let removed = queues_lock.remove(&key).unwrap();
-        assert_eq!(removed.id, queue.id);
-    }
+const NUM_BUCKETS: usize = 64;
+
+static BUCKETS: [SpinLock<Bucket>; NUM_BUCKETS] = [const {
+    SpinLock::new(Bucket {
+        head: null_mut(),
+        tail: null_mut(),
+    })
+}; NUM_BUCKETS];
+
+fn bucket(key: usize) -> &'static SpinLock<Bucket> {
+    // Fibonacci hashing of the futex word's address.
+    let hash = ((key as u64) >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    &BUCKETS[(hash >> (u64::BITS - NUM_BUCKETS.ilog2())) as usize]
 }
 
 // Returns false on timeout.
@@ -137,42 +129,59 @@ fn futex_wait_impl(
         return true;
     }
 
-    // Get/create the queue.
-    let queue = add_waiter_to_queue(key);
+    let mut waiter = Waiter {
+        key,
+        thread: moto_sys::current_thread().as_u64(),
+        prev: null_mut(),
+        next: null_mut(),
+        linked: true,
+    };
+    let node = &raw mut waiter;
+    let bucket = bucket(key);
+    // SAFETY: `waiter` does not move until it is unlinked below.
+    unsafe { bucket.lock().push_back(node) };
 
-    if futex_ref.load(Ordering::Acquire) != expected {
-        remove_waiter_from_queue(key, queue);
-        return true;
-    }
+    // Wakers change the value before they look for waiters, so a change made
+    // after the node is linked is either seen here or followed by a wake.
+    let awake = if futex_ref.load(Ordering::Acquire) != expected {
+        true
+    } else if timeout.is_some_and(|timo| timo <= moto_rt::time::Instant::now()) {
+        false
+    } else {
+        match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeout) {
+            Ok(()) => true,
+            Err(err) => {
+                assert_eq!(err, moto_rt::E_TIMED_OUT);
+                false
+            }
+        }
+    };
 
-    if let Some(timo) = timeout
-        && timo <= moto_rt::time::Instant::now()
-    {
-        remove_waiter_from_queue(key, queue);
-        return false;
-    }
-
-    let timedout = queue.wait(&timeout);
-    remove_waiter_from_queue(key, queue);
+    let mut bucket = bucket.lock();
+    // SAFETY: the node is only accessed under the bucket lock.
+    let woken = unsafe {
+        let woken = !(*node).linked;
+        if !woken {
+            bucket.unlink(node);
+        }
+        woken
+    };
+    drop(bucket);
 
     // Note: we DO NOT check futex value again and loop if expected,
     // because a tokio test will hang. It seems that tokio expects
     // a wake/wake_all to kick a waiter (all waiters) unconditionally.
 
-    !timedout
+    // A wake that raced with the timeout was consumed here, so report it.
+    awake || woken
 }
 
-fn futex_wake_impl(futex: *const AtomicU32) -> bool {
-    let key = futex as usize;
-    let queue = {
-        let lock = FUTEX_WAIT_QUEUES.lock();
-        match lock.get(&key) {
-            Some(q) => q.clone(),
-            None => return false,
-        }
+fn futex_wake_impl(key: usize) -> bool {
+    let Some(thread) = bucket(key).lock().pop(key) else {
+        return false;
     };
-
-    queue.wake_one()
+    let _ = SysCpu::wake(SysHandle::from_u64(thread)); // Ignore errors: the wake could have raced with wait.
+    true
 }
 
 // Returns 0 on timeout.
@@ -190,18 +199,21 @@ pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u6
 }
 
 pub extern "C" fn futex_wake(futex: *const AtomicU32) -> u32 {
-    if futex_wake_impl(futex) { 1 } else { 0 }
+    if futex_wake_impl(futex as usize) {
+        1
+    } else {
+        0
+    }
 }
 
 pub extern "C" fn futex_wake_all(futex: *const AtomicU32) {
     let key = futex as usize;
-    let queue = {
-        let lock = FUTEX_WAIT_QUEUES.lock();
-        match lock.get(&key) {
-            Some(q) => q.clone(),
-            None => return,
+    // Only the waiters present now: one that is woken and waits again must
+    // not keep this loop going.
+    let waiters = bucket(key).lock().count(key);
+    for _ in 0..waiters {
+        if !futex_wake_impl(key) {
+            break;
         }
-    };
-
-    queue.wake_all()
+    }
 }
