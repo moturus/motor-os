@@ -17,6 +17,7 @@ mod file_locking;
 mod fs;
 mod fs_permissions;
 mod fsbench;
+mod futex_stress;
 mod icmp;
 mod io_channel;
 mod kernel_log;
@@ -1214,6 +1215,10 @@ fn main() {
     }
     if args.len() >= 2 && args[1] == "wake-bench" {
         wakebench::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "futex-stress" {
+        futex_stress::run(&args);
         return;
     }
     if args.len() >= 2 && args[1] == "fs-bench" {

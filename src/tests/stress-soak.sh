@@ -5,7 +5,8 @@
 # Boots ONE long-lived VM and drives it with concurrent, continuously-looping
 # workloads spanning the VM-side coverage in full-test.sh (fs, DNS/networking,
 # tokio/mio, process/stdio), plus continuous TUI traffic through all three
-# terminal providers (sys-tty, russhd pty, and rmux), while a foreground
+# terminal providers (sys-tty, russhd pty, and rmux) and futex stress
+# (`systest futex-stress`: raw and std-primitive phases), while a foreground
 # monitor scans for crash markers, detects stalls, and -- on the first anomaly
 # -- captures full forensics (ps / stats x2 / mdbg
 # print-stacks / qemu-monitor vCPU dump / console tail) BEFORE tearing the VM
@@ -546,6 +547,20 @@ w_suites() {  # cycle suites that are safe alongside unrelated network traffic
     done
   done
 }
+# Futex stress in its own process, beside the rest of the load. Each pass runs
+# rounds of contention, ping-pong, timeout-race, broadcast, park, rwlock and
+# barrier phases for 60s and checks their exact results; a lost wakeup stalls
+# a phase, and the stress exits 3 after printing every waiter's futex word.
+w_futex() {
+  local n=0 f=0 rc
+  while :; do
+    n=$((n+1))
+    run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
+      "/devtools/tests/systest futex-stress 60" >>"$OUT/futex.log" 2>&1; rc=$?
+    echo "iter=$n rc=$rc" >>"$OUT/futex.log"
+    [ "$rc" -ne 0 ] && f=$((f+1)); write_stat futex "$n" "$f" "$rc" "futex-stress"; pace "$rc"
+  done
+}
 # Repeat the same directory, download, upload/overwrite, recursive-copy, and
 # cleanup assertions used by full-test.sh.
 # 600s SLO: under 4:1 oversubscription plus six sibling workloads a pass
@@ -740,6 +755,7 @@ start_workload() { # name function [args...]
   WL_PIDS+=($!)
 }
 start_workload suites w_suites
+start_workload futex w_futex
 start_workload fs-sftp w_fs_sftp
 start_workload fs-write w_fs_write
 start_workload tui-console w_tui_console
