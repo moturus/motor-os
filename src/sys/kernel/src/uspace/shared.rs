@@ -256,12 +256,8 @@ pub(super) fn get(
             | MappingOptions::DONT_ZERO,
     );
     if mapping_result.is_err() {
-        log::warn!("consider re-adding listener to LISTENERS.");
         log::debug!("shared: get: failed to map.");
-        // The server may have closed the listener after LISTENERS was released.
-        if let Some(sharer) = listener.sharer.upgrade() {
-            sharer.wake(false);
-        }
+        requeue(listener);
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let sharee = SysObject::new_owned(
@@ -272,6 +268,23 @@ pub(super) fn get(
     *listener.sharee.lock(line!()) = Arc::downgrade(&sharee);
 
     Ok(sharee)
+}
+
+// Returns a listener that a failed connection left unconnected to its pool,
+// unless its server closed it or lost the name in the meantime. The server is
+// not woken: it has nothing to serve.
+fn requeue(listener: Arc<Shared>) {
+    // Declared before the guard, so it drops after unlocking: dropping the
+    // last reference to an open endpoint runs name cleanup, which locks.
+    let Some(sharer) = listener.sharer.upgrade() else {
+        return;
+    };
+    let mut listeners = LISTENERS.lock(line!());
+    if let Some(service) = listeners.get_mut(&listener.url) {
+        if service.owner.ptr_eq(&listener.owner) && !sharer.closed() {
+            service.pending.push_front(listener);
+        }
+    }
 }
 
 /// Attempts to wake the peer.

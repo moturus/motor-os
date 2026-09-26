@@ -10,6 +10,16 @@ fn listen(url: &str) -> Result<LocalServer, moto_rt::ErrorCode> {
     LocalServer::new(url, ChannelSize::Small, 4, 1)
 }
 
+// Connects with an address that is not a mapped page, so mapping fails.
+fn connect_unmapped(url: &str) -> Result<SysHandle, moto_rt::ErrorCode> {
+    let url = moto_sys::url_encode(url);
+    SysObj::get(
+        SysHandle::SELF,
+        0,
+        &format!("shared:url={url};address=0;page_type=small;page_num=1"),
+    )
+}
+
 pub fn run_command(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
         Some("test-ipc-service-ownership") => run_tests(),
@@ -112,6 +122,10 @@ pub fn run_tests() {
     let url = format!("systest-ipc-owner-{}", std::process::id());
     let mut peer = Peer::start(&url);
     assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
+    // Each failed mapping leaves the only listener pooled for the next client.
+    for _ in 0..8 {
+        assert_eq!(connect_unmapped(&url), Err(moto_rt::E_INVALID_ARGUMENT));
+    }
     let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
     assert_eq!(client.handle(), SysHandle::NONE);
     client.connect(&url).unwrap();
