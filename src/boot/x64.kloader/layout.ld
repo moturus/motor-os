@@ -31,7 +31,7 @@ SECTIONS
   text_end = .;
   /* Placed here so that .data is the last section before the kernel image:
      a read-only section right before it would share its PT_LOAD, and the
-     33 MB gap would be written into the file. */
+     15 MB gap would be written into the file. */
   .eh_frame_hdr : { *(.eh_frame_hdr) }
   .eh_frame     : { KEEP(*(.eh_frame)) }
   .got          : { *(.got .got.*) }
@@ -42,7 +42,7 @@ SECTIONS
      address, so a PVH loader (cloud-hypervisor, Firecracker, QEMU -kernel)
      places it. kloader.bin drops this section: the BIOS path loads the
      kernel from the initrd. Keep in sync with KERNEL_PHYS_START in mm.rs. */
-  . = 34M;
+  . = 16M;
   .kernel_image : { KEEP(*(.kernel_image)) }
 
   /* Strip symbols from the output binary (comment out to get symbols) */

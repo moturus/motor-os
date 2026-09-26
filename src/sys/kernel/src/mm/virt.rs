@@ -41,7 +41,7 @@ const ONE_GB: u64 = 1u64 << 30;
 // so let's have these regions large enough to not think about it too much.
 
 pub const VMEM_KERNEL_CODE_START: u64 = super::PAGING_DIRECT_MAP_OFFSET + super::KERNEL_PHYS_START;
-const _: () = assert!(VMEM_KERNEL_CODE_START == 0x400002200000);
+const _: () = assert!(VMEM_KERNEL_CODE_START == 0x400001000000);
 pub const VMEM_KERNEL_DATA_START: u64 = super::PAGING_DIRECT_MAP_OFFSET - (512 * super::ONE_GB);
 
 // NOTE: all of kernel offsets below are relative to VMEM_KERNEL_DYNAMIC_START.

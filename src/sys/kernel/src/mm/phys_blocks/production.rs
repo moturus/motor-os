@@ -30,6 +30,16 @@ impl BootInputs {
     }
 }
 
+// The boot heap for RAM ending at `ram_end`: the descriptor lines of its
+// span, plus 512 KiB for every other startup allocation. Those measure under
+// 400 KiB up to the span cap: the startup allocator serves small requests in
+// batches of 64 slots, so the bitmaps of a large span alone take 256 KiB.
+pub(crate) fn boot_heap_bytes(ram_end: u64) -> u64 {
+    let blocks = ram_end.div_ceil(1 << BLOCK_SHIFT).min(MAX_BLOCKS as u64);
+    let lines = blocks.div_ceil(4) * size_of::<BlockLine>() as u64;
+    (lines + (512 << 10)).next_multiple_of(PAGE_SIZE_SMALL)
+}
+
 const LOW_BLOCKS: usize = (128 << 20) >> BLOCK_SHIFT;
 
 const LOW_RESERVED: MemorySegment = MemorySegment {

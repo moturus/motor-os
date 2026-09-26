@@ -49,8 +49,7 @@ jump_to_64bit:
     # load a 64-bit code segment into our GDT.
     lgdtl GDT64_PTR
     # Initialize the stack pointer (Rust code always uses the stack)
-    # Kernel bootup stack: 32MB
-    # movl $0x2000000, %esp
+    # Kernel bootup stack: just below the kloader heap (see mm.rs).
     movl (BOOTUP_STACK_START), %esp  # defined in mm.rs in kloader.
     # Set segment registers to a 64-bit segment.
     movw $0x10, %ax

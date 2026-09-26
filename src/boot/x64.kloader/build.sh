@@ -23,7 +23,7 @@ flat_sections() {
 }
 
 # A section the linker placed after .kernel_image would drag the flat image
-# out to 34 MB, and a read-only one right before it would put the 33 MB gap
+# out to 16 MB, and a read-only one right before it would put the 15 MB gap
 # into the ELF; layout.ld orders the known sections to avoid both.
 check_sizes() {
     if [[ "$(stat -c %s "${BIN_DIR}/kloader.bin")" -ge $((1 << 20)) ]] ; then

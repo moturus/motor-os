@@ -517,7 +517,7 @@ mod production;
 mod search;
 mod shaping;
 
-pub(crate) use production::{BlockPool, BootInputs};
+pub(crate) use production::{boot_heap_bytes, BlockPool, BootInputs};
 
 #[cfg(debug_assertions)]
 mod tests;

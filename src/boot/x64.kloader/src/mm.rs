@@ -10,35 +10,41 @@ use core::sync::atomic::Ordering;
  *           [yy..zz) - sys-io
  *
  * x64.boot loads initrd at 1M (in qemu).
- * Both qemu and CHV load initrd at a high address
- * (higher than the max phys mem).
+ * PVH loaders (CHV, Firecracker) load initrd at the top of RAM.
  *
  * CHV loads kloader at 1M + 512.
  *
  * So kloader is at [1M+512..kloader.len)
  *
- * [..32M) - kernel/bsp stack (starts at 32M)
- * [0..64M) - direct mapped by bootup_bsp.s
+ * [0..1G) - direct mapped by bootup_bsp.s
  *
  * KLOADER: 1M + 512, direct mapped.
- * HEAP   : phys: [32M..33M), virt: via high-mem direct map.
- * KERNEL : phys: [34M..), virt: at kernel_offset.
+ * STACK  : phys: [15M..15.5M), the BSP stack grows down from 15.5M.
+ * HEAP   : phys: [15.5M..16M).
+ * KERNEL : phys: [16M..), virt: at kernel_offset.
+ *
+ * An initrd at 1M must end below the stack: the debug one is about 11M.
+ * Everything below the kernel is released by the kernel once it is up, so
+ * placing the kernel higher costs no RAM; it only raises the smallest RAM
+ * that can boot.
  *
  * The whole phys mem is mapped at PAGING_DIRECT_MAP_OFFSET.
  */
 
 const ONE_MB: usize = 1 << 20;
 
-// #[no_mangle]
-// static BOOTUP_MAPPED_PAGES: u32 = 32;
+// We load the kernel at 16MB phys and PAGING_DIRECT_MAP_OFFSET + 16MB virt.
+// Keep in sync with KERNEL_PHYS_START in the kernel and with layout.ld.
+pub const KERNEL_PHYS_START: usize = ONE_MB * 16;
 
-// Heap starts at 32M.
-const HEAP_START: usize = ONE_MB * 32;
-// No more than 1M for heap.
-const HEAP_SZ: usize = ONE_MB;
+// The heap holds the AP stacks (16K each) and the kernel's bootup info:
+// 240K with 16 CPUs.
+const HEAP_SZ: usize = ONE_MB / 2;
+const HEAP_START: usize = KERNEL_PHYS_START - HEAP_SZ;
 
-// We load the kernel at 34MB phys and PAGING_DIRECT_MAP_OFFSET + 34MB virt.
-pub const KERNEL_PHYS_START: usize = HEAP_START + (ONE_MB * 2);
+// The BSP stack needs under 8K even in debug builds.
+const STACK_SZ: usize = ONE_MB / 2;
+const STACK_BOTTOM: usize = HEAP_START - STACK_SZ;
 
 #[no_mangle]
 pub static BOOTUP_STACK_START: u32 = HEAP_START as u32;
@@ -140,10 +146,8 @@ pub unsafe fn alloc(layout: Layout) -> usize {
     let start = align_up(ALLOCATED_HEAP.load(Ordering::Relaxed), layout.align());
     ALLOCATED_HEAP.store(start + layout.size(), Ordering::Relaxed);
 
-    assert!(
-        ALLOCATED_HEAP.load(Ordering::Relaxed)
-            < ((PAGING_DIRECT_MAP_OFFSET as usize) + HEAP_START + HEAP_SZ)
-    );
+    // The heap ends where the kernel starts.
+    assert!(ALLOCATED_HEAP.load(Ordering::Relaxed) <= HEAP_START + HEAP_SZ);
 
     start
 }
@@ -196,11 +200,24 @@ pub fn init(pvh: &'static PvhStartInfo) {
         );
     }
 
-    // initrd is either mapped at 1M by our x64.boot, or much higher by CHV.
-    // So we start the heap at 32M.
-    let (pvh_start, pvh_size) = pvh.initrd();
-    if pvh_start + pvh_size > HEAP_START && pvh_start < HEAP_START + HEAP_SZ {
-        crate::raw_log!("KLOADER: PVH intersects with HEAP.\nTry adding more RAM.\n");
+    // initrd is either loaded at 1M by our x64.boot, below the stack, or at
+    // the top of RAM by a PVH loader, above the kernel.
+    let (initrd_start, initrd_size) = pvh.initrd();
+    let initrd_end = initrd_start + initrd_size;
+    let kernel_end = KERNEL_PHYS_START + crate::KERNEL_IMAGE_LEN;
+    if initrd_end > STACK_BOTTOM && initrd_start < kernel_end {
+        crate::raw_log!(
+            "KLOADER: initrd [0x{:x}..0x{:x}) overlaps the boot stack, heap or kernel at [0x{:x}..0x{:x}).\n",
+            initrd_start,
+            initrd_end,
+            STACK_BOTTOM,
+            kernel_end
+        );
+        if initrd_start < STACK_BOTTOM {
+            crate::raw_log!("The initrd is too large for KERNEL_PHYS_START.\n");
+        } else {
+            crate::raw_log!("Try adding more RAM.\n");
+        }
         crate::vmm_exit();
     }
 

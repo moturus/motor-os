@@ -368,7 +368,7 @@ impl ThreadControlBlock {
             out("r11") rip
             );
 
-            rip & 0x400002000000 == 0x400002000000
+            crate::mm::virt::is_kernel_ip(rip)
         }
     }
 

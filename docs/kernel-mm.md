@@ -19,7 +19,7 @@ is redesigned or its case is recorded as untested.
 
 | Module | Role |
 |---|---|
-| `mm/mod.rs` | Constants (direct map at 1 << 46, kernel at 34 MiB physical), page sizes, the raw slab page supplier. |
+| `mm/mod.rs` | Constants (direct map at 1 << 46, kernel at 16 MiB physical), page sizes, the raw slab page supplier. |
 | `mm/kheap.rs` | The kernel heap: `frusa` ([frusa.md](frusa.md)) with a per-CPU stage (private blocks and a magazine of freed slots) over a page supplier that bumps from the boot heap until memory is initialized, then allocates from the kernel heap region. |
 | `mm/slab.rs` | Fixed-size slabs with intrusive refcounts (`SlabArc`); used for `Frame`, `Page` and segment descriptors, never deallocated. |
 | `mm/phys.rs` | The physical allocator facade: `Frame` ownership, stage-2 release, metrics and statistics. |
@@ -37,10 +37,14 @@ is redesigned or its case is recorded as untested.
 
 Two physical regions are never managed by the block pool:
 
-- The kernel image and its boot heap, loaded at 34 MiB. The boot heap
-  (2 to 4 MiB) is a bump allocator with checked, aligned reservation; if it
+- The kernel image and its boot heap, loaded at 16 MiB. The boot heap is a
+  bump allocator with checked, aligned reservation that serves startup
+  allocations only; nothing is taken from it once memory is initialized. It
+  is sized for the pool's descriptor lines plus 512 KiB for everything else
+  (`phys_blocks::boot_heap_bytes`): 512 KiB on small guests, about 1 MiB at
+  the span cap; measured use leaves over 100 KiB spare from 32 MiB to 40 GiB. If it
   cannot hold a startup allocation the kernel panics with the failing layout
-  and the remaining bytes. That panic is the check; no budget is computed.
+  and the remaining bytes.
 - MMIO, which is not RAM. Validation refuses any block carrying the RAM flag
   or a non-absent state, so RAM is refused at 2 MiB granularity, and rejects
   addresses beyond the x86 PTE's 52-bit address field. Outside-RAM addresses
@@ -244,7 +248,7 @@ prefix and a guard owns the remaining suffix; rollback drops each exactly once.
 ### Boot shaping
 
 `phys::init` receives available ranges with the kernel and boot heap already
-subtracted, in-use ranges (the low 34 MiB and an above-kernel initrd), and the
+subtracted, in-use ranges (the low 16 MiB and an above-kernel initrd), and the
 raw firmware ranges for the RAM flag. Ranges are page-normalized, checked for
 order and overlap, and coalesced; the initrd must lie wholly inside managed
 RAM with no hole. Shaping touches no free data page:
@@ -252,7 +256,7 @@ RAM with no hole. Shaping touches no free data page:
 | Layout | Initial shape |
 |---|---|
 | No managed RAM | Absent; RAM flag retained where applicable. |
-| Managed RAM below 34 MiB | Split, fully reserved, empty list, intervals [0, 0). |
+| Managed RAM below 16 MiB | Split, fully reserved, empty list, intervals [0, 0). |
 | Entirely free managed RAM | Whole; SMALL_ONLY below 128 MiB. |
 | Other layout, no initrd | Split; the largest free run is both the allocatable and the unused interval. |
 | Layout with initrd | Split; the largest free run immediately adjacent to the initrd, or none. Allocatable interval is that run plus the initrd; unused interval is the run only. |
@@ -296,7 +300,7 @@ points. `mem.pages_reserved` is constant after boot. Debug `PhysStats` and
 ### Layout
 
 The full physical memory is mapped at `PAGING_DIRECT_MAP_OFFSET = 1 << 46`;
-the kernel runs at that offset plus 34 MiB. Kernel data lives in a 512 GiB
+the kernel runs at that offset plus 16 MiB. Kernel data lives in a 512 GiB
 region below the direct map, laid out so a single L3 table covers it:
 static (4 GiB), kernel stacks (8 GiB), kernel heap (8 GiB), MMIO (1 GiB),
 slabs (7 GiB), then the kernel's copy of sys-io. User addresses run from zero

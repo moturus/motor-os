@@ -30,7 +30,7 @@ static KERNEL_ENTRY_POINT: AtomicU64 = AtomicU64::new(0);
 struct KernelBootupInfo {
     pvh_addr: u64, // *const PvhStartInfo
     start_tsc: u64,
-    max_ram_offset: u64, // Max in use memory offset above 34M phys
+    max_ram_offset: u64, // Max in use memory offset above KERNEL_PHYS_START
     num_cpus: u32,
 }
 

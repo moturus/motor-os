@@ -26,8 +26,11 @@ pub const ONE_MB: u64 = 1 << 20;
 // The full physical memory is mapped to [DIRECT_MAP_OFFSET, *)
 pub const PAGING_DIRECT_MAP_OFFSET: u64 = 1_u64 << 46;
 
-// We load the kernel at 34MB phys and PAGING_DIRECT_MAP_OFFSET + 34MB virt.
-pub const KERNEL_PHYS_START: u64 = ONE_MB * 34;
+// We load the kernel at 16MB phys and PAGING_DIRECT_MAP_OFFSET + 16MB virt.
+// Keep in sync with KERNEL_PHYS_START in x64.kloader. Low blocks are
+// released whole at stage 2, so the start is block (2 MiB) aligned.
+pub const KERNEL_PHYS_START: u64 = ONE_MB * 16;
+const _: () = assert!(KERNEL_PHYS_START.is_multiple_of(PAGE_SIZE_MID));
 
 // Note that we don't do kaslr, as it is mostly pointless:
 // https://grsecurity.net/kaslr_an_exercise_in_cargo_cult_security
@@ -317,15 +320,23 @@ pub(super) fn cpu_initialized() -> bool {
 
 // Returns the new stack.
 pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
-    // [0..34M) - potentially used by the bootloader
-    // [34M..max_ram_offset) - the kernel binary
+    // [0..16M) - potentially used by the bootloader
+    // [16M..max_ram_offset) - the kernel binary
     // initrd may be either below the kernel (if we loaded it) or above (if CHV)
 
-    // Step 1. Give 2M+ to the kernel heap, permanently.
+    // Step 1. Give the kernel heap its bootup region, permanently. Only
+    // startup allocations use it, so it is sized for them: nothing is taken
+    // from it once memory is initialized.
+    let ram_end = boot_info
+        .pvh()
+        .mem_map()
+        .iter()
+        .filter(|entry| entry.available())
+        .map(|entry| entry.to_segment().end())
+        .max()
+        .unwrap_or(0);
     let heap_start_phys = align_up(boot_info.kernel_bytes_phys().end(), PAGE_SIZE_SMALL);
-    let heap_size = align_up(heap_start_phys + PAGE_SIZE_MID, PAGE_SIZE_MID) - heap_start_phys;
-    assert!(heap_size >= PAGE_SIZE_MID);
-    assert!(heap_size < PAGE_SIZE_MID * 2);
+    let heap_size = phys_blocks::boot_heap_bytes(ram_end);
 
     #[cfg(debug_assertions)]
     crate::raw_log!(
