@@ -467,16 +467,11 @@ impl LocalServerConnection {
         self.status == LocalServerConnectionStatus::Connected
     }
 
+    /// Stops serving the connection. Its endpoint stays open until
+    /// `LocalServer` retires it.
     pub fn disconnect(&mut self) {
-        match self.status {
-            LocalServerConnectionStatus::Listening | LocalServerConnectionStatus::Connected => {
-                SysObj::put(self.handle).unwrap();
-                self.handle = SysHandle::NONE;
-                self.status = LocalServerConnectionStatus::None;
-                self.seq = 0;
-            }
-            LocalServerConnectionStatus::None => {}
-        }
+        self.status = LocalServerConnectionStatus::None;
+        self.seq = 0;
     }
 
     pub fn finish_rpc(&mut self) -> Result<(), ErrorCode> {
@@ -552,6 +547,9 @@ pub struct LocalServer {
 
     listeners: BTreeMap<SysHandle, LocalServerConnection>,
     active_conns: BTreeMap<SysHandle, LocalServerConnection>,
+    // Closing a server's last endpoint releases its name, so endpoints are
+    // closed only once a listener holds the name.
+    retired: Vec<LocalServerConnection>,
 }
 
 impl LocalServer {
@@ -570,6 +568,7 @@ impl LocalServer {
             url: url.to_owned(),
             listeners: BTreeMap::new(),
             active_conns: BTreeMap::new(),
+            retired: Vec::new(),
         };
 
         for _i in 0..self_.max_listeners {
@@ -591,10 +590,18 @@ impl LocalServer {
         swap_target: SysHandle,
         extra_waiters: &[SysHandle],
     ) -> Result<Vec<SysHandle>, Vec<SysHandle>> {
+        let disconnected = self
+            .active_conns
+            .extract_if(.., |_, conn| !conn.connected());
+        self.retired.extend(disconnected.map(|(_, conn)| conn));
+
         while self.listeners.len() < (self.max_listeners as usize)
             && (self.listeners.len() + self.active_conns.len() < (self.max_connections as usize))
         {
             self.add_listener().unwrap();
+        }
+        if !self.listeners.is_empty() {
+            self.retired.clear();
         }
 
         let mut waiters = Vec::with_capacity(
@@ -604,16 +611,9 @@ impl LocalServer {
         for k in self.listeners.keys() {
             waiters.push(*k);
         }
-
-        // cleanup active connections, register waiters
-        self.active_conns.retain(|handle, conn| {
-            if conn.connected() {
-                waiters.push(*handle);
-                true
-            } else {
-                false // remove inactive connections from the list
-            }
-        });
+        for k in self.active_conns.keys() {
+            waiters.push(*k);
+        }
 
         for k in extra_waiters {
             waiters.push(*k);
@@ -627,13 +627,13 @@ impl LocalServer {
                 if *waiter == SysHandle::NONE {
                     break;
                 }
-                if let Some(mut conn) = self.active_conns.remove(waiter) {
+                if let Some(conn) = self.active_conns.remove(waiter) {
                     assert!(conn.connected());
-                    conn.disconnect();
+                    self.retired.push(conn);
                     bad_handles.push(*waiter);
-                } else if let Some(mut listener) = self.listeners.remove(waiter) {
+                } else if let Some(listener) = self.listeners.remove(waiter) {
                     // A remote process can connect to the listener and then drop.
-                    listener.disconnect();
+                    self.retired.push(listener);
                 } else {
                     bad_handles.push(*waiter);
                 }

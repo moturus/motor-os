@@ -50,6 +50,11 @@ fn run_child(url: &str) {
                 conn.resp::<ResponseHeader>().result = moto_rt::E_OK;
                 conn.finish_rpc().unwrap();
             }
+            "reap" => assert!(server.as_mut().unwrap().wait(SysHandle::NONE, &[]).is_err()),
+            "kick" => {
+                let server = server.as_mut().unwrap();
+                server.get_connection(last).unwrap().disconnect();
+            }
             "duplicate" => duplicate = SysObj::dup(last).unwrap(),
             "close" => drop(server.take().unwrap()),
             "release" => {
@@ -188,6 +193,7 @@ pub fn run_tests() {
     println!("test_ipc_service_ownership PASS");
 
     test_closed_listeners_freed();
+    test_closed_endpoints_keep_name();
 }
 
 // Closed listeners must not accumulate in the kernel while another endpoint
@@ -208,4 +214,29 @@ fn test_closed_listeners_freed() {
     let growth = heap().saturating_sub(before);
     assert!(growth < (1 << 20), "kernel heap grew by {growth} bytes");
     println!("test_closed_listeners_freed PASS (kernel heap grew by {growth} bytes)");
+}
+
+// A live server keeps its name while it replaces a closed endpoint, even
+// when that endpoint was its last one.
+fn test_closed_endpoints_keep_name() {
+    let url = format!("systest-ipc-retire-{}", std::process::id());
+    let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
+
+    // The only listener connects and drops before the server wakes.
+    let mut peer = Peer::start(&url);
+    client.connect(&url).unwrap();
+    client.disconnect();
+    peer.command("reap");
+    assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
+    peer.stop();
+
+    // The server disconnects its only connection before refilling its pool.
+    let mut peer = Peer::start(&url);
+    client.connect(&url).unwrap();
+    peer.rpc(&mut client);
+    peer.command("kick");
+    assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
+    client.disconnect();
+    peer.stop();
+    println!("test_closed_endpoints_keep_name PASS");
 }
