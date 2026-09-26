@@ -1116,6 +1116,8 @@ esac
 # raw bytes for the last complete label would incorrectly keep `[0/28]`.
 # tmux's `[above/total]` is exact: a total above zero is a pane that kept
 # history, and `above == total` is `g` having reached the oldest line of it.
+# Only stdout is the screen: debug builds log to stderr, and a log line between
+# two frames scrolls the reconstruction away from the status row.
 rmux_copy_mode_keys() {
   printf 'for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do echo LINE$I; done\n'
   sleep 5
@@ -1126,7 +1128,7 @@ rmux_copy_mode_keys() {
   sleep 1
   printf 'exit\n'
 }
-out="$(rmux_copy_mode_keys | vm_rmux 2>&1)"
+out="$(rmux_copy_mode_keys | vm_rmux)"
 indicator="$(printf '%s' "$out" | bash "$WD/test-rmux-copy-status.sh")"
 [ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
 counts="${indicator##*[}"
