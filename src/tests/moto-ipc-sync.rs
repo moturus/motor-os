@@ -37,6 +37,8 @@ struct Kernel {
     handles: BTreeSet<SysHandle>,
     mappings: BTreeSet<u64>,
     refuse: bool,
+    mapping_limit: Option<usize>,
+    lost_name: bool,
     reply: Option<(Vec<SysHandle>, Result<(), ErrorCode>)>,
     timeout: Option<time::Instant>,
 }
@@ -50,7 +52,7 @@ impl SysMem {
     pub const F_WRITABLE: u32 = 2;
     pub fn map(_: SysHandle, _: u32, _: u64, _: u64, _: u64, _: u64) -> Result<u64, ErrorCode> {
         KERNEL.with_borrow_mut(|kernel| {
-            if kernel.refuse {
+            if kernel.refuse || kernel.mapping_limit == Some(kernel.mappings.len()) {
                 return Err(E_OUT_OF_MEMORY);
             }
             kernel.next_address += sys_mem::PAGE_SIZE_SMALL;
@@ -79,7 +81,10 @@ impl SysObj {
         unreachable!("these tests exercise server endpoints")
     }
     pub fn put(handle: SysHandle) -> Result<(), ErrorCode> {
-        KERNEL.with_borrow_mut(|kernel| assert!(kernel.handles.remove(&handle)));
+        KERNEL.with_borrow_mut(|kernel| {
+            assert!(kernel.handles.remove(&handle));
+            kernel.lost_name |= kernel.handles.is_empty();
+        });
         Ok(())
     }
 }
@@ -156,4 +161,93 @@ fn refused_refill_still_reports_closed_connections() {
     reply(&[1], Err(E_BAD_HANDLE));
     assert_eq!(server.wait(SysHandle::NONE, &[]), Err(vec![SysHandle(1)]));
     assert!(server.get_connection(SysHandle(1)).is_none());
+}
+
+struct Extension(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for Extension {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn disconnected_pair() -> (LocalServer, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 2, 2).unwrap();
+    reply(&[1, 2], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for handle in [SysHandle(1), SysHandle(2)] {
+        let connection = server.get_connection(handle).unwrap();
+        connection.set_extension(Box::new(Extension(dropped.clone())));
+        connection.disconnect();
+    }
+    (server, dropped)
+}
+
+#[test]
+fn retired_memory_is_available_to_the_next_refill() {
+    let (mut server, dropped) = disconnected_pair();
+    // Only retiring the old mappings makes room for replacement listeners.
+    KERNEL.with_borrow_mut(|kernel| kernel.mapping_limit = Some(2));
+    reply(&[], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 2);
+    KERNEL.with_borrow(|kernel| {
+        assert_eq!(kernel.handles, BTreeSet::from([SysHandle(3), SysHandle(4)]));
+        assert_eq!(kernel.mappings.len(), 2);
+        assert!(!kernel.lost_name);
+    });
+    drop(server);
+    KERNEL.with_borrow(|kernel| {
+        assert!(kernel.handles.is_empty());
+        assert!(kernel.mappings.is_empty());
+    });
+}
+
+#[test]
+fn refused_refills_keep_one_handle_without_retired_memory() {
+    let (mut server, dropped) = disconnected_pair();
+    KERNEL.with_borrow_mut(|kernel| kernel.refuse = true);
+    for _ in 0..3 {
+        reply(&[], Err(E_TIMED_OUT));
+        assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![]));
+        KERNEL.with_borrow(|kernel| {
+            assert_eq!(kernel.handles.len(), 1);
+            assert!(kernel.mappings.is_empty());
+            assert!(!kernel.lost_name);
+        });
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+    drop(server);
+    assert!(KERNEL.with_borrow(|kernel| kernel.handles.is_empty()));
+}
+
+#[test]
+fn bad_active_and_listening_peers_release_their_mappings() {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 3, 2).unwrap();
+    reply(&[1], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    KERNEL.with_borrow_mut(|kernel| kernel.refuse = true);
+    reply(&[1, 2], Err(E_BAD_HANDLE));
+    assert_eq!(server.wait(SysHandle::NONE, &[]), Err(vec![SysHandle(1)]));
+    KERNEL.with_borrow(|kernel| {
+        assert!(kernel.mappings.is_empty());
+        assert_eq!(kernel.handles.len(), 1);
+        assert!(!kernel.lost_name);
+    });
+}
+
+#[test]
+fn a_live_endpoint_releases_the_retired_handle_during_refusal() {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 2, 2).unwrap();
+    reply(&[1], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    server.get_connection(SysHandle(1)).unwrap().disconnect();
+    KERNEL.with_borrow_mut(|kernel| kernel.refuse = true);
+    reply(&[], Err(E_TIMED_OUT));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    KERNEL.with_borrow(|kernel| {
+        assert_eq!(kernel.handles, BTreeSet::from([SysHandle(2)]));
+        assert_eq!(kernel.mappings.len(), 1);
+        assert!(!kernel.lost_name);
+    });
 }

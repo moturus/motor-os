@@ -373,6 +373,14 @@ impl Drop for LocalServerConnection {
 }
 
 impl LocalServerConnection {
+    // Keep one endpoint as the name reservation, but let Drop release this
+    // connection's mapping and extension before another listener is allocated.
+    fn retire(mut self, reservation: &mut SysHandle) {
+        if *reservation == SysHandle::NONE {
+            *reservation = core::mem::replace(&mut self.handle, SysHandle::NONE);
+        }
+    }
+
     pub fn new(channel_size: ChannelSize) -> Result<Self, ErrorCode> {
         let addr = match channel_size {
             ChannelSize::Small => SysMem::map(
@@ -550,9 +558,16 @@ pub struct LocalServer {
 
     listeners: BTreeMap<SysHandle, LocalServerConnection>,
     active_conns: BTreeMap<SysHandle, LocalServerConnection>,
-    // Closing a server's last endpoint releases its name, so endpoints are
-    // closed only once a listener holds the name.
-    retired: Vec<LocalServerConnection>,
+    // One bare endpoint reserves the name while the listener pool is empty.
+    retired: SysHandle,
+}
+
+impl Drop for LocalServer {
+    fn drop(&mut self) {
+        if self.retired != SysHandle::NONE {
+            SysObj::put(self.retired).unwrap();
+        }
+    }
 }
 
 impl LocalServer {
@@ -571,7 +586,7 @@ impl LocalServer {
             url: url.to_owned(),
             listeners: BTreeMap::new(),
             active_conns: BTreeMap::new(),
-            retired: Vec::new(),
+            retired: SysHandle::NONE,
         };
 
         for _i in 0..self_.max_listeners {
@@ -588,15 +603,26 @@ impl LocalServer {
         Ok(())
     }
 
+    fn release_retired(&mut self) {
+        if self.retired != SysHandle::NONE
+            && (!self.listeners.is_empty() || !self.active_conns.is_empty())
+        {
+            SysObj::put(core::mem::replace(&mut self.retired, SysHandle::NONE)).unwrap();
+        }
+    }
+
     pub fn wait(
         &mut self,
         swap_target: SysHandle,
         extra_waiters: &[SysHandle],
     ) -> Result<Vec<SysHandle>, Vec<SysHandle>> {
-        let disconnected = self
+        for (_, conn) in self
             .active_conns
-            .extract_if(.., |_, conn| !conn.connected());
-        self.retired.extend(disconnected.map(|(_, conn)| conn));
+            .extract_if(.., |_, conn| !conn.connected())
+        {
+            conn.retire(&mut self.retired);
+        }
+        self.release_retired();
 
         // When memory is low, the kernel refuses new listeners. Keep serving
         // the open connections and retry every REFILL_RETRY: a server with no
@@ -614,9 +640,7 @@ impl LocalServer {
                 Err(err) => panic!("LocalServer '{}': cannot listen: {err}", self.url),
             }
         }
-        if !self.listeners.is_empty() {
-            self.retired.clear();
-        }
+        self.release_retired();
         let timeout = refused.then(|| moto_rt::time::Instant::now() + REFILL_RETRY);
 
         let mut waiters = Vec::with_capacity(
@@ -653,15 +677,16 @@ impl LocalServer {
                 }
                 if let Some(conn) = self.active_conns.remove(waiter) {
                     assert!(conn.connected());
-                    self.retired.push(conn);
+                    conn.retire(&mut self.retired);
                     bad_handles.push(*waiter);
                 } else if let Some(listener) = self.listeners.remove(waiter) {
                     // A remote process can connect to the listener and then drop.
-                    self.retired.push(listener);
+                    listener.retire(&mut self.retired);
                 } else {
                     bad_handles.push(*waiter);
                 }
             }
+            self.release_retired();
             bad_handles
         })?;
 
