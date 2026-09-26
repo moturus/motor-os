@@ -537,6 +537,9 @@ impl LocalServerConnection {
     }
 }
 
+/// How often a server retries a listener refill that admission refused.
+const REFILL_RETRY: core::time::Duration = core::time::Duration::from_millis(100);
+
 // LocalServer: not Send/Sync.
 pub struct LocalServer {
     max_connections: u64,
@@ -595,14 +598,26 @@ impl LocalServer {
             .extract_if(.., |_, conn| !conn.connected());
         self.retired.extend(disconnected.map(|(_, conn)| conn));
 
+        // When memory is low, the kernel refuses new listeners. Keep serving
+        // the open connections and retry every REFILL_RETRY: a server with no
+        // listener left might otherwise never be woken to try again.
+        let mut refused = false;
         while self.listeners.len() < (self.max_listeners as usize)
             && (self.listeners.len() + self.active_conns.len() < (self.max_connections as usize))
         {
-            self.add_listener().unwrap();
+            match self.add_listener() {
+                Ok(()) => {}
+                Err(moto_rt::E_OUT_OF_MEMORY) => {
+                    refused = true;
+                    break;
+                }
+                Err(err) => panic!("LocalServer '{}': cannot listen: {err}", self.url),
+            }
         }
         if !self.listeners.is_empty() {
             self.retired.clear();
         }
+        let timeout = refused.then(|| moto_rt::time::Instant::now() + REFILL_RETRY);
 
         let mut waiters = Vec::with_capacity(
             self.listeners.len() + self.active_conns.len() + extra_waiters.len(),
@@ -620,7 +635,11 @@ impl LocalServer {
         }
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, None).map_err(|err| {
+        let result = SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, timeout);
+        if result == Err(moto_rt::E_TIMED_OUT) {
+            return Ok(Vec::new());
+        }
+        result.map_err(|err| {
             assert_eq!(err, moto_rt::E_BAD_HANDLE);
             let mut bad_handles = Vec::new();
             for waiter in &waiters {

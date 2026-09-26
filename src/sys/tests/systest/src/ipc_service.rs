@@ -1,9 +1,10 @@
 use moto_ipc::sync::{ChannelSize, ClientConnection, LocalServer, RequestHeader, ResponseHeader};
 use moto_sys::{SysHandle, SysObj};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 const CHILD: &str = "ipc-service-child";
+const HOARD: &str = "ipc-service-hoard";
 const CHILD_CAPS: u64 = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
 
 fn listen(url: &str) -> Result<LocalServer, moto_rt::ErrorCode> {
@@ -27,6 +28,7 @@ pub fn run_command(args: &[String]) -> bool {
             assert_eq!(listen(&args[2]).err(), Some(moto_rt::E_INVALID_ARGUMENT));
         }
         Some(CHILD) if args.len() == 3 => run_child(&args[2]),
+        Some(HOARD) if args.len() == 2 => run_hoard(),
         _ => return false,
     }
     true
@@ -42,7 +44,13 @@ fn run_child(url: &str) {
         match command.unwrap().as_str() {
             "rpc" => {
                 let server = server.as_mut().unwrap();
-                let ready = server.wait(SysHandle::NONE, &[]).unwrap();
+                // While refills are refused, wait() also returns empty.
+                let ready = loop {
+                    let ready = server.wait(SysHandle::NONE, &[]).unwrap();
+                    if !ready.is_empty() {
+                        break ready;
+                    }
+                };
                 assert_eq!(ready.len(), 1);
                 last = ready[0];
                 let conn = server.get_connection(last).unwrap();
@@ -71,6 +79,33 @@ fn run_child(url: &str) {
     assert_eq!(duplicate, SysHandle::NONE);
 }
 
+// Keeps free memory at the user floor until stdin closes, taking back any
+// memory that other processes free meanwhile. Every mapping is charged 64
+// extra pages, so kernel objects, charged 16, take the last pages below that.
+fn run_hoard() -> ! {
+    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
+
+    std::thread::spawn(|| {
+        let _ = std::io::stdin().read_line(&mut String::new());
+        std::process::exit(0);
+    });
+    let pid = std::process::id();
+    let object = format!("shared:url={HOARD}-{pid};address=4096;page_type=small;page_num=1");
+    let take = |pages| SysMem::alloc(PAGE_SIZE_SMALL, pages).is_ok();
+    let fill = || {
+        while take(64) {}
+        while take(1) {}
+        while SysObj::create(SysHandle::SELF, 0, &object).is_ok() {}
+    };
+    println!("ready");
+    fill();
+    println!("hoarded");
+    loop {
+        fill();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 struct Peer {
     child: Child,
     stdout: BufReader<ChildStdout>,
@@ -78,8 +113,12 @@ struct Peer {
 
 impl Peer {
     fn start(url: &str) -> Self {
+        Self::spawn(&[CHILD, url])
+    }
+
+    fn spawn(args: &[&str]) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([CHILD, url])
+            .args(args)
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
                 format!("0x{CHILD_CAPS:x}"),
@@ -197,6 +236,7 @@ pub fn run_tests() {
     test_closed_listeners_freed();
     test_closed_endpoints_keep_name();
     test_dup_races_close();
+    test_refused_refill_retries();
 }
 
 // Closed listeners must not accumulate in the kernel while another endpoint
@@ -318,4 +358,50 @@ fn test_dup_races_close() {
     SysMem::unmap(SysHandle::SELF, 0, u64::MAX, listener_page).unwrap();
     SysMem::unmap(SysHandle::SELF, 0, u64::MAX, client_page).unwrap();
     println!("test_dup_races_close PASS ({duplicated} of {ROUNDS} duplicated)");
+}
+
+// When memory is low, the kernel refuses new listeners. The server must keep
+// serving its open connection, and must add a listener again soon after the
+// memory comes back, even if no client wakes it.
+fn test_refused_refill_retries() {
+    let url = format!("systest-ipc-refill-{}", std::process::id());
+    let mut peer = Peer::start(&url);
+    let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
+    let mut late = ClientConnection::new(ChannelSize::Small).unwrap();
+    client.connect(&url).unwrap();
+    peer.rpc(&mut client); // Takes the only listener; the next wait() refills.
+
+    let mut hoarder = Peer::spawn(&[HOARD]);
+    // Nothing here may allocate until the hoarder is gone: at the floor this
+    // process cannot grow its heap either.
+    let mut hoarded = [0_u8; 8];
+    hoarder.stdout.read_exact(&mut hoarded).unwrap();
+    assert_eq!(&hoarded, b"hoarded\n");
+    peer.send("rpc"); // The refill is refused.
+    client.req::<RequestHeader>().cmd = 1;
+    client.do_rpc(None).unwrap();
+    assert_eq!(client.resp::<ResponseHeader>().result, moto_rt::E_OK);
+    peer.send("rpc"); // The server now waits, retrying the refill.
+    drop(hoarder.child.stdin.take());
+    assert!(hoarder.child.wait().unwrap().success());
+    drop(hoarder); // A dead process keeps its memory until its last handle closes.
+    peer.expect("ok\n");
+
+    // Only the retry timer can add the listener this client needs.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while let Err(err) = late.connect(&url) {
+        assert_eq!(err, moto_rt::E_NOT_FOUND);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no listener after refusal"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    late.req::<RequestHeader>().cmd = 1;
+    late.do_rpc(None).unwrap();
+    assert_eq!(late.resp::<ResponseHeader>().result, moto_rt::E_OK);
+    peer.expect("ok\n");
+    drop((client, late));
+    peer.stop();
+    println!("test_refused_refill_retries PASS");
 }
