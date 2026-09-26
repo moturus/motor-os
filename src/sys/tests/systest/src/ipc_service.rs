@@ -186,4 +186,26 @@ pub fn run_tests() {
     drop(replacement);
     drop(listen(&url).unwrap());
     println!("test_ipc_service_ownership PASS");
+
+    test_closed_listeners_freed();
+}
+
+// Closed listeners must not accumulate in the kernel while another endpoint
+// keeps the name: each leaked one would hold a few hundred heap bytes.
+fn test_closed_listeners_freed() {
+    let url = format!("systest-ipc-churn-{}", std::process::id());
+    let _holder = listen(&url).unwrap();
+    let churn = |count| {
+        for _ in 0..count {
+            drop(listen(&url).unwrap());
+        }
+    };
+    let heap = || moto_sys::stats::MemoryStats::get().unwrap().heap_total;
+
+    churn(1_000); // Warms up the kernel allocator's caches.
+    let before = heap();
+    churn(10_000);
+    let growth = heap().saturating_sub(before);
+    assert!(growth < (1 << 20), "kernel heap grew by {growth} bytes");
+    println!("test_closed_listeners_freed PASS (kernel heap grew by {growth} bytes)");
 }

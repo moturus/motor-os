@@ -5,7 +5,7 @@ use crate::{
 };
 use alloc::{
     borrow::ToOwned,
-    collections::{BTreeMap, LinkedList},
+    collections::{BTreeMap, VecDeque},
     string::String,
     sync::{Arc, Weak},
 };
@@ -117,6 +117,10 @@ impl Shared {
         if !service.owner.ptr_eq(&self.owner) {
             return;
         }
+        // A closed listener must not stay pooled while the name lives on.
+        service
+            .pending
+            .retain(|listener| !core::ptr::eq(Arc::as_ptr(listener), self));
         service.endpoints -= 1;
         if service.endpoints == 0 {
             listeners.remove(&self.url);
@@ -128,7 +132,7 @@ struct Service {
     owner: Weak<Process>,
     // Listening and connected server endpoints both reserve the service name.
     endpoints: usize,
-    pending: LinkedList<Arc<Shared>>,
+    pending: VecDeque<Arc<Shared>>,
 }
 
 // It would have been better to use a HashMap, but it is unavailable in [no-std].
@@ -161,7 +165,7 @@ pub(super) fn create(
     let service = listeners.entry(url.clone()).or_insert_with(|| Service {
         owner: process_owner.clone(),
         endpoints: 0,
-        pending: LinkedList::new(),
+        pending: VecDeque::new(),
     });
     if !service.owner.ptr_eq(&process_owner) {
         if service
@@ -281,6 +285,7 @@ fn requeue(listener: Arc<Shared>) {
     };
     let mut listeners = LISTENERS.lock(line!());
     if let Some(service) = listeners.get_mut(&listener.url) {
+        // A close after this check finds the listener pooled and removes it.
         if service.owner.ptr_eq(&listener.owner) && !sharer.closed() {
             service.pending.push_front(listener);
         }
