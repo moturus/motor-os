@@ -321,7 +321,15 @@ impl VsockStream {
             result
         })
         .await?;
-        response.status().map_err(ErrorCode::from)
+        match response.status().map_err(ErrorCode::from) {
+            // sys-io reclaims a stream once it has published its terminal
+            // state, and that ordered notification precedes this reply: as
+            // for TX, the stream's terminal result is authoritative.
+            Err(moto_rt::E_NOT_FOUND) if self.state() & api_vsock::STATE_TERMINAL != 0 => {
+                Err(self.dead_write_error())
+            }
+            result => result,
+        }
     }
 
     pub(super) fn weak(&self) -> Weak<Self> {

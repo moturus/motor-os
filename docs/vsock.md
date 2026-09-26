@@ -105,7 +105,9 @@ translation layer.
   `ConnectionReset`, delivered after earlier validated RX drains. The first
   connection-local terminal cause is retained.
 - Writes after local SEND, peer RECEIVE, or orderly close are `NotConnected`;
-  a retained terminal error takes precedence. Try-I/O without progress is
+  a retained terminal error takes precedence. Shutdown of a terminated stream
+  reports the same, even when sys-io reclaimed the stream before the request
+  arrived. Try-I/O without progress is
   `NotReady`, and orderly read EOF is `Ok(0)`.
 - Global stream/listener/pending-accept/shutdown admission and required socket
   allocation failures return `OutOfMemory`. A full client channel returns
