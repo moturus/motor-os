@@ -1909,8 +1909,20 @@ impl Thread {
         thread_data
     }
 
-    pub fn wake_by_timeout(&self) {
+    // The timer is claimed under the status lock. Every path that ends a
+    // wait takes the thread out of InWait under this lock before cancelling
+    // the timer, so a timer still current here while the thread is InWait
+    // belongs to this wait. Claimed before the lock, a delayed job could
+    // find the thread InWait again in a later wait, even an untimed one.
+    fn wake_by_timeout(&self, timer_id: u64) {
         let mut status = self.status.lock(line!());
+        if self
+            .timer_id
+            .compare_exchange(timer_id, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         if let ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) = *status {
             self.diag.to_wakes.fetch_add(1, Ordering::Relaxed);
             *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
@@ -2325,13 +2337,7 @@ impl Thread {
     fn job_fn_wake_by_timeout(thread: Weak<Self>, timer_id: u64) {
         crate::xray::tracing::trace("job_fn_wake_by_timeout", 0, 0, 0);
         if let Some(thread) = thread.upgrade() {
-            if thread
-                .timer_id
-                .compare_exchange(timer_id, 0, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                thread.wake_by_timeout();
-            }
+            thread.wake_by_timeout(timer_id);
         }
     }
 
