@@ -320,6 +320,9 @@ extern "C" fn runtime_thread(param: u64) {
         }
     });
 
+    // A raw thread does not exit through the runtime's trampoline: release
+    // its TLS and allocator cache here, or every relay thread strands them.
+    unsafe { crate::rt_tls::on_thread_exiting() };
     let _ = moto_sys::SysObj::put(SysHandle::SELF);
     unreachable!()
 }
