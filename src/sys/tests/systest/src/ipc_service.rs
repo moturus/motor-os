@@ -194,6 +194,7 @@ pub fn run_tests() {
 
     test_closed_listeners_freed();
     test_closed_endpoints_keep_name();
+    test_dup_races_close();
 }
 
 // Closed listeners must not accumulate in the kernel while another endpoint
@@ -239,4 +240,80 @@ fn test_closed_endpoints_keep_name() {
     client.disconnect();
     peer.stop();
     println!("test_closed_endpoints_keep_name PASS");
+}
+
+// Duplicating a listener's only handle while another thread closes it: when
+// the duplicate is created, the listener must stay open and connectable.
+// Both orders are correct, so the test cannot flake. It runs both orders, but
+// the old race window was a few instructions wide and is rarely hit.
+fn test_dup_races_close() {
+    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    const ROUNDS: usize = 2_000;
+    let url = format!("systest-ipc-dup-{}", std::process::id());
+    let map = |flags| {
+        SysMem::map(
+            SysHandle::SELF,
+            flags,
+            u64::MAX,
+            u64::MAX,
+            PAGE_SIZE_SMALL,
+            1,
+        )
+        .unwrap()
+    };
+    let shared_url = |addr| {
+        let url = moto_sys::url_encode(&url);
+        format!("shared:url={url};address={addr};page_type=small;page_num=1")
+    };
+    let listener_page = map(0);
+    let client_page = map(SysMem::F_READABLE | SysMem::F_WRITABLE);
+    let (listener_url, client_url) = (shared_url(listener_page), shared_url(client_page));
+
+    // Spinning starts both syscalls together; yielding keeps one vCPU moving.
+    let wait_for = |counter: &AtomicUsize, value| {
+        let mut spins = 0;
+        while counter.load(Ordering::Acquire) != value {
+            spins += 1;
+            if spins < 10_000 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    };
+    let (listener, published, closed) =
+        (AtomicU64::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+    let mut duplicated = 0;
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for round in 1..=ROUNDS {
+                wait_for(&published, round);
+                SysObj::put(SysHandle::from_u64(listener.load(Ordering::Relaxed))).unwrap();
+                closed.store(round, Ordering::Release);
+            }
+        });
+        for round in 1..=ROUNDS {
+            let handle = SysObj::create(SysHandle::SELF, 0, &listener_url).unwrap();
+            listener.store(handle.as_u64(), Ordering::Relaxed);
+            published.store(round, Ordering::Release);
+            // Sweeps the timing so that either call can come first or overlap.
+            for _ in 0..round % 16 {
+                std::hint::spin_loop();
+            }
+            let dup = SysObj::dup(handle);
+            wait_for(&closed, round);
+            let Ok(dup) = dup else {
+                continue;
+            };
+            duplicated += 1;
+            let client = SysObj::get(SysHandle::SELF, 0, &client_url).unwrap();
+            SysObj::put(client).unwrap();
+            SysObj::put(dup).unwrap();
+        }
+    });
+    SysMem::unmap(SysHandle::SELF, 0, u64::MAX, listener_page).unwrap();
+    SysMem::unmap(SysHandle::SELF, 0, u64::MAX, client_page).unwrap();
+    println!("test_dup_races_close PASS ({duplicated} of {ROUNDS} duplicated)");
 }

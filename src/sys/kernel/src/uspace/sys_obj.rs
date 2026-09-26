@@ -463,9 +463,8 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             // (WaitObject::wake_count), so waiters on the two handles
             // cannot consume each other's pending wakes.
             let handle = SysHandle::from_u64(args.args[0]);
-            let process = thread.owner();
-            match process.get_object(&handle) {
-                Some(obj) => ResultBuilder::ok_1(process.add_object(obj.sys_object).as_u64()),
+            match thread.owner().dup_object(&handle) {
+                Some(dup) => ResultBuilder::ok_1(dup.as_u64()),
                 None => ResultBuilder::bad_handle(handle),
             }
         }

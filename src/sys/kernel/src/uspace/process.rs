@@ -384,14 +384,28 @@ impl Process {
     }
 
     pub(super) fn add_object(&self, object: Arc<SysObject>) -> SysHandle {
+        self.insert_object(&mut self.wait_objects.lock(line!()), object)
+    }
+
+    // The lookup and the new handle share one table lock: put_object removes
+    // handles under it, so closing the last other handle cannot slip between.
+    pub(super) fn dup_object(&self, handle: &SysHandle) -> Option<SysHandle> {
+        let mut objects = self.wait_objects.lock(line!());
+        let object = objects.get(handle)?.sys_object.clone();
+        Some(self.insert_object(&mut objects, object))
+    }
+
+    fn insert_object(
+        &self,
+        objects: &mut BTreeMap<SysHandle, WaitObject>,
+        object: Arc<SysObject>,
+    ) -> SysHandle {
         object.add_process_handle();
-        let wait_object = WaitObject::new(object);
         let object_id = self
             .next_wait_object_id
             .fetch_add(1, Ordering::Relaxed)
             .into();
-        let mut objects = self.wait_objects.lock(line!());
-        objects.insert(object_id, wait_object);
+        objects.insert(object_id, WaitObject::new(object));
         object_id
     }
 
