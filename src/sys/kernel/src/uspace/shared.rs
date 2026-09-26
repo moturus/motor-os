@@ -5,7 +5,7 @@ use crate::{
 };
 use alloc::{
     borrow::ToOwned,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     string::String,
     sync::{Arc, Weak},
 };
@@ -120,7 +120,7 @@ impl Shared {
         // A closed listener must not stay pooled while the name lives on.
         service
             .pending
-            .retain(|listener| !core::ptr::eq(Arc::as_ptr(listener), self));
+            .retain(|_, listener| !core::ptr::eq(Arc::as_ptr(listener), self));
         service.endpoints -= 1;
         if service.endpoints == 0 {
             listeners.remove(&self.url);
@@ -132,7 +132,9 @@ struct Service {
     owner: Weak<Process>,
     // Listening and connected server endpoints both reserve the service name.
     endpoints: usize,
-    pending: VecDeque<Arc<Shared>>,
+    // Small tree nodes keep growth within object admission's fixed charge;
+    // a contiguous queue would reallocate the entire pool on growth.
+    pending: BTreeMap<u64, Arc<Shared>>,
 }
 
 // It would have been better to use a HashMap, but it is unavailable in [no-std].
@@ -165,7 +167,7 @@ pub(super) fn create(
     let service = listeners.entry(url.clone()).or_insert_with(|| Service {
         owner: process_owner.clone(),
         endpoints: 0,
-        pending: VecDeque::new(),
+        pending: BTreeMap::new(),
     });
     if !service.owner.ptr_eq(&process_owner) {
         if service
@@ -201,7 +203,7 @@ pub(super) fn create(
     }
 
     service.endpoints += 1;
-    service.pending.push_back(self_);
+    service.pending.insert(sharer.id(), self_);
     Ok(sharer)
 }
 
@@ -224,7 +226,7 @@ pub(super) fn get(
                 return Err(moto_rt::E_NOT_FOUND);
             };
             loop {
-                let Some(shared) = service.pending.front() else {
+                let Some((_, shared)) = service.pending.first_key_value() else {
                     // Exhausting the listener pool does not release ownership.
                     return Err(moto_rt::E_NOT_FOUND);
                 };
@@ -233,7 +235,7 @@ pub(super) fn get(
                 // create and is closed before its last reference drops; a last
                 // drop of an open endpoint would self-deadlock in release_name.
                 if shared.sharer.upgrade().is_none_or(|sharer| sharer.closed()) {
-                    service.pending.pop_front();
+                    service.pending.pop_first();
                     continue;
                 }
 
@@ -241,7 +243,7 @@ pub(super) fn get(
                     log::debug!("shared: get: '{url}': pages don't match.");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
-                let listener = service.pending.pop_front().unwrap();
+                let (_, listener) = service.pending.pop_first().unwrap();
                 // Takeover clears pending, so the listener's page is in the
                 // address space of the service owner mapped below.
                 debug_assert!(listener.owner.ptr_eq(&service.owner));
@@ -294,7 +296,7 @@ fn requeue(listener: Arc<Shared>) {
     if let Some(service) = listeners.get_mut(&listener.url) {
         // A close after this check finds the listener pooled and removes it.
         if service.owner.ptr_eq(&listener.owner) && !sharer.closed() {
-            service.pending.push_front(listener);
+            service.pending.insert(sharer.id(), listener);
         }
     }
 }

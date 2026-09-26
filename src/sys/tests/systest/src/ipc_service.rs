@@ -5,6 +5,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 const CHILD: &str = "ipc-service-child";
 const HOARD: &str = "ipc-service-hoard";
+const POOL_GROWTH: &str = "ipc-service-pool-growth";
 const CHILD_CAPS: u64 = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
 
 fn listen(url: &str) -> Result<LocalServer, moto_rt::ErrorCode> {
@@ -29,6 +30,7 @@ pub fn run_command(args: &[String]) -> bool {
         }
         Some(CHILD) if args.len() == 3 => run_child(&args[2]),
         Some(HOARD) if args.len() == 2 => run_hoard(),
+        Some(POOL_GROWTH) if args.len() == 3 => run_pool_growth(&args[2]),
         _ => return false,
     }
     true
@@ -103,6 +105,29 @@ fn run_hoard() -> ! {
     loop {
         fill();
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+// The next insertion would double a full VecDeque to a 2 MiB buffer. Object
+// admission only reserves 64 KiB, so the pool must grow in small increments.
+fn run_pool_growth(url: &str) -> ! {
+    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
+
+    let object = format!("shared:url={url};address=4096;page_type=small;page_num=1");
+    for _ in 0..131_072 {
+        SysObj::create(SysHandle::SELF, 0, &object).unwrap();
+    }
+    println!("ready");
+    while SysMem::alloc(PAGE_SIZE_SMALL, 64).is_ok() {}
+    while SysMem::alloc(PAGE_SIZE_SMALL, 1).is_ok() {}
+    // Mapping admission stops above the smaller object charge. The following
+    // insertion must succeed without consuming the protected user reserve.
+    SysObj::create(SysHandle::SELF, 0, &object).unwrap();
+    let stats = moto_sys::stats::AdmissionStats::get().unwrap();
+    assert!(stats.free_for_admission() >= stats.user_floor_pages);
+    println!("grown");
+    loop {
+        std::thread::park();
     }
 }
 
@@ -236,7 +261,25 @@ pub fn run_tests() {
     test_closed_listeners_freed();
     test_closed_endpoints_keep_name();
     test_dup_races_close();
+    test_listener_pool_growth();
     test_refused_refill_retries();
+}
+
+fn test_listener_pool_growth() {
+    let url = format!("systest-ipc-pool-growth-{}", std::process::id());
+    let object = format!("shared:url={url};address=4096;page_type=small;page_num=1");
+    let mut peer = Peer::spawn(&[POOL_GROWTH, &url]);
+    let mut grown = [0_u8; 6];
+    peer.stdout.read_exact(&mut grown).unwrap();
+    assert_eq!(&grown, b"grown\n");
+    moto_sys::SysCpu::kill_pid(u64::from(peer.child.id())).unwrap();
+    // Take over before waiting for cleanup, exercising a large pending pool
+    // and avoiding the still-quadratic close path addressed separately.
+    let replacement = SysObj::create(SysHandle::SELF, 0, &object).unwrap();
+    SysObj::put(replacement).unwrap();
+    assert_eq!(peer.child.wait().unwrap().code(), Some(-1));
+    drop(peer);
+    println!("test_listener_pool_growth PASS");
 }
 
 // Closed listeners must not accumulate in the kernel while another endpoint
