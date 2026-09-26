@@ -228,6 +228,10 @@ pub(super) fn get(
                     // Exhausting the listener pool does not release ownership.
                     return Err(moto_rt::E_NOT_FOUND);
                 };
+                // This drops the upgraded reference under LISTENERS. That is safe
+                // only because a named endpoint gets a process handle right after
+                // create and is closed before its last reference drops; a last
+                // drop of an open endpoint would self-deadlock in release_name.
                 if shared.sharer.upgrade().is_none_or(|sharer| sharer.closed()) {
                     service.pending.pop_front();
                     continue;
@@ -238,6 +242,9 @@ pub(super) fn get(
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 let listener = service.pending.pop_front().unwrap();
+                // Takeover clears pending, so the listener's page is in the
+                // address space of the service owner mapped below.
+                debug_assert!(listener.owner.ptr_eq(&service.owner));
                 log::debug!("shared: got '{url}'.");
                 break (listener, proc);
             }
