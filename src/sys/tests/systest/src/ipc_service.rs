@@ -175,9 +175,11 @@ pub fn run_tests() {
 
     // Preserve takeover after death even with an exhausted pool and retained
     // process/client handles. The original pending-listener restart test stays.
+    // Unlike Child::kill, kill_pid does not wait for exit cleanup, so the
+    // takeover may precede the dead owner's cleanup; both orders must pass.
     let mut peer = Peer::start(&url);
     client.connect(&url).unwrap();
-    peer.child.kill().unwrap();
+    moto_sys::SysCpu::kill_pid(u64::from(peer.child.id())).unwrap();
     let replacement = listen(&url).unwrap();
     assert_eq!(peer.child.wait().unwrap().code(), Some(-1));
     client.disconnect();
