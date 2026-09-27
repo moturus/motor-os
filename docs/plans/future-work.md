@@ -5,6 +5,151 @@
 1. double-copy during process spawn
 2. process text not shared across process copies
 
+## Any process can kill most other processes (2026-09-26)
+
+`SysCpu::kill_pid` (`F_KILL_PID` in `sys_kill_impl`,
+`src/sys/kernel/src/uspace/sys_cpu.rs`) checks only the target: it refuses to
+kill a process that holds `CAP_SYS`. It does not check the caller at all. So
+any process, even one with no capabilities, can kill every process that lacks
+`CAP_SYS`. That includes other users' programs, dns-resolver (which runs with
+`CAP_LOG | CAP_NET`), and a future privileged rmux server.
+
+This predates the `CAP_NET`/`CAP_FS_WRITE` work. It was found by a review of
+the new-caps IPC fixes, not by a failure. Current callers are Rush's `kill`
+builtin, gears on Motor, and systest (`spawn_wait_kill`, `ipc_service`).
+
+Possible rules, to choose from when this is picked up:
+
+- require a capability to kill a process other than oneself;
+- allow killing only one's own descendants; or
+- allow it only when the caller holds every capability the target holds.
+
+Check what Rush's `kill` and gears need before choosing.
+
+## A TCP bind at the memory floor can abort the process (2026-09-27)
+
+`std::net::TcpListener::bind` should either succeed or fail with
+`OutOfMemory` when free memory is at the user floor. It can abort the whole
+process instead. rt.vdso's `rt_net::bind` (`src/sys/lib/rt.vdso/src/net/rt_net.rs`)
+makes several infallible allocations before sys-io is asked: the event
+source, the listener observer, and the RPC state in `NetChannel::rpc_bind`
+(`src/sys/lib/moto-io/src/net/channel.rs`: a `oneshot` `Arc` and an
+`rpc_map` `BTreeMap` insert). If the process heap has no slack left, one of
+them fails and rt.vdso aborts.
+
+Seen once, in a release `full-test.sh` run on 2026-09-27 (commit
+`960f9163`, which touches only rmux and tests). systest died in
+`admission::test_aggregate_listener_exhaustion`, at its "one more bind while
+the flood holds everything": "memory allocation of 136 bytes failed", status
+222. The innermost frames were rt.vdso's `rt_net::bind` →
+`NetChannel::rpc_bind` → `handle_alloc_error`, found by rebuilding rt.vdso
+with symbols (the code shifts by 12 bytes, so the match is by nearby
+function, not exact). The same test passed in the three other gate runs that
+night, so whether it fails depends on how much heap slack the process has.
+Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-bf8e-bab1741e9591/scratchpad/gates/g2/run2-__release.log`.
+
+A fix makes the bind path allocate fallibly, or reserve what it needs before
+admission, as `57796b3d` did for network teardown. It touches rt.vdso and
+moto-io, so it needs its own reviewed patch. Until then the test can flake.
+
+## IPC listener is published before its missed-wake snapshot (2026-09-26)
+
+A shared endpoint is created in two steps. `shared::create`
+(`src/sys/kernel/src/uspace/shared.rs`) inserts the new listener into the
+service pool under `LISTENERS` and returns the `SysObject`. Only then does
+`sys_handle_shared` (`src/sys/kernel/src/uspace/sys_obj.rs`) call
+`Process::add_object`, which builds the `WaitObject` and records the object's
+wake count at that moment (`WaitObject::new`,
+`src/sys/kernel/src/uspace/process.rs`). A later wait reports the handle only
+if the object's counter has moved past that snapshot (`process_wait_handles`,
+`src/sys/kernel/src/uspace/sys_cpu.rs`).
+
+Between the two steps another process can already find the listener, map it,
+and wake it: a client's first `do_rpc`, or a `SysObj::get` with `F_WAKE_PEER`,
+which wakes inside the connect syscall itself. That wake lands before the
+snapshot, so the snapshot counts it as already consumed. The server never
+sees the connection, and the client blocks in `do_rpc` until its timeout, if
+it has one. The window is a few hundred nanoseconds on another CPU. IPC pairs
+are not affected: neither side learns its handle before the syscall that
+creates both returns, and by then both snapshots are taken.
+
+This predates the new-caps IPC fixes. It was found by code reading during
+their review, not by a failure.
+
+The fix is to take the snapshot before the listener is published: build the
+`WaitObject`, or the handle itself, before `create` inserts into
+`service.pending`. It touches `src/sys/kernel`, so do it as its own small
+patch, with a stress test in the style of `test_dup_races_close`.
+
+Possibly seen on 2026-09-27, not confirmed. A release `full-test-dev.sh` run
+on `df60016d` (4 vCPUs, 8 GiB) stalled in systest's
+`ipc_service::test_refused_refill_retries` for about 14 minutes, until the
+suite's 1500 s timeout; the test normally takes 2 s. That test has a client
+poll `connect` every 10 ms while the server's retry timer publishes a fresh
+listener, then call `do_rpc(None)`, so a lost first wake would block it for
+good. The stall did not come back in 150 runs of the IPC tests alone on the
+same VM shape, in a full systest run there, or in the next two developer
+gates. Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-bf8e-bab1741e9591/scratchpad/gates/dev1/dev-release.log`
+(its last systest line is `test_listener_pool_growth PASS`). Giving that
+`do_rpc` a deadline that fails loudly would turn a future stall into
+evidence.
+
+## A process can take an rmux server's name first (2026-09-27)
+
+rmux on Motor finds its server by a service name made of the server's mask
+(`src/bin/rmux/details.md` §4.2.1). Any process may register that name before
+the real server starts. The client checks the holder's mask before sending
+anything, so the impostor learns nothing. But the real server cannot start
+while the name is held: the client reports the holder's PID and gives up.
+Open question: is that enough, or should a name like this be reserved for
+processes with the matching mask? Reserving it would need kernel support.
+
+## IPC service error codes (2026-09-26)
+
+Needs a decision. A conflicting `create` of a service name returns
+`E_INVALID_ARGUMENT`; should it return `E_ALREADY_IN_USE`? A `get` on a live
+server with no free listener returns `E_NOT_FOUND`; should it return
+`E_NOT_READY`? systest's `ipc_service.rs` pins the current codes, so a change
+must update those assertions.
+
+## Any process can use up a sync IPC service's listeners (2026-09-26)
+
+A process can connect to a `moto-ipc::sync` service and never send a request.
+The kernel has then handed out a listener that the server does not know is
+taken, because a server learns of a connection only from its first request.
+Enough such connections leave no free listener, and other clients get
+`E_NOT_FOUND` until they close. This affects every such service (sys-log,
+dns-resolver, rmux). It costs availability, not authority.
+
+## 96 MiB guests fail systest (2026-09-27)
+
+Needs a decision: should `full-test.sh --release --cpus 1 --memory 96` pass
+the full suite?
+
+It fails every time, even on a freshly booted guest running only the IPC
+tests, in systest's `ipc_service::test_listener_pool_growth` (added in
+`0046aedc`). Measured with temporary prints:
+
+- A fresh 1 vCPU / 96 MiB guest has about 12,200 pages (48 MB) free for
+  admission, and the kernel uses 4.7 MB.
+- The test's child creates 131,072 listeners. Each 8,192 cost about 1,000
+  pages, so the whole pool needs about 64 MB. At about 98,000 listeners free
+  memory reaches the floor, and the child dies on a 4-byte heap allocation
+  instead of getting a clean refusal.
+- Afterwards the kernel holds 53.8 MB and keeps it: its heap does not shrink
+  when the listeners are freed. Every later test on that guest runs out of
+  memory, and a rerun fails at its first spawn.
+
+The count 131,072 was chosen to make the old `VecDeque` pool double to 2 MiB;
+the pool is a `BTreeMap` now. A smaller count, or one scaled to free memory,
+would keep the test runnable on small guests.
+
+Before that test existed, the same shape failed later, at
+`stdio_file_relay.rs:597`, where a child that spawns two more copies of
+systest exited with -1; probably also a memory shortage, never confirmed.
+Such failures were hard to read because the loader reported running out of
+memory as `E_INVALID_ARGUMENT`; `f3fec151` fixed that.
+
 ## Deferred PCI BAR-boundary hardening (2026-09-15)
 
 Additional defenses against buggy or malicious VMMs are outside the
@@ -426,3 +571,15 @@ the ruling; nothing here should be picked up without a fresh call.
   10.7 ms and one boot showed TCP throughput halving under 16 saturated disk
   readers. Pick up only with a matched-load network measurement and the
   threaded latency probe; patch and data under `build/virtio-waiters-results/`.
+
+## Declined review findings (2026-09-24)
+
+Considered in the review of the `CAP_NET`/`CAP_FS_WRITE` work and declined.
+Do not raise them again.
+
+- Fresh-boot placement budget (finding 8). The existing budget still limits
+  added spread relative to the fragmentation at boot. A global split-event
+  delta would test a different property.
+- vsock credit on undecodable headers (finding 14). No credit stall was shown.
+  Credit advertisements are cumulative, and malformed headers must not become
+  trusted credit input.

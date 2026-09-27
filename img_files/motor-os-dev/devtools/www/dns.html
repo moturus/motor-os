@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -446,7 +447,8 @@ a.card h3 { color: var(--accent); }
 <h1>DNS resolver</h1>
 <p class="lead">Name resolution is a standalone service, <code>dns-resolver</code>, reached
 over bounded synchronous IPC. Its backend is native Rust and depends only on Motor OS
-networking and filesystem APIs. It runs with the None role.</p>
+networking and filesystem APIs. It runs with the None role, holding only
+<code>CAP_LOG</code> and <code>CAP_NET</code>.</p>
 
 <h2>Request path</h2>
 <pre><code>Rust application (std::net::ToSocketAddrs, TcpStream::connect("host:port"), ...)
@@ -463,6 +465,11 @@ format defined in the <code>moto-dns</code> crate (names up to 253 bytes, up to 
 addresses per answer). Because each lookup takes one IPC connection into four workers,
 more than 32 concurrent lookups are refused with <code>NotConnected</code>; raising this
 is on the follow-up list.</p>
+<p>The service answers only callers that hold <code>CAP_NET</code>, checked against the
+capabilities the kernel reports for the connection; other callers get
+<code>PermissionDenied</code>. So a process without network access cannot borrow the
+resolver's. Numeric addresses and <code>localhost</code> need no capability. See
+<a href="capabilities.html#network">Capabilities</a>.</p>
 
 <h2>Configuration</h2>
 <p>The service reads <code>/system/cfg/libc/hosts</code> first and

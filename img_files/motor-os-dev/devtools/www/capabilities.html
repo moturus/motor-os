@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Motor OS capabilities: every bit, how parents grant them to children, network and filesystem-write access, named IPC services, and how rush and rmux use them.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Capabilities | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation">
+<div class="nav-group">
+  <div class="nav-title">Getting started</div>
+  <ul>
+    <li><a href="docs.html">Documentation</a></li>
+    <li><a href="what.html">Overview</a></li>
+    <li><a href="why.html">Why Motor OS</a></li>
+    <li><a href="build.html">Building from source</a></li>
+    <li><a href="running.html">Running a VM</a></li>
+    <li><a href="imager.html">Imager: image tools</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">System</div>
+  <ul>
+    <li><a href="architecture.html">Architecture</a></li>
+    <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html" class="current">Capabilities</a></li>
+    <li><a href="memory.html">Memory</a></li>
+    <li><a href="filesystem.html">Filesystem</a></li>
+    <li><a href="networking.html">Networking</a></li>
+    <li><a href="dns.html">DNS resolver</a></li>
+    <li><a href="terminals.html">Terminals</a></li>
+    <li><a href="diagnostics.html">Logs and diagnostics</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Userspace</div>
+  <ul>
+    <li><a href="commands.html">Commands</a></li>
+    <li><a href="rush.html">rush: the shell</a></li>
+    <li><a href="rmux.html">rmux: the multiplexer</a></li>
+    <li><a href="editors.html">Editors</a></li>
+    <li><a href="devtools.html">Developer image</a></li>
+  </ul>
+</div>
+<div class="nav-group">
+  <div class="nav-title">Developing</div>
+  <ul>
+    <li><a href="toolchain.html">Toolchains</a></li>
+    <li><a href="rust.html">Rust on Motor OS</a></li>
+    <li><a href="c-cpp.html">C/C++ on Motor OS</a></li>
+    <li><a href="lorry.html">Lorry: the package manager</a></li>
+    <li><a href="gix.html">gix: the Git client</a></li>
+    <li><a href="hello.html">Hello, world</a></li>
+    <li><a href="profiling.html">Profiling</a></li>
+  </ul>
+</div>
+</nav>
+</aside>
+<article class="content">
+<div class="eyebrow">System</div>
+<h1>Capabilities</h1>
+<p class="lead">Every Motor OS process has an immutable 64-bit capability mask, set when the
+process is created. Each set bit allows a class of operations, checked by the kernel or by
+the service that performs the operation. This page lists every capability, how a process
+passes capabilities to its children, and how rush and rmux use them.</p>
+<p>A process cannot change its own capabilities. It can only ask for a mask for a new
+child, and the kernel decides whether the parent may grant it. The definitions and the
+default child policy live in <code>moto_sys::caps</code>
+(<code>src/sys/lib/moto-sys/src/caps.rs</code>); the design notes are in
+<code>docs/caps.md</code> and <code>docs/process-roles.md</code>. For the process model around
+them, see <a href="processes.html">Processes and roles</a>.</p>
+
+<h2 id="the-bits">The capability bits</h2>
+<p>Masks are written in hexadecimal and combined with bitwise OR.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Capability</th><th>Bit</th><th>Mask</th><th>What it allows</th></tr>
+  <tr><td><code>CAP_SYS</code></td><td>0</td><td><code>0x01</code></td><td>The System role: protection from being killed by ordinary userspace processes, and broad authority to grant capabilities to children.</td></tr>
+  <tr><td><code>CAP_IO_MANAGER</code></td><td>1</td><td><code>0x02</code></td><td>IO-manager operations: mapping device memory (MMIO) and the serial console. Held by sys-io.</td></tr>
+  <tr><td><code>CAP_SPAWN</code></td><td>2</td><td><code>0x04</code></td><td>Creating processes. The kernel checks it when a child address space is created.</td></tr>
+  <tr><td><code>CAP_LOG</code></td><td>3</td><td><code>0x08</code></td><td>Writing records to the kernel log and to strobe, the logging service.</td></tr>
+  <tr><td><code>CAP_SHUTDOWN</code></td><td>4</td><td><code>0x10</code></td><td>Shutting the system down.</td></tr>
+  <tr><td><code>CAP_SPAWN_DETACHED</code></td><td>5</td><td><code>0x20</code></td><td>Creating detached children, which outlive their parent.</td></tr>
+  <tr><td><code>CAP_INTERACTIVE</code></td><td>6</td><td><code>0x40</code></td><td>Acting with the logged-in user's authority: the Interactive role, unless <code>CAP_SYS</code> is also set.</td></tr>
+  <tr><td><code>CAP_VSOCK</code></td><td>7</td><td><code>0x80</code></td><td>Creating and listening on native virtio-vsock streams. Needs <code>CAP_NET</code> as well.</td></tr>
+  <tr><td><code>CAP_NET</code></td><td>8</td><td><code>0x100</code></td><td>Using sys-io's network API: TCP, UDP, ICMP, loopback, and vsock.</td></tr>
+  <tr><td><code>CAP_FS_WRITE</code></td><td>9</td><td><code>0x200</code></td><td>Changing the filesystem and using file locks through sys-io.</td></tr>
+</table>
+</div>
+<p>Two things these bits do not do:</p>
+<ul>
+  <li><code>CAP_SYS</code> does not imply the other bits. A System process still needs
+  <code>CAP_SPAWN</code> to create a child, <code>CAP_SHUTDOWN</code> to shut down,
+  <code>CAP_NET</code> to use the network, and <code>CAP_FS_WRITE</code> to change files.
+  Its broader authority applies only to granting capabilities, below.</li>
+  <li><code>CAP_LOG</code> does not open <code>/system/logs</code>. Reading log files is a
+  matter of filesystem permissions; <code>CAP_LOG</code> only allows sending records. A
+  panic message or a backtrace goes to the process's stderr and needs no capability.</li>
+</ul>
+
+<h2 id="roles">Roles</h2>
+<p>Two bits also decide the process's role, which is all the filesystem knows about who
+is asking. <code>CAP_SYS</code> means <strong>System</strong>; otherwise
+<code>CAP_INTERACTIVE</code> means <strong>Interactive</strong>; otherwise the role is
+<strong>None</strong>. A None-role process can still hold individual capabilities such as
+<code>CAP_SPAWN</code> or <code>CAP_NET</code>, and the Interactive role alone grants no
+logging, spawning, or shutdown authority. The roles and the per-role file permissions are
+described under <a href="processes.html">Processes and roles</a> and
+<a href="filesystem.html">Filesystem</a>.</p>
+
+<h2 id="granting">Granting capabilities to a child</h2>
+<p>The kernel checks the requested mask when it creates the child:</p>
+<ul>
+  <li>A parent without <code>CAP_SYS</code> may grant only capabilities it holds, and never
+  <code>CAP_SYS</code> or <code>CAP_IO_MANAGER</code>.</li>
+  <li>A None-role parent may not grant <code>CAP_LOG</code>, even if it holds it. An
+  Interactive parent that holds <code>CAP_LOG</code> may pass it on explicitly.</li>
+  <li>A System parent may grant capabilities it does not hold, except
+  <code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code>. Every
+  parent must hold these three to grant them, so they can only be narrowed on the way
+  down the process tree.</li>
+  <li>Spawning a detached child needs <code>CAP_SPAWN_DETACHED</code> in the parent, even
+  when the parent is System.</li>
+</ul>
+<p>A request that breaks these rules fails with <code>E_NOT_ALLOWED</code>
+(<code>PermissionDenied</code> in <code>std</code>). The kernel never quietly drops the
+forbidden bits. Below System, a child can never get a higher role than its parent.</p>
+
+<h3 id="default-mask">The default mask</h3>
+<p>Without an explicit mask, the runtime computes one from the parent's role with
+<code>default_child_capabilities</code>:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Parent's role</th><th>Default child mask</th></tr>
+  <tr><td>System</td><td><code>CAP_SPAWN</code> and <code>CAP_LOG</code>, plus whichever of <code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code> the parent holds. The child has the None role.</td></tr>
+  <tr><td>Interactive</td><td><code>CAP_INTERACTIVE</code>, plus whichever of <code>CAP_SPAWN</code>, <code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code> the parent holds.</td></tr>
+  <tr><td>None</td><td>Only the parent's <code>CAP_SPAWN</code>, <code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code> bits.</td></tr>
+</table>
+</div>
+<p><code>CAP_SYS</code>, <code>CAP_IO_MANAGER</code>, <code>CAP_SHUTDOWN</code>, and
+<code>CAP_SPAWN_DETACHED</code> never pass on by default, and <code>CAP_LOG</code> does
+only from a System parent. A System parent's default child has the None role even if the
+parent also holds <code>CAP_INTERACTIVE</code>: a system service has to say explicitly
+when it creates a user session. Defaults from non-System parents only ever contain bits
+the parent holds.</p>
+
+<h3 id="explicit-mask">An explicit mask</h3>
+<p>Setting <code>MOTOR_OS_CAPS</code> in a child's environment replaces the whole default.
+The value is hexadecimal, with an optional lowercase <code>0x</code>: <code>44</code> and
+<code>0x44</code> both mean <code>CAP_SPAWN | CAP_INTERACTIVE</code>, and <code>0</code>
+asks for nothing. A value that is not valid hexadecimal, or does not fit in 64 bits, fails
+the spawn with <code>InvalidInput</code> rather than falling back to the default. The
+parent's runtime consumes the variable, so the child never sees it.</p>
+<pre><code>use moto_sys::caps::{CAP_SPAWN, MOTOR_OS_CAPS_ENV_KEY};
+use std::process::Command;
+
+// A None-role worker that may spawn, but not write files or use the network.
+let worker = Command::new(program)
+    .env(MOTOR_OS_CAPS_ENV_KEY, format!("{CAP_SPAWN:#x}"))
+    .spawn()?;</code></pre>
+<p>An explicit mask is a replacement, not an addition. Leaving out
+<code>CAP_INTERACTIVE</code> drops the Interactive role; leaving out <code>CAP_NET</code>
+or <code>CAP_FS_WRITE</code> denies that access even though the parent holds it. The
+child's own children then use their own defaults or explicit masks.</p>
+
+<h3 id="detached">Detached children</h3>
+<p>Setting <code>MOTOR_OS_DETACHED</code> to exactly <code>true</code> or <code>TRUE</code>
+asks for a detached child; other values do not. The runtime consumes the variable either
+way. A detached child is owned by the kernel and survives its parent; an ordinary
+non-System child is killed when its parent is reaped. Detaching is separate from the
+child's mask:</p>
+<ul>
+  <li>the parent needs <code>CAP_SPAWN_DETACHED</code>;</li>
+  <li>the child does not need that bit to be detached;</li>
+  <li>giving the child <code>CAP_SPAWN_DETACHED</code> lets it detach its own children,
+  but does not detach it.</li>
+</ul>
+<p>A detached worker is best started with null standard streams, so that it does not
+depend on its launcher for I/O.</p>
+
+<h2 id="network">Network access</h2>
+<p>sys-io authorizes the process at the other end of each connection, using the mask the
+kernel reports for it; nothing a client sends can widen it. If sys-io cannot get that
+mask, it drops the connection rather than treat the client as unprivileged.</p>
+<p>Without <code>CAP_NET</code>, sys-io drops a network connection as soon as it accepts
+it, before serving any request. That covers TCP, UDP, ICMP, loopback, and vsock, including
+vsock discovery. The IPC connect itself can succeed, so the refusal shows up as a closed
+connection: native network calls fail with <code>NotConnected</code>, and a raw
+<code>io_channel</code> client sees its channel close. <code>CAP_VSOCK</code> alone grants
+nothing; vsock needs both bits.</p>
+<p>The DNS resolver checks its own callers for <code>CAP_NET</code> and refuses the others
+with <code>PermissionDenied</code>, so a process cannot borrow the resolver's network
+access. Numeric addresses and <code>localhost</code> are answered in the runtime and need
+no capability.</p>
+
+<h2 id="filesystem-writes">Filesystem writes</h2>
+<p>Without <code>CAP_FS_WRITE</code>, a process still connects to the filesystem and can
+stat, read, and list what its role allows. Every other request fails with
+<code>PermissionDenied</code>, and the connection stays usable. That includes creating,
+writing, resizing, copying into, deleting, moving, and changing permissions of entries,
+flushing the filesystem, and every file-lock operation, unlock included. Denying locks is
+a provisional policy. The runtime refuses opens with write, append, create, or truncate
+intent early, even of an existing file, but sys-io enforces the rule for any client that
+bypasses the runtime.</p>
+<p><code>CAP_FS_WRITE</code> never overrides filesystem permissions: a change needs both
+the capability and the role's permission. Without the capability, <code>flush</code> on a
+read-only file does nothing, and flushing a writable file is refused.</p>
+<p>The checks follow the process that talks to sys-io:</p>
+<ul>
+  <li>A file handed to a child as a standard stream with <code>Stdio::from(file)</code> is
+  used through the child's own connection, so a child without <code>CAP_FS_WRITE</code>
+  cannot write to it.</li>
+  <li>A child that inherits a file-backed standard stream writes through its parent's
+  relay, with the parent's authority.</li>
+  <li>Pipes carry no filesystem authority at all.</li>
+</ul>
+<p>Rust's standard streams report a denied write as <code>PermissionDenied</code>, and
+<code>println!</code> and <code>eprintln!</code> panic when a write fails. A closed
+standard stream reads as end of file and discards writes without an error.</p>
+
+<h2 id="checking">Reading a mask</h2>
+<p>A process reads its own mask without a syscall, from a read-only page the kernel maps
+into every process:</p>
+<pre><code>let caps = moto_sys::ProcessStaticPage::get().capabilities;
+let role = moto_sys::caps::ProcessRole::from_caps(caps);
+let can_spawn = caps &amp; moto_sys::caps::CAP_SPAWN != 0;</code></pre>
+<p>For the process at the other end of a connection,
+<code>SysObj::get_capabilities(handle)</code> returns that process's mask, and
+<code>SysObj::get_pid(handle)</code> its PID. Both answers come from the kernel, so they
+cannot be forged; servers should authorize with them, as sys-io, strobe, and the DNS
+resolver do. Process statistics (<code>ps</code>, <code>top</code>) show only the derived
+role, not the mask, and are for observation, not authorization.</p>
+
+<h2 id="named-ipc-services">Named IPC services</h2>
+<p>A server registers a service name by creating a listener for it, usually through
+<code>moto_ipc::sync::LocalServer</code>. The kernel gives each name one owner process:</p>
+<ul>
+  <li>The first process to register a name owns it; its later listeners share it.</li>
+  <li>The owner keeps the name while it has any listening or connected endpoint for it,
+  and loses it when it closes the last one or exits. A running <code>LocalServer</code>
+  never gives its name up: when memory runs low it keeps serving its open connections
+  and retries adding listeners every 100 ms.</li>
+  <li>While the owner is alive, another process cannot register the name. Once the owner
+  has exited, another process can take it.</li>
+</ul>
+<p>Only the <code>sys-io</code> name is reserved. Any other name belongs to whoever
+registers it first, so a name alone does not prove who the server is. Check both ends
+through the connection: a server checks each client's mask before serving it, and a client
+that sends anything sensitive checks the server's mask first. Never trust a mask or a PID
+that the other side sends as data.</p>
+
+<h2 id="rush">Capabilities in rush</h2>
+<p>An Interactive shell's commands are Interactive by the default rule. A System console
+shell explicitly grants <code>CAP_SYS</code> to the ordinary commands it runs, because the
+default rule never passes System on. Programs listed by name under
+<code>spawn-detached</code> in <code>/user/cfg/rush.toml</code> (the image lists
+<code>rmux</code>) also get <code>CAP_SPAWN_DETACHED</code>, so they can leave a server
+running after the session ends.</p>
+
+<h3 id="rush-explicit">Giving a command an explicit mask</h3>
+<p><code>MOTOR_OS_CAPS</code> works in rush both as a command assignment and as an exported
+variable, and the assignment wins over the export. Either way it reaches the runtime
+unchanged and suppresses both of rush's automatic grants, so
+<code>MOTOR_OS_CAPS=0x2ec rmux</code> runs rmux without <code>CAP_NET</code> and without
+the detach grant added on top. Assignments before <code>command</code> and
+<code>exec</code> reach the program they run in the same way.</p>
+<p>A mask needs a real child process. Rush refuses a masked function, <code>eval</code>,
+<code>.</code> (source), any other builtin, a compound command, or a redirection-only
+command with status 126, before running its body or opening its redirections, rather
+than run it with the shell's own authority. <code>command</code> and <code>exec</code> can
+forward a mask to an external program, but cannot make a builtin honor it. Rush only
+checks that the variable is present; an empty, zero, or malformed value is refused the
+same way.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Invocation</th><th>What happens</th></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 sh</code></td><td>Starts a shell with the requested capabilities.</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 ./script.sh</code></td><td>Runs the script in a new, restricted rush process.</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 eval '...'</code></td><td>Refused with status 126.</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 . ./script.sh</code></td><td>Refused with status 126.</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 function_name</code></td><td>Refused with status 126.</td></tr>
+</table>
+</div>
+<p>An exported mask follows the same rule, for every builtin: while a mask is exported,
+<code>exit</code>, <code>return</code>, <code>break</code>, <code>continue</code>,
+<code>wait</code>, <code>unset</code>, <code>trap</code>, <code>if</code>, loops, and
+other compounds are all refused with status 126. A refusal is an ordinary failure: without
+<code>set -e</code>, a script continues past a refused <code>exit</code>, and a refused
+<code>wait</code> does not wait. So prefer a command assignment. Rush's emulated
+subshells do not isolate exported variables; use a separate shell process when an export
+must not affect the caller. Bare assignments without redirections are ordinary shell
+setup.</p>
+<p>Refusal happens when rush reaches the command; it does not scan a script in advance.
+Command-line expansions, and the redirections of a permitted child launch, still run
+with the calling shell's authority: with <code>MOTOR_OS_CAPS=0x44 prog &gt; out</code>,
+the shell creates or truncates <code>out</code>, but <code>prog</code>'s writes to it are
+denied. To restrict a whole shell body, run it as
+<code>MOTOR_OS_CAPS=0x44 sh -c '...'</code>. Inside that shell the mask is already
+consumed, so its builtins, functions, and sourcing work, with the restricted
+capabilities; unsetting <code>MOTOR_OS_CAPS</code> there cannot bring back what was
+left out.</p>
+<p>Rush stages pipelines and command substitutions through temporary files in
+<code>$TMPDIR</code>, so they need <code>CAP_FS_WRITE</code>. If staging fails, the
+pipeline or substitution returns status 2; it does not fall back to the shell's own
+streams or pretend to succeed with empty output. For example,
+<code>MOTOR_OS_CAPS=0x44 sh -c 'x=$(printf hi)'</code> fails with status 2.</p>
+
+<h2 id="rmux">Capabilities in rmux</h2>
+<p>An rmux server often has more capabilities than a program that might try to talk to it.
+On Motor OS the rmux client and server therefore meet over a
+<a href="#named-ipc-services">named IPC service</a>, not TCP, so each side can ask the
+kernel for the other's mask.</p>
+<ul>
+  <li><strong>The server's mask.</strong> The server is spawned with the default mask of
+  the process that starts it. Its service name is that mask in hex:
+  <code>rmux/&lt;mask&gt;</code>, or <code>rmux/&lt;mask&gt;/&lt;TMPDIR&gt;</code> when
+  <code>TMPDIR</code> is set.</li>
+  <li><strong>Finding a server.</strong> A client computes the mask its own server would
+  get, <code>default_child_capabilities(own mask)</code>, and looks up that name. Before it
+  sends anything, it checks that the server holding the name has exactly that mask, so a
+  less privileged impostor cannot collect keystrokes. If a process with another mask holds
+  the name, the client names that process and gives up.</li>
+  <li><strong>Refusing clients.</strong> The server serves a client only if the client
+  holds every bit the server holds, or would grant it to its own children by default. A
+  client that fails the check is refused before any request is processed, so it cannot
+  list, create, attach to, type into, or kill a session.</li>
+  <li><strong>Roles.</strong> <code>CAP_SYS</code> and <code>CAP_INTERACTIVE</code> are part
+  of the mask, so a None-role process never reaches an Interactive server, even if it
+  holds every other bit.</li>
+  <li><strong>Narrower servers.</strong> A client with a different mask finds or starts
+  its own server, with its own sessions. A restricted program gets an equally restricted
+  rmux, never a way into a more privileged one. The match is exact: a client never uses a
+  narrower server, whose new panes would silently lose capabilities.</li>
+  <li><strong>Panes.</strong> A pane's program gets the server's default child mask, which
+  for an Interactive server is the server's own mask.</li>
+  <li><strong>Starting a server</strong> needs <code>CAP_SPAWN</code> and
+  <code>CAP_SPAWN_DETACHED</code>, because the server is detached so that it outlives the
+  session. A client without them fails with a message naming the missing capability. rush
+  grants the detach bit to rmux through its <code>spawn-detached</code> list; an explicit
+  <code>MOTOR_OS_CAPS</code> must include <code>0x20</code> itself.</li>
+</ul>
+<p>How some launchers map to servers:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Launched as</th><th>Client mask</th><th>Server and pane mask</th></tr>
+  <tr><td><code>rmux</code> from an SSH shell</td><td><code>0x3e4</code></td><td><code>0x3c4</code> (Interactive)</td></tr>
+  <tr><td><code>rmux attach</code> typed in one of that server's panes</td><td><code>0x3c4</code></td><td><code>0x3c4</code>, the same server</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x2ec rmux</code> (no <code>CAP_NET</code>)</td><td><code>0x2ec</code></td><td><code>0x2c4</code>, a separate server</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x3a4 rmux</code> (None role)</td><td><code>0x3a4</code></td><td><code>0x384</code>, a separate None-role server</td></tr>
+  <tr><td><code>MOTOR_OS_CAPS=0x44 rmux</code> (no detach)</td><td><code>0x44</code></td><td>none: it can join a <code>0x44</code> server, not start one</td></tr>
+</table>
+</div>
+<p>One gap is accepted for now: for a System user the name changes inside a pane. A
+System client with every bit set gets a <code>0x38c</code> server, whose None-role panes
+run as <code>0x384</code>, so an <code>rmux attach</code> typed in such a pane looks for a
+different server. The design is in <code>src/bin/rmux/details.md</code>, section 4.2.1.</p>
+
+<h2 id="configured">Masks in the shipped image</h2>
+<p><code>/system/cfg/sys-init.cfg</code> starts each service with an explicit mask, and
+services get only what they need. russhd runs with <code>0x3fc</code>, and each
+authenticated SSH shell gets the Interactive part of it, <code>0x3ec</code>. The DNS
+resolver runs with <code>0x108</code> (<code>CAP_LOG | CAP_NET</code>), so it has the
+network but cannot write files; strobe has the reverse. These launch chains pass
+<code>CAP_NET</code> and <code>CAP_FS_WRITE</code> on only where they hold them. How a
+session gets its role is described under
+<a href="processes.html#how-a-session-gets-its-role">Processes and roles</a>.</p>
+<nav class="pager">
+<a class="pager-prev" href="processes.html"><span>Previous</span>Processes and roles</a>
+<a class="pager-next" href="memory.html"><span>Next</span>Memory</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+    <p><a href="https://github.com/moturus/motor-os">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

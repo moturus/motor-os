@@ -300,3 +300,43 @@ Process statistics expose the derived role through
 `ProcessInfoV1.process_role`, not the full capability mask. Statistics are
 for observation; use the connection-bound capability query for peer
 authorization.
+
+## Named IPC services
+
+A server registers a service name by creating a `shared:url=...` listener,
+usually through `moto_ipc::sync::LocalServer`. The kernel gives each name one
+owner process:
+
+- The first process to register a name owns it. Its later listeners for the
+  name share it.
+- The owner keeps the name while it has any listening or connected endpoint
+  for it. The name is released when the owner closes its last endpoint or
+  exits.
+- While the owner is alive, another process cannot register the name. Its
+  attempt fails with `E_INVALID_ARGUMENT`.
+- After the owner exits, another process can take the name over, even if
+  handles to the old endpoints are still open.
+
+A running `LocalServer` never gives up its name, so another process cannot
+take it over, even by using up memory. When the kernel refuses a new
+listener, the server keeps serving its open connections and retries every
+100 ms.
+
+The kernel reserves only the `sys-io` name, for sys-io. Any other name belongs
+to whichever process registers it first. A name alone therefore does not prove
+who the server is. Check both ends through the connection:
+
+- A server checks each client with `SysObj::get_capabilities(handle)` before
+  serving it.
+- A client that sends sensitive data checks its server the same way, using
+  `ClientConnection::handle()`. `SysObj::get_pid(handle)` gives the server's
+  PID.
+- Never trust a mask or PID that the peer sends as data.
+
+rmux does all of this. Its server registers a name made of its own mask
+(`rmux/<mask>`), a client checks that mask before it sends a key, and the
+server refuses a client that lacks any of its bits. A restricted program
+therefore gets its own, equally restricted rmux server rather than a way into
+a more privileged one. Roles are covered too, because `CAP_SYS` and
+`CAP_INTERACTIVE` are part of the mask: a None-role process gets a None-role
+server and cannot use an Interactive one, even if it holds every other bit.

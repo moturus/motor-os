@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html" class="current">Networking</a></li>
@@ -552,6 +553,10 @@ this is an accepted non-POSIX exception.</p>
 </ul>
 
 <h2>From a program's point of view</h2>
+<p>Networking needs <code>CAP_NET</code>. A process without it can still connect to
+sys-io, but sys-io drops the connection before serving any request, so network calls fail
+with <code>NotConnected</code>; native vsock also needs <code>CAP_VSOCK</code>. See
+<a href="capabilities.html#network">Capabilities</a>.</p>
 <p><code>std::net</code> works: <code>TcpListener</code>, <code>TcpStream</code>,
 <code>UdpSocket</code>, name resolution, nonblocking mode, timeouts, and shutdown. The
 Motor OS ports of mio and Tokio sit on an edge-triggered readiness interface in the

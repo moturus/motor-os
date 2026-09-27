@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html" class="current">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -496,7 +497,8 @@ filesystem, no network code, and no program loader. What it does:</p>
   when nothing else is runnable, and a wake can hand the CPU directly to the woken
   thread.</li>
   <li><strong>Processes and threads</strong> as kernel objects, with an immutable capability
-  word per process (see <a href="processes.html">Processes and roles</a>).</li>
+  word per process (see <a href="processes.html">Processes and roles</a> and
+  <a href="capabilities.html">Capabilities</a>).</li>
   <li><strong>Wait/wake objects.</strong> Every kernel object a process holds a handle to
   can be waited on. A wake is queued on a lock-free list that the scheduler drains, and a
   missed wake is latched per handle so a waiter cannot lose it. Userspace futexes, pipes,

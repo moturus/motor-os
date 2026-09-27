@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -452,15 +453,15 @@ kills the client and leaves everything else running.</p>
 <p>Why not port tmux? tmux is built on one pty per pane, and Motor OS has no pty, no tty
 layer, no termios, no ioctl, and no signals. It has one console, a polled UART owned by
 sys-tty, and a multiplexer is what makes that one console usable, so it had to be
-written. rmux has zero dependencies, only Rust <code>std</code>, builds and runs on Linux
-as well, and is tested there against real tmux: a corpus of key scripts is driven
+written. rmux is plain Rust with few dependencies (crossterm for its own console, and on
+Motor OS the native IPC crates), builds and runs on Linux as well, and is tested there against real tmux: a corpus of key scripts is driven
 through both, and the two must paint the same picture. Its differences from tmux are
 listed and each is itself tested.</p>
 
 <h2>Using it</h2>
 <pre><code>rmux                       attach to the most recent session, or start one
 rmux new [-s name]         start a session and attach
-rmux attach [-t name]      attach to a named session
+rmux attach [-d] [-t name] attach to a session; -d detaches its other clients
 rmux ls                    list sessions
 rmux kill-session -t name  kill it and everything in it</code></pre>
 <p>The prefix is <kbd>C-a</kbd>. After it:</p>
@@ -502,7 +503,9 @@ reaches rmux instead of QEMU's monitor.</p>
   rush sets to the foreground command's name, until a rename takes over.</li>
   <li><strong>Sessions</strong>: real and multiple, named or auto-numbered, with detach and
   re-attach and a list to pick from; <code>aggressive-resize</code> sizes a window to the
-  smallest client watching it.</li>
+  smallest client watching it. A session outlives a lost connection: when the client's
+  terminal goes away, for example when an SSH connection drops, the client detaches and
+  the session keeps running for the next <code>rmux attach</code>.</li>
   <li><strong>A terminal emulator per pane</strong>: cursor motion, erases, insert and
   delete, scroll regions, SGR including the 256-color palette and true color, the
   alternate screen, autowrap, bracketed paste, titles, and the terminal-size protocol
@@ -549,10 +552,12 @@ The server registers a service name made of its own capability mask, and each en
 the kernel for the other's mask. A client looks for the server its own capabilities would
 start, checks that server's mask before it sends a key, and starts one if none runs. The
 server refuses a client that lacks any of its capabilities, so a restricted program gets
-its own, equally restricted rmux server rather than a way into a more privileged one. The
-server is spawned detached, which needs <code>CAP_SPAWN_DETACHED</code>; that is why rmux
-is on rush's detached-spawn list, and why an rmux server survives the SSH session that
-started it.</p>
+its own, equally restricted rmux server rather than a way into a more privileged one.
+Roles are part of the mask, so a None-role process never reaches an Interactive server
+(see <a href="capabilities.html#rmux">Capabilities in rmux</a>). The server is
+spawned detached, which needs <code>CAP_SPAWN_DETACHED</code>; that is why rmux is on
+rush's detached-spawn list, and why an rmux server survives the SSH session that started
+it. A launcher without that capability cannot start a server, and rmux says so.</p>
 <nav class="pager">
 <a class="pager-prev" href="rush.html"><span>Previous</span>rush: the shell</a>
 <a class="pager-next" href="editors.html"><span>Next</span>Editors</a>

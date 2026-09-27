@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="The Motor OS process model: capabilities, the System, Interactive, and None roles, spawning, and detached processes.">
+<meta name="description" content="The Motor OS process model: capabilities, network and filesystem-write access, the System, Interactive, and None roles, named IPC services, spawning, and detached processes.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Processes and roles | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html" class="current">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -451,28 +452,12 @@ decide what it may do with files.</p>
 <h2>Capabilities</h2>
 <p>Every process carries an immutable 64-bit capability word, set when the process is
 created and readable by the process itself without a syscall (it is in a read-only page
-the kernel maps into every process). The defined bits:</p>
-<div class="table-wrap">
-<table>
-  <tr><th>Capability</th><th>Meaning</th></tr>
-  <tr><td><code>CAP_SYS</code></td><td>System authority: root-like, unkillable from userspace, may grant any capability to a child.</td></tr>
-  <tr><td><code>CAP_IO_MANAGER</code></td><td>May map device memory and contiguous physical memory; held by sys-io.</td></tr>
-  <tr><td><code>CAP_SPAWN</code></td><td>May create processes.</td></tr>
-  <tr><td><code>CAP_LOG</code></td><td>May write records to the kernel log and to the logging service.</td></tr>
-  <tr><td><code>CAP_SHUTDOWN</code></td><td>May halt the machine.</td></tr>
-  <tr><td><code>CAP_SPAWN_DETACHED</code></td><td>May create detached children that outlive the parent.</td></tr>
-  <tr><td><code>CAP_INTERACTIVE</code></td><td>Acts with the authority of the logged-in user.</td></tr>
-  <tr><td><code>CAP_VSOCK</code></td><td>May use native virtio-vsock streams (with <code>CAP_NET</code>).</td></tr>
-  <tr><td><code>CAP_NET</code></td><td>May use sys-io's network API; without it sys-io drops the connection.</td></tr>
-  <tr><td><code>CAP_FS_WRITE</code></td><td>May modify the filesystem and use file locks; without it, read only.</td></tr>
-</table>
-</div>
-<p>The kernel enforces one rule at spawn: a parent without <code>CAP_SYS</code> may only
-grant a subset of its own capabilities, and never <code>CAP_SYS</code> or
-<code>CAP_IO_MANAGER</code>. A <code>CAP_SYS</code> parent may grant anything except
-<code>CAP_VSOCK</code>, <code>CAP_NET</code>, and <code>CAP_FS_WRITE</code>, which every
-parent must hold to pass on. Because a capability can never be gained after creation,
-a process cannot escalate.</p>
+the kernel maps into every process). Ten bits are defined: system authority, device
+access, spawning, logging, shutdown, detached spawning, the user's authority, vsock, the
+network, and filesystem writes. The kernel decides what a parent may grant a child, and a
+capability can never be gained after creation, so a process cannot escalate.
+<a href="capabilities.html">Capabilities</a> describes every bit, the grant rules, network
+and filesystem-write access, and how rush and rmux use them.</p>
 
 <h2>The three roles</h2>
 <p>A role is derived from the capability word: <code>CAP_SYS</code> means
@@ -492,7 +477,9 @@ filesystem knows about: every file and directory stores one permission byte per 
 of the process at the other end of a connection; the answer comes from the kernel, not
 from the client, so it cannot be forged. sys-io does this once per filesystem connection
 and uses the result for every permission check on that connection. If the query fails,
-the connection is dropped rather than given a default role.</p>
+the connection is dropped rather than given a default role. Servers that clients find by
+name check each other the same way; see
+<a href="capabilities.html#named-ipc-services">Named IPC services</a>.</p>
 
 <h2>Spawning</h2>
 <p>There is no <code>fork</code> and no <code>exec</code>. <code>std::process::Command</code>
@@ -501,7 +488,10 @@ address space, loads the ELF executable into it, maps the runtime, writes the ar
 and environment, sets up stdio, creates the process object with the chosen capabilities,
 and wakes the main thread. The program file's execute permission for the parent's role is
 checked before loading; a script needs both the script and its interpreter to be
-executable.</p>
+executable. A failed spawn says why: <code>PermissionDenied</code> for a program the
+parent's role cannot execute, <code>InvalidInput</code> for a file that is not a loadable
+executable, and <code>OutOfMemory</code> when the kernel refuses memory for the program's
+segments.</p>
 <p>The child's capabilities come from an environment key that the parent's runtime
 consumes at spawn time and the child never sees:</p>
 <ul>
@@ -522,9 +512,10 @@ logged-in session cannot appear by accident. A None parent gets a None child. In
 case the default is intersected with what the parent holds, and <code>CAP_SPAWN</code> is
 included so that children can have children. <code>CAP_VSOCK</code>, <code>CAP_NET</code>,
 and <code>CAP_FS_WRITE</code> follow whenever the parent holds them, so a restriction
-applies to all descendants.</p>
+applies to all descendants. The full rules are under
+<a href="capabilities.html#granting">Capabilities</a>.</p>
 
-<h3>How a session gets its role</h3>
+<h3 id="how-a-session-gets-its-role">How a session gets its role</h3>
 <p>The chain is explicit at every step. sys-init starts sys-tty and russhd with a mask
 that includes <code>CAP_INTERACTIVE</code>; sys-tty starts the console shell with the
 same role it has itself; russhd gives each authenticated session shell the Interactive
@@ -568,7 +559,7 @@ process with status 130 unless it registered a handler; see
 systems, and <code>rush</code> treats 130 as an interrupt.</p>
 <nav class="pager">
 <a class="pager-prev" href="architecture.html"><span>Previous</span>Architecture</a>
-<a class="pager-next" href="memory.html"><span>Next</span>Memory</a>
+<a class="pager-next" href="capabilities.html"><span>Next</span>Capabilities</a>
 </nav>
 </article>
 </main>

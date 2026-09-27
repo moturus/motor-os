@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -516,7 +517,8 @@ below are deliberate properties of the system, described in detail on the
   <code>SIGCHLD</code>. Use <code>waitpid</code> and <code>poll</code>.</li>
   <li>There are no symbolic or hard links, no users or groups (<code>getuid</code> and
   friends are not meaningful), and file permissions are per role rather than per
-  owner.</li>
+  owner. Writing also needs <code>CAP_FS_WRITE</code> (see
+  <a href="capabilities.html#filesystem-writes">Capabilities</a>).</li>
   <li>There is no file-backed <code>mmap</code>; read the file. Anonymous mappings work.</li>
   <li>A terminal is a pipe whose far end behaves like one: <code>isatty</code> works,
   but there is no termios and no <code>ioctl</code>. Raw mode and the terminal size are

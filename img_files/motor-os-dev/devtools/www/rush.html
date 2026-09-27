@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -537,7 +538,12 @@ commands inherit Interactive by the default rule. Programs on rush's detached-sp
 list, such as rmux, are started with <code>CAP_SPAWN_DETACHED</code> so that they can leave
 a server running after the session ends. An explicit <code>MOTOR_OS_CAPS</code>, either
 a <code>MOTOR_OS_CAPS=... command</code> assignment or an exported variable, replaces both
-grants unchanged and can narrow the child; the assignment wins over the export. Background jobs are started without the terminal input stream, since Motor has no
+grants unchanged and can narrow the child; the assignment wins over the export. A mask
+needs a real child process: rush refuses a masked builtin, function, <code>eval</code>, or
+<code>.</code> with status 126 rather than run it with the shell's own authority.
+Pipelines and command substitutions are staged through temporary files, so they need
+<code>CAP_FS_WRITE</code>. <a href="capabilities.html#rush">Capabilities in rush</a> has the
+full rules. Background jobs are started without the terminal input stream, since Motor has no
 <code>SIGTTIN</code> to stop them from stealing keystrokes, and for the same reason there is
 no interactive job control (<kbd>^Z</kbd>, <code>bg</code>): a foreground command runs until
 it exits or is interrupted. rush re-exports

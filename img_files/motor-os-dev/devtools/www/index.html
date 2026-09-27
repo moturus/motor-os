@@ -382,10 +382,12 @@ a.card h3 { color: var(--accent); }
     <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
     resolver service, and configuration from one TOML file.</p>
   </a>
-  <a class="card" href="processes.html">
+  <a class="card" href="capabilities.html">
     <h3>Capability-based security</h3>
     <p>Every process carries an immutable capability word. Three roles, System, Interactive,
-    and None, drive filesystem permissions. There is no root account.</p>
+    and None, drive filesystem permissions. Network access and filesystem writes are
+    capabilities of their own, which a process can only narrow for its children. There is
+    no root account.</p>
   </a>
   <a class="card" href="commands.html">
     <h3>A working shell and tools</h3>

@@ -409,6 +409,7 @@ a.card h3 { color: var(--accent); }
   <ul>
     <li><a href="architecture.html">Architecture</a></li>
     <li><a href="processes.html">Processes and roles</a></li>
+    <li><a href="capabilities.html">Capabilities</a></li>
     <li><a href="memory.html">Memory</a></li>
     <li><a href="filesystem.html" class="current">Filesystem</a></li>
     <li><a href="networking.html">Networking</a></li>
@@ -511,6 +512,11 @@ nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</c
 </ul>
 <p>sys-io learns the role of each client once, when the client connects, by asking the
 kernel for the peer's capabilities; it never trusts a role sent by the client.</p>
+<p>Changes also need <code>CAP_FS_WRITE</code>. Without it a process can stat, read, and
+list what its role allows, and every other request fails with
+<code>PermissionDenied</code>, file locks included. The capability never overrides the
+permissions above: a change needs both. See
+<a href="capabilities.html#filesystem-writes">Capabilities</a>.</p>
 
 <h3>What an image ships with</h3>
 <p>Images are built with a declarative policy, <code>src/imager/motor-os-permissions.yaml</code>,
