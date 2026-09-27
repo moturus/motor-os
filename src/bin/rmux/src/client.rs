@@ -28,6 +28,7 @@
 //! killed when its parent is reaped, so detaching is the difference between a
 //! session that survives a detach and one that does not.
 
+use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpStream;
@@ -104,6 +105,9 @@ enum Local {
     /// The console is a different shape: rows, then columns.
     Resized(u16, u16),
     ConsoleEof,
+    /// The console was a terminal, and it went away: a dropped SSH connection
+    /// or a closed window, not the end of a script.
+    HungUp,
     FromServer(ToClient),
     ServerGone,
 }
@@ -286,6 +290,13 @@ fn relay(
             // reading a script ends, and keep painting until the server says
             // the work is done.
             Local::ConsoleEof => send(server, &ToServer::EndInput)?,
+            // Nobody is left to see the session, so leave it running for the
+            // next attach, as a detach does. Ending its input would end the
+            // shell in it, and the session with it.
+            Local::HungUp => {
+                let _ = send(server, &ToServer::Detach);
+                return Ok(0);
+            }
             Local::FromServer(ToClient::Write(bytes)) => {
                 // Not a held lock: crossterm's Motor OS backend writes its size
                 // probe to stdout from the reader thread, and a lock this thread
@@ -411,6 +422,8 @@ fn read_server(mut server: TcpStream, events: Sender<Local>, mut frames: Frames)
 /// thread is where crossterm's event source runs, which is why the size probing
 /// happens at all — it is done while waiting for a key.
 fn read_console(events: Sender<Local>) {
+    // Asked up front: once the console has gone, its descriptor may say less.
+    let terminal = std::io::stdin().is_terminal();
     // A read error is the console going away, which is as final as EOF.
     while let Ok(event) = crossterm::event::read() {
         let local = match event {
@@ -428,7 +441,11 @@ fn read_console(events: Sender<Local>) {
             return;
         }
     }
-    let _ = events.send(Local::ConsoleEof);
+    let _ = events.send(if terminal {
+        Local::HungUp
+    } else {
+        Local::ConsoleEof
+    });
 }
 
 fn restore_console() {
@@ -785,6 +802,38 @@ mod tests {
                 ToServer::Key(Key::plain(crate::keys::Code::Char('|'))),
             ]
         );
+    }
+
+    #[test]
+    fn a_console_that_hangs_up_detaches_rather_than_ending_input() {
+        // A dropped SSH connection ends a terminal console. Ending the pane's
+        // input would end the shell in it and the session with it (§7.3).
+        let (events, queue) = channel();
+        events.send(Local::HungUp).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let sent = std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().unwrap();
+            let mut frames = Frames::new();
+            let mut buf = [0_u8; 4096];
+            let mut out = Vec::new();
+            while let Ok(read) = server.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                frames.feed(&buf[..read]);
+                while let Some(Some(message)) = frames.take::<ToServer>() {
+                    out.push(message);
+                }
+            }
+            out
+        });
+
+        let mut server = TcpStream::connect(address).unwrap();
+        assert_eq!(relay(&mut server, &queue, (24, 80), Vec::new()).unwrap(), 0);
+        drop(server);
+        assert_eq!(sent.join().unwrap(), [ToServer::Detach]);
     }
 
     // ---- what answered on that port ----------------------------------------

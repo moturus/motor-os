@@ -1045,6 +1045,39 @@ RMUX_TITLE_SSH_PID=""
 [ "$rmux_title_status" -eq 0 ] ||
   fail "rmux title client exited with status $rmux_title_status: '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
 
+# A terminal that goes away is not the end of a script. When an SSH connection
+# drops, russhd closes rmux's console; the session must stay for the next
+# attach instead of ending with its shell's input.
+RMUX_HANGUP_TMPDIR="$TEST_TMP/full-test-rmux-hangup"
+coproc RMUX_HANGUP_CLIENT {
+  ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \
+    "TMPDIR=$RMUX_HANGUP_TMPDIR /user/bin/rmux new -s hangup" 2>&1
+}
+RMUX_HANGUP_SSH_PID="$!"
+rmux_hangup_output=""
+rmux_hangup_deadline=$((SECONDS + 20))
+while [[ "$rmux_hangup_output" != *"motor-os"* ]]; do
+  [ "$SECONDS" -lt "$rmux_hangup_deadline" ] &&
+    IFS= read -r -t 20 -n 1 rmux_hangup_byte <&"${RMUX_HANGUP_CLIENT[0]}" ||
+    fail "rmux hang-up client never reached a prompt: '$rmux_hangup_output'"
+  rmux_hangup_output+="$rmux_hangup_byte"
+done
+kill "$RMUX_HANGUP_SSH_PID"
+wait "$RMUX_HANGUP_SSH_PID" || true
+rmux_hangup_deadline=$((SECONDS + 20))
+while :; do
+  rmux_hangup_ls="$(vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux ls)"
+  case "$rmux_hangup_ls" in
+    *"hangup: 1 window (attached)"*) ;;
+    *"hangup: 1 window"*) break ;;
+    *) fail "rmux session ended with its console: '$rmux_hangup_ls'" ;;
+  esac
+  [ "$SECONDS" -lt "$rmux_hangup_deadline" ] ||
+    fail "rmux client outlived its console: '$rmux_hangup_ls'"
+  sleep 0.2
+done
+vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
+
 # sysbox ls colors directory names orange, executable files bright red, and
 # non-executable files with the terminal's default color. A pane
 # supplies the terminal that enables colors; the child names do not appear in
