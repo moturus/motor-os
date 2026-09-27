@@ -544,11 +544,15 @@ would otherwise provide is provided elsewhere: the pane sets <code>$COLUMNS</cod
 a pty buys that has no equivalent, <code>SIGWINCH</code>, is replaced by a subscription:
 a program that enables mode 2048 gets its size written into its stdin at once and on
 every later resize.</p>
-<p>The client and server are unrelated processes and meet over loopback TCP: the server
-binds <code>127.0.0.1:0</code> and writes the port to a file under the scratch
-directory. The server is spawned detached, which needs <code>CAP_SPAWN_DETACHED</code>;
-that is why rmux is on rush's detached-spawn list, and why an rmux server survives the
-SSH session that started it.</p>
+<p>The client and server are unrelated processes and meet over <code>moto-ipc</code>.
+The server registers a service name made of its own capability mask, and each end asks
+the kernel for the other's mask. A client looks for the server its own capabilities would
+start, checks that server's mask before it sends a key, and starts one if none runs. The
+server refuses a client that lacks any of its capabilities, so a restricted program gets
+its own, equally restricted rmux server rather than a way into a more privileged one. The
+server is spawned detached, which needs <code>CAP_SPAWN_DETACHED</code>; that is why rmux
+is on rush's detached-spawn list, and why an rmux server survives the SSH session that
+started it.</p>
 <nav class="pager">
 <a class="pager-prev" href="rush.html"><span>Previous</span>rush: the shell</a>
 <a class="pager-next" href="editors.html"><span>Next</span>Editors</a>
