@@ -67,6 +67,8 @@ const DATA_MAX: usize = 4096 - DATA_AT;
 
 /// How long opening a connection may take once the server holds its name.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// A server must acknowledge each input request before another can be sent.
+const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Two connections per client.
 const MAX_CONNECTIONS: u64 = 64;
@@ -126,6 +128,8 @@ fn get_len(page: &[u8]) -> usize {
 /// The client's half that carries `ToServer` bytes.
 pub struct Writer {
     conn: ClientConnection,
+    /// A timed-out request may still be outstanding on this connection.
+    stuck: bool,
 }
 
 /// The client's half that long-polls for `ToClient` bytes.
@@ -221,7 +225,13 @@ pub fn connect(name: &str, profile: u64) -> std::io::Result<Option<(Writer, Read
         timeout: None,
         stuck: false,
     };
-    Ok(Some((Writer { conn: input }, reader)))
+    Ok(Some((
+        Writer {
+            conn: input,
+            stuck: false,
+        },
+        reader,
+    )))
 }
 
 /// Connect to this process's server, starting one with `spawn` if none runs.
@@ -277,9 +287,24 @@ pub fn connect_or_start(
 
 impl Write for Writer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.stuck {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
         let len = buf.len().min(DATA_MAX);
-        request(&mut self.conn, CMD_INPUT, 0, &buf[..len], None)?;
-        Ok(len)
+        match request(
+            &mut self.conn,
+            CMD_INPUT,
+            0,
+            &buf[..len],
+            Some(INPUT_TIMEOUT),
+        ) {
+            Ok(()) => Ok(len),
+            Err(err) if err.raw_os_error() == Some(moto_rt::E_TIMED_OUT as i32) => {
+                self.stuck = true;
+                Err(std::io::ErrorKind::TimedOut.into())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
