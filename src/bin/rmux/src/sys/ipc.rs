@@ -542,7 +542,9 @@ impl Ipc {
         put_u64(page, TOKEN_AT, token);
         put_len(page, data.len());
         page[DATA_AT..DATA_AT + data.len()].copy_from_slice(data);
-        let _ = conn.finish_rpc();
+        if conn.finish_rpc().is_err() {
+            self.forget(handle);
+        }
     }
 
     /// Answer `handle` with an error and close it, with its client.
@@ -583,6 +585,7 @@ impl Ipc {
     /// clients the server has finished with.
     fn deliver(&mut self) {
         let mut finished = Vec::new();
+        let mut failed = Vec::new();
         {
             let mut map = self.outboxes.map.lock().unwrap();
             for (id, outbox) in map.iter_mut() {
@@ -592,13 +595,16 @@ impl Ipc {
                     outbox.awaiting = false;
                     let output = self.peers[id].output;
                     let Some(conn) = self.server.get_connection(output) else {
+                        failed.push(output);
                         continue;
                     };
                     conn.resp::<ResponseHeader>().result = moto_rt::E_OK;
                     let page = conn.data_mut();
                     put_len(page, chunk.len());
                     page[DATA_AT..DATA_AT + chunk.len()].copy_from_slice(&chunk);
-                    let _ = conn.finish_rpc();
+                    if conn.finish_rpc().is_err() {
+                        failed.push(output);
+                    }
                 }
                 // Closing a connection can discard the reply its client has
                 // not read yet, so wait for the client to ask again, as the
@@ -611,6 +617,9 @@ impl Ipc {
             }
         }
         self.outboxes.changed.notify_all();
+        for handle in failed {
+            self.forget(handle);
+        }
         for id in finished {
             self.end(id);
         }
