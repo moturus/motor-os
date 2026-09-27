@@ -1153,10 +1153,12 @@ rmux_refused "pairing with another process's token" \
 kill "$RMUX_HALF_SSH_PID"
 wait "$RMUX_HALF_SSH_PID" || true
 
-# Reduced clients, with a minimal mask and with the privileged one minus
-# CAP_NET, can neither see nor reach the privileged server's sessions.
+# Reduced clients can neither see nor reach the privileged server's sessions:
+# a minimal mask, the privileged one minus CAP_NET, and the privileged one
+# minus CAP_INTERACTIVE, which leaves a None-role client with every other bit.
 rmux_no_net="$(printf '%#x' $((rmux_profile & ~0x100)))"
-for rmux_mask in 0x44 "$rmux_no_net"; do
+rmux_no_role="$(printf '%#x' $((rmux_profile & ~0x40)))"
+for rmux_mask in 0x44 "$rmux_no_net" "$rmux_no_role"; do
   out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_mask" /user/bin/rmux ls)"
   [ -z "$out" ] || fail "rmux ls with $rmux_mask saw another server's sessions: '$out'"
   rmux_refused "list with $rmux_mask" \
