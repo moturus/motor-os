@@ -1111,7 +1111,8 @@ rmux_refused() {
   local label="$1"
   local out
   shift
-  if out="$(vm_ssh "$*" 2>&1)"; then
+  # Stdout only: a debug runtime logs to stderr.
+  if out="$(vm_ssh "$*")"; then
     fail "$label was served: '$out'"
   fi
   case "$out" in
