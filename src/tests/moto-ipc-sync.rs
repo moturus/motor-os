@@ -291,3 +291,22 @@ fn a_disconnected_connection_has_no_request() {
     // Reset to expect sequence one, the page still says one: not a request.
     assert!(!connection.have_req());
 }
+
+#[test]
+fn a_changed_request_sequence_disconnects_without_panicking() {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 2, 1).unwrap();
+    reply(&[1], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    let connection = server.get_connection(SysHandle(1)).unwrap();
+    connection.data_mut()[..8].copy_from_slice(&1_u64.to_ne_bytes());
+    assert!(connection.have_req());
+
+    // The client owns the page and can change it while the server prepares a reply.
+    connection.data_mut()[..8].copy_from_slice(&3_u64.to_ne_bytes());
+    assert_eq!(connection.finish_rpc(), Err(E_INVALID_ARGUMENT));
+    assert!(!connection.connected());
+
+    reply(&[], Ok(()));
+    assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![]));
+    assert!(server.get_connection(SysHandle(1)).is_none());
+}

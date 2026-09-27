@@ -500,13 +500,17 @@ impl LocalServerConnection {
     /// is reported by that wait like any dead waiter.
     pub fn finish_rpc_deferred(&mut self) -> Result<(), ErrorCode> {
         if self.connected() {
-            self.seq += 2;
-            let seq = self
+            let expected = self.seq + 1;
+            if self
                 .resp::<ResponseHeader>()
                 .seq
-                .fetch_add(1, Ordering::SeqCst);
-            assert_eq!(self.seq, seq + 1);
-            assert_eq!(0, self.seq & 1);
+                .compare_exchange(expected, expected + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                self.disconnect();
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+            self.seq += 2;
             Ok(())
         } else {
             Err(moto_rt::E_INVALID_ARGUMENT)
