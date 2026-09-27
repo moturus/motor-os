@@ -253,8 +253,11 @@ pub fn connect_or_start(
         }
     }
     // Panes inherit `TMPDIR`, and Rush stages pipelines there. The port file
-    // used to create it before a server started, so keep doing that.
-    if let Some(dir) = std::env::var_os("TMPDIR") {
+    // used to create it before a server started, so keep doing that, but only
+    // when it is absent (docs/fs-permissions.md, "rmux creates ...").
+    if let Some(dir) = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
+        && !dir.is_dir()
+    {
         let _ = std::fs::create_dir_all(dir);
     }
     spawn()?;

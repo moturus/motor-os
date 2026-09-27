@@ -323,16 +323,14 @@ after they are accepted.
    resolved entry. Guest tests concentrate on executable installation
    boundaries and functional access checks, avoiding a brittle duplicate of
    the complete image manifest.
-9. **`rmux` creates its port directory only when it is absent.** A detached
-   server spawned by a System-role client deliberately receives the default
-   None role. `/user/tmp` permits that role to create the port file, but
-   blindly calling `create_dir_all("/user/tmp")` first asks Motor FS to create
-   the already-existing child of `/user`; Motor FS checks write access to the
-   non-None-writable parent before detecting the existing child. Preserving
-   System authority in the server or making `/user` None-writable would grant
-   unnecessary authority. Testing whether the shipped scratch directory
-   exists before creating it preserves the role boundary and still supports a
-   caller-selected, absent `TMPDIR`.
+9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor, rmux's
+   client and server meet over `moto-ipc` and need no port file. The client
+   still creates a caller-selected, absent `TMPDIR` before it starts a server,
+   because panes inherit it and Rush stages pipelines there. Blindly calling
+   `create_dir_all` on an existing directory first asks Motor FS to create
+   it, and Motor FS checks write access to the parent before detecting the
+   existing child, so a role that may not write the parent is refused.
+   Testing whether the directory exists first avoids that request.
 10. **Denial acceptance tests assert filesystem postconditions.** During
     implementation, the sysbox `mkdir` and `mv` applets printed a permission
     diagnostic but returned success; `rm` already returned failure correctly.
