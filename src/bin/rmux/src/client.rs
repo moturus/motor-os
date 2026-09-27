@@ -175,9 +175,7 @@ fn attached(opening: impl FnOnce(u16, u16) -> ToServer) -> std::io::Result<i32> 
 
     let (size, early) = settle_size(size, &queue);
 
-    let (mut server, opened_with, frames) = join_server(&opening(size.0, size.1))?;
-
-    let reader = server.try_clone()?;
+    let (mut server, reader, opened_with, frames) = join_server(&opening(size.0, size.1))?;
     std::thread::spawn(move || read_server(reader, events, frames));
 
     // The opening frame is already in hand: it is what proved this was a server
@@ -253,7 +251,7 @@ fn leave_console() {
 
 /// The client's whole event loop: keys one way, bytes the other.
 fn relay(
-    server: &mut TcpStream,
+    server: &mut impl Write,
     queue: &Receiver<Local>,
     opened_at: (u16, u16),
     early: Vec<Local>,
@@ -336,7 +334,7 @@ pub fn ask(request: ToServer) -> std::io::Result<i32> {
     // a question about sessions that is the answer rather than an error. So it
     // gets one attempt at whatever the port file names, and if that turns out
     // not to be a server the file is forgotten and there is nothing to ask.
-    let Some((mut server, port)) = try_connect() else {
+    let Some((mut server, mut reader, not_a_server)) = question()? else {
         return Ok(0);
     };
     send(&mut server, &request)?;
@@ -346,10 +344,10 @@ pub fn ask(request: ToServer) -> std::io::Result<i32> {
     // script: every question gets an answer (§4.2), so a silence here is a
     // failure however far in it happens.
     let mut frames = Frames::new();
-    let mut said = match first_words(&mut server, &mut frames, FIRST_WORD_TIMEOUT)? {
+    let mut said = match first_words(&mut reader, &mut frames, FIRST_WORD_TIMEOUT)? {
         Some(said) => said,
         None => {
-            forget_port(port);
+            not_a_server();
             return Err(no_answer());
         }
     };
@@ -372,7 +370,7 @@ pub fn ask(request: ToServer) -> std::io::Result<i32> {
                 _ => {}
             }
         }
-        let read = match server.read(&mut buf) {
+        let read = match reader.read(&mut buf) {
             Ok(0) => return Ok(0),
             Ok(read) => read,
             Err(err) if proto::timed_out(&err) => return Err(no_answer()),
@@ -385,7 +383,7 @@ pub fn ask(request: ToServer) -> std::io::Result<i32> {
     }
 }
 
-fn send(server: &mut TcpStream, message: &ToServer) -> std::io::Result<()> {
+fn send(server: &mut impl Write, message: &ToServer) -> std::io::Result<()> {
     server.write_all(&proto::encode(message))?;
     server.flush()
 }
@@ -395,7 +393,7 @@ fn send(server: &mut TcpStream, message: &ToServer) -> std::io::Result<()> {
 /// `frames` is where [`first_words`] left off: whatever it read past the
 /// opening frame is still in there, and a fresh buffer would take the tail of a
 /// half-read frame for the head of a new one.
-fn read_server(mut server: TcpStream, events: Sender<Local>, mut frames: Frames) {
+fn read_server(mut server: impl Read, events: Sender<Local>, mut frames: Frames) {
     let mut buf = [0_u8; 4096];
     loop {
         let read = match server.read(&mut buf) {
@@ -463,6 +461,27 @@ fn no_answer() -> std::io::Error {
     )
 }
 
+/// A byte stream from the server whose reads can be given a deadline.
+trait Timed: Read {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl Timed for TcpStream {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+}
+
+/// The server to put a question to, without starting one; and how to forget
+/// its port if it turns out not to be a server.
+fn question() -> std::io::Result<Option<(TcpStream, TcpStream, impl FnOnce())>> {
+    let Some((server, port)) = try_connect() else {
+        return Ok(None);
+    };
+    let reader = server.try_clone()?;
+    Ok(Some((server, reader, move || forget_port(port))))
+}
+
 /// Join a server that answers, starting one if the port file was a dead end.
 ///
 /// **The port file is a hint, not a promise** (§4.2). It names a port and
@@ -480,7 +499,9 @@ fn no_answer() -> std::io::Error {
 /// So the first word decides. Whatever answered gets [`FIRST_WORD_TIMEOUT`] to
 /// prove it is a server; if it does not, that port is forgotten and this tries
 /// once more, which -- the file now gone -- means starting a server of its own.
-fn join_server(opening: &ToServer) -> std::io::Result<(TcpStream, Vec<ToClient>, Frames)> {
+fn join_server(
+    opening: &ToServer,
+) -> std::io::Result<(TcpStream, TcpStream, Vec<ToClient>, Frames)> {
     for _ in 0..ATTEMPTS {
         let (mut server, port) = connect_or_start()?;
         send(&mut server, opening)?;
@@ -493,7 +514,8 @@ fn join_server(opening: &ToServer) -> std::io::Result<(TcpStream, Vec<ToClient>,
             // than by ending a working session five seconds into its first
             // silence.
             server.set_read_timeout(None)?;
-            return Ok((server, said, frames));
+            let reader = server.try_clone()?;
+            return Ok((server, reader, said, frames));
         }
         forget_port(port);
     }
@@ -515,7 +537,7 @@ fn join_server(opening: &ToServer) -> std::io::Result<(TcpStream, Vec<ToClient>,
 /// parameter only so that a test can ask a shorter question than a user would
 /// sit through.
 fn first_words(
-    server: &mut TcpStream,
+    server: &mut impl Timed,
     frames: &mut Frames,
     patience: Duration,
 ) -> std::io::Result<Option<Vec<ToClient>>> {
