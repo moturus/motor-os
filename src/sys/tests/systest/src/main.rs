@@ -42,6 +42,7 @@ mod sys_io_self_test;
 mod sys_tty;
 mod sysbox_cat;
 mod sysbox_chmod;
+mod sysbox_diff;
 mod sysbox_find;
 mod sysbox_head;
 mod sysbox_less;
@@ -1563,6 +1564,7 @@ fn main() {
     spawn_wait_kill::test_thread_creation_exit_rollback();
     ctrl_c::run_tests();
     command_output::run_test();
+    sysbox_diff::run_test();
     sysbox_find::run_test();
     sysbox_head::run_test();
     sysbox_less::run_test();

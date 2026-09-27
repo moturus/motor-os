@@ -74,6 +74,12 @@ The shell is somewhat barebones now (contributions are welcome!).
   starts at line or byte NUM instead. It takes the same NUM suffixes as `head`
   and the obsolete `tail -NUM` and `tail +NUM` forms, but cannot follow a
   growing file (`-f`, `-F`);
+- `diff [-u | -U NUM | -c | -C NUM] [-q] [-s] [-r] [-N] [-i] [-b] [-w] [-a] [-d]
+  [--label LABEL]... FILE1 FILE2` compares files, or directories, line by line.
+  The output formats, messages and exit status (0 same, 1 different, 2
+  trouble) follow GNU `diff`, and so do the hunks: it finds the same edit
+  script GNU `diff` does. Side-by-side and ed output, `-B`, `-I` and `-x`
+  are not supported;
 - On the development image, `/devtools/tests/systest`,
   `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
   make sure everything is working as expected;

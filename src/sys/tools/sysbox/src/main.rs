@@ -8,6 +8,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox chmod");
     println!("\tsysbox cp");
     println!("\tsysbox date");
+    println!("\tsysbox diff");
     println!("\tsysbox find");
     println!("\tsysbox free");
     println!("\tsysbox head");
@@ -70,6 +71,7 @@ fn main() {
         "chmod" => commands::chmod::do_command(&args[1..]),
         "cp" => commands::cp::do_command(&args[1..]),
         "date" => commands::date::do_command(&args[1..]),
+        "diff" => commands::diff::do_command(&args[1..]),
         "find" => commands::find::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "head" => commands::head::do_command(&args[1..]),

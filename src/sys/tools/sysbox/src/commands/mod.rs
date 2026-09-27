@@ -2,6 +2,7 @@ pub mod cat;
 pub mod chmod;
 pub mod cp;
 pub mod date;
+pub mod diff;
 pub mod find;
 pub mod free;
 pub mod head;
