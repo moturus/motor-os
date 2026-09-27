@@ -536,6 +536,11 @@ impl LocalServerConnection {
     }
 
     pub fn have_req(&self) -> bool {
+        // A disconnected connection stays visible until the next wait()
+        // retires it; its reset sequence must not make a stale request look new.
+        if !self.connected() {
+            return false;
+        }
         let seq = self.req::<RequestHeader>().seq.load(Ordering::SeqCst);
         // Zero means the client disconnected and reset the header (see
         // ClientConnection::disconnect). Any other value that is not the

@@ -33,7 +33,6 @@ pub fn url_encode(url: &str) -> String {
 #[derive(Default)]
 struct Kernel {
     next_handle: u64,
-    next_address: u64,
     handles: BTreeSet<SysHandle>,
     mappings: BTreeSet<u64>,
     refuse: bool,
@@ -50,13 +49,14 @@ pub struct SysMem;
 impl SysMem {
     pub const F_READABLE: u32 = 1;
     pub const F_WRITABLE: u32 = 2;
+    // A real page, so that a test can put a request header in it.
     pub fn map(_: SysHandle, _: u32, _: u64, _: u64, _: u64, _: u64) -> Result<u64, ErrorCode> {
         KERNEL.with_borrow_mut(|kernel| {
             if kernel.refuse || kernel.mapping_limit == Some(kernel.mappings.len()) {
                 return Err(E_OUT_OF_MEMORY);
             }
-            kernel.next_address += sys_mem::PAGE_SIZE_SMALL;
-            let address = kernel.next_address;
+            let page: &'static mut [u64; 512] = Box::leak(Box::new([0; 512]));
+            let address = page.as_mut_ptr() as u64;
             assert!(kernel.mappings.insert(address));
             Ok(address)
         })
@@ -275,4 +275,19 @@ fn refused_refill_arms_a_timer_until_memory_recovers() {
     assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![SysHandle(2)]));
     assert!(server.get_connection(SysHandle(2)).unwrap().connected());
     assert!(KERNEL.with_borrow(|kernel| kernel.timeout.is_none()));
+}
+
+#[test]
+fn a_disconnected_connection_has_no_request() {
+    let mut server = LocalServer::new("test", ChannelSize::Small, 2, 1).unwrap();
+    reply(&[1], Ok(()));
+    server.wait(SysHandle::NONE, &[]).unwrap();
+    let connection = server.get_connection(SysHandle(1)).unwrap();
+    // The header's sequence number is the page's first word; one is the
+    // client's first request.
+    connection.data_mut()[..8].copy_from_slice(&1_u64.to_ne_bytes());
+    assert!(connection.have_req());
+    connection.disconnect();
+    // Reset to expect sequence one, the page still says one: not a request.
+    assert!(!connection.have_req());
 }
