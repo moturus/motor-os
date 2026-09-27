@@ -69,6 +69,11 @@ The shell is somewhat barebones now (contributions are welcome!).
   lines of each file, or the first NUM lines or bytes; a leading `-` on NUM
   prints all but the last NUM instead. NUM takes the GNU multiplier suffixes
   (`b`, `K`, `kB`, `KiB`, `M`, ...), and the obsolete `head -NUM` form works;
+- `tail [-n [+]NUM | -c [+]NUM] [-q | -v] [-z] [FILE]...` prints the last 10
+  lines of each file, or the last NUM lines or bytes; a leading `+` on NUM
+  starts at line or byte NUM instead. It takes the same NUM suffixes as `head`
+  and the obsolete `tail -NUM` and `tail +NUM` forms, but cannot follow a
+  growing file (`-f`, `-F`);
 - On the development image, `/devtools/tests/systest`,
   `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
   make sure everything is working as expected;

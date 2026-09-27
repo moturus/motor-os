@@ -46,6 +46,7 @@ mod sysbox_find;
 mod sysbox_head;
 mod sysbox_less;
 mod sysbox_ls;
+mod sysbox_tail;
 mod sysbox_wc;
 mod sysbox_which;
 mod tcp;
@@ -1566,6 +1567,7 @@ fn main() {
     sysbox_head::run_test();
     sysbox_less::run_test();
     sysbox_ls::run_test();
+    sysbox_tail::run_test();
     sysbox_wc::run_test();
     sysbox_which::run_test();
     test_oom();

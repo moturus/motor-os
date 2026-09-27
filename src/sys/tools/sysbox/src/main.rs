@@ -26,6 +26,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox sleep");
     println!("\tsysbox ss");
     println!("\tsysbox stats");
+    println!("\tsysbox tail");
     println!("\tsysbox time");
     println!("\tsysbox top");
     println!("\tsysbox uptime");
@@ -87,6 +88,7 @@ fn main() {
         "sleep" => commands::sleep::do_command(&args[1..]),
         "ss" => commands::ss::do_command(&args[1..]),
         "stats" => commands::stats::do_command(&args[1..]),
+        "tail" => commands::tail::do_command(&args[1..]),
         "time" => commands::time::do_command(&args[1..]),
         "top" => commands::top::do_command(&args[1..]),
         "uptime" => commands::uptime::do_command(&args[1..]),
