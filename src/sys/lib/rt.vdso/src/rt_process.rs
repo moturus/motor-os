@@ -276,6 +276,10 @@ struct Loader {
 
     // Map of allocated pages: remote addr -> (local addr, num_pages).
     mapped_regions: BTreeMap<u64, (u64, u64)>,
+
+    // Why the kernel refused to map a segment. elfloader can only report
+    // OutOfMemory, which would call a bad segment address a lack of memory.
+    map_error: Option<ErrorCode>,
 }
 
 impl Loader {
@@ -360,7 +364,10 @@ impl elfloader::ElfLoader for Loader {
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
                 num_pages,
             )
-            .map_err(|_| elfloader::ElfLoaderErr::OutOfMemory)?;
+            .map_err(|err| {
+                self.map_error = Some(err);
+                elfloader::ElfLoaderErr::OutOfMemory
+            })?;
 
             assert_eq!(remote, vaddr_start);
             self.mapped_regions.insert(vaddr_start, (local, num_pages));
@@ -449,9 +456,12 @@ fn load_binary(bytes: &[u8], address_space: moto_sys::SysHandle) -> Result<u64, 
         address_space,
         relocated: false,
         mapped_regions: BTreeMap::default(),
+        map_error: None,
     };
     match elf_binary.load(&mut elf_loader) {
-        Err(_) => Err(moto_rt::E_INVALID_ARGUMENT),
+        // A refused mapping keeps the kernel's reason, so running out of
+        // memory is not reported as a bad binary.
+        Err(_) => Err(elf_loader.map_error.unwrap_or(moto_rt::E_INVALID_ARGUMENT)),
         Ok(()) => Ok(elf_binary.entry_point()),
     }
 }

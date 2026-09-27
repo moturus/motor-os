@@ -891,6 +891,46 @@ fn test_writable_executable_elf_rejected() {
     println!("test_writable_executable_elf_rejected PASS");
 }
 
+// A segment larger than memory is refused for lack of memory, and spawn has
+// to say so rather than call the binary invalid.
+fn test_oversized_elf_segment_reports_oom() {
+    let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let mut modified = false;
+    for idx in 0..phnum {
+        let offset = phoff + idx * phentsize;
+        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        // A writable segment's tail is zero-filled, so only p_memsz grows.
+        if kind == 1 && flags & 2 != 0 {
+            bytes[offset + 40..offset + 48].copy_from_slice(&(1_u64 << 40).to_le_bytes());
+            modified = true;
+            break;
+        }
+    }
+    assert!(modified, "current executable has no writable PT_LOAD");
+
+    let path = std::env::temp_dir().join("systest-oversized-elf-segment");
+    write_executable(&path, &bytes);
+    let result = std::process::Command::new(&path)
+        .arg("test-native-net-cancellation")
+        .spawn();
+    std::fs::remove_file(path).unwrap();
+
+    match result {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            panic!("loader mapped a 1 TiB segment: {status}");
+        }
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory, "{err:?}"),
+    }
+
+    println!("test_oversized_elf_segment_reports_oom PASS");
+}
+
 fn test_caps() {
     use moto_sys::caps::{CAP_INTERACTIVE, CAP_SYS, ProcessRole};
 
@@ -1642,6 +1682,7 @@ fn main() {
     admission::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
+    test_oversized_elf_segment_reports_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     sys_io_self_test::run_all_tests();
