@@ -30,8 +30,14 @@ impl SysObj {
     //     - "process:entry_point=$NUM;capabilities=$NUM"
     //     - "serial_console"
     //     - "shared:url=$URL;address=$addr;page_type=[small|mid];page_num=$num"
-    //            - A "server" calls CREATE for a custom URL (can be duplicates). Then waits.
+    //            - A "server" calls CREATE for a custom URL. Then waits.
     //              may provide an unmapped page.
+    //            - Each URL has one live owner: the first process to CREATE it. The owner
+    //              may CREATE more listeners for it; another process's CREATE fails while
+    //              the owner is alive. The owner keeps the URL while it has any listening
+    //              or connected endpoint for it, and releases it on its last close or on
+    //              exit. Only "sys-io" is reserved (for sys-io); any other URL is first
+    //              come, so peers authenticate each other with get_capabilities()/get_pid().
     //            - A "client" calls GET for the URL; page must be mapped; if there is a matching
     //              endpoint, the IPC channel is created and returned. Who then waits and who wakes
     //              is up to the userspace.
