@@ -1541,6 +1541,9 @@ fn main() {
     test_random_bytes();
     tls::test_tls();
     tls::test_tls_join();
+    tls::test_tls_exit_dtors();
+    tls::test_tls_set_no_dtor();
+    tls::test_tls_current_on_drop();
     test_caps();
     test_liveness();
 

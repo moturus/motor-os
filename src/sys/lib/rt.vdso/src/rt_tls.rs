@@ -109,14 +109,12 @@ pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
         None => ThreadBlock::ensure(),
     };
 
-    let prev_value = if value.is_null() {
-        block.map.remove(&key)
+    // Like pthread_setspecific, replacement does not run a destructor. In
+    // particular, std resets its cleanup guard from RUN to DEFER here.
+    if value.is_null() {
+        block.map.remove(&key);
     } else {
-        block.map.insert(key, value as usize)
-    };
-
-    if let Some(prev_value) = prev_value {
-        unsafe { run_dtor(key, prev_value) };
+        block.map.insert(key, value as usize);
     }
 }
 
@@ -136,55 +134,54 @@ pub unsafe extern "C" fn destroy(key: Key) {
     KEYS.lock().remove(&key);
 }
 
-unsafe fn run_dtor(key: Key, value: usize) {
-    if value == 1 {
-        return; // Sentinel.
-    }
-
-    // Note: we should not hold the KEYS lock when running dtors,
-    // as a dtor can spawn a thread and then end up here, trying
-    // to acquire the same lock (=> deadlock).
-    let dtor: Option<Dtor> = {
-        let keys = KEYS.lock();
-        if let Some(Some(dtor)) = keys.get(&key) {
-            Some(*dtor)
-        } else {
-            None
-        }
-    };
-
-    if let Some(dtor) = dtor {
-        unsafe { dtor(value as *mut u8) };
-    }
+/// The first key after `after` that has both a value and a destructor.
+fn next_with_dtor(map: &PerThreadMap, after: Option<Key>) -> Option<(Key, Dtor)> {
+    use core::ops::Bound::{Excluded, Unbounded};
+    let keys = KEYS.lock();
+    let lower = after.map_or(Unbounded, Excluded);
+    map.range((lower, Unbounded))
+        .find_map(|(key, _)| match keys.get(key) {
+            Some(Some(dtor)) => Some((*key, *dtor)),
+            _ => None,
+        })
 }
 
-// Returns true if it did some work.
-unsafe fn run_one_dtor(map: &mut PerThreadMap) -> bool {
-    if let Some((key, pval)) = map.pop_first() {
-        if pval == 0 {
-            return true;
-        }
-        unsafe { run_dtor(key, pval) };
-        true
-    } else {
-        false
+/// One POSIX destructor round, in key order. As in POSIX, a value is taken
+/// out before its destructor runs, so its key reads as null meanwhile, and
+/// keys without a destructor keep their values for the destructors that
+/// read them (std's current-thread handle). Returns whether any ran.
+fn run_dtor_round() -> bool {
+    let mut ran = false;
+    let mut after = None;
+    // Borrowed anew each step and never across a destructor, which can reach
+    // this map itself through `set` and `get`.
+    while let Some(block) = ThreadBlock::current() {
+        let Some((key, dtor)) = next_with_dtor(&block.map, after) else {
+            break;
+        };
+        after = Some(key);
+        let Some(value) = block.map.remove(&key) else {
+            continue;
+        };
+        unsafe { dtor(value as *mut u8) };
+        ran = true;
     }
+    ran
 }
 
 pub(super) unsafe fn on_thread_exiting() {
+    if ThreadBlock::current().is_none() {
+        return;
+    }
+    // Destructors can set values, their own key's included: std's cleanup
+    // guard defers itself to a later round, and runs only in a round where no
+    // other destructor of its runtime ran. Every non-null value is passed
+    // on: 1 is that guard's "defer" state, not a sentinel.
+    while run_dtor_round() {}
     let Some(block) = ThreadBlock::current() else {
         return;
     };
-    // Dtors can insert values into TLS, and then a tokio test complains
-    // that a thing was not destroyed, so we need to handle TLS modifications
-    // happening during thread exiting.
-    loop {
-        let mut map = core::mem::take(&mut block.map);
-        if map.is_empty() {
-            break;
-        }
-        while unsafe { run_one_dtor(&mut map) } {}
-    }
+    block.map.clear();
     // The cache's private blocks rejoin their slabs. The slot is cleared
     // before the thread block is freed on the shared path, so nothing on
     // this thread can find a freed cache; a free after this point takes the
