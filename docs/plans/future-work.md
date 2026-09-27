@@ -132,17 +132,19 @@ tests, in systest's `ipc_service::test_listener_pool_growth` (added in
 
 - A fresh 1 vCPU / 96 MiB guest has about 12,200 pages (48 MB) free for
   admission, and the kernel uses 4.7 MB.
-- The test's child creates 131,072 listeners. Each 8,192 cost about 1,000
-  pages, so the whole pool needs about 64 MB. At about 98,000 listeners free
-  memory reaches the floor, and the child dies on a 4-byte heap allocation
+- The test's child created 131,072 listeners. Each 8,192 cost about 1,000
+  pages, so the whole pool needed about 64 MB. At about 98,000 listeners free
+  memory reached the floor, and the child died on a 4-byte heap allocation
   instead of getting a clean refusal.
-- Afterwards the kernel holds 53.8 MB and keeps it: its heap does not shrink
-  when the listeners are freed. Every later test on that guest runs out of
-  memory, and a rerun fails at its first spawn.
+- Afterwards the kernel held 53.8 MB and kept it: its heap does not shrink
+  when the listeners are freed. Every later test on that guest ran out of
+  memory, and a rerun failed at its first spawn.
 
 The count 131,072 was chosen to make the old `VecDeque` pool double to 2 MiB;
-the pool is a `BTreeMap` now. A smaller count, or one scaled to free memory,
-would keep the test runnable on small guests.
+the pool is a `BTreeMap` now. On 2026-09-27 the count was cut to 8,192, the
+smallest pool whose next contiguous doubling (64 KiB to 128 KiB) exceeds the
+16-page object charge. That costs about 4 MB of kernel heap instead of 64 MB.
+Whether the 96 MiB shape now passes the full suite has not been checked.
 
 Before that test existed, the same shape failed later, at
 `stdio_file_relay.rs:597`, where a child that spawns two more copies of

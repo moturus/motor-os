@@ -114,13 +114,15 @@ fn run_hoard() -> ! {
     }
 }
 
-// The next insertion would double a full VecDeque to a 2 MiB buffer. Object
-// admission only reserves 64 KiB, so the pool must grow in small increments.
+// Object admission reserves 64 KiB, so the pool must grow in small increments.
+// A contiguous pool of this many entries fills 64 KiB, and the next insertion
+// would double it to 128 KiB. Larger counts leave the kernel heap bloated for
+// the rest of the suite: it does not shrink when the listeners are freed.
 fn run_pool_growth(url: &str) -> ! {
     use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
 
     let object = format!("shared:url={url};address=4096;page_type=small;page_num=1");
-    for _ in 0..131_072 {
+    for _ in 0..8_192 {
         SysObj::create(SysHandle::SELF, 0, &object).unwrap();
     }
     println!("ready");
