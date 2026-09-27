@@ -43,11 +43,11 @@ use std::io::Write;
 use std::process::Child;
 
 #[cfg(not(unix))]
+pub mod ipc;
+#[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
-pub use motor::{
-    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, port_file, spawn_pane,
-};
+pub use motor::{END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, spawn_pane};
 
 #[cfg(unix)]
 mod unix;

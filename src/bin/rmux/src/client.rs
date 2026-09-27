@@ -31,6 +31,7 @@
 use std::io::IsTerminal;
 use std::io::Read;
 use std::io::Write;
+#[cfg(unix)]
 use std::net::TcpStream;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
@@ -98,6 +99,7 @@ const FIRST_WORD_TIMEOUT: Duration = Duration::from_secs(5);
 /// instead. A third would spend another [`FIRST_WORD_TIMEOUT`] of the user's
 /// time on the same doubt, and by then the answer is that this machine cannot
 /// run an rmux server at all.
+#[cfg(unix)]
 const ATTEMPTS: usize = 2;
 
 enum Local {
@@ -466,14 +468,52 @@ trait Timed: Read {
     fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()>;
 }
 
+#[cfg(unix)]
 impl Timed for TcpStream {
     fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
         TcpStream::set_read_timeout(self, timeout)
     }
 }
 
+#[cfg(not(unix))]
+impl Timed for sys::ipc::Reader {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        sys::ipc::Reader::set_read_timeout(self, timeout)
+    }
+}
+
+/// Join this client's server, starting one if none runs (`sys::ipc`).
+///
+/// Unlike a port, the service name can only be held by a server with the
+/// capabilities this client expects, which `sys::ipc` checks before sending
+/// anything. What is left to doubt is only whether it answers.
+#[cfg(not(unix))]
+fn join_server(
+    opening: &ToServer,
+) -> std::io::Result<(sys::ipc::Writer, sys::ipc::Reader, Vec<ToClient>, Frames)> {
+    let (mut server, mut reader) = sys::ipc::connect_or_start(spawn_server, SERVER_START_TIMEOUT)?;
+    send(&mut server, opening)?;
+    let mut frames = Frames::new();
+    match first_words(&mut reader, &mut frames, FIRST_WORD_TIMEOUT)? {
+        Some(said) => {
+            reader.set_read_timeout(None)?;
+            Ok((server, reader, said, frames))
+        }
+        None => Err(no_answer()),
+    }
+}
+
+/// The server to put a question to, without starting one.
+#[cfg(not(unix))]
+fn question() -> std::io::Result<Option<(sys::ipc::Writer, sys::ipc::Reader, impl FnOnce())>> {
+    let profile = sys::ipc::profile();
+    let link = sys::ipc::connect(&sys::ipc::service_name(profile), profile)?;
+    Ok(link.map(|(server, reader)| (server, reader, || {})))
+}
+
 /// The server to put a question to, without starting one; and how to forget
 /// its port if it turns out not to be a server.
+#[cfg(unix)]
 fn question() -> std::io::Result<Option<(TcpStream, TcpStream, impl FnOnce())>> {
     let Some((server, port)) = try_connect() else {
         return Ok(None);
@@ -499,6 +539,7 @@ fn question() -> std::io::Result<Option<(TcpStream, TcpStream, impl FnOnce())>> 
 /// So the first word decides. Whatever answered gets [`FIRST_WORD_TIMEOUT`] to
 /// prove it is a server; if it does not, that port is forgotten and this tries
 /// once more, which -- the file now gone -- means starting a server of its own.
+#[cfg(unix)]
 fn join_server(
     opening: &ToServer,
 ) -> std::io::Result<(TcpStream, TcpStream, Vec<ToClient>, Frames)> {
@@ -586,6 +627,7 @@ fn first_words(
 }
 
 /// Forget a port that did not answer, so that the next attempt starts a server.
+#[cfg(unix)]
 ///
 /// Only if the file still names it: by now it may have been rewritten by the
 /// very server this client started, and deleting *that* would leave a server
@@ -597,6 +639,7 @@ fn forget_port(port: u16) {
 }
 
 /// The port the file names, if it names one.
+#[cfg(unix)]
 fn named_port() -> Option<u16> {
     std::fs::read_to_string(sys::port_file())
         .ok()?
@@ -606,6 +649,7 @@ fn named_port() -> Option<u16> {
 }
 
 /// Connect to whatever the port file names, and say which port that was.
+#[cfg(unix)]
 fn try_connect() -> Option<(TcpStream, u16)> {
     let port = named_port()?;
     let server = TcpStream::connect(("127.0.0.1", port)).ok()?;
@@ -618,6 +662,7 @@ fn try_connect() -> Option<(TcpStream, u16)> {
 /// what makes that true: two servers would mean two session lists and one port
 /// file to name them by, so the loser of that race would hold sessions nobody
 /// could ever reach.
+#[cfg(unix)]
 fn connect_or_start() -> std::io::Result<(TcpStream, u16)> {
     if let Some(server) = try_connect() {
         return Ok(server);
@@ -686,7 +731,8 @@ fn spawn_server() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// The transport these exercise is the host's.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -102,18 +102,6 @@ pub fn spawn_pane(mut cmd: Command, size: (u16, u16)) -> std::io::Result<PaneIo>
     })
 }
 
-/// Where the server publishes the port it bound (details.md §4.2).
-///
-/// `/user/tmp` is Motor's explicitly materialized user-scratch directory.
-/// Tests may select a private server with `$TMPDIR`, as they do on Unix;
-/// ordinary sessions share the default.
-pub fn port_file() -> PathBuf {
-    std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/user/tmp"))
-        .join("rmux.port")
-}
-
 /// Where a user's overrides live (details.md §2.2), the same convention red uses.
 pub fn config_file() -> PathBuf {
     PathBuf::from("/user/cfg/rmux.toml")

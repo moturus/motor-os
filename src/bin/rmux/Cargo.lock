@@ -15,13 +15,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "crossbeam"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e71406cd8807725f7ac2f999a4cdd32e98f829fdf65f528343cebf945e41df1e"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "crossterm"
 version = "0.29.0"
 source = "git+https://github.com/moturus/crossterm.git?branch=motor-os-support#94317189d1be68cd409d13380b8f4f94af9bc08c"
 dependencies = [
  "bitflags",
  "mio",
- "moto-rt",
+ "moto-rt 0.17.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "parking_lot",
  "rustix",
  "signal-hook",
@@ -78,10 +113,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-async"
+version = "0.1.0"
+dependencies = [
+ "crossbeam",
+ "log",
+ "moto-mpmc",
+ "moto-rt 0.17.6",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-ipc"
+version = "0.2.6"
+dependencies = [
+ "log",
+ "moto-async",
+ "moto-rt 0.17.6",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-mpmc"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils",
+ "moto-rt 0.17.6",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-rt"
+version = "0.17.6"
+
+[[package]]
 name = "moto-rt"
 version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
+
+[[package]]
+name = "moto-sys"
+version = "0.3.0"
+dependencies = [
+ "moto-rt 0.17.6",
+]
 
 [[package]]
 name = "parking_lot"
@@ -121,6 +197,9 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "libc",
+ "moto-ipc",
+ "moto-rt 0.17.6",
+ "moto-sys",
 ]
 
 [[package]]

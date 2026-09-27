@@ -35,9 +35,13 @@
 //! - anything else is looked up in the **root table**, and if it is not there
 //!   it goes to the pane as the bytes it was made of.
 
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::net::TcpListener;
+#[cfg(unix)]
 use std::net::TcpStream;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
@@ -56,7 +60,9 @@ use crate::grid::Cell;
 use crate::keys::Code;
 use crate::keys::Key;
 use crate::pane::PaneId;
+#[cfg(unix)]
 use crate::proto;
+#[cfg(unix)]
 use crate::proto::Frames;
 use crate::proto::ToClient;
 use crate::proto::ToServer;
@@ -1421,7 +1427,7 @@ impl ClientIds {
 ///
 /// Long enough that a client reading its last message always wins the race,
 /// short enough that a client which never reads cannot pin a thread.
-const FAREWELL: Duration = Duration::from_secs(5);
+pub(crate) const FAREWELL: Duration = Duration::from_secs(5);
 
 /// Bind, publish the port, and serve until the last session ends.
 ///
@@ -1431,6 +1437,10 @@ const FAREWELL: Duration = Duration::from_secs(5);
 /// `moto-ipc` is not standard Rust. systest already proves loopback works here
 /// (`systest/src/tcp.rs:241-262` binds `127.0.0.1:0` and connects to the port
 /// it got), which is why this needed no spike.
+///
+/// On Motor OS the transport is `moto-ipc` instead (`sys::ipc`), because an
+/// IPC connection tells the server what its client may do.
+#[cfg(unix)]
 pub fn serve() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
@@ -1462,6 +1472,20 @@ pub fn serve() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Register this server's name and serve until the last session ends.
+///
+/// Fails when another server holds the name: the kernel gave it to one of
+/// two servers started at once, and the clients reach that one.
+#[cfg(not(unix))]
+pub fn serve() -> std::io::Result<()> {
+    let (events, queue) = channel();
+    crate::sys::ipc::listen(events.clone())?;
+    let (config, complaints) = Config::load();
+    Server::new(config, &complaints, events).run(queue);
+    Ok(())
+}
+
+#[cfg(unix)]
 fn accept(listener: TcpListener, events: Sender<Event>) {
     let mut ids = ClientIds::default();
     for stream in listener.incoming() {
@@ -1486,6 +1510,7 @@ fn accept(listener: TcpListener, events: Sender<Event>) {
     }
 }
 
+#[cfg(unix)]
 fn read_client(id: ClientId, mut stream: TcpStream, events: Sender<Event>) {
     let mut frames = Frames::new();
     let mut buf = [0_u8; 4096];
@@ -1515,6 +1540,7 @@ fn read_client(id: ClientId, mut stream: TcpStream, events: Sender<Event>) {
 /// most importantly, after an `Exit`. Dropping the socket here can discard what
 /// was just written (§4.2, from `systest/src/tcp.rs:250`), so this waits for
 /// the client to close first, which it does once it has read that last message.
+#[cfg(unix)]
 fn write_client(mut stream: TcpStream, outbox: Receiver<ToClient>) {
     while let Ok(message) = outbox.recv() {
         if stream.write_all(&proto::encode(&message)).is_err() || stream.flush().is_err() {
