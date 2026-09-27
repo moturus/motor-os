@@ -839,6 +839,16 @@ fn test_nx() {
     println!("test_nx() PASS");
 }
 
+// A new file is not executable until it is given PERM_EXEC.
+fn write_executable(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    moto_rt::fs::set_perm(
+        path.to_str().unwrap(),
+        moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+    )
+    .unwrap();
+}
+
 fn test_writable_executable_elf_rejected() {
     let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
     assert_eq!(&bytes[..4], b"\x7fELF");
@@ -862,16 +872,20 @@ fn test_writable_executable_elf_rejected() {
     assert!(modified, "current executable has no executable PT_LOAD");
 
     let path = std::env::temp_dir().join("systest-writable-executable-elf");
-    std::fs::write(&path, bytes).unwrap();
+    write_executable(&path, &bytes);
     let result = std::process::Command::new(&path)
         .arg("test-native-net-cancellation")
         .spawn();
     std::fs::remove_file(path).unwrap();
 
-    if let Ok(mut child) = result {
-        let _ = child.kill();
-        let status = child.wait().unwrap();
-        panic!("loader accepted a writable executable PT_LOAD: {status}");
+    match result {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            panic!("loader accepted a writable executable PT_LOAD: {status}");
+        }
+        // The loader's refusal, not an earlier one such as a missing PERM_EXEC.
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err:?}"),
     }
 
     println!("test_writable_executable_elf_rejected PASS");
