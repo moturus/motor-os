@@ -484,7 +484,10 @@ fn test_refused_refill_retries() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     late.req::<RequestHeader>().cmd = 1;
-    late.do_rpc(None).unwrap();
+    // A lost first wake would block this rpc for good; fail loudly instead.
+    let answer_by = moto_rt::time::Instant::now() + std::time::Duration::from_secs(10);
+    late.do_rpc(Some(answer_by))
+        .expect("the server did not answer the first request on a fresh listener");
     assert_eq!(late.resp::<ResponseHeader>().result, moto_rt::E_OK);
     peer.expect("ok\n");
     drop((client, late));

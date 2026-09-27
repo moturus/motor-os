@@ -90,9 +90,10 @@ listener, then call `do_rpc(None)`, so a lost first wake would block it for
 good. The stall did not come back in 150 runs of the IPC tests alone on the
 same VM shape, in a full systest run there, or in the next two developer
 gates. Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-bf8e-bab1741e9591/scratchpad/gates/dev1/dev-release.log`
-(its last systest line is `test_listener_pool_growth PASS`). Giving that
-`do_rpc` a deadline that fails loudly would turn a future stall into
-evidence.
+(its last systest line is `test_listener_pool_growth PASS`). Since
+2026-09-27 that `do_rpc` has a 10 s deadline and panics with a message, so a
+future stall fails the test quickly and names itself instead of running out
+the suite's clock.
 
 ## A process can take an rmux server's name first (2026-09-27)
 
