@@ -12,7 +12,7 @@ README, so a section here is the long answer to a comment there.
 
 It was written first as a plan, and it is left standing because the reasoning
 outlived the planning: §3 is the argument that a multiplexer needs no pty, §4.2
-is why the transport is loopback TCP, §9 is why conformance is measured against
+is why the transport was loopback TCP (on Motor it is `moto-ipc` now), §9 is why conformance is measured against
 tmux rather than asserted, and §10 is what each phase actually cost — including
 the things that turned out not to be true. Everything in it is built, with the
 exceptions listed under §10's last entry.
@@ -496,6 +496,15 @@ and may switch between them while attached. The CLI is `rmux`, `rmux new`,
 planned.
 
 ### 4.2 Transport: loopback TCP
+
+**Superseded on Motor OS (2026-09-26).** TCP tells a server only the address
+of its client, not what that client may do. Once processes had capability
+masks, a restricted program could connect to a more privileged rmux server
+and run commands with the server's authority. On Motor the client and server
+now meet over `moto-ipc` instead (`src/sys/ipc.rs`), which lets each end ask
+the kernel for the other's mask; `docs/plans/new-caps.md` is the design. The
+Linux host keeps the TCP transport described below, and the protocol itself
+is unchanged.
 
 The client and server are unrelated processes, so they need a rendezvous. The
 constraint is *standard Rust only*, which rules out `moto-ipc`'s `io_channel`

@@ -279,18 +279,11 @@ if __name__ == "__main__":
     vm.pump(3.0)
 
     # ---- rmux runs on the real console at all ----
-    # Start from a known rendezvous. The disk is real and survives a reboot, so
-    # a port file outlives the server it names whenever this qemu is killed
-    # rather than shut down -- and the client that finds it waits five seconds
-    # on a port nobody is listening on, says so, and removes it (§4.2). That is
-    # the right behaviour and a bad start for a harness, whose first `rmux`
-    # would then be the one paying for the last run.
-    # Motor's `rm` is `rm [-r] $FILE`: one file, no `-f`, and it complains about
-    # one that is not there. Both of those are fine here.
+    # On Motor a client finds its server by a service name, not a port file
+    # (§4.2), so a killed qemu leaves no stale rendezvous behind. The scratch
+    # directory is still where the pane's shell stages its pipelines.
     vm.send("mkdir /devtools\r", settle=1.0)
     vm.send("mkdir /devtools/tmp\r", settle=1.0)
-    vm.send("/system/bin/rm /devtools/tmp/rmux.port\r", settle=1.0)
-    vm.send("/system/bin/rm /devtools/tmp/rmux.lock\r", settle=1.0)
     vm.send("PS1='$ ' TMPDIR=/devtools/tmp /user/bin/rmux\r", settle=3.0)
     check("rmux-starts", painted(vm, "[0] "), repr(vm.rows()[-1]))
     check("status-line-is-the-last-row", painted(vm, "[0] ") and "[0] " in vm.rows()[ROWS - 1],

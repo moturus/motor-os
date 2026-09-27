@@ -160,9 +160,16 @@ because the subscription *is* the question, and one that can be taken back.
 `docs/tui.md` is the design, which `sys-tty`'s host
 terminal and `russhd` implement too, so nesting composes.
 
-The client and server are unrelated processes, so they rendezvous over loopback
-TCP: the server binds `127.0.0.1:0` and writes the port to a file. The server is
-spawned **detached** — an ordinary orphan on Motor is killed when its parent is
+The client and server are unrelated processes, so they need a rendezvous. On
+Motor it is `moto-ipc` (`src/sys/ipc.rs`): the server registers a service name
+made of its own capability mask, and each end asks the kernel for the other's
+mask. A client looks for the server its own capabilities would start, checks
+that server's mask before sending anything, and starts one if none runs. The
+server refuses a client that lacks any of its capabilities, so a restricted
+program cannot use a more privileged rmux server to escape its restrictions.
+On the Linux host the rendezvous is loopback TCP: the server binds
+`127.0.0.1:0` and writes the port to a file. The server is spawned
+**detached** — an ordinary orphan on Motor is killed when its parent is
 reaped, so detach rests on a spawn flag gated by `CAP_SPAWN_DETACHED`, which is
 why rmux is on rush's `spawn-detached` list.
 
