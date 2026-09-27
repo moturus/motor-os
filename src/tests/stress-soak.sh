@@ -401,8 +401,10 @@ out="$(printf 'relay-smoke\n' |
 out="$(vssh_n "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = tail-smoke ] || gate_fail "relay tail smoke: got '$out'"
 
+# Only stdout is the screen: debug builds log to stderr, and a log line can
+# land inside an escape sequence (see a8772f70).
 out="$(printf 'echo $((21+21))\nexit\n' | vssh \
-  "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"
+  "TMPDIR=/devtools/tmp /user/bin/rmux" 2>>"$GATE_LOG")"
 case "$out" in *42*) ;; *) gate_fail "rmux command output missing" ;; esac
 # The interactive marker is the pane shell's prompt; rush's Motor prompt
 # has been "motor-os:$PWD$" since 3c19505b (it was "rush:..." before).
@@ -410,7 +412,7 @@ case "$out" in *motor-os*) ;; *) gate_fail "rmux shell was not interactive" ;; e
 case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
-out="$(gate_rmux_copy_keys | vssh "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"
+out="$(gate_rmux_copy_keys | vssh "TMPDIR=/devtools/tmp /user/bin/rmux" 2>>"$GATE_LOG")"
 indicator="$(printf '%s' "$out" |
   grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
 [ -n "$indicator" ] || gate_fail "rmux copy mode did not open"
@@ -720,12 +722,41 @@ w_tui_pty() {
   done
 }
 
-tui_rmux_keys() {
-  printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n'
-  sleep 5
-  printf 'q'
-  sleep 2
-  printf 'exit\n'
+wait_file_for() { # file extended-regex tries(0.25s each)
+  local _
+  for _ in $(seq 1 "$3"); do
+    LC_ALL=C grep -aqE "$2" "$1" 2>/dev/null && return
+    sleep 0.25
+  done
+  return 1
+}
+
+# Like tui_pty_once, type `q` only once the child runs: the pane's shell reads
+# ahead, so a key typed before that reaches the shell's next prompt instead.
+# The signal is the status bar naming the child, which rush sets right before
+# the spawn; the child's own `ready` is no marker, as rmux redraws only the
+# cells that change and can split it. `exit` waits for the child's verdict.
+# Only stdout is the screen, as in the gate above.
+tui_rmux_once() { # tmpdir
+  local in_fd ssh_pid rc cur="$OUT/tui-rmux.cur" fifo="$OUT/tui-rmux.in"
+
+  : > "$cur"
+  [ -p "$fifo" ] || mkfifo "$fifo"
+  run_timeout 90 ssh "${SSH_OPTS[@]}" \
+    motor@"$VM_IP" "TMPDIR=$1 /user/bin/rmux" <"$fifo" >"$cur" 2>"$cur.err" &
+  ssh_pid=$!
+  exec {in_fd}>"$fifo"
+
+  # A subshell per write: if ssh is gone, SIGPIPE ends it, not this workload.
+  ( printf 'TMPDIR=/devtools/tmp /devtools/tests/crossterm-smoke keys\n' >&"$in_fd" ) 2>/dev/null
+  wait_file_for "$cur" 'crossterm-smoke\*' 240 && ( printf 'q' >&"$in_fd" ) 2>/dev/null
+  wait_file_for "$cur" 'end=(quit|timeout|[A-Z])' 40
+  ( printf 'exit\n' >&"$in_fd" ) 2>/dev/null
+  exec {in_fd}>&-
+  wait "$ssh_pid"; rc=$?
+  TUI_RMUX_OUT="$(cat "$cur")"
+  TUI_RMUX_ERR="$(cat "$cur.err")"
+  TUI_RMUX_RC=$rc
 }
 
 # rmux creates and removes rmux.port and rmux.lock in $TMPDIR every session, so
@@ -735,13 +766,13 @@ w_tui_rmux() {
   vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/tui-rmux.log" 2>&1
   while :; do
     n=$((n+1))
-    out="$(tui_rmux_keys | run_timeout 90 ssh "${SSH_OPTS[@]}" \
-      motor@"$VM_IP" "TMPDIR=$dir /user/bin/rmux" 2>&1)"; rc=$?
+    tui_rmux_once "$dir"; out="$TUI_RMUX_OUT"; rc="$TUI_RMUX_RC"
     case "$out" in
       *"key=Char('q')"*"end=quit"*$'\033'"[?1049l"*) ;;
       *) [ "$rc" -ne 0 ] || rc=96 ;;
     esac
     printf 'iter=%d rc=%d\n%s\n' "$n" "$rc" "$out" >> "$OUT/tui-rmux.log"
+    [ "$rc" -eq 0 ] || printf 'stderr:\n%s\n' "$TUI_RMUX_ERR" >> "$OUT/tui-rmux.log"
     [ "$rc" -ne 0 ] && f=$((f+1))
     write_stat tui-rmux "$n" "$f" "$rc" "rmux-pane-keys"
     pace "$rc"
