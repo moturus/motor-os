@@ -1080,7 +1080,7 @@ done
 vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
 
 # rmux's client and server meet over moto-ipc, and a server serves only
-# clients that hold every capability it holds (docs/plans/new-caps.md).
+# clients that hold every capability it holds (src/bin/rmux/details.md §4.2.1).
 # rmux-probe is a hand-written client that can name any server, so these
 # checks do not rely on rmux's own client choosing the right one.
 RMUX_CAPS_TMPDIR="$TEST_TMP/full-test-rmux-caps"

@@ -502,9 +502,8 @@ of its client, not what that client may do. Once processes had capability
 masks, a restricted program could connect to a more privileged rmux server
 and run commands with the server's authority. On Motor the client and server
 now meet over `moto-ipc` instead (`src/sys/ipc.rs`), which lets each end ask
-the kernel for the other's mask; `docs/plans/new-caps.md` is the design. The
-Linux host keeps the TCP transport described below, and the protocol itself
-is unchanged.
+the kernel for the other's mask; §4.2.1 is the design. The Linux host keeps
+the TCP transport described below, and the protocol itself is unchanged.
 
 The client and server are unrelated processes, so they need a rendezvous. The
 constraint is *standard Rust only*, which rules out `moto-ipc`'s `io_channel`
@@ -567,6 +566,96 @@ private server — one `sys::` function. **Correction, measured in M4:**
 `/user/tmp` is an explicit image-manifest directory, so it exists even when it
 contains no tracked files. Rmux only chooses the port-file path; image
 construction owns directory materialization.
+
+#### 4.2.1 Motor: capability-checked `moto-ipc` (2026-09-26)
+
+The problem: a server often has more capabilities than a client, and over TCP
+it cannot tell who is connecting. A restricted program could skip `rmux new`,
+speak the protocol directly, and type into a session with the server's
+authority. `moto-ipc` connections are bound to their peer process, and
+`SysObj::get_capabilities(handle)` tells each end the other's mask.
+`docs/caps.md` ("Named IPC services") has the kernel's side of this.
+
+**Two connections per client.** The protocol is full duplex, but a
+`moto-ipc::sync` connection carries one request at a time. So a client holds
+two small (4 KiB) connections, both carrying raw bytes rather than messages;
+`Frames` reassembles any split.
+
+- *Output*: each request is a long poll. The server answers as soon as it has
+  `ToClient` bytes, up to a page per reply.
+- *Input*: each request carries up to a page of `ToServer` bytes, answered at
+  once.
+
+**Pairing.** The client opens the output connection first, and the reply
+carries a token: the client's number on that server. The input connection
+presents it. The server also requires both connections to come from the same
+PID, so the token need not be secret.
+
+**Authentication.** Before serving a connection's first request, the server
+checks the client's mask. The client must hold every bit the server holds, or
+be able to give it to its own children by default (a System process grants
+`CAP_SPAWN` and `CAP_LOG` without holding them). Otherwise the server replies
+`E_NOT_ALLOWED` and closes the connection. Roles are covered, because
+`CAP_SYS` and `CAP_INTERACTIVE` are part of the mask. The client, before it
+sends anything, checks that the server's mask is exactly the profile it
+expects, so a less privileged impostor cannot collect keystrokes. Neither
+side trusts a mask or PID sent as data.
+
+**Discovery.** The service name is the server's own mask in hex: `rmux/<mask>`,
+or `rmux/<mask>/<TMPDIR>` when `TMPDIR` is set (tests use that for a private
+server; ordinary sessions leave it unset, so the name reveals no path). A
+client looks up `default_child_capabilities(own mask)`, which is exactly the
+mask of a server it would spawn. Keying on the server's mask lets clients
+meet: `rmux` started from Rush holds `CAP_SPAWN_DETACHED`, an `rmux attach`
+typed in one of its panes does not, and both find the same server. The match
+is exact: a client never uses a narrower server, whose new panes would
+silently lose capabilities. A client with a different profile gets its own
+server, and session names are local to a server.
+
+**Startup.** If the name is absent, the client checks that it holds
+`CAP_SPAWN` and `CAP_SPAWN_DETACHED` (and fails with a message naming the
+missing one), creates `TMPDIR` if it is set and absent (panes inherit it, and
+Rush stages pipelines there), spawns a detached server, and retries until the
+name appears. There is no lock file: if two servers race, the kernel gives
+the name to one, the other's `LocalServer::new` fails, and it exits. If a
+process with the wrong mask holds the name, the client says which PID holds
+it and gives up.
+
+**Server threads.** One IPC thread owns the `LocalServer` and turns requests
+into the existing `Event`s. Each client's writer thread became a forwarder: it
+appends each `ToClient`'s bytes to that client's queue and rings a doorbell,
+and the IPC thread answers pending polls. The doorbell is a same-process IPC
+pair, not a thread wake. An object wake stays latched until waited for; a
+thread wake can be consumed by an unrelated futex wait on the IPC thread
+(`rt_futex.rs` treats any wake as its own), which would delay a reply until
+the next event. The farewell still holds: after the last message, the
+forwarder waits up to `FAREWELL` for the client to take it, and the IPC thread
+closes the connections only once the client has asked again or gone, since
+closing earlier can discard a reply the client has not read.
+
+**Known gaps.**
+
+- For a System user the key changes inside a pane. A System client with all
+  bits set gets a `0x38c` server, whose None-role panes run as `0x384`, so an
+  `rmux attach` typed in a pane looks for a different server. For interactive
+  users the key stays the same.
+- Any process may register a profile's name before the real server starts.
+  The client's check stops it from reading keystrokes, but the real server
+  cannot start (docs/plans/future-work.md).
+
+**Rejected.** One connection polled on a timer (latency, idle CPU); one
+connection with out-of-band wakes (not the standard channel); a 2 MiB
+mid-page channel per client (memory, for rare repaints). `moto-ipc::io_channel`
+is full duplex and would need one connection, but it is async and manages
+shared pages explicitly.
+
+**Tests.** `src/bin/rmux-probe.rs` is a hand-written client that can name any
+server. `src/tests/full-test.sh` uses it to show that clients with a minimal
+mask, without `CAP_NET`, or without the Interactive role cannot list, create,
+attach to, kill, or send raw input to a privileged server; that another
+process cannot pair with a client's token; that panes run with the server's
+mask; and that a launcher without detach authority fails clearly. Each check
+fails against a server with that check removed.
 
 ### 4.3 What runs in a pane: `sh`
 

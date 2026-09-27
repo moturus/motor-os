@@ -3,7 +3,7 @@
 //! A server often holds more capabilities than its clients, and TCP tells it
 //! only an address. An IPC connection is bound to the process on the other
 //! end, so each side asks the kernel what the other may do
-//! (docs/plans/new-caps.md, docs/caps.md "Named IPC services").
+//! (details.md §4.2.1, docs/caps.md "Named IPC services").
 //!
 //! A `sync` connection carries one request at a time, and rmux talks both
 //! ways at once, so a client holds two small connections:
