@@ -616,7 +616,8 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
     "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
     "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
-    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" |
+    "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
+    "put $ROOT_DIR/build/bin/$BUILD/rmux-probe $TEST_BIN/rmux-probe" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" motor@192.168.4.2
@@ -1077,6 +1078,130 @@ while :; do
   sleep 0.2
 done
 vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
+
+# rmux's client and server meet over moto-ipc, and a server serves only
+# clients that hold every capability it holds (docs/plans/new-caps.md).
+# rmux-probe is a hand-written client that can name any server, so these
+# checks do not rely on rmux's own client choosing the right one.
+RMUX_CAPS_TMPDIR="$TEST_TMP/full-test-rmux-caps"
+RMUX_PROBE="$TEST_BIN/rmux-probe"
+vm_ssh /system/bin/mkdir "$RMUX_CAPS_TMPDIR"
+
+rmux_caps() {
+  vm_ssh "TMPDIR=$RMUX_CAPS_TMPDIR $*"
+}
+
+wait_vm_caps() {
+  local path="$1"
+  local label="$2"
+  local deadline=$((SECONDS + 20))
+  local line=""
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    line="$(vm_ssh /system/bin/cat "$path" 2>/dev/null)" || line=""
+    case "$line" in
+      caps=*) printf '%s' "$line"; return ;;
+    esac
+    sleep 0.2
+  done
+  fail "$label never wrote $path: '$line'"
+}
+
+rmux_refused() {
+  local label="$1"
+  local out
+  shift
+  if out="$(vm_ssh "$*" 2>&1)"; then
+    fail "$label was served: '$out'"
+  fi
+  case "$out" in
+    "refused: "*) ;;
+    *) fail "$label was not refused: '$out'" ;;
+  esac
+}
+
+# A privileged session, left running after its pane reports its own mask.
+# An ordinary child of this ssh session computes the profile its rmux
+# server should run with.
+rmux_probe_self="$(vm_ssh "$RMUX_PROBE" whoami)"
+rmux_profile="${rmux_probe_self##*profile=}"
+printf '%s whoami > %s/priv-pane\n\001d' "$RMUX_PROBE" "$RMUX_CAPS_TMPDIR" |
+  rmux_caps /user/bin/rmux new -s priv > /dev/null
+out="$(wait_vm_caps "$RMUX_CAPS_TMPDIR/priv-pane" "privileged pane")"
+[ "${out%% *}" = "caps=$rmux_profile" ] ||
+  fail "privileged pane runs with '$out', want caps=$rmux_profile"
+rmux_service="rmux/${rmux_profile#0x}/$RMUX_CAPS_TMPDIR"
+out="$(vm_ssh "$RMUX_PROBE ls $rmux_service $rmux_profile")"
+[ "$out" = "sessions: priv: 1 window" ] ||
+  fail "a privileged probe cannot list the privileged server: '$out'"
+
+# Only a client's own process can pair with its output connection, so a
+# process that learns another's token still cannot type into its session.
+coproc RMUX_HALF {
+  vm_ssh "$RMUX_PROBE half $rmux_service"
+}
+RMUX_HALF_SSH_PID="$!"
+IFS= read -r -t 20 rmux_half <&"${RMUX_HALF[0]}" ||
+  fail "rmux-probe half did not open an output connection"
+case "$rmux_half" in
+  token=*) ;;
+  *) fail "rmux-probe half: '$rmux_half'" ;;
+esac
+rmux_refused "pairing with another process's token" \
+  "$RMUX_PROBE pair $rmux_service ${rmux_half#token=}"
+kill "$RMUX_HALF_SSH_PID"
+wait "$RMUX_HALF_SSH_PID" || true
+
+# Reduced clients, with a minimal mask and with the privileged one minus
+# CAP_NET, can neither see nor reach the privileged server's sessions.
+rmux_no_net="$(printf '%#x' $((rmux_profile & ~0x100)))"
+for rmux_mask in 0x44 "$rmux_no_net"; do
+  out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_mask" /user/bin/rmux ls)"
+  [ -z "$out" ] || fail "rmux ls with $rmux_mask saw another server's sessions: '$out'"
+  rmux_refused "list with $rmux_mask" \
+    "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE ls $rmux_service $rmux_profile"
+  for rmux_request in new attach kill; do
+    rmux_refused "$rmux_request with $rmux_mask" \
+      "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE $rmux_request $rmux_service $rmux_profile priv"
+  done
+  rmux_refused "raw input with $rmux_mask" \
+    "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE raw $rmux_service"
+done
+[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
+  fail "a refused client changed the privileged server's sessions"
+
+# The same profile without detach authority still reaches the server.
+out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_profile" /user/bin/rmux ls)"
+[ "$out" = "priv: 1 window" ] || fail "a same-profile client cannot list priv: '$out'"
+
+# A launcher without CAP_NET starts a narrower server of its own, whose panes
+# have that server's mask, and the two servers do not see each other.
+rmux_probe_caps="${rmux_probe_self%% *}"
+rmux_narrow="$(printf '%#x' $(((${rmux_probe_caps#caps=} | 0x20) & ~0x100)))"
+out="$(vm_ssh "MOTOR_OS_CAPS=$rmux_narrow $RMUX_PROBE whoami")"
+rmux_narrow_profile="${out##*profile=}"
+[ "$rmux_narrow_profile" != "$rmux_profile" ] ||
+  fail "dropping CAP_NET did not change the profile: '$out'"
+printf '%s whoami > %s/narrow-pane\n\001d' "$RMUX_PROBE" "$RMUX_CAPS_TMPDIR" |
+  rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux new -s narrow > /dev/null
+out="$(wait_vm_caps "$RMUX_CAPS_TMPDIR/narrow-pane" "narrow pane")"
+[ "${out%% *}" = "caps=$rmux_narrow_profile" ] ||
+  fail "narrow pane runs with '$out', want caps=$rmux_narrow_profile"
+out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux ls)"
+[ "$out" = "narrow: 1 window" ] || fail "the narrow server lists '$out'"
+[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
+  fail "the privileged server sees the narrow session"
+rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux kill-session -t narrow
+
+# Without detach authority there is no server to start, and rmux says why.
+if out="$(printf 'exit\n' | rmux_caps "MOTOR_OS_CAPS=0x44" /user/bin/rmux new 2>&1)"; then
+  fail "rmux started without CAP_SPAWN_DETACHED: '$out'"
+fi
+case "$out" in
+  *"starting one needs CAP_SPAWN_DETACHED"*) ;;
+  *) fail "rmux did not say why it cannot start a server: '$(printf '%s' "$out" | tail -c 400)'" ;;
+esac
+rmux_caps /user/bin/rmux kill-session -t priv
 
 # sysbox ls colors directory names orange, executable files bright red, and
 # non-executable files with the terminal's default color. A pane

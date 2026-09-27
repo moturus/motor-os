@@ -207,6 +207,8 @@ rmux:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/rmux && CARGO_TARGET_DIR="$(OBJ_DIR)/rmux" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rmux" "$(OBJ_DIR)/rmux/$(SUB_DIR)/rmux"
+# A test-only client (src/tests/full-test.sh); the images do not list it.
+	strip -o "$(BIN_DIR)/rmux-probe" "$(OBJ_DIR)/rmux/$(SUB_DIR)/rmux-probe"
 
 rnetbench:
 	mkdir -p $(BIN_DIR)
