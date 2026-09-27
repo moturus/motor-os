@@ -22,6 +22,7 @@ input_files:
   - "/devtools/tests/crossbench"
   - "/devtools/tests/crossterm-smoke"
   - "/devtools/tests/mio-test"
+  - "/devtools/tests/rmux-probe"
   - "/devtools/tests/rnetbench"
   - "/devtools/tests/systest"
   - "/devtools/tests/tokio-tests"
