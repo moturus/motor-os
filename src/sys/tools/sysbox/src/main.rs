@@ -10,6 +10,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox date");
     println!("\tsysbox find");
     println!("\tsysbox free");
+    println!("\tsysbox head");
     println!("\tsysbox help");
     println!("\tsysbox less");
     println!("\tsysbox loop");
@@ -70,6 +71,7 @@ fn main() {
         "date" => commands::date::do_command(&args[1..]),
         "find" => commands::find::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
+        "head" => commands::head::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
         "less" => commands::less::do_command(&args[1..]),
         "loop" => commands::loop_cmd::do_command(&args[1..]),

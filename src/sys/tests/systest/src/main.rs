@@ -43,6 +43,7 @@ mod sys_tty;
 mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_find;
+mod sysbox_head;
 mod sysbox_less;
 mod sysbox_ls;
 mod sysbox_wc;
@@ -1562,6 +1563,7 @@ fn main() {
     ctrl_c::run_tests();
     command_output::run_test();
     sysbox_find::run_test();
+    sysbox_head::run_test();
     sysbox_less::run_test();
     sysbox_ls::run_test();
     sysbox_wc::run_test();

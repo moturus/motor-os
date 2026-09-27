@@ -350,7 +350,7 @@ fn print_version_and_exit() -> ! {
 
 /// The classic message for the errors that have one, so that a failure reads
 /// the same as it does on Linux.
-fn strerror(err: &std::io::Error) -> String {
+pub(super) fn strerror(err: &std::io::Error) -> String {
     match err.kind() {
         std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
         std::io::ErrorKind::IsADirectory => "Is a directory".to_owned(),

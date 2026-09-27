@@ -65,6 +65,10 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
   numeric IPv4 and IPv6 addresses, `localhost`, and DNS names;
+- `head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...` prints the first 10
+  lines of each file, or the first NUM lines or bytes; a leading `-` on NUM
+  prints all but the last NUM instead. NUM takes the GNU multiplier suffixes
+  (`b`, `K`, `kB`, `KiB`, `M`, ...), and the obsolete `head -NUM` form works;
 - On the development image, `/devtools/tests/systest`,
   `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
   make sure everything is working as expected;
