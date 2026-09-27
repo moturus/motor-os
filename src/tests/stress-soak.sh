@@ -728,12 +728,15 @@ tui_rmux_keys() {
   printf 'exit\n'
 }
 
+# rmux creates and removes rmux.port and rmux.lock in $TMPDIR every session, so
+# it gets its own directory for the same reason fs-write does.
 w_tui_rmux() {
-  local n=0 f=0 rc out
+  local n=0 f=0 rc out dir=/devtools/tmp/strm
+  vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/tui-rmux.log" 2>&1
   while :; do
     n=$((n+1))
     out="$(tui_rmux_keys | run_timeout 90 ssh "${SSH_OPTS[@]}" \
-      motor@"$VM_IP" "TMPDIR=/devtools/tmp /user/bin/rmux" 2>&1)"; rc=$?
+      motor@"$VM_IP" "TMPDIR=$dir /user/bin/rmux" 2>&1)"; rc=$?
     case "$out" in
       *"key=Char('q')"*"end=quit"*$'\033'"[?1049l"*) ;;
       *) [ "$rc" -ne 0 ] || rc=96 ;;
