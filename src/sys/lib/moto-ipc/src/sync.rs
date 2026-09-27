@@ -290,18 +290,22 @@ impl ClientConnection {
                 let res = SysCpu::wait(&mut handles, self.handle, SysHandle::NONE, timeout);
 
                 fence(core::sync::atomic::Ordering::SeqCst);
-                if res.is_ok() {
+                if res.is_ok() || res == Err(moto_rt::E_TIMED_OUT) {
                     let seq = self.resp::<ResponseHeader>().seq.load(Ordering::SeqCst);
-                    if self.seq == seq {
+                    if self.seq + 1 == seq {
+                        self.seq += 1;
+                        return Ok(());
+                    }
+                    if res.is_ok() {
+                        assert_eq!(self.seq, seq);
                         continue;
                     }
-                    assert_eq!(self.seq + 1, seq);
-                    self.seq += 1;
+                    return Err(moto_rt::E_TIMED_OUT);
                 } else if let Err(moto_rt::E_BAD_HANDLE) = res {
                     assert_eq!(handles[0], self.handle);
                     self.disconnect();
                 } else {
-                    assert_eq!(res.err().unwrap(), moto_rt::E_TIMED_OUT);
+                    unreachable!("unexpected IPC wait error: {res:?}");
                 }
                 return res;
             }

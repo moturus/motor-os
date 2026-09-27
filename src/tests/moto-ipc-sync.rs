@@ -5,6 +5,7 @@ extern crate self as moto_sys;
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type ErrorCode = u16;
 pub const E_INVALID_ARGUMENT: ErrorCode = 1;
@@ -39,6 +40,7 @@ struct Kernel {
     mapping_limit: Option<usize>,
     lost_name: bool,
     reply: Option<(Vec<SysHandle>, Result<(), ErrorCode>)>,
+    response_seq: Option<(u64, u64)>,
     timeout: Option<time::Instant>,
 }
 thread_local! {
@@ -77,8 +79,8 @@ impl SysObj {
             Ok(handle)
         })
     }
-    pub fn get(_: SysHandle, _: u32, _: &str) -> Result<SysHandle, ErrorCode> {
-        unreachable!("these tests exercise server endpoints")
+    pub fn get(parent: SysHandle, flags: u32, url: &str) -> Result<SysHandle, ErrorCode> {
+        Self::create(parent, flags, url)
     }
     pub fn put(handle: SysHandle) -> Result<(), ErrorCode> {
         KERNEL.with_borrow_mut(|kernel| {
@@ -101,6 +103,10 @@ impl SysCpu {
             kernel.timeout = timeout;
             let (wakers, result) = kernel.reply.take().expect("missing syscall outcome");
             assert!(wakers.iter().all(|handle| handles.contains(handle)));
+            if let Some((address, seq)) = kernel.response_seq.take() {
+                // Model a server that completed the shared response before wait returned.
+                unsafe { (*(address as *const AtomicU64)).store(seq, Ordering::Release) };
+            }
             handles.fill(SysHandle::NONE);
             handles[..wakers.len()].copy_from_slice(&wakers);
             result
@@ -309,4 +315,36 @@ fn a_changed_request_sequence_disconnects_without_panicking() {
     reply(&[], Ok(()));
     assert_eq!(server.wait(SysHandle::NONE, &[]), Ok(vec![]));
     assert!(server.get_connection(SysHandle(1)).is_none());
+}
+
+#[test]
+fn completed_response_wins_over_a_simultaneous_timeout() {
+    let mut client = sync::ClientConnection::new(ChannelSize::Small).unwrap();
+    client.connect("test").unwrap();
+    let address = client.data().as_ptr() as u64;
+    KERNEL.with_borrow_mut(|kernel| kernel.response_seq = Some((address, 2)));
+    reply(&[1], Err(E_TIMED_OUT));
+
+    assert_eq!(client.do_rpc(Some(time::Instant::now())), Ok(()));
+    assert_eq!(
+        u64::from_ne_bytes(client.data()[..8].try_into().unwrap()),
+        2
+    );
+    // The next RPC can use the sequence slot after a completed reply.
+    KERNEL.with_borrow_mut(|kernel| kernel.response_seq = Some((address, 4)));
+    reply(&[1], Ok(()));
+    assert_eq!(client.do_rpc(None), Ok(()));
+}
+
+#[test]
+fn timeout_without_a_completed_response_remains_an_error() {
+    let mut client = sync::ClientConnection::new(ChannelSize::Small).unwrap();
+    client.connect("test").unwrap();
+    reply(&[], Err(E_TIMED_OUT));
+
+    assert_eq!(client.do_rpc(Some(time::Instant::now())), Err(E_TIMED_OUT));
+    assert_eq!(
+        u64::from_ne_bytes(client.data()[..8].try_into().unwrap()),
+        1
+    );
 }
