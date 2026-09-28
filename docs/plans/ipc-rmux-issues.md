@@ -11,6 +11,33 @@ refill the pool. A fix likely needs either a kernel-side wake on
 connect or a distinct error code, so it touches `src/sys` and should
 be discussed first.
 
+Implementation follows the approved `ipc-rmux-fixes.md` plan. Connection
+wakeups are mandatory, with listener replenishment and early rmux peer
+authentication. Findings below retain the original review for context.
+
+### Implementation progress
+
+Finding 1 is fixed and gated by three full debug runs and three full release
+runs. Successful logs: `/tmp/ipc-rmux-issue1-debug-{2,3,4}.log` and
+`/tmp/ipc-rmux-issue1-release-{1,2,3}.log`. The 12 IPC host tests also pass
+in both modes, and rmux clippy passes in both modes with warnings denied.
+The kernel now always wakes shared servers on connection; LocalServer's
+existing next-wait refill replaces consumed listeners even without an RPC.
+rmux authenticates connection notifications before inspecting request data.
+The guest regression covers silent notification, refill, capacity limits,
+and peer close; an rmux probe holds a rejected silent peer open while a
+legitimate client lists sessions.
+
+Validation diagnosis: the first sandboxed debug run stopped because an
+existing toolchain test needs its generated `../patched-crates` cache.
+The subsequent unrestricted run passed the guest IPC regressions but found
+an incorrect assertion in the new rmux probe: a close during `SysCpu::wait`
+returns a wake (`Ok(())`), whereas an already-closed peer returns
+`E_BAD_HANDLE`. The probe now checks peer closure after either result, using
+the same deadline and no retry. Original logs are preserved in
+`/tmp/ipc-rmux-issue1-debug-1.log` and
+`/tmp/ipc-rmux-issue1-debug-1-unsandboxed.log`.
+
 ## Correctness findings, most severe first
 
 ### 1. Silent connects can lock out the rmux server

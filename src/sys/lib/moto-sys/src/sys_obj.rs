@@ -19,7 +19,7 @@ impl SysObj {
     pub const F_QUERY_PID: u32 = 4;
     pub const F_QUERY_CAPS: u32 = 8;
 
-    // When connecting to ("getting") a shared URL, wake the counterpart.
+    // Retained for compatibility; shared GET always wakes the counterpart.
     pub const F_WAKE_PEER: u32 = 1;
 
     // URLS:
@@ -39,8 +39,8 @@ impl SysObj {
     //              exit. Only "sys-io" is reserved (for sys-io); any other URL is first
     //              come, so peers authenticate each other with get_capabilities()/get_pid().
     //            - A "client" calls GET for the URL; page must be mapped; if there is a matching
-    //              endpoint, the IPC channel is created and returned. Who then waits and who wakes
-    //              is up to the userspace.
+    //              endpoint, the IPC channel is created and the server is woken, even without
+    //              a request. Subsequent waits and wakes are up to userspace.
     //            - For now, only 1:1 connections are supported.
     //            - Later "multicast" connections will be added (server writes), multiple clients read.
     #[cfg(feature = "userspace")]

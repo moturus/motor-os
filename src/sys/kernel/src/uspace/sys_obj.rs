@@ -413,7 +413,9 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
 
             match sys_handle_get(thread, parent, &url) {
                 Ok(handle) => {
-                    if wake_peer
+                    // A silent client still consumes a listener. Always notify
+                    // shared servers so they can authenticate it and refill.
+                    if (wake_peer || url.starts_with("shared:"))
                         && super::sys_cpu::do_wake(thread, handle, SysHandle::NONE, false).is_err()
                     {
                         log::warn!(

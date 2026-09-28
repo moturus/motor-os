@@ -624,6 +624,9 @@ impl LocalServer {
         }
     }
 
+    /// Returns connection notifications as well as request wakes. A newly
+    /// connected peer need not have a request yet; check `have_req()` before
+    /// reading it. The next wait replenishes the consumed listeners.
     pub fn wait(
         &mut self,
         swap_target: SysHandle,

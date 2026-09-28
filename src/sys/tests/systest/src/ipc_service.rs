@@ -44,12 +44,23 @@ fn run_child(url: &str) {
     std::io::stdout().flush().unwrap();
     for command in std::io::stdin().lock().lines() {
         match command.unwrap().as_str() {
+            "accept" => {
+                let server = server.as_mut().unwrap();
+                let ready = server.wait(SysHandle::NONE, &[]).unwrap();
+                assert_eq!(ready.len(), 1);
+                assert!(!server.get_connection(ready[0]).unwrap().have_req());
+            }
             command @ ("rpc" | "retry") => {
                 let server = server.as_mut().unwrap();
                 let mut report_retry = command == "retry";
                 // While refills are refused, wait() also returns empty.
                 let ready = loop {
-                    let ready = server.wait(SysHandle::NONE, &[]).unwrap();
+                    let ready: Vec<_> = server
+                        .wait(SysHandle::NONE, &[])
+                        .unwrap()
+                        .into_iter()
+                        .filter(|handle| server.get_connection(*handle).unwrap().have_req())
+                        .collect();
                     if !ready.is_empty() {
                         break ready;
                     }
@@ -196,6 +207,7 @@ impl Peer {
 }
 
 pub fn run_tests() {
+    test_silent_connections();
     let url = format!("systest-ipc-owner-{}", std::process::id());
     let mut peer = Peer::start(&url);
     assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
@@ -272,6 +284,43 @@ pub fn run_tests() {
     test_listener_pool_closes();
     test_listener_pool_growth();
     test_refused_refill_retries();
+}
+
+fn test_silent_connections() {
+    let url = format!("systest-ipc-silent-{}", std::process::id());
+    let mut server = listen(&url).unwrap();
+    let (ring, doorbell) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
+        client.connect(&url).unwrap();
+        let ready = server.wait(SysHandle::NONE, &[]).unwrap();
+        assert_eq!(ready.len(), 1);
+        let conn = server.get_connection(ready[0]).unwrap();
+        assert!(conn.connected());
+        assert!(!conn.have_req());
+        clients.push(client);
+
+        // A separate wake lets wait() refill without any RPC or client close.
+        moto_sys::SysCpu::wake(ring).unwrap();
+        assert_eq!(
+            server.wait(SysHandle::NONE, &[doorbell]),
+            Ok(vec![doorbell])
+        );
+    }
+    let mut extra = ClientConnection::new(ChannelSize::Small).unwrap();
+    assert_eq!(extra.connect(&url), Err(moto_rt::E_NOT_FOUND));
+    drop(clients.pop());
+    assert_eq!(server.wait(SysHandle::NONE, &[]).unwrap_err().len(), 1);
+    moto_sys::SysCpu::wake(ring).unwrap();
+    assert_eq!(
+        server.wait(SysHandle::NONE, &[doorbell]),
+        Ok(vec![doorbell])
+    );
+    extra.connect(&url).unwrap();
+    SysObj::put(ring).unwrap();
+    SysObj::put(doorbell).unwrap();
+    println!("test_silent_connections PASS");
 }
 
 fn test_listener_pool_growth() {
@@ -448,7 +497,7 @@ fn test_refused_refill_retries() {
     let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
     let mut late = ClientConnection::new(ChannelSize::Small).unwrap();
     client.connect(&url).unwrap();
-    peer.rpc(&mut client); // Takes the only listener; the next wait() refills.
+    peer.command("accept"); // Takes the only listener; the next wait() refills.
 
     let mut hoarder = Peer::spawn(&[HOARD]);
     // Nothing here may allocate until the hoarder is gone: at the floor this

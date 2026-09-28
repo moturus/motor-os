@@ -461,6 +461,23 @@ impl Ipc {
         let Some(conn) = self.server.get_connection(handle) else {
             return;
         };
+        // Connect wakes us even if the peer sends nothing. Authenticate it
+        // now so silent unauthorized clients cannot occupy the listener pool.
+        if !self.conns.contains_key(&handle) {
+            let allowed =
+                SysObj::get_capabilities(handle).is_ok_and(|client| may_use(client, self.caps));
+            if !allowed {
+                if conn.have_req() {
+                    self.refuse(handle, moto_rt::E_NOT_ALLOWED);
+                } else {
+                    conn.disconnect();
+                }
+                return;
+            }
+            self.conns.insert(handle, None);
+        }
+
+        let conn = self.server.get_connection(handle).unwrap();
         if !conn.have_req() {
             return;
         }
@@ -469,16 +486,6 @@ impl Ipc {
         let page = conn.data();
         let token = get_u64(page, TOKEN_AT);
         let data = page[DATA_AT..DATA_AT + get_len(page)].to_vec();
-
-        if !self.conns.contains_key(&handle) {
-            let allowed =
-                SysObj::get_capabilities(handle).is_ok_and(|client| may_use(client, self.caps));
-            if !allowed {
-                self.refuse(handle, moto_rt::E_NOT_ALLOWED);
-                return;
-            }
-            self.conns.insert(handle, None);
-        }
 
         match (cmd, self.conns[&handle]) {
             (CMD_OPEN_OUTPUT, None) => self.open_output(handle),

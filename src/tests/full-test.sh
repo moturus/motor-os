@@ -1136,6 +1136,19 @@ out="$(vm_ssh "$RMUX_PROBE ls $rmux_service $rmux_profile")"
 [ "$out" = "sessions: priv: 1 window" ] ||
   fail "a privileged probe cannot list the privileged server: '$out'"
 
+# No RPC, explicit wake, or client close may be needed to reject this peer.
+coproc RMUX_SILENT {
+  vm_ssh "MOTOR_OS_CAPS=0x44 $RMUX_PROBE silent $rmux_service"
+}
+RMUX_SILENT_SSH_PID="$!"
+IFS= read -r -t 20 out <&"${RMUX_SILENT[0]}" ||
+  fail "silent rmux client was not rejected"
+[ "$out" = "silent rejected" ] || fail "silent rmux probe: '$out'"
+[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
+  fail "silent unauthorized client blocked the privileged server"
+printf 'done\n' >&"${RMUX_SILENT[1]}"
+wait "$RMUX_SILENT_SSH_PID" || fail "silent rmux probe failed"
+
 # Only a client's own process can pair with its output connection, so a
 # process that learns another's token still cannot type into its session.
 coproc RMUX_HALF {

@@ -10,6 +10,7 @@
 //! rmux-probe ls|kill|new|attach NAME PROFILE [SESSION]
 //! rmux-probe raw NAME                        a Kill as the first request
 //! rmux-probe half NAME                       open an output, print its token, wait
+//! rmux-probe silent NAME                     connect without an RPC, wait for rejection
 //! rmux-probe pair NAME TOKEN                 pair an input with that token
 //! ```
 //!
@@ -48,6 +49,7 @@ mod motor {
     pub fn run(args: &[String]) -> i32 {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
+            ["silent", name] => silent(name),
             ["whoami"] => {
                 let caps = moto_sys::ProcessStaticPage::get().capabilities;
                 println!("caps={caps:#x} profile={:#x}", ipc::profile());
@@ -84,6 +86,35 @@ mod motor {
                 2
             }
         }
+    }
+
+    fn silent(name: &str) -> i32 {
+        use moto_sys::{SysCpu, SysHandle, SysObj};
+
+        let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+        conn.connect(name).unwrap();
+        let mut handles = [conn.handle()];
+        let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
+        // Closing during wait is a wake; closing before wait is a bad handle.
+        let result = SysCpu::wait(
+            &mut handles,
+            SysHandle::NONE,
+            SysHandle::NONE,
+            Some(deadline),
+        );
+        assert!(result.is_ok() || result == Err(moto_rt::E_BAD_HANDLE));
+        assert_eq!(
+            SysObj::handle_status(conn.handle()),
+            Err(moto_rt::E_BAD_HANDLE),
+            "silent unauthorized connection was not rejected"
+        );
+        println!("silent rejected");
+        std::io::stdout().flush().unwrap();
+        // Keep the client endpoint and process alive during the legitimate list.
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        drop(conn);
+        0
     }
 
     fn parse_mask(text: &str) -> u64 {
