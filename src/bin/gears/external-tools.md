@@ -71,7 +71,11 @@ rejected: tool behavior and approval identity must not depend on an ambient
 
 Gears reads tool directories only when they are explicitly listed in its
 configuration. It does not recursively scan a project, download tools, compile
-source, or run an installer.
+source, or run an installer. Installed copies live under `tools/` in the Gears
+directory, `/user/cfg/gears/tools/` on Motor OS and `~/.gears/tools/` on
+Linux, and one directory serves both systems: its manifest names a program
+path per system and may give a description and argument schema per system,
+and a tool that exists on one system only is simply absent on the other.
 
 ## Manifest
 
@@ -85,16 +89,24 @@ description = "Describe exactly what the tool does for the model."
 parameters = "parameters.json"
 prompt = "prompt.md"                 # optional
 display = "{path}"                   # optional permission/UI detail
+parallel_safe = false                # optional; true only for read-only tools
+profile = "read"                     # read, write, net, user or user-net
+spawn = false                        # optional; true if it starts programs
 
 [process]
 timeout_seconds = 30                 # optional; default 30
 max_output_bytes = 1048576           # optional; per stream
 stdin = "arguments"                  # optional: arguments or null
+output = "shell"                     # optional: shell or stdout
 
 [process.command]
 common = ["./run"]
 # linux = ["./run-linux"]            # optional platform override
 # motor = ["./run-motor"]            # optional platform override
+
+# [motor]                            # optional per-system overrides of
+# description = "..."                # description, parameters, prompt
+# parameters = "parameters-motor.json"   # and display; [linux] likewise
 ```
 
 The fields mean:
@@ -116,16 +128,40 @@ The fields mean:
 - `display` is an optional template used for the permission prompt and generic
   TUI rendering. Without it, Gears displays the tool name and compact argument
   JSON.
+- `[linux]` and `[motor]` may each give their own `description`, `parameters`,
+  `prompt` and `display`, replacing the top-level value on that system. A
+  program whose arguments differ between systems, as sysbox's `find` differs
+  from GNU `find`, describes each version to the model exactly; a program
+  that is the same on both, such as `rg`, needs only the top-level fields.
+- `profile` names the capabilities the tool's process runs with: `read`,
+  `write`, `net`, `user` or `user-net`, defined in the batteries plan (§7,
+  G7). It is required; Gears refuses a manifest without one or with a name
+  it does not know, and the configuration may narrow a profile, never widen
+  it. `CAP_SPAWN` is not part of any profile: `spawn = true` adds it, for a
+  tool that starts other programs, such as a shell or a build tool.
+- `parallel_safe`, when true, declares that the tool only reads, so Gears may
+  run consecutive calls to such tools together (batteries plan G17). A tool
+  that writes, publishes or runs arbitrary commands must leave it false.
 - `process.timeout_seconds` is between 1 and 3600.
 - `process.max_output_bytes` is between 1024 and 16777216 for each output
   stream.
 - `process.stdin = "arguments"` writes the exact tool-call argument JSON to the
   child and closes stdin. `process.stdin = "null"` gives the child an empty,
   closed stdin.
+- `process.output = "shell"`, the default, gives the model the exit status
+  and the bounded stdout and stderr, as the current `sh` tool does.
+  `process.output = "stdout"` gives the model the child's stdout as plain text
+  and reports a non-zero exit or any stderr as an error result; tools whose
+  output is meant to be read as-is, such as file readers, use it.
 - `process.command.common` supplies the command on both systems.
   `process.command.linux` or `process.command.motor` replaces it on that
   system. The selected vector must not be empty, and its program must be an
-  absolute path or begin with `./`.
+  absolute path or begin with `./`. A tool exists on a system when it has a
+  command for it. A tool with no command for the running system, such as
+  `lorry` on Linux or `cargo` on Motor OS, is still loaded and validated, is
+  listed by `/tools` as not available on this system, is never sent to the
+  model, and is not an error, so one configuration and one set of tool
+  directories serve both systems.
 
 All referenced resource paths are relative, single-file paths inside the tool
 directory: absolute paths and `..` are rejected. This keeps the reviewable
@@ -164,6 +200,12 @@ template language this small avoids inventing a second shell.
 bad or missing placeholder makes that tool call fail visibly; it never falls
 back to executing an ambiguous command.
 
+A substituted value that begins with `-` is refused unless the command vector
+places a literal `--` before it, so a value from the model can never act as an
+option of the wrapped program. The shipped manifests put `--` before every
+placeholder that takes a path or pattern; in a prototype, a search path of
+`--pre=sh` made `rg` run arbitrary commands.
+
 ## Process execution contract
 
 The child process always starts with its working directory set to the selected
@@ -176,12 +218,15 @@ A relative program beginning with `./` is resolved against the tool directory
 before the child starts, so changing the child's working directory does not
 make a packaged executable disappear. A tool that needs its own data files can
 use `GEARS_TOOL_DIR`; it should not assume its package is the working directory.
-Gears also provides `GEARS_TOOL_NAME`, `GEARS_WORKSPACE`, and
-`GEARS_SESSION_ID`. The provider API key is removed from the environment.
+Gears also provides `GEARS_TOOL_NAME`, `GEARS_WORKSPACE`, `GEARS_SESSION_ID`,
+and, when the session is saved to disk, `GEARS_SESSION_PATH`, as hooks
+receive it. The provider API key is removed from the environment.
 
 Stdout and stderr are streamed separately to the UI and retained within the
-configured bounds. The model-facing result contains the exit status and bounded
-stdout/stderr, using the same representation that the current `sh` tool uses.
+configured bounds. In the default `output = "shell"` mode the model-facing
+result contains the exit status and bounded stdout/stderr, using the same
+representation that the current `sh` tool uses; in `output = "stdout"` mode it
+is the bounded stdout as plain text, and any stderr makes the result an error.
 A non-zero exit status, timeout, cancellation, spawn failure, invalid argument
 object, or invalid template is an error tool result. Timeout and cancellation
 stop the process tree through the existing Linux or Motor OS backend.
@@ -205,38 +250,49 @@ Every call follows this order:
 
 1. Reject an unknown or disabled tool without executing it.
 2. Run permission hooks. Any deny, including failure of a configured
-   permission hook, denies the call. Any allow executes it immediately.
-3. If all hooks ask, consult matching session and global approval grants.
+   permission hook, denies the call. Any allow executes it immediately. A
+   `confirm` answer skips the grants of step 3 and asks the attended user;
+   an unattended run denies.
+3. If all hooks ask, consult matching session and global approval grants. A
+   session grant beats a global grant for the same identity; within a scope
+   the latest answer replaces the earlier one. A matching deny grant refuses
+   the call; a matching allow grant executes it. In an unattended run, deny
+   grants apply and allow grants do not.
 4. If no grant matches, ask an attended user; an unattended run denies.
 
 Thus a saved grant never overrides a policy hook. External-tool manifests and
 future loadable modules cannot bypass the same decision path.
 
-An interactive approval prompt offers four choices:
+An interactive approval prompt offers six choices, allow or deny at each of
+three scopes:
 
 ```text
-[y] allow once  [n] deny  [s] allow this tool for this session  [g] allow globally
+[y] allow once   [s] allow this tool for this session   [g] allow globally
+[n] deny once    [S] deny this tool for this session    [G] deny globally
 ```
 
 `y` and `n` apply only to the pending call. `s` records an allow grant and then
-runs the pending call. For a saved session, the grant survives resume; for an
-ephemeral session it lasts until that session ends. A session grant belongs to
-the whole session rather than its active conversation branch, so `/tree` does
-not unexpectedly revoke or resurrect authority. Starting, forking, or cloning
-to a new session does not copy grants.
+runs the pending call; `S` records a deny grant and refuses it, and later calls
+of the same identity in the session are refused without asking. For a saved
+session, a grant survives resume; for an ephemeral session it lasts until that
+session ends. A session grant belongs to the whole session rather than its
+active conversation branch, so `/tree` does not unexpectedly revoke or
+resurrect authority. Starting, forking, or cloning to a new session does not
+copy grants.
 
-`g` records an allow grant for the current user across sessions and workspaces,
-then runs the pending call. Global grants are stored atomically in a separate
-Gears-owned file:
+`g` and `G` record an allow or deny grant for the current user across sessions
+and workspaces, then run or refuse the pending call. Global grants are stored
+atomically in a separate Gears-owned file:
 
-- Linux: `~/.config/gears/permissions.toml`
+- Linux: `~/.gears/permissions.toml`
 - Motor OS: `/user/cfg/gears/permissions.toml`
 
 A grant records the tool name, kind, owner, complete approval-identity hash,
-and creation time. It does not constrain arguments: "allow this tool" means
-all calls and all argument values exposed by that tool. In particular, a grant
-for `sh` permits arbitrary shell commands, so the prompt must distinguish this
-clearly from allowing the displayed command once.
+its direction (allow or deny), and creation time. It does not constrain
+arguments: "allow this tool" means all calls and all argument values exposed
+by that tool. In particular, a grant for `sh` permits arbitrary shell
+commands, so the prompt must distinguish this clearly from allowing the
+displayed command once.
 
 If a session or global grant cannot be written, Gears does not run the call
 under the requested persistent scope. It reports the write error and returns
@@ -250,7 +306,7 @@ selected command vector and path; its grant deliberately trusts later updates
 to that system program. A future WebAssembly tool must include the module hash.
 A hook tool includes its owner hook, registered specification, and configured
 hook command. Changing an identity makes old grants non-matching and requires
-approval again. The same four interactive choices apply to process and hook
+approval again. The same six interactive choices apply to process and hook
 tools and, later, to loadable tools.
 
 The following slash commands make persistent authority inspectable and
@@ -262,9 +318,10 @@ revocable:
 /permission revoke NAME --global
 ```
 
-`/permissions` shows active session/global grants and a short approval-identity
-fingerprint. Session revoke appends a session-wide revocation; global revoke
-atomically removes matching global grants. Stale grants may be displayed for
+`/permissions` shows active session/global grants, each with its direction
+and a short approval-identity fingerprint. Session revoke appends a
+session-wide revocation; global revoke atomically removes matching global
+grants. Stale grants may be displayed for
 diagnosis but never match a changed tool.
 
 ## Gears configuration
@@ -273,23 +330,35 @@ Available tools are listed explicitly:
 
 ```toml
 [[tools]]
-directory = "/home/me/.config/gears/tools/sh"
+directory = "tools/sh"               # relative to the Gears directory
 enabled = true
 
 [[tools]]
-directory = "/home/me/.config/gears/tools/ls"
+directory = "tools/ls"
 enabled = false
 ```
 
-`directory` must be absolute. `enabled` is the default when no later override
-exists. Gears loads and validates every listed directory at startup, including
-disabled tools, so a typo or duplicate name is found before a session begins.
-No tools are available when the list is empty.
+`directory` is absolute, or relative to the Gears directory: `/user/cfg/gears`
+on Motor OS and `~/.gears` on Linux. That directory holds `gears.toml` itself,
+`tools.toml`, `permissions.toml`, the tool directories under `tools/`, the
+sessions and the batteries' data, so copying it to another computer, on
+either system, carries the configuration and the tools with it (batteries
+plan Q10). Gears reads `gears.toml` from there first and from the earlier
+locations, `/user/cfg/gears.toml` and `~/.config/gears.toml`, when it is
+absent; `api_key_file` (renamed from `key_file`, which stays accepted) and
+`ca_cert` in it may be relative to the directory as well. `enabled` is the
+default when no later override exists. Gears loads and validates every listed
+directory at startup, including disabled tools and
+tools absent on this system, so a typo or duplicate name is found before a
+session begins. No tools are available when the list is empty.
 
-Gears ships reference `sh` and `ls` directories in `src/bin/gears/tools/`, but
-does not silently enable them. A development configuration can point directly
-at those directories. An installed configuration can point at copies placed in
-the user's chosen location.
+Gears ships reference directories in `src/bin/gears/tools/` for `sh`, `ls` and
+the common commands listed under "Shipped reference tools", but does not
+silently enable any of them. A development configuration can point directly
+at those directories; the developer image places copies under
+`/user/cfg/gears/tools/`, and a Linux user copies them under `~/.gears/tools/`.
+One configuration lists them all on both systems: a directory whose program a
+system lacks is shown by `/tools` as not available there.
 
 ### Enablement precedence
 
@@ -307,7 +376,7 @@ Global slash commands do not rewrite the user's main TOML, which may contain
 comments and deliberate formatting. They atomically update a small,
 Gears-owned versioned file:
 
-- Linux: `~/.config/gears/tools.toml`
+- Linux: `~/.gears/tools.toml`
 - Motor OS: `/user/cfg/gears/tools.toml`
 
 That file maps tool names to booleans and contains no discovery paths or
@@ -371,6 +440,26 @@ execution path in Rust.
 or `/system/bin/ls` on Motor OS directly with a single path argument and no
 shell. Its purpose is to demonstrate a narrow external tool whose authority
 and model interface are easier to review than arbitrary shell access.
+
+The common commands follow the `ls` pattern, each a manifest naming the
+program's path per platform, a one-line description, an argument-vector
+schema with `--` before every placeholder, and a timeout. The read-only ones,
+`rg`, `head`, `tail`, `diff`, `find`, `wc` and `cat`, set `parallel_safe` and
+`output = "stdout"`. The ones that change or publish things, `gix`, `lorry`,
+`cargo` and `sed`, keep the shell-style result and are never `parallel_safe`.
+Running a command as its own tool gives it its own approval identity, so
+allowing `lorry` for a session does not allow arbitrary shell commands, and
+lets a policy hook allow the read-only ones without asking. Where the two
+systems' programs take different arguments, sysbox's `ls`, `find`, `head`,
+`tail`, `diff`, `wc` and `cat` against their GNU counterparts, the manifest
+gives a description and schema per system. `gix` and `lorry` have a command
+for Motor OS only and `cargo` for Linux only; on the other system each is
+listed as not available and never offered to the model.
+
+Pipeline filters are not shipped as tools: `sort`, `uniq`, `cut` and `tr`
+(sysbox commands, batteries plan step 8a) do their work between pipes, which
+only `sh` has, and `xargs` runs other programs, so it belongs behind the
+shell's approval rather than an identity of its own.
 
 ## Adding a tool
 
