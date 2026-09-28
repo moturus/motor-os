@@ -1579,7 +1579,10 @@ fn test_invalid_socket_subchannels_are_rejected() {
     let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
-    let tcp_before = read_sys_io_metric("net.tcp_sockets");
+    // Not the live TCP count: it also counts earlier tests' sockets that are
+    // still draining, and those are released whenever their linger ends. The
+    // total count shows that nothing was created, and the end of the test
+    // checks this test's own sockets by address.
     let total_tcp_before = read_sys_io_metric("net.total_tcp_sockets");
     let udp_before = read_sys_io_metric("net.udp_sockets");
     let total_udp_before = read_sys_io_metric("net.total_udp_sockets");
@@ -1610,7 +1613,6 @@ fn test_invalid_socket_subchannels_are_rejected() {
 
     assert_eq!(read_sys_io_metric("net.active_clients"), clients_before + 1);
     assert_eq!(read_sys_io_metric("net.total_clients"), total_clients);
-    assert_eq!(read_sys_io_metric("net.tcp_sockets"), tcp_before);
     assert_eq!(
         read_sys_io_metric("net.total_tcp_sockets"),
         total_tcp_before
@@ -1644,8 +1646,7 @@ fn test_invalid_socket_subchannels_are_rejected() {
     drop(connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
     wait_for_sys_io_metric("net.udp_sockets", |value| value == udp_before);
-    wait_for_sockets_released(client_addr);
-    wait_for_sys_io_metric("net.tcp_sockets", |value| value == tcp_before);
+    wait_for_connection_released(client_addr, listener_addr);
     drop(listener);
     println!("test_invalid_socket_subchannels_are_rejected() PASS");
 }
@@ -1953,6 +1954,23 @@ fn sockets_on_addr_released(addr: SocketAddr) -> bool {
     read_tcp_socket_stats()
         .iter()
         .all(|socket| socket.local_addr() != Some(addr))
+}
+
+/// Waits until neither end of the connection between `a` and `b` is left.
+/// Both addresses together identify it: a port alone can also belong to an
+/// earlier connection that is still draining.
+fn wait_for_connection_released(a: SocketAddr, b: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while read_tcp_socket_stats().iter().any(|socket| {
+        let ends = (socket.local_addr(), socket.remote_addr());
+        ends == (Some(a), Some(b)) || ends == (Some(b), Some(a))
+    }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the connection between {a} and {b} was not released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn wait_for_sockets_released(addr: SocketAddr) {
