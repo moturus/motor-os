@@ -586,6 +586,16 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
         4 => moto_io::net::channel::fail_construction_for_test(a2 != 0),
         #[cfg(feature = "netdev")]
         5 => crate::net::pool::fail_runtime_construction_for_test(a2 != 0),
+        #[cfg(feature = "netdev")]
+        6 => {
+            // Free-list slots still count as in use until reclamation drains
+            // them. This diagnostic runs only after channel threads exit.
+            crate::rt_alloc::FRUSA.reclaim();
+            // Runtime bookkeeping lives in slabs. Exclude allocator metadata,
+            // unused slab capacity, and kernel-managed stacks from leak checks.
+            let stats = crate::rt_alloc::FRUSA.stats();
+            return (stats.in_use - stats.in_use_metadata) as u64;
+        }
         _ => panic!("Unrecognized option {a1}"),
     }
 

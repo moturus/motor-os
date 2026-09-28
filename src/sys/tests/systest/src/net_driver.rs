@@ -1595,23 +1595,17 @@ fn test_pool_cold_start_coalesces() {
     println!("net_driver::test_pool_cold_start_coalesces PASS");
 }
 
-/// This process's value of the kernel metric `name`.
-fn own_kernel_metric(name: &str) -> u64 {
-    let kernel = moto_stats::Collector::kernel();
-    let id = moto_stats::Collector::describe(&kernel)
-        .unwrap()
-        .into_iter()
-        .find(|metric| metric.name == name)
-        .unwrap_or_else(|| panic!("no kernel metric '{name}'"))
-        .id;
-    moto_stats::Collector::read(&kernel, id, moto_sys::current_pid()).unwrap()
+fn active_threads() -> u64 {
+    moto_sys::ProcessStaticPage::get()
+        .active_threads
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Waits until no pool channel thread is left: channel threads exit a little
-/// after their channel unpublishes, and a live one holds a stack.
+/// Thread exit follows runtime/TLS cleanup, but precedes stack reclamation.
+/// This is sufficient for live slab bytes, not for the kernel's pages_user.
 fn wait_for_idle_threads(idle: u64) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while own_kernel_metric("active_threads") > idle {
+    while active_threads() > idle {
         assert!(
             std::time::Instant::now() < deadline,
             "pool channel threads did not exit"
@@ -1620,11 +1614,16 @@ fn wait_for_idle_threads(idle: u64) {
     }
 }
 
-/// One channel lifetime: the socket provisions a channel, and dropping it
-/// retires the channel and its thread.
-fn churn_one_channel() {
+/// Drain userspace cleanup between lifetimes so retired threads cannot
+/// accumulate runtime allocations or private allocator caches.
+fn churn_one_channel(idle: u64) {
     drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
     wait_for_cold_pool();
+    wait_for_idle_threads(idle);
+}
+
+fn live_slab_bytes() -> u64 {
+    moto_rt::internal_helper(0, 6, 0, 0, 0, 0)
 }
 
 /// A pool channel's thread exits with `SysObj::put(SELF)`, which drops
@@ -1635,31 +1634,25 @@ fn churn_one_channel() {
 pub fn pool_channel_churn_child() -> ! {
     const WARMUP: usize = 20;
     const CHANNELS: usize = 300;
-    const SLACK_PAGES: u64 = 32;
+    const SLACK_BYTES: u64 = 32 * 4096;
 
+    // Record the known idle state before this fresh child opens its first
+    // socket; no channel thread can be included in the baseline.
+    let idle = active_threads();
     for _ in 0..WARMUP {
-        churn_one_channel();
+        churn_one_channel(idle);
     }
-    let idle = (0..20)
-        .map(|_| {
-            std::thread::sleep(Duration::from_millis(10));
-            own_kernel_metric("active_threads")
-        })
-        .min()
-        .unwrap();
-    wait_for_idle_threads(idle);
-    let before = own_kernel_metric("pages_user");
+    let before = live_slab_bytes();
 
     for _ in 0..CHANNELS {
-        churn_one_channel();
+        churn_one_channel(idle);
     }
-    wait_for_idle_threads(idle);
-    let after = own_kernel_metric("pages_user");
+    let after = live_slab_bytes();
 
-    println!("pool channel churn: pages_user {before} -> {after} over {CHANNELS} channels");
+    println!("pool channel churn: live slab bytes {before} -> {after} over {CHANNELS} channels");
     assert!(
-        after <= before + SLACK_PAGES,
-        "{CHANNELS} channel lifetimes grew the process from {before} to {after} pages"
+        after <= before + SLACK_BYTES,
+        "{CHANNELS} channel lifetimes grew live slab allocations from {before} to {after} bytes"
     );
     std::process::exit(0);
 }
