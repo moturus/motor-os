@@ -361,8 +361,6 @@ struct Outbox {
     bytes: VecDeque<u8>,
     /// The client has a poll outstanding.
     awaiting: bool,
-    /// The server has nothing more to say to this client.
-    closing: bool,
     /// The forwarder stopped waiting for the client to take its last bytes.
     abandoned: bool,
 }
@@ -618,8 +616,8 @@ impl Ipc {
         self.outboxes.changed.notify_all();
     }
 
-    /// Answer every outstanding poll that has bytes waiting, and let go of
-    /// clients the server has finished with.
+    /// Answer outstanding polls with bytes, and end clients whose farewell
+    /// deadline expired. A final poll alone does not acknowledge the exit.
     fn deliver(&mut self) {
         let mut finished = Vec::new();
         let mut failed = Vec::new();
@@ -643,12 +641,9 @@ impl Ipc {
                         failed.push(output);
                     }
                 }
-                // Closing a connection can discard the reply its client has
-                // not read yet, so wait for the client to ask again, as the
-                // TCP writer waits for the client to close.
-                if (outbox.closing && outbox.bytes.is_empty() && outbox.awaiting)
-                    || outbox.abandoned
-                {
+                // The reader can poll again before the relay processes Exit.
+                // Keep input alive until the client closes or farewell expires.
+                if outbox.abandoned {
                     finished.push(*id);
                 }
             }
@@ -676,11 +671,6 @@ fn forward(id: ClientId, messages: Receiver<ToClient>, outboxes: Arc<Outboxes>, 
 
     let deadline = Instant::now() + crate::server::FAREWELL;
     let mut map = outboxes.map.lock().unwrap();
-    match map.get_mut(&id) {
-        Some(outbox) => outbox.closing = true,
-        None => return,
-    }
-    let _ = SysCpu::wake(ring);
     while map.contains_key(&id) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {

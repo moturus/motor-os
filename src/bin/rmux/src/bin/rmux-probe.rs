@@ -6,6 +6,7 @@
 //! of the image: the tests copy it to the VM.
 //!
 //! ```text
+//! rmux-probe closing                         final poll overlaps input; exit 5
 //! rmux-probe whoami                          caps=0x... profile=0x...
 //! rmux-probe ls|kill|new|attach NAME PROFILE [SESSION]
 //! rmux-probe raw NAME                        a Kill as the first request
@@ -51,6 +52,7 @@ mod motor {
     pub fn run(args: &[String]) -> i32 {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
+            ["closing"] => closing(),
             ["silent", name] => silent(name),
             ["saturate", name, profile] => saturate(name, profile),
             ["parallel", name, profile] => {
@@ -97,6 +99,67 @@ mod motor {
                 2
             }
         }
+    }
+
+    fn closing() -> i32 {
+        use rmux::server::Event;
+
+        // Own both application ends, but use the real IPC thread and forwarder.
+        let (events, queue) = std::sync::mpsc::channel();
+        ipc::listen(events).unwrap();
+        let caps = moto_sys::ProcessStaticPage::get().capabilities;
+        let (mut writer, mut reader) = ipc::connect(&ipc::service_name(caps), caps)
+            .unwrap()
+            .unwrap();
+        let Event::ClientArrived(client) = queue.recv().unwrap() else {
+            panic!("missing client arrival");
+        };
+        client
+            .out
+            .send(ToClient::Write(b"farewell".to_vec()))
+            .unwrap();
+        client.out.send(ToClient::Exit(5)).unwrap();
+        drop(client.out);
+
+        let mut frames = Frames::new();
+        let mut output = Vec::new();
+        let mut buf = [0; 4096];
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let status = 'read: loop {
+            let len = reader.read(&mut buf).unwrap();
+            assert_ne!(len, 0, "closed before Exit");
+            frames.feed(&buf[..len]);
+            while let Some(Some(message)) = frames.take::<ToClient>() {
+                match message {
+                    ToClient::Write(bytes) => output.extend(bytes),
+                    ToClient::Exit(code) => break 'read code,
+                    _ => panic!("unexpected final message"),
+                }
+            }
+        };
+        assert_eq!(output, b"farewell");
+        assert_eq!(status, 5);
+
+        // Model read_server polling before the relay consumes Exit. Timeout
+        // leaves that poll in flight; it must not close the input connection.
+        assert_eq!(
+            reader.read(&mut buf).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        writer
+            .write_all(&proto::encode(&ToServer::EndInput))
+            .unwrap();
+        assert!(
+            matches!(queue.recv().unwrap(), Event::FromClient(id, ToServer::EndInput) if id == client.id)
+        );
+        drop(writer);
+        assert!(matches!(queue.recv().unwrap(), Event::ClientGone(id) if id == client.id));
+        client.farewell.join().unwrap();
+        drop(reader);
+        println!("final input acknowledged; exit={status}");
+        status
     }
 
     fn saturate(name: &str, profile: &str) -> i32 {

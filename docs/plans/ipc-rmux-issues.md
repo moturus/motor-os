@@ -38,7 +38,7 @@ the same deadline and no retry. Original logs are preserved in
 `/tmp/ipc-rmux-issue1-debug-1.log` and
 `/tmp/ipc-rmux-issue1-debug-1-unsandboxed.log`.
 
-Finding 2 is fixed and gated by three full debug runs and three full release
+Finding 2 is fixed in `c4de82bb` and gated by three full debug runs and three full release
 runs on the final patch. Successful logs:
 `/tmp/ipc-rmux-issue2-final-{debug,release}-{1,2,3}.log`. IPC host tests pass
 in both modes; rmux clippy passes in both modes with warnings denied.
@@ -62,6 +62,27 @@ deadline, 50 ms interval, and required metric. This is a compatibility
 update to finding 2, not a new retry policy. Original failure log:
 `/tmp/ipc-rmux-issue2-debug-2.log`. All six final gates passed after this
 correction.
+
+Finding 3 is fixed and gated by full debug and release runs:
+`/tmp/ipc-rmux-issue3-{debug,release}.log`. Both final host component suites
+pass (`/tmp/ipc-rmux-issue3-host-final-{debug,release}.log`), and Motor-target
+clippy passes with warnings denied in both modes. A final
+output poll stays pending after the last message. The input connection stays
+usable until the client closes either endpoint or the existing five-second
+farewell expires; only then does the pending reader see EOF. This matches
+the client's ownership: the relay drops its Writer after processing Exit,
+which releases the reader thread. No new close message is needed.
+The guest probe sends final output and Exit(5), leaves another poll in
+flight, verifies an input RPC is acknowledged, and then checks client-close
+cleanup. A host relay regression queues a key ahead of Exit(5).
+
+Validation diagnosis: the initial sandboxed component run passed the new
+regression but failed nine existing loopback socket tests with `EPERM` at
+`TcpListener::bind`. Log: `/tmp/ipc-rmux-issue3-host-debug.log`. The unrestricted
+runs passed. Host clippy found an unnecessary clone in the new host-only
+regression; it was removed and both component suites rerun. The two remaining
+`collapsible_if` warnings are in unchanged Unix startup paths (confirmed
+against the parent commit); no new warnings remain.
 
 ## Correctness findings, most severe first
 

@@ -1085,6 +1085,10 @@ vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
 # checks do not rely on rmux's own client choosing the right one.
 RMUX_CAPS_TMPDIR="$TEST_TMP/full-test-rmux-caps"
 RMUX_PROBE="$TEST_BIN/rmux-probe"
+status=0
+out="$(vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-closing $RMUX_PROBE closing")" || status=$?
+[ "$status" -eq 5 ] || fail "rmux final input lost exit 5: status=$status, '$out'"
+[ "$out" = "final input acknowledged; exit=5" ] || fail "rmux closing probe: '$out'"
 vm_ssh /system/bin/mkdir "$RMUX_CAPS_TMPDIR"
 
 rmux_caps() {

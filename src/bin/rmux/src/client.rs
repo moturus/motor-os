@@ -831,6 +831,19 @@ mod tests {
     }
 
     #[test]
+    fn a_key_before_the_queued_exit_preserves_its_status() {
+        let (events, queue) = channel();
+        let key = Key::plain(crate::keys::Code::Char('x'));
+        events.send(Local::Key(key)).unwrap();
+        events.send(Local::FromServer(ToClient::Exit(5))).unwrap();
+        let mut input = Vec::new();
+        assert_eq!(relay(&mut input, &queue, (24, 80), Vec::new()).unwrap(), 5);
+        let mut frames = Frames::new();
+        frames.feed(&input);
+        assert_eq!(frames.take::<ToServer>(), Some(Some(ToServer::Key(key))));
+    }
+
+    #[test]
     fn a_key_reaches_the_server_as_the_key_it_was() {
         // The client decodes and the server decides (§8.2), so what crosses the
         // wire is the key rather than the bytes it arrived as.
