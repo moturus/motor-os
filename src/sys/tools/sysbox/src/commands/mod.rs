@@ -11,6 +11,7 @@ pub mod loop_cmd; // Can't be just 'loop', as it is a keyword.
 pub mod ls;
 pub mod mkdir;
 pub mod mv;
+pub mod nproc;
 pub mod ping;
 pub mod printenv;
 pub mod ps;
