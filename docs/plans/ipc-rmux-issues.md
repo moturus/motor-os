@@ -63,7 +63,7 @@ update to finding 2, not a new retry policy. Original failure log:
 `/tmp/ipc-rmux-issue2-debug-2.log`. All six final gates passed after this
 correction.
 
-Finding 3 is fixed and gated by full debug and release runs:
+Finding 3 is fixed in `569d7147` and gated by full debug and release runs:
 `/tmp/ipc-rmux-issue3-{debug,release}.log`. Both final host component suites
 pass (`/tmp/ipc-rmux-issue3-host-final-{debug,release}.log`), and Motor-target
 clippy passes with warnings denied in both modes. A final
@@ -83,6 +83,30 @@ runs passed. Host clippy found an unnecessary clone in the new host-only
 regression; it was removed and both component suites rerun. The two remaining
 `collapsible_if` warnings are in unchanged Unix startup paths (confirmed
 against the parent commit); no new warnings remain.
+
+Finding 4 is fixed and gated by full debug and release suites, including
+rmux component tests: `/tmp/ipc-rmux-issue4-resumed-{debug,release}.log`.
+Motor-target clippy passes in both modes with warnings denied. rmux escapes
+`%`, `;`, `&`, `:`, and `=` in the TMPDIR portion of its service name in one
+pass. Escaping percent keeps literal escape spellings distinct. The latter
+three characters also need escaping because the common URL encoder turns
+them into entities containing semicolons, which the kernel splits before
+decoding. Ordinary service names retain their existing spelling; the shared
+encoding contract is unchanged. The guest regression starts two servers in
+directories containing all delimiters, existing entity spellings, and the
+literal encoded counterpart, then checks their separate session listings.
+
+Validation diagnosis: the first debug gate stopped in the new setup because
+Motor's `mkdir` accepts exactly one directory argument. The test now uses
+one invocation per directory; no production change was needed. Original
+failure: `/tmp/ipc-rmux-issue4-debug.log`. Both full gates restart with the
+corrected test. The corrected debug run passed the new discovery checks but
+was interrupted by the agent daemon restart before the suite reported PASS
+(`/tmp/ipc-rmux-issue4-final-debug.log`); no test process or VM survived.
+Both resumed gates passed; the interrupted run was not counted as a pass.
+
+The original finding's `%2F` example was inaccurate: slashes are not escaped
+by the shared URL encoder. Semicolons still cause the diagnosed parse error.
 
 ## Correctness findings, most severe first
 
@@ -161,7 +185,7 @@ Where: `src/bin/rmux/src/sys/ipc.rs:93` (`service_name`),
 `:` and `=`. The kernel parser splits on `;`.
 
 Scenario: `TMPDIR='/user/tmp;x' rmux new`. `start_listening` builds
-`shared:url=rmux/384/%2Fuser%2Ftmp;x;address=...`. The kernel sees an
+`shared:url=rmux/384//user/tmp;x;address=...`. The kernel sees an
 `x` entry and returns `E_INVALID_ARGUMENT`, so `LocalServer::new`
 fails and the server exits. The client's `connect` also gets
 `E_INVALID_ARGUMENT` and reports an OS error. The port-file path

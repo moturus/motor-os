@@ -1079,6 +1079,22 @@ while :; do
 done
 vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
 
+# Delimiters and the common URL encoder's entity spellings must survive
+# real server discovery. A directory spelling the first one's escapes must
+# select a different server, not alias the same service name.
+RMUX_DELIMITERS="$TEST_TMP/full-test-rmux;:=&%3B&amp;&col;&eq;"
+RMUX_ESCAPES="$TEST_TMP/full-test-rmux%3B%3A%3D%26%253B%26amp%3B%26col%3B%26eq%3B"
+vm_ssh "/system/bin/mkdir '$RMUX_DELIMITERS'"
+vm_ssh "/system/bin/mkdir '$RMUX_ESCAPES'"
+printf '\001d' | vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux new -s delimiters" > /dev/null
+printf '\001d' | vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux new -s escapes" > /dev/null
+out="$(vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux ls")"
+[ "$out" = "delimiters: 1 window" ] || fail "rmux delimiter directory discovery: '$out'"
+out="$(vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux ls")"
+[ "$out" = "escapes: 1 window" ] || fail "rmux escape-spelling directory collision: '$out'"
+vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux kill-session -t delimiters"
+vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux kill-session -t escapes"
+
 # rmux's client and server meet over moto-ipc, and a server serves only
 # clients that hold every capability it holds (src/bin/rmux/details.md §4.2.1).
 # rmux-probe is a hand-written client that can name any server, so these

@@ -90,7 +90,23 @@ pub fn profile() -> u64 {
 /// ordinary session leaves it unset, so its name reveals no path.
 pub fn service_name(caps: u64) -> String {
     match std::env::var("TMPDIR") {
-        Ok(dir) if !dir.is_empty() => format!("rmux/{caps:x}/{dir}"),
+        Ok(dir) if !dir.is_empty() => {
+            let mut name = format!("rmux/{caps:x}/");
+            // Shared URLs are split on ';' before decoding, and the common
+            // encoder introduces ';' for &, :, and =. Escape those here,
+            // including '%' so literal escape spellings remain distinct.
+            for ch in dir.chars() {
+                match ch {
+                    '%' => name.push_str("%25"),
+                    ';' => name.push_str("%3B"),
+                    '&' => name.push_str("%26"),
+                    ':' => name.push_str("%3A"),
+                    '=' => name.push_str("%3D"),
+                    _ => name.push(ch),
+                }
+            }
+            name
+        }
         _ => format!("rmux/{caps:x}"),
     }
 }
