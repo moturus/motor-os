@@ -334,10 +334,11 @@ fn completed_response_wins_over_a_simultaneous_timeout() {
     KERNEL.with_borrow_mut(|kernel| kernel.response_seq = Some((address, 4)));
     reply(&[1], Ok(()));
     assert_eq!(client.do_rpc(None), Ok(()));
+    assert!(!client.rpc_pending());
 }
 
 #[test]
-fn timeout_without_a_completed_response_remains_an_error() {
+fn timeout_without_a_completed_response_rejects_reuse() {
     let mut client = sync::ClientConnection::new(ChannelSize::Small).unwrap();
     client.connect("test").unwrap();
     reply(&[], Err(E_TIMED_OUT));
@@ -347,4 +348,36 @@ fn timeout_without_a_completed_response_remains_an_error() {
         u64::from_ne_bytes(client.data()[..8].try_into().unwrap()),
         1
     );
+    let before = client.data().to_vec();
+    assert!(client.rpc_pending());
+    assert_eq!(client.do_rpc(None), Err(E_INVALID_ARGUMENT));
+    assert_eq!(client.data(), before);
+    assert!(client.rpc_pending());
+}
+
+#[test]
+fn a_late_response_does_not_allow_reusing_a_timed_out_rpc() {
+    let mut client = sync::ClientConnection::new(ChannelSize::Small).unwrap();
+    client.connect("test").unwrap();
+    client.data_mut()[16..24].copy_from_slice(b"request!");
+    reply(&[], Err(E_TIMED_OUT));
+    assert_eq!(client.do_rpc(Some(time::Instant::now())), Err(E_TIMED_OUT));
+
+    // Model the server completing the response after do_rpc returned its timeout.
+    let address = client.data().as_ptr() as u64;
+    unsafe { (*(address as *const AtomicU64)).store(2, Ordering::Release) };
+    let before = client.data().to_vec();
+    assert!(client.rpc_pending());
+    assert_eq!(client.do_rpc(None), Err(E_INVALID_ARGUMENT));
+    assert_eq!(client.data(), before);
+    assert!(client.rpc_pending());
+
+    // Explicit disconnect resets the local sequence before a fresh connection.
+    client.disconnect();
+    assert!(!client.rpc_pending());
+    client.connect("test").unwrap();
+    KERNEL.with_borrow_mut(|kernel| kernel.response_seq = Some((address, 2)));
+    reply(&[client.handle().0], Ok(()));
+    assert_eq!(client.do_rpc(None), Ok(()));
+    assert!(!client.rpc_pending());
 }

@@ -253,6 +253,13 @@ impl ClientConnection {
         self.status == ClientConnectionStatus::Connected
     }
 
+    /// Whether an RPC still lacks an observed reply. This remains true after
+    /// a timeout, even if the peer later completes the response. Do not modify
+    /// request buffers while pending; disconnect before reusing the connection.
+    pub fn rpc_pending(&self) -> bool {
+        self.seq & 1 != 0
+    }
+
     /// Borrow the connection handle for kernel-authenticated peer queries.
     pub fn handle(&self) -> SysHandle {
         self.handle
@@ -274,7 +281,7 @@ impl ClientConnection {
     }
 
     pub fn do_rpc(&mut self, timeout: Option<moto_rt::time::Instant>) -> Result<(), ErrorCode> {
-        if self.connected() {
+        if self.connected() && !self.rpc_pending() {
             fence(core::sync::atomic::Ordering::SeqCst);
             let seq = self
                 .req::<RequestHeader>()
@@ -638,6 +645,8 @@ impl LocalServer {
         {
             conn.retire(&mut self.retired);
         }
+        // Release the retired endpoint now if another endpoint already holds the
+        // name: this frees the kernel object and wakes its peer before we allocate.
         self.release_retired();
 
         // When memory is low, the kernel refuses new listeners. Keep serving
@@ -656,6 +665,7 @@ impl LocalServer {
                 Err(err) => panic!("LocalServer '{}': cannot listen: {err}", self.url),
             }
         }
+        // A fresh listener may now hold the name in place of the retired endpoint.
         self.release_retired();
         let timeout = refused.then(|| moto_rt::time::Instant::now() + REFILL_RETRY);
 

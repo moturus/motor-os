@@ -230,6 +230,11 @@ mod motor {
             reader.read(&mut buf).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
+        // Reuse remains a timeout without publishing a second request.
+        assert_eq!(
+            reader.read(&mut buf).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
         writer
             .write_all(&proto::encode(&ToServer::EndInput))
             .unwrap();

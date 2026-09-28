@@ -144,8 +144,6 @@ fn get_len(page: &[u8]) -> usize {
 /// The client's half that carries `ToServer` bytes.
 pub struct Writer {
     conn: ClientConnection,
-    /// A timed-out request may still be outstanding on this connection.
-    stuck: bool,
 }
 
 /// The client's half that long-polls for `ToClient` bytes.
@@ -154,9 +152,6 @@ pub struct Reader {
     held: Vec<u8>,
     at: usize,
     timeout: Option<Duration>,
-    /// A poll timed out and is still outstanding, so this connection cannot
-    /// ask another question.
-    stuck: bool,
 }
 
 fn request(
@@ -166,6 +161,10 @@ fn request(
     data: &[u8],
     timeout: Option<Duration>,
 ) -> std::io::Result<()> {
+    // Check before touching the page: a timed-out peer may still be reading it.
+    if conn.rpc_pending() {
+        return Err(os_error(moto_rt::E_TIMED_OUT));
+    }
     let header = conn.req::<RequestHeader>();
     header.cmd = cmd;
     header.ver = 0;
@@ -244,15 +243,8 @@ pub fn connect(name: &str, profile: u64) -> std::io::Result<Option<(Writer, Read
         held: Vec::new(),
         at: 0,
         timeout: None,
-        stuck: false,
     };
-    Ok(Some((
-        Writer {
-            conn: input,
-            stuck: false,
-        },
-        reader,
-    )))
+    Ok(Some((Writer { conn: input }, reader)))
 }
 
 /// Connect to this process's server, starting one with `spawn` if none runs.
@@ -308,9 +300,6 @@ pub fn connect_or_start(
 
 impl Write for Writer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.stuck {
-            return Err(std::io::ErrorKind::TimedOut.into());
-        }
         let len = buf.len().min(DATA_MAX);
         match request(
             &mut self.conn,
@@ -321,7 +310,6 @@ impl Write for Writer {
         ) {
             Ok(()) => Ok(len),
             Err(err) if err.raw_os_error() == Some(moto_rt::E_TIMED_OUT as i32) => {
-                self.stuck = true;
                 Err(std::io::ErrorKind::TimedOut.into())
             }
             Err(err) => Err(err),
@@ -343,13 +331,9 @@ impl Reader {
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.at == self.held.len() {
-            if self.stuck {
-                return Err(std::io::ErrorKind::TimedOut.into());
-            }
             match request(&mut self.conn, CMD_POLL, 0, &[], self.timeout) {
                 Ok(()) => {}
                 Err(err) if err.raw_os_error() == Some(moto_rt::E_TIMED_OUT as i32) => {
-                    self.stuck = true;
                     return Err(std::io::ErrorKind::TimedOut.into());
                 }
                 // do_rpc disconnects on peer closure. A completed error reply
