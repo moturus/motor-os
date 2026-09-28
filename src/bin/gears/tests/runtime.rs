@@ -321,8 +321,6 @@ fn always_allow_is_not_stored_with_the_session() {
 
 #[test]
 fn a_hook_denial_wins_over_always_allow() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = Fixture::new("always-deny");
     let hook = fixture.root.join("hook.sh");
     std::fs::write(
@@ -336,11 +334,12 @@ esac
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
         name: "fixture".to_string(),
-        command: vec![hook.display().to_string()],
+        // A parallel spawn can briefly inherit the script's writable fd.
+        // Let sh read it without executing that inode (ETXTBSY on Linux).
+        command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
         max_output_bytes: 64 * 1024,
     });
@@ -364,8 +363,6 @@ esac
 
 #[test]
 fn a_hook_can_register_authorize_and_execute_a_tool() {
-    use std::os::unix::fs::PermissionsExt;
-
     let fixture = Fixture::new("hook");
     let hook = fixture.root.join("hook.sh");
     std::fs::write(
@@ -390,11 +387,10 @@ esac
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut config = Config::default();
     config.hooks.push(HookConfig {
         name: "fixture".to_string(),
-        command: vec![hook.display().to_string()],
+        command: vec!["sh".to_string(), hook.display().to_string()],
         timeout: Duration::from_secs(2),
         max_output_bytes: 64 * 1024,
     });
