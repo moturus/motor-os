@@ -11,6 +11,8 @@
 //! rmux-probe raw NAME                        a Kill as the first request
 //! rmux-probe half NAME                       open an output, print its token, wait
 //! rmux-probe silent NAME                     connect without an RPC, wait for rejection
+//! rmux-probe saturate NAME PROFILE           fill the pool until stdin supplies a line
+//! rmux-probe parallel NAME PROFILE           list sessions from three concurrent clients
 //! rmux-probe pair NAME TOKEN                 pair an input with that token
 //! ```
 //!
@@ -50,6 +52,15 @@ mod motor {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
             ["silent", name] => silent(name),
+            ["saturate", name, profile] => saturate(name, profile),
+            ["parallel", name, profile] => {
+                std::thread::scope(|scope| {
+                    for _ in 0..3 {
+                        scope.spawn(|| assert_eq!(ask(name, profile, ToServer::List), 0));
+                    }
+                });
+                0
+            }
             ["whoami"] => {
                 let caps = moto_sys::ProcessStaticPage::get().capabilities;
                 println!("caps={caps:#x} profile={:#x}", ipc::profile());
@@ -86,6 +97,31 @@ mod motor {
                 2
             }
         }
+    }
+
+    fn saturate(name: &str, profile: &str) -> i32 {
+        // rmux's 64-endpoint limit permits 32 paired clients. Use its normal
+        // open path so transient pool exhaustion exercises bounded refill waits.
+        let clients: Vec<_> = (0..32)
+            .map(|_| ipc::connect(name, parse_mask(profile)).unwrap().unwrap())
+            .collect();
+        let mut extra = ClientConnection::new(ChannelSize::Small).unwrap();
+        assert_eq!(extra.connect(name), Err(moto_rt::E_NOT_READY));
+        assert_eq!(ipc::service_name(ipc::profile()), name);
+        let error = ipc::connect_or_start(
+            || panic!("a busy server must not invoke the spawn callback"),
+            Duration::from_secs(5),
+        )
+        .err()
+        .expect("a full server accepted another client");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("server is busy"));
+        println!("pool full");
+        std::io::stdout().flush().unwrap();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+        drop(clients);
+        0
     }
 
     fn silent(name: &str) -> i32 {

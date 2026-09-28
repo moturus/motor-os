@@ -41,6 +41,8 @@ impl SysObj {
     //            - A "client" calls GET for the URL; page must be mapped; if there is a matching
     //              endpoint, the IPC channel is created and the server is woken, even without
     //              a request. Subsequent waits and wakes are up to userspace.
+    //              GET returns E_NOT_READY when the owner has no free listener;
+    //              E_NOT_FOUND means no live service owns the URL.
     //            - For now, only 1:1 connections are supported.
     //            - Later "multicast" connections will be added (server writes), multiple clients read.
     #[cfg(feature = "userspace")]

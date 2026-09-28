@@ -227,7 +227,7 @@ pub(super) fn get(
             loop {
                 let Some((_, shared)) = service.pending.first_key_value() else {
                     // Exhausting the listener pool does not release ownership.
-                    return Err(moto_rt::E_NOT_FOUND);
+                    return Err(moto_rt::E_NOT_READY);
                 };
                 // This drops the upgraded reference under LISTENERS. That is safe
                 // only because a named endpoint gets a process handle right after

@@ -1149,6 +1149,27 @@ IFS= read -r -t 20 out <&"${RMUX_SILENT[0]}" ||
 printf 'done\n' >&"${RMUX_SILENT[1]}"
 wait "$RMUX_SILENT_SSH_PID" || fail "silent rmux probe failed"
 
+coproc RMUX_FULL {
+  rmux_caps "$RMUX_PROBE saturate $rmux_service $rmux_profile"
+}
+RMUX_FULL_SSH_PID="$!"
+IFS= read -r -t 20 out <&"${RMUX_FULL[0]}" || fail "rmux pool did not fill"
+[ "$out" = "pool full" ] || fail "rmux pool probe: '$out'"
+for request in "ls" "attach -t priv" "new -s overflow"; do
+  if out="$(rmux_caps "/user/bin/rmux $request" 2>&1)"; then
+    fail "rmux $request succeeded with a full pool: '$out'"
+  fi
+  case "$out" in
+    *"the rmux server is busy"*) ;;
+    *) fail "rmux $request mistook a full pool for absence: '$out'" ;;
+  esac
+done
+printf 'done\n' >&"${RMUX_FULL[1]}"
+wait "$RMUX_FULL_SSH_PID" || fail "rmux pool probe failed"
+out="$(vm_ssh "$RMUX_PROBE parallel $rmux_service $rmux_profile")"
+expected="$(printf '%s\n' 'sessions: priv: 1 window' 'sessions: priv: 1 window' 'sessions: priv: 1 window')"
+[ "$out" = "$expected" ] || fail "concurrent rmux clients did not recover: '$out'"
+
 # Only a client's own process can pair with its output connection, so a
 # process that learns another's token still cannot type into its session.
 coproc RMUX_HALF {

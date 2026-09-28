@@ -17,8 +17,8 @@ authentication. Findings below retain the original review for context.
 
 ### Implementation progress
 
-Finding 1 is fixed and gated by three full debug runs and three full release
-runs. Successful logs: `/tmp/ipc-rmux-issue1-debug-{2,3,4}.log` and
+Finding 1 is fixed in `89a99f74` and gated by three full debug runs and three
+full release runs. Successful logs: `/tmp/ipc-rmux-issue1-debug-{2,3,4}.log` and
 `/tmp/ipc-rmux-issue1-release-{1,2,3}.log`. The 12 IPC host tests also pass
 in both modes, and rmux clippy passes in both modes with warnings denied.
 The kernel now always wakes shared servers on connection; LocalServer's
@@ -37,6 +37,31 @@ returns a wake (`Ok(())`), whereas an already-closed peer returns
 the same deadline and no retry. Original logs are preserved in
 `/tmp/ipc-rmux-issue1-debug-1.log` and
 `/tmp/ipc-rmux-issue1-debug-1-unsandboxed.log`.
+
+Finding 2 is fixed and gated by three full debug runs and three full release
+runs on the final patch. Successful logs:
+`/tmp/ipc-rmux-issue2-final-{debug,release}-{1,2,3}.log`. IPC host tests pass
+in both modes; rmux clippy passes in both modes with warnings denied.
+An exhausted live service now returns
+`E_NOT_READY`; rmux waits for listener refill within the existing five-second
+opening budget and reports a busy timeout if capacity never returns. Only
+actual absence returns `None`. Both halves of a connection use that rule.
+The guest ownership/refill tests distinguish exhaustion from absence. The
+rmux saturation probe fills all 64 endpoints, proves `connect_or_start`
+never invokes its spawn callback, checks busy errors from `ls`, `attach`,
+and `new`, then releases the pool and verifies three concurrent listings.
+
+Validation diagnosis: after one debug and two release passes, a debug run
+failed at `tcp.rs::read_sys_io_metric` with error 3 (`E_NOT_READY`) opening
+the stats IPC connection. `Collector::read` propagates its connect error;
+the provider's query response only returns success (or invalid argument for
+an unknown command). The existing helper's `E_NOT_FOUND` retry had also
+covered pool exhaustion, which the new kernel result now distinguishes.
+Its error check now accepts that split result with the same 30-second
+deadline, 50 ms interval, and required metric. This is a compatibility
+update to finding 2, not a new retry policy. Original failure log:
+`/tmp/ipc-rmux-issue2-debug-2.log`. All six final gates passed after this
+correction.
 
 ## Correctness findings, most severe first
 

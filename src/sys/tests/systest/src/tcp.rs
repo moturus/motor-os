@@ -37,15 +37,17 @@ pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
         .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
     // read() polls sys-io's net runtime for a live snapshot; under load that
     // round-trip can come back empty and surface as NotFound for a metric that
-    // always exists (same race as fs.rs::read_sys_io_fs_metrics). Retry to a
-    // deadline; a metric that never appears still fails.
+    // always exists (same race as fs.rs::read_sys_io_fs_metrics). Opening the
+    // stats connection can also exhaust its listener pool: formerly NotFound,
+    // now NotReady. Keep both within the existing snapshot deadline.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         match moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL) {
             Ok(value) => return value,
             Err(err) => {
                 assert!(
-                    err == moto_rt::E_NOT_FOUND && std::time::Instant::now() < deadline,
+                    matches!(err, moto_rt::E_NOT_FOUND | moto_rt::E_NOT_READY)
+                        && std::time::Instant::now() < deadline,
                     "read sys-io metric {name:?}: {err}"
                 );
                 std::thread::sleep(Duration::from_millis(50));

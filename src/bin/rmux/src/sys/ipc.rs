@@ -170,10 +170,24 @@ fn request(
 /// has a listener free.
 fn open(name: &str, profile: u64) -> std::io::Result<Option<ClientConnection>> {
     let mut conn = ClientConnection::new(ChannelSize::Small).map_err(os_error)?;
-    match conn.connect(name) {
-        Ok(()) => {}
-        Err(moto_rt::E_NOT_FOUND) => return Ok(None),
-        Err(err) => return Err(os_error(err)),
+    let deadline = Instant::now() + OPEN_TIMEOUT;
+    loop {
+        match conn.connect(name) {
+            Ok(()) => break,
+            Err(moto_rt::E_NOT_FOUND) => return Ok(None),
+            // Connect notifications let the server refill the pool. A busy
+            // live service must never be mistaken for one we need to start.
+            Err(moto_rt::E_NOT_READY) => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("the rmux server is busy: {name}"),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => return Err(os_error(err)),
+        }
     }
     // Before a byte is sent: whoever holds the name with another mask is not
     // the server this client means to type into.
@@ -199,17 +213,8 @@ pub fn connect(name: &str, profile: u64) -> std::io::Result<Option<(Writer, Read
     let token = get_u64(output.data(), TOKEN_AT);
     let server = SysObj::get_pid(output.handle()).map_err(os_error)?;
 
-    // The server refills its listeners after answering, so the second
-    // connection may briefly find none free.
-    let deadline = Instant::now() + OPEN_TIMEOUT;
-    let mut input = loop {
-        if let Some(input) = open(name, profile)? {
-            break input;
-        }
-        if Instant::now() >= deadline {
-            return Err(std::io::ErrorKind::TimedOut.into());
-        }
-        std::thread::sleep(Duration::from_millis(5));
+    let Some(mut input) = open(name, profile)? else {
+        return Ok(None);
     };
     if SysObj::get_pid(input.handle()).map_err(os_error)? != server {
         return Err(std::io::Error::other(format!(

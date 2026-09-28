@@ -230,7 +230,7 @@ pub fn run_tests() {
     // Connecting and a subsequent failed lookup must both retain ownership.
     assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
     let mut extra = ClientConnection::new(ChannelSize::Small).unwrap();
-    assert_eq!(extra.connect(&url), Err(moto_rt::E_NOT_FOUND));
+    assert_eq!(extra.connect(&url), Err(moto_rt::E_NOT_READY));
     assert_eq!(listen(&url).err(), Some(moto_rt::E_INVALID_ARGUMENT));
     peer.rpc(&mut client);
     peer.rpc(&mut client); // Replenishes the exhausted listener pool.
@@ -309,7 +309,7 @@ fn test_silent_connections() {
         );
     }
     let mut extra = ClientConnection::new(ChannelSize::Small).unwrap();
-    assert_eq!(extra.connect(&url), Err(moto_rt::E_NOT_FOUND));
+    assert_eq!(extra.connect(&url), Err(moto_rt::E_NOT_READY));
     drop(clients.pop());
     assert_eq!(server.wait(SysHandle::NONE, &[]).unwrap_err().len(), 1);
     moto_sys::SysCpu::wake(ring).unwrap();
@@ -525,7 +525,7 @@ fn test_refused_refill_retries() {
     // Only the retry timer can add the listener this client needs.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while let Err(err) = late.connect(&url) {
-        assert_eq!(err, moto_rt::E_NOT_FOUND);
+        assert_eq!(err, moto_rt::E_NOT_READY);
         assert!(
             std::time::Instant::now() < deadline,
             "no listener after refusal"
