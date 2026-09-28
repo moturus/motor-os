@@ -1321,6 +1321,9 @@ fn main() {
     if net_caps::is_without_vsock_child(&args) {
         net_caps::run_without_vsock_child(&args);
     }
+    if args.len() == 2 && args[1] == "pool-channel-churn-child" {
+        net_driver::pool_channel_churn_child();
+    }
     if net_driver::is_vsock_discovery_denied_child(&args) {
         net_driver::run_vsock_discovery_denied_child(args.len() == 3);
     }

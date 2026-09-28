@@ -1595,6 +1595,84 @@ fn test_pool_cold_start_coalesces() {
     println!("net_driver::test_pool_cold_start_coalesces PASS");
 }
 
+/// This process's value of the kernel metric `name`.
+fn own_kernel_metric(name: &str) -> u64 {
+    let kernel = moto_stats::Collector::kernel();
+    let id = moto_stats::Collector::describe(&kernel)
+        .unwrap()
+        .into_iter()
+        .find(|metric| metric.name == name)
+        .unwrap_or_else(|| panic!("no kernel metric '{name}'"))
+        .id;
+    moto_stats::Collector::read(&kernel, id, moto_sys::current_pid()).unwrap()
+}
+
+/// Waits until no pool channel thread is left: channel threads exit a little
+/// after their channel unpublishes, and a live one holds a stack.
+fn wait_for_idle_threads(idle: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while own_kernel_metric("active_threads") > idle {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pool channel threads did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// One channel lifetime: the socket provisions a channel, and dropping it
+/// retires the channel and its thread.
+fn churn_one_channel() {
+    drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    wait_for_cold_pool();
+}
+
+/// A pool channel's thread exits with `SysObj::put(SELF)`, which drops
+/// nothing in its frame: a runtime left there leaked a few KiB per channel
+/// lifetime, and russhd, which retires channels all the time, grew without
+/// bound. Runs in a spawned child so that no other socket keeps a channel
+/// open.
+pub fn pool_channel_churn_child() -> ! {
+    const WARMUP: usize = 20;
+    const CHANNELS: usize = 300;
+    const SLACK_PAGES: u64 = 32;
+
+    for _ in 0..WARMUP {
+        churn_one_channel();
+    }
+    let idle = (0..20)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            own_kernel_metric("active_threads")
+        })
+        .min()
+        .unwrap();
+    wait_for_idle_threads(idle);
+    let before = own_kernel_metric("pages_user");
+
+    for _ in 0..CHANNELS {
+        churn_one_channel();
+    }
+    wait_for_idle_threads(idle);
+    let after = own_kernel_metric("pages_user");
+
+    println!("pool channel churn: pages_user {before} -> {after} over {CHANNELS} channels");
+    assert!(
+        after <= before + SLACK_PAGES,
+        "{CHANNELS} channel lifetimes grew the process from {before} to {after} pages"
+    );
+    std::process::exit(0);
+}
+
+fn test_pool_channel_churn_frees_runtimes() {
+    let status = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("pool-channel-churn-child")
+        .status()
+        .expect("failed to spawn the channel-churn child");
+    assert!(status.success(), "channel-churn child failed: {status:?}");
+    println!("net_driver::test_pool_channel_churn_frees_runtimes PASS");
+}
+
 fn wait_for_cold_pool() {
     // The pool must be cold, or an existing channel satisfies the
     // reservation without provisioning. Idle channels self-close when
@@ -2292,6 +2370,7 @@ pub fn run_all_tests() {
     test_dropped_futures_leave_no_waiters();
     test_channel_failure_wakes_every_waiter();
     test_pool_cold_start_coalesces();
+    test_pool_channel_churn_frees_runtimes();
     test_sys_io_unavailable_fails_all();
     test_channel_allocation_failure();
     test_pool_runtime_allocation_failure();

@@ -210,7 +210,16 @@ extern "C" fn channel_thread_entry(ctx: u64) {
     // Safety: the pool is a static; see spawn_channel_thread().
     let pool: &'static NetPool = unsafe { &*(ctx as usize as *const NetPool) };
     moto_sys::set_current_thread_name("rt_net::pool_channel").unwrap();
+    run_channel(pool);
 
+    // What the compatibility host's thread-exit hook used to do: reclaim
+    // TLS, then exit; the kernel reaps the thread.
+    exit_channel_thread();
+}
+
+// Owns the runtime so that it is freed when this returns: SysObj::put(SELF)
+// ends the thread without dropping its caller's locals.
+fn run_channel(pool: &'static NetPool) {
     let runtime = if FAIL_RUNTIME_CONSTRUCTION_FOR_TEST.load(Ordering::Acquire) {
         Err(moto_rt::Error::OutOfMemory)
     } else {
@@ -222,8 +231,7 @@ extern "C" fn channel_thread_entry(ctx: u64) {
             let mut inner = pool.inner.lock();
             inner.provisions_in_flight -= 1;
             inner.fail_waiters(err);
-            drop(inner);
-            exit_channel_thread();
+            return;
         }
     };
 
@@ -307,10 +315,6 @@ extern "C" fn channel_thread_entry(ctx: u64) {
             pool.remove(&client);
         }
     });
-
-    // What the compatibility host's thread-exit hook used to do: reclaim
-    // TLS, then exit; the kernel reaps the thread.
-    exit_channel_thread();
 }
 
 fn exit_channel_thread() -> ! {
