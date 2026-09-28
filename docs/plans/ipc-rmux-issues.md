@@ -84,7 +84,7 @@ regression; it was removed and both component suites rerun. The two remaining
 `collapsible_if` warnings are in unchanged Unix startup paths (confirmed
 against the parent commit); no new warnings remain.
 
-Finding 4 is fixed and gated by full debug and release suites, including
+Finding 4 is fixed in `dc80ca44` and gated by full debug and release suites, including
 rmux component tests: `/tmp/ipc-rmux-issue4-resumed-{debug,release}.log`.
 Motor-target clippy passes in both modes with warnings denied. rmux escapes
 `%`, `;`, `&`, `:`, and `=` in the TMPDIR portion of its service name in one
@@ -107,6 +107,19 @@ Both resumed gates passed; the interrupted run was not counted as a pass.
 
 The original finding's `%2F` example was inaccurate: slashes are not escaped
 by the shared URL encoder. Semicolons still cause the diagnosed parse error.
+
+Finding 5 is fixed and gated by full debug and release suites, including
+rmux component tests: `/tmp/ipc-rmux-issue5-{debug,release}.log`. Motor-target
+clippy passes in both modes with warnings denied. Reader now
+reports EOF only when moto-ipc disconnected the peer. Explicit error replies
+retain their OS error code. The guest probe keeps a refusing peer alive while
+the client checks opening and poll errors, and separately verifies repeated
+reads after actual peer closure remain EOF.
+
+The original opening-refusal scenario below was incorrect: `connect()`
+already propagates `CMD_OPEN_OUTPUT` refusals before `Reader::read` is called.
+The lost error occurs on a completed `CMD_POLL` error response. The regression
+covers both paths and checks `E_NOT_ALLOWED` directly.
 
 ## Correctness findings, most severe first
 
@@ -199,14 +212,11 @@ Where: `src/bin/rmux/src/sys/ipc.rs:335` (`Reader::read`).
 server's explicit `E_NOT_ALLOWED`, into `Ok(0)` (EOF). The refusal
 reason is lost.
 
-Scenario: a client whose mask lacks a server bit runs `rmux ls`.
-`connect()` succeeds, because the `caps == profile` check is
-client-side only. The `CMD_OPEN_OUTPUT` reply is `E_NOT_ALLOWED`, so
-`request` returns `Err`. In `ask()`, `first_words` gets `Ok(0)` and
-`no_answer()` prints "the rmux server did not answer". The server
-answered with a refusal. The attached path behaves the same way: the
-user is told the server is silent rather than that they are not
-allowed.
+Scenario (corrected during implementation): an established client's output
+poll receives an explicit `E_NOT_ALLOWED` response. `Reader::read` discards
+that error and returns EOF; a caller waiting for its first message reports
+that the server did not answer. An opening refusal is different: `connect()`
+already returns it before a Reader is made, so it never enters this path.
 
 ## Cleanups
 

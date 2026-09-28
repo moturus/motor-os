@@ -1101,6 +1101,9 @@ vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux kill-session -t escapes"
 # checks do not rely on rmux's own client choosing the right one.
 RMUX_CAPS_TMPDIR="$TEST_TMP/full-test-rmux-caps"
 RMUX_PROBE="$TEST_BIN/rmux-probe"
+out="$(vm_ssh "$RMUX_PROBE errors")"
+[ "$out" = "opening and poll refusals preserved; closed peer remains EOF" ] ||
+  fail "rmux refusal/EOF probe: '$out'"
 status=0
 out="$(vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-closing $RMUX_PROBE closing")" || status=$?
 [ "$status" -eq 5 ] || fail "rmux final input lost exit 5: status=$status, '$out'"

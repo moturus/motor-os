@@ -352,8 +352,10 @@ impl Read for Reader {
                     self.stuck = true;
                     return Err(std::io::ErrorKind::TimedOut.into());
                 }
-                // The server is gone, or has refused this client.
-                Err(_) => return Ok(0),
+                // do_rpc disconnects on peer closure. A completed error reply
+                // leaves the transport connected and must retain its reason.
+                Err(_) if !self.conn.connected() => return Ok(0),
+                Err(err) => return Err(err),
             }
             let page = self.conn.data();
             let len = get_len(page);

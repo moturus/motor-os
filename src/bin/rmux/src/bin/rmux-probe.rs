@@ -6,6 +6,7 @@
 //! of the image: the tests copy it to the VM.
 //!
 //! ```text
+//! rmux-probe errors                          explicit refusals and closed-peer EOF
 //! rmux-probe closing                         final poll overlaps input; exit 5
 //! rmux-probe whoami                          caps=0x... profile=0x...
 //! rmux-probe ls|kill|new|attach NAME PROFILE [SESSION]
@@ -52,6 +53,7 @@ mod motor {
     pub fn run(args: &[String]) -> i32 {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
+            ["errors"] => errors(),
             ["closing"] => closing(),
             ["silent", name] => silent(name),
             ["saturate", name, profile] => saturate(name, profile),
@@ -99,6 +101,86 @@ mod motor {
                 2
             }
         }
+    }
+
+    fn errors() -> i32 {
+        use moto_ipc::sync::LocalServer;
+        use moto_sys::SysHandle;
+        use std::sync::mpsc::channel;
+
+        let caps = moto_sys::ProcessStaticPage::get().capabilities;
+        let name = format!("rmux-probe-errors/{}", std::process::id());
+        for (stop_on, close) in [
+            (ipc::CMD_OPEN_OUTPUT, false),
+            (ipc::CMD_POLL, false),
+            (ipc::CMD_POLL, true),
+        ] {
+            let (started, ready) = channel();
+            let (finish, finished) = channel();
+            let service = name.clone();
+            let peer = std::thread::spawn(move || {
+                let mut server = LocalServer::new(&service, ChannelSize::Small, 4, 2).unwrap();
+                started.send(()).unwrap();
+                loop {
+                    for handle in server.wait(SysHandle::NONE, &[]).unwrap() {
+                        let conn = server.get_connection(handle).unwrap();
+                        if !conn.have_req() {
+                            continue;
+                        }
+                        let cmd = conn.req::<RequestHeader>().cmd;
+                        assert!(matches!(
+                            cmd,
+                            ipc::CMD_OPEN_OUTPUT | ipc::CMD_OPEN_INPUT | ipc::CMD_POLL
+                        ));
+                        if cmd == stop_on && close {
+                            return; // Drop both endpoints without a response.
+                        }
+                        conn.resp::<ResponseHeader>().result = if cmd == stop_on {
+                            moto_rt::E_NOT_ALLOWED
+                        } else {
+                            moto_rt::E_OK
+                        };
+                        let page = conn.data_mut();
+                        page[ipc::TOKEN_AT..ipc::TOKEN_AT + 8]
+                            .copy_from_slice(&1_u64.to_ne_bytes());
+                        page[ipc::LEN_AT..ipc::LEN_AT + 4].copy_from_slice(&0_u32.to_ne_bytes());
+                        conn.finish_rpc().unwrap();
+                        if cmd == stop_on {
+                            // Keep the peer alive until the client has inspected
+                            // the explicit error, so closure cannot mask it.
+                            finished.recv().unwrap();
+                            return;
+                        }
+                    }
+                }
+            });
+            ready.recv().unwrap();
+            if stop_on == ipc::CMD_OPEN_OUTPUT {
+                let error = ipc::connect(&name, caps)
+                    .err()
+                    .expect("opening refusal was lost");
+                assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED as i32));
+            } else {
+                let (_writer, mut reader) = ipc::connect(&name, caps).unwrap().unwrap();
+                reader
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0; 32];
+                if close {
+                    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+                    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+                } else {
+                    let error = reader.read(&mut buf).unwrap_err();
+                    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED as i32));
+                }
+            }
+            if !close {
+                finish.send(()).unwrap();
+            }
+            peer.join().unwrap();
+        }
+        println!("opening and poll refusals preserved; closed peer remains EOF");
+        0
     }
 
     fn closing() -> i32 {
