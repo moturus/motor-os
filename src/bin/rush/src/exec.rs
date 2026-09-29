@@ -139,7 +139,7 @@ impl FdSource {
     /// the next command; a file → the file; a here-document → its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
-            FdSource::Inherit => Box::new(crate::sys::RawStdin),
+            FdSource::Inherit => Box::new(crate::sys::RawStdin::default()),
             FdSource::File(f) => f
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Read>)

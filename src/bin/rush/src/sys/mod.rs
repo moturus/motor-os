@@ -49,30 +49,66 @@ pub use motor::{
 
 // ---- stdin -----------------------------------------------------------------
 
-/// The shell's own descriptor 0, read one byte per OS read.
+/// The shell's own descriptor 0, read no further than the line at hand.
 ///
 /// Whatever the shell reads is gone for the command it runs next, so a shell
 /// must not read past the line it needs. std's `stdin()` is buffered and would
-/// take up to 8 KiB; this takes exactly what the caller asks for, up to one
-/// byte, and keeps nothing.
-pub struct RawStdin;
+/// take up to 8 KiB. This takes what the platform can promise belongs to the
+/// current line — on Motor OS the bytes already waiting, through their first
+/// newline; on the Unix host one byte — and serves it out as asked.
+#[derive(Default)]
+pub struct RawStdin {
+    pending: Vec<u8>,
+    pos: usize,
+}
 
 impl std::io::Read for RawStdin {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let Some(slot) = buf.first_mut() else {
+        if buf.is_empty() {
             return Ok(0);
-        };
-        #[cfg(unix)]
-        let byte = unix::read_stdin_byte()?;
-        #[cfg(not(unix))]
-        let byte = motor::read_stdin_byte()?;
-        match byte {
-            Some(byte) => {
-                *slot = byte;
-                Ok(1)
-            }
-            None => Ok(0),
         }
+        if self.pos == self.pending.len() {
+            let mut chunk = [0_u8; 256];
+            #[cfg(unix)]
+            let got = unix::read_stdin_line(&mut chunk)?;
+            #[cfg(not(unix))]
+            let got = motor::read_stdin_line(&mut chunk)?;
+            if got == 0 {
+                return Ok(0);
+            }
+            self.pending.clear();
+            self.pending.extend_from_slice(&chunk[..got]);
+            self.pos = 0;
+        }
+        let n = buf.len().min(self.pending.len() - self.pos);
+        buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// How much of `waiting`, bytes stdin already holds, a line reader may take:
+/// through the first newline, or all of it when none is there yet — and one
+/// byte, to be waited for, when nothing is.
+#[cfg(any(not(unix), test))]
+fn line_prefix_len(waiting: &[u8]) -> usize {
+    match waiting.iter().position(|&b| b == b'\n') {
+        Some(end) => end + 1,
+        None => waiting.len().max(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_prefix_len;
+
+    #[test]
+    fn a_line_reader_takes_through_the_first_newline_and_never_past_it() {
+        assert_eq!(line_prefix_len(b""), 1);
+        assert_eq!(line_prefix_len(b"ab"), 2);
+        assert_eq!(line_prefix_len(b"\n"), 1);
+        assert_eq!(line_prefix_len(b"ab\ncd\n"), 3);
+        assert_eq!(line_prefix_len(b"a\r\nb"), 3);
     }
 }
 

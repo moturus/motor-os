@@ -131,17 +131,16 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
 
 // ---- stdin -----------------------------------------------------------------
 
-/// One byte from stdin, or `None` at end of input. The error keeps its Motor
-/// code, as std's own `Stdin` reports it.
-pub(super) fn read_stdin_byte() -> std::io::Result<Option<u8>> {
-    let mut byte = [0_u8; 1];
-    match moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte) {
-        Ok(0) => Ok(None),
-        Ok(_) => Ok(Some(byte[0])),
-        Err(err) => Err(std::io::Error::from_raw_os_error(i32::from(
-            moto_rt::ErrorCode::from(err),
-        ))),
-    }
+/// Into `buf`, what stdin already holds through its first newline, or one
+/// byte, waited for, when nothing is waiting: a line costs a few reads rather
+/// than one per byte, and no byte of the next line is taken. The error keeps
+/// its Motor code, as std's own `Stdin` reports it.
+pub(super) fn read_stdin_line(buf: &mut [u8]) -> std::io::Result<usize> {
+    // Nothing waiting, or a stream that cannot say: one byte.
+    let waiting = moto_rt::net::peek(moto_rt::FD_STDIN, buf).unwrap_or(0);
+    let take = super::line_prefix_len(&buf[..waiting]);
+    moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf[..take])
+        .map_err(|err| std::io::Error::from_raw_os_error(i32::from(moto_rt::ErrorCode::from(err))))
 }
 
 // ---- process control -------------------------------------------------------

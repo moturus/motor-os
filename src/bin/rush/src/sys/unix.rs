@@ -56,21 +56,20 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
 
 // ---- stdin -----------------------------------------------------------------
 
-/// One byte from descriptor 0, or `None` at end of input. A trapped signal
-/// interrupts `read(2)` (no `SA_RESTART`); the trap runs later either way, so
-/// the read is simply retried.
-pub(super) fn read_stdin_byte() -> std::io::Result<Option<u8>> {
-    let mut byte = 0_u8;
+/// One byte of descriptor 0 into `buf`, or none at end of input: a host pipe
+/// cannot be peeked, so one byte is all a line reader can safely take. A
+/// trapped signal interrupts `read(2)` (no `SA_RESTART`); the trap runs later
+/// either way, so the read is simply retried.
+pub(super) fn read_stdin_line(buf: &mut [u8]) -> std::io::Result<usize> {
     loop {
-        match unsafe { libc::read(0, (&raw mut byte).cast(), 1) } {
-            1 => return Ok(Some(byte)),
-            0 => return Ok(None),
-            _ => {
+        match unsafe { libc::read(0, buf.as_mut_ptr().cast(), 1) } {
+            -1 => {
                 let err = std::io::Error::last_os_error();
                 if err.kind() != std::io::ErrorKind::Interrupted {
                     return Err(err);
                 }
             }
+            got => return Ok(got as usize),
         }
     }
 }

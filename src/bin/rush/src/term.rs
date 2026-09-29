@@ -457,16 +457,21 @@ enum ReadOutcome {
 /// Input bytes from stdin, for the one mode that has no terminal to read from.
 ///
 /// A script is not keystrokes ([`Term::readline_piped`]), so it does not go
-/// through crossterm at all: these bytes are read and handed on as they came.
-/// Read one byte at a time and never buffered: a command this shell runs
-/// inherits the same stdin, and must find the lines after its own.
+/// through crossterm at all: these bytes are read and handed on as they came,
+/// through [`crate::sys::RawStdin`], which takes no more than the line at
+/// hand: a command this shell runs inherits the same stdin, and must find the
+/// lines after its own.
 struct Stdin {
+    raw: crate::sys::RawStdin,
     eof: bool,
 }
 
 impl Stdin {
     fn new() -> Self {
-        Self { eof: false }
+        Self {
+            raw: crate::sys::RawStdin::default(),
+            eof: false,
+        }
     }
 
     /// The next byte, or `None` at end of input. Blocks until there is one.
@@ -475,7 +480,7 @@ impl Stdin {
             return None;
         }
         let mut byte = [0_u8; 1];
-        match crate::sys::RawStdin.read(&mut byte) {
+        match self.raw.read(&mut byte) {
             Ok(1) => Some(byte[0]),
             // A closed stdin stays closed, and a read error is as final as EOF:
             // remember it, so that a shell whose input went away exits instead
