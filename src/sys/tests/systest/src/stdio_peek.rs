@@ -37,8 +37,9 @@ pub fn run_child(args: &[String]) -> ! {
         PEEK_IDLE => run_peek_idle(),
         PEEK_TERMINAL_PARENT => run_terminal_parent(),
         PEEK_TERMINAL_CHILD => run_terminal_child(),
-        PEEK_WRITER => run_writer(&args[2], &args[3]),
-        PEEK_LOSS_READER => run_loss_reader(&args[2], &args[3]),
+        PEEK_WRITER => run_writer(&args[2], &args[3], &args[4]),
+        PEEK_LOSS_READER if args[4] == "polled" => run_loss_reader(&args[2], &args[3]),
+        PEEK_LOSS_READER => run_unregistered_loss_reader(&args[2], &args[3], &args[4]),
         _ => unreachable!(),
     }
 }
@@ -147,11 +148,12 @@ fn run_terminal_child() -> ! {
 /// Starts a detached reader, writes `ab` to it, and stays until it is
 /// killed: the reader's input then ends by its writer vanishing, with no
 /// orderly close.
-fn run_writer(result: &str, got: &str) -> ! {
+fn run_writer(result: &str, got: &str, mode: &str) -> ! {
     let mut reader = Command::new(std::env::current_exe().unwrap())
         .arg(PEEK_LOSS_READER)
         .arg(result)
         .arg(got)
+        .arg(mode)
         .env(moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY, "true")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -185,7 +187,7 @@ fn run_loss_reader(result: &str, got_path: &str) -> ! {
                 let mut events = [moto_rt::poll::Event::default(); 1];
                 let ready = moto_rt::poll::wait(registry, events.as_mut_ptr(), 1, Some(deadline));
                 if ready != Ok(1) {
-                    std::fs::write(result, b"input said more was coming, then went quiet").unwrap();
+                    publish_result(result, "input said more was coming, then went quiet");
                     std::process::exit(1)
                 }
             }
@@ -198,8 +200,48 @@ fn run_loss_reader(result: &str, got_path: &str) -> ! {
     } else {
         format!("got {got:?}, ended with {end:?}")
     };
-    std::fs::write(result, verdict).unwrap();
+    publish_result(result, &verdict);
     std::process::exit(0)
+}
+
+/// No poll registration, including before the writer dies. A separate file
+/// releases this reader only after the parent has killed and waited for the writer.
+fn run_unregistered_loss_reader(result: &str, got_path: &str, mode: &str) -> ! {
+    let buffered = mode == "buffered";
+    let initial = if buffered { b"a".as_slice() } else { b"ab" };
+    assert_eq!(read(FD_STDIN, initial.len()), initial);
+    if buffered {
+        assert_eq!(peek(FD_STDIN, 8).unwrap(), b"b");
+    } else {
+        assert_eq!(peek(FD_STDIN, 8), Err(moto_rt::Error::NotReady));
+    }
+    std::fs::write(got_path, b"").unwrap();
+    wait_for_file(
+        &std::path::Path::new(result).with_extension("release"),
+        "the writer was not killed",
+    );
+
+    if buffered {
+        assert_eq!(peek(FD_STDIN, 8).unwrap(), b"b");
+        assert_eq!(peek(FD_STDIN, 8).unwrap(), b"b");
+        assert_eq!(read(FD_STDIN, 8), b"b");
+    }
+    let end = peek(FD_STDIN, 8);
+    let verdict = if end == Err(moto_rt::Error::BadHandle) {
+        "ok".to_owned()
+    } else {
+        format!("unregistered {mode} reader ended with {end:?}")
+    };
+    publish_result(result, &verdict);
+    std::process::exit(0)
+}
+
+/// Existence means the complete verdict is readable, not just that the
+/// writer has created an empty file and is about to fill it.
+fn publish_result(path: &str, verdict: &str) {
+    let pending = std::path::Path::new(path).with_extension("pending");
+    std::fs::write(&pending, verdict).unwrap();
+    std::fs::rename(pending, path).unwrap();
 }
 
 fn wait_for_file(path: &std::path::Path, what: &str) {
@@ -264,10 +306,18 @@ fn test_terminal_peek() {
 /// Requires detached-spawn authority, so that the reader outlives its killed
 /// writer, and CAP_FS_WRITE for the reader's reports.
 pub fn test_peek_after_the_writer_vanishes() {
-    let result = crate::temp_path("stdio-peek-loss-result");
-    let got = crate::temp_path("stdio-peek-loss-got");
+    for mode in ["polled", "empty", "buffered"] {
+        peek_after_the_writer_vanishes(mode);
+    }
+}
+
+fn peek_after_the_writer_vanishes(mode: &str) {
+    let result = crate::temp_path(&format!("stdio-peek-loss-{mode}-result"));
+    let got = crate::temp_path(&format!("stdio-peek-loss-{mode}-got"));
+    let release = result.with_extension("release");
     let _ = std::fs::remove_file(&result);
     let _ = std::fs::remove_file(&got);
+    let _ = std::fs::remove_file(&release);
     let caps = format!(
         "0x{:x}",
         moto_sys::caps::CAP_SPAWN
@@ -279,6 +329,7 @@ pub fn test_peek_after_the_writer_vanishes() {
         .arg(PEEK_WRITER)
         .arg(&result)
         .arg(&got)
+        .arg(mode)
         .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, caps)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -289,6 +340,7 @@ pub fn test_peek_after_the_writer_vanishes() {
     wait_for_file(&got, "the reader did not get its input");
     writer.kill().unwrap();
     let _ = writer.wait();
+    std::fs::write(&release, b"").unwrap();
     wait_for_file(&result, "the reader did not finish");
     assert_eq!(
         String::from_utf8(std::fs::read(&result).unwrap()).unwrap(),
@@ -296,6 +348,7 @@ pub fn test_peek_after_the_writer_vanishes() {
     );
     std::fs::remove_file(result).unwrap();
     std::fs::remove_file(got).unwrap();
+    std::fs::remove_file(release).unwrap();
 }
 
 pub fn run_all_tests() {

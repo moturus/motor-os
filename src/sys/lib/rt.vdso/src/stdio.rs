@@ -372,17 +372,24 @@ impl PosixFile for SelfStdio {
     }
     /// Takes the claim as a read does, and leaves the stash count and
     /// readiness alone: nothing is consumed.
-    ///
-    /// A writer gone without closing (a relay whose own input ended, say) is
-    /// not input still to come: its hangup was the last readiness this stream
-    /// will report. Once nothing is left, say what a read would. The check
-    /// comes first, so that whatever the writer published is seen.
     fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        let writer_gone = self.event_source.is_closed();
-        match self.with_impl(|inner| inner.peek(buf)) {
-            Err(moto_rt::E_NOT_READY) if writer_gone => Err(E_BAD_HANDLE),
-            result => result,
-        }
+        self.with_impl(|inner| {
+            let result = inner.peek(buf);
+            if result != Err(moto_rt::E_NOT_READY) {
+                return result;
+            }
+            // Query only an empty pipe. Unlike the readiness task, this works
+            // without a poll registration and neither consumes nor sends wakes.
+            let Err(err) = moto_sys::SysObj::handle_status(self.pipe.handle()) else {
+                return result;
+            };
+            // The writer may have published bytes or closed since the first
+            // peek. Deliver those before reporting that its handle is gone.
+            match inner.peek(buf) {
+                Err(moto_rt::E_NOT_READY) => Err(err),
+                result => result,
+            }
+        })
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);
