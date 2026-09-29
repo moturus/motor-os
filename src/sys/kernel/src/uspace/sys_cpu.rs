@@ -515,6 +515,20 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     if args.flags == SysCpu::F_KILL_PID {
         let target_pid = args.args[0];
         if let Some(target_stats) = crate::xray::stats::stats_from_pid(target_pid) {
+            use moto_sys::caps::ProcessRole;
+            if ProcessRole::from_caps(killer.capabilities()) == ProcessRole::None {
+                // Start at the parent: self is not a descendant.
+                let mut ancestor = target_stats.parent();
+                loop {
+                    let Some(parent) = ancestor else {
+                        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+                    };
+                    if parent.pid() == killer.owner().pid() {
+                        break;
+                    }
+                    ancestor = parent.parent();
+                }
+            }
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS != 0 {
                     return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);

@@ -32,6 +32,7 @@ mod net_driver;
 mod net_harness;
 mod poll;
 mod pressure;
+mod process_permissions;
 mod rush_caps;
 mod spawn_wait_kill;
 mod stats;
@@ -1189,6 +1190,14 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("process-permissions-child") {
+        process_permissions::run_child(&args);
+        return;
+    }
+    if args.len() == 2 && args[1] == "pid-kill-permissions" {
+        process_permissions::test_pid_kill_permissions();
+        return;
+    }
     if rush_caps::is_print_caps_child(&args) {
         rush_caps::run_print_caps_child(&args);
     }
@@ -1682,6 +1691,7 @@ fn main() {
     spawn_wait_kill::test_kill_after_wait();
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
+    process_permissions::test_pid_kill_permissions();
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
