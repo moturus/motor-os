@@ -20,6 +20,7 @@ const MASK_CHILD: &str = "stdio-terminal-mask-child";
 const FILE_RELAY_PARENT: &str = "stdio-terminal-file-relay-parent";
 const CLOSE_STDIN_PARENT: &str = "stdio-terminal-close-stdin-parent";
 const CLOSE_TERMINAL_PARENT: &str = "stdio-terminal-close-terminal-parent";
+const READ_UNTIL_Q: &str = "stdio-terminal-read-until-q";
 
 /// The mask child's exit code is `MASK_EXIT_BASE` plus its 3-bit mask, so a
 /// child whose streams are all captured needs no working stdout to report
@@ -456,9 +457,161 @@ fn test_non_stdio_descriptors() {
     println!("test_stdio_terminal_non_stdio_descriptors PASS");
 }
 
+pub fn is_read_until_q(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == READ_UNTIL_Q
+}
+
+/// Says it has started, then reports what its stdin held, through a `q`.
+pub fn run_read_until_q() -> ! {
+    println!("ready");
+    std::io::stdout().flush().unwrap();
+    let mut got = Vec::new();
+    for byte in std::io::stdin().lock().bytes() {
+        got.push(byte.unwrap());
+        if got.ends_with(b"q") {
+            break;
+        }
+    }
+    println!("got={:?}", String::from_utf8_lossy(&got));
+    std::io::stdout().flush().unwrap();
+    std::process::exit(0)
+}
+
+/// Rush on a terminal this test provides, as rmux provides one to a pane.
+struct RushOnTerminal {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    output: std::sync::mpsc::Receiver<Vec<u8>>,
+    seen: String,
+    stderr: std::thread::JoinHandle<Vec<u8>>,
+}
+
+impl RushOnTerminal {
+    fn spawn() -> Self {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("/system/bin/rush")
+            .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true")
+            .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
+            .env("PS1", "$ ")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (sender, output) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0; 512];
+            while let Ok(count @ 1..) = stdout.read(&mut buf) {
+                if sender.send(buf[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut child_stderr = child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            child_stderr.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let mut rush = RushOnTerminal {
+            child,
+            stdin,
+            output,
+            seen: String::new(),
+            stderr,
+        };
+        rush.await_output(0, "$ ");
+        rush
+    }
+
+    /// Writes `bytes` in one write, which lands in rush's stdin whole.
+    fn send(&mut self, bytes: &[u8]) -> usize {
+        let since = self.seen.len();
+        self.stdin.write_all(bytes).unwrap();
+        since
+    }
+
+    /// Waits for `needle` in what rush wrote after offset `since`, and returns
+    /// the offset just past it.
+    fn await_output(&mut self, since: usize, needle: &str) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(at) = self.seen[since..].find(needle) {
+                return since + at + needle.len();
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.output.recv_timeout(left) {
+                Ok(bytes) => self.seen.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => panic!("no {needle:?} from rush in {:?}", &self.seen[since..]),
+            }
+        }
+    }
+
+    /// What the reading command reported after offset `since`.
+    fn got(&mut self, since: usize) -> String {
+        let start = self.await_output(since, "got=");
+        let end = self.await_output(start, "\n") - 1;
+        self.seen[start..end].trim_end_matches('\r').to_owned()
+    }
+
+    fn finish(mut self) {
+        self.send(b"exit\r");
+        let status = self.child.wait().unwrap();
+        let stderr = String::from_utf8_lossy(&self.stderr.join().unwrap()).into_owned();
+        assert!(status.success(), "{status}: {stderr}");
+        assert!(!stderr.contains("not found"), "{stderr}");
+    }
+}
+
+fn read_until_q_command() -> String {
+    let exe = std::env::current_exe().unwrap();
+    format!("{} {READ_UNTIL_Q}", exe.display())
+}
+
+/// Types a command and then `after` in one write, and returns what the command
+/// read of it.
+fn type_ahead(after: &[u8]) -> String {
+    let mut rush = RushOnTerminal::spawn();
+    let mut burst = read_until_q_command().into_bytes();
+    burst.extend_from_slice(after);
+    let since = rush.send(&burst);
+    let got = rush.got(since);
+    rush.finish();
+    got
+}
+
+/// Keys typed ahead of a command are the command's: rush's line editor reads
+/// through the Enter, however the terminal spells it, and no further.
+fn test_rush_leaves_type_ahead_to_the_command() {
+    assert_eq!(type_ahead(b"\r\nq"), r#""q""#);
+    assert_eq!(type_ahead(b"\rq"), r#""q""#);
+    assert_eq!(type_ahead(b"\nq"), r#""q""#);
+    assert_eq!(type_ahead(b"\rxq"), r#""xq""#);
+    // Only the first LF pairs with the CR.
+    assert_eq!(type_ahead(b"\r\n\nq"), r#""\nq""#);
+    println!("test_rush_leaves_type_ahead_to_the_command PASS");
+}
+
+/// A lone CR runs the command at once. The LF of a pair that arrives after
+/// that is the command's (docs/plans/rush-peek.md).
+fn test_rush_gives_a_late_lf_to_the_command() {
+    let mut rush = RushOnTerminal::spawn();
+    let since = rush.send(format!("{}\r", read_until_q_command()).as_bytes());
+    let since = rush.await_output(since, "ready");
+    rush.send(b"\nq");
+    assert_eq!(rush.got(since), r#""\nq""#);
+    rush.finish();
+    println!("test_rush_gives_a_late_lf_to_the_command PASS");
+}
+
 pub fn run_all_tests() {
     test_terminal_backed_child();
     test_captured_child_non_terminal();
     test_direct_spawn_hint();
     test_non_stdio_descriptors();
+    test_rush_leaves_type_ahead_to_the_command();
+    test_rush_gives_a_late_lf_to_the_command();
 }

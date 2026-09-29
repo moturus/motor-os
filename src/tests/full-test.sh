@@ -1500,6 +1500,18 @@ esac
 [ "$(crossterm_readings "$out")" = "key=Char('q')
 end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
 
+# Type-ahead through Rush over a forced pty: a key typed after a command's Enter
+# is the command's, not the start of the next command line. The Enter is a
+# lone CR, as an SSH client sends it: one host write is not guaranteed to be
+# one guest write, and an LF that arrives after its CR is the command's anyway.
+out="$(printf '%s\rq' "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" |
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 /system/bin/rush 2>/dev/null)"
+[ "$(crossterm_readings "$out")" = "key=Char('q')
+end=quit" ] || fail "Rush kept its command's type-ahead: '$(crossterm_readings "$out")'"
+case "$out" in
+  *"not found"*) fail "Rush ran its command's type-ahead: '$out'" ;;
+esac
+
 # Ctrl+C remains fatal unless a TUI explicitly installs crossterm's adapter.
 # The adapter owns the process handler for life, so a second call must fail.
 out="$(printf '' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \

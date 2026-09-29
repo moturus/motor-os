@@ -1574,6 +1574,9 @@ fn main() {
     if stdio_terminal::is_mask_child(&args) {
         stdio_terminal::run_mask_child(&args);
     }
+    if stdio_terminal::is_read_until_q(&args) {
+        stdio_terminal::run_read_until_q();
+    }
     if sysbox_less::is_helper(&args) {
         sysbox_less::run_helper(&args);
     }
