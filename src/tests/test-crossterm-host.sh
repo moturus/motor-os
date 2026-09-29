@@ -9,7 +9,9 @@
 # ordinary Rush pass does not use.
 #
 # Testing is offline. --prepare, which full-test-prepare.sh runs, is the one
-# step that fetches, and it builds the tests ahead of the suite's clock.
+# step that fetches, and it builds the tests ahead of the suite's clock. For
+# that build to still be fresh when the suite runs, the copy is made once per
+# revision, under build/, rather than anew each run.
 
 set -euo pipefail
 
@@ -42,10 +44,17 @@ source_dir="$(cargo metadata --locked --offline --format-version 1 \
           if p["name"] == "crossterm"]
 print(os.path.dirname(path))')"
 
-copy="$(mktemp -d /tmp/crossterm-host.XXXXXX)"
-trap 'rm -rf "$copy"' EXIT
-cp -R "$source_dir/." "$copy"
-chmod -R u+w "$copy"
+# Cargo names the checkout after the revision. An interrupted copy must not
+# pass for a complete one, so the copy takes its place only once finished.
+copies="$ROOT_DIR/build/crossterm-host/source"
+copy="$copies/$(basename "$source_dir")"
+if [ ! -d "$copy" ]; then
+  mkdir -p "$copies"
+  staging="$(mktemp -d "$copies/.staging.XXXXXX")"
+  cp -R "$source_dir/." "$staging"
+  chmod -R u+w "$staging"
+  mv "$staging" "$copy"
+fi
 
 targets="$ROOT_DIR/build/crossterm-host/$profile"
 for features in events events,use-dev-tty; do
