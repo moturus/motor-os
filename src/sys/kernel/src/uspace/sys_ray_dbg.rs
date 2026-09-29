@@ -76,6 +76,11 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
         return ResultBuilder::invalid_argument();
     }
 
+    use moto_sys::caps::ProcessRole;
+    if ProcessRole::from_caps(thread.capabilities()) == ProcessRole::None {
+        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+    }
+
     let pid = args.args[0];
     if pid < 2 {
         // Cannot debug system processes.

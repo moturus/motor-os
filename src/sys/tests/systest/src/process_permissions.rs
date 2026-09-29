@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 
 use moto_sys::caps::{CAP_INTERACTIVE, CAP_SPAWN, CAP_SYS, MOTOR_OS_CAPS_ENV_KEY, ProcessRole};
-use moto_sys::{ProcessStaticPage, SysCpu};
+use moto_sys::{ProcessStaticPage, SysCpu, SysRay};
 
 fn command(mode: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -55,6 +55,21 @@ pub fn run_child(args: &[String]) {
             SysCpu::kill_pid(pid.trim().parse().unwrap()).unwrap();
             assert_eq!(Some(0), branch.wait().unwrap().code());
         }
+        "debug" => {
+            assert_none_role();
+            let mut child = idle_child();
+            // Even our own child is forbidden; invalid PIDs cannot bypass the
+            // role check either. Parent and sibling PIDs come from the runner.
+            for pid in [u64::from(child.id()), moto_sys::current_pid(), u64::MAX]
+                .into_iter()
+                .chain(args[3..].iter().map(|pid| pid.parse::<u64>().unwrap()))
+            {
+                assert_eq!(SysRay::dbg_attach(pid), Err(moto_rt::E_NOT_ALLOWED));
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            drop(child.stdin.take());
+            assert_eq!(Some(0), child.wait().unwrap().code());
+        }
         mode => panic!("unknown process permissions child: {mode}"),
     }
 }
@@ -78,4 +93,28 @@ pub fn test_pid_kill_permissions() {
     SysCpu::kill_pid(u64::from(sibling.id())).unwrap();
     assert_eq!(Some(-1), sibling.wait().unwrap().code());
     println!("test_pid_kill_permissions PASS");
+}
+
+pub fn test_debug_attach_permissions() {
+    let own = ProcessStaticPage::get().capabilities;
+    assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
+    let mut sibling = idle_child();
+    for caps in [CAP_SPAWN, own & !(CAP_SYS | CAP_INTERACTIVE)] {
+        let status = command("debug")
+            .args([
+                moto_sys::current_pid().to_string(),
+                sibling.id().to_string(),
+            ])
+            .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))
+            .status()
+            .unwrap();
+        assert_eq!(Some(0), status.code());
+        assert!(sibling.try_wait().unwrap().is_none());
+    }
+    // Interactive debuggers retain their existing authority.
+    let session = SysRay::dbg_attach(u64::from(sibling.id())).unwrap();
+    SysRay::dbg_detach(session).unwrap();
+    drop(sibling.stdin.take());
+    assert_eq!(Some(0), sibling.wait().unwrap().code());
+    println!("test_debug_attach_permissions PASS");
 }

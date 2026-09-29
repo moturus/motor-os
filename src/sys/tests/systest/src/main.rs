@@ -1198,6 +1198,10 @@ fn main() {
         process_permissions::test_pid_kill_permissions();
         return;
     }
+    if args.len() == 2 && args[1] == "debug-attach-permissions" {
+        process_permissions::test_debug_attach_permissions();
+        return;
+    }
     if rush_caps::is_print_caps_child(&args) {
         rush_caps::run_print_caps_child(&args);
     }
@@ -1692,6 +1696,7 @@ fn main() {
     spawn_wait_kill::test_ctrl_c_interrupt();
     spawn_wait_kill::test_pid_kill();
     process_permissions::test_pid_kill_permissions();
+    process_permissions::test_debug_attach_permissions();
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
