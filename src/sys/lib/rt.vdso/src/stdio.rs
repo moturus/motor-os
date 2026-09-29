@@ -299,6 +299,15 @@ impl SelfStdio {
         result
     }
 
+    /// [`Self::with_impl`] for a caller that must not wait: `None` while a
+    /// relay or a read on another thread owns the reader.
+    fn try_with_impl<R>(&self, f: impl FnOnce(&mut StdioImpl) -> R) -> Option<R> {
+        let mut owned = self.inner.lock().take()?;
+        let result = f(&mut owned);
+        self.return_impl(owned);
+        Some(result)
+    }
+
     fn return_impl(&self, owned: StdioImpl) {
         let previous = self.inner.lock().replace(owned);
         assert!(previous.is_none());
@@ -370,10 +379,12 @@ impl PosixFile for SelfStdio {
             .rearm_interest(moto_rt::poll::POLL_READABLE);
         result
     }
-    /// Takes the claim as a read does, and leaves the stash count and
-    /// readiness alone: nothing is consumed.
+    /// Never waits, unlike a read: while a relay or a read on another thread
+    /// owns the reader, whatever arrives is theirs, and this reports
+    /// `E_NOT_READY`. Leaves the stash count and readiness alone: nothing is
+    /// consumed.
     fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.with_impl(|inner| {
+        self.try_with_impl(|inner| {
             let result = inner.peek(buf);
             if result != Err(moto_rt::E_NOT_READY) {
                 return result;
@@ -390,6 +401,7 @@ impl PosixFile for SelfStdio {
                 result => result,
             }
         })
+        .unwrap_or(Err(moto_rt::E_NOT_READY))
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);
