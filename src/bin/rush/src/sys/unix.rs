@@ -54,6 +54,27 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
     })
 }
 
+// ---- stdin -----------------------------------------------------------------
+
+/// One byte from descriptor 0, or `None` at end of input. A trapped signal
+/// interrupts `read(2)` (no `SA_RESTART`); the trap runs later either way, so
+/// the read is simply retried.
+pub(super) fn read_stdin_byte() -> std::io::Result<Option<u8>> {
+    let mut byte = 0_u8;
+    loop {
+        match unsafe { libc::read(0, (&raw mut byte).cast(), 1) } {
+            1 => return Ok(Some(byte)),
+            0 => return Ok(None),
+            _ => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
 // ---- process control -------------------------------------------------------
 
 /// Wait for `child`, returning early if a signal arrives first.

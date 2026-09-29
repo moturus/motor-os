@@ -47,7 +47,6 @@
 //! No terminfo: the escape sequences are the plain ANSI ones crossterm emits,
 //! which every terminal understands.
 
-use std::collections::VecDeque;
 use std::io::{IsTerminal, Read, Write};
 use std::sync::Mutex;
 
@@ -459,49 +458,33 @@ enum ReadOutcome {
 ///
 /// A script is not keystrokes ([`Term::readline_piped`]), so it does not go
 /// through crossterm at all: these bytes are read and handed on as they came.
-/// Deliberately a small read: what is buffered here is out of reach of a child
-/// that inherits this stdin.
+/// Read one byte at a time and never buffered: a command this shell runs
+/// inherits the same stdin, and must find the lines after its own.
 struct Stdin {
-    pending: VecDeque<u8>,
     eof: bool,
 }
 
 impl Stdin {
     fn new() -> Self {
-        Self {
-            pending: VecDeque::new(),
-            eof: false,
-        }
+        Self { eof: false }
     }
 
-    /// Take whatever stdin has to give into `pending`, and report whether the
-    /// stream is still open. Blocks until there is something to take.
-    fn absorb(&mut self) -> bool {
+    /// The next byte, or `None` at end of input. Blocks until there is one.
+    fn get(&mut self) -> Option<u8> {
         if self.eof {
-            return false;
+            return None;
         }
-        let mut buf = [0_u8; 64];
-        match std::io::stdin().read(&mut buf) {
-            Ok(n) if n > 0 => {
-                self.pending.extend(&buf[..n]);
-                true
-            }
+        let mut byte = [0_u8; 1];
+        match crate::sys::RawStdin.read(&mut byte) {
+            Ok(1) => Some(byte[0]),
             // A closed stdin stays closed, and a read error is as final as EOF:
             // remember it, so that a shell whose input went away exits instead
             // of spinning on it.
             _ => {
                 self.eof = true;
-                false
+                None
             }
         }
-    }
-
-    /// The next byte, or `None` at end of input.
-    fn get(&mut self) -> Option<u8> {
-        if self.pending.is_empty() {
-            self.absorb();
-        }
-        self.pending.pop_front()
     }
 }
 

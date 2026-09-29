@@ -135,10 +135,11 @@ impl FdSource {
     }
 
     /// A reader for this fd used as *standard input* (for `read`): `Inherit` →
-    /// stdin, a file → the file, a here-document → its body.
+    /// the shell's stdin, unbuffered so that the bytes after the line stay for
+    /// the next command; a file → the file; a here-document → its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
-            FdSource::Inherit => Box::new(std::io::stdin()),
+            FdSource::Inherit => Box::new(crate::sys::RawStdin),
             FdSource::File(f) => f
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Read>)

@@ -837,6 +837,17 @@ out="$(printf 'relay-smoke\n' | vm_ssh_stdout "/system/bin/rush -c 'read X && ec
 out="$(vm_ssh_stdout "/system/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
+# Rush reads its own stdin only through the line it needs, so the rest reaches
+# the command it runs: from the read builtin, and from the piped line reader.
+out="$(printf 'a\nb\n' | vm_ssh_stdout "/system/bin/rush -c 'read X; echo X=\$X; cat'")"
+[ "$out" = $'X=a\nb' ] || fail "rush read took the next line: got '$out'"
+for mode in --piped -i; do
+  out="$(printf 'read X\nhello\necho X=$X\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
+  [ "$out" = "X=hello" ] || fail "rush $mode read: got '$out'"
+  out="$(printf 'head -n 1\nhello\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
+  [ "$out" = "hello" ] || fail "rush $mode took head's input: got '$out'"
+done
+
 # A foreground status 130 is rush's v1 interrupt indication. It fires INT once
 # and abandons the rest of the pipeline, loop, and enclosing command list.
 rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""

@@ -129,6 +129,21 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
     ))
 }
 
+// ---- stdin -----------------------------------------------------------------
+
+/// One byte from stdin, or `None` at end of input. The error keeps its Motor
+/// code, as std's own `Stdin` reports it.
+pub(super) fn read_stdin_byte() -> std::io::Result<Option<u8>> {
+    let mut byte = [0_u8; 1];
+    match moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte) {
+        Ok(0) => Ok(None),
+        Ok(_) => Ok(Some(byte[0])),
+        Err(err) => Err(std::io::Error::from_raw_os_error(i32::from(
+            moto_rt::ErrorCode::from(err),
+        ))),
+    }
+}
+
 // ---- process control -------------------------------------------------------
 
 /// Wait for `child`. Nothing can interrupt this on Motor OS (no signals), so the

@@ -19,11 +19,17 @@ struct Run {
 
 /// Run `rush <args…>` with `stdin` fed in, from a clean environment.
 fn run_args(args: &[&str], stdin: &str) -> Run {
+    run_env(args, &[], stdin)
+}
+
+/// [`run_args`] with `env` added to the clean environment.
+fn run_env(args: &[&str], env: &[(&str, &str)], stdin: &str) -> Run {
     let mut child = Command::new(RUSH)
         .args(args)
         // Start from a clean slate so host env vars (PS1, ENV, …) can't leak in.
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -724,4 +730,48 @@ fn verbose_echoes_input() {
 
     // Like dash, a `-c` string is not echoed: it was never "read" as input.
     assert_eq!(run_c("set -v; echo hi").stderr, "");
+}
+
+// ---- the shell's own stdin ---------------------------------------------------
+
+// What the shell reads from its stdin is gone for the commands it runs, so it
+// must stop at the end of the line it needs. Every case here leaves the rest of
+// the input to a command and checks that the command got it, as in bash (dash
+// reads ahead in the interactive modes).
+
+#[test]
+fn read_builtin_leaves_the_next_line_to_a_command() {
+    let run = run_args(&["-c", "read x; echo \"x=$x\"; cat"], "a\nb\n");
+    assert_eq!(run.stdout, "x=a\nb\n");
+    let run = run_args(
+        &["-c", "read a; read b; echo \"$a|$b\"; cat"],
+        "one\ntwo\nthree\n",
+    );
+    assert_eq!(run.stdout, "one|two\nthree\n");
+}
+
+#[test]
+fn read_builtin_contract_holds_on_raw_stdin() {
+    let run = run_args(
+        &["-c", "read -r x; printf '[%s]\\n' \"$x\"; cat"],
+        "a\\b\nrest\n",
+    );
+    assert_eq!(run.stdout, "[a\\b]\nrest\n");
+    // A backslash-newline continues the line.
+    let run = run_args(&["-c", "read x; echo \"[$x]\"; cat"], "a\\\nb\nrest\n");
+    assert_eq!(run.stdout, "[ab]\nrest\n");
+    let run = run_args(&["-c", "read x; echo \"rc=$? [$x]\""], "");
+    assert_eq!(run.stdout, "rc=1 []\n");
+}
+
+#[test]
+fn piped_line_reader_leaves_the_next_line_to_a_command() {
+    let quiet = [("PS1", ""), ("PS2", "")];
+    for mode in ["--piped", "-i"] {
+        let run = run_env(&[mode], &quiet, "read x\nhello\necho \"x=$x\"\n");
+        assert_eq!(run.stdout, "x=hello\n", "{mode}");
+        let run = run_env(&[mode], &quiet, "head -n 1\nhello\n");
+        assert_eq!(run.stdout, "hello\n", "{mode}");
+        assert!(!run.stderr.contains("not found"), "{mode}: {}", run.stderr);
+    }
 }

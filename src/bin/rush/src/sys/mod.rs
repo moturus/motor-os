@@ -47,6 +47,35 @@ pub use motor::{
     set_disposition, wait_child,
 };
 
+// ---- stdin -----------------------------------------------------------------
+
+/// The shell's own descriptor 0, read one byte per OS read.
+///
+/// Whatever the shell reads is gone for the command it runs next, so a shell
+/// must not read past the line it needs. std's `stdin()` is buffered and would
+/// take up to 8 KiB; this takes exactly what the caller asks for, up to one
+/// byte, and keeps nothing.
+pub struct RawStdin;
+
+impl std::io::Read for RawStdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(slot) = buf.first_mut() else {
+            return Ok(0);
+        };
+        #[cfg(unix)]
+        let byte = unix::read_stdin_byte()?;
+        #[cfg(not(unix))]
+        let byte = motor::read_stdin_byte()?;
+        match byte {
+            Some(byte) => {
+                *slot = byte;
+                Ok(1)
+            }
+            None => Ok(0),
+        }
+    }
+}
+
 // ---- signals ---------------------------------------------------------------
 
 use std::sync::atomic::{AtomicBool, Ordering};
