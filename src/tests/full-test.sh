@@ -313,6 +313,14 @@ else
   cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-async/Cargo.toml" --features host-construction-test --test fallible
 fi
 
+# rt.vdso's stdio pipe ring, host-tested; moto-async needs its host feature to
+# build off Motor OS.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-ipc/Cargo.toml" --features stdio-pipe,moto-async/host-construction-test
+else
+  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-ipc/Cargo.toml" --features stdio-pipe,moto-async/host-construction-test
+fi
+
 # Platform wire helpers are no_std in the image and unit-tested on the host.
 if [ "$BUILD" = "release" ]; then
   cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"

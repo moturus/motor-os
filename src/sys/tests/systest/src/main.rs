@@ -39,6 +39,7 @@ mod stdio;
 mod stdio_file_direct;
 mod stdio_file_input;
 mod stdio_file_relay;
+mod stdio_peek;
 mod stdio_terminal;
 mod subcommand;
 mod sys_io_self_test;
@@ -1495,6 +1496,13 @@ fn main() {
     }
     if stdio::is_inherited_relay_child(&args) {
         stdio::run_inherited_relay_child(&args);
+    }
+    if stdio_peek::is_child(&args) {
+        stdio_peek::run_child(&args);
+    }
+    if args.get(1).map(String::as_str) == Some("test-stdio-peek") {
+        stdio_peek::run_all_tests();
+        return;
     }
     if args.get(1).map(String::as_str) == Some("test-inherited-relay-order") {
         stdio::test_wait_drains_inherited_output();

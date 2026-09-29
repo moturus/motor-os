@@ -43,6 +43,11 @@ pub trait PosixFile: Any + Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+    /// Copy what a read would return without consuming it, and never wait:
+    /// `E_NOT_READY` while the stream is open and empty.
+    fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        Err(E_BAD_HANDLE)
+    }
     /// Serve the first non-empty buffer, which is what a descriptor kind
     /// without a native vectored path can always do correctly. Kinds that can
     /// do better (regular files, TCP streams) override this; a kind that

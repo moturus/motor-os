@@ -1762,6 +1762,7 @@ pub fn run_all_tests() {
     test_stdio_pipe_flush();
     test_stdio_pipe_take_unread();
     crate::stdio_terminal::run_all_tests();
+    crate::stdio_peek::run_all_tests();
     test_stdio_reader_wake_on_writer_drop();
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();

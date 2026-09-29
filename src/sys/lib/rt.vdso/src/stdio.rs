@@ -185,6 +185,21 @@ impl StdioImpl {
         }
     }
 
+    /// What a read would return, without consuming it: the stash first, then
+    /// the ring. Never waits.
+    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if !self.kind.is_reader() {
+            return Err(E_INVALID_ARGUMENT);
+        }
+        let stashed = buf.len().min(self.overflow.len());
+        buf[..stashed].copy_from_slice(&self.overflow[..stashed]);
+        match self.pipe.nonblocking_peek(&mut buf[stashed..]) {
+            Ok(sz) => Ok(stashed + sz),
+            Err(_) if stashed > 0 => Ok(stashed),
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn write(&mut self, buf: &[u8], nonblocking: bool) -> Result<usize, ErrorCode> {
         if self.kind.is_reader() {
             return Err(E_INVALID_ARGUMENT);
@@ -354,6 +369,11 @@ impl PosixFile for SelfStdio {
         self.event_source
             .rearm_interest(moto_rt::poll::POLL_READABLE);
         result
+    }
+    /// Takes the claim as a read does, and leaves the stash count and
+    /// readiness alone: nothing is consumed.
+    fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.with_impl(|inner| inner.peek(buf))
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let nonblocking = self.nonblocking.load(Ordering::Acquire);

@@ -399,7 +399,11 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         }
     }
 
-    -(moto_rt::E_BAD_HANDLE as i64)
+    // Not a socket: the descriptor's own peek, if its kind has one (stdio).
+    match posix_file.peek(buf) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
 }
 
 pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {

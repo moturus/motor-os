@@ -191,36 +191,25 @@ impl PipeBuffer {
         to_write
     }
 
-    fn read(&mut self, dst: &mut [u8]) -> usize {
+    /// Copy up to `dst.len()` unread bytes into `dst` without consuming them.
+    fn peek(&self, dst: &mut [u8]) -> usize {
         let writer_counter = self.writer_counter().load(Ordering::SeqCst);
         let reader_counter = self.reader_counter().load(Ordering::SeqCst);
 
-        let mut to_read = writer_counter - reader_counter;
-
-        if to_read > dst.len() {
-            to_read = dst.len();
-        }
-
-        if to_read == 0 {
-            return 0;
-        }
-
+        let to_read = (writer_counter - reader_counter).min(dst.len());
         let reader_offset = reader_counter & (self.work_buf_len - 1);
-        if (reader_offset + to_read) <= self.work_buf_len {
-            (&mut *dst)[0..to_read]
-                .copy_from_slice(&self.work_buf[reader_offset..(reader_offset + to_read)]);
+        let first_read = to_read.min(self.work_buf_len - reader_offset);
+        dst[..first_read]
+            .copy_from_slice(&self.work_buf[reader_offset..(reader_offset + first_read)]);
+        dst[first_read..to_read].copy_from_slice(&self.work_buf[..(to_read - first_read)]);
+        to_read
+    }
+
+    fn read(&mut self, dst: &mut [u8]) -> usize {
+        let to_read = self.peek(dst);
+        if to_read > 0 {
             self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
-            return to_read;
         }
-
-        let first_read = self.work_buf_len - reader_offset;
-        (&mut *dst)[0..first_read]
-            .copy_from_slice(&self.work_buf[reader_offset..self.work_buf_len]);
-
-        let second_read = to_read - first_read;
-        (&mut *dst)[first_read..to_read].copy_from_slice(&self.work_buf[0..second_read]);
-
-        self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
         to_read
     }
 
@@ -611,6 +600,31 @@ impl StdioPipe {
         }
 
         Ok(sz)
+    }
+
+    /// What [`Self::nonblocking_read`] would return, without consuming it: the
+    /// reader counter stays where it is and the writer is not woken.
+    pub fn nonblocking_peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if !self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Ok(0);
+        };
+
+        let buffer = buffer.lock();
+        let sz = buffer.peek(buf);
+        if sz > 0 {
+            return Ok(sz);
+        }
+        // The writer publishes its last bytes before it closes: look again.
+        if buffer.writer_closed() {
+            return Ok(buffer.peek(buf));
+        }
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
+        }
+        Err(moto_rt::E_NOT_READY)
     }
 
     pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
@@ -1195,6 +1209,110 @@ mod tests {
             .writer_counter()
             .store(buffer.work_buf_len + 1, Ordering::SeqCst);
         assert_eq!(buffer.take_unread(), Err(moto_rt::E_INVALID_ARGUMENT));
+    }
+
+    #[test]
+    fn peek_leaves_the_bytes_for_read() {
+        let (_mapping, mut buffer) = test_buffer();
+        assert_eq!(buffer.write(b"abcdef"), 6);
+
+        let mut peeked = [0; 8];
+        assert_eq!(buffer.peek(&mut peeked), 6);
+        assert_eq!(&peeked[..6], b"abcdef");
+        assert_eq!(buffer.reader_counter().load(Ordering::SeqCst), 0);
+        let mut short = [0; 2];
+        assert_eq!(buffer.peek(&mut short), 2);
+        assert_eq!(&short, b"ab");
+
+        let mut read = [0; 8];
+        assert_eq!(buffer.read(&mut read), 6);
+        assert_eq!(&read[..6], b"abcdef");
+        assert_eq!(buffer.peek(&mut peeked), 0);
+    }
+
+    #[test]
+    fn peek_copies_across_the_ring_wrap() {
+        let (_mapping, mut buffer) = test_buffer();
+        let filler = vec![0; buffer.work_buf_len - 3];
+        assert_eq!(buffer.write(&filler), filler.len());
+        let mut drained = vec![0; filler.len()];
+        assert_eq!(buffer.read(&mut drained), filler.len());
+        assert_eq!(buffer.write(b"wrapped"), 7);
+
+        let mut peeked = [0; 7];
+        assert_eq!(buffer.peek(&mut peeked), 7);
+        assert_eq!(&peeked, b"wrapped");
+        let mut read = [0; 7];
+        assert_eq!(buffer.read(&mut read), 7);
+        assert_eq!(&read, b"wrapped");
+    }
+
+    /// A reader endpoint over a test mapping. Never dropped: its `Drop` would
+    /// release the (absent) IPC handle and mapping through syscalls.
+    fn test_reader() -> (Box<TestMapping>, ManuallyDrop<StdioPipe>) {
+        let mapping = Box::new(TestMapping([0; 4096]));
+        let pipe = unsafe {
+            StdioPipe::new_reader(RawPipeData {
+                buf_addr: mapping.0.as_ptr() as usize,
+                buf_size: mapping.0.len(),
+                ipc_handle: SysHandle::NONE.as_u64(),
+            })
+        };
+        (mapping, ManuallyDrop::new(pipe))
+    }
+
+    #[test]
+    fn nonblocking_peek_never_consumes() {
+        let (_mapping, pipe) = test_reader();
+        let buffer = pipe.buffer.as_ref().unwrap();
+        let mut peeked = [0; 8];
+        assert_eq!(
+            pipe.nonblocking_peek(&mut peeked),
+            Err(moto_rt::E_NOT_READY)
+        );
+
+        assert_eq!(buffer.lock().write(b"abc"), 3);
+        assert_eq!(pipe.nonblocking_peek(&mut peeked), Ok(3));
+        assert_eq!(pipe.nonblocking_peek(&mut peeked), Ok(3));
+        assert_eq!(&peeked[..3], b"abc");
+        assert_eq!(pipe.total_read(), 0);
+
+        // A closed writer's bytes are still there, and EOF comes after them.
+        pipe.counters.unwrap().close_writer();
+        assert_eq!(pipe.nonblocking_peek(&mut peeked), Ok(3));
+        let mut read = [0; 8];
+        assert_eq!(buffer.lock().read(&mut read), 3);
+        assert_eq!(pipe.nonblocking_peek(&mut peeked), Ok(0));
+    }
+
+    #[test]
+    fn nonblocking_peek_reports_a_peer_error_only_once_drained() {
+        let (_mapping, pipe) = test_reader();
+        let buffer = pipe.buffer.as_ref().unwrap();
+        assert_eq!(buffer.lock().write(b"left"), 4);
+        buffer.lock().error_code = moto_rt::E_BAD_HANDLE;
+
+        let mut peeked = [0; 8];
+        assert_eq!(pipe.nonblocking_peek(&mut peeked), Ok(4));
+        let mut read = [0; 8];
+        assert_eq!(buffer.lock().read(&mut read), 4);
+        assert_eq!(
+            pipe.nonblocking_peek(&mut peeked),
+            Err(moto_rt::E_BAD_HANDLE)
+        );
+    }
+
+    #[test]
+    fn nonblocking_peek_needs_a_reader() {
+        let mut peeked = [0; 1];
+        assert_eq!(
+            StdioPipe::new_empty(false).nonblocking_peek(&mut peeked),
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+        assert_eq!(
+            StdioPipe::new_empty(true).nonblocking_peek(&mut peeked),
+            Ok(0)
+        );
     }
 
     #[test]
