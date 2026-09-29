@@ -166,6 +166,29 @@ impl Pty {
         panic!("rush never prompted; it wrote {:?}", self.seen);
     }
 
+    /// Wait, sending nothing, until the output after its first `since` bytes
+    /// contains `needle`.
+    fn await_seen(&mut self, since: usize, needle: &str) {
+        for _ in 0..5 {
+            if self.seen[since..].contains(needle) {
+                return;
+            }
+            let _ = self.read_output();
+        }
+        panic!("no {needle:?} in {:?}", &self.seen[since..]);
+    }
+
+    /// Wait, sending nothing, until a row reads exactly `row`.
+    fn await_row(&mut self, row: &str) -> Vec<String> {
+        for _ in 0..5 {
+            let rows = self.screen(80);
+            if rows.iter().any(|r| r == row) {
+                return rows;
+            }
+        }
+        panic!("no row {row:?} in {:?}", self.screen(80));
+    }
+
     /// Wait for the shell to exit and report its status.
     fn wait(&mut self) -> i32 {
         // Drain, so the shell is never blocked writing while we wait for it.
@@ -1190,6 +1213,71 @@ fn a_size_nobody_exported_is_not_exported_by_the_shell() {
 fn an_empty_line_at_the_prompt_just_reprompts() {
     let rows = typed(b"\r\r\recho hi\r", 80);
     assert!(rows.iter().any(|r| r == "hi"), "{rows:?}");
+}
+
+// ---- type-ahead -------------------------------------------------------------
+
+// Keys typed ahead of a command are the command's: the editor reads through the
+// Enter that ends its line and leaves the rest in the terminal, as readline
+// does. Each burst below is one write, and nothing more is sent until its result
+// is on screen.
+
+#[test]
+fn keys_typed_ahead_of_a_command_reach_it() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    // Queued while the terminal is raw, the child's line gets no CR-to-LF
+    // translation, so an LF ends it.
+    pty.send(b"head -n 1\rhello\n");
+    pty.await_row("hello");
+    assert!(!pty.seen.contains("not found"), "{:?}", pty.seen);
+    pty.send(b"exit 0\r");
+    assert_eq!(pty.wait(), 0);
+}
+
+#[test]
+fn a_command_typed_in_one_burst_runs_with_no_more_input() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"echo burst-ok\r");
+    pty.await_row("burst-ok");
+}
+
+#[test]
+fn a_burst_of_lines_runs_each_across_a_foreground_child() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"echo one\recho two\r");
+    let rows = pty.await_row("two");
+    assert!(rows.iter().any(|r| r == "one"), "{rows:?}");
+
+    // `read` takes its line a byte at a time, so the command after it is left
+    // for the next prompt.
+    pty.send(b"sh -c 'read x; echo got=$x'\rhello\necho after\r");
+    let rows = pty.await_row("after");
+    assert!(rows.iter().any(|r| r == "got=hello"), "{rows:?}");
+}
+
+#[test]
+fn escape_then_a_pause_is_not_alt() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"echo a");
+    let since = pty.seen.len();
+    pty.send(b"\x1b");
+    // The editor beeps at a lone Esc: it has decided that the key is complete.
+    pty.await_seen(since, "\x07");
+    pty.send(b"b");
+    assert_eq!(prompt_line(&pty.screen(80)), "$ echo ab");
+}
+
+#[test]
+fn keys_queued_together_are_each_decoded() {
+    // Alt-b back over `two`, then Left from the end and a two-byte character.
+    let rows = typed(b"echo one two\x1bbX", 80);
+    assert_eq!(prompt_line(&rows), "$ echo one Xtwo");
+    let rows = typed("echo ab\x1b[D\u{e9}".as_bytes(), 80);
+    assert_eq!(prompt_line(&rows), "$ echo a\u{e9}b");
 }
 
 fn tmpdir(name: &str) -> String {

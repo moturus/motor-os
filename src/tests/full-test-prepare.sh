@@ -62,6 +62,8 @@ host_build --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 for crate in red rmux rush russhd; do
   (cd "$ROOT_DIR/src/bin/$crate" && host_build)
 done
+# Fetches what test-crossterm-host.sh then runs offline.
+bash "$WD/test-crossterm-host.sh" --prepare "${profile_args[@]}"
 host_build --offline --manifest-path "$ROOT_DIR/src/bin/httpd-axum/Cargo.toml" --tests
 # test-gears-http.sh: curl's host binary, then Gears against it.
 for crate in curl gears gears-mock-provider; do

@@ -235,6 +235,10 @@ pub fn execute(inv: Invocation) {
         sh.opts.get(Opt::Interactive) || (inv.mode == Mode::Stdin && (inv.piped || stdin_is_tty));
     sh.set_interactive(interactive);
 
+    // Keys typed ahead of a command are the command's: the line editor reads
+    // no further than the Enter that ends its own line.
+    crossterm::event::set_line_end_reads(true);
+
     #[cfg(target_os = "motor")]
     if interactive
         && (moto_rt::fs::is_terminal(moto_rt::FD_STDIN)

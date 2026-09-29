@@ -283,6 +283,9 @@ for crate in red rmux rush russhd; do
   fi
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
+# The crossterm revision Rush ships: its own tests, and Rush's pty tests over
+# the Unix event source the pass above does not use.
+bash "$WD/test-crossterm-host.sh" "${profile_args[@]}"
 
 # Static HTTP serving, including default protocol restrictions and TLS.
 if [ "$BUILD" = "release" ]; then

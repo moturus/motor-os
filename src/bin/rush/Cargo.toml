@@ -23,6 +23,11 @@ crossterm = { version = "0.29", default-features = false, features = ["events"] 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+# crossterm's other Unix event source (poll(2) instead of Mio), for the host
+# tests: `full-test.sh` runs the pty tests over both.
+dev-tty = ["crossterm/use-dev-tty"]
+
 # On Motor OS, `std::process::id()` panics (Motor pids are u64), so pids come
 # from moto-sys instead — see `sys::pid()`. moto-rt is where the `E_*` error
 # constants live (`ErrorCode` is a bare `u16`, not an enum); moto-sys re-exports
