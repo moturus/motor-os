@@ -5,7 +5,7 @@
 //! test can write. A single write lands in the ring whole, so once a child has
 //! read the first byte of one, the rest is waiting.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 use moto_rt::{FD_STDIN, FD_STDOUT, FD_TERMINAL, RtFd};
@@ -14,12 +14,19 @@ const PEEK_CHILD: &str = "stdio-peek-child";
 const PEEK_IDLE: &str = "stdio-peek-idle";
 const PEEK_TERMINAL_PARENT: &str = "stdio-peek-terminal-parent";
 const PEEK_TERMINAL_CHILD: &str = "stdio-peek-terminal-child";
+const PEEK_WRITER: &str = "stdio-peek-writer-parent";
+const PEEK_LOSS_READER: &str = "stdio-peek-loss-reader";
 
 pub fn is_child(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| {
         matches!(
             arg.as_str(),
-            PEEK_CHILD | PEEK_IDLE | PEEK_TERMINAL_PARENT | PEEK_TERMINAL_CHILD
+            PEEK_CHILD
+                | PEEK_IDLE
+                | PEEK_TERMINAL_PARENT
+                | PEEK_TERMINAL_CHILD
+                | PEEK_WRITER
+                | PEEK_LOSS_READER
         )
     })
 }
@@ -30,6 +37,8 @@ pub fn run_child(args: &[String]) -> ! {
         PEEK_IDLE => run_peek_idle(),
         PEEK_TERMINAL_PARENT => run_terminal_parent(),
         PEEK_TERMINAL_CHILD => run_terminal_child(),
+        PEEK_WRITER => run_writer(&args[2], &args[3]),
+        PEEK_LOSS_READER => run_loss_reader(&args[2], &args[3]),
         _ => unreachable!(),
     }
 }
@@ -135,6 +144,72 @@ fn run_terminal_child() -> ! {
     std::process::exit(0)
 }
 
+/// Starts a detached reader, writes `ab` to it, and stays until it is
+/// killed: the reader's input then ends by its writer vanishing, with no
+/// orderly close.
+fn run_writer(result: &str, got: &str) -> ! {
+    let mut reader = Command::new(std::env::current_exe().unwrap())
+        .arg(PEEK_LOSS_READER)
+        .arg(result)
+        .arg(got)
+        .env(moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY, "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    reader.stdin.as_mut().unwrap().write_all(b"ab").unwrap();
+    let mut sink = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut sink);
+    std::process::exit(0)
+}
+
+/// Reads its input as a line editor does: peek, read what is there, and wait
+/// for readiness only when the peek says more is to come. Reports through
+/// files, being detached.
+fn run_loss_reader(result: &str, got_path: &str) -> ! {
+    let registry = moto_rt::poll::new().unwrap();
+    moto_rt::poll::add(registry, FD_STDIN, 1, moto_rt::poll::POLL_READABLE).unwrap();
+    let deadline = moto_rt::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut got = Vec::new();
+    let end = loop {
+        match peek(FD_STDIN, 8) {
+            Ok(bytes) if bytes.is_empty() => break Ok(()),
+            Ok(bytes) => {
+                got.extend(read(FD_STDIN, bytes.len()));
+                if got == b"ab" {
+                    std::fs::write(got_path, b"").unwrap();
+                }
+            }
+            Err(moto_rt::Error::NotReady) => {
+                let mut events = [moto_rt::poll::Event::default(); 1];
+                let ready = moto_rt::poll::wait(registry, events.as_mut_ptr(), 1, Some(deadline));
+                if ready != Ok(1) {
+                    std::fs::write(result, b"input said more was coming, then went quiet").unwrap();
+                    std::process::exit(1)
+                }
+            }
+            Err(err) => break Err(err),
+        }
+    };
+    // A vanished writer is the end of this input, reported as a read does.
+    let verdict = if got == b"ab" && end == Err(moto_rt::Error::BadHandle) {
+        "ok".to_owned()
+    } else {
+        format!("got {got:?}, ended with {end:?}")
+    };
+    std::fs::write(result, verdict).unwrap();
+    std::process::exit(0)
+}
+
+fn wait_for_file(path: &std::path::Path, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !path.exists() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        std::thread::yield_now();
+    }
+}
+
 fn test_self_stdio_peek() {
     let release = crate::temp_path("stdio-peek-release");
     let _ = std::fs::remove_file(&release);
@@ -181,6 +256,46 @@ fn test_terminal_peek() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
     println!("test_terminal_peek PASS");
+}
+
+/// A peek after the reader's writer has vanished says the input has ended:
+/// the hangup the reader was woken for is the last readiness it gets.
+///
+/// Requires detached-spawn authority, so that the reader outlives its killed
+/// writer, and CAP_FS_WRITE for the reader's reports.
+pub fn test_peek_after_the_writer_vanishes() {
+    let result = crate::temp_path("stdio-peek-loss-result");
+    let got = crate::temp_path("stdio-peek-loss-got");
+    let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_file(&got);
+    let caps = format!(
+        "0x{:x}",
+        moto_sys::caps::CAP_SPAWN
+            | moto_sys::caps::CAP_SPAWN_DETACHED
+            | moto_sys::caps::CAP_INTERACTIVE
+            | moto_sys::caps::CAP_FS_WRITE
+    );
+    let mut writer = Command::new(std::env::current_exe().unwrap())
+        .arg(PEEK_WRITER)
+        .arg(&result)
+        .arg(&got)
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, caps)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    wait_for_file(&got, "the reader did not get its input");
+    writer.kill().unwrap();
+    let _ = writer.wait();
+    wait_for_file(&result, "the reader did not finish");
+    assert_eq!(
+        String::from_utf8(std::fs::read(&result).unwrap()).unwrap(),
+        "ok"
+    );
+    std::fs::remove_file(result).unwrap();
+    std::fs::remove_file(got).unwrap();
 }
 
 pub fn run_all_tests() {

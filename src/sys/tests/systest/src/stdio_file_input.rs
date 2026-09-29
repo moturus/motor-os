@@ -605,6 +605,7 @@ fn privileged_lifetime_tests() {
     }
 
     crate::stdio::test_child_stdin_eof_on_process_exit();
+    crate::stdio_peek::test_peek_after_the_writer_vanishes();
 }
 
 fn access_and_null_tests() {
