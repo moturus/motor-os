@@ -634,13 +634,21 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
 /// after `DIP_HOLD`, so the parent can see the flag down after a request
 /// that the return let through.
 pub fn run_pressure_squeeze_child(target_pages: u64) -> ! {
-    // The stdin reader ends the squeeze; started before the drain, while its
-    // thread charge is still admitted.
-    std::thread::spawn(|| {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
+    // The stdin reader ends the squeeze. It takes stdin's buffer, room for
+    // the parent's line, and with them its allocator cache before the drain,
+    // which would refuse them all.
+    let reader_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready = reader_ready.clone();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::with_capacity(64);
+        ready.store(true, std::sync::atomic::Ordering::Release);
+        let _ = stdin.read_line(&mut line);
         std::process::exit(0);
     });
+    while !reader_ready.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::yield_now();
+    }
 
     let above_target = || AdmissionStats::get().unwrap().free_for_admission() > target_pages;
     let mut squeezed = false;

@@ -103,11 +103,21 @@ fn run_child(url: &str) {
 // extra pages, so kernel objects, charged 16, take the last pages below that.
 fn run_hoard() -> ! {
     use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    std::thread::spawn(|| {
-        let _ = std::io::stdin().read_line(&mut String::new());
+    // The reader takes stdin's buffer, and with it its allocator cache,
+    // before memory goes to the floor, where it could get neither.
+    let reader_ready = std::sync::Arc::new(AtomicBool::new(false));
+    let ready = reader_ready.clone();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        ready.store(true, Ordering::Release);
+        let _ = stdin.read_line(&mut String::new());
         std::process::exit(0);
     });
+    while !reader_ready.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
     let pid = std::process::id();
     let object = format!("shared:url={HOARD}-{pid};address=4096;page_type=small;page_num=1");
     let take = |pages| SysMem::alloc(PAGE_SIZE_SMALL, pages).is_ok();
