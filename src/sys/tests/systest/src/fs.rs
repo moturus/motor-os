@@ -1297,9 +1297,57 @@ fn path_resolution_test() {
     println!("    ---- FS: path_resolution_test PASS");
 }
 
+/// Cached requests on one connection must not starve a new client's handshake.
+pub fn service_progress_test() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_hot = stop.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let hot = std::thread::spawn(move || {
+        let mut completed = 0;
+        while !stop_hot.load(Ordering::Acquire) {
+            assert_eq!(
+                std::fs::metadata("/system/bin/.systest-missing-progress")
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::NotFound,
+            );
+            completed += 1;
+            if completed == 256 {
+                ready_tx.send(()).unwrap();
+            }
+            std::thread::yield_now();
+        }
+    });
+
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let newcomer = std::thread::spawn(move || {
+        // Exercise fresh listeners repeatedly while the original client stays hot.
+        for _ in 0..32 {
+            let client = moto_io::fs::FsClient::connect().unwrap();
+            moto_async::LocalRuntime::new().block_on(async {
+                client.stat("/system/bin").await.unwrap();
+            });
+        }
+        done_tx.send(()).unwrap();
+    });
+    let progress = done_rx.recv_timeout(Duration::from_secs(2));
+    // Always release the load and join both clients, including on failure.
+    stop.store(true, Ordering::Release);
+    hot.join().unwrap();
+    newcomer.join().unwrap();
+    progress.expect("a busy filesystem client starved another client");
+    println!("    ---- FS: service_progress_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     concurrent_client_progress_test();
+    service_progress_test();
     block_cache_capacity_test();
     scattered_writes_test();
     permissions_vdso_test();

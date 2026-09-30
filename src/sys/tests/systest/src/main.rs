@@ -1390,6 +1390,10 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    if args.len() == 2 && args[1] == "test-fs-service-progress" {
+        fs::service_progress_test();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-fs-scattered-writes" {
         fs::scattered_writes_test();
         return;
