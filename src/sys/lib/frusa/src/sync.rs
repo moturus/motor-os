@@ -110,6 +110,8 @@ impl SpinLock {
     }
 
     pub fn lock(&self) -> SpinGuard<'_> {
+        #[cfg(test)]
+        crate::tests::before_spin_lock();
         loop {
             if self
                 .0

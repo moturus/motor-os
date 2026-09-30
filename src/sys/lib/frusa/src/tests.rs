@@ -7,6 +7,18 @@ use std::vec::Vec;
 use crate::block::Block;
 use crate::sync::{ReaderShard, RwLock, SHARDS, SpinLock};
 
+thread_local! {
+    static BEFORE_SPIN_LOCK: core::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+pub(crate) fn before_spin_lock() {
+    let hook = BEFORE_SPIN_LOCK.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 fn shards() -> [ReaderShard; SHARDS] {
     [const { ReaderShard::new() }; SHARDS]
 }
@@ -1285,6 +1297,64 @@ fn remote_frees_into_a_private_block_are_reused_by_its_owner() {
     assert!(unsafe { (*block).is_full() });
     SHARED.release_cache(&cache);
     SHARED.inner.check_invariants();
+}
+
+#[test]
+fn releasing_private_block_does_not_republish_another_caches_block() {
+    use std::rc::Rc;
+
+    let frusa = Rc::new(Frusa4K::new(&BACK_END));
+    let cache = Cache4K::new();
+    let other = Rc::new(Cache4K::new());
+    let layout = Layout::from_size_align(64, 8).unwrap();
+
+    // Leave another block available: the interleaved claim must not grow
+    // the slab while release_cache holds its read guard.
+    let warm: Vec<_> = (0..2 * Block::ENTRIES)
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    for ptr in warm {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    let mut ptrs: Vec<_> = (0..Block::ENTRIES - 1)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    let slab = frusa.inner.slab_for_sz(64);
+    let block = cache.current[slab.table_idx as usize].get();
+    let b = unsafe { &*block };
+
+    // Pause the owner's last allocation just before release_private, and
+    // two remote frees just before the first calls push_unowned.
+    let (last, full) = b.alloc().unwrap();
+    assert!(full);
+    ptrs.push(last);
+    assert!(b.dealloc(ptrs[0]));
+    assert!(!b.dealloc(ptrs[1]));
+
+    let claimed = Rc::new(core::cell::Cell::new(core::ptr::null_mut()));
+    BEFORE_SPIN_LOCK.with(|hook| {
+        let frusa = frusa.clone();
+        let other = other.clone();
+        let claimed = claimed.clone();
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let slab = frusa.inner.slab_for_sz(64);
+            frusa.inner.push_unowned(slab, block);
+            claimed.set(unsafe { frusa.alloc_cached(&other, layout) });
+        }));
+    });
+    frusa.release_cache(&cache);
+    assert!(!claimed.get().is_null());
+    frusa.inner.check_invariants();
+    let owned = other.current[slab.table_idx as usize].get();
+    assert!(!owned.is_null());
+    assert!(!unsafe { (*owned).on_stack() });
+
+    frusa.release_cache(&other);
+    for ptr in ptrs.into_iter().skip(2).chain([claimed.get()]) {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    frusa.reclaim();
+    assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
 }
 
 /// Eight caching threads exchange objects through a shared pool and free
