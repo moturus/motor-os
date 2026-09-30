@@ -464,12 +464,10 @@ This page describes what is in the images and how to start and reach a VM.</p>
     <td>The developer image: the standard image plus the native LLVM and rustc toolchains,
     Lorry, Gears, curl, Lua, mdbg, the test suites, source snapshots, and this website
     under <code>/devtools/www</code>. See <a href="devtools.html">Developer image</a>.</td></tr>
-  <tr><td><code>motor-os-system-tty.img</code></td><td>raw, 64 MB</td>
-    <td>A test-only variant of the base image whose serial console runs with the System role.
-    Built by <code>make system-tty.img</code>, not by the build script, and used by
-    <code>src/tests/test-system-tty.sh</code>.</td></tr>
 </table>
 </div>
+<p>The dedicated System-console and vsock test images are created in temporary directories
+outside <code>vm_images/</code> and removed by their test scripts after use, including on failure.</p>
 <p>Every image is built by <a href="imager.html">imager</a> from a YAML description in <code>src/imager/</code>
 and a declarative permission policy; see <a href="filesystem.html">Filesystem</a> for the
 layout and permissions, and <a href="build.html">Building Motor OS</a> for how the images

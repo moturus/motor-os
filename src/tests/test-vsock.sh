@@ -84,8 +84,13 @@ outgoing_args=(--vmm "$VMM")
 [ "$BUILD" = release ] && outgoing_args=(--release "${outgoing_args[@]}")
 "$WD/test-vsock-outgoing.sh" "${outgoing_args[@]}"
 
-select_test_vm "$ROOT_DIR" "$BUILD" system-console "$VMM"
-make -C "$ROOT_DIR" vsock-test.img BUILD="$BUILD" -j"$(nproc)"
+IMAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/test-vsock-image.XXXXXX")"
+trap 'rm -rf "$IMAGE_ROOT"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+select_test_vm "$IMAGE_ROOT" "$BUILD" system-console "$VMM"
+make -C "$ROOT_DIR" vsock-test.img BUILD="$BUILD" \
+  TEST_IMAGE_ROOT="$IMAGE_ROOT" -j"$(nproc)"
 
 run_discovery() (
   local mode="$1"
@@ -138,6 +143,8 @@ run_discovery() (
     exit "$status"
   }
   trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
     # Preserve the existing full-test knob's intentional shell splitting.

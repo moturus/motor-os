@@ -300,27 +300,32 @@ raw.img: assembly-resolved boot core sys user
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the raw standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
 
-# A small test-only image whose later overlay selects a System serial console.
-system-tty.img: boot core sys-base user-base
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
+# Test harnesses own the output directory and remove it after VM teardown.
+# A temporary root supplies the imager's usual layout without copying inputs.
+define BUILD_TEST_IMAGE
+	@case "$(TEST_IMAGE_ROOT)" in /*) ;; *) \
+		echo "$(1).img requires an absolute TEST_IMAGE_ROOT; use the corresponding test script" >&2; exit 2 ;; esac
+	test_root="$$(realpath -e -- "$(TEST_IMAGE_ROOT)")" && \
+	case "$$(realpath -m -- "$$test_root/vm_images/$(IMG_CMD)")/" in "$$(realpath -m -- "$(ROOT_DIR)/vm_images")/"*) \
+		echo "test images must be built outside vm_images" >&2; exit 2 ;; esac && \
+	mkdir -p "$$test_root/build" "$$test_root/vm_images/$(IMG_CMD)" && \
+	ln -sfn "$(ROOT_DIR)/build/bin" "$$test_root/build/bin" && \
+	ln -sfn "$(ROOT_DIR)/img_files" "$$test_root/img_files" && \
 	cd src/imager && \
 		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
 		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os-system-tty.yaml
-	$(INSTALL_VM_SCRIPTS)
-	@echo "built the System-console test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-system-tty.img"
+			"$$test_root" $(IMG_CMD) motor-os-$(1).yaml
+	cp -f "$(ROOT_DIR)/src/vm_scripts/"* "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/"
+	chmod 400 "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/test.key"
+endef
+
+# A small test-only image whose later overlay selects a System serial console.
+system-tty.img: boot core sys-base user-base
+	$(call BUILD_TEST_IMAGE,system-tty)
 
 # An isolated System-console image for vsock tests that must run without IP.
 vsock-test.img: boot core sys-base sysbox rush systest
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-vsock-test.img"
-	cd src/imager && \
-		flock "$(IMAGER_LOCK)" env CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" \
-		cargo run $(CARGO_RELEASE) -- \
-			"$(ROOT_DIR)" $(IMG_CMD) motor-os-vsock-test.yaml
-	$(INSTALL_VM_SCRIPTS)
-	@echo "built the IP-disabled vsock test image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-vsock-test.img"
+	$(call BUILD_TEST_IMAGE,vsock-test)
 
 # The minimal base image; it does not consume toolchain assembly overlays.
 base.img: boot core sys-base user-base

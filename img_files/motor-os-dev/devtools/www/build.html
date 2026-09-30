@@ -558,7 +558,7 @@ make -j"$(nproc)" images           # the developer image as well
 make -j"$(nproc)" BUILD=release    # the same into vm_images/release/
 make -j"$(nproc)" dev.img BUILD=release
 make sys-io rush                   # individual components
-make system-tty.img                # the test-only System-console image
+src/tests/test-system-tty.sh        # builds, runs, and removes its temporary test image
 make clippy
 make clean                         # removes build/ and vm_images/; keeps the toolchains and assemblies</code></pre>
 <p>Every component is a target named after its binary: <code>kernel</code>,
@@ -568,7 +568,10 @@ make clean                         # removes build/ and vm_images/; keeps the to
 <code>httpd</code>, <code>httpd-axum</code>, <code>lorry</code>, <code>curl</code>,
 <code>gears</code>, <code>mdbg</code>, <code>systest</code>, and so on; the image targets
 are <code>base.img</code>, <code>main.img</code>, <code>dev.img</code>, and
-<code>system-tty.img</code>. Stripped binaries go to <code>build/bin/&lt;profile&gt;/</code>,
+<code>system-tty.img</code> and <code>vsock-test.img</code>. The two test image
+targets require an absolute <code>TEST_IMAGE_ROOT</code> outside <code>vm_images/</code>;
+their test scripts create temporary directories and remove them after use.
+Stripped binaries go to <code>build/bin/&lt;profile&gt;/</code>,
 and Cargo's target directories, with the unstripped binaries that <code>addr2line</code>
 needs, to <code>build/obj/&lt;toolchain-key&gt;/&lt;profile&gt;/&lt;component&gt;/</code>.</p>
 <p>The imager (<code>src/imager</code>) assembles each image from a YAML description and

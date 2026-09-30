@@ -38,16 +38,15 @@ fi
 select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
 IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
 
-# The suite's own image targets, plus the two images its VM tests build for
-# themselves: test-vsock.sh and test-system-tty.sh.
-IMAGE_TARGETS=("$IMG_TARGET" vsock-test.img system-tty.img)
+# Dedicated test images are created only while their owning tests run.
+IMAGE_TARGETS=("$IMG_TARGET")
 if [ "$TEST_VM_PHASE" = standard ]; then
   for required_target in main.img base.img; do
     [ "$IMG_TARGET" = "$required_target" ] || IMAGE_TARGETS+=("$required_target")
   done
 fi
 
-make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
+make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" boot core sys-base user-base systest mio-test tokio-tests \
   crossterm-smoke BUILD="$BUILD" -j"$(nproc)"
 
 # The host-side test binaries the suite runs. --no-run builds exactly what a

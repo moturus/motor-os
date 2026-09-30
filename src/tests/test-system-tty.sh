@@ -41,16 +41,8 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
   exit 2
 fi
 . "$WD/vm-test-selection.sh"
-select_test_vm "$ROOT_DIR" "$BUILD" system-console "$VMM"
-export MOTO_IMAGE="$TEST_VM_IMAGE"
 export MOTO_MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 export MOTO_SMP="${MOTO_SMP:-4}"
-
-if [ "$BUILD" = release ]; then
-  make -C "$ROOT_DIR" system-tty.img systest BUILD=release -j"$(nproc)"
-else
-  make -C "$ROOT_DIR" system-tty.img systest -j"$(nproc)"
-fi
 
 chmod 600 "$WD/test.key"
 SSH_OPTIONS=(
@@ -85,10 +77,17 @@ cleanup() {
   set +e
   exec 3>&-
   stop_serial_test_vm || status=1
-  rm -rf "$SCRATCH"
+  rm -rf "$SCRATCH" || status=1
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+select_test_vm "$SCRATCH" "$BUILD" system-console "$VMM"
+export MOTO_IMAGE="$TEST_VM_IMAGE"
+make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest BUILD="$BUILD" \
+  TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
 
 CHECK_STDERR="$SCRATCH/check-console-stderr"
 rustc --edition=2024 -D warnings "$WD/check-console-stderr.rs" -o "$CHECK_STDERR"

@@ -366,6 +366,12 @@ Runner sources live in `src/vm_scripts/`; copies in `vm_images/` are generated.
 | Non-selected VMM boot check | Main qcow2 image. | `base.img` → `motor-os-base.img`. |
 | IP-disabled vsock discovery | Isolated raw `motor-os-vsock-test.img`, with and without the device. | Same. |
 
+The System-console and IP-disabled discovery images are built in temporary
+directories owned by their test scripts, outside `vm_images/`. Each script
+removes its image and boot artifacts after VM teardown, including on failure
+or interruption. Full-suite preparation compiles their binaries without
+creating test images.
+
 `raw.img` stays outside default build targets. Both peer and discovery phases
 use the selected VMM, profile, and CPU/memory settings. Main-image full tests
 also boot-check the other two VMMs, including SSH and liveness checks; these
