@@ -1357,6 +1357,67 @@ fn releasing_private_block_does_not_republish_another_caches_block() {
     assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
 }
 
+#[test]
+fn stale_remote_free_does_not_push_a_refilled_block() {
+    use std::rc::Rc;
+
+    let frusa = Rc::new(Frusa4K::new(&BACK_END));
+    let cache = Rc::new(Cache4K::new());
+    let other = Rc::new(Cache4K::new());
+    let layout = Layout::from_size_align(64, 8).unwrap();
+
+    // Leave another block available: the interleaved claim must not grow
+    // the slab while the free holds its read guard.
+    let warm: Vec<_> = (0..2 * Block::ENTRIES)
+        .map(|_| unsafe { frusa.alloc(layout) })
+        .collect();
+    for ptr in warm {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    let mut ptrs: Vec<_> = (0..Block::ENTRIES - 1)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    let slab = frusa.inner.slab_for_sz(64);
+    let block = cache.current[slab.table_idx as usize].get();
+    let b = unsafe { &*block };
+    let (last, full) = b.alloc().unwrap();
+    assert!(full);
+    ptrs.push(last);
+
+    // A remote free makes the full block non-full and pauses before taking
+    // the partial lock. Meanwhile the owner releases the block, another
+    // cache claims it and fills the slot that was just freed.
+    let claimed = Rc::new(core::cell::Cell::new(core::ptr::null_mut()));
+    BEFORE_SPIN_LOCK.with(|hook| {
+        let frusa = frusa.clone();
+        let cache = cache.clone();
+        let other = other.clone();
+        let claimed = claimed.clone();
+        *hook.borrow_mut() = Some(Box::new(move || {
+            frusa.release_cache(&cache);
+            assert!(unsafe { (*block).on_stack() });
+            claimed.set(unsafe { frusa.alloc_cached(&other, layout) });
+            assert!(!unsafe { (*block).on_stack() });
+        }));
+    });
+    unsafe { frusa.dealloc(ptrs[0], layout) };
+    // The stale free finds the block full again and must not push it.
+    assert_eq!(claimed.get(), ptrs[0]);
+    assert!(b.is_full());
+    assert!(!b.on_stack());
+    frusa.inner.check_invariants();
+    // The shared path serves the other block, not the full one.
+    let extra = unsafe { frusa.alloc(layout) };
+    assert_ne!(slab.lookup(extra), block);
+
+    frusa.release_cache(&other);
+    for ptr in ptrs.into_iter().skip(1).chain([claimed.get(), extra]) {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    frusa.reclaim();
+    assert_eq!(frusa.stats().in_use, frusa.stats().in_use_metadata);
+}
+
 /// Eight caching threads exchange objects through a shared pool and free
 /// each other's, while a coordinator reclaims; caches are released and
 /// reused along the way. Every invariant must hold at the end and all

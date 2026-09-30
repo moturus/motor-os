@@ -568,10 +568,13 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     /// A block that just went from full to non-full rejoins the stack unless
     /// a cache owns it: the owner sees the free slot itself, and if it is
-    /// giving the block up, its own re-check pushes it (§5.2 of the plan).
+    /// giving the block up, its own release pushes it. Fullness is checked
+    /// again under the lock: before the lock was taken the block may have
+    /// been released, claimed by another cache and filled up again.
     fn push_unowned(&self, slab: &Slab, block: *mut Block) {
         let _lock = slab.partial_lock.lock();
-        if unsafe { (*block).owner.load(Ordering::SeqCst) }.is_null() {
+        let b = unsafe { &*block };
+        if b.owner.load(Ordering::SeqCst).is_null() && !b.is_full() {
             slab.stack_push(block);
         }
     }

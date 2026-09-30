@@ -128,7 +128,8 @@ greatest `data` not above the pointer; validate the range and that the
 offset is a multiple of the slot size, panicking otherwise; `fetch_xor` the
 bit, asserting it was set. If the block was full, take `partial_lock` and
 push it unless a cache owns it (the owner sees the free slot itself, and its
-own release re-checks). No lock is taken otherwise.
+own release pushes it) or it is full again (it was released, claimed and
+refilled before the lock was taken). No lock is taken otherwise.
 
 ### 4.3 Growth
 
@@ -196,9 +197,9 @@ slot on the shard's list if the list is below its limit and not busy; the
 slot stays marked in use, so nothing shared changes. Otherwise
 `dealloc_to_slab` with the cache's shard: a free into a block another
 thread owns just flips the bit, and the owner sees the slot on its next
-allocation. The release re-check and the free's owner check both use
-sequentially consistent operations, so a remote free that lands while a
-block is being released is never lost.
+allocation. The release and the free's owner check both run under
+`partial_lock`, so a remote free that lands while a block is being released
+is never lost, and neither side publishes a block the other has claimed.
 
 Memory on a list is reachable from every thread: the tier before growth
 scans the other shards, and reclaim drains every list before it looks for
