@@ -796,8 +796,9 @@ set -o pipefail
 # The SSH shell is Interactive, whose unadorned children no longer receive
 # CAP_LOG. The complete suite exercises logging, so grant
 # CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET | CAP_FS_WRITE
-# explicitly.
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest" 2>&1 |
+# explicitly. --vsock runs the vsock tests, which expect this image's
+# topology (a NIC, no vsock device) and these capabilities.
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest --vsock" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||

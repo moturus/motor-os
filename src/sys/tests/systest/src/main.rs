@@ -1322,9 +1322,15 @@ fn main() {
         alloc_bench::run();
         return;
     }
-    if args.len() == 2 && args[1] == "--under-load" {
-        UNDER_LOAD.store(true, Ordering::Relaxed);
-        args.truncate(1); // Not a subcommand: run the normal suite.
+    // Suite flags, not subcommands: strip them and run the normal suite.
+    let mut vsock_tests = false;
+    while args.len() >= 2 {
+        match args[1].as_str() {
+            "--under-load" => UNDER_LOAD.store(true, Ordering::Relaxed),
+            "--vsock" => vsock_tests = true,
+            _ => break,
+        }
+        args.remove(1);
     }
     if args.len() == 2 && args[1] == "pool-cold-start-child" {
         net_driver::pool_cold_start_child();
@@ -1723,6 +1729,11 @@ fn main() {
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     sys_io_self_test::run_all_tests();
+    if vsock_tests {
+        net_driver::run_vsock_tests();
+    } else {
+        println!("vsock tests: skipped (run with --vsock under the test harness)");
+    }
     net_driver::run_all_tests();
     tcp::run_all_tests();
     udp::run_all_tests();

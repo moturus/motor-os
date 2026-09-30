@@ -2345,9 +2345,16 @@ fn test_channel_failure_wakes_every_waiter() {
     println!("net_driver::test_channel_failure_wakes_every_waiter PASS");
 }
 
-pub fn run_all_tests() {
+/// The vsock tests of the standard image: the wire codecs, then discovery on
+/// a guest with a NIC and no vsock device. They expect the topology and the
+/// capabilities the test harness provides (`MOTOR_OS_CAPS=0x3cc`), so the
+/// suite runs them only when started with `--vsock`.
+pub fn run_vsock_tests() {
     crate::vsock::run_wire_tests();
     test_vsock_discovery_inner("absent", true);
+}
+
+pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_drop_driver_immediately_after_connect();
     test_queued_queries_fail_after_driver_exit();

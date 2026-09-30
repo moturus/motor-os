@@ -344,7 +344,7 @@ udp_sockets="$(read_udp_socket_count)"
 SYSTEST_LOG=/tmp/full-test-systest.log
 systest_status=0
 set -o pipefail
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest" 2>&1 |
+vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest --vsock" 2>&1 |
   tee "$SYSTEST_LOG" || systest_status="$?"
 set +o pipefail
 [ "$systest_status" -eq 0 ] ||
