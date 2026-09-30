@@ -90,21 +90,8 @@ pub fn run(lorry: &Path) -> io::Result<()> {
     case.wait_for_flychecks(1)?;
     let source = root.join("src/lib.rs");
     let source_uri = file_uri(&source);
-    let diagnostics = case
-        .latest_diagnostics(&source_uri)
-        .ok_or_else(|| invalid("flycheck published no root diagnostics"))?;
-    if !diagnostics.as_array().is_some_and(|diagnostics| {
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic["source"] == "rustc"
-                && diagnostic["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("lorry flycheck marker"))
-        })
-    }) {
-        return Err(invalid(format!(
-            "flycheck omitted the rustc marker diagnostic: {diagnostics}"
-        )));
-    }
+    // Flycheck completion and diagnostic publication are separate notifications.
+    case.wait_for_rustc_message(&source_uri, "lorry flycheck marker")?;
     case.shutdown()?;
     let stderr = case.stderr_tail();
     validate_invocations(&log, &root, &toolchain.sysroot, &stderr)?;

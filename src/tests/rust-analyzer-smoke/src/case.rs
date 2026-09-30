@@ -221,6 +221,26 @@ impl SemanticCase {
         })
     }
 
+    pub fn wait_for_rustc_message(&mut self, uri: &str, message: &str) -> io::Result<()> {
+        loop {
+            if self
+                .latest_diagnostics(uri)
+                .and_then(Value::as_array)
+                .is_some_and(|diagnostics| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "rustc"
+                            && diagnostic["message"]
+                                .as_str()
+                                .is_some_and(|text| text.contains(message))
+                    })
+                })
+            {
+                return Ok(());
+            }
+            self.session.pump(self.deadline)?;
+        }
+    }
+
     pub fn stderr_tail(&self) -> String {
         self.session.stderr_tail()
     }
