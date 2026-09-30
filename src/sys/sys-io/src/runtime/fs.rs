@@ -504,6 +504,8 @@ async fn fs_listener(
         let _ = ticket_tx.send(()).await;
     }
 
+    const IO_YIELD_BUDGET: u8 = 32;
+    let mut requests_since_io = 0_u8;
     loop {
         let _ticket = ticket_rx.recv().await;
 
@@ -517,6 +519,13 @@ async fn fs_listener(
                     on_msg(msg, sender, runtime, role, can_write).await;
                     let _ = ticket_tx.send(()).await;
                 });
+                requests_since_io += 1;
+                if requests_since_io == IO_YIELD_BUDGET {
+                    requests_since_io = 0;
+                    // Shared-memory replies can keep this client runnable forever.
+                    // Poll kernel wakes so listeners and other clients also progress.
+                    moto_async::yield_to_io().await;
+                }
             }
             Err(_) => {
                 let grants = runtime

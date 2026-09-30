@@ -46,6 +46,71 @@ fn temp_dir() -> PathBuf {
     path
 }
 
+/// A busy filesystem connection must not prevent kernel wakes from admitting
+/// another connection or delivering that client's intermittent requests.
+pub fn concurrent_client_progress_test() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    const REQUESTS: usize = 16;
+    let stop = Arc::new(AtomicBool::new(false));
+    let busy_requests = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let busy_stop = stop.clone();
+    let busy_count = busy_requests.clone();
+    let busy = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async {
+            let client = moto_io::fs::FsClient::connect().unwrap();
+            client.stat("/user").await.unwrap();
+            ready_tx.send(()).unwrap();
+            while !busy_stop.load(Ordering::Relaxed) {
+                client.stat("/user").await.unwrap();
+                busy_count.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let intermittent_count = completed.clone();
+    let started = std::time::Instant::now();
+    let intermittent = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async {
+            let client = moto_io::fs::FsClient::connect().unwrap();
+            for _ in 0..REQUESTS {
+                // Let this receiver's shared-memory spin window expire, so
+                // the server must poll kernel I/O to see its next request.
+                std::thread::sleep(Duration::from_millis(5));
+                client.stat("/user").await.unwrap();
+                intermittent_count.fetch_add(1, Ordering::Relaxed);
+            }
+            done_tx.send(()).unwrap();
+        });
+    });
+
+    let outcome = done_rx.recv_timeout(Duration::from_secs(5));
+    stop.store(true, Ordering::Relaxed);
+    assert!(
+        outcome.is_ok(),
+        "filesystem client made {}/{} requests while the busy client made {}: {outcome:?}",
+        completed.load(Ordering::Relaxed),
+        REQUESTS,
+        busy_requests.load(Ordering::Relaxed),
+    );
+    busy.join().unwrap();
+    intermittent.join().unwrap();
+    println!(
+        "    ---- FS: concurrent_client_progress_test PASS ({:?}, {} busy requests)",
+        started.elapsed(),
+        busy_requests.load(Ordering::Relaxed),
+    );
+}
+
 fn create_dir_with_children(root: &std::path::Path, depth: u8) {
     assert!(!std::fs::exists(root).unwrap());
     std::fs::create_dir_all(root).unwrap();
@@ -1234,6 +1299,7 @@ fn path_resolution_test() {
 
 pub fn run_tests() {
     println!("running FS tests ...");
+    concurrent_client_progress_test();
     block_cache_capacity_test();
     scattered_writes_test();
     permissions_vdso_test();
