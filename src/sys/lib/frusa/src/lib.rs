@@ -804,21 +804,22 @@ impl<const SLABS: usize> Frusa<SLABS> {
         }
     }
 
-    /// Gives up the private block of `class`. Clear ownership and recheck
-    /// fullness under the partial lock: a remote free must not publish the
-    /// block and let another cache claim it before we finish publishing it.
-    /// Read guard held by the caller.
+    /// Gives up the private block of `class`. Ownership is cleared without
+    /// the lock; a full block (the common case) needs nothing more, as the
+    /// remote free that makes it non-full pushes it. A non-full block goes
+    /// through the same locked re-check as a remote free: it must not be
+    /// published if a concurrent free already did so and another cache
+    /// claimed it meanwhile. Read guard held by the caller.
     fn release_private(&self, slab: &Slab, cache: &ThreadCache<SLABS>, class: usize) {
         let block = cache.current[class].replace(core::ptr::null_mut());
         if block.is_null() {
             return;
         }
         let b = unsafe { &*block };
-        let _lock = slab.partial_lock.lock();
         let previous = b.owner.swap(core::ptr::null_mut(), Ordering::SeqCst);
         debug_assert_eq!(previous, cache.id());
         if !b.is_full() {
-            slab.stack_push(block);
+            self.push_unowned(slab, block);
         }
     }
 

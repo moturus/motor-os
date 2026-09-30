@@ -93,6 +93,7 @@ descriptors are never freed under a read guard, so there is no ABA hazard.
 | Shared allocation | read guard, then `partial_lock` |
 | Free through the slab | read guard, then `partial_lock` only on a full-to-non-full transition |
 | Cached allocation from a private block | none |
+| Release of a private block | read guard, then `partial_lock` only if the block is not full |
 | Cached allocation or free through a list | the list's lock alone, tried once |
 | Cached allocation that takes a block from the stack | read guard, then `partial_lock` |
 | Cached allocation that takes from another shard's list | the list's lock alone, tried once, no guard held |
@@ -197,9 +198,12 @@ slot on the shard's list if the list is below its limit and not busy; the
 slot stays marked in use, so nothing shared changes. Otherwise
 `dealloc_to_slab` with the cache's shard: a free into a block another
 thread owns just flips the bit, and the owner sees the slot on its next
-allocation. The release and the free's owner check both run under
-`partial_lock`, so a remote free that lands while a block is being released
-is never lost, and neither side publishes a block the other has claimed.
+allocation. A release clears `owner` with a sequentially consistent swap
+and then reads the bitmap; a free flips the bit and then reads `owner`, so
+one of them always sees the other and a remote free that lands during a
+release is never lost. Both push through the same re-check under
+`partial_lock` (no owner, not full), so neither side publishes a block that
+another cache has since claimed or refilled.
 
 Memory on a list is reachable from every thread: the tier before growth
 scans the other shards, and reclaim drains every list before it looks for

@@ -1358,6 +1358,41 @@ fn releasing_private_block_does_not_republish_another_caches_block() {
 }
 
 #[test]
+fn releasing_a_full_private_block_takes_no_lock() {
+    use std::rc::Rc;
+
+    let frusa = Frusa4K::new(&BACK_END);
+    let cache = Cache4K::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let mut ptrs: Vec<_> = (0..Block::ENTRIES - 1)
+        .map(|_| unsafe { frusa.alloc_cached(&cache, layout) })
+        .collect();
+    let slab = frusa.inner.slab_for_sz(64);
+    let class = slab.table_idx as usize;
+    let block = cache.current[class].get();
+    let (last, full) = unsafe { (*block).alloc() }.unwrap();
+    assert!(full);
+    ptrs.push(last);
+
+    let locked = Rc::new(core::cell::Cell::new(false));
+    BEFORE_SPIN_LOCK.with(|hook| {
+        let locked = locked.clone();
+        *hook.borrow_mut() = Some(Box::new(move || locked.set(true)));
+    });
+    frusa.release_cache(&cache);
+    assert!(!locked.get());
+    BEFORE_SPIN_LOCK.with(|hook| hook.borrow_mut().take());
+    assert!(cache.current[class].get().is_null());
+    assert!(unsafe { (*block).owner.load(Ordering::Relaxed) }.is_null());
+    assert!(!unsafe { (*block).on_stack() });
+
+    for ptr in ptrs {
+        unsafe { frusa.dealloc(ptr, layout) };
+    }
+    frusa.inner.check_invariants();
+}
+
+#[test]
 fn stale_remote_free_does_not_push_a_refilled_block() {
     use std::rc::Rc;
 
