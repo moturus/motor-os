@@ -348,7 +348,10 @@ fn run_stdin_exit_child(args: &[String]) -> ! {
     std::fs::write(&args[3], b"").unwrap();
     let mut byte = [0];
     assert_eq!(moto_rt::fs::read(moto_rt::FD_STDIN, &mut byte).unwrap(), 0);
-    std::fs::write(&args[2], b"ok").unwrap();
+    // The coordinator reads the verdict as soon as the path exists.
+    let pending = std::path::Path::new(&args[2]).with_extension("pending");
+    std::fs::write(&pending, b"ok").unwrap();
+    std::fs::rename(pending, &args[2]).unwrap();
     std::process::exit(0)
 }
 
