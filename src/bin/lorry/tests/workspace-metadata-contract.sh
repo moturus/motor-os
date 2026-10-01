@@ -11,7 +11,8 @@ fi
 WORK="$(mktemp -d /tmp/lorry-workspace-metadata-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 PROJECT="$WORK/project"
-mkdir -p "$PROJECT/app/src" "$PROJECT/shared/src" "$WORK/home"
+mkdir -p "$PROJECT/app/src" "$PROJECT/shared/src" "$PROJECT/tools/helper/src" \
+    "$PROJECT/tools/helper/nested/src" "$WORK/outside/src" "$WORK/home"
 cat >"$PROJECT/Cargo.toml" <<'EOF'
 [workspace]
 members = ["app", "shared"]
@@ -24,6 +25,8 @@ version = "0.1.0"
 edition = "2021"
 [dependencies]
 shared = { path = "../shared" }
+helper = { path = "../tools/helper" }
+outside = { path = "../../outside" }
 [dev-dependencies]
 unprepared = "1"
 EOF
@@ -38,6 +41,14 @@ crate-type = ["staticlib"]
 EOF
 printf 'fn main() { shared::answer(); }\n' >"$PROJECT/app/src/main.rs"
 printf 'pub fn answer() {}\n' >"$PROJECT/shared/src/lib.rs"
+# Path dependencies below the root are implicit members, recursively and for
+# every dependency kind. A path dependency outside the root is not a member.
+for directory in "$PROJECT/tools/helper" "$PROJECT/tools/helper/nested" "$WORK/outside"; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' \
+        "$(basename "$directory")" >"$directory/Cargo.toml"
+    printf 'pub fn answer() {}\n' >"$directory/src/lib.rs"
+done
+printf '[dev-dependencies]\nnested = { path = "nested" }\n' >>"$PROJECT/tools/helper/Cargo.toml"
 
 # No compiler, configuration, lockfile, or admission is needed to describe
 # source targets. This also proves the command cannot fetch dependencies.
@@ -49,11 +60,13 @@ source_metadata() {
         --filter-platform x86_64-unknown-motor --manifest-path "$manifest" "$@"
 }
 source_files=("$PROJECT/Cargo.toml" "$PROJECT/app/Cargo.toml" "$PROJECT/shared/Cargo.toml"
-    "$PROJECT/app/src/main.rs" "$PROJECT/shared/src/lib.rs")
+    "$PROJECT/app/src/main.rs" "$PROJECT/shared/src/lib.rs" "$PROJECT/tools/helper/Cargo.toml")
 sha256sum "${source_files[@]}" >"$WORK/sources.before"
 source_metadata "$PROJECT/Cargo.toml" >"$WORK/root.json"
 source_metadata "$PROJECT/app/Cargo.toml" >"$WORK/member.json"
 cmp "$WORK/root.json" "$WORK/member.json"
+source_metadata "$PROJECT/tools/helper/Cargo.toml" >"$WORK/implicit.json"
+cmp "$WORK/root.json" "$WORK/implicit.json"
 sha256sum "${source_files[@]}" >"$WORK/sources.after"
 cmp "$WORK/sources.before" "$WORK/sources.after"
 source_metadata "$PROJECT/Cargo.toml" -p app >"$WORK/selected.json"

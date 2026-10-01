@@ -201,7 +201,8 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
 source targets and declared dependencies without requiring Cargo.lock,
 compiler discovery, or dependency preparation. In an explicit workspace it
 describes all members, including when invoked with a member manifest; `-p`
-selects one member. Source metadata can describe library crate types and
+selects one member. As in Cargo, path dependencies below the workspace root
+are members too. Source metadata can describe library crate types and
 development dependencies outside Lorry's build admission rules.
 
 Without `--no-deps`, the command verifies and resolves the selected package's
