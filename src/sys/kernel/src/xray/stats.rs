@@ -565,14 +565,45 @@ impl KProcessStats {
         //
         // Detached children are the exception: they are owned by the kernel and
         // outlive us on purpose (CAP_SPAWN_DETACHED), so they are left running.
-        let children = self.children.lock(line!());
-        for (pid, weak) in children.iter() {
-            if let Some(child) = weak.upgrade() {
-                if child.detached {
-                    continue;
+        Self::for_each_child(
+            &self.children,
+            ProcessId::from_u64(0),
+            line!(),
+            |pid, child| {
+                if !child.is_some_and(|child| child.detached) {
+                    crate::uspace::process::post_kill_by_pid(pid.as_u64());
                 }
+                true
+            },
+        );
+    }
+
+    /// Calls `func` with each entry of `children` from `start` on, in pid
+    /// order, until it returns false. Each child is upgraded under the lock
+    /// but handed to `func` after the lock is released: if that `Arc` is the
+    /// last one, dropping it runs `Drop`, which takes the `children` locks of
+    /// the child's parent and of the system.
+    fn for_each_child<F>(
+        children: &SpinLock<BTreeMap<ProcessId, Weak<KProcessStats>>>,
+        start: ProcessId,
+        lockword: u32,
+        mut func: F,
+    ) where
+        F: FnMut(ProcessId, Option<Arc<KProcessStats>>) -> bool,
+    {
+        let mut next = start;
+        loop {
+            let (pid, child) = {
+                let children = children.lock(lockword);
+                let Some((pid, weak)) = children.range(next..).next() else {
+                    return;
+                };
+                (*pid, weak.upgrade())
+            };
+            if !func(pid, child) {
+                return;
             }
-            crate::uspace::process::post_kill_by_pid(pid.as_u64());
+            next = ProcessId::from_u64(pid.as_u64() + 1);
         }
     }
 
@@ -722,14 +753,9 @@ impl KProcessStats {
             if start.as_u64() == PID_SYSTEM && !func(SYSTEM_STATS.as_ref()) {
                 return;
             }
-            let child_lock = SYSTEM_STATS.children.lock(line!());
-            for entry in child_lock.range(start..) {
-                if let Some(e) = entry.1.upgrade() {
-                    if !func(e.as_ref()) {
-                        return;
-                    }
-                }
-            }
+            Self::for_each_child(&SYSTEM_STATS.children, start, line!(), |_, child| {
+                child.is_none_or(|e| func(e.as_ref()))
+            });
         } else {
             let entry = {
                 let child_lock = SYSTEM_STATS.children.lock(line!());
@@ -741,14 +767,12 @@ impl KProcessStats {
             };
 
             if let Some(entry) = entry.upgrade() {
-                let child_lock = entry.children.lock(line!());
-                for entry in child_lock.iter() {
-                    if let Some(e) = entry.1.upgrade() {
-                        if !func(e.as_ref()) {
-                            return;
-                        }
-                    }
-                }
+                Self::for_each_child(
+                    &entry.children,
+                    ProcessId::from_u64(0),
+                    line!(),
+                    |_, child| child.is_none_or(|e| func(e.as_ref())),
+                );
             }
         }
     }
