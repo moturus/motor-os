@@ -35,10 +35,17 @@ Changing the example's `answer` binding from `u32` to `bool` and saving
 produces a compiler diagnostic; restoring `u32` and saving clears it.
 Navigation on `rt_version` opens the installed Motor standard library.
 
-For another project, open an admitted Lorry package and prepare its
-dependencies explicitly with `lorry vendor`. A virtual workspace root is
-not a Lorry package. Build scripts and checks run with the invoking user's
-authority; opening a project is not a sandbox boundary.
+Same-crate definitions and module navigation also work in a fresh checkout
+with explicit workspace members, including `src/sys/tools/sysbox` in Motor
+OS. Lorry provides source metadata without dependency preparation or a
+lockfile. rust-analyzer uses it as an offline fallback and logs the full
+metadata error.
+
+Dependency navigation, resolved features, generated sources, and compiler
+checks require an admitted Lorry package and dependencies prepared explicitly
+with `lorry vendor`. A virtual workspace root is not a Lorry build package.
+Build scripts and checks run with the invoking user's authority; opening a
+project is not a sandbox boundary.
 
 ## Native Rust integration
 
@@ -151,7 +158,8 @@ and [`test-unwind.sh`](../src/tests/test-unwind.sh) cover this requirement.
 `src/tests/test-tui.sh` and its `test-helix-lsp.sh` helper cover parser health,
 editing, saves, terminal restoration, resize, rmux, native semantic requests,
 formatting, and clean server shutdown. The LSP cases include empty editor
-startup, opening a file afterward, edits during loading, paths with spaces,
+startup, opening a file afterward, an unprepared virtual workspace with
+same-file and module definitions, edits during loading, paths with spaces,
 Motor std navigation, and formatter-error recovery. The readiness helper's
 host tests guard waiting for source scans and indexing before semantic
 assertions. These tests run through `src/tests/full-test.sh`; developer

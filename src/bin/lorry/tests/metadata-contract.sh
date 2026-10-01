@@ -133,10 +133,10 @@ cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
 cp -R "$PROJECT" "$WORK/unsupported-target"
 sed -i '/^\[lib\]$/a crate-type = ["cdylib"]' \
     "$WORK/unsupported-target/Cargo.toml"
-if "$LORRY" metadata --format-version 1 --no-deps \
+if "$LORRY" metadata --format-version 1 \
     --manifest-path "$WORK/unsupported-target/Cargo.toml" \
     >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"; then
-    fail "metadata accepted an unsupported custom target"
+    fail "resolved metadata accepted an unsupported custom target"
 fi
 grep -F 'custom library crate types are not supported' \
     "$WORK/unsupported.err" >/dev/null ||

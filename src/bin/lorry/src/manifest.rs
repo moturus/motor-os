@@ -10,6 +10,9 @@ use crate::sparse::DependencyKind;
 use crate::toml::Document;
 use crate::toolchain::TargetInfo;
 
+mod source;
+pub(crate) use source::SourceWorkspace;
+
 const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -282,21 +285,8 @@ impl Manifest {
         package: Option<&str>,
         require_current_lock: bool,
     ) -> Result<Self> {
-        let path = fs::canonicalize(manifest_path).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize manifest path `{}`: {error}",
-                manifest_path.display()
-            ))
-        })?;
-        if path.file_name().and_then(|name| name.to_str()) != Some(MANIFEST_NAME) {
-            return Err(Error::failure(format!(
-                "manifest path `{}` does not name Cargo.toml",
-                manifest_path.display()
-            )));
-        }
-        let root = path
-            .parent()
-            .ok_or_else(|| Error::failure("manifest path has no parent directory"))?;
+        let path = canonical_manifest(manifest_path)?;
+        let root = path.parent().unwrap();
         let manifest = Self::load_project(root, package, require_current_lock)?;
         if manifest.path != path {
             return Err(Error::failure(format!(
@@ -530,12 +520,12 @@ impl Manifest {
         let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
         let library = parse_library(path, document, root, &name, mode)?;
-        let binaries = if mode == ManifestMode::Root {
+        let binaries = if matches!(mode, ManifestMode::Root | ManifestMode::Source) {
             parse_binaries(path, document, root, package, &name)?
         } else {
             Vec::new()
         };
-        let integration_tests = if mode == ManifestMode::Dependency {
+        let integration_tests = if matches!(mode, ManifestMode::Dependency | ManifestMode::Source) {
             parse_dependency_integration_tests(path, document, root, package)?
         } else {
             Vec::new()
@@ -553,7 +543,7 @@ impl Manifest {
                 &mut dependencies,
             )?;
         }
-        if mode == ManifestMode::Dependency
+        if matches!(mode, ManifestMode::Dependency | ManifestMode::Source)
             && let Some(item) = document.root().get("build-dependencies")
         {
             let table = require_table(path, document, item, "build-dependencies")?;
@@ -568,6 +558,20 @@ impl Manifest {
             )?;
         }
         validate_ignored_dev_dependencies(path, document)?;
+        if mode == ManifestMode::Source
+            && let Some(item) = document.root().get("dev-dependencies")
+        {
+            let table = require_table(path, document, item, "dev-dependencies")?;
+            parse_dependency_table(
+                path,
+                document,
+                root,
+                table,
+                None,
+                DependencyKind::Dev,
+                &mut dependencies,
+            )?;
+        }
         let mut unsupported_target_dev_dependencies = Vec::new();
         parse_target_dependencies(
             path,
@@ -617,6 +621,22 @@ impl Manifest {
             unsupported_target_dev_dependencies,
         })
     }
+}
+
+fn canonical_manifest(manifest_path: &Path) -> Result<PathBuf> {
+    let path = fs::canonicalize(manifest_path).map_err(|error| {
+        Error::failure(format!(
+            "failed to canonicalize manifest path `{}`: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if path.file_name().and_then(|name| name.to_str()) != Some(MANIFEST_NAME) {
+        return Err(Error::failure(format!(
+            "manifest path `{}` does not name Cargo.toml",
+            manifest_path.display()
+        )));
+    }
+    Ok(path)
 }
 
 #[derive(Clone)]
@@ -847,6 +867,7 @@ fn workspace_member_root(
 enum ManifestMode {
     Root,
     Dependency,
+    Source,
 }
 
 #[derive(Default)]
@@ -965,7 +986,7 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
         let supported = matches!(
             (mode, key),
             (
-                ManifestMode::Root,
+                ManifestMode::Root | ManifestMode::Source,
                 "package"
                     | "dependencies"
                     | "target"
@@ -976,6 +997,9 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
                     | "bin"
                     | "lints"
                     | "workspace"
+            ) | (
+                ManifestMode::Source,
+                "build-dependencies" | "dev-dependencies" | "test"
             ) | (
                 ManifestMode::Dependency,
                 "package"
@@ -1049,7 +1073,8 @@ fn validate_package_keys(
     ];
     for (key, item) in package.iter() {
         if !ROOT_ALLOWED.contains(&key)
-            && !(mode == ManifestMode::Dependency && DEPENDENCY_ONLY.contains(&key))
+            && !(matches!(mode, ManifestMode::Dependency | ManifestMode::Source)
+                && DEPENDENCY_ONLY.contains(&key))
         {
             return Err(Error::at(
                 path,
@@ -1069,7 +1094,7 @@ fn validate_package_keys(
             "a boolean",
         ));
     }
-    if mode == ManifestMode::Dependency {
+    if matches!(mode, ManifestMode::Dependency | ManifestMode::Source) {
         for key in DEPENDENCY_ONLY
             .iter()
             .copied()
@@ -1296,9 +1321,11 @@ fn parse_library(
         .transpose()?;
     if let Some(values) = &declared_crate_types
         && (values.is_empty()
-            || values
-                .iter()
-                .any(|value| !matches!(value.as_str(), "lib" | "rlib")))
+            || values.iter().any(|value| {
+                !matches!(value.as_str(), "lib" | "rlib")
+                    && !(mode == ManifestMode::Source
+                        && matches!(value.as_str(), "staticlib" | "dylib" | "cdylib"))
+            }))
     {
         return Err(Error::at(
             path,
@@ -1330,17 +1357,22 @@ fn parse_library(
     let relative = optional_string(path, document, table, "lib", "path")?
         .unwrap_or_else(|| "src/lib.rs".to_owned());
     validate_relative_path(path, document.line_of_table(table), "lib.path", &relative)?;
+    let crate_types = if proc_macro {
+        vec!["proc-macro".to_owned()]
+    } else {
+        declared_crate_types.unwrap_or_else(|| vec!["lib".to_owned()])
+    };
+    let doctestable = crate_types
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"));
     Ok(Some(LibraryTarget {
         name,
         path: root.join(relative),
         proc_macro,
-        crate_types: if proc_macro {
-            vec!["proc-macro".to_owned()]
-        } else {
-            declared_crate_types.unwrap_or_else(|| vec!["lib".to_owned()])
-        },
+        crate_types,
         test: optional_bool(path, document, table, "lib", "test")?.unwrap_or(true),
-        doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true),
+        doctest: optional_bool(path, document, table, "lib", "doctest")?.unwrap_or(true)
+            && doctestable,
         doc: optional_bool(path, document, table, "lib", "doc")?.unwrap_or(true),
     }))
 }
@@ -1977,7 +2009,10 @@ fn parse_target_dependencies(
         for (key, item) in target.iter() {
             let kind = match (mode, key) {
                 (_, "dependencies") => Some(DependencyKind::Normal),
-                (ManifestMode::Dependency, "build-dependencies") => Some(DependencyKind::Build),
+                (ManifestMode::Dependency | ManifestMode::Source, "build-dependencies") => {
+                    Some(DependencyKind::Build)
+                }
+                (ManifestMode::Source, "dev-dependencies") => Some(DependencyKind::Dev),
                 (ManifestMode::Dependency, "dev-dependencies") => None,
                 (ManifestMode::Root, "dev-dependencies") => {
                     require_table(

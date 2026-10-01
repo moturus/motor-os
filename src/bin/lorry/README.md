@@ -198,10 +198,16 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
 ```
 
 `metadata` emits the Cargo metadata version-1 schema. `--no-deps` describes
-only the selected package; otherwise the command verifies and resolves the
+source targets and declared dependencies without requiring Cargo.lock,
+compiler discovery, or dependency preparation. In an explicit workspace it
+describes all members, including when invoked with a member manifest; `-p`
+selects one member. Source metadata can describe library crate types and
+development dependencies outside Lorry's build admission rules.
+
+Without `--no-deps`, the command verifies and resolves the selected package's
 admitted graph and publishes stable content-addressed source views needed by
-consumers such as rust-analyzer. `--locked` is accepted because Lorry is
-always locked.
+consumers such as rust-analyzer. `--locked` is accepted; resolved graphs are
+always locked and source-only metadata never reads or writes the lockfile.
 
 `tree` prints the selected target's resolved normal and build dependency graph
 in Cargo's deterministic text form. It includes path and Git identities,

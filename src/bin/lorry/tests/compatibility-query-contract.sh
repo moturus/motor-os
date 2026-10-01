@@ -103,10 +103,11 @@ located="$(cd "$WORK/workspace/app" && HOME="$HOME_DIR" \
     "$LORRY" locate-project --workspace --manifest-path "$MEMBER_MANIFEST")"
 [ "$located" = "{\"root\":\"$MEMBER_MANIFEST\"}" ] || \
     fail "locate-project did not preserve the selected member"
-if (cd "$WORK/workspace" && HOME="$HOME_DIR" "$LORRY" locate-project \
-    --workspace --manifest-path "$WORK/workspace/Cargo.toml") >/dev/null 2>&1; then
-    fail "locate-project accepted a virtual workspace manifest"
-fi
+WORKSPACE_MANIFEST="$(realpath "$WORK/workspace/Cargo.toml")"
+located="$(cd "$WORK/workspace" && HOME="$HOME_DIR" "$LORRY" locate-project \
+    --workspace --manifest-path "$WORKSPACE_MANIFEST")"
+[ "$located" = "{\"root\":\"$WORKSPACE_MANIFEST\"}" ] || \
+    fail "locate-project did not identify the virtual workspace"
 
 common_environment=(
     HOME="$HOME_DIR"

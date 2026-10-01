@@ -93,9 +93,43 @@ helix_wait_format_edits() {
 }
 
 helix_check_end='"token":"rust-analyzer/flycheck/0","value":\{"kind":"end"'
+# A fresh checkout selects the virtual workspace above the current member.
+# Source navigation must work before lock creation or dependency preparation.
+helix_workspace="$GUEST_HELIX_ROOT/workspace"
+helix_lsp_log="$GUEST_HELIX_ROOT/workspace.log"
+printf 'put -r "%s" "%s"\nmkdir "%s/.git"\n' \
+  "$ROOT_DIR/src/tests/helix-workspace-fixture" "$helix_workspace" "$helix_workspace" |
+  helix_sftp_batch
+start_pty "cd '$helix_workspace/member' && hx -v --log $helix_lsp_log"
+wait_pty_output "[scratch]" "empty workspace Helix startup"
+PTY_OUTPUT=""
+printf ':o src/main.rs\r' >&"$PTY_IN_FD"
+wait_pty_output "main.rs" "opening unprepared workspace source"
+helix_log_wait '"token":"rustAnalyzer/Roots Scanned".*"kind":"end"' \
+  "workspace source loading" 1 true
+helix_log_mark
+printf '8G17lgd' >&"$PTY_IN_FD"
+helix_log_wait 'rust-analyzer <- .*"id":[0-9]+.*"(uri|targetUri)":"file:[^"]*/member/src/main.rs"' \
+  "same-file definition"
+helix_log_wait 'rust-analyzer <- .*"id":[0-9]+.*"line":2' "same-file definition line"
+helix_save_screen workspace_local_definition
+helix_log_mark
+printf '4G17lgd' >&"$PTY_IN_FD"
+wait_pty_output "definitions.rs" "workspace module definition"
+helix_log_wait 'rust-analyzer <- .*"id":[0-9]+.*"(uri|targetUri)":"file:[^"]*/member/src/definitions.rs"' \
+  "workspace module definition response"
+helix_save_screen workspace_module_definition
+printf ':q!\r' >&"$PTY_IN_FD"
+finish_pty 0 "unprepared workspace navigation"
+helix_log_wait '"method":"shutdown"' "workspace server shutdown"
+cp "$HELIX_LSP_EVIDENCE/helix.log" "$HELIX_LSP_EVIDENCE/workspace-project.log"
+vm_ssh "[ ! -e '$helix_workspace/Cargo.lock' ] && [ ! -e '$helix_workspace/member/.lorry' ]" ||
+  fail "workspace discovery changed dependency state"
+
 # Reproduce the reported workflow on the shipped project. Opening and editing
 # during workspace loading previously cancelled Salsa work and killed the server.
 helix_lsp_log="$GUEST_HELIX_ROOT/open.log"
+helix_log_start=1
 shipped_format=/devtools/src/helix-rust-demo/src/rustfmt-test.rs
 printf 'put "%s" "%s"\n' "$rustfmt_fixtures/in-place.in.rs" "$shipped_format" |
   helix_sftp_batch

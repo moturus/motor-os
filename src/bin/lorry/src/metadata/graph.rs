@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::dependency::PreparedGraph;
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::resolver::{PackageKey, ResolvedEdge, selected_root_features};
 use crate::sparse::DependencyKind;
 use crate::unit::CompilationPlan;
@@ -12,19 +12,28 @@ use crate::unit::CompilationPlan;
 use super::package::{self, Identity};
 use super::wire;
 
-pub(super) fn no_dependencies(manifest: &Manifest) -> Result<wire::Metadata> {
-    let root_id = package::package_id(manifest, Identity::Root)?;
-    finish(
-        manifest,
-        root_id,
-        vec![package::map(
-            manifest,
-            Identity::Root,
-            &manifest.root,
-            &BTreeMap::new(),
-        )?],
-        None,
-    )
+pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metadata> {
+    let mut packages = workspace
+        .packages
+        .iter()
+        .map(|manifest| package::map(manifest, Identity::Root, &manifest.root, &BTreeMap::new()))
+        .collect::<Result<Vec<_>>>()?;
+    packages.sort_by(|left, right| left.id.cmp(&right.id));
+    let members = packages
+        .iter()
+        .map(|package| package.id.clone())
+        .collect::<Vec<_>>();
+    // Cargo defaults to the root package for a nonvirtual workspace, and to
+    // every member for a virtual one.
+    let default_members = match workspace
+        .packages
+        .iter()
+        .find(|package| package.root == workspace.root)
+    {
+        Some(root) => vec![package::package_id(root, Identity::Root)?],
+        None => members.clone(),
+    };
+    finish(&workspace.root, members, default_members, packages, None)
 }
 
 pub(crate) fn resolved(
@@ -120,8 +129,9 @@ pub(crate) fn resolved(
     }
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
     finish(
-        manifest,
-        root_id.clone(),
+        &manifest.workspace_root,
+        vec![root_id.clone()],
+        vec![root_id.clone()],
         packages,
         Some(wire::Resolve {
             nodes,
@@ -131,20 +141,18 @@ pub(crate) fn resolved(
 }
 
 fn finish(
-    manifest: &Manifest,
-    root_id: String,
+    root: &Path,
+    workspace_members: Vec<String>,
+    workspace_default_members: Vec<String>,
     packages: Vec<wire::Package>,
     resolve: Option<wire::Resolve>,
 ) -> Result<wire::Metadata> {
-    let workspace_root = package::path_utf8(&manifest.workspace_root, "workspace root")?;
-    let target_directory = package::path_utf8(
-        &manifest.workspace_root.join("target"),
-        "metadata target directory",
-    )?;
+    let workspace_root = package::path_utf8(root, "workspace root")?;
+    let target_directory = package::path_utf8(&root.join("target"), "metadata target directory")?;
     Ok(wire::Metadata {
         packages,
-        workspace_members: vec![root_id.clone()],
-        workspace_default_members: vec![root_id],
+        workspace_members,
+        workspace_default_members,
         resolve,
         workspace_root,
         target_directory: target_directory.clone(),

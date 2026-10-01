@@ -15,7 +15,7 @@ use crate::cli::{Cli, MetadataOptions, Verbosity};
 use crate::config::{Config, effective_rustflags};
 use crate::dependency::{self, PreparedGraph};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::progress::Progress;
 use crate::repository::RepositorySet;
 use crate::resolver::{PackageKey, ResolvedSource, TargetSelection};
@@ -29,6 +29,14 @@ const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
+    if options.no_deps {
+        let workspace = SourceWorkspace::load(
+            &current,
+            options.manifest_path.as_deref().map(std::path::Path::new),
+            cli.package.as_deref(),
+        )?;
+        return write_document(&graph::no_dependencies(&workspace)?);
+    }
     let manifest = Manifest::load_selected_or_manifest_path(
         &current,
         options.manifest_path.as_deref().map(std::path::Path::new),
@@ -55,9 +63,6 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
         );
     }
 
-    if options.no_deps {
-        return write_document(&graph::no_dependencies(&manifest)?);
-    }
     let compact_state = CompactState::load(&manifest.root)?;
     if let Some(compact) = &compact_state {
         compact.require_context(&host.triple, &target.triple)?;

@@ -1,7 +1,7 @@
 use crate::cli::{Cli, RustcQueryKind, RustcQueryOptions};
 use crate::config::{Config, TargetSelector, effective_rustflags};
 use crate::diagnostic::{Error, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, SourceWorkspace};
 use crate::process;
 use crate::toolchain::Toolchain;
 use std::env;
@@ -10,14 +10,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub fn locate_project(manifest_path: &str) -> Result<i32> {
-    let manifest = Manifest::load_selected_or_manifest_path(
-        Path::new("."),
-        Some(Path::new(manifest_path)),
-        None,
-        false,
-    )?;
-    let path = manifest
-        .path
+    // Resolved metadata is per package, so a member manifest locates itself.
+    let workspace = SourceWorkspace::load(Path::new("."), Some(Path::new(manifest_path)), None)?;
+    let path = workspace
+        .manifest_path
         .to_str()
         .ok_or_else(|| Error::failure("selected manifest path is not Unicode"))?;
     println!("{}", serde_json::json!({ "root": path }));
