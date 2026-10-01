@@ -11,12 +11,20 @@ fi
 WORK="$(mktemp -d /tmp/lorry-workspace-metadata-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 PROJECT="$WORK/project"
-mkdir -p "$PROJECT/app/src" "$PROJECT/shared/src" "$PROJECT/tools/helper/src" \
-    "$PROJECT/tools/helper/nested/src" "$WORK/outside/src" "$WORK/home"
+mkdir -p "$PROJECT/app/src" "$PROJECT/shared/src" "$WORK/home"
+# Source metadata reads only membership. Build-only tables need no support.
 cat >"$PROJECT/Cargo.toml" <<'EOF'
 [workspace]
 members = ["app", "shared"]
+exclude = ["tools/excluded"]
 resolver = "2"
+[workspace.package]
+version = "9.9.9"
+[workspace.dependencies]
+unprepared = "1"
+[profile.custom]
+inherits = "release"
+debug = 1
 EOF
 cat >"$PROJECT/app/Cargo.toml" <<'EOF'
 [package]
@@ -27,8 +35,18 @@ edition = "2021"
 shared = { path = "../shared" }
 helper = { path = "../tools/helper" }
 outside = { path = "../../outside" }
+excluded = { path = "../tools/excluded" }
 [dev-dependencies]
 unprepared = "1"
+[features]
+extra = []
+[[bin]]
+name = "app"
+path = "src/main.rs"
+required-features = ["extra"]
+doc = true
+[badges]
+maintenance = { status = "experimental" }
 EOF
 cat >"$PROJECT/shared/Cargo.toml" <<'EOF'
 [package]
@@ -42,11 +60,16 @@ EOF
 printf 'fn main() { shared::answer(); }\n' >"$PROJECT/app/src/main.rs"
 printf 'pub fn answer() {}\n' >"$PROJECT/shared/src/lib.rs"
 # Path dependencies below the root are implicit members, recursively and for
-# every dependency kind. A path dependency outside the root is not a member.
-for directory in "$PROJECT/tools/helper" "$PROJECT/tools/helper/nested" "$WORK/outside"; do
+# every dependency kind. Excluded paths and paths outside the root are not.
+package() {
+    mkdir -p "$1/src"
     printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' \
-        "$(basename "$directory")" >"$directory/Cargo.toml"
-    printf 'pub fn answer() {}\n' >"$directory/src/lib.rs"
+        "$(basename "$1")" >"$1/Cargo.toml"
+    printf 'pub fn answer() {}\n' >"$1/src/lib.rs"
+}
+for directory in "$PROJECT/tools/helper" "$PROJECT/tools/helper/nested" \
+    "$PROJECT/tools/excluded" "$WORK/outside"; do
+    package "$directory"
 done
 printf '[dev-dependencies]\nnested = { path = "nested" }\n' >>"$PROJECT/tools/helper/Cargo.toml"
 
@@ -59,14 +82,24 @@ source_metadata() {
         --format-version 1 --no-deps --locked \
         --filter-platform x86_64-unknown-motor --manifest-path "$manifest" "$@"
 }
+agrees_with_cargo() {
+    local manifest="$1" name="$2"
+    source_metadata "$manifest" >"$WORK/$name.json"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata --format-version 1 \
+        --no-deps --offline --manifest-path "$manifest" >"$WORK/$name.cargo.json"
+    RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --quiet --locked --offline \
+        --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
+        compare-projection "$WORK/$name.json" "$WORK/$name.cargo.json"
+}
 source_files=("$PROJECT/Cargo.toml" "$PROJECT/app/Cargo.toml" "$PROJECT/shared/Cargo.toml"
     "$PROJECT/app/src/main.rs" "$PROJECT/shared/src/lib.rs" "$PROJECT/tools/helper/Cargo.toml")
 sha256sum "${source_files[@]}" >"$WORK/sources.before"
-source_metadata "$PROJECT/Cargo.toml" >"$WORK/root.json"
-source_metadata "$PROJECT/app/Cargo.toml" >"$WORK/member.json"
-cmp "$WORK/root.json" "$WORK/member.json"
-source_metadata "$PROJECT/tools/helper/Cargo.toml" >"$WORK/implicit.json"
-cmp "$WORK/root.json" "$WORK/implicit.json"
+# A member, including an implicit one, describes the whole workspace and
+# selects itself as the default member. An excluded package stands alone.
+agrees_with_cargo "$PROJECT/Cargo.toml" root
+agrees_with_cargo "$PROJECT/app/Cargo.toml" member
+agrees_with_cargo "$PROJECT/tools/helper/Cargo.toml" implicit
+agrees_with_cargo "$PROJECT/tools/excluded/Cargo.toml" excluded
 sha256sum "${source_files[@]}" >"$WORK/sources.after"
 cmp "$WORK/sources.before" "$WORK/sources.after"
 source_metadata "$PROJECT/Cargo.toml" -p app >"$WORK/selected.json"
@@ -76,12 +109,6 @@ grep -F "\"workspace_members\":[\"path+file://$PROJECT/app#0.1.0\"]" \
 [ ! -e "$PROJECT/Cargo.lock" ]
 [ ! -e "$PROJECT/target" ]
 [ ! -e "$PROJECT/.lorry" ]
-
-RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata --format-version 1 \
-    --no-deps --offline --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo.json"
-RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --locked --offline \
-    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
-    compare-projection "$WORK/root.json" "$WORK/cargo.json"
 
 # Existing, invalid lock bytes must survive editor discovery untouched.
 printf 'not a Cargo lockfile\n' >"$PROJECT/Cargo.lock"
@@ -100,11 +127,19 @@ edition = "2021"
 EOF
 mkdir "$PROJECT/src"
 printf 'pub fn root() {}\n' >"$PROJECT/src/lib.rs"
-source_metadata "$PROJECT/Cargo.toml" >"$WORK/nonvirtual.json"
-RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" metadata --format-version 1 \
-    --no-deps --offline --manifest-path "$PROJECT/Cargo.toml" >"$WORK/cargo.json"
-RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" run --locked --offline \
-    --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" -- \
-    compare-projection "$WORK/nonvirtual.json" "$WORK/cargo.json"
+agrees_with_cargo "$PROJECT/Cargo.toml" nonvirtual
+
+# A root may list itself as ".", declare default-members, or use an empty
+# `[workspace]` table. Its path dependencies are still implicit members.
+for root in "$WORK/dot" "$WORK/empty"; do
+    package "$root"
+    package "$root/inner"
+    package "$root/listed"
+    printf '[dependencies]\ninner = { path = "inner" }\n[workspace]\n' >>"$root/Cargo.toml"
+done
+printf 'members = [".", "listed"]\ndefault-members = ["listed"]\n' >>"$WORK/dot/Cargo.toml"
+agrees_with_cargo "$WORK/dot/Cargo.toml" dot
+agrees_with_cargo "$WORK/empty/Cargo.toml" empty
+agrees_with_cargo "$WORK/empty/inner/Cargo.toml" empty-inner
 
 echo "PASS: unprepared workspace source metadata agrees with Cargo"

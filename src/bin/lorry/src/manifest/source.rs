@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    DependencySource, MANIFEST_NAME, MAX_WORKSPACE_MEMBERS, Manifest, ManifestMode, Workspace,
-    canonical_manifest, resolve_target_defaults,
+    DependencySource, MANIFEST_NAME, MAX_WORKSPACE_MEMBERS, Manifest, ManifestMode,
+    canonical_manifest, require_table, resolve_target_defaults, string_array,
+    workspace_member_root,
 };
 use crate::diagnostic::{Error, Result};
 use crate::toml::Document;
@@ -13,6 +14,7 @@ pub(crate) struct SourceWorkspace {
     pub manifest_path: PathBuf,
     pub root: PathBuf,
     pub packages: Vec<Manifest>,
+    pub default_members: Vec<PathBuf>,
 }
 
 impl SourceWorkspace {
@@ -25,27 +27,30 @@ impl SourceWorkspace {
     ) -> Result<Self> {
         let manifest_path =
             canonical_manifest(manifest_path.unwrap_or(&current.join(MANIFEST_NAME)))?;
-        let directory = manifest_path.parent().unwrap();
-        let (mut root, mut packages) = match nearest_workspace(directory)? {
-            Some(workspace) => (workspace.root.clone(), load_members(&workspace)?),
-            None => (
-                directory.to_owned(),
-                vec![load_package(directory, directory)?],
-            ),
+        let directory = manifest_path.parent().unwrap().to_owned();
+        let mut workspace = match nearest_workspace(&directory)? {
+            Some(root) => {
+                let packages = root.load_members()?;
+                if directory == root.root || packages.contains_key(&directory) {
+                    Self::from_root(manifest_path, root, packages)?
+                } else {
+                    // As in Lorry's build path, a package that its nearest
+                    // workspace does not include is a standalone package.
+                    Self::standalone(&manifest_path)?
+                }
+            }
+            None => Self::standalone(&manifest_path)?,
         };
-        // As in Lorry's build path, a package that its nearest workspace does
-        // not include is described as a standalone package.
-        if directory != root && !packages.iter().any(|package| package.root == directory) {
-            root = directory.to_owned();
-            packages = vec![load_package(directory, directory)?];
-        }
         if let Some(selected) = selected {
-            let available = packages
+            let available = workspace
+                .packages
                 .iter()
                 .map(|package| package.name.clone())
                 .collect::<Vec<_>>();
-            packages.retain(|package| package.name == selected);
-            if packages.is_empty() {
+            workspace
+                .packages
+                .retain(|package| package.name == selected);
+            let Some(package) = workspace.packages.first() else {
                 return Err(
                     Error::failure(format!("workspace has no package named `{selected}`"))
                         .with_help(format!(
@@ -53,21 +58,152 @@ impl SourceWorkspace {
                             available.join(", ")
                         )),
                 );
-            }
+            };
+            workspace.default_members = vec![package.root.clone()];
         }
-        if packages.is_empty() {
+        if workspace.packages.is_empty() {
             return Err(Error::failure("workspace has no source packages"));
         }
+        Ok(workspace)
+    }
+
+    fn from_root(
+        manifest_path: PathBuf,
+        root: WorkspaceRoot,
+        packages: BTreeMap<PathBuf, Manifest>,
+    ) -> Result<Self> {
+        let directory = manifest_path.parent().unwrap();
+        // Cargo applies default-members only to the root manifest. A member
+        // selects itself, and a virtual root selects every member.
+        let default_members = match root.default_members {
+            Some(declared) if directory == root.root => {
+                if let Some(path) = declared.iter().find(|path| !packages.contains_key(*path)) {
+                    return Err(Error::failure(format!(
+                        "package `{}` is listed in default-members but is not a member",
+                        path.display()
+                    )));
+                }
+                declared
+            }
+            _ if directory != root.root || root.package => vec![directory.to_owned()],
+            _ => packages.keys().cloned().collect(),
+        };
         Ok(Self {
             manifest_path,
-            root,
-            packages,
+            root: root.root,
+            packages: packages.into_values().collect(),
+            default_members,
+        })
+    }
+
+    fn standalone(manifest_path: &Path) -> Result<Self> {
+        let directory = manifest_path.parent().unwrap();
+        Ok(Self {
+            manifest_path: manifest_path.to_owned(),
+            root: directory.to_owned(),
+            packages: vec![load_package(directory, directory)?],
+            default_members: vec![directory.to_owned()],
         })
     }
 }
 
-// Cargo selects the nearest enclosing manifest with a `[workspace]` table.
-fn nearest_workspace(directory: &Path) -> Result<Option<Workspace>> {
+// Only membership is read from the root. Profiles, patches, and inherited
+// tables matter to builds, not to a description of source targets.
+struct WorkspaceRoot {
+    root: PathBuf,
+    package: bool,
+    members: Vec<PathBuf>,
+    exclude: Vec<PathBuf>,
+    default_members: Option<Vec<PathBuf>>,
+}
+
+impl WorkspaceRoot {
+    fn parse(root: &Path, path: &Path, document: &Document) -> Result<Self> {
+        let item = document.root().get("workspace").unwrap();
+        let table = require_table(path, document, item, "workspace")?;
+        let paths = |key: &str| {
+            table
+                .get(key)
+                .map(|item| {
+                    let values = string_array(path, document, item, &format!("workspace.{key}"))?;
+                    if values.len() > MAX_WORKSPACE_MEMBERS {
+                        return Err(Error::failure(format!(
+                            "workspace.{key} lists more than {MAX_WORKSPACE_MEMBERS} paths"
+                        )));
+                    }
+                    Ok(values)
+                })
+                .transpose()
+        };
+        let member_roots = |values: Vec<String>| {
+            values
+                .iter()
+                .map(|member| match member.as_str() {
+                    "." => Ok(root.to_owned()),
+                    _ => workspace_member_root(root, path, document, member),
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        Ok(Self {
+            root: root.to_owned(),
+            package: document.root().contains_key("package"),
+            members: member_roots(paths("members")?.unwrap_or_default())?,
+            exclude: paths("exclude")?
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| root.join(entry))
+                .collect(),
+            default_members: paths("default-members")?.map(member_roots).transpose()?,
+        })
+    }
+
+    // An explicit member path takes precedence over `exclude`, as in Cargo.
+    fn excludes(&self, directory: &Path) -> bool {
+        self.exclude.iter().any(|path| directory.starts_with(path))
+            && !self.members.iter().any(|path| directory.starts_with(path))
+    }
+
+    // Path dependencies below the root are implicit members in Cargo.
+    fn load_members(&self) -> Result<BTreeMap<PathBuf, Manifest>> {
+        let mut pending = self.members.clone();
+        if self.package {
+            pending.push(self.root.clone());
+        }
+        let mut packages = BTreeMap::new();
+        let mut names = BTreeSet::new();
+        while let Some(directory) = pending.pop() {
+            if packages.contains_key(&directory) {
+                continue;
+            }
+            if packages.len() == MAX_WORKSPACE_MEMBERS {
+                return Err(Error::failure(format!(
+                    "workspace has more than {MAX_WORKSPACE_MEMBERS} members"
+                )));
+            }
+            let package = load_package(&directory, &self.root)?;
+            if !names.insert(package.name.clone()) {
+                return Err(Error::failure(format!(
+                    "workspace contains duplicate package name `{}`",
+                    package.name
+                )));
+            }
+            for dependency in &package.dependencies {
+                if let DependencySource::Path(path) = &dependency.source
+                    && let Ok(path) = fs::canonicalize(path)
+                    && path.starts_with(&self.root)
+                    && !self.excludes(&path)
+                {
+                    pending.push(path);
+                }
+            }
+            packages.insert(directory, package);
+        }
+        Ok(packages)
+    }
+}
+
+// Cargo uses the nearest enclosing workspace that does not exclude the package.
+fn nearest_workspace(directory: &Path) -> Result<Option<WorkspaceRoot>> {
     for ancestor in directory.ancestors() {
         let path = ancestor.join(MANIFEST_NAME);
         if !path.is_file() {
@@ -75,37 +211,13 @@ fn nearest_workspace(directory: &Path) -> Result<Option<Workspace>> {
         }
         let document = Document::load(&path, "Cargo source manifest")?;
         if document.root().contains_key("workspace") {
-            return Workspace::parse(ancestor, &path, &document).map(Some);
+            let workspace = WorkspaceRoot::parse(ancestor, &path, &document)?;
+            if ancestor == directory || !workspace.excludes(directory) {
+                return Ok(Some(workspace));
+            }
         }
     }
     Ok(None)
-}
-
-// Path dependencies below the workspace root are implicit members in Cargo.
-fn load_members(workspace: &Workspace) -> Result<Vec<Manifest>> {
-    let mut pending = workspace.members.values().cloned().collect::<Vec<_>>();
-    let mut packages = BTreeMap::new();
-    while let Some(directory) = pending.pop() {
-        if packages.contains_key(&directory) {
-            continue;
-        }
-        if packages.len() == MAX_WORKSPACE_MEMBERS {
-            return Err(Error::failure(format!(
-                "workspace has more than {MAX_WORKSPACE_MEMBERS} members"
-            )));
-        }
-        let package = load_package(&directory, &workspace.root)?;
-        for dependency in &package.dependencies {
-            if let DependencySource::Path(path) = &dependency.source
-                && let Ok(path) = fs::canonicalize(path)
-                && path.starts_with(&workspace.root)
-            {
-                pending.push(path);
-            }
-        }
-        packages.insert(directory, package);
-    }
-    Ok(packages.into_values().collect())
 }
 
 fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
@@ -113,6 +225,6 @@ fn load_package(directory: &Path, root: &Path) -> Result<Manifest> {
     let document = Document::load(&path, "Cargo source manifest")?;
     let mut manifest = Manifest::parse_document(directory, &path, &document, ManifestMode::Source)?;
     resolve_target_defaults(&mut manifest)?;
-    root.clone_into(&mut manifest.workspace_root);
+    manifest.workspace_root = root.to_owned();
     Ok(manifest)
 }

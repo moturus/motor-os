@@ -199,11 +199,18 @@ lorry check [-p NAME|PACKAGE_ID] [--manifest-path PATH]
 
 `metadata` emits the Cargo metadata version-1 schema. `--no-deps` describes
 source targets and declared dependencies without requiring Cargo.lock,
-compiler discovery, or dependency preparation. In an explicit workspace it
-describes all members, including when invoked with a member manifest; `-p`
-selects one member. As in Cargo, path dependencies below the workspace root
-are members too. Source metadata can describe library crate types and
-development dependencies outside Lorry's build admission rules.
+compiler discovery, or dependency preparation. In a workspace it describes
+all members, including when invoked with a member manifest; `-p` selects one
+member. As in Cargo, path dependencies below the workspace root are members
+too. Source metadata can describe library crate types, development
+dependencies, and binary `required-features` outside Lorry's build admission
+rules.
+
+Source metadata reads only workspace membership: `members` (which may list
+`"."`), `exclude`, and `default-members`. An empty `[workspace]` table is
+accepted. Build-only tables, such as profiles and patches, are ignored.
+Workspace inheritance, member globs, and example and bench targets are not
+supported yet.
 
 Without `--no-deps`, the command verifies and resolves the selected package's
 admitted graph and publishes stable content-addressed source views needed by

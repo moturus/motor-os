@@ -159,6 +159,7 @@ pub struct BinaryTarget {
     pub path: PathBuf,
     pub test: bool,
     pub doc: bool,
+    pub required_features: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -521,7 +522,7 @@ impl Manifest {
         let build_script = parse_build_script(path, document, package, root)?;
         let library = parse_library(path, document, root, &name, mode)?;
         let binaries = if matches!(mode, ManifestMode::Root | ManifestMode::Source) {
-            parse_binaries(path, document, root, package, &name)?
+            parse_binaries(path, document, root, package, &name, mode)?
         } else {
             Vec::new()
         };
@@ -986,7 +987,7 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
         let supported = matches!(
             (mode, key),
             (
-                ManifestMode::Root | ManifestMode::Source,
+                ManifestMode::Root,
                 "package"
                     | "dependencies"
                     | "target"
@@ -998,10 +999,9 @@ fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode
                     | "lints"
                     | "workspace"
             ) | (
-                ManifestMode::Source,
-                "build-dependencies" | "dev-dependencies" | "test"
-            ) | (
-                ManifestMode::Dependency,
+                // Source descriptions accept every table that a dependency may
+                // use, which includes every table of a root package.
+                ManifestMode::Dependency | ManifestMode::Source,
                 "package"
                     | "dependencies"
                     | "build-dependencies"
@@ -1383,6 +1383,7 @@ fn parse_binaries(
     root: &Path,
     package: &Table,
     package_name: &str,
+    mode: ManifestMode,
 ) -> Result<Vec<BinaryTarget>> {
     let mut binaries = if package.get("autobins").and_then(Item::as_bool) == Some(false) {
         BTreeMap::new()
@@ -1409,10 +1410,15 @@ fn parse_binaries(
         }
         for table in tables.iter() {
             for (key, item) in table.iter() {
-                if !matches!(key, "name" | "path" | "test" | "bench" | "doc") {
+                if !matches!(key, "name" | "path" | "test" | "bench" | "doc")
+                    && !(mode == ManifestMode::Source && key == "required-features")
+                {
                     return Err(unsupported_key(path, document, item, &format!("bin.{key}")));
                 }
-                if matches!(key, "bench" | "doc") && item.as_bool() != Some(false) {
+                if mode == ManifestMode::Root
+                    && matches!(key, "bench" | "doc")
+                    && item.as_bool() != Some(false)
+                {
                     return Err(Error::at(
                         path,
                         document.line_of_item(item),
@@ -1432,6 +1438,14 @@ fn parse_binaries(
                 path: root.join(relative),
                 test: optional_bool(path, document, table, "bin", "test")?.unwrap_or(true),
                 doc: optional_bool(path, document, table, "bin", "doc")?.unwrap_or(true),
+                required_features: optional_string_array(
+                    path,
+                    document,
+                    table,
+                    "bin",
+                    "required-features",
+                )?
+                .unwrap_or_default(),
             };
             if !explicit_names.insert(target.name.clone()) {
                 return Err(Error::at(
@@ -1463,6 +1477,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                 path: main,
                 test: true,
                 doc: true,
+                required_features: Vec::new(),
             },
         );
     }
@@ -1522,6 +1537,7 @@ fn discover_binaries(root: &Path, package_name: &str) -> Result<BTreeMap<String,
                     path: source,
                     test: true,
                     doc: true,
+                    required_features: Vec::new(),
                 },
             )
             .is_some()

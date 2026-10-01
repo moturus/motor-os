@@ -23,16 +23,13 @@ pub(super) fn no_dependencies(workspace: &SourceWorkspace) -> Result<wire::Metad
         .iter()
         .map(|package| package.id.clone())
         .collect::<Vec<_>>();
-    // Cargo defaults to the root package for a nonvirtual workspace, and to
-    // every member for a virtual one.
-    let default_members = match workspace
+    let mut default_members = workspace
         .packages
         .iter()
-        .find(|package| package.root == workspace.root)
-    {
-        Some(root) => vec![package::package_id(root, Identity::Root)?],
-        None => members.clone(),
-    };
+        .filter(|package| workspace.default_members.contains(&package.root))
+        .map(|package| package::package_id(package, Identity::Root))
+        .collect::<Result<Vec<_>>>()?;
+    default_members.sort();
     finish(&workspace.root, members, default_members, packages, None)
 }
 

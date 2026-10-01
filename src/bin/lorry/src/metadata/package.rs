@@ -159,7 +159,7 @@ fn map_targets(manifest: &Manifest, root: &Path) -> Result<Vec<wire::Target>> {
             name: binary.name.clone(),
             kind: vec!["bin".to_owned()],
             crate_types: vec!["bin".to_owned()],
-            required_features: Vec::new(),
+            required_features: binary.required_features.clone(),
             src_path: rebase_path(manifest, root, &binary.path, "binary source")?,
             edition: edition(manifest.edition).to_owned(),
             doctest: false,
