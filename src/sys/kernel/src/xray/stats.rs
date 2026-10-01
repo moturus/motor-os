@@ -569,9 +569,9 @@ impl KProcessStats {
             &self.children,
             ProcessId::from_u64(0),
             line!(),
-            |pid, child| {
-                if !child.is_some_and(|child| child.detached) {
-                    crate::uspace::process::post_kill_by_pid(pid.as_u64());
+            |_, child| {
+                if let Some(child) = child.filter(|child| !child.detached) {
+                    crate::uspace::process::post_kill(child.owner.clone());
                 }
                 true
             },

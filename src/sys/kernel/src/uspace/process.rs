@@ -828,13 +828,14 @@ impl Process {
         }
     }
 
-    fn job_fn_kill_by_pid(_: Weak<Thread>, pid: u64) {
-        crate::xray::tracing::trace("job_fn_kill_by_pid", pid, 0, 0);
-        if let Some(target_stats) = crate::xray::stats::stats_from_pid(pid) {
-            if let Some(target) = target_stats.owner.upgrade() {
-                if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
-                    target.die();
-                }
+    fn job_fn_kill(_: Weak<Thread>, target: u64) {
+        // Safety: `target` comes from `Weak::into_raw` in `post_kill`, and a
+        // posted job runs exactly once.
+        let target = unsafe { Weak::from_raw(target as usize as *const Process) };
+        if let Some(target) = target.upgrade() {
+            crate::xray::tracing::trace("job_fn_kill", target.pid().as_u64(), 0, 0);
+            if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
+                target.die();
             }
         }
     }
@@ -2365,11 +2366,13 @@ impl Thread {
     }
 }
 
-pub fn post_kill_by_pid(pid: u64) {
+/// Kills `target` asynchronously. The job holds the process itself, not its
+/// pid: a pid can be reused by an unrelated process before the job runs.
+pub fn post_kill(target: Weak<Process>) {
     crate::sched::post(crate::sched::Job::new(
-        Process::job_fn_kill_by_pid,
+        Process::job_fn_kill,
         Weak::default(),
-        pid,
+        Weak::into_raw(target) as usize as u64,
         uCpus::MAX,
     ));
 }
