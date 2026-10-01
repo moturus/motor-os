@@ -413,13 +413,15 @@ case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate 
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
 out="$(gate_rmux_copy_keys | vssh "TMPDIR=/devtools/tmp /user/bin/rmux" 2>>"$GATE_LOG")"
-indicator="$(printf '%s' "$out" |
-  grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
+# rmux repaints only the changed cells, so a later indicator need not appear
+# whole in the byte stream; read it from the rendered screen, as full-test does.
+indicator="$(printf '%s' "$out" | bash "$SCRIPT_DIR/test-rmux-copy-status.sh")"
 [ -n "$indicator" ] || gate_fail "rmux copy mode did not open"
 counts="${indicator##*[}"; above="${counts%%/*}"
 total="${counts%]}"; total="${total##*/}"
-[ "$total" -gt 0 ] || gate_fail "rmux pane kept no scrollback"
-[ "$above" = "$total" ] || gate_fail "rmux copy mode did not reach oldest line"
+[ "$total" -gt 0 ] || gate_fail "rmux pane kept no scrollback: '$indicator'"
+[ "$above" = "$total" ] ||
+  gate_fail "rmux copy mode did not reach oldest line: '$indicator'"
 
 log "VM gate: SFTP integration"
 RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
