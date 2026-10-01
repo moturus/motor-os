@@ -54,6 +54,8 @@ name = "shared"
 version = "0.1.0"
 edition = "2021"
 resolver = "2"
+keywords = ["motor", "source"]
+categories = ["development-tools"]
 [lib]
 crate-type = ["staticlib"]
 EOF

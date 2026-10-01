@@ -90,6 +90,8 @@ pub struct Version {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackageMetadata {
     pub authors: Vec<String>,
+    pub keywords: Vec<String>,
+    pub categories: Vec<String>,
     pub description: String,
     pub homepage: String,
     pub documentation: String,
@@ -1151,6 +1153,10 @@ fn parse_package_metadata(
 ) -> Result<PackageMetadata> {
     Ok(PackageMetadata {
         authors: optional_string_array(path, document, package, "package", "authors")?
+            .unwrap_or_default(),
+        keywords: optional_string_array(path, document, package, "package", "keywords")?
+            .unwrap_or_default(),
+        categories: optional_string_array(path, document, package, "package", "categories")?
             .unwrap_or_default(),
         description: optional_string(path, document, package, "package", "description")?
             .unwrap_or_default(),
