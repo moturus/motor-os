@@ -5,6 +5,30 @@
 1. double-copy during process spawn
 2. process text not shared across process copies
 
+## FS block cache at RAM/16 (2026-10-01)
+
+sys-io's block cache (`block_cache_blocks` in
+`src/sys/sys-io/src/runtime/fs.rs`) stops at 16 MiB from 256 MiB of RAM up.
+Executables larger than that are reread from the disk on every spawn, since
+the vdso loader reads the whole file: rustc (119 MB) and llvm (105 MB) on the
+developer image. Cached reads run at about 5.2 GB/s, uncached ones at
+1.2-1.4 GB/s. Proposal: 1 MiB per 16 MiB of RAM from 256 MiB up (512 MiB on an
+8 GiB guest); smaller guests unchanged.
+
+Measured with a release prototype on 4 vCPUs pinned to host P-cores, 8 GiB:
+a trivial rustc launch went from 150-180 to 85-94 ms, a no-op `lorry check`
+from 1.6 to 0.87 s, and the native rust-analyzer case from 21.6 to 13.8 s to
+quiescence and from 1.72 to 0.95 s from save to diagnostics.
+
+Before adopting:
+
+- Debug builds walk the whole cache on every transaction
+  (`debug_check_clean`, called from `Txn`'s drop in `motor-fs`); keep debug
+  at 16 MiB or make that check O(1).
+- [OOM handling](../oom-handling.md) argues the cache is filled at boot and
+  so never grows sys-io afterwards. With RAM/16 it grows after boot up to its
+  capacity and never shrinks; revisit that argument and the memory floors.
+
 ## Any process can kill most other processes (2026-09-26)
 
 `SysCpu::kill_pid` (`F_KILL_PID` in `sys_kill_impl`,

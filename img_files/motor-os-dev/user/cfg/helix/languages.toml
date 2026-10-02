@@ -14,7 +14,8 @@ MOTURUS_STDIO_NO_TERMINAL = "true"
 [language-server.rust-analyzer.config]
 cargo.target = "x86_64-unknown-motor"
 cargo.targetDir = true
-cargo.sysroot = "discover"
+# The installed sysroot; "discover" costs a rustc launch per workspace load.
+cargo.sysroot = "/devtools/rust"
 cargo.buildScripts.enable = true
 cargo.buildScripts.useRustcWrapper = false
 check.targets = ["x86_64-unknown-motor"]

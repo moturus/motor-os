@@ -43,8 +43,12 @@ authority; opening a project is not a sandbox boundary.
 ## Native Rust integration
 
 The packaged configuration is
-[`img_files/motor-os-dev/user/.config/helix/languages.toml`](../img_files/motor-os-dev/user/.config/helix/languages.toml),
-installed at `/user/.config/helix/languages.toml`. Normal Helix project
+[`img_files/motor-os-dev/user/cfg/helix/languages.toml`](../img_files/motor-os-dev/user/cfg/helix/languages.toml),
+installed at `/user/cfg/helix/languages.toml`. The `/devtools/bin/hx`
+launcher sets `XDG_CONFIG_HOME=/user/cfg` and
+`XDG_CACHE_HOME=/user/tmp/.cache` unless they are already set, so Helix's
+log is `/user/tmp/.cache/helix/helix.log`, and its built-in Git support
+reads `/user/cfg/git/config` besides `~/.gitconfig`. Normal Helix project
 overrides in `.helix/languages.toml` still apply. A custom `XDG_CONFIG_HOME`
 needs the native settings copied into its own `helix/languages.toml`.
 
@@ -60,8 +64,9 @@ required to keep its terminal-input relay from taking Helix's keyboard
 stream. Motor consumes this instruction before the server starts; see
 [foreground forwarding](tui.md#foreground-forwarding).
 
-The server targets `x86_64-unknown-motor`, discovers the matching installed
-sysroot, and uses Lorry's Cargo-compatible metadata and check commands.
+The server targets `x86_64-unknown-motor`, uses the installed sysroot at
+`/devtools/rust` (discovery would launch rustc on every workspace load), and
+uses Lorry's Cargo-compatible metadata and check commands.
 Build scripts are enabled without a rustc wrapper; procedural-macro
 expansion in the analyzer is disabled. The client reports file changes.
 Lorry's compiler-side procedural-macro support is separate. General server
@@ -86,7 +91,9 @@ from Helix's own configuration lookup above.
 
 Helix is a static PIE at `/devtools/helix/hx`; the developer overlay's
 `/devtools/bin/hx` launcher forwards quoted arguments, including paths with
-spaces. Its runtime is `/devtools/helix/runtime`.
+spaces, and selects the configuration and cache directories above. Running
+the binary directly falls back to `$HOME/.config/helix` and
+`$HOME/.cache/helix`. Its runtime is `/devtools/helix/runtime`.
 
 Ten tree-sitter grammars are linked into the binary: Rust, TOML, Markdown,
 Markdown inline, C, C++, JSON, YAML, Bash, and Lua. Their generated sources,
