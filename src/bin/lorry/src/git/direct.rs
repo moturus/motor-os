@@ -855,7 +855,7 @@ mod tests {
             resolver: crate::manifest::Resolver::V2,
             incompatible_rust_versions: None,
             rust_version: semver::Version::parse("1.85.0").unwrap(),
-            max_packages: 16,
+            package_limit: crate::policy::PackageLimit::with_max(16),
             max_depth: 8,
         };
         let resolution = crate::resolver::resolve(&manifest, &catalog, &options, &[]).unwrap();

@@ -441,7 +441,7 @@ mod tests {
                 resolver: Resolver::V2,
                 incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
                 rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
+                package_limit: crate::policy::PackageLimit::with_max(16),
                 max_depth: 8,
             },
             &locked,

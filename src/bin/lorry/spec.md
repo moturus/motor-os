@@ -772,7 +772,10 @@ additionally require the build-script grant.
 Default limits are 64 selected packages, depth 16, 16 MiB compressed and
 128 MiB/20,000 files extracted per package, 256 MiB compressed and 1 GiB
 extracted per transaction, and 300 seconds/8 MiB captured output per build
-script. Archives admit regular files and directories only and reject links,
+script. The package limit counts packages from outside the workspace; the
+selected package and other explicit workspace members do not count.
+Reaching it stops resolution at once, without trying older versions, and
+the error names `max-packages` and the configuration file that set it. Archives admit regular files and directories only and reject links,
 special files, traversal, malformed metadata, duplicates, and limit evasion.
 
 ## HTTPS acquisition and redirect trust

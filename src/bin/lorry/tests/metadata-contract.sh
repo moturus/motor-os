@@ -116,18 +116,45 @@ CARGO_HOME="$HOST_CARGO_HOME" "$LORRY_TEST_CARGO" run \
     --manifest-path "$SCRIPT_DIR/metadata-schema/Cargo.toml" \
     --locked --offline -- compare "$WORK/no-deps.json" "$WORK/cargo-no-deps.json"
 
+# The package limit counts packages from outside the workspace, never the
+# root. With two path dependencies, a limit of 1 fails and 2 succeeds.
+LIMITED="$WORK/limited"
+mkdir -p "$LIMITED/app/src" "$LIMITED/one/src" "$LIMITED/two/src"
+printf '%s\n' '[package]' 'name = "app"' 'version = "0.1.0"' 'edition = "2021"' \
+    '[dependencies]' 'one = { path = "../one" }' 'two = { path = "../two" }' \
+    >"$LIMITED/app/Cargo.toml"
+for package in one two; do
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' "$package" \
+        >"$LIMITED/$package/Cargo.toml"
+    printf 'pub fn answer() {}\n' >"$LIMITED/$package/src/lib.rs"
+done
+printf 'pub fn app() {}\n' >"$LIMITED/app/src/lib.rs"
+printf '%s\n' 'version = 4' '[[package]]' 'name = "app"' 'version = "0.1.0"' \
+    'dependencies = [' ' "one",' ' "two",' ']' '[[package]]' 'name = "one"' \
+    'version = "0.1.0"' '[[package]]' 'name = "two"' 'version = "0.1.0"' \
+    >"$LIMITED/app/Cargo.lock"
 cp "$TEST_HOME/.config/lorry/lorry.toml" "$WORK/config.backup"
-printf '%s\n' '' '[policy.limits]' 'max-packages = 1' \
-    >>"$TEST_HOME/.config/lorry/lorry.toml"
-if "$LORRY" metadata --format-version 1 \
-    --filter-platform x86_64-unknown-linux-gnu --locked \
-    --manifest-path "$PROJECT/Cargo.toml" >"$WORK/limited.out" 2>"$WORK/limited.err"; then
+limited_metadata() {
+    cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
+    printf '%s\n' '' '[policy.limits]' "max-packages = $1" \
+        >>"$TEST_HOME/.config/lorry/lorry.toml"
+    "$LORRY" metadata --format-version 1 --locked \
+        --manifest-path "$LIMITED/app/Cargo.toml" >"$WORK/limited.out" 2>"$WORK/limited.err"
+}
+if limited_metadata 1; then
     fail "metadata accepted a graph above the configured package limit"
 fi
-if ! grep -F 'package' "$WORK/limited.err" >/dev/null; then
+if ! grep -F "limit of 1 (set in \`$TEST_HOME/.config/lorry/lorry.toml\`)" \
+    "$WORK/limited.err" >/dev/null ||
+    ! grep -F 'raise `max-packages` in the `[policy.limits]` table' \
+        "$WORK/limited.err" >/dev/null; then
     cat "$WORK/limited.err" >&2
-    fail "package-limit rejection omitted its cause"
+    fail "package-limit rejection omitted its cause, setting, or source"
 fi
+limited_metadata 2 || {
+    cat "$WORK/limited.err" >&2
+    fail "the package limit counted the root package"
+}
 cp "$WORK/config.backup" "$TEST_HOME/.config/lorry/lorry.toml"
 
 cp -R "$PROJECT" "$WORK/unsupported-target"

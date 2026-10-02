@@ -38,20 +38,7 @@ pub(crate) fn resolved(
     prepared: &PreparedGraph,
     plan: &CompilationPlan,
     presented_roots: &BTreeMap<PackageKey, PathBuf>,
-    max_packages: u64,
 ) -> Result<wire::Metadata> {
-    let package_count = prepared
-        .resolution
-        .packages
-        .len()
-        .checked_add(1)
-        .ok_or_else(|| Error::failure("metadata package count overflowed"))?;
-    if u64::try_from(package_count).unwrap_or(u64::MAX) > max_packages {
-        return Err(Error::failure(format!(
-            "metadata graph exceeds the package-count limit of {max_packages}"
-        )));
-    }
-
     let root_id = package::package_id(manifest, Identity::Root)?;
     let mut ids = BTreeMap::new();
     let mut dependency_roots = BTreeMap::new();

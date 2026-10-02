@@ -173,6 +173,8 @@ impl Default for Policy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
     pub max_packages: u64,
+    /// The `lorry.toml` that set `max-packages`; `None` is Lorry's default.
+    pub max_packages_source: Option<PathBuf>,
     pub max_depth: u64,
     pub max_package_bytes: u64,
     pub max_extracted_package_bytes: u64,
@@ -187,6 +189,7 @@ impl Default for PolicyLimits {
     fn default() -> Self {
         Self {
             max_packages: 64,
+            max_packages_source: None,
             max_depth: 16,
             max_package_bytes: 16 * 1024 * 1024,
             max_extracted_package_bytes: 128 * 1024 * 1024,
@@ -834,7 +837,10 @@ fn merge_policy_limits(
     for (key, item) in table.iter() {
         let value = positive_integer(path, document, item, &format!("policy.limits.{key}"))?;
         match key {
-            "max-packages" => limits.max_packages = value,
+            "max-packages" => {
+                limits.max_packages = value;
+                limits.max_packages_source = Some(path.to_owned());
+            }
             "max-depth" => limits.max_depth = value,
             "max-package-bytes" => limits.max_package_bytes = value,
             "max-extracted-package-bytes" => limits.max_extracted_package_bytes = value,
@@ -2268,6 +2274,10 @@ locked = [
         assert_eq!(config.vendor.targets.len(), 2);
         assert_eq!(config.policy.rules.len(), 1);
         assert_eq!(config.constraints.len(), 2);
+        assert_eq!(
+            config.policy.limits.max_packages_source.as_deref(),
+            Some(config_path.as_path())
+        );
         assert_eq!(
             config
                 .native_tools

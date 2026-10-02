@@ -14,6 +14,7 @@ use crate::hash::{decode_hex, hex};
 use crate::manifest::{
     DependencySource, GitDependency, Lockfile, Manifest, Resolver as ResolverVersion,
 };
+use crate::policy::PackageLimit;
 use crate::repository::RepositorySet;
 use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
@@ -644,7 +645,7 @@ pub struct Options {
     pub resolver: ResolverVersion,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub rust_version: Version,
-    pub max_packages: u64,
+    pub package_limit: PackageLimit,
     pub max_depth: u64,
 }
 
@@ -909,7 +910,11 @@ fn resolve_with_scope(
         loader,
     )
     .map_err(|failure| {
-        Error::failure(format!("dependency resolution failed: {}", failure.message))
+        if failure.package_limit {
+            options.package_limit.error()
+        } else {
+            Error::failure(format!("dependency resolution failed: {}", failure.message))
+        }
     })?;
     Ok(state.into_resolution(manifest))
 }
@@ -1322,6 +1327,7 @@ impl State {
 struct Failure {
     message: String,
     fatal: bool,
+    package_limit: bool,
 }
 
 impl Failure {
@@ -1329,6 +1335,7 @@ impl Failure {
         Self {
             message: message.into(),
             fatal: false,
+            package_limit: false,
         }
     }
 
@@ -1336,6 +1343,17 @@ impl Failure {
         Self {
             message: message.into(),
             fatal: true,
+            package_limit: false,
+        }
+    }
+
+    // The limit is policy, not a constraint: backtracking to a smaller graph
+    // would silently choose different versions than Cargo.
+    fn package_limit() -> Self {
+        Self {
+            message: String::new(),
+            fatal: true,
+            package_limit: true,
         }
     }
 }
@@ -1423,19 +1441,17 @@ fn solve(
             }
             continue;
         }
-        if state.nodes.len() as u64 >= options.max_packages {
-            last_failure = Some(Failure::new(format!(
-                "selected package count exceeds {}",
-                options.max_packages
-            )));
-            continue;
-        }
-
         let key = PackageKey {
             name: record.name.clone(),
             version: record.version.clone(),
             source: record.source.key(),
         };
+        let limit = &options.package_limit;
+        if limit.counts(&key)
+            && state.nodes.keys().filter(|node| limit.counts(node)).count() as u64 >= limit.max
+        {
+            return Err(Failure::package_limit());
+        }
         let mut candidate_state = state.clone();
         if let Some(links) = &record.links {
             if let Some(existing) = candidate_state.links.get(links) {
@@ -2203,7 +2219,7 @@ mod tests {
             resolver,
             incompatible_rust_versions: None,
             rust_version: Version::parse("1.70.0").unwrap(),
-            max_packages: 64,
+            package_limit: PackageLimit::with_max(64),
             max_depth: 16,
         }
     }
@@ -3235,7 +3251,7 @@ mod tests {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
                 rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 16,
+                package_limit: PackageLimit::with_max(16),
                 max_depth: 8,
             },
             &locked,
@@ -3261,6 +3277,43 @@ mod tests {
     }
 
     #[test]
+    fn reaching_the_package_limit_fails_instead_of_choosing_older_versions() {
+        let mut catalog = Catalog::default();
+        let dependencies = format!("[{},{}]", dependency("x", "1"), dependency("y", "1"));
+        catalog
+            .insert(record("a", "1.1.0", &dependencies, "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("a", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("x", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        catalog
+            .insert(record("y", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+        let root = manifest("a = \"1\"", "", "2");
+        // `a 1.0.0` would fit in two packages, but Cargo selects `a 1.1.0`.
+        let mut limited = options(ResolverVersion::V2);
+        limited.package_limit = PackageLimit::with_max(2);
+        let error = resolve(&root, &catalog, &limited, &[])
+            .unwrap_err()
+            .render();
+        assert!(error.contains("limit of 2"), "{error}");
+        assert!(error.contains("`max-packages`"), "{error}");
+
+        limited.package_limit = PackageLimit::with_max(3);
+        let resolution = resolve(&root, &catalog, &limited, &[]).unwrap();
+        assert!(
+            resolution
+                .packages
+                .iter()
+                .any(|package| package.key.name == "a"
+                    && package.key.version == Version::new(1, 1, 0))
+        );
+    }
+
+    #[test]
     fn rejects_links_conflicts_and_graph_limits() {
         let mut catalog = Catalog::default();
         catalog
@@ -3278,12 +3331,12 @@ mod tests {
         );
 
         let mut limits = options(ResolverVersion::V2);
-        limits.max_packages = 1;
+        limits.package_limit = PackageLimit::with_max(1);
         assert!(
             resolve(&root, &catalog, &limits, &[])
                 .unwrap_err()
                 .to_string()
-                .contains("package count")
+                .contains("limit of 1")
         );
     }
 
@@ -3365,7 +3418,7 @@ mod tests {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
             rust_version: Version::parse("1.98.0").unwrap(),
-            max_packages: 64,
+            package_limit: PackageLimit::with_max(64),
             max_depth: 16,
         };
         let complete = resolve(&manifest, &catalog, &options, &locked).unwrap();
@@ -3483,7 +3536,7 @@ mod tests {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
                 rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 64,
+                package_limit: PackageLimit::with_max(64),
                 max_depth: 16,
             },
             &locked,
@@ -3544,7 +3597,7 @@ mod tests {
                 resolver: manifest.resolver,
                 incompatible_rust_versions: None,
                 rust_version: Version::parse("1.98.0").unwrap(),
-                max_packages: 64,
+                package_limit: PackageLimit::with_max(64),
                 max_depth: 16,
             },
             &locked,

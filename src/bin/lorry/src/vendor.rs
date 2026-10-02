@@ -759,6 +759,8 @@ fn prepare_with_catalog(
     }
     let selected =
         resolver::merge_resolutions(per_context.iter().map(|(_, resolution)| resolution.clone()))?;
+    // Each context resolution is within the limit; their union may not be.
+    options.package_limit.check(&selected)?;
     Ok((
         lockfile::render(manifest, &complete)?,
         per_context,

@@ -1,16 +1,88 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use semver::Version;
 
-use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyRule};
+use crate::config::{
+    NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule,
+};
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::Manifest;
 use crate::repository::RegistryObject;
 use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
+
+/// Lorry's limit on the number of packages in one dependency graph. Workspace
+/// members are the user's own code, so only other packages count.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageLimit {
+    pub max: u64,
+    source: Option<PathBuf>,
+    workspace_root: PathBuf,
+    members: BTreeSet<String>,
+}
+
+impl PackageLimit {
+    pub fn new(limits: &PolicyLimits, manifest: &Manifest) -> Self {
+        Self {
+            max: limits.max_packages,
+            source: limits.max_packages_source.clone(),
+            workspace_root: manifest.workspace_root.clone(),
+            members: manifest.workspace_members.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_max(max: u64) -> Self {
+        Self {
+            max,
+            source: None,
+            workspace_root: PathBuf::new(),
+            members: BTreeSet::new(),
+        }
+    }
+
+    pub fn counts(&self, key: &PackageKey) -> bool {
+        !matches!(&key.source, PackageSourceKey::Path(path)
+            if path.starts_with(&self.workspace_root) && self.members.contains(&key.name))
+    }
+
+    pub fn check(&self, resolution: &Resolution) -> Result<()> {
+        let counted = resolution
+            .packages
+            .iter()
+            .filter(|package| self.counts(&package.key))
+            .count();
+        if counted as u64 > self.max {
+            return Err(self.error());
+        }
+        Ok(())
+    }
+
+    pub fn error(&self) -> Error {
+        let origin = match &self.source {
+            Some(path) => format!("set in `{}`", path.display()),
+            None => "Lorry's default".to_owned(),
+        };
+        let user = if cfg!(target_os = "motor") {
+            "/user/cfg/lorry.toml"
+        } else {
+            "~/.config/lorry/lorry.toml"
+        };
+        Error::failure(format!(
+            "the dependency graph has more packages from outside the workspace than \
+             the limit of {} ({origin})",
+            self.max
+        ))
+        .with_help(format!(
+            "raise `max-packages` in the `[policy.limits]` table of `{user}` \
+             or of the project's `lorry.toml`"
+        ))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Preflight {
@@ -79,13 +151,6 @@ struct Facts<'a> {
 }
 
 pub fn preflight(policy: &Policy, resolution: &Resolution) -> Result<Preflight> {
-    if resolution.packages.len() as u64 > policy.limits.max_packages {
-        return Err(Error::failure(format!(
-            "selected package count {} exceeds policy limit {}",
-            resolution.packages.len(),
-            policy.limits.max_packages
-        )));
-    }
     let depth = selected_depth(resolution)?;
     if depth > policy.limits.max_depth {
         return Err(Error::failure(format!(
@@ -955,6 +1020,40 @@ mod tests {
             edges: Vec::new(),
             lock_edges: Vec::new(),
         }
+    }
+
+    #[test]
+    fn package_limit_counts_only_packages_outside_the_workspace() {
+        let mut manifest = Manifest::parse(
+            Path::new("/ws/app"),
+            Path::new("/ws/app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        manifest.workspace_root = Path::new("/ws").to_owned();
+        manifest.workspace_members = ["app", "local-demo"].map(str::to_owned).into();
+        let limits = PolicyLimits {
+            max_packages: 1,
+            max_packages_source: Some(Path::new("/user/cfg/lorry.toml").to_owned()),
+            ..PolicyLimits::default()
+        };
+        let limit = PackageLimit::new(&limits, &manifest);
+        let member = path_package(Path::new("/ws/local-demo"), false, false);
+        let outside = path_package(Path::new("/elsewhere/local-demo"), false, false);
+        let registry = registry_package("demo", "1.2.3", 4);
+
+        limit
+            .check(&make_resolution(vec![member.clone(), registry.clone()]))
+            .unwrap();
+        let error = limit
+            .check(&make_resolution(vec![member, outside, registry]))
+            .unwrap_err()
+            .render();
+        assert!(
+            error.contains("limit of 1 (set in `/user/cfg/lorry.toml`)"),
+            "{error}"
+        );
+        assert!(error.contains("raise `max-packages`"), "{error}");
     }
 
     fn make_resolution(packages: Vec<ResolvedPackage>) -> Resolution {

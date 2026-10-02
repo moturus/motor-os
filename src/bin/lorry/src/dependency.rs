@@ -289,7 +289,7 @@ pub fn resolver_options(
         resolver: manifest.resolver,
         incompatible_rust_versions: config.incompatible_rust_versions,
         rust_version,
-        max_packages: config.policy.limits.max_packages,
+        package_limit: crate::policy::PackageLimit::new(&config.policy.limits, manifest),
         max_depth: config.policy.limits.max_depth,
     })
 }
@@ -979,7 +979,7 @@ mod tests {
             resolver: manifest.resolver,
             incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
             rust_version: Version::parse("1.98.0").unwrap(),
-            max_packages: 64,
+            package_limit: crate::policy::PackageLimit::with_max(64),
             max_depth: 16,
         }
     }

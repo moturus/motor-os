@@ -162,13 +162,7 @@ pub fn execute(cli: &Cli, options: &MetadataOptions) -> Result<i32> {
     })?;
     let cache_root = config.cache_directory()?;
     let roots = publish_sources(&cache_root, &config, &prepared)?;
-    write_document(&graph::resolved(
-        &manifest,
-        &prepared,
-        &plan,
-        &roots,
-        config.policy.limits.max_packages,
-    )?)
+    write_document(&graph::resolved(&manifest, &prepared, &plan, &roots)?)
 }
 
 pub(crate) fn publish_sources(

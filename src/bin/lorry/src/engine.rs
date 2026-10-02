@@ -772,7 +772,6 @@ fn build_inner(
                 &prepared,
                 &metadata_plan,
                 &roots,
-                build.config.policy.limits.max_packages,
             )?;
             Some(crate::check_message::Reporter::new(
                 build.manifest,
