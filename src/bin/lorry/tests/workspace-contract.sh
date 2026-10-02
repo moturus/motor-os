@@ -19,14 +19,14 @@ WORK="$(mktemp -d /tmp/lorry-workspace-contract-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME:?}/.rustup}"
 mkdir -p "$WORK/home/.config/lorry" "$WORK/project/app/src" \
-    "$WORK/project/tool/src" "$WORK/project/shared/src"
+    "$WORK/project/tool/src" "$WORK/project/shared/src" "$WORK/project/scripted/src"
 printf 'config-version = 1\n[cache]\ndirectory = "%s"\n' "$WORK/cache" \
     >"$WORK/home/.config/lorry/lorry.toml"
 export HOME="$WORK/home"
 
 printf '%s\n' \
     '[workspace]' \
-    'members = ["app", "tool", "shared"]' \
+    'members = ["app", "tool", "shared", "scripted"]' \
     'resolver = "2"' \
     '' \
     '[profile.dev]' \
@@ -44,6 +44,9 @@ printf '%s\n' \
     ']' \
     '[[package]]' \
     'name = "shared"' \
+    'version = "0.1.0"' \
+    '[[package]]' \
+    'name = "scripted"' \
     'version = "0.1.0"' >"$WORK/project/Cargo.lock"
 for package in app tool; do
     printf '%s\n' \
@@ -68,6 +71,14 @@ printf '%s\n' \
     '[lib]' \
     'path = "src/lib.rs"' >"$WORK/project/shared/Cargo.toml"
 printf 'pub const VALUE: &str = "tool";\n' >"$WORK/project/shared/src/lib.rs"
+printf '%s\n' \
+    '[package]' \
+    'name = "scripted"' \
+    'version = "0.1.0"' \
+    'edition = "2024"' >"$WORK/project/scripted/Cargo.toml"
+printf 'fn main() { println!("cargo:rustc-cfg=scripted"); }\n' \
+    >"$WORK/project/scripted/build.rs"
+printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 
 (
     cd "$WORK/project"
@@ -102,4 +113,18 @@ printf 'pub const VALUE: &str = "tool";\n' >"$WORK/project/shared/src/lib.rs"
 [ ! -e "$WORK/project/target/lorry/packages/app" ]
 [ -x "$WORK/project/target/lorry/packages/tool/debug/tool" ]
 
-echo "PASS: selected workspace members build, run, test, and clean independently"
+# A selected member's build script is never silently skipped.
+for command in build check test run; do
+    if (cd "$WORK/project" && "$LORRY" "$command" -p scripted) \
+        2>"$WORK/scripted.stderr"; then
+        echo "workspace-contract: $command ignored a member build script" >&2
+        exit 1
+    fi
+    grep -F 'package `scripted` has a build script' "$WORK/scripted.stderr" >/dev/null || {
+        cat "$WORK/scripted.stderr" >&2
+        exit 1
+    }
+done
+[ ! -e "$WORK/project/target/lorry/packages/scripted" ]
+
+echo "PASS: selected workspace members build, run, test, and clean independently, and a member build script is rejected"

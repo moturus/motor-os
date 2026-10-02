@@ -64,9 +64,8 @@ The supported dependency model includes renamed and optional dependencies,
 default and forwarded features, target-conditioned dependencies, dependency
 build scripts, procedural-macro dependencies, and root crates.io patches.
 Root build scripts and root build-dependencies are not operationally
-supported. The current parser accepts a dependency-free root `build.rs`, but
-the engine does not run it; do not use Lorry for such a package until that
-known conformance defect is fixed. Alternative registries, selecting a
+supported. `build`, `run`, `test`, and `check` reject a selected package
+that has a build script, including a workspace member selected with `-p`. Alternative registries, selecting a
 procedural-macro package as the root, root dev
 dependencies selected for the build target, examples, benches, explicit test
 targets, and CLI feature selection are not supported. A target-conditioned

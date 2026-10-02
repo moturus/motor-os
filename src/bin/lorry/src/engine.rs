@@ -55,6 +55,20 @@ fn execute_inner(cli: &Cli) -> Result<i32> {
         Command::Check(options) => load_check_manifest(&current, options, cli.package.as_deref())?,
         _ => Manifest::load_selected(&current, cli.package.as_deref())?,
     };
+    // Compiling the selected package without its build script would quietly
+    // produce a different crate, so reject it before any other work.
+    if let Some(script) = &manifest.build_script {
+        return Err(Error::failure(format!(
+            "package `{}` has a build script (`{}`), and Lorry does not run build \
+             scripts of the selected package",
+            manifest.name,
+            script.display()
+        ))
+        .with_help(
+            "Lorry runs build scripts only for dependencies; build scripts of the \
+             selected package are a deferred capability",
+        ));
+    }
     if let Command::Check(options) = &cli.command
         && options.lib
         && manifest.library.is_none()

@@ -258,10 +258,10 @@ match the selected target, and produces the unsupported-dependency diagnostic
 when it does. Lorry may compile approved transitive build-dependencies for
 dependency build scripts.
 
-A manifest containing a root build script must fail before compilation. The
-current implementation parses a dependency-free root script but fails to
-schedule it; that implementation defect does not make silently ignored
-`build.rs` semantics part of the supported model.
+A selected package with a build script fails before any compilation:
+`build`, `run`, `test`, and `check` reject it, naming the script. Commands
+that only describe the package, such as `metadata`, `tree`, and `vendor`,
+accept it.
 
 Lorry rejects root build scripts, explicit `[[test]]`, examples, benches,
 custom crate types, `harness`, `required-features`, `autotests`, unsupported
