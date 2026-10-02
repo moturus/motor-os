@@ -3105,14 +3105,14 @@ fn resolve_declared_path(root: &Path, value: &str) -> PathBuf {
 }
 
 fn validate_lint_level(path: &Path, line: usize, value: &str) -> Result<String> {
-    if matches!(value, "allow" | "warn" | "force-warn" | "deny" | "forbid") {
+    if matches!(value, "allow" | "warn" | "deny" | "forbid") {
         Ok(value.to_owned())
     } else {
         Err(Error::at(
             path,
             line,
             format!("unsupported rustc lint level `{value}`"),
-            "choose allow, warn, force-warn, deny, or forbid",
+            "choose allow, warn, deny, or forbid",
         ))
     }
 }

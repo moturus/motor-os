@@ -113,6 +113,22 @@ printf 'fn main() {}\n' >"$WORK/project/scripted/src/main.rs"
 [ ! -e "$WORK/project/target/lorry/packages/app" ]
 [ -x "$WORK/project/target/lorry/packages/tool/debug/tool" ]
 
+# Cargo rejects force-warn in a manifest, in both supported lint forms.
+cp "$WORK/project/app/Cargo.toml" "$WORK/app-baseline.toml"
+for declaration in 'unused = "force-warn"' \
+    'unused = { level = "force-warn" }'; do
+    cp "$WORK/app-baseline.toml" "$WORK/project/app/Cargo.toml"
+    printf '\n[lints.rust]\n%s\n' "$declaration" >>"$WORK/project/app/Cargo.toml"
+    if (cd "$WORK/project" && "$LORRY" build -p app) \
+        2>"$WORK/force-warn.stderr"; then
+        echo "workspace-contract: accepted force-warn manifest lint" >&2
+        exit 1
+    fi
+    grep -F 'unsupported rustc lint level `force-warn`' \
+        "$WORK/force-warn.stderr" >/dev/null
+done
+cp "$WORK/app-baseline.toml" "$WORK/project/app/Cargo.toml"
+
 # A selected member's build script is never silently skipped.
 for command in build check test run; do
     if (cd "$WORK/project" && "$LORRY" "$command" -p scripted) \
@@ -172,4 +188,4 @@ limited_vendor 2 || {
 }
 cp "$WORK/config.backup" "$WORK/home/.config/lorry/lorry.toml"
 
-echo "PASS: selected workspace members build, run, test, and clean independently, a member build script is rejected, and members are matched by directory for the package limit"
+echo "PASS: selected members build, run, test, and clean; unsupported lint levels and member build scripts fail; the package limit matches members by directory"

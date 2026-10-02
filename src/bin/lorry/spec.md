@@ -240,6 +240,7 @@ The supported manifest surface includes:
 - resolver versions 1, 2, and 3, including edition defaults and explicit root
   `resolver`;
 - `package.rust-version`, enforced during selection;
+- `[lints.rust]` levels `allow`, `warn`, `deny`, and `forbid`;
 - the default development profile and supported release-profile settings;
 - implicit library/binary discovery, explicit binaries, `autobins`,
   `default-run`, exact build/run `--bin`, and root `[lints.rust]`;
