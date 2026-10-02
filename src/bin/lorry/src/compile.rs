@@ -208,7 +208,10 @@ pub fn dependency_rustc_invocation_with_build_output(
         push(&mut arguments, "--extern");
         push(&mut arguments, "proc_macro");
     }
-    if matches!(key.package.source, PackageSourceKey::CratesIo) {
+    if matches!(
+        key.package.source,
+        PackageSourceKey::CratesIo | PackageSourceKey::Git(_)
+    ) {
         push(&mut arguments, "--cap-lints");
         push(
             &mut arguments,

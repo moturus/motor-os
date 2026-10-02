@@ -258,6 +258,8 @@ STATE_HASH="$(sha256sum "$STATE_PATH")"
 
 echo "== Batching branch, HEAD, tag, and named-rev movement =="
 cat >"$WORK/source/demo/src/lib.rs" <<'EOF'
+#![deny(dead_code)]
+fn intentionally_unused() {}
 pub fn answer() -> u32 { 44 }
 EOF
 /usr/bin/git -C "$WORK/source" add demo/src/lib.rs
