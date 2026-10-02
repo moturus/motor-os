@@ -225,6 +225,8 @@ explicit `[[bin]]` targets, and honors `package.autobins = false`. `[lib]` and
 `[[bin]]` accept the Cargo-defaulted `name`, `path`, and `test` fields needed
 by the supported packages. Lorry discovers top-level `tests/*.rs` integration
 crates automatically.
+Dependency manifests may describe up to 1,024 integration-test targets;
+these targets are not built when that package is only a dependency.
 
 `build` builds all binaries unless one exact `--bin NAME` is selected. `run`
 selects an explicit `--bin`, then `package.default-run`, then a sole binary;

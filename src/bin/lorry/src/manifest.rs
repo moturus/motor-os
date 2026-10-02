@@ -17,6 +17,7 @@ const MANIFEST_NAME: &str = "Cargo.toml";
 const LOCK_NAME: &str = "Cargo.lock";
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const MAX_BINARY_TARGETS: usize = 64;
+const MAX_DESCRIBED_TARGETS: usize = 1_024;
 const MAX_WORKSPACE_MEMBERS: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1655,9 +1656,9 @@ fn parse_dependency_integration_tests(
             );
         }
     }
-    if targets.len() > MAX_BINARY_TARGETS {
+    if targets.len() > MAX_DESCRIBED_TARGETS {
         return Err(Error::failure(format!(
-            "package describes more than {MAX_BINARY_TARGETS} integration-test targets"
+            "package describes more than {MAX_DESCRIBED_TARGETS} integration-test targets"
         )));
     }
     let mut crate_names = BTreeSet::new();
