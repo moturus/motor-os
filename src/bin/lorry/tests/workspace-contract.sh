@@ -127,4 +127,49 @@ for command in build check test run; do
 done
 [ ! -e "$WORK/project/target/lorry/packages/scripted" ]
 
-echo "PASS: selected workspace members build, run, test, and clean independently, and a member build script is rejected"
+# The package limit skips members by directory, not by name: a nonmember
+# below the root that shares a member's name still counts.
+LIMITED="$WORK/limited"
+mkdir -p "$LIMITED/app/src" "$LIMITED/one/src" "$LIMITED/three/src" \
+    "$LIMITED/vendored/one/src" "$LIMITED/two/src"
+printf '%s\n' '[workspace]' 'members = ["app", "one", "three"]' 'resolver = "2"' \
+    >"$LIMITED/Cargo.toml"
+printf '%s\n' '[package]' 'name = "app"' 'version = "0.1.0"' 'edition = "2024"' \
+    '[dependencies]' 'one = { path = "../vendored/one" }' 'two = { path = "../two" }' \
+    'three = { path = "../three" }' >"$LIMITED/app/Cargo.toml"
+for package in one:0.3.0:one three:0.1.0:three one:0.1.0:vendored/one two:0.1.0:two; do
+    IFS=: read -r name version directory <<<"$package"
+    printf '[package]\nname = "%s"\nversion = "%s"\nedition = "2024"\n' \
+        "$name" "$version" >"$LIMITED/$directory/Cargo.toml"
+    printf 'pub fn value() {}\n' >"$LIMITED/$directory/src/lib.rs"
+done
+printf 'pub fn value() {}\n' >"$LIMITED/app/src/lib.rs"
+printf '%s\n' 'version = 4' \
+    '[[package]]' 'name = "app"' 'version = "0.1.0"' \
+    'dependencies = [' ' "one 0.1.0",' ' "three",' ' "two",' ']' \
+    '[[package]]' 'name = "one"' 'version = "0.1.0"' \
+    '[[package]]' 'name = "one"' 'version = "0.3.0"' \
+    '[[package]]' 'name = "three"' 'version = "0.1.0"' \
+    '[[package]]' 'name = "two"' 'version = "0.1.0"' >"$LIMITED/Cargo.lock"
+cp "$WORK/home/.config/lorry/lorry.toml" "$WORK/config.backup"
+limited_vendor() {
+    cp "$WORK/config.backup" "$WORK/home/.config/lorry/lorry.toml"
+    printf '%s\n' '[policy.limits]' "max-packages = $1" >>"$WORK/home/.config/lorry/lorry.toml"
+    (cd "$LIMITED" && "$LORRY" vendor -p app --accept-all) 2>"$WORK/limited.stderr"
+}
+if limited_vendor 1; then
+    echo "workspace-contract: a member's namesake was exempt from the package limit" >&2
+    exit 1
+fi
+grep -F 'than the limit of 1' "$WORK/limited.stderr" >/dev/null || {
+    cat "$WORK/limited.stderr" >&2
+    exit 1
+}
+limited_vendor 2 || {
+    cat "$WORK/limited.stderr" >&2
+    echo "workspace-contract: a member counted toward the package limit" >&2
+    exit 1
+}
+cp "$WORK/config.backup" "$WORK/home/.config/lorry/lorry.toml"
+
+echo "PASS: selected workspace members build, run, test, and clean independently, a member build script is rejected, and members are matched by directory for the package limit"

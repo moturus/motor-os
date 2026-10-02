@@ -16,13 +16,13 @@ use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedPackage,
 use crate::source_tree::{DEFAULT_LIMITS, Exclusions, Tree};
 
 /// Lorry's limit on the number of packages in one dependency graph. Workspace
-/// members are the user's own code, so only other packages count.
+/// members are the user's own code, so only other packages count. Members are
+/// matched by canonical directory: another package may share a member's name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageLimit {
     pub max: u64,
     source: Option<PathBuf>,
-    workspace_root: PathBuf,
-    members: BTreeSet<String>,
+    members: BTreeSet<PathBuf>,
 }
 
 impl PackageLimit {
@@ -30,8 +30,7 @@ impl PackageLimit {
         Self {
             max: limits.max_packages,
             source: limits.max_packages_source.clone(),
-            workspace_root: manifest.workspace_root.clone(),
-            members: manifest.workspace_members.clone(),
+            members: manifest.workspace_members.values().cloned().collect(),
         }
     }
 
@@ -40,14 +39,12 @@ impl PackageLimit {
         Self {
             max,
             source: None,
-            workspace_root: PathBuf::new(),
             members: BTreeSet::new(),
         }
     }
 
     pub fn counts(&self, key: &PackageKey) -> bool {
-        !matches!(&key.source, PackageSourceKey::Path(path)
-            if path.starts_with(&self.workspace_root) && self.members.contains(&key.name))
+        !matches!(&key.source, PackageSourceKey::Path(path) if self.members.contains(path))
     }
 
     pub fn check(&self, resolution: &Resolution) -> Result<()> {
@@ -1031,7 +1028,9 @@ mod tests {
         )
         .unwrap();
         manifest.workspace_root = Path::new("/ws").to_owned();
-        manifest.workspace_members = ["app", "local-demo"].map(str::to_owned).into();
+        manifest.workspace_members = [("app", "/ws/app"), ("local-demo", "/ws/local-demo")]
+            .map(|(name, root)| (name.to_owned(), Path::new(root).to_owned()))
+            .into();
         let limits = PolicyLimits {
             max_packages: 1,
             max_packages_source: Some(Path::new("/user/cfg/lorry.toml").to_owned()),
@@ -1040,11 +1039,20 @@ mod tests {
         let limit = PackageLimit::new(&limits, &manifest);
         let member = path_package(Path::new("/ws/local-demo"), false, false);
         let outside = path_package(Path::new("/elsewhere/local-demo"), false, false);
+        // Below the root and named like a member, but not a member directory.
+        let namesake = path_package(Path::new("/ws/vendored/local-demo"), false, false);
         let registry = registry_package("demo", "1.2.3", 4);
 
         limit
             .check(&make_resolution(vec![member.clone(), registry.clone()]))
             .unwrap();
+        limit
+            .check(&make_resolution(vec![
+                member.clone(),
+                namesake,
+                registry.clone(),
+            ]))
+            .unwrap_err();
         let error = limit
             .check(&make_resolution(vec![member, outside, registry]))
             .unwrap_err()

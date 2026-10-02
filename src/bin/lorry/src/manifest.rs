@@ -23,7 +23,8 @@ const MAX_WORKSPACE_MEMBERS: usize = 64;
 pub struct Manifest {
     pub root: PathBuf,
     pub workspace_root: PathBuf,
-    pub workspace_members: BTreeSet<String>,
+    /// Explicit workspace members by name, with their canonical directories.
+    pub workspace_members: BTreeMap<String, PathBuf>,
     pub path: PathBuf,
     pub name: String,
     pub crate_name: String,
@@ -600,7 +601,7 @@ impl Manifest {
         Ok(Self {
             root: root.to_path_buf(),
             workspace_root: root.to_path_buf(),
-            workspace_members: std::iter::once(name.clone()).collect(),
+            workspace_members: std::iter::once((name.clone(), root.to_path_buf())).collect(),
             path: path.to_path_buf(),
             crate_name: name.replace('-', "_"),
             name,
@@ -794,7 +795,7 @@ impl Workspace {
             }
         }
         manifest.workspace_root.clone_from(&self.root);
-        manifest.workspace_members = self.members.keys().cloned().collect();
+        manifest.workspace_members.clone_from(&self.members);
         manifest.dev.clone_from(&self.dev);
         manifest.release.clone_from(&self.release);
         manifest.resolver = self.resolver;

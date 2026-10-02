@@ -227,7 +227,7 @@ fn preserve_unselected_workspace(
         .filter(|package| {
             package.source.is_none()
                 && package.name != manifest.name
-                && manifest.workspace_members.contains(&package.name)
+                && manifest.workspace_members.contains_key(&package.name)
         })
         .collect::<Vec<_>>();
     preserve_locked_packages(lock, pending, nodes)
