@@ -118,6 +118,13 @@ export LORRY_CHECK_RUSTC_LOG="$LOG"
     "$LORRY" vendor --accept-all
 )
 
+if "$LORRY" check --examples --manifest-path "$PROJECT/Cargo.toml" \
+    >"$WORK/examples.out" 2>"$WORK/examples.err"; then
+    echo "check-contract: unsupported --examples succeeded without checking" >&2
+    exit 1
+fi
+grep -F '`check --examples` is not supported' "$WORK/examples.err" >/dev/null
+
 TARGET="$WORK/editor-target"
 : >"$LOG"
 "$LORRY" check --workspace --manifest-path "$PROJECT/Cargo.toml" \

@@ -638,6 +638,11 @@ fn load_check_manifest(
 }
 
 fn check(build: Build<'_>, target_root: &Path, options: &CheckOptions) -> Result<i32> {
+    if options.examples {
+        return Err(Error::failure(
+            "`check --examples` is not supported until example targets are implemented",
+        ));
+    }
     match build_inner(build, Some((target_root, options)))? {
         BuildOutcome::Check(code) => Ok(code),
         BuildOutcome::Artifacts(_) => unreachable!("check returned ordinary build artifacts"),

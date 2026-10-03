@@ -963,6 +963,8 @@ An integration test with no program binaries needs only the test-profile
 closure.
 `build` and `test` no longer use the separate selected-package rustc path;
 the remaining direct root compiler handles `check` targets.
+Until example targets are implemented, `check --examples` fails explicitly
+instead of succeeding without checking a target.
 
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
