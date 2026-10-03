@@ -309,6 +309,10 @@ The `cat` directory takes one required string `path`. Linux passes it after
 the path directly. On Motor OS a path beginning with `-` must be written with
 a `./` prefix. Spaces and glob characters remain literal on both systems.
 
+The `curl` directory takes one required string `url`. Its manifest fixes the
+HTTP and HTTPS protocol set, one request, the 30-second transfer limit, and
+response headers; the model cannot add flags or request data.
+
 Details:
 
 - **`read_file`** returns numbered lines in pages of about 30 KB and refuses
