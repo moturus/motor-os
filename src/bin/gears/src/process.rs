@@ -143,16 +143,32 @@ pub fn run(
     let mut stderr = Capture::new(request.max_output_bytes);
     let mut timed_out = false;
     let mut was_cancelled = false;
-    let mut cleanup_complete = true;
-    let status = loop {
+    let (status, mut cleanup_complete) = loop {
         while let Ok((stream, bytes)) = receiver.try_recv() {
             receive(stream, &bytes, &mut stdout, &mut stderr, observer);
         }
-        if let Some(status) = child.try_wait().map_err(|error| RunError {
-            detail: format!("cannot wait for {}: {error}", request.program),
-            started: true,
-        })? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A wrapper can exit while its descendants still hold our pipes.
+                break (status, crate::platform::kill_tree(&child));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let cleaned = crate::platform::kill_tree(&child);
+                let _ = child.wait();
+                return Err(RunError {
+                    detail: format!(
+                        "cannot wait for {}: {error}; process-tree cleanup {}",
+                        request.program,
+                        if cleaned {
+                            "completed"
+                        } else {
+                            "could not be confirmed"
+                        }
+                    ),
+                    started: true,
+                });
+            }
         }
         if cancellation.cancelled() {
             was_cancelled = true;
@@ -160,7 +176,7 @@ pub fn run(
             timed_out = true;
         }
         if was_cancelled || timed_out {
-            cleanup_complete = crate::platform::kill_tree(&child);
+            let cleanup_complete = crate::platform::kill_tree(&child);
             let status = child.wait().map_err(|error| RunError {
                 detail: format!("cannot reap {}: {error}", request.program),
                 started: true,
@@ -171,7 +187,7 @@ pub fn run(
                     "child process-tree cleanup could not be confirmed",
                 );
             }
-            break status;
+            break (status, cleanup_complete);
         }
         match receiver.recv_timeout(Duration::from_millis(10)) {
             Ok((stream, bytes)) => receive(stream, &bytes, &mut stdout, &mut stderr, observer),
@@ -192,6 +208,9 @@ pub fn run(
     while let Ok((stream, bytes)) = receiver.try_recv() {
         receive(stream, &bytes, &mut stdout, &mut stderr, observer);
     }
+    if readers.iter().flatten().any(|reader| !reader.is_finished()) {
+        cleanup_complete = false;
+    }
     if let Some(input) = input {
         input
             .join()
@@ -203,6 +222,15 @@ pub fn run(
                 detail: format!("{} stdin: {error}", request.program),
                 started: true,
             })?;
+    }
+    if !cleanup_complete {
+        return Err(RunError {
+            detail: format!(
+                "{}: process-tree cleanup could not be confirmed",
+                request.program
+            ),
+            started: true,
+        });
     }
     let (stdout_text, stdout_dropped) = stdout.finish();
     let (stderr_text, stderr_dropped) = stderr.finish();
@@ -431,6 +459,27 @@ mod tests {
         .unwrap();
         assert!(output.timed_out);
         assert!(output.status.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_exit_stops_background_descendants() {
+        let output = sh(
+            std::env::temp_dir(),
+            "sleep 10 & echo $!",
+            Duration::from_secs(3),
+            4096,
+            &Cancellation::new(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(output.code, Some(0));
+        let pid: u32 = output.stdout.trim().parse().unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+        if let Ok(stat) = stat {
+            let state = stat.rsplit_once(") ").unwrap().1.chars().next().unwrap();
+            assert_eq!(state, 'Z', "background child {pid} is still running");
+        }
     }
 
     #[cfg(unix)]
