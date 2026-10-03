@@ -26,8 +26,13 @@ artifact tree is reset under the artifact lock on first use.
 An interrupted compiler-unit replacement restores its previous completed
 directory before the next build tries to reuse it; staging cleanup still
 requires child-lifetime proof.
-On Linux, an inherited child lease keeps subsequent Lorry commands from
-entering the artifact tree while a child survives a killed parent.
+On Linux, a lease passed only to compiler and build-script children keeps
+subsequent Lorry commands from entering the artifact tree while a child
+survives a killed parent.
+The native suite includes a Motor process-lifetime probe that kills Lorry
+during compilation and checks that its child is gone before recovery.
+Published check units retain and replay compiler messages, keeping
+rust-analyzer flycheck diagnostics visible when those units are reused.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the
