@@ -1893,6 +1893,7 @@ mod tests {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
                 alias: "demo".to_owned(),
+                target: None,
                 kind: sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: CompileKind::Target,

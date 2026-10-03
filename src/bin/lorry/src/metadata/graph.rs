@@ -188,19 +188,19 @@ fn map_node(
     for edge in edges {
         let dependency = manifest
             .dependencies
-            .get(edge.dependency_index)
+            .iter()
+            .find(|dependency| {
+                dependency.alias == edge.alias
+                    && dependency.package == edge.package.name
+                    && dependency.kind == edge.kind
+                    && dependency.target == edge.target
+            })
             .ok_or_else(|| {
                 Error::failure(format!(
                     "metadata edge from `{}` has no declaration",
                     manifest.name
                 ))
             })?;
-        if dependency.alias != edge.alias || dependency.kind != edge.kind {
-            return Err(Error::failure(format!(
-                "metadata edge from `{}` does not match its dependency declaration",
-                manifest.name
-            )));
-        }
         let package_id = ids.get(&edge.package).ok_or_else(|| {
             Error::failure(format!(
                 "metadata edge from `{}` references unresolved package `{} {}`",
@@ -295,6 +295,7 @@ mod tests {
         ResolvedEdge {
             dependency_index: index,
             alias: alias.to_owned(),
+            target: None,
             kind: DependencyKind::Normal,
             parent_compile_kind: Some(CompileKind::Target),
             compile_kind: CompileKind::Target,
@@ -335,5 +336,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("references unresolved package"));
+    }
+
+    #[test]
+    fn matches_sparse_edges_independently_of_manifest_order() {
+        let manifest = Manifest::parse_dependency(
+            Path::new("/metadata-root"),
+            Path::new("/metadata-root/Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             [dependencies]\none = \"1\"\n\
+             [target.'cfg(unix)'.dependencies]\none = \"1\"\n",
+        )
+        .unwrap();
+        let one = key("one");
+        let ids = BTreeMap::from([(one.clone(), "registry#one@1.0.0".to_owned())]);
+        // Sparse records may interleave dev dependencies omitted by this parser.
+        let ordinary = edge(4, "one", one.clone());
+        let mut conditional = edge(0, "one", one);
+        conditional.target = Some("cfg(unix)".to_owned());
+        let node = map_node(
+            "root",
+            &[ordinary, conditional.clone()],
+            &manifest,
+            BTreeSet::new(),
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(node.deps.len(), 1);
+        assert_eq!(node.deps[0].dep_kinds.len(), 2);
+        assert_eq!(node.deps[0].dep_kinds[0].target, None);
+        assert_eq!(
+            node.deps[0].dep_kinds[1].target.as_deref(),
+            Some("cfg(unix)")
+        );
+        for mismatch in ["target", "kind", "package"] {
+            let mut invalid = conditional.clone();
+            match mismatch {
+                "target" => invalid.target = Some("cfg(windows)".to_owned()),
+                "kind" => invalid.kind = DependencyKind::Build,
+                "package" => invalid.package.name = "another".to_owned(),
+                _ => unreachable!(),
+            }
+            let error = map_node("root", &[invalid], &manifest, BTreeSet::new(), &ids).unwrap_err();
+            assert!(
+                error.to_string().contains("has no declaration"),
+                "{mismatch}: {error}"
+            );
+        }
     }
 }

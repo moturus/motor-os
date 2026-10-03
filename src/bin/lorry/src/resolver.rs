@@ -729,6 +729,8 @@ pub struct ResolvedEdge {
     pub dependency_index: usize,
     pub alias: String,
     pub kind: DependencyKind,
+    /// The declaration's platform condition; sparse and manifest indexes differ.
+    pub target: Option<String>,
     /// Compilation context of the package declaring this dependency.
     /// This differs from `compile_kind` when a target library uses a host
     /// procedural macro.
@@ -1238,6 +1240,7 @@ impl State {
                             dependency_index: *dependency_index,
                             alias: dependency.alias.clone(),
                             kind: dependency.kind,
+                            target: dependency.target.clone(),
                             parent_compile_kind: Some(*parent_kind),
                             compile_kind: *compile_kind,
                             context: context.clone(),
@@ -1279,6 +1282,7 @@ impl State {
                             dependency_index,
                             alias: dependency.alias.clone(),
                             kind: dependency.kind,
+                            target: dependency.target.clone(),
                             parent_compile_kind: Some(parent_kind),
                             compile_kind,
                             context,
@@ -1309,6 +1313,7 @@ impl State {
                     dependency_index,
                     alias: dependency.alias.clone(),
                     kind: dependency.kind,
+                    target: dependency.target.clone(),
                     parent_compile_kind: None,
                     compile_kind,
                     context,
@@ -2915,6 +2920,7 @@ mod tests {
             .unwrap();
         assert_eq!(target.edges[0].alias, "host-build");
         assert_eq!(target.edges[0].kind, DependencyKind::Build);
+        assert_eq!(target.edges[0].target.as_deref(), Some("cfg(unix)"));
         let host = resolution
             .packages
             .iter()
@@ -2922,6 +2928,7 @@ mod tests {
             .unwrap();
         assert_eq!(host.edges[0].alias, "host-selected");
         assert_eq!(host.edges[0].kind, DependencyKind::Normal);
+        assert_eq!(host.edges[0].target.as_deref(), Some("cfg(windows)"));
         assert!(host.feature_sets.contains_key(&FeatureContext::Host));
     }
 

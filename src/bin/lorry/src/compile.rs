@@ -1060,6 +1060,7 @@ mod tests {
                         ResolvedEdge {
                             dependency_index: 0,
                             alias: "typenum".to_owned(),
+                            target: None,
                             kind: DependencyKind::Normal,
                             parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Target,
@@ -1069,6 +1070,7 @@ mod tests {
                         ResolvedEdge {
                             dependency_index: 1,
                             alias: "version_check".to_owned(),
+                            target: None,
                             kind: DependencyKind::Build,
                             parent_compile_kind: Some(CompileKind::Target),
                             compile_kind: CompileKind::Host,
@@ -1530,6 +1532,7 @@ mod tests {
                     vec![ResolvedEdge {
                         dependency_index: 0,
                         alias: "derive".to_owned(),
+                        target: None,
                         kind: DependencyKind::Normal,
                         parent_compile_kind: Some(CompileKind::Target),
                         compile_kind: CompileKind::Host,

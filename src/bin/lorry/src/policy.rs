@@ -1071,6 +1071,7 @@ mod tests {
             .map(|(dependency_index, package)| ResolvedEdge {
                 dependency_index,
                 alias: package.key.name.clone(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,
@@ -1309,6 +1310,7 @@ mod tests {
         first.edges.push(ResolvedEdge {
             dependency_index: 0,
             alias: "child".to_owned(),
+            target: None,
             kind: crate::sparse::DependencyKind::Normal,
             parent_compile_kind: Some(crate::resolver::CompileKind::Target),
             compile_kind: crate::resolver::CompileKind::Target,
@@ -1319,6 +1321,7 @@ mod tests {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
                 alias: "demo".to_owned(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,

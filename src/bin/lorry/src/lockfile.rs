@@ -447,6 +447,7 @@ mod tests {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
                 alias: "demo".to_owned(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,
@@ -517,6 +518,7 @@ mod tests {
                 ResolvedEdge {
                     dependency_index: 0,
                     alias: "registry-demo".to_owned(),
+                    target: None,
                     kind: crate::sparse::DependencyKind::Normal,
                     parent_compile_kind: None,
                     compile_kind: crate::resolver::CompileKind::Target,
@@ -526,6 +528,7 @@ mod tests {
                 ResolvedEdge {
                     dependency_index: 1,
                     alias: "path-demo".to_owned(),
+                    target: None,
                     kind: crate::sparse::DependencyKind::Normal,
                     parent_compile_kind: None,
                     compile_kind: crate::resolver::CompileKind::Target,
@@ -622,6 +625,7 @@ mod tests {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
                 alias: "local".to_owned(),
+                target: None,
                 kind: crate::sparse::DependencyKind::Normal,
                 parent_compile_kind: None,
                 compile_kind: crate::resolver::CompileKind::Target,

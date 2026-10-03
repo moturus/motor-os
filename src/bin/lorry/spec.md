@@ -96,6 +96,10 @@ compiler, accept `cargo-compat-version = "1.99"` for an equivalent custom or
 unpaired toolchain, and reject every other family. Native Motor target units
 use the logical identity of an explicit
 `x86_64-unknown-motor` target even when `--target` was omitted.
+Resolved metadata matches dependency declarations by alias, package, kind,
+and platform condition. Crates.io sparse-index positions are not manifest
+positions, since the index can interleave dependency kinds omitted by the
+build manifest reader.
 
 Debug builds must reproduce Cargo-equivalent compilation semantics but need
 not be byte-identical across hosts because paths and debug information can

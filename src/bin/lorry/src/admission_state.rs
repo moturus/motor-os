@@ -3289,6 +3289,7 @@ mod tests {
         let root_edge = ResolvedEdge {
             dependency_index: 0,
             alias: "libc".to_owned(),
+            target: None,
             kind: DependencyKind::Normal,
             parent_compile_kind: None,
             compile_kind: CompileKind::Target,
