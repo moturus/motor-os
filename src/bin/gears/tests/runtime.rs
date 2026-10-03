@@ -828,6 +828,51 @@ fn an_observer_error_pairs_calls_that_never_started() {
 }
 
 #[test]
+fn a_failed_result_hook_preserves_the_completed_call() {
+    let fixture = Fixture::new("result-hook-error");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nevent=$(cat)\ncase \"$event\" in\n  *'\"event\":\"tool_result\"'*) exit 7 ;;\n  *) printf '{}' ;;\nesac\n",
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.hooks.push(HookConfig {
+        name: "fixture".to_string(),
+        command: vec!["sh".to_string(), hook.display().to_string()],
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 4096,
+    });
+    let provider = Scripted::new(vec![Ok(Completion {
+        tool_calls: vec![
+            ToolCall::new("call_1", "sh", r#"{"command":"touch done"}"#),
+            ToolCall::new("call_2", "sh", r#"{"command":"touch never"}"#),
+        ],
+        finish_reason: Some(FinishReason::ToolCalls),
+        ..Completion::default()
+    })]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let error = runtime
+        .turn("go".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .unwrap_err();
+    assert!(error.contains("exited unsuccessfully"), "{error}");
+    assert!(fixture.workspace.join("done").exists());
+    assert!(!fixture.workspace.join("never").exists());
+    let outcomes = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, [ToolOutcome::Completed, ToolOutcome::NotStarted]);
+}
+
+#[test]
 fn automatic_compaction_runs_before_an_oversized_follow_up() {
     let fixture = Fixture::new("automatic-compact");
     let provider = Scripted::new(vec![

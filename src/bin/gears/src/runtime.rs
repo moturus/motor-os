@@ -587,19 +587,28 @@ impl Runtime {
                 ToolOutcome::NotStarted,
             )
         };
+        let mut post_error = None;
         let result = if self.cancellation.cancelled() {
             result
         } else {
             let mut notices = Vec::new();
             let transformed = self.hooks.transform_tool_result(
                 &call,
-                result,
+                result.clone(),
                 &mut self.session,
                 &self.cancellation,
                 &mut |notice| notices.push(notice),
-            )?;
-            emit_notices(observer, notices)?;
-            transformed
+            );
+            if let Err(error) = emit_notices(observer, notices) {
+                post_error = Some(error);
+            }
+            match transformed {
+                Ok(transformed) => transformed,
+                Err(error) => {
+                    post_error = Some(error);
+                    result
+                }
+            }
         };
         let entry = self
             .session
@@ -610,16 +619,20 @@ impl Runtime {
                 result.is_error,
                 outcome,
             ))?;
-        self.notify(
+        let notification = self.notify(
             "entry",
             serde_json::json!({"id": entry, "type": "message", "role": "tool"}),
             observer,
-        )?;
-        observer.event(Event::ToolEnd {
+        );
+        let end = observer.event(Event::ToolEnd {
             name: call.name,
             content: result.content,
             is_error: result.is_error,
-        })
+        });
+        match post_error.or(notification.err()).or(end.err()) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn record_unstarted_calls(
