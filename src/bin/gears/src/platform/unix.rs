@@ -84,10 +84,48 @@ pub fn kill_tree(child: &std::process::Child) -> bool {
     let Ok(pid @ 1..) = libc::pid_t::try_from(child.id()) else {
         return false;
     };
-    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
-        return true;
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    // Signal delivery is asynchronous. A successful killpg does not yet
+    // mean a grandchild has stopped before the next tool starts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match process_group_has_live_members(pid) {
+            Ok(false) => return true,
+            Ok(true) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn process_group_has_live_members(group: libc::pid_t) -> Result<bool, ()> {
+    for entry in std::fs::read_dir("/proc").map_err(|_| ())? {
+        let entry = entry.map_err(|_| ())?;
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(()),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return Err(());
+        };
+        let mut fields = fields.split_whitespace();
+        let (Some(state), Some(_parent), Some(process_group)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(());
+        };
+        if process_group.parse::<libc::pid_t>() == Ok(group) && !matches!(state, "Z" | "X" | "x") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn cancellation_text(complete: bool) -> &'static str {

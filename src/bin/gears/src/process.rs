@@ -212,16 +212,18 @@ pub fn run(
         cleanup_complete = false;
     }
     if let Some(input) = input {
-        input
-            .join()
-            .map_err(|_| RunError {
-                detail: format!("{} stdin writer panicked", request.program),
-                started: true,
-            })?
-            .map_err(|error| RunError {
+        let result = input.join().map_err(|_| RunError {
+            detail: format!("{} stdin writer panicked", request.program),
+            started: true,
+        })?;
+        if let Err(error) = result
+            && !((was_cancelled || timed_out) && error.kind() == std::io::ErrorKind::BrokenPipe)
+        {
+            return Err(RunError {
                 detail: format!("{} stdin: {error}", request.program),
                 started: true,
-            })?;
+            });
+        }
     }
     if !cleanup_complete {
         return Err(RunError {
@@ -442,6 +444,34 @@ mod tests {
         )
         .unwrap();
         thread.join().unwrap();
+        assert!(output.cancelled);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_does_not_report_the_killed_childs_broken_stdin() {
+        let cancellation = Cancellation::new();
+        let signal = cancellation.clone();
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            signal.cancel();
+        });
+        let output = run(
+            &Request {
+                program: "sh".into(),
+                args: vec!["-c".into(), "sleep 5".into()],
+                cwd: std::env::temp_dir(),
+                stdin: Some(vec![b'x'; 1024 * 1024]),
+                timeout: Duration::from_secs(10),
+                max_output_bytes: 4096,
+                env: Vec::new(),
+                remove_env: Vec::new(),
+            },
+            &cancellation,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        cancel.join().unwrap();
         assert!(output.cancelled);
     }
 
