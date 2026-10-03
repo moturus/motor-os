@@ -488,6 +488,21 @@ impl Runtime {
     }
 
     fn install_session(&mut self, mut session: Session) -> Result<(), String> {
+        let provider_name = session
+            .provider()
+            .unwrap_or_else(|| self.provider_name.clone());
+        let provider = if provider_name != self.provider_name {
+            let factory = self
+                .provider_factory
+                .as_ref()
+                .ok_or("provider switching is not configured")?;
+            Some(factory(&provider_name)?)
+        } else {
+            None
+        };
+        if session.provider().is_none() {
+            session.set_provider(&provider_name)?;
+        }
         if session.recovered_entries() > 0 {
             self.startup_notices.push(format!(
                 "discarded {} incomplete session records after a crash",
@@ -517,6 +532,10 @@ impl Runtime {
             self.model = model;
         } else {
             session.set_model(&self.model)?;
+        }
+        if let Some(provider) = provider {
+            self.provider = provider;
+            self.provider_name = provider_name;
         }
         self.session = session;
         if std::mem::take(&mut self.allow_all) {

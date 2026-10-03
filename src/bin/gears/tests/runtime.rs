@@ -818,6 +818,45 @@ fn a_provider_switch_is_recorded_and_used_on_the_next_turn() {
     );
 }
 
+#[test]
+fn resuming_another_session_restores_its_provider() {
+    let fixture = Fixture::new("provider-session-switch");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let first_session = store.create(false, None).unwrap();
+    let mut second_session = store.create(false, None).unwrap();
+    second_session.set_provider("second").unwrap();
+    let second_id = second_session.id().to_string();
+    drop(second_session);
+
+    let first = Scripted::new(Vec::new());
+    let second = Scripted::new(vec![answer("from second")]);
+    let mut runtime = Runtime::new(
+        first.clone(),
+        store,
+        first_session,
+        &Config::default(),
+        "test/model".to_string(),
+    )
+    .unwrap();
+    let next = second.clone();
+    runtime.install_provider_factory(Arc::new(move |name| {
+        if name == "second" {
+            Ok(next.clone() as Arc<dyn Provider>)
+        } else {
+            Err(format!("unknown provider {name}"))
+        }
+    }));
+    runtime.resume(&second_id).unwrap();
+    assert_eq!(runtime.provider_name(), "second");
+    runtime
+        .turn("hello".to_string(), &mut FixedApproval(false), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert!(first.requests.lock().unwrap().is_empty());
+    assert_eq!(second.requests.lock().unwrap().len(), 1);
+}
+
 struct UntilCancelled;
 
 impl Provider for UntilCancelled {
