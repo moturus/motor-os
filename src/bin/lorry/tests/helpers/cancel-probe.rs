@@ -90,6 +90,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     interrupted.kill().map_err(|error| error.to_string())?;
     interrupted.wait().map_err(|error| error.to_string())?;
+    drop(interrupted);
     fs::remove_file(root.join("block")).map_err(|error| error.to_string())?;
     let mut recovery = build().spawn().map_err(|error| error.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(30);
