@@ -1011,6 +1011,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shipped_rg_and_gix_have_typed_platform_commands() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let registry = Registry::load(
+            &["rg", "gix"].map(|name| ToolDirectory {
+                directory: PathBuf::from(format!("tools/{name}")),
+                enabled: true,
+            }),
+            base,
+        )
+        .unwrap();
+        let rg = &registry.tools()[0];
+        let argv = rg
+            .process
+            .expand_arguments(
+                &serde_json::json!({"fixed_strings":true,"pattern":"-needle","path":"a * b.txt"}),
+                &rg.parameters,
+            )
+            .unwrap();
+        assert_eq!(&argv[1..], ["-F", "--", "-needle", "a * b.txt"]);
+        assert_eq!(rg.process.normal_exit_statuses, [0, 1]);
+        assert!(rg.read_only);
+        let gix = &registry.tools()[1];
+        assert!(!gix.read_only);
+        #[cfg(unix)]
+        assert!(gix.process.command.is_none());
+        #[cfg(not(unix))]
+        assert_eq!(
+            gix.process.command.as_ref().unwrap(),
+            &["/devtools/bin/gix"]
+        );
+    }
+
+    #[test]
     fn approval_identity_tracks_package_executable_and_schema() {
         let directory =
             std::env::temp_dir().join(format!("gears-approval-identity-{}", std::process::id()));

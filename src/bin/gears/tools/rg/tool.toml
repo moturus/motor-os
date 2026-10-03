@@ -1,0 +1,39 @@
+version = 1
+kind = "process"
+name = "rg"
+description = "Search one path with ripgrep; pattern and path are literal arguments. No matches is a normal result."
+parameters = "parameters.json"
+display = "search {path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+normal_exit_statuses = [0, 1]
+
+[process.command]
+linux = ["/usr/bin/rg"]
+motor = ["/system/bin/rg"]
+
+[process.arguments]
+before_double_dash = ["ignore_case", "fixed_strings", "line_numbers"]
+after_double_dash = ["pattern", "path"]
+
+[process.arguments.ignore_case]
+type = "boolean_flag"
+flag = "-i"
+
+[process.arguments.fixed_strings]
+type = "boolean_flag"
+flag = "-F"
+
+[process.arguments.line_numbers]
+type = "boolean_flag"
+flag = "-n"
+
+[process.arguments.pattern]
+type = "string"
+
+[process.arguments.path]
+type = "string"

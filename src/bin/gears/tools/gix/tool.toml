@@ -1,0 +1,40 @@
+version = 1
+kind = "process"
+name = "gix"
+description = "Inspect, stage, or commit a Motor OS Git repository with Gix. Each action accepts only its documented options."
+parameters = "parameters.json"
+display = "gix {action}"
+
+[process]
+timeout_seconds = 120
+max_output_bytes = 1048576
+
+[process.command]
+motor = ["/devtools/bin/gix"]
+
+[process.arguments]
+before_double_dash = ["repository", "action", "message", "staged", "all"]
+after_double_dash = ["paths"]
+
+[process.arguments.repository]
+type = "string_option"
+flag = "-r"
+
+[process.arguments.action]
+type = "enum"
+values = { status = "status", diff = "diff", log = "log", add = "add", commit = "commit" }
+
+[process.arguments.message]
+type = "string_option"
+flag = "-m"
+
+[process.arguments.staged]
+type = "boolean_flag"
+flag = "--staged"
+
+[process.arguments.all]
+type = "boolean_flag"
+flag = "-A"
+
+[process.arguments.paths]
+type = "string_list"

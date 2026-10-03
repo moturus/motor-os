@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {"type": "string", "enum": ["status", "diff", "log", "add", "commit"]},
+    "repository": {"type": "string", "description": "Repository directory; defaults to the workspace."},
+    "message": {"type": "string", "description": "Required for commit; invalid for other actions."},
+    "staged": {"type": "boolean", "description": "Show staged changes with diff; invalid for other actions."},
+    "all": {"type": "boolean", "description": "Stage all changes with add; invalid for other actions."},
+    "paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Literal paths for add or diff. Add requires paths unless all is true."
+    }
+  },
+  "required": ["action"],
+  "additionalProperties": false
+}

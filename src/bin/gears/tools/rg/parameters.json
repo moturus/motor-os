@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "pattern": {
+      "type": "string",
+      "description": "Ripgrep pattern, or a literal string when fixed_strings is true."
+    },
+    "path": {
+      "type": "string",
+      "description": "One literal workspace-relative or absolute file or directory path."
+    },
+    "ignore_case": {"type": "boolean", "description": "Search without case sensitivity."},
+    "fixed_strings": {"type": "boolean", "description": "Treat the pattern as literal text."},
+    "line_numbers": {"type": "boolean", "description": "Include matching line numbers."}
+  },
+  "required": ["pattern", "path"],
+  "additionalProperties": false
+}
