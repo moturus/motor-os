@@ -3708,6 +3708,7 @@ mod tests {
                 &bundle,
                 &["--list".to_owned()],
                 &fixture.0,
+                &BTreeMap::new(),
                 Some("cross-target"),
                 &runner_options,
                 Verbosity::Quiet,
