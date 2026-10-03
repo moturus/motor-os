@@ -36,11 +36,29 @@ verifies a controlled live child holds the barrier, and checks abandoned
 staging removal. The complete Lorry suite passed in 564 seconds on
 2026-10-03, including online native vendoring and Motor self-build. An earlier
 parallel Rust-test run intermittently failed to execute a just-published
-workspace-member binary with `ETXTBSY`; the cause remains unresolved. Stop
-before milestone 3 under `AGENTS.md`'s preexisting-bug rule, diagnose that
-failure, and record the milestone-2 Motor performance measurements.
+workspace-member binary with `ETXTBSY`. A deterministic reproducer now shows
+that a forked child inherits the writable staging descriptor and keeps the
+published executable busy after the parent closes its descriptor. A proposed
+Linux fix uses atomic hard-link publication, as Cargo does; the owner is
+reviewing the shared-file semantics. The Lorry-local `AGENTS.md` makes
+preexisting Lorry issues part of this work.
+The milestone-2 native measurements are recorded: cold `sysbox check` took
+22.623 seconds, warm check 1.424 seconds, and resolved metadata 1.411 seconds.
+They exposed and led to fixes for inert `lib.doc-scrape-examples` metadata
+and sparse-index/manifest dependency-order mismatches. Full milestone
+validation must run again after the executable-publication fix.
 Published check units retain and replay compiler messages, keeping
 rust-analyzer flycheck diagnostics visible when those units are reused.
+
+Milestone 3 has begun in independent small patches. Build, check, run, and
+test share Cargo JSON reporting and approved format combinations. Run and
+test finish the build stream before starting children; `test --no-run`
+reports harness executables. Programs and harnesses receive Cargo package
+metadata, run preserves its caller's directory, and global presentation
+options work after command names. These patches passed focused contracts.
+Warning replay, real diagnostic paths, dynamic library search paths, Lorry's
+own error messages, the remaining Cargo option forms, documentation, and
+the full milestone gate remain. The own-message option name is under review.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the

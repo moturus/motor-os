@@ -649,8 +649,67 @@ executing its published binary: Linux returned `ETXTBSY` at the test's
 the primary executable is committed after its staging file is closed.
 Targeted `lsof` instrumentation did not reproduce the failure, so it did not
 identify a remaining writable handle. A later passing run is not a root-cause
-explanation. Diagnose this before milestone 3; Motor cold/warm `check`,
-resolved `metadata`, and target-size measurements are also outstanding.
+explanation.
+
+The 2026-10-03 continuation traced one parallel Rust-suite run (357 passed,
+10 ignored), which did not reproduce the intermittent failure. A separate
+deterministic diagnostic then held a fork child before exec while an
+`AtomicFile` executable staging descriptor was open. The parent committed
+and closed its descriptor; launching the published file returned `ETXTBSY`.
+After the held child exited, that executable launched successfully. This
+demonstrates the descriptor-inheritance window used by Linux sandbox and
+child-lease pre-exec hooks. The diagnostic was removed; its source patch and
+logs remain under `/tmp/lorry-m2-inherited-writer-*`, with the parallel trace
+under `/tmp/lorry-m2-writers.*`. The proposed fix atomically hard-links the
+completed compiler output on Linux instead of opening a new executable for
+writing. The owner is reviewing the consequence that primary and unit paths
+share one file; Motor retains independent copies. Milestone validation remains
+pending this fix. The Lorry-local `AGENTS.md` explicitly puts existing Lorry
+issues in scope, so independent milestone-3 patches have continued.
+
+### Native performance checkpoint, 2026-10-03
+
+The release developer VM used 8 virtual CPUs and 8 GiB of memory. A tracked
+copy of `src/sys` lived at `/devtools/tmp/lorry-m2-sys`; no repository system
+sources changed. A release cross-built Lorry ran natively, using only the
+Motor vendor context. Online vendoring preceded a cold check with empty
+artifact and unit caches, followed by an unchanged warm check. Durations
+include command startup and the SSH invocation.
+
+| Command | Seconds |
+|---|---:|
+| `lorry vendor --accept-all` | 11.349 |
+| Cold `lorry -v check` in `tools/sysbox` | 22.623 |
+| Warm `lorry -v check` in `tools/sysbox` | 1.424 |
+| Resolved `lorry metadata --format-version 1` | 1.411 |
+
+The target tree contained 219,837,042 regular-file bytes in 1,117 files;
+the per-user unit cache contained 71,210,520 bytes in 1,151 files. These are
+logical file sizes, measured by a small standard-Rust walker, not filesystem
+allocated-block counts. The warm check reused compiler units and reran the
+five dependency scripts; the build/run no-script shortcut is a separate
+contract. Logs and phase timings are `/tmp/lorry-m2-measure-metadata-fixed.log`
+and `/tmp/lorry-m2-measure.tsv`.
+
+The temporary copy granted exact, checksum-bound proc-macro capabilities to
+`async-trait 0.1.89`, `bytemuck_derive 1.10.2`, and `derive_more-impl 2.1.1`.
+The exercised scripts were `crossbeam-utils 0.8.21`, `proc-macro2 1.0.106`,
+`quote 1.0.45`, the locked Git `parking_lot_core 0.9.12`, and the tracked
+path `moto-io 0.1.0`; path/Git grants used exact source-tree digests. The
+snapshot also retained exact `camino` and `serde_core` script grants from
+setup; they were not exercised by this native check.
+
+Two compatibility failures were diagnosed and fixed during setup.
+`pin-project-lite 0.2.17` declares boolean `lib.doc-scrape-examples`, which
+is inert for these commands and is now accepted with type checking.
+Resolved metadata previously interpreted a sparse-index dependency position
+as a manifest position. `async-trait`'s index interleaves dev dependencies
+that the build manifest reader omits. Edges now retain their platform
+condition, and metadata matches alias, package, dependency kind, and condition
+instead of list position. A regression covers reordered declarations and
+rejects identity/condition mismatches; resolver and Cargo metadata contracts
+passed. The original native metadata failure took 1.420 seconds and was
+preserved before the successful rerun.
 
 A released lock does not itself prove that a killed command's compiler
 or build-script children have stopped writing. Track child completion and
