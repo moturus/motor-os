@@ -237,7 +237,17 @@ impl Runtime {
         )?;
         self.notify("turn_start", serde_json::json!({"input": input}), observer)?;
 
-        let result = self.run_turn(approver, observer);
+        let entries_before = self.session.entries().len();
+        let result = self.run_turn(approver, observer).or_else(|error| {
+            let recorded = self.session.entries()[entries_before..]
+                .iter()
+                .any(|entry| entry.kind == "turn_error");
+            if recorded {
+                Err(error)
+            } else {
+                self.fail_turn(error, self.cancellation.cancelled(), observer)
+            }
+        });
         let payload = match &result {
             Ok(()) => serde_json::json!({"status": "completed"}),
             Err(error) => serde_json::json!({

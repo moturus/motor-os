@@ -599,6 +599,31 @@ fn provider_failures_are_recorded() {
 }
 
 #[test]
+fn an_oversized_first_turn_records_its_error() {
+    let fixture = Fixture::new("oversized-first-turn");
+    let config = Config {
+        context: ContextConfig {
+            window_tokens: 800,
+            output_reserve_tokens: 200,
+            recent_tail_tokens: 50,
+        },
+        ..Config::default()
+    };
+    let mut runtime = fixture.runtime(Scripted::new(Vec::new()), &config);
+    let error = runtime
+        .turn(
+            "large input ".repeat(10_000),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    assert!(error.contains("limit"), "{error}");
+    assert!(runtime.session().entries().iter().any(|entry| {
+        entry.kind == "turn_error" && entry.data["detail"].as_str() == Some(error.as_str())
+    }));
+}
+
+#[test]
 fn resume_restores_context_model_and_cumulative_usage() {
     let fixture = Fixture::new("resume");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
