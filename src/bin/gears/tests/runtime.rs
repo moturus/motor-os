@@ -325,7 +325,10 @@ fn shipped_sh_tool_runs_from_its_directory() {
         ..Config::default()
     };
     let provider = Scripted::new(vec![
-        tool("sh", r#"{"command":"printf made > result.txt"}"#),
+        tool(
+            "sh",
+            r#"{"command":"test -d \"$GEARS_SH_STATE_DIR\" && printf made > result.txt"}"#,
+        ),
         answer("done"),
     ]);
     let mut runtime = fixture.runtime(provider.clone(), &config);
@@ -337,6 +340,14 @@ fn shipped_sh_tool_runs_from_its_directory() {
     assert_eq!(
         std::fs::read_to_string(fixture.workspace.join("result.txt")).unwrap(),
         "made"
+    );
+    assert!(
+        runtime
+            .session()
+            .path()
+            .unwrap()
+            .with_extension("sh-state")
+            .is_dir()
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(

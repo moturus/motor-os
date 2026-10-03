@@ -26,6 +26,13 @@ pub struct Tool {
     pub process: ProcessTool,
 }
 
+pub struct ExecutionContext<'a> {
+    pub workspace: &'a Path,
+    pub session_id: &'a str,
+    pub session_path: Option<&'a Path>,
+    pub shell_state: Option<&'a Path>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessTool {
     pub command: Option<Vec<String>>,
@@ -144,9 +151,7 @@ impl Tool {
     pub fn execute(
         &self,
         arguments: &str,
-        workspace: &Path,
-        session_id: &str,
-        session_path: Option<&Path>,
+        context: &ExecutionContext<'_>,
         cancellation: &Cancellation,
         observer: &mut dyn FnMut(Stream, &str),
     ) -> Result<process::Output, process::RunError> {
@@ -181,21 +186,29 @@ impl Tool {
             ("GEARS_TOOL_NAME".to_string(), self.name.clone()),
             (
                 "GEARS_WORKSPACE".to_string(),
-                workspace.display().to_string(),
+                context.workspace.display().to_string(),
             ),
-            ("GEARS_SESSION_ID".to_string(), session_id.to_string()),
+            (
+                "GEARS_SESSION_ID".to_string(),
+                context.session_id.to_string(),
+            ),
         ];
         let mut remove_env = vec![KEY_ENV.to_string()];
-        if let Some(path) = session_path {
+        if let Some(path) = context.session_path {
             env.push(("GEARS_SESSION_PATH".to_string(), path.display().to_string()));
         } else {
             remove_env.push("GEARS_SESSION_PATH".to_string());
+        }
+        if let Some(path) = context.shell_state {
+            env.push(("GEARS_SH_STATE_DIR".to_string(), path.display().to_string()));
+        } else {
+            remove_env.push("GEARS_SH_STATE_DIR".to_string());
         }
         process::run(
             &process::Request {
                 program: program.display().to_string(),
                 args: command,
-                cwd: workspace.to_path_buf(),
+                cwd: context.workspace.to_path_buf(),
                 stdin: self
                     .process
                     .stdin_arguments
@@ -1072,9 +1085,12 @@ type = "string_list"
         let output = tool
             .execute(
                 r#"{"text":"two words"}"#,
-                &workspace,
-                "session-test",
-                None,
+                &ExecutionContext {
+                    workspace: &workspace,
+                    session_id: "session-test",
+                    session_path: None,
+                    shell_state: None,
+                },
                 &Cancellation::new(),
                 &mut |_, _| {},
             )

@@ -14,7 +14,7 @@ use crate::provider::{
     ToolOutcome, ToolSpec, UsageMeter,
 };
 use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
-use crate::tools::Registry;
+use crate::tools::{ExecutionContext, Registry};
 
 const MODEL_STREAM_BYTES: usize = 32 * 1024;
 
@@ -680,7 +680,19 @@ impl Runtime {
                 ToolOutcome::NotStarted,
             )
         } else if let Some(tool) = self.tools.enabled(&call.name) {
-            self.execute_directory_tool(tool, &call, observer)
+            let shell_state = (call.name == "sh")
+                .then(|| self.session.shell_state_directory())
+                .transpose();
+            match shell_state {
+                Ok(path) => self.execute_directory_tool(tool, &call, path.as_deref(), observer),
+                Err(error) => (
+                    ToolResult {
+                        content: error,
+                        is_error: true,
+                    },
+                    ToolOutcome::NotStarted,
+                ),
+            }
         } else if self.hooks.owns_tool(&call.name) {
             let mut notices = Vec::new();
             let result = self.hooks.execute_tool(
@@ -803,14 +815,19 @@ impl Runtime {
         &self,
         tool: &crate::tools::Tool,
         call: &ToolCall,
+        shell_state: Option<&std::path::Path>,
         observer: &mut dyn Observer,
     ) -> (ToolResult, ToolOutcome) {
         let mut observer_error = None;
+        let context = ExecutionContext {
+            workspace: self.store.workspace(),
+            session_id: self.session.id(),
+            session_path: self.session.path(),
+            shell_state,
+        };
         let output = tool.execute(
             &call.arguments,
-            self.store.workspace(),
-            self.session.id(),
-            self.session.path(),
+            &context,
             &self.cancellation,
             &mut |stream, text| {
                 if let Err(error) = observer.event(Event::ToolOutput {
