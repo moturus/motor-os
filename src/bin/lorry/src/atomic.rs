@@ -209,7 +209,7 @@ impl AtomicDirectory {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| Error::failure("output destination has no UTF-8 name"))?;
-        let prefix = format!(".{name}.lorry-previous-");
+        let prefix = unique_prefix(name, "previous");
         let mut backups = Vec::new();
         for entry in fs::read_dir(parent)
             .map_err(|error| Error::failure(format!("failed to list output parent: {error}")))?
@@ -488,7 +488,15 @@ pub(crate) fn move_no_replace(_source: &Path, destination: &Path) -> Result<bool
 }
 
 fn unique_name(label: &str, role: &str) -> String {
-    format!(".{label}.lorry-{role}-{}", unique_suffix())
+    format!("{}{}", unique_prefix(label, role), unique_suffix())
+}
+
+fn unique_prefix(label: &str, role: &str) -> String {
+    // Motor rejects names beginning with `..`, including staging for a
+    // published hidden file such as `.lorry-shared-layout-v1`.
+    let label = label.trim_start_matches('.');
+    let label = if label.is_empty() { "output" } else { label };
+    format!(".{label}.lorry-{role}-")
 }
 
 fn compact_unique_name() -> String {
@@ -809,6 +817,25 @@ mod tests {
         staging.commit().unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_destination_uses_motor_compatible_staging_name() {
+        let root = temp_root("hidden-file");
+        let destination = root.join(".lorry-layout");
+        let mut staged = AtomicFile::new(&destination).unwrap();
+        assert!(
+            staged
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".lorry-layout.lorry-staging-")
+        );
+        staged.write_all(b"complete").unwrap();
+        staged.commit().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"complete");
         fs::remove_dir_all(root).unwrap();
     }
 
