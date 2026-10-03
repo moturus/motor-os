@@ -13,6 +13,7 @@ use gears::net::motor_curl::MotorCurl as HttpBackend;
 use gears::provider::{
     ApiKey, Endpoint, EventSink, KEY_ENV, Message, OpenAiCompat, Provider, Request, StreamEvent,
 };
+use gears::run_lock::DirectoryLock;
 use gears::runtime::Runtime;
 use gears::session::{Session, Store};
 
@@ -52,6 +53,24 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let directory_lock = match DirectoryLock::acquire_default() {
+        Ok(lock) => lock,
+        Err(error) => {
+            diagnostic(&error);
+            return ExitCode::FAILURE;
+        }
+    };
+    match directory_lock.cleanup_temporaries() {
+        Ok(0) => {}
+        Ok(count) => diagnostic(&format!("removed {count} abandoned state temporary files")),
+        Err(error) => {
+            diagnostic(&format!("state cleanup: {error}"));
+            return ExitCode::FAILURE;
+        }
+    }
+    // SAFETY: startup has not spawned any threads; descendants inherit this
+    // owner so nested Gears can verify and use its ancestor's lock.
+    unsafe { directory_lock.export_owner() };
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
             Ok(tracer) => gears::trace::init(tracer),
