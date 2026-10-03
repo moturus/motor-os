@@ -2,8 +2,8 @@
 //!
 //! The dialect delivers a turn as fragments: text a token at a time, tool
 //! calls as an id and a name followed by argument text in pieces, and usage
-//! in a final chunk. Reassembly is keyed by the tool call's `index`, which is
-//! what keeps parallel calls apart while their fragments interleave.
+//! in a final chunk. Reassembly uses the call id as well as its index because
+//! some endpoints reuse index zero for several calls.
 
 use super::wire::{ApiError, StreamChunk};
 use super::{Completion, EventSink, FinishReason, ProviderError, StreamEvent, ToolCall, Usage};
@@ -62,7 +62,7 @@ impl DeltaAssembler {
                     .map_err(|e| ProviderError::Aborted(e.to_string()))?;
             }
             for fragment in &delta.tool_calls {
-                let slot = self.slot(fragment.index);
+                let slot = self.slot(fragment.index, fragment.id.as_deref());
                 if let Some(id) = fragment.id.as_deref().filter(|id| !id.is_empty())
                     && slot.id.is_empty()
                 {
@@ -133,8 +133,23 @@ impl DeltaAssembler {
         })
     }
 
-    fn slot(&mut self, index: usize) -> &mut PartialCall {
-        match self.calls.iter().position(|call| call.index == index) {
+    fn slot(&mut self, index: usize, id: Option<&str>) -> &mut PartialCall {
+        // A repeated id identifies an earlier call even when another call
+        // with the same index arrived between its fragments. Without an id,
+        // the most recent call at that index is the only addressable one.
+        let at = match id.filter(|id| !id.is_empty()) {
+            Some(id) => self
+                .calls
+                .iter()
+                .rposition(|call| call.index == index && call.id == id)
+                .or_else(|| {
+                    self.calls
+                        .iter()
+                        .rposition(|call| call.index == index && call.id.is_empty())
+                }),
+            None => self.calls.iter().rposition(|call| call.index == index),
+        };
+        match at {
             Some(at) => &mut self.calls[at],
             None => {
                 self.calls.push(PartialCall {
@@ -275,6 +290,25 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&completion.tool_calls[1].arguments).unwrap();
         assert_eq!(parsed["q"], "fn main");
+    }
+
+    #[test]
+    fn distinct_ids_at_one_index_remain_distinct_calls() {
+        let (completion, _) = run(&[
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[
+                 {"index":0,"id":"one","function":{"name":"sh","arguments":"{\"command\":\"echo "}},
+                 {"index":0,"id":"two","function":{"name":"sh","arguments":"{\"command\":\"echo b\"}"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[
+                 {"index":0,"id":"one","function":{"arguments":"a\"}"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ]);
+
+        let calls = completion.unwrap().tool_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "one");
+        assert_eq!(calls[0].arguments, r#"{"command":"echo a"}"#);
+        assert_eq!(calls[1].id, "two");
+        assert_eq!(calls[1].arguments, r#"{"command":"echo b"}"#);
     }
 
     #[test]
