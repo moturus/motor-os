@@ -1293,6 +1293,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_grant_write_does_not_change_the_session_answer() {
+        let (base, _, store) = fixture("grant-write-failure");
+        let mut session = store.create(false, None).unwrap();
+        let grant = PermissionGrant {
+            name: "sh".into(),
+            identity: "a".repeat(64),
+            allow: Some(false),
+            ..PermissionGrant::default()
+        };
+        session.append_permission_grant(&grant).unwrap();
+        session.writer = Some(std::fs::File::open(session.path().unwrap()).unwrap());
+        assert!(
+            session
+                .append_permission_grant(&PermissionGrant {
+                    allow: Some(true),
+                    ..grant.clone()
+                })
+                .is_err()
+        );
+        assert_eq!(session.permission_grants().unwrap()[&grant.identity], grant);
+        drop(session);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn a_partial_tail_is_ignored_but_earlier_damage_is_not() {
         let (base, _, store) = fixture("tail");
         let mut session = store.create(false, None).unwrap();

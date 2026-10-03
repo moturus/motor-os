@@ -474,6 +474,133 @@ fn failed_global_grant_write_keeps_the_pending_tool_unapproved() {
 }
 
 #[test]
+fn session_answers_override_global_answers_in_both_directions() {
+    for session_allow in [true, false] {
+        let fixture = Fixture::new(if session_allow {
+            "session-allow"
+        } else {
+            "session-deny"
+        });
+        let config = Config {
+            tools: vec![ToolDirectory {
+                directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+                enabled: true,
+            }],
+            ..Config::default()
+        };
+        let registry = Registry::load_config(&config).unwrap();
+        let identity = registry.tools()[0].approval_identity().unwrap();
+        let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+        let mut session = store.create(false, None).unwrap();
+        session
+            .append_permission_grant(&PermissionGrant {
+                name: "sh".into(),
+                identity: identity.clone(),
+                allow: Some(session_allow),
+                ..PermissionGrant::default()
+            })
+            .unwrap();
+        let global_dir = fixture.root.join("global");
+        let mut global = Grants::default();
+        global.by_identity.insert(
+            identity,
+            Grant {
+                name: "sh".into(),
+                allow: !session_allow,
+                ..Grant::default()
+            },
+        );
+        global.save(&global_dir).unwrap();
+        let provider = Scripted::new(vec![
+            tool("sh", r#"{"command":"printf made > result"}"#),
+            answer("done"),
+        ]);
+        let mut runtime = Runtime::new_with_registry_at(
+            provider,
+            store,
+            session,
+            &config,
+            "test/model".into(),
+            registry,
+            global_dir,
+        )
+        .unwrap();
+        runtime
+            .turn("go".into(), &mut UnexpectedApproval, &mut |_| Ok(()))
+            .unwrap();
+        assert_eq!(fixture.workspace.join("result").exists(), session_allow);
+    }
+}
+
+#[test]
+fn an_executable_change_invalidates_a_session_allow_before_the_next_call() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new("executable-grant-change");
+    let directory = fixture.root.join("package");
+    std::fs::create_dir(&directory).unwrap();
+    let executable = directory.join("run");
+    std::fs::write(&executable, "#!/bin/sh\nprintf original\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(directory.join("parameters.json"), r#"{"type":"object"}"#).unwrap();
+    std::fs::write(
+        directory.join("tool.toml"),
+        r#"
+version = 1
+kind = "process"
+name = "package"
+description = "Fixture"
+parameters = "parameters.json"
+[process.command]
+common = ["./run"]
+"#,
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory,
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("package", "{}"),
+        tool("package", "{}"),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    let mut asked = 0;
+    let mut approver = |_: &Permission| {
+        asked += 1;
+        if asked == 1 {
+            Approval::Session
+        } else {
+            Approval::Deny
+        }
+    };
+    let mut output = String::new();
+    let mut completed = 0;
+    runtime
+        .turn("go".into(), &mut approver, &mut |event| {
+            if let Event::ToolOutput { ref text, .. } = event {
+                output.push_str(text);
+            }
+            if let Event::ToolEnd {
+                is_error: false, ..
+            } = event
+            {
+                completed += 1;
+                std::fs::write(&executable, "#!/bin/sh\nprintf changed\n").unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(asked, 2);
+    assert_eq!(completed, 1);
+    assert_eq!(output, "original");
+    assert!(!runtime.permission_statuses().unwrap()[0].current);
+}
+
+#[test]
 fn global_denial_persists_and_refuses_later_attended_calls() {
     let fixture = Fixture::new("global-denial");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();

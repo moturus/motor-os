@@ -416,6 +416,7 @@ pub const PROVIDER_SCENARIOS: &[&str] = &[
     "streamed-text",
     "fragmented-sse",
     "sh-round",
+    "sh-round-twice",
     "hook-round",
     "compaction",
     "interrupt-stream",
@@ -450,6 +451,19 @@ pub fn provider_scenario(name: &str) -> Option<Vec<Script>> {
             serde_json::json!({"command": "printf mock-sh"}),
             "sh complete",
         )),
+        "sh-round-twice" => Some(
+            ["call_sh_first", "call_sh_second"]
+                .into_iter()
+                .flat_map(|id| {
+                    tool_round(
+                        id,
+                        "sh",
+                        serde_json::json!({"command": "printf mock-sh"}),
+                        "sh complete",
+                    )
+                })
+                .collect(),
+        ),
         "hook-round" => Some(tool_round(
             "call_hook",
             "echo_hook",
@@ -522,7 +536,7 @@ pub fn validate_provider_request(
         .get("messages")
         .and_then(serde_json::Value::as_array)
         .ok_or("request messages must be an array")?;
-    if name == "sh-round" {
+    if matches!(name, "sh-round" | "sh-round-twice") {
         if messages.is_empty() {
             return Err("sh-round request messages must not be empty".to_string());
         }
