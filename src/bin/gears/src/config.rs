@@ -35,6 +35,12 @@ pub struct NamedProvider {
     pub reasoning_echo: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDirectory {
+    pub directory: PathBuf,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub egress_allowlist: Vec<String>,
@@ -48,6 +54,7 @@ pub struct Config {
     pub ca_cert: Option<PathBuf>,
     pub reasoning_echo: Option<bool>,
     pub providers: BTreeMap<String, NamedProvider>,
+    pub tools: Vec<ToolDirectory>,
     pub default_provider: String,
     pub default_model: Option<String>,
     pub log_file: Option<PathBuf>,
@@ -71,6 +78,7 @@ impl Default for Config {
             ca_cert: None,
             reasoning_echo: None,
             providers: BTreeMap::new(),
+            tools: Vec::new(),
             default_provider: "default".to_string(),
             default_model: None,
             log_file: None,
@@ -99,6 +107,8 @@ struct RawConfig {
     #[serde(default)]
     providers: BTreeMap<String, RawProvider>,
     #[serde(default)]
+    tools: Vec<RawToolDirectory>,
+    #[serde(default)]
     models: RawModels,
     #[serde(default)]
     trace: RawTrace,
@@ -124,6 +134,12 @@ struct RawProvider {
     key_file: Option<PathBuf>,
     ca_cert: Option<PathBuf>,
     reasoning_echo: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RawToolDirectory {
+    directory: PathBuf,
+    enabled: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -324,6 +340,25 @@ impl Config {
             }
             None => "default".to_string(),
         };
+        let mut tools = Vec::with_capacity(raw.tools.len());
+        for tool in raw.tools {
+            if tool.directory.as_os_str().is_empty()
+                || (!tool.directory.is_absolute()
+                    && tool
+                        .directory
+                        .components()
+                        .any(|component| !matches!(component, std::path::Component::Normal(_))))
+            {
+                return Err(format!(
+                    "invalid tool directory {}",
+                    tool.directory.display()
+                ));
+            }
+            tools.push(ToolDirectory {
+                directory: tool.directory,
+                enabled: tool.enabled,
+            });
+        }
         let log_level = match raw.trace.level {
             Some(level) => crate::trace::Level::parse(&level)
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
@@ -398,6 +433,7 @@ impl Config {
             ca_cert,
             reasoning_echo: raw.provider.reasoning_echo,
             providers,
+            tools,
             default_provider,
             default_model: raw.default_model.filter(|model| !model.trim().is_empty()),
             log_file: raw.trace.file,
@@ -630,6 +666,31 @@ reasoning_echo = false
         assert!(config.provider("missing").is_none());
         assert!(Config::parse("version = 1\n[providers.one]\nbase_url = 'https://one.test/v1'\n[providers.two]\nbase_url = 'https://two.test/v1'").is_err());
         assert!(Config::parse("version = 1\ndefault_provider = 'missing'").is_err());
+    }
+
+    #[test]
+    fn tool_directories_are_explicit_and_ordered() {
+        let config = Config::parse(
+            r#"version = 1
+[[tools]]
+directory = 'tools/sh'
+enabled = true
+[[tools]]
+directory = '/opt/gears/ls'
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.tools.len(), 2);
+        assert_eq!(config.tools[0].directory, PathBuf::from("tools/sh"));
+        assert!(config.tools[0].enabled);
+        assert_eq!(config.tools[1].directory, PathBuf::from("/opt/gears/ls"));
+        assert!(!config.tools[1].enabled);
+        assert!(Config::default().tools.is_empty());
+        assert!(Config::parse("version = 1\n[[tools]]\ndirectory = 'tools/sh'").is_err());
+        assert!(
+            Config::parse("version = 1\n[[tools]]\ndirectory = '../sh'\nenabled = true").is_err()
+        );
     }
 
     #[test]
