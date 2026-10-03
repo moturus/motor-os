@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gears::config::{Config, ContextConfig, HookConfig};
 use gears::provider::{
-    Completion, ContentBlock, EventSink, FinishReason, Provider, ProviderError, Request,
+    Completion, ContentBlock, EventSink, FinishReason, Message, Provider, ProviderError, Request,
     StreamEvent, ToolCall, ToolOutcome,
 };
 use gears::runtime::{Approval, Approver, Event, Permission, Runtime};
@@ -602,6 +602,49 @@ fn resume_restores_context_model_and_cumulative_usage() {
             .iter()
             .any(|message| message.text_content() == "first answer")
     );
+}
+
+#[test]
+fn resume_reports_discarded_crash_tail_and_completes_a_new_turn() {
+    let fixture = Fixture::new("crash-recovery");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    session.append_message(&Message::user("before")).unwrap();
+    session
+        .append_message(&Message::assistant_response(
+            String::new(),
+            vec![
+                ToolCall::new("one", "sh", "{}"),
+                ToolCall::new("two", "sh", "{}"),
+            ],
+        ))
+        .unwrap();
+    session
+        .append_message(&Message::tool_result("one", "sh", "done", false))
+        .unwrap();
+    let id = session.id().to_string();
+    drop(session);
+
+    let mut runtime = Runtime::new(
+        Scripted::new(vec![answer("recovered")]),
+        store.clone(),
+        store.open(&id).unwrap(),
+        &Config::default(),
+        "test/model".to_string(),
+    )
+    .unwrap();
+    assert!(
+        runtime
+            .take_startup_notices()
+            .iter()
+            .any(|notice| notice.contains("discarded 2 incomplete session records"))
+    );
+    runtime
+        .turn("next".to_string(), &mut FixedApproval(false), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(runtime.session().context_messages().unwrap().len(), 3);
 }
 
 struct UntilCancelled;

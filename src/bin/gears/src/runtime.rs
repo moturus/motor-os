@@ -123,6 +123,12 @@ impl Runtime {
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
         let mut startup_notices = Vec::new();
+        if session.recovered_entries() > 0 {
+            startup_notices.push(format!(
+                "discarded {} incomplete session records after a crash",
+                session.recovered_entries()
+            ));
+        }
         let hooks = Hooks::initialize(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
@@ -437,6 +443,12 @@ impl Runtime {
     }
 
     fn install_session(&mut self, mut session: Session) -> Result<(), String> {
+        if session.recovered_entries() > 0 {
+            self.startup_notices.push(format!(
+                "discarded {} incomplete session records after a crash",
+                session.recovered_entries()
+            ));
+        }
         self.hooks.notify(
             "session_end",
             serde_json::json!({"session_id": self.session.id()}),

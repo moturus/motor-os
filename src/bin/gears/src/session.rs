@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::provider::{Message, Role, Usage, UsageMeter};
+use crate::provider::{ContentBlock, Message, Role, Usage, UsageMeter};
 use crate::state::StateRoot;
 
 const VERSION: u32 = 1;
@@ -277,6 +277,7 @@ pub struct Session {
     path: Option<PathBuf>,
     writer: Option<File>,
     lock: Option<PathBuf>,
+    recovered_entries: usize,
 }
 
 impl Session {
@@ -293,7 +294,7 @@ impl Session {
         file.sync_data()
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let lock = acquire_lock(&path)?;
-        Self::from_parts(header, entries, Some(path), Some(file), Some(lock))
+        Self::from_parts(header, entries, Some(path), Some(file), Some(lock), 0)
     }
 
     fn saved(path: PathBuf, parsed: Parsed) -> Result<Self, String> {
@@ -333,11 +334,12 @@ impl Session {
             Some(path),
             Some(writer),
             Some(lock),
+            parsed.discarded_entries,
         )
     }
 
     fn ephemeral(header: Header, entries: Vec<Entry>) -> Result<Self, String> {
-        Self::from_parts(header, entries, None, None, None)
+        Self::from_parts(header, entries, None, None, None, 0)
     }
 
     fn from_parts(
@@ -346,6 +348,7 @@ impl Session {
         path: Option<PathBuf>,
         writer: Option<File>,
         lock: Option<PathBuf>,
+        recovered_entries: usize,
     ) -> Result<Self, String> {
         validate_entries(&entries)?;
         let active_leaf = entries.last().map(|entry| entry.id.clone());
@@ -364,6 +367,7 @@ impl Session {
             path,
             writer,
             lock,
+            recovered_entries,
         })
     }
 
@@ -385,6 +389,10 @@ impl Session {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    pub fn recovered_entries(&self) -> usize {
+        self.recovered_entries
     }
 
     pub fn entry(&self, id: &str) -> Option<&Entry> {
@@ -660,6 +668,7 @@ struct Parsed {
     header: Header,
     entries: Vec<Entry>,
     valid_len: u64,
+    discarded_entries: usize,
 }
 
 fn read_session(path: &Path) -> Result<Parsed, String> {
@@ -672,14 +681,21 @@ fn read_session(path: &Path) -> Result<Parsed, String> {
     File::open(path)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let valid_len = bytes
+    let mut valid_len = bytes
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1) as u64;
+    let partial_tail = bytes.len() as u64 > valid_len;
     let mut lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
     // A trailing newline contributes an empty slice; without one, the last
     // slice is the only record that may have been interrupted by a crash.
     lines.pop();
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut offset = 0;
+    for line in &lines {
+        starts.push(offset);
+        offset += line.len() + 1;
+    }
     let Some(first) = lines.first() else {
         return Err(format!("session {} has no complete header", path.display()));
     };
@@ -704,12 +720,53 @@ fn read_session(path: &Path) -> Result<Parsed, String> {
             .map_err(|error| format!("{}:{}: {error}", path.display(), index + 1))?;
         entries.push(entry);
     }
+    let discarded_entries = match incomplete_round_start(&entries)? {
+        Some(index) => {
+            let count = entries.len() - index;
+            valid_len = starts[index + 1] as u64;
+            entries.truncate(index);
+            count
+        }
+        None => 0,
+    } + usize::from(partial_tail);
     validate_entries(&entries)?;
     Ok(Parsed {
         header,
         entries,
         valid_len,
+        discarded_entries,
     })
+}
+
+fn incomplete_round_start(entries: &[Entry]) -> Result<Option<usize>, String> {
+    let mut results = HashMap::<String, usize>::new();
+    for (index, entry) in entries.iter().enumerate().rev() {
+        if entry.kind != "message" {
+            continue;
+        }
+        let message: Message = serde_json::from_value(entry.data.clone())
+            .map_err(|error| format!("entry {}: bad message: {error}", entry.id))?;
+        match message.role {
+            Role::Tool => {
+                for block in message.content {
+                    if let ContentBlock::ToolResult { call_id, .. } = block {
+                        *results.entry(call_id).or_default() += 1;
+                    }
+                }
+            }
+            Role::Assistant => {
+                let calls = message.tool_calls().collect::<Vec<_>>();
+                if calls.is_empty() {
+                    return Ok(None);
+                }
+                let paired = calls.iter().all(|call| results.get(&call.id) == Some(&1))
+                    && calls.len() == results.len();
+                return Ok((!paired).then_some(index));
+            }
+            Role::User => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 fn validate_entries(entries: &[Entry]) -> Result<(), String> {
@@ -970,6 +1027,7 @@ mod tests {
             .unwrap();
 
         let mut reopened = store.open_path(&path).unwrap();
+        assert_eq!(reopened.recovered_entries(), 1);
         reopened
             .append_message(&Message::assistant("after"))
             .unwrap();
@@ -978,6 +1036,45 @@ mod tests {
         let context = again.context_messages().unwrap();
         assert_eq!(context.len(), 2);
         assert_eq!(context[1].text_content(), "after");
+        drop(again);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn an_incomplete_tool_round_is_discarded_before_resume() {
+        let (base, _, store) = fixture("crashed-round");
+        let mut session = store.create(false, None).unwrap();
+        session.append_message(&Message::user("first")).unwrap();
+        session
+            .append_message(&Message::assistant_response(
+                String::new(),
+                vec![
+                    crate::provider::ToolCall::new("call_1", "sh", "{}"),
+                    crate::provider::ToolCall::new("call_2", "sh", "{}"),
+                ],
+            ))
+            .unwrap();
+        session
+            .append_message(&Message::tool_result("call_1", "sh", "done", false))
+            .unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        drop(session);
+
+        let mut resumed = store.open_path(&path).unwrap();
+        assert_eq!(resumed.recovered_entries(), 2);
+        assert_eq!(
+            resumed.context_messages().unwrap(),
+            [Message::user("first")]
+        );
+        resumed.append_message(&Message::user("next")).unwrap();
+        resumed
+            .append_message(&Message::assistant("new answer"))
+            .unwrap();
+        drop(resumed);
+        let again = store.open_path(&path).unwrap();
+        let context = again.context_messages().unwrap();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[2].text_content(), "new answer");
         drop(again);
         std::fs::remove_dir_all(base).unwrap();
     }
