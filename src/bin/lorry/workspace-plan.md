@@ -8,7 +8,11 @@ library, binaries, test harnesses, integration tests, and check targets use
 one unit planner and executor. Cargo build, test, and check unit graphs and
 byte identity are covered. The complete Lorry suite passed in 556 seconds
 on 2026-10-02, including native Motor self-build and identity checks.
-Milestone 2 is next.
+Milestone 2 is in progress. An artifact lock now serializes builds and clean
+for one target directory, Cargo's target-directory precedence is supported,
+unsupported build-setting environment variables fail explicitly, and selected
+libraries use the verified local unit cache with dep-info. Per-unit publication,
+reuse in place, ownership-aware clean, and cancellation recovery remain.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the
