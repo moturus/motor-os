@@ -368,6 +368,19 @@ impl Arguments {
                     directory.display()
                 ));
             }
+            if after_delimiter
+                && matches!(
+                    mapping,
+                    ArgumentMapping::BooleanFlag { .. }
+                        | ArgumentMapping::IntegerOption { .. }
+                        | ArgumentMapping::Enum { .. }
+                )
+            {
+                return Err(format!(
+                    "{}: fixed option {name:?} must be before --",
+                    directory.display()
+                ));
+            }
             match mapping {
                 ArgumentMapping::BooleanFlag { flag } | ArgumentMapping::IntegerOption { flag } => {
                     if !flag.starts_with('-')
@@ -416,6 +429,135 @@ impl Arguments {
                 "{}: schema has an unmapped command argument",
                 directory.display()
             ));
+        }
+        Ok(())
+    }
+}
+
+impl ProcessTool {
+    pub fn expand_arguments(
+        &self,
+        arguments: &Value,
+        schema: &Value,
+    ) -> Result<Vec<String>, String> {
+        let supplied = arguments
+            .as_object()
+            .ok_or_else(|| "tool arguments must be an object".to_string())?;
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for name in required {
+                let name = name
+                    .as_str()
+                    .ok_or("invalid required property in tool schema")?;
+                if !supplied.contains_key(name) {
+                    return Err(format!("missing required tool argument {name:?}"));
+                }
+            }
+        }
+        let Some(mut command) = self.command.clone() else {
+            return Err("tool is unavailable on this system".to_string());
+        };
+        if self.arguments.mappings.is_empty() {
+            if !self.stdin_arguments && !supplied.is_empty() {
+                return Err("tool has no argument mappings".to_string());
+            }
+            return Ok(command);
+        }
+        if supplied
+            .keys()
+            .any(|name| !self.arguments.mappings.contains_key(name))
+        {
+            return Err("tool call contains an unmapped argument".to_string());
+        }
+        let mut after = Vec::new();
+        for name in &self.arguments.before_double_dash {
+            if let Some(value) = supplied.get(name) {
+                self.expand_one(name, value, false, &mut command, &mut after)?;
+            }
+        }
+        for name in &self.arguments.after_double_dash {
+            if let Some(value) = supplied.get(name) {
+                self.expand_one(name, value, true, &mut command, &mut after)?;
+            }
+        }
+        if !self.arguments.after_double_dash.is_empty() {
+            command.push("--".to_string());
+        }
+        command.extend(after);
+        Ok(command)
+    }
+
+    fn expand_one(
+        &self,
+        name: &str,
+        value: &Value,
+        after_delimiter: bool,
+        before: &mut Vec<String>,
+        after: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let mapping = &self.arguments.mappings[name];
+        match mapping {
+            ArgumentMapping::String => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| format!("{name:?} must be a string"))?;
+                self.push_model_string(text, after_delimiter, before, after)?;
+            }
+            ArgumentMapping::BooleanFlag { flag } => {
+                let enabled = value
+                    .as_bool()
+                    .ok_or_else(|| format!("{name:?} must be a boolean"))?;
+                if enabled {
+                    before.push(flag.clone());
+                }
+            }
+            ArgumentMapping::IntegerOption { flag } => {
+                let integer = value
+                    .as_i64()
+                    .map(|number| number.to_string())
+                    .or_else(|| value.as_u64().map(|number| number.to_string()))
+                    .ok_or_else(|| format!("{name:?} must be an integer"))?;
+                before.push(flag.clone());
+                before.push(integer);
+            }
+            ArgumentMapping::Enum { values } => {
+                let key = value
+                    .as_str()
+                    .ok_or_else(|| format!("{name:?} must be a string"))?;
+                let selected = values
+                    .get(key)
+                    .ok_or_else(|| format!("{name:?} has an unsupported value"))?;
+                before.push(selected.clone());
+            }
+            ArgumentMapping::StringList => {
+                let items = value
+                    .as_array()
+                    .ok_or_else(|| format!("{name:?} must be an array"))?;
+                for item in items {
+                    let text = item
+                        .as_str()
+                        .ok_or_else(|| format!("{name:?} needs string items"))?;
+                    self.push_model_string(text, true, before, after)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn push_model_string(
+        &self,
+        value: &str,
+        after_delimiter: bool,
+        before: &mut Vec<String>,
+        after: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if value.starts_with('-') && self.allowed_flags.iter().any(|flag| flag == value) {
+            before.push(value.to_string());
+        } else if after_delimiter {
+            after.push(value.to_string());
+        } else if value.starts_with('-') {
+            return Err(format!("argument {value:?} needs -- or an allowed flag"));
+        } else {
+            before.push(value.to_string());
         }
         Ok(())
     }
@@ -523,6 +665,98 @@ mod tests {
                 .unwrap_err()
                 .contains("after --")
         );
+    }
+
+    #[test]
+    fn typed_mapping_expands_without_splitting_or_flag_injection() {
+        let schema = serde_json::json!({
+            "type": "object", "required": ["pattern"],
+            "properties": {
+                "ignore_case": {"type": "boolean"},
+                "limit": {"type": "integer"},
+                "mode": {"type": "string"},
+                "pattern": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}}
+            }
+        });
+        let raw: RawProcess = toml::from_str(
+            r#"
+            allowed_flags = ["--release"]
+            [command]
+            common = ["/bin/rg", "--color=never"]
+            [arguments]
+            before_double_dash = ["ignore_case", "limit", "mode"]
+            after_double_dash = ["pattern", "paths"]
+            [arguments.ignore_case]
+            type = "boolean_flag"
+            flag = "-i"
+            [arguments.limit]
+            type = "integer_option"
+            flag = "-m"
+            [arguments.mode]
+            type = "enum"
+            values = { files = "-l", count = "-c" }
+            [arguments.pattern]
+            type = "string"
+            [arguments.paths]
+            type = "string_list"
+        "#,
+        )
+        .unwrap();
+        let process = ProcessTool::parse(raw, Path::new("/tmp/example-tool"), &schema).unwrap();
+        let arguments = serde_json::json!({
+            "ignore_case": true, "limit": 3, "mode": "files",
+            "pattern": "two words", "paths": ["-literal", "dir with spaces"]
+        });
+        assert_eq!(
+            process.expand_arguments(&arguments, &schema).unwrap(),
+            [
+                "/bin/rg",
+                "--color=never",
+                "-i",
+                "-m",
+                "3",
+                "-l",
+                "--",
+                "two words",
+                "-literal",
+                "dir with spaces"
+            ]
+        );
+        assert!(
+            process
+                .expand_arguments(&serde_json::json!({"paths": []}), &schema)
+                .unwrap_err()
+                .contains("missing required")
+        );
+        assert!(
+            process
+                .expand_arguments(
+                    &serde_json::json!({"pattern": "x", "mode": "unsafe"}),
+                    &schema
+                )
+                .unwrap_err()
+                .contains("unsupported value")
+        );
+        assert!(
+            process
+                .expand_arguments(&serde_json::json!({"pattern": "x", "extra": "x"}), &schema)
+                .unwrap_err()
+                .contains("unmapped")
+        );
+
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        assert!(
+            process
+                .push_model_string("-unsafe", false, &mut before, &mut after)
+                .is_err()
+        );
+        process
+            .push_model_string("--release", true, &mut before, &mut after)
+            .unwrap();
+        assert_eq!(before, ["--release"]);
+        assert!(after.is_empty());
     }
 
     #[test]
