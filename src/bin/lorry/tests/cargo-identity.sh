@@ -35,6 +35,24 @@ fail() {
     exit 1
 }
 
+compare_workspace_harnesses() {
+    local lorry_root="$1" cargo_root="$2" label="$3" name lorry_file cargo_file
+    local -a lorry_names cargo_names
+    mapfile -t lorry_names < <(find "$lorry_root" -type f -perm -111 \
+        -name 'app-*' -printf '%f\n' | sort)
+    mapfile -t cargo_names < <(find "$cargo_root" -type f -perm -111 \
+        -name 'app-*' -printf '%f\n' | sort)
+    [ "${#lorry_names[@]}" -eq 2 ] || fail "$label selected member harnesses are absent"
+    [ "${lorry_names[*]}" = "${cargo_names[*]}" ] ||
+        fail "$label selected member harness identities differ from Cargo"
+    for name in "${lorry_names[@]}"; do
+        lorry_file="$(find "$lorry_root" -type f -name "$name" -print -quit)"
+        cargo_file="$(find "$cargo_root" -type f -name "$name" -print -quit)"
+        cmp "$lorry_file" "$cargo_file" ||
+            fail "$label selected member harness '$name' differs from Cargo"
+    done
+}
+
 NATIVE_RUSTC="$LORRY_TEST_RUSTC"
 MOTOR_RUSTC="$LORRY_TEST_RUSTC"
 CARGO="$LORRY_TEST_CARGO"
@@ -104,6 +122,16 @@ cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
 [ "$("$WORKSPACE/target/lorry/packages/app/release/app")" = \
     "app/src/main.rs app/src/lib.rs shared/src/lib.rs" ] ||
     fail "selected member source paths differ from Cargo"
+(
+    cd "$WORKSPACE"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        RUSTC="$NATIVE_RUSTC" "$LORRY" test -p app --release --no-run
+    RUSTC="$NATIVE_RUSTC" "$CARGO" test -p app --locked --offline --release \
+        --no-run --target-dir "$WORK/cargo-workspace-native-test"
+)
+compare_workspace_harnesses \
+    "$WORKSPACE/target/lorry/packages/app/release/build/app" \
+    "$WORK/cargo-workspace-native-test/release/build/app" native
 
 echo "== Comparing native dev panic-abort artifacts with Cargo =="
 (
@@ -177,6 +205,18 @@ cp "$PROJECT/.cargo/config.toml" "$WORKSPACE/.cargo/config.toml"
 cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
     "$WORK/cargo-workspace-motor/$MOTOR_TARGET/release/app" ||
     fail "Motor selected member executable differs from Cargo"
+(
+    cd "$WORKSPACE"
+    HOME="$LORRY_HOME" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
+        "$LORRY" +"$MOTOR_TOOLCHAIN" test -p app --release \
+        --target "$MOTOR_TARGET" --no-run
+    RUSTC="$MOTOR_RUSTC" "$CARGO" test -p app --locked --offline --release \
+        --target "$MOTOR_TARGET" --no-run \
+        --target-dir "$WORK/cargo-workspace-motor-test"
+)
+compare_workspace_harnesses \
+    "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/build/app" \
+    "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/build/app" Motor
 
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||

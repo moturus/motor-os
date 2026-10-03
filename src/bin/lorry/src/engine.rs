@@ -778,7 +778,7 @@ fn build_inner(
         }
         crate::trace::event("root profile requires rebuilding");
     }
-    let dependency_plan = |test_profile, include_selected_library| {
+    let dependency_plan = |test_profile, include_selected, include_binaries| {
         let options = PlanOptions {
             workspace_root: &build.manifest.workspace_root,
             release: build.release,
@@ -789,8 +789,13 @@ fn build_inner(
             logical_target: build.logical_target,
             rustflags: build.rustflags,
         };
-        if include_selected_library {
-            prepared.selected_targets_plan(&options, build.manifest, build.binary_selection)
+        if include_selected {
+            prepared.selected_targets_plan(
+                &options,
+                build.manifest,
+                build.binary_selection,
+                include_binaries,
+            )
         } else {
             prepared.dependency_plan(&options)
         }
@@ -799,7 +804,7 @@ fn build_inner(
         Some((_, options)) if options.message_format != MessageFormat::Human => {
             let roots =
                 crate::metadata::publish_sources(build.global_cache_root, build.config, &prepared)?;
-            let metadata_plan = dependency_plan(false, false)?;
+            let metadata_plan = dependency_plan(false, false, false)?;
             let metadata = crate::metadata::graph::resolved(
                 build.manifest,
                 &prepared,
@@ -890,7 +895,11 @@ fn build_inner(
         None => !build.test || (selected_integration && !build.manifest.binaries.is_empty()),
     };
     let normal = if needs_normal_plan {
-        let plan = dependency_plan(false, check.is_none() && !build.test)?;
+        let plan = dependency_plan(
+            false,
+            check.is_none() && !build.test,
+            check.is_none() && !build.test,
+        )?;
         let outputs = executor::execute(&plan, &manifests, &executor_options)?;
         let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
         crate::trace::event(format_args!(
@@ -902,8 +911,8 @@ fn build_inner(
         None
     };
     let needs_test_plan = build.test || check.is_some_and(|(_, options)| options.selects_tests());
-    let test_dependencies = if needs_test_plan {
-        let test_plan = dependency_plan(true, false)?;
+    let test_result = if needs_test_plan {
+        let test_plan = dependency_plan(true, build.test && selected_library.is_some(), false)?;
         let outputs = match normal.as_ref() {
             Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
                 &test_plan,
@@ -918,13 +927,20 @@ fn build_inner(
             "executed {} test dependency units",
             test_plan.units.len()
         ));
-        Some(root_dependencies(
-            &prepared.resolution,
-            &test_plan,
-            &outputs,
-        )?)
+        let dependencies = root_dependencies(&prepared.resolution, &test_plan, &outputs)?;
+        let library = match selected_library.as_ref() {
+            Some(key) if test_plan.units.contains_key(key) => {
+                Some(planned_root_library(&test_plan, &outputs, key)?)
+            }
+            _ => None,
+        };
+        Some((dependencies, library))
     } else {
         None
+    };
+    let (test_dependencies, test_library) = match &test_result {
+        Some((dependencies, library)) => (dependencies.as_slice(), library.as_ref()),
+        None => (&[][..], None),
     };
     let normal_dependencies = normal
         .as_ref()
@@ -948,7 +964,7 @@ fn build_inner(
             staging.path(),
             &incremental.target,
             normal_dependencies,
-            test_dependencies.as_deref().unwrap_or(&[]),
+            test_dependencies,
             options,
             message_reporter.as_ref(),
         )?;
@@ -970,7 +986,8 @@ fn build_inner(
             staging.path(),
             &host_profile,
             normal_dependencies,
-            test_dependencies.as_ref().unwrap(),
+            test_dependencies,
+            test_library,
             &TestOutput {
                 destination: &destination,
                 target_root,
@@ -2371,6 +2388,7 @@ fn compile_test_targets(
     host_profile: &Path,
     normal_dependencies: &[RootDependency],
     test_dependencies: &[RootDependency],
+    test_library: Option<&RootLibraryArtifact>,
     output: &TestOutput<'_>,
 ) -> Result<StagedArtifacts> {
     let features = selected_root_features(build.manifest)?
@@ -2427,22 +2445,6 @@ fn compile_test_targets(
         }
     }
 
-    let test_library = build
-        .manifest
-        .library
-        .as_ref()
-        .map(|target| {
-            compile_root_library(
-                build,
-                target,
-                staging,
-                host_profile,
-                test_dependencies,
-                &features,
-                true,
-            )
-        })
-        .transpose()?;
     let mut harnesses = Vec::new();
     if build.test_name.is_none() {
         if let Some(library) = build.manifest.library.as_ref().filter(|target| target.test) {
@@ -2465,7 +2467,7 @@ fn compile_test_targets(
                 staging,
                 host_profile,
                 test_dependencies,
-                test_library.as_ref(),
+                test_library,
                 &features,
                 None,
                 &[],
@@ -2493,7 +2495,7 @@ fn compile_test_targets(
                 staging,
                 host_profile,
                 test_dependencies,
-                test_library.as_ref(),
+                test_library,
                 &features,
                 Some(IntegrationEnvironment {
                     binaries: build

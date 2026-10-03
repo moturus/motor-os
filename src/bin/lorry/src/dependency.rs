@@ -62,14 +62,15 @@ impl PreparedGraph {
         options: &PlanOptions<'_>,
         selected: &Manifest,
         binary_name: Option<&str>,
+        include_binaries: bool,
     ) -> Result<CompilationPlan> {
-        self.plan(options, Some((selected, binary_name)))
+        self.plan(options, Some((selected, binary_name, include_binaries)))
     }
 
     fn plan(
         &self,
         options: &PlanOptions<'_>,
-        selected: Option<(&Manifest, Option<&str>)>,
+        selected: Option<(&Manifest, Option<&str>, bool)>,
     ) -> Result<CompilationPlan> {
         let mut manifests = self
             .packages
@@ -77,19 +78,21 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         let mut graph = dependency_units(&self.resolution, &manifests)?;
-        if let Some((selected, binary_name)) = selected {
+        if let Some((selected, binary_name, include_binaries)) = selected {
             let key = if selected.library.is_some() {
                 add_selected_library(&mut graph, &self.resolution, &manifests, selected)?
             } else {
                 selected_library_key(selected)?
             };
-            add_selected_binaries(
-                &mut graph,
-                &self.resolution,
-                &manifests,
-                selected,
-                binary_name,
-            )?;
+            if include_binaries {
+                add_selected_binaries(
+                    &mut graph,
+                    &self.resolution,
+                    &manifests,
+                    selected,
+                    binary_name,
+                )?;
+            }
             if manifests.insert(key.package, selected.clone()).is_some() {
                 return Err(Error::failure(
                     "selected package duplicates a dependency package",

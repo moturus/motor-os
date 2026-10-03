@@ -925,6 +925,10 @@ declared extern aliases, and its source identity is the package path relative
 to the workspace root. The selected library remains outside the dependency
 unit cache; the completed-profile record controls reuse until per-unit
 publication is available.
+
+When `test` needs the selected library in its test profile, that library is
+also scheduled on the dependency DAG and remains outside the unit cache.
+
 For `build` and `run`, selected binaries are distinct named units on that
 same DAG. Each binary has edges to its normal dependencies and the selected
 library when present. Its hashed executable is installed at the selected
