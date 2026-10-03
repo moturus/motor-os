@@ -61,12 +61,18 @@ pub(crate) fn format_permissions(runtime: &Runtime) -> Result<String, String> {
         .iter()
         .map(|grant| {
             format!(
-                "{}: {} {} [{}] {}",
+                "{}: {} {} [{}] {}{}",
                 grant.name,
                 grant.scope,
                 if grant.allow { "allow" } else { "deny" },
                 &grant.identity[..12],
-                if grant.current { "current" } else { "stale" }
+                if grant.current { "current" } else { "stale" },
+                grant
+                    .identity_error
+                    .as_ref()
+                    .map_or(String::new(), |error| {
+                        format!("; identity unavailable: {error}")
+                    })
             )
         })
         .collect::<Vec<_>>()

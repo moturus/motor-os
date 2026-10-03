@@ -79,6 +79,7 @@ pub struct PermissionStatus {
     pub allow: bool,
     pub scope: &'static str,
     pub current: bool,
+    pub identity_error: Option<String>,
 }
 
 pub trait Observer {
@@ -290,7 +291,14 @@ impl Runtime {
         let mut statuses = Vec::new();
         for (identity, grant) in self.session.permission_grants()? {
             statuses.push(PermissionStatus {
-                current: current.get(&grant.name) == Some(&identity),
+                current: current
+                    .get(&grant.name)
+                    .and_then(|result| result.as_ref().ok())
+                    == Some(&identity),
+                identity_error: current
+                    .get(&grant.name)
+                    .and_then(|result| result.as_ref().err())
+                    .cloned(),
                 name: grant.name,
                 identity,
                 allow: grant
@@ -301,7 +309,14 @@ impl Runtime {
         }
         for (identity, grant) in Grants::load(&self.tool_state_directory)?.by_identity {
             statuses.push(PermissionStatus {
-                current: current.get(&grant.name) == Some(&identity),
+                current: current
+                    .get(&grant.name)
+                    .and_then(|result| result.as_ref().ok())
+                    == Some(&identity),
+                identity_error: current
+                    .get(&grant.name)
+                    .and_then(|result| result.as_ref().err())
+                    .cloned(),
                 name: grant.name,
                 identity,
                 allow: grant.allow,
@@ -350,17 +365,17 @@ impl Runtime {
 
     fn current_permission_identities(
         &self,
-    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+    ) -> Result<std::collections::BTreeMap<String, Result<String, String>>, String> {
         let mut identities = std::collections::BTreeMap::new();
         for tool in self.tools.tools() {
-            identities.insert(tool.name.clone(), tool.approval_identity()?);
+            identities.insert(tool.name.clone(), tool.approval_identity());
         }
         for tool in self.hooks.initialized().tools {
             let identity = self
                 .hooks
                 .approval_identity(&tool.name)
                 .ok_or_else(|| format!("no approval identity for {:?}", tool.name))?;
-            identities.insert(tool.name, identity);
+            identities.insert(tool.name, Ok(identity));
         }
         Ok(identities)
     }

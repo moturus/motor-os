@@ -296,6 +296,70 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
 }
 
 #[test]
+fn a_missing_executable_does_not_prevent_listing_or_revoking_grants() {
+    let fixture = Fixture::new("missing-grant-executable");
+    let directory = fixture.root.join("package");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("parameters.json"), r#"{"type":"object"}"#).unwrap();
+    std::fs::write(directory.join("run"), "#!/bin/sh\nprintf original\n").unwrap();
+    std::fs::write(
+        directory.join("tool.toml"),
+        r#"
+version = 1
+kind = "process"
+name = "package"
+description = "Fixture"
+parameters = "parameters.json"
+[process.command]
+common = ["./run"]
+"#,
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: directory.clone(),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let identity = registry.tools()[0].approval_identity().unwrap();
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let mut session = store.create(false, None).unwrap();
+    session
+        .append_permission_grant(&PermissionGrant {
+            name: "package".into(),
+            identity,
+            allow: Some(true),
+            ..PermissionGrant::default()
+        })
+        .unwrap();
+    let mut runtime = Runtime::new_with_registry_at(
+        Scripted::new(Vec::new()),
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        fixture.root.join("global"),
+    )
+    .unwrap();
+    std::fs::remove_file(directory.join("run")).unwrap();
+    let listed = runtime.permission_statuses().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].current);
+    assert!(
+        listed[0]
+            .identity_error
+            .as_ref()
+            .unwrap()
+            .contains("executable disappeared")
+    );
+    runtime.revoke_permission("package", false).unwrap();
+    assert!(runtime.permission_statuses().unwrap().is_empty());
+}
+
+#[test]
 fn global_allow_survives_new_sessions_but_not_unattended_calls() {
     let fixture = Fixture::new("global-allow-unattended");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
