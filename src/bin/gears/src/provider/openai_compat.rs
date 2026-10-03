@@ -34,6 +34,8 @@ pub struct Quirks {
     /// Whether usage comes priced. Without it a spend budget can only be
     /// counted in tokens.
     pub reports_cost: bool,
+    /// Echo plaintext assistant reasoning in later requests.
+    pub reasoning_echo: bool,
 }
 
 impl Quirks {
@@ -45,10 +47,12 @@ impl Quirks {
             "openrouter.ai" => Quirks {
                 usage: UsageStyle::Include,
                 reports_cost: true,
+                reasoning_echo: true,
             },
             _ => Quirks {
                 usage: UsageStyle::StreamOptions,
                 reports_cost: false,
+                reasoning_echo: false,
             },
         }
     }
@@ -264,7 +268,7 @@ fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
         }));
     }
     for message in &req.messages {
-        messages.extend(wire_messages(message)?);
+        messages.extend(wire_messages(message, quirks)?);
     }
     let tools = req
         .tools
@@ -299,7 +303,10 @@ fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
         .map_err(|e| ProviderError::Protocol(format!("cannot serialize the request: {e}")))
 }
 
-fn wire_messages(message: &Message) -> Result<Vec<serde_json::Value>, ProviderError> {
+fn wire_messages(
+    message: &Message,
+    quirks: Quirks,
+) -> Result<Vec<serde_json::Value>, ProviderError> {
     let text = message
         .content
         .iter()
@@ -340,6 +347,11 @@ fn wire_messages(message: &Message) -> Result<Vec<serde_json::Value>, ProviderEr
             });
             if !calls.is_empty() {
                 value["tool_calls"] = serde_json::Value::Array(calls);
+            }
+            if quirks.reasoning_echo
+                && let Some(reasoning) = message.reasoning.as_deref()
+            {
+                value["reasoning"] = serde_json::Value::String(reasoning.to_string());
             }
             Ok(vec![value])
         }
@@ -482,6 +494,7 @@ mod tests {
         let openrouter = Endpoint::openrouter().quirks();
         assert_eq!(openrouter.usage, UsageStyle::Include);
         assert!(openrouter.reports_cost);
+        assert!(openrouter.reasoning_echo);
 
         // Anything else gets the generic dialect: usable, just untested.
         let other = Endpoint::new("https://router.huggingface.co/v1")
@@ -489,6 +502,7 @@ mod tests {
             .quirks();
         assert_eq!(other.usage, UsageStyle::StreamOptions);
         assert!(!other.reports_cost);
+        assert!(!other.reasoning_echo);
     }
 
     #[test]
@@ -503,6 +517,25 @@ mod tests {
         assert_eq!(generic["stream"], json!(true));
         assert_eq!(generic["stream_options"], json!({"include_usage": true}));
         assert!(generic.get("usage").is_none());
+    }
+
+    #[test]
+    fn assistant_reasoning_is_echoed_only_for_enabled_hosts() {
+        let completion = Completion {
+            content: "answer".into(),
+            reasoning: "thought".into(),
+            ..Completion::default()
+        };
+        let message = completion.message();
+        assert_eq!(message.reasoning.as_deref(), Some("thought"));
+        let restored: Message =
+            serde_json::from_slice(&serde_json::to_vec(&message).unwrap()).unwrap();
+        let req = Request::new("m", vec![Message::user("question"), restored]);
+
+        let openrouter = body(&req, Quirks::for_host("openrouter.ai"));
+        assert_eq!(openrouter["messages"][1]["reasoning"], "thought");
+        let generic = body(&req, Quirks::for_host("elsewhere.test"));
+        assert!(generic["messages"][1].get("reasoning").is_none());
     }
 
     #[test]

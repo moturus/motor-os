@@ -45,6 +45,8 @@ pub enum ToolOutcome {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl Message {
@@ -69,6 +71,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            reasoning: None,
         }
     }
 
@@ -103,6 +106,7 @@ impl Message {
                 is_error,
                 outcome,
             }],
+            reasoning: None,
         }
     }
 
@@ -110,6 +114,7 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
+            reasoning: None,
         }
     }
 
@@ -267,7 +272,12 @@ pub struct Completion {
 
 impl Completion {
     pub fn message(&self) -> Message {
-        Message::assistant_response(self.content.clone(), self.tool_calls.clone())
+        let mut message =
+            Message::assistant_response(self.content.clone(), self.tool_calls.clone());
+        if !self.reasoning.is_empty() {
+            message.reasoning = Some(self.reasoning.clone());
+        }
+        message
     }
 
     pub fn wants_tools(&self) -> bool {
