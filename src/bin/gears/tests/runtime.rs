@@ -775,6 +775,49 @@ fn resume_reports_discarded_crash_tail_and_completes_a_new_turn() {
     assert_eq!(runtime.session().context_messages().unwrap().len(), 3);
 }
 
+#[test]
+fn a_provider_switch_is_recorded_and_used_on_the_next_turn() {
+    let fixture = Fixture::new("provider-switch");
+    let first = Scripted::new(vec![answer("first answer")]);
+    let second = Scripted::new(vec![answer("second answer")]);
+    let mut runtime = fixture.runtime(first.clone(), &Config::default());
+    let next = second.clone();
+    runtime.install_provider_factory(Arc::new(move |name| {
+        if name == "second" {
+            Ok(next.clone() as Arc<dyn Provider>)
+        } else {
+            Err(format!("unknown provider {name}"))
+        }
+    }));
+    runtime
+        .turn(
+            "one".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    runtime.set_provider("second", &mut |_| Ok(())).unwrap();
+    assert_eq!(runtime.provider_name(), "second");
+    assert_eq!(runtime.session().provider().as_deref(), Some("second"));
+    runtime
+        .turn(
+            "two".to_string(),
+            &mut FixedApproval(false),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(first.requests.lock().unwrap().len(), 1);
+    assert_eq!(second.requests.lock().unwrap().len(), 1);
+    assert!(
+        runtime
+            .session()
+            .context_messages()
+            .unwrap()
+            .iter()
+            .any(|message| message.text_content() == "second answer")
+    );
+}
+
 struct UntilCancelled;
 
 impl Provider for UntilCancelled {

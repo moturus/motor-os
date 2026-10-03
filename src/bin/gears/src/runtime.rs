@@ -95,8 +95,12 @@ where
     }
 }
 
+pub type ProviderFactory = Arc<dyn Fn(&str) -> Result<Arc<dyn Provider>, String> + Send + Sync>;
+
 pub struct Runtime {
     provider: Arc<dyn Provider>,
+    provider_name: String,
+    provider_factory: Option<ProviderFactory>,
     store: Store,
     session: Session,
     hooks: Hooks,
@@ -164,8 +168,11 @@ impl Runtime {
             &mut |notice| startup_notices.push(notice),
         );
         let usage = session.usage();
+        let provider_name = session.provider().unwrap_or_else(|| "default".to_string());
         Ok(Self {
             provider,
+            provider_name,
+            provider_factory: None,
             store,
             session,
             hooks,
@@ -191,6 +198,14 @@ impl Runtime {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+
+    pub fn install_provider_factory(&mut self, factory: ProviderFactory) {
+        self.provider_factory = Some(factory);
     }
 
     pub fn usage(&self) -> &UsageMeter {
@@ -392,6 +407,26 @@ impl Runtime {
             observer,
         )?;
         observer.event(Event::ModelChanged(model))
+    }
+
+    pub fn set_provider(&mut self, name: &str, observer: &mut dyn Observer) -> Result<(), String> {
+        if name == self.provider_name {
+            return Ok(());
+        }
+        let factory = self
+            .provider_factory
+            .as_ref()
+            .ok_or("provider switching is not configured")?;
+        let provider = factory(name)?;
+        let entry = self.session.set_provider(name)?;
+        self.provider = provider;
+        self.provider_name = name.to_string();
+        self.notify(
+            "provider_change",
+            serde_json::json!({"id": entry, "provider": name}),
+            observer,
+        )?;
+        observer.event(Event::Notice(format!("provider: {name}")))
     }
 
     pub fn set_name(&mut self, name: &str) -> Result<(), String> {

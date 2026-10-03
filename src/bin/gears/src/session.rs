@@ -468,6 +468,24 @@ impl Session {
             .map(str::to_string)
     }
 
+    pub fn set_provider(&mut self, provider: &str) -> Result<String, String> {
+        self.append(
+            "provider_change",
+            &serde_json::json!({"provider": provider}),
+        )
+    }
+
+    pub fn provider(&self) -> Option<String> {
+        self.active_entries()
+            .ok()?
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "provider_change")
+            .and_then(|entry| entry.data.get("provider"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
     pub fn set_name(&mut self, name: &str) -> Result<String, String> {
         let name = name.trim();
         if name.is_empty() {
