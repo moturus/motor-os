@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gears::config::{Config, ContextConfig, HookConfig};
+use gears::config::{Config, ContextConfig, HookConfig, ToolDirectory};
 use gears::mock::{MockServer, Script, sse_response};
 use gears::net::EgressPolicy;
 use gears::net::host_curl::HostCurl;
@@ -145,6 +145,106 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn configured_directory_tool_is_advertised_and_executed() {
+    let fixture = Fixture::new("directory-tool");
+    let directory = fixture.root.join("print-tool");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("parameters.json"),
+        r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("prompt.md"), "Use print to emit text.").unwrap();
+    std::fs::write(
+        directory.join("tool.toml"),
+        r#"
+version = 1
+kind = "process"
+name = "print"
+description = "Print one string"
+parameters = "parameters.json"
+prompt = "prompt.md"
+read_only = true
+[process]
+output = "stdout"
+[process.command]
+common = ["/usr/bin/printf", "%s"]
+[process.arguments]
+after_double_dash = ["text"]
+[process.arguments.text]
+type = "string"
+"#,
+    )
+    .unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: directory.clone(),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("print", r#"{"text":"two words"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut output = String::new();
+    runtime
+        .turn(
+            "print".to_string(),
+            &mut FixedApproval(true),
+            &mut |event| {
+                if let Event::ToolOutput { name, text, .. } = event {
+                    assert_eq!(name, "print");
+                    output.push_str(&text);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(output, "two words");
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[0].tools.iter().any(|spec| spec.name == "print"));
+    assert!(
+        requests[0]
+            .system
+            .iter()
+            .any(|text| text.contains("Use print to emit text."))
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content() == "two words")
+    );
+    drop(requests);
+
+    let mut disabled = config;
+    disabled.tools[0].enabled = false;
+    let provider = Scripted::new(vec![tool("print", r#"{"text":"not run"}"#), answer("done")]);
+    let mut runtime = fixture.runtime(provider.clone(), &disabled);
+    runtime
+        .turn("print".to_string(), &mut FixedApproval(true), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert!(!requests[0].tools.iter().any(|spec| spec.name == "print"));
+    assert!(
+        !requests[0]
+            .system
+            .iter()
+            .any(|text| text.contains("Use print to emit text."))
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("unknown tool"))
+    );
 }
 
 #[test]

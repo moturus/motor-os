@@ -161,11 +161,15 @@ impl Runtime {
             &mut |notice| startup_notices.push(notice),
         )?;
         let initialized = hooks.initialized();
+        let builtin_sh = !tools.tools().iter().any(|tool| tool.name == "sh");
         let manifest = serde_json::json!({
-            "builtin_tools": [sh_spec()],
+            "builtin_tools": if builtin_sh { vec![sh_spec()] } else { Vec::new() },
+            "directory_tools": tools.enabled_tools().collect::<Vec<_>>(),
             "hooks": hooks.manifest(),
         });
-        let prompt = Effective::new(store.workspace(), initialized.prompt_fragments, &manifest);
+        let mut prompt_fragments = initialized.prompt_fragments;
+        prompt_fragments.extend(tools.enabled_tools().filter_map(|tool| tool.prompt.clone()));
+        let prompt = Effective::new(store.workspace(), prompt_fragments, &manifest);
         let identity = prompt.identity();
         if previous_identity
             .as_ref()
@@ -662,7 +666,9 @@ impl Runtime {
                 },
                 ToolOutcome::NotStarted,
             )
-        } else if call.name == "sh" {
+        } else if let Some(tool) = self.tools.enabled(&call.name) {
+            self.execute_directory_tool(tool, &call, observer)
+        } else if call.name == "sh" && !self.tools.tools().iter().any(|tool| tool.name == "sh") {
             self.execute_sh(&call, observer)
         } else if self.hooks.owns_tool(&call.name) {
             let mut notices = Vec::new();
@@ -864,12 +870,88 @@ impl Runtime {
         }
     }
 
+    fn execute_directory_tool(
+        &self,
+        tool: &crate::tools::Tool,
+        call: &ToolCall,
+        observer: &mut dyn Observer,
+    ) -> (ToolResult, ToolOutcome) {
+        let mut observer_error = None;
+        let output = tool.execute(
+            &call.arguments,
+            self.store.workspace(),
+            self.session.id(),
+            self.session.path(),
+            &self.cancellation,
+            &mut |stream, text| {
+                if let Err(error) = observer.event(Event::ToolOutput {
+                    name: call.name.clone(),
+                    stream,
+                    text: text.to_string(),
+                }) {
+                    observer_error = Some(error);
+                    self.cancellation.cancel();
+                }
+            },
+        );
+        if let Some(error) = observer_error {
+            return (
+                ToolResult {
+                    content: error,
+                    is_error: true,
+                },
+                ToolOutcome::InterruptedUnknown,
+            );
+        }
+        match output {
+            Ok(output) => {
+                let interrupted = output.cancelled || output.timed_out;
+                let failed = interrupted
+                    || !output
+                        .code
+                        .is_some_and(|code| tool.process.normal_exit_statuses.contains(&code));
+                let content = if tool.process.stdout_only && !failed {
+                    output.model_stdout(MODEL_STREAM_BYTES)
+                } else {
+                    output.model_text(MODEL_STREAM_BYTES)
+                };
+                (
+                    ToolResult {
+                        content,
+                        is_error: failed,
+                    },
+                    if interrupted {
+                        ToolOutcome::InterruptedUnknown
+                    } else {
+                        ToolOutcome::Completed
+                    },
+                )
+            }
+            Err(error) => (
+                ToolResult {
+                    content: error.to_string(),
+                    is_error: true,
+                },
+                if error.started {
+                    ToolOutcome::InterruptedUnknown
+                } else {
+                    ToolOutcome::NotStarted
+                },
+            ),
+        }
+    }
+
     fn request(&self, messages: Vec<Message>, tools: bool) -> Request {
         let request = Request::new(&self.model, messages)
             .with_system(self.prompt.fragments().to_vec())
             .with_cancellation(self.cancellation.clone());
         if tools {
-            let mut specs = vec![sh_spec()];
+            let mut specs = if self.tools.tools().iter().any(|tool| tool.name == "sh") {
+                Vec::new()
+            } else {
+                vec![sh_spec()]
+            };
+            specs.extend(self.tools.enabled_tools().map(crate::tools::Tool::spec));
             specs.extend(self.hooks.initialized().tools);
             request.with_tools(specs)
         } else {

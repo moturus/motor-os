@@ -72,6 +72,10 @@ impl Output {
         }
         result
     }
+
+    pub fn model_stdout(&self, max_bytes: usize) -> String {
+        bounded_view(&self.stdout, max_bytes, self.stdout_dropped)
+    }
 }
 
 pub fn sh(
