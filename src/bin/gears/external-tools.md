@@ -471,6 +471,10 @@ special execution path in Rust.
 or `/system/bin/sysbox ls` on Motor OS directly with a single path argument
 and no shell. Its purpose is to demonstrate a narrow external tool whose authority
 and model interface are easier to review than arbitrary shell access.
+Its mapping is `after_double_dash = ["path"]` with `path.type = "string"`;
+the fixed command contains no flags, so a path with spaces or a leading `-`
+remains one literal operand after `--`. It returns bounded stdout as plain
+text and treats exit status zero as normal.
 
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
