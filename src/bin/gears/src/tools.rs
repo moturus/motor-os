@@ -44,6 +44,7 @@ pub struct ProcessTool {
     pub stdout_only: bool,
     pub normal_exit_statuses: Vec<i32>,
     pub allowed_flags: Vec<String>,
+    pub shell_state: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -433,6 +434,8 @@ struct RawProcess {
     normal_exit_statuses: Option<Vec<i32>>,
     allowed_flags: Option<Vec<String>>,
     #[serde(default)]
+    shell_state: bool,
+    #[serde(default)]
     arguments: Arguments,
     command: RawCommand,
 }
@@ -547,6 +550,7 @@ impl ProcessTool {
             stdout_only,
             normal_exit_statuses,
             allowed_flags,
+            shell_state: raw.shell_state,
         })
     }
 }

@@ -680,7 +680,9 @@ impl Runtime {
                 ToolOutcome::NotStarted,
             )
         } else if let Some(tool) = self.tools.enabled(&call.name) {
-            let shell_state = (call.name == "sh")
+            let shell_state = tool
+                .process
+                .shell_state
                 .then(|| self.session.shell_state_directory())
                 .transpose();
             match shell_state {

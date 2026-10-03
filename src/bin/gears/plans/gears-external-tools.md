@@ -66,6 +66,9 @@ entries.
 - Keep parsing and normalization platform-neutral, selecting only the command
   vector through `cfg(unix)` / `cfg(not(unix))` so Motor OS remains a
   first-class build target.
+- A process manifest may set `shell_state = true` to receive a private
+  per-session `GEARS_SH_STATE_DIR`; Gears filters and saves the shell's
+  `cwd.pending` and `env.pending` snapshots after the process exits.
 - Add unit tests using temporary self-contained tool directories. Do not add
   a dependency; use the existing `serde`, `serde_json`, and `toml` crates.
 

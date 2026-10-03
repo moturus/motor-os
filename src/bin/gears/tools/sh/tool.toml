@@ -9,6 +9,7 @@ display = "{command}"
 timeout_seconds = 120
 max_output_bytes = 1048576
 output = "shell"
+shell_state = true
 
 [process.command]
 linux = ["/bin/bash", "-c", "GEARS_SH_FIXED_PATH=/usr/local/bin:/usr/bin:/bin; . \"$GEARS_TOOL_DIR/run.sh\"", "gears-sh"]
