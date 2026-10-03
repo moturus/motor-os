@@ -161,6 +161,39 @@ fn one_shot_streams_from_the_hermetic_backend() {
 }
 
 #[test]
+fn one_shot_uses_the_selected_named_provider() {
+    let root = fixture("named-provider");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let server = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"named answer"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let config = root.join("gears.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\ndefault_provider = 'local'\ndefault_model = 'test/model'\n[net]\negress_allowlist = ['127.0.0.1']\nplain_http_allowlist = ['127.0.0.1']\n[providers.local]\nbase_url = '{}'\n",
+            server.url("/v1")
+        ),
+    )
+    .unwrap();
+    let output = gears(&root, &workspace, &config)
+        .args(["--provider", "local", "-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("named answer"));
+    assert_eq!(server.requests().len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unattended_sh_is_denied_and_the_turn_continues() {
     let root = fixture("deny");
     let workspace = root.join("workspace");
@@ -251,7 +284,7 @@ fn http_refuses_implicit_credentials_and_preserves_explicit_precedence() {
             assert!(!output.status.success());
             let error = String::from_utf8(output.stderr).unwrap();
             assert!(error.contains("implicit default key file"), "{error}");
-            assert!(error.contains("provider.key_file"));
+            assert!(error.contains("provider.api_key_file"));
             assert!(error.contains("OPENROUTER_API_KEY"));
             assert!(server.requests().is_empty());
         }

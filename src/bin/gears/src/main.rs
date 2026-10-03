@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gears::cancellation::Cancellation;
 use gears::cli::{Action, Args, SessionStart};
-use gears::config::Config;
+use gears::config::{Config, NamedProvider};
 use gears::net::EgressPolicy;
 #[cfg(unix)]
 use gears::net::host_curl::HostCurl as HttpBackend;
@@ -117,15 +117,18 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
             std::io::stdout().is_terminal(),
         )
     })?;
-    let key = load_key(config, key_from_env)?;
-    let provider: Arc<dyn Provider> = Arc::new(connect(config, &key, args.verbosity)?);
+    let selected_provider = selected_provider(args, config)?;
+    let key = load_key(&selected_provider, key_from_env)?;
+    let provider: Arc<dyn Provider> =
+        Arc::new(connect(config, &selected_provider, &key, args.verbosity)?);
     let store = Store::new(&workspace)?;
     let session = open_session(&store, args)?;
     let model = args
         .model
         .clone()
         .or_else(|| session.model())
-        .or_else(|| config.model.clone())
+        .or_else(|| config.default_model.clone())
+        .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
     let mut runtime = Runtime::new(provider, store, session, config, model)?;
@@ -164,14 +167,16 @@ fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
 }
 
 fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
+    let selected_provider = selected_provider(args, config)?;
     let model = args
         .model
         .clone()
-        .or_else(|| config.model.clone())
+        .or_else(|| config.default_model.clone())
+        .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
         .ok_or("gears ask needs a model; use --model or provider.model in the config")?;
-    let key = load_key(config, key_from_env)?;
-    let provider = connect(config, &key, args.verbosity)?;
+    let key = load_key(&selected_provider, key_from_env)?;
+    let provider = connect(config, &selected_provider, &key, args.verbosity)?;
     let request = Request::new(
         model,
         vec![Message::user(
@@ -204,21 +209,29 @@ impl EventSink for AskSink {
     }
 }
 
-fn load_key(config: &Config, from_env: Option<String>) -> Result<ApiKey, String> {
+fn selected_provider(args: &Args, config: &Config) -> Result<NamedProvider, String> {
+    let name = args.provider.as_deref().unwrap_or(&config.default_provider);
+    config
+        .provider(name)
+        .ok_or_else(|| format!("unknown provider {name:?}"))
+}
+
+fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<ApiKey, String> {
     match from_env {
         Some(key) => ApiKey::parse(&key, KEY_ENV),
         // A cloud credential in the default file must not leak in the clear
         // just because base_url changed.
-        None if config.plain_http && config.key_file.is_none() => Err(format!(
+        None if provider.plain_http && provider.key_file.is_none() => Err(format!(
             "plain HTTP cannot use the implicit default key file; \
-             set provider.key_file or {KEY_ENV} explicitly"
+             set provider.api_key_file or {KEY_ENV} explicitly"
         )),
-        None => ApiKey::load(config.key_file.as_deref()),
+        None => ApiKey::load(provider.key_file.as_deref()),
     }
 }
 
 fn connect(
     config: &Config,
+    provider: &NamedProvider,
     key: &ApiKey,
     verbosity: u8,
 ) -> Result<OpenAiCompat<HttpBackend>, String> {
@@ -228,11 +241,11 @@ fn connect(
         .map_err(|error| error.to_string())?
         .with_verbosity(verbosity)
         .with_secret(KEY_ENV, key.expose());
-    let http = match config.ca_cert.as_deref() {
+    let http = match provider.ca_cert.as_deref() {
         Some(path) => http.with_ca_cert(path).map_err(|error| error.to_string())?,
         None => http,
     };
-    let endpoint = Endpoint::new(&config.base_url).map_err(|error| error.to_string())?;
+    let endpoint = Endpoint::new(&provider.base_url).map_err(|error| error.to_string())?;
     Ok(OpenAiCompat::new(http, endpoint))
 }
 

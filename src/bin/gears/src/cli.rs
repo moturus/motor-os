@@ -13,6 +13,7 @@ Options:
   --config PATH       Read configuration from PATH
   --workspace DIR     Use DIR as the working directory
   --log-file PATH     Append a diagnostic trace to PATH
+  --provider NAME     Select a configured provider
   -m, --model ID      Select a model
   --ui UI             Use auto, tui, or line
   -p, --prompt TEXT   Run one prompt
@@ -54,6 +55,7 @@ pub struct Args {
     pub config: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
     pub log_file: Option<PathBuf>,
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub prompt: Option<String>,
     pub ui: crate::ui::select::Requested,
@@ -69,6 +71,7 @@ impl Args {
             config: None,
             workspace: None,
             log_file: None,
+            provider: None,
             model: None,
             prompt: None,
             ui: crate::ui::select::Requested::Auto,
@@ -108,6 +111,9 @@ impl Args {
                 "--config" => args.config = Some(value(flag, inline, &mut iterator)?.into()),
                 "--workspace" => args.workspace = Some(value(flag, inline, &mut iterator)?.into()),
                 "--log-file" => args.log_file = Some(value(flag, inline, &mut iterator)?.into()),
+                "--provider" => {
+                    args.provider = Some(value(flag, inline, &mut iterator)?.to_string())
+                }
                 "-m" | "--model" => {
                     args.model = Some(value(flag, inline, &mut iterator)?.to_string())
                 }
@@ -215,6 +221,24 @@ mod tests {
         assert_eq!(args.prompt.as_deref(), Some("hello"));
         assert!(Args::parse(&["ask", "hello", "--ui", "line"]).is_err());
         assert!(Args::parse(&["ask", "hello", "-c"]).is_err());
+    }
+
+    #[test]
+    fn named_provider_can_be_selected_for_agent_and_ask() {
+        assert_eq!(
+            Args::parse(&["--provider=local", "-p", "hello"])
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("local")
+        );
+        assert_eq!(
+            Args::parse(&["ask", "--provider", "remote", "hello"])
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("remote")
+        );
     }
 
     #[test]
