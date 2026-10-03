@@ -104,6 +104,8 @@ done
 kill -KILL "$killed"
 wait "$killed" 2>/dev/null || true
 test -f "$WORK/target/lorry/debug/artifact-lock-fixture"
+staging_parent="$WORK/target/lorry/debug/build/artifact-lock-fixture"
+test -n "$(find "$staging_parent" -maxdepth 1 -type d -name '.*.lorry-staging-*' -print -quit)"
 (
     cd "$WORK"
     exec env RUSTC="$WORK/rustc-wrapper" "$LORRY" build
@@ -114,4 +116,5 @@ test ! -e "$SECOND_ENTERED_FILE"
 : >"$RELEASE_FILE"
 wait "$recovered"
 test "$("$WORK/target/lorry/debug/artifact-lock-fixture")" = recovered
-echo "PASS: artifact lock survives clean, releases before programs, and waits for killed builds' children"
+test -z "$(find "$staging_parent" -maxdepth 1 -type d -name '.*.lorry-staging-*' -print -quit)"
+echo "PASS: artifact lock survives clean, releases before programs, and cleans killed builds' staging after children exit"

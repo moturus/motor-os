@@ -1168,7 +1168,9 @@ seconds fails the command without changing artifacts.
 If a compiler-unit replacement is interrupted between preserving the old
 directory and installing the new one, the next build restores the previous
 completed directory under the artifact lock. It leaves abandoned staging
-untouched until it can establish that no child still writes there.
+untouched until the lock has established that no child still writes there.
+Before reusing or replacing that unit, it removes only matching abandoned
+staging directories under the unit's parent.
 
 Unit-cache writers publish atomically. A selected-library entry is replaced
 when an external dep-info input changes; other entries are never replaced.

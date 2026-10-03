@@ -267,6 +267,62 @@ impl AtomicDirectory {
         Ok(())
     }
 
+    /// Removes staging for one unit after the artifact lock has established
+    /// that no child of an interrupted writer can still use it.
+    pub fn discard_abandoned_staging(destination: &Path) -> Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error::failure("output destination has no parent"))?;
+        match fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(Error::failure("output parent is not a real directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect output parent: {error}"
+                )));
+            }
+        }
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failure("output destination has no UTF-8 name"))?;
+        let prefix = unique_prefix(name, "staging");
+        for entry in fs::read_dir(parent).map_err(|error| {
+            Error::failure(format!(
+                "failed to list output parent `{}`: {error}",
+                parent.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                Error::failure(format!("failed to read output parent: {error}"))
+            })?;
+            if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect abandoned staging `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::failure(format!(
+                    "abandoned staging `{}` is not a real directory",
+                    path.display()
+                )));
+            }
+            fs::remove_dir_all(&path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to discard abandoned staging `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn new(parent: &Path, label: &str) -> Result<Self> {
         Self::create(parent, || unique_name(label, "staging"))
     }
@@ -610,13 +666,15 @@ mod tests {
     }
 
     #[test]
-    fn recovers_interrupted_directory_replacement_without_touching_staging() {
+    fn recovers_previous_output_before_discarding_its_staging() {
         let root = temp_root("recover");
         let destination = root.join("unit");
         let previous = root.join(".unit.lorry-previous-dead");
         let staging = root.join(".unit.lorry-staging-live");
+        let unrelated = root.join(".other.lorry-staging-live");
         fs::create_dir(&previous).unwrap();
         fs::create_dir(&staging).unwrap();
+        fs::create_dir(&unrelated).unwrap();
         fs::write(previous.join("complete"), b"old").unwrap();
         fs::write(staging.join("partial"), b"in progress").unwrap();
 
@@ -628,6 +686,10 @@ mod tests {
         fs::create_dir(&obsolete).unwrap();
         AtomicDirectory::recover_previous(&destination).unwrap();
         assert!(!obsolete.exists());
+        AtomicDirectory::discard_abandoned_staging(&destination).unwrap();
+        assert!(!staging.exists());
+        assert!(unrelated.is_dir());
+        assert_eq!(fs::read(destination.join("complete")).unwrap(), b"old");
         fs::remove_dir_all(root).unwrap();
     }
 
