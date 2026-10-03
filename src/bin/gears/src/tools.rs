@@ -24,6 +24,8 @@ pub struct Tool {
     pub read_only: bool,
     pub directory: PathBuf,
     pub enabled_by_default: bool,
+    #[serde(skip)]
+    pub enabled: bool,
     pub process: ProcessTool,
 }
 
@@ -81,7 +83,7 @@ pub enum ArgumentMapping {
     TimeoutSeconds,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Registry {
     tools: Vec<Tool>,
 }
@@ -124,15 +126,25 @@ impl Registry {
     }
 
     pub fn enabled(&self, name: &str) -> Option<&Tool> {
-        self.tools.iter().find(|tool| {
-            tool.name == name && tool.enabled_by_default && tool.process.command.is_some()
-        })
+        self.tools
+            .iter()
+            .find(|tool| tool.name == name && tool.enabled && tool.process.command.is_some())
     }
 
     pub fn enabled_tools(&self) -> impl Iterator<Item = &Tool> {
         self.tools
             .iter()
-            .filter(|tool| tool.enabled_by_default && tool.process.command.is_some())
+            .filter(|tool| tool.enabled && tool.process.command.is_some())
+    }
+
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        let tool = self
+            .tools
+            .iter_mut()
+            .find(|tool| tool.name == name)
+            .ok_or_else(|| format!("unknown directory tool {name:?}"))?;
+        tool.enabled = enabled;
+        Ok(())
     }
 }
 
@@ -362,6 +374,7 @@ impl Tool {
             read_only: raw.read_only,
             directory: directory.to_path_buf(),
             enabled_by_default,
+            enabled: enabled_by_default,
             process,
         })
     }
@@ -1250,6 +1263,7 @@ type = "string_list"
             read_only: true,
             directory: directory.clone(),
             enabled_by_default: true,
+            enabled: true,
             process: ProcessTool::parse(raw, &directory, &schema).unwrap(),
         };
         let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();

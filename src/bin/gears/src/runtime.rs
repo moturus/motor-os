@@ -13,7 +13,8 @@ use crate::provider::{
     ContentBlock, EventSink, Message, Provider, ProviderError, Request, StreamEvent, ToolCall,
     ToolOutcome, ToolSpec, UsageMeter,
 };
-use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
+use crate::session::{Compaction, Session, SessionInfo, Store, ToolState, TreeItem};
+use crate::tool_state::Overrides;
 use crate::tools::{ExecutionContext, Registry};
 
 const MODEL_STREAM_BYTES: usize = 32 * 1024;
@@ -105,6 +106,7 @@ pub struct Runtime {
     session: Session,
     hooks: Hooks,
     tools: Registry,
+    tool_state_directory: PathBuf,
     prompt: Effective,
     model: String,
     max_tool_rounds: usize,
@@ -131,14 +133,39 @@ impl Runtime {
     pub fn new_with_registry(
         provider: Arc<dyn Provider>,
         store: Store,
-        mut session: Session,
+        session: Session,
         config: &Config,
         model: String,
         tools: Registry,
     ) -> Result<Self, String> {
+        Self::new_with_registry_at(
+            provider,
+            store,
+            session,
+            config,
+            model,
+            tools,
+            Overrides::default_directory()?,
+        )
+    }
+
+    pub fn new_with_registry_at(
+        provider: Arc<dyn Provider>,
+        store: Store,
+        mut session: Session,
+        config: &Config,
+        model: String,
+        mut tools: Registry,
+        tool_state_directory: PathBuf,
+    ) -> Result<Self, String> {
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
         let mut startup_notices = Vec::new();
+        startup_notices.extend(apply_tool_states(
+            &mut tools,
+            &Overrides::load(&tool_state_directory)?,
+            &session,
+        )?);
         if session.recovered_entries() > 0 {
             startup_notices.push(format!(
                 "discarded {} incomplete session records after a crash",
@@ -158,14 +185,7 @@ impl Runtime {
             &cancellation,
             &mut |notice| startup_notices.push(notice),
         )?;
-        let initialized = hooks.initialized();
-        let manifest = serde_json::json!({
-            "directory_tools": tools.enabled_tools().collect::<Vec<_>>(),
-            "hooks": hooks.manifest(),
-        });
-        let mut prompt_fragments = initialized.prompt_fragments;
-        prompt_fragments.extend(tools.enabled_tools().filter_map(|tool| tool.prompt.clone()));
-        let prompt = Effective::new(store.workspace(), prompt_fragments, &manifest);
+        let prompt = effective_prompt(store.workspace(), &tools, &hooks);
         let identity = prompt.identity();
         if previous_identity
             .as_ref()
@@ -197,6 +217,7 @@ impl Runtime {
             session,
             hooks,
             tools,
+            tool_state_directory,
             prompt,
             model,
             max_tool_rounds: config.max_tool_rounds,
@@ -545,6 +566,12 @@ impl Runtime {
             &self.cancellation,
             &mut |notice| self.startup_notices.push(notice),
         );
+        self.startup_notices.extend(apply_tool_states(
+            &mut self.tools,
+            &Overrides::load(&self.tool_state_directory)?,
+            &session,
+        )?);
+        self.prompt = effective_prompt(self.store.workspace(), &self.tools, &self.hooks);
         let identity = self.prompt.identity();
         if session
             .latest_runtime_identity()
@@ -1114,6 +1141,50 @@ impl EventSink for CancellationSink<'_> {
     }
 }
 
+fn apply_tool_states(
+    tools: &mut Registry,
+    global: &Overrides,
+    session: &Session,
+) -> Result<Vec<String>, String> {
+    let session_states = session.tool_states()?;
+    let mut notices = Vec::new();
+    for name in global.tools.keys().chain(session_states.keys()) {
+        if !tools.tools().iter().any(|tool| &tool.name == name) {
+            notices.push(format!(
+                "tool state refers to unconfigured directory tool {name:?}"
+            ));
+        }
+    }
+    notices.sort();
+    notices.dedup();
+    let states = tools
+        .tools()
+        .iter()
+        .map(|tool| {
+            let enabled = session_states
+                .get(&tool.name)
+                .map(|state| *state == ToolState::Enabled)
+                .or_else(|| global.tools.get(&tool.name).copied())
+                .unwrap_or(tool.enabled_by_default);
+            (tool.name.clone(), enabled)
+        })
+        .collect::<Vec<_>>();
+    for (name, enabled) in states {
+        tools.set_enabled(&name, enabled)?;
+    }
+    Ok(notices)
+}
+
+fn effective_prompt(workspace: &std::path::Path, tools: &Registry, hooks: &Hooks) -> Effective {
+    let manifest = serde_json::json!({
+        "directory_tools": tools.enabled_tools().collect::<Vec<_>>(),
+        "hooks": hooks.manifest(),
+    });
+    let mut fragments = hooks.initialized().prompt_fragments;
+    fragments.extend(tools.enabled_tools().filter_map(|tool| tool.prompt.clone()));
+    Effective::new(workspace, fragments, &manifest)
+}
+
 fn estimate_request_tokens(prompt: &[String], messages: &[Message], tools: &[ToolSpec]) -> u64 {
     let bytes = serde_json::to_vec(&(prompt, messages, tools))
         .map(|bytes| bytes.len())
@@ -1217,6 +1288,39 @@ fn validate_compaction_limits(window: u64, reserve: u64, tail: u64) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_state_precedence_and_stale_names() {
+        let root =
+            std::env::temp_dir().join(format!("gears-runtime-tool-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let store = Store::with_root(&root.join("workspace"), root.join("state")).unwrap();
+        let mut session = store.create(true, None).unwrap();
+        let mut registry = Registry::load(
+            &[crate::config::ToolDirectory {
+                directory: PathBuf::from("tools/sh"),
+                enabled: true,
+            }],
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .unwrap();
+        let mut global = Overrides::default();
+        global.tools.insert("sh".into(), false);
+        global.tools.insert("removed".into(), true);
+        let notices = apply_tool_states(&mut registry, &global, &session).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("removed"));
+        assert!(registry.enabled("sh").is_none());
+        session.set_tool_state("sh", ToolState::Enabled).unwrap();
+        apply_tool_states(&mut registry, &global, &session).unwrap();
+        assert!(registry.enabled("sh").is_some());
+        session.set_tool_state("sh", ToolState::Inherit).unwrap();
+        apply_tool_states(&mut registry, &global, &session).unwrap();
+        assert!(registry.enabled("sh").is_none());
+        drop(session);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tail_does_not_begin_with_a_tool_result() {
