@@ -204,11 +204,11 @@ pub fn provider_conformance_corpus() -> Vec<ProviderCase> {
     let mut rate = plain_reply(429, "Too Many Requests", "application/json", "{}");
     rate.head
         .headers
-        .push(("Retry-After".to_string(), "12".to_string()));
+        .push(("Retry-After".to_string(), "0".to_string()));
     cases.push(provider_case(
         "rate limit",
         rate,
-        ProviderExpectation::RateLimited(Some(12)),
+        ProviderExpectation::RateLimited(Some(0)),
     ));
     cases.push(provider_case(
         "mid-stream error",

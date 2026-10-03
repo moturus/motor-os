@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use gears::cancellation::Cancellation;
-use gears::mock::{MockServer, Script, provider_conformance_corpus, sse_response};
+use gears::mock::{MockServer, Script, plain_response, provider_conformance_corpus, sse_response};
 use gears::net::host_curl::HostCurl;
 use gears::net::motor_curl::MotorCurl;
 use gears::net::{EgressPolicy, Timeouts};
@@ -68,6 +68,89 @@ fn normalized_request_streams_through_the_real_transport() {
     );
     let body: serde_json::Value = serde_json::from_slice(&server.requests()[0].body).unwrap();
     assert_eq!(body["messages"][0]["role"], "user");
+}
+
+#[test]
+fn rate_limit_retries_before_output_and_reports_the_wait() {
+    let limited = Script::new()
+        .write("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\n\r\n");
+    let server = MockServer::start(vec![
+        limited,
+        sse_response(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"#,
+        ]),
+    ])
+    .unwrap();
+    let mut rendered = Rendered::default();
+    let completion = provider(&server)
+        .complete(&request(), &mut rendered)
+        .unwrap();
+    assert_eq!(completion.content, "ok");
+    assert_eq!(server.requests().len(), 2);
+    assert!(
+        matches!(&rendered.events[0], StreamEvent::Notice(text) if text.contains("429") || text.contains("rate limited"))
+    );
+    assert_eq!(rendered.events[1], StreamEvent::Text("ok".into()));
+}
+
+#[test]
+fn visible_partial_output_is_never_retried() {
+    let partial = Script::new()
+        .write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        .write("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"part\"}}]}\n\n")
+        .close();
+    let server = MockServer::start(vec![partial, sse_response(&[])]).unwrap();
+    let mut rendered = Rendered::default();
+    assert!(
+        provider(&server)
+            .complete(&request(), &mut rendered)
+            .is_err()
+    );
+    assert_eq!(server.requests().len(), 1);
+    assert_eq!(rendered.events, [StreamEvent::Text("part".into())]);
+}
+
+#[test]
+fn cancellation_ends_a_retry_wait() {
+    let limited = Script::new()
+        .write("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n");
+    let server = MockServer::start(vec![limited, sse_response(&[])]).unwrap();
+    let cancellation = Cancellation::new();
+    let signal = cancellation.clone();
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        signal.cancel();
+    });
+    let mut rendered = Rendered::default();
+    let started = Instant::now();
+    let result =
+        provider(&server).complete(&request().with_cancellation(cancellation), &mut rendered);
+    cancel.join().unwrap();
+    assert!(matches!(
+        result,
+        Err(gears::provider::ProviderError::Aborted(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(server.requests().len(), 1);
+    assert!(matches!(
+        rendered.events.as_slice(),
+        [StreamEvent::Notice(_)]
+    ));
+}
+
+#[test]
+fn client_errors_are_not_retried() {
+    let server = MockServer::start(vec![
+        plain_response(400, "Bad Request", "text/plain", "invalid"),
+        sse_response(&[]),
+    ])
+    .unwrap();
+    assert!(
+        provider(&server)
+            .complete(&request(), &mut Rendered::default())
+            .is_err()
+    );
+    assert_eq!(server.requests().len(), 1);
 }
 
 /// The component gate selects the in-tree curl binary; ordinary host tests
@@ -142,7 +225,18 @@ fn cancellation_interrupts_a_silent_transport() {
 #[test]
 fn the_provider_corpus_survives_subprocess_curl() {
     let cases = provider_conformance_corpus();
-    let scripts = cases.iter().map(|case| case.script()).collect();
+    let scripts = cases
+        .iter()
+        .flat_map(|case| {
+            let attempts = match case.expected {
+                gears::mock::ProviderExpectation::RateLimited(_)
+                | gears::mock::ProviderExpectation::Unavailable
+                | gears::mock::ProviderExpectation::Timeout => 3,
+                _ => 1,
+            };
+            (0..attempts).map(move |_| case.script())
+        })
+        .collect();
     let server = MockServer::start(scripts).unwrap();
     for case in cases {
         let mut rendered = Rendered {

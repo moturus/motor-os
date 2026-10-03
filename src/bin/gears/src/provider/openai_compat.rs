@@ -15,6 +15,7 @@ use super::assembler::DeltaAssembler;
 use super::wire::{ApiError, StreamChunk};
 use super::{
     Completion, ContentBlock, EventSink, KEY_ENV, Message, Provider, ProviderError, Request, Role,
+    StreamEvent,
 };
 
 /// The blessed default: the one endpoint validated against a real key.
@@ -184,8 +185,8 @@ impl<C: HttpClient> OpenAiCompat<C> {
     }
 }
 
-impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
-    fn complete(
+impl<C: HttpClient> OpenAiCompat<C> {
+    fn complete_once(
         &self,
         req: &Request,
         sink: &mut dyn EventSink,
@@ -276,6 +277,97 @@ impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
             ),
         );
         Ok(completion)
+    }
+}
+
+impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
+    fn complete(
+        &self,
+        req: &Request,
+        sink: &mut dyn EventSink,
+    ) -> Result<Completion, ProviderError> {
+        for attempt in 0..3 {
+            if req
+                .cancellation
+                .as_ref()
+                .is_some_and(|token| token.cancelled())
+            {
+                return Err(ProviderError::Aborted("turn cancelled".into()));
+            }
+            let mut visible = VisibleSink {
+                sink,
+                visible: false,
+            };
+            let result = self.complete_once(req, &mut visible);
+            let error = match result {
+                Ok(completion) => return Ok(completion),
+                Err(error) => error,
+            };
+            if visible.visible || attempt == 2 {
+                return Err(error);
+            }
+            let Some(wait) = retry_delay(&error, attempt) else {
+                return Err(error);
+            };
+            sink.on_event(StreamEvent::Notice(format!(
+                "provider request failed: {error}; retrying in {}s (attempt {}/3)",
+                wait.as_secs(),
+                attempt + 2
+            )))
+            .map_err(|failure| ProviderError::Aborted(failure.to_string()))?;
+            wait_or_cancel(req, wait)?;
+        }
+        unreachable!("the bounded retry loop returns on its last attempt")
+    }
+}
+
+struct VisibleSink<'a> {
+    sink: &'a mut dyn EventSink,
+    visible: bool,
+}
+
+impl EventSink for VisibleSink<'_> {
+    fn on_event(&mut self, event: StreamEvent) -> std::io::Result<()> {
+        if matches!(event, StreamEvent::Text(_) | StreamEvent::Reasoning(_)) {
+            self.visible = true;
+        }
+        self.sink.on_event(event)
+    }
+}
+
+fn retry_delay(error: &ProviderError, attempt: usize) -> Option<std::time::Duration> {
+    let seconds = match error {
+        ProviderError::RateLimited {
+            retry_after: Some(seconds),
+            ..
+        } => *seconds,
+        ProviderError::RateLimited { .. }
+        | ProviderError::Unavailable(_)
+        | ProviderError::Net(
+            NetError::Dns(_)
+            | NetError::Connect(_)
+            | NetError::Timeout(_)
+            | NetError::Disconnected(_),
+        ) => 1 << attempt,
+        _ => return None,
+    };
+    (seconds <= 30).then(|| std::time::Duration::from_secs(seconds))
+}
+
+fn wait_or_cancel(req: &Request, delay: std::time::Duration) -> Result<(), ProviderError> {
+    let deadline = std::time::Instant::now() + delay;
+    loop {
+        if req
+            .cancellation
+            .as_ref()
+            .is_some_and(|token| token.cancelled())
+        {
+            return Err(ProviderError::Aborted("turn cancelled".into()));
+        }
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            return Ok(());
+        };
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
     }
 }
 

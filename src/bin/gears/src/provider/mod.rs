@@ -30,7 +30,7 @@ pub const KEY_ENV: &str = "OPENROUTER_API_KEY";
 
 /// Why a completion failed. The variants are what the agent layer reacts to:
 /// a key problem, a spend problem and a truncated stream call for different
-/// responses, and none of them is retried automatically (plan decision 7).
+/// responses. Only transient failures before visible output may be retried.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderError {
     /// 401/403: the key is missing, rejected, or not allowed this model.
