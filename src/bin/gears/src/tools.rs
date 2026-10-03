@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::ToolDirectory;
+use crate::config::{Config, ToolDirectory};
 use crate::process::{self, Cancellation, Stream};
 use crate::provider::KEY_ENV;
 use crate::provider::ToolSpec;
@@ -64,6 +64,16 @@ pub struct Registry {
 }
 
 impl Registry {
+    pub fn load_config(config: &Config) -> Result<Self, String> {
+        if config.tools.is_empty() {
+            return Ok(Self::default());
+        }
+        let directory = Config::default_path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .ok_or("cannot locate Gears directory for configured tools")?;
+        Self::load(&config.tools, &directory)
+    }
+
     pub fn load(entries: &[ToolDirectory], base: &Path) -> Result<Self, String> {
         let mut tools = Vec::with_capacity(entries.len());
         let mut names = HashSet::new();

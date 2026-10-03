@@ -14,6 +14,7 @@ use crate::provider::{
     ToolOutcome, ToolSpec, UsageMeter,
 };
 use crate::session::{Compaction, Session, SessionInfo, Store, TreeItem};
+use crate::tools::Registry;
 
 const PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 const MODEL_STREAM_BYTES: usize = 32 * 1024;
@@ -104,6 +105,7 @@ pub struct Runtime {
     store: Store,
     session: Session,
     hooks: Hooks,
+    tools: Registry,
     prompt: Effective,
     model: String,
     sh_timeout: std::time::Duration,
@@ -120,9 +122,21 @@ impl Runtime {
     pub fn new(
         provider: Arc<dyn Provider>,
         store: Store,
+        session: Session,
+        config: &Config,
+        model: String,
+    ) -> Result<Self, String> {
+        let tools = Registry::load_config(config)?;
+        Self::new_with_registry(provider, store, session, config, model, tools)
+    }
+
+    pub fn new_with_registry(
+        provider: Arc<dyn Provider>,
+        store: Store,
         mut session: Session,
         config: &Config,
         model: String,
+        tools: Registry,
     ) -> Result<Self, String> {
         let cancellation = Cancellation::new();
         let previous_identity = session.latest_runtime_identity();
@@ -133,9 +147,15 @@ impl Runtime {
                 session.recovered_entries()
             ));
         }
-        let hooks = Hooks::initialize(
+        let reserved_names = tools
+            .tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let hooks = Hooks::initialize_with_reserved(
             config.hooks.clone(),
             store.workspace().to_path_buf(),
+            &reserved_names,
             &mut session,
             &cancellation,
             &mut |notice| startup_notices.push(notice),
@@ -176,6 +196,7 @@ impl Runtime {
             store,
             session,
             hooks,
+            tools,
             prompt,
             model,
             sh_timeout: config.sh_timeout,
@@ -190,6 +211,10 @@ impl Runtime {
 
     pub fn cancellation(&self) -> Cancellation {
         self.cancellation.clone()
+    }
+
+    pub fn tools(&self) -> &Registry {
+        &self.tools
     }
 
     pub fn take_startup_notices(&mut self) -> Vec<String> {

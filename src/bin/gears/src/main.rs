@@ -55,18 +55,13 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if !config.tools.is_empty() {
-        let Some(directory) =
-            Config::default_path().and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        else {
-            diagnostic("cannot locate Gears directory for configured tools");
-            return ExitCode::FAILURE;
-        };
-        if let Err(error) = Registry::load(&config.tools, &directory) {
+    let tools = match Registry::load_config(&config) {
+        Ok(tools) => tools,
+        Err(error) => {
             diagnostic(&format!("tools: {error}"));
             return ExitCode::FAILURE;
         }
-    }
+    };
     let directory_lock = match DirectoryLock::acquire_default() {
         Ok(lock) => lock,
         Err(error) => {
@@ -113,7 +108,7 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     }
     let result = match args.action {
         Action::Ask => ask(&args, &config, choice.as_ref(), key_from_env),
-        Action::Run => agent(&args, &config, choice.as_ref(), key_from_env),
+        Action::Run => agent(&args, &config, choice.as_ref(), key_from_env, tools),
         Action::Version | Action::Help => unreachable!(),
     };
     match result {
@@ -131,6 +126,7 @@ fn agent(
     config: &Config,
     choice: Option<&ProviderChoice>,
     key_from_env: Option<String>,
+    tools: Registry,
 ) -> Result<(), String> {
     let workspace = args.workspace.clone().map_or_else(
         || std::env::current_dir().map_err(|error| format!("current directory: {error}")),
@@ -178,7 +174,7 @@ fn agent(
         .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
         .ok_or("no model selected; use --model or provider.model in the config")?;
-    let mut runtime = Runtime::new(provider, store, session, config, model)?;
+    let mut runtime = Runtime::new_with_registry(provider, store, session, config, model, tools)?;
     let factory_config = config.clone();
     let verbosity = args.verbosity;
     let factory: ProviderFactory = Arc::new(move |name| {
