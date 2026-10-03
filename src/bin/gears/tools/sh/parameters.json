@@ -4,6 +4,12 @@
     "command": {
       "type": "string",
       "description": "Shell command to execute."
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "description": "Optional timeout in seconds, from 1 to 120."
     }
   },
   "required": ["command"],

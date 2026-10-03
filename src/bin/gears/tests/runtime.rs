@@ -426,6 +426,64 @@ fn shipped_sh_restores_directory_and_exports_after_resume() {
 }
 
 #[test]
+fn shipped_sh_uses_a_bounded_per_call_timeout() {
+    let fixture = Fixture::new("sh-call-timeout");
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"export SH_TEST_VALUE=kept"}"#),
+        tool(
+            "sh",
+            r#"{"command":"printf bad > unstarted.txt","timeout":121}"#,
+        ),
+        tool(
+            "sh",
+            r#"{"command":"export SH_TEST_VALUE=lost; sleep 5","timeout":1}"#,
+        ),
+        tool(
+            "sh",
+            r#"{"command":"printf '%s' \"$SH_TEST_VALUE\" > state.txt"}"#,
+        ),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider, &config);
+    runtime
+        .turn("run".to_string(), &mut FixedApproval(true), &mut |_| Ok(()))
+        .unwrap();
+    assert!(!fixture.workspace.join("unstarted.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("state.txt")).unwrap(),
+        "kept"
+    );
+    let results = runtime
+        .session()
+        .context_messages()
+        .unwrap()
+        .into_iter()
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("between 1 and 120 seconds"))
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("timed out after 1s"))
+    );
+}
+
+#[test]
 fn shipped_ls_passes_literal_paths_to_the_program() {
     let fixture = Fixture::new("shipped-ls");
     let spaced = fixture.workspace.join("dir with spaces");

@@ -464,9 +464,10 @@ notices and leave the previous state unchanged.
 
 ## Shipped reference tools
 
-`sh` has one required string parameter, `command`. Its manifest selects `bash -c`
+`sh` has one required string parameter, `command`, and an optional `timeout`
+in seconds bounded by its 120-second manifest limit. Its manifest selects `bash -c`
 on Linux and `/system/bin/rush -c` on Motor OS, uses `{command}` as the exact
-permission detail, gives the child a closed stdin, and retains the current
+permission detail, gives the child a closed stdin, and defaults to the
 120-second timeout. Its working directory and exported variables persist
 between calls on both systems. Once the registry is implemented, `sh` has no
 special execution path in Rust.

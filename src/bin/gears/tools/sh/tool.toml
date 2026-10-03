@@ -19,7 +19,10 @@ linux = ["/bin/bash", "-c", "GEARS_SH_FIXED_PATH=/usr/local/bin:/usr/bin:/bin; .
 motor = ["/system/bin/rush", "-c", "GEARS_SH_FIXED_PATH=/system/bin:/devtools/bin; . \"$GEARS_TOOL_DIR/run.sh\"", "gears-sh"]
 
 [process.arguments]
-before_double_dash = ["command"]
+before_double_dash = ["timeout", "command"]
+
+[process.arguments.timeout]
+type = "timeout_seconds"
 
 [process.arguments.command]
 type = "string"
