@@ -11,10 +11,16 @@ use crate::state::StateRoot;
 const FILE: &str = "permissions.toml";
 const VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub created_ms: u64,
     pub allow: bool,
 }
 
@@ -94,6 +100,7 @@ mod tests {
             Grant {
                 name: "sh".into(),
                 allow: false,
+                ..Grant::default()
             },
         );
         grants.save(&directory).unwrap();

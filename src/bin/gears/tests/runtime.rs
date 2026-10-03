@@ -253,6 +253,7 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
             name: "sh".into(),
             identity: identity.clone(),
             allow: Some(false),
+            ..PermissionGrant::default()
         })
         .unwrap();
     let global_dir = fixture.root.join("global");
@@ -262,6 +263,7 @@ fn permission_listing_marks_stale_grants_and_revoke_clears_each_scope() {
         Grant {
             name: "sh".into(),
             allow: true,
+            ..Grant::default()
         },
     );
     global.save(&global_dir).unwrap();
@@ -332,6 +334,11 @@ fn global_allow_survives_new_sessions_but_not_unattended_calls() {
         .turn("first".into(), &mut grant, &mut |_| Ok(()))
         .unwrap();
     assert_eq!(grant.asked, 1);
+    let saved = Grants::load(&fixture.root.join("global")).unwrap();
+    let saved = saved.by_identity.values().next().unwrap();
+    assert_eq!(saved.kind, "process");
+    assert!(saved.owner.ends_with("tools/sh"));
+    assert!(saved.created_ms > 0);
     runtime.new_session(false, None).unwrap();
     runtime
         .turn("second".into(), &mut UnattendedApproval, &mut |_| Ok(()))
@@ -1384,6 +1391,11 @@ fn session_allow_is_stored_with_the_session() {
     runtime
         .turn("first".to_string(), &mut always, &mut |_| Ok(()))
         .unwrap();
+    let saved = runtime.session().permission_grants().unwrap();
+    let saved = saved.values().next().unwrap();
+    assert_eq!(saved.kind, "process");
+    assert!(saved.owner.ends_with("tools/sh"));
+    assert!(saved.created_ms > 0);
     let id = runtime.summary().id;
     drop(runtime);
 
@@ -1440,6 +1452,7 @@ fn saved_denial_prevents_a_permission_hook_from_allowing_the_call() {
             name: "sh".into(),
             identity,
             allow: Some(false),
+            ..PermissionGrant::default()
         })
         .unwrap();
     let provider = Scripted::new(vec![
@@ -1486,6 +1499,7 @@ fn hook_confirm_asks_even_after_a_saved_allowance() {
             name: "sh".into(),
             identity,
             allow: Some(true),
+            ..PermissionGrant::default()
         })
         .unwrap();
     let provider = Scripted::new(vec![

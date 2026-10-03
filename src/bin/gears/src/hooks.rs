@@ -256,6 +256,11 @@ impl Manager {
         self.tool_owner.contains_key(name)
     }
 
+    pub fn tool_owner(&self, name: &str) -> Option<&str> {
+        let index = *self.tool_owner.get(name)?;
+        Some(&self.hooks[index].config.name)
+    }
+
     pub fn approval_identity(&self, name: &str) -> Option<String> {
         let index = *self.tool_owner.get(name)?;
         let spec = self.tools.iter().find(|tool| tool.name == name)?;

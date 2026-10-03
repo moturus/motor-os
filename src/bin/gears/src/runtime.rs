@@ -337,11 +337,11 @@ impl Runtime {
             if matching.is_empty() {
                 return Err(format!("no session grant for {name:?}"));
             }
-            for (identity, _) in matching {
+            for (_, grant) in matching {
                 self.session.append_permission_grant(&PermissionGrant {
-                    name: name.to_string(),
-                    identity,
                     allow: None,
+                    created_ms: crate::session::now_ms(),
+                    ..grant
                 })?;
             }
             Ok(())
@@ -419,12 +419,27 @@ impl Runtime {
         let Some(allow) = allow else {
             return Ok(());
         };
+        let (kind, owner) = if let Some(tool) = self.tools.enabled(name) {
+            ("process", tool.directory.display().to_string())
+        } else {
+            (
+                "hook",
+                self.hooks
+                    .tool_owner(name)
+                    .ok_or_else(|| format!("unknown tool {name:?}"))?
+                    .to_string(),
+            )
+        };
+        let created_ms = crate::session::now_ms();
         if matches!(answer, Approval::Global | Approval::DenyGlobal) {
             let mut grants = Grants::load(&self.tool_state_directory)?;
             grants.by_identity.insert(
                 identity.to_string(),
                 Grant {
                     name: name.to_string(),
+                    kind: kind.to_string(),
+                    owner,
+                    created_ms,
                     allow,
                 },
             );
@@ -433,6 +448,9 @@ impl Runtime {
             self.session.append_permission_grant(&PermissionGrant {
                 name: name.to_string(),
                 identity: identity.to_string(),
+                kind: kind.to_string(),
+                owner,
+                created_ms,
                 allow: Some(allow),
             })?;
             Ok(())

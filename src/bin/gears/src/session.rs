@@ -75,10 +75,16 @@ pub struct ToolStateEntry {
     pub state: ToolState,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionGrant {
     pub name: String,
     pub identity: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub created_ms: u64,
     /// None revokes an earlier answer for this identity.
     pub allow: Option<bool>,
 }
@@ -1106,7 +1112,7 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     system_ms(SystemTime::now())
 }
 
@@ -1238,6 +1244,7 @@ mod tests {
             name: "sh".into(),
             identity: "fingerprint".into(),
             allow: Some(false),
+            ..PermissionGrant::default()
         };
         session.append_permission_grant(&grant).unwrap();
         session
