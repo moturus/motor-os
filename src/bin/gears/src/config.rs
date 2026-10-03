@@ -1,5 +1,6 @@
 //! Small, versioned configuration for the provider, runtime, and hooks.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,6 +26,15 @@ pub struct ContextConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct NamedProvider {
+    pub base_url: String,
+    pub plain_http: bool,
+    pub model: Option<String>,
+    pub key_file: Option<PathBuf>,
+    pub ca_cert: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub egress_allowlist: Vec<String>,
     pub plain_http_allowlist: Vec<String>,
@@ -35,6 +45,9 @@ pub struct Config {
     pub models: Vec<String>,
     pub key_file: Option<PathBuf>,
     pub ca_cert: Option<PathBuf>,
+    pub providers: BTreeMap<String, NamedProvider>,
+    pub default_provider: String,
+    pub default_model: Option<String>,
     pub log_file: Option<PathBuf>,
     pub log_level: crate::trace::Level,
     pub sh_timeout: Duration,
@@ -54,6 +67,9 @@ impl Default for Config {
             models: Vec::new(),
             key_file: None,
             ca_cert: None,
+            providers: BTreeMap::new(),
+            default_provider: "default".to_string(),
+            default_model: None,
             log_file: None,
             log_level: crate::trace::Level::Info,
             sh_timeout: Duration::from_secs(120),
@@ -71,10 +87,14 @@ impl Default for Config {
 #[derive(Deserialize)]
 struct RawConfig {
     version: u32,
+    default_provider: Option<String>,
+    default_model: Option<String>,
     #[serde(default)]
     net: RawNet,
     #[serde(default)]
     provider: RawProvider,
+    #[serde(default)]
+    providers: BTreeMap<String, RawProvider>,
     #[serde(default)]
     models: RawModels,
     #[serde(default)]
@@ -135,6 +155,20 @@ struct RawHook {
 }
 
 impl Config {
+    pub fn provider(&self, name: &str) -> Option<NamedProvider> {
+        if name == "default" {
+            Some(NamedProvider {
+                base_url: self.base_url.clone(),
+                plain_http: self.plain_http,
+                model: self.model.clone(),
+                key_file: self.key_file.clone(),
+                ca_cert: self.ca_cert.clone(),
+            })
+        } else {
+            self.providers.get(name).cloned()
+        }
+    }
+
     pub fn default_path() -> Option<PathBuf> {
         #[cfg(target_os = "motor")]
         {
@@ -247,6 +281,43 @@ impl Config {
         }
         let key_file = provider_path(raw.provider.key_file, base)?;
         let ca_cert = provider_path(raw.provider.ca_cert, base)?;
+        let mut providers = BTreeMap::new();
+        for (name, provider) in raw.providers {
+            if name.is_empty() || !valid_name(&name) || name == "default" {
+                return Err(format!("invalid provider name {name:?}"));
+            }
+            let base_url = provider
+                .base_url
+                .ok_or_else(|| format!("provider {name:?} needs base_url"))?;
+            let endpoint = crate::provider::Endpoint::new(&base_url)
+                .map_err(|error| format!("bad provider {name:?} base_url: {error}"))?;
+            let plain_http = endpoint.url().scheme() == crate::net::Scheme::Http;
+            if plain_http {
+                crate::net::EgressPolicy::new(&egress_allowlist)
+                    .with_plain_http_allowlist(&plain_http_allowlist)
+                    .check(endpoint.url())
+                    .map_err(|error| format!("provider {name:?} base_url: {error}"))?;
+            }
+            providers.insert(
+                name,
+                NamedProvider {
+                    base_url,
+                    plain_http,
+                    model: provider.model.filter(|model| !model.trim().is_empty()),
+                    key_file: provider_path(provider.key_file, base)?,
+                    ca_cert: provider_path(provider.ca_cert, base)?,
+                },
+            );
+        }
+        let default_provider = match raw.default_provider {
+            Some(name) if name == "default" || providers.contains_key(&name) => name,
+            Some(name) => return Err(format!("unknown default_provider {name:?}")),
+            None if providers.len() == 1 => providers.keys().next().unwrap().clone(),
+            None if providers.len() > 1 => {
+                return Err("default_provider is required with multiple providers".to_string());
+            }
+            None => "default".to_string(),
+        };
         let log_level = match raw.trace.level {
             Some(level) => crate::trace::Level::parse(&level)
                 .ok_or_else(|| format!("unknown trace level {level:?}"))?,
@@ -319,6 +390,9 @@ impl Config {
             models,
             key_file,
             ca_cert,
+            providers,
+            default_provider,
+            default_model: raw.default_model.filter(|model| !model.trim().is_empty()),
             log_file: raw.trace.file,
             log_level,
             sh_timeout,
@@ -506,6 +580,44 @@ plain_http_allowlist = ["192.168.4.1"]"#,
     fn old_key_file_name_remains_accepted() {
         let config = Config::parse("version = 1\n[provider]\nkey_file = '/secret/key'\n").unwrap();
         assert_eq!(config.key_file, Some(PathBuf::from("/secret/key")));
+    }
+
+    #[test]
+    fn named_providers_are_validated_and_have_a_selected_default() {
+        let path = Path::new("/tmp/gears-test-config/gears.toml");
+        let config = Config::parse_at(
+            r#"version = 1
+default_provider = 'local'
+default_model = 'small'
+[net]
+egress_allowlist = ['127.0.0.1', 'openrouter.ai']
+plain_http_allowlist = ['127.0.0.1']
+[providers.local]
+base_url = 'http://127.0.0.1:9090/v1'
+api_key_file = 'secrets/local.key'
+model = 'local/model'
+[providers.remote]
+base_url = 'https://openrouter.ai/api/v1'
+"#,
+            path,
+        )
+        .unwrap();
+        assert_eq!(config.default_provider, "local");
+        assert_eq!(config.default_model.as_deref(), Some("small"));
+        assert_eq!(config.providers.len(), 2);
+        assert!(config.providers["local"].plain_http);
+        assert_eq!(
+            config.providers["local"].key_file,
+            Some(PathBuf::from("/tmp/gears-test-config/secrets/local.key"))
+        );
+        assert!(!config.providers["remote"].plain_http);
+        assert_eq!(
+            config.provider("local").unwrap().model.as_deref(),
+            Some("local/model")
+        );
+        assert!(config.provider("missing").is_none());
+        assert!(Config::parse("version = 1\n[providers.one]\nbase_url = 'https://one.test/v1'\n[providers.two]\nbase_url = 'https://two.test/v1'").is_err());
+        assert!(Config::parse("version = 1\ndefault_provider = 'missing'").is_err());
     }
 
     #[test]
