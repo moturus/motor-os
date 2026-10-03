@@ -967,6 +967,9 @@ The check planner represents selected libraries, binaries, and enabled test
 harnesses with distinct check modes. It gives integration checks test-profile
 library dependencies without program-artifact edges. Dependency libraries
 remain full-compilation units while check execution moves to the DAG.
+Checked units request rustc metadata and dep-info only. Their metadata output
+is a distinct artifact type, and checked dependents use `.rmeta` paths for
+their Rust externs.
 Until example targets are implemented, `check --examples` fails explicitly
 instead of succeeding without checking a target.
 

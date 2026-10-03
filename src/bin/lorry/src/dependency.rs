@@ -1326,28 +1326,25 @@ mod tests {
         let binary_path = fixture.0.join("output/root");
         let binary_paths = BTreeMap::from([("root".to_owned(), binary_path.clone())]);
         let temp_dir = fixture.0.join("output/tmp");
-        let invocation = dependency_rustc_invocation(
-            &focused,
-            &manifests,
-            integration,
-            &CommandOptions {
-                cargo: Path::new("/cargo"),
-                workspace_root: &fixture.0,
-                selected_package: Some(&library.package),
-                host_profile: Path::new("/target/release"),
-                target_profile: Path::new("/target/release"),
-                host_incremental: Path::new("/incremental/host"),
-                target_incremental: Path::new("/incremental/target"),
-                physical_target: None,
-                host_linker: None,
-                target_linker: None,
-                integration_binaries: Some(&binary_paths),
-                integration_temp_dir: Some(&temp_dir),
-                verbose: false,
-            },
-        )
-        .unwrap()
-        .unwrap();
+        let command_options = CommandOptions {
+            cargo: Path::new("/cargo"),
+            workspace_root: &fixture.0,
+            selected_package: Some(&library.package),
+            host_profile: Path::new("/target/release"),
+            target_profile: Path::new("/target/release"),
+            host_incremental: Path::new("/incremental/host"),
+            target_incremental: Path::new("/incremental/target"),
+            physical_target: None,
+            host_linker: None,
+            target_linker: None,
+            integration_binaries: Some(&binary_paths),
+            integration_temp_dir: Some(&temp_dir),
+            verbose: false,
+        };
+        let invocation =
+            dependency_rustc_invocation(&focused, &manifests, integration, &command_options)
+                .unwrap()
+                .unwrap();
         assert!(
             invocation
                 .arguments
@@ -1523,6 +1520,25 @@ mod tests {
             unit.unit.key.kind == UnitKind::IntegrationHarness
                 && unit.settings.mode == crate::identity::CargoCompileMode::Check { test: true }
         }));
+        let check_key = check_plan
+            .units
+            .keys()
+            .find(|key| key.kind == UnitKind::IntegrationHarness)
+            .unwrap();
+        let check_invocation =
+            dependency_rustc_invocation(&check_plan, &manifests, check_key, &command_options)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            check_invocation.output,
+            crate::compile::RustcOutput::Metadata { .. }
+        ));
+        assert!(
+            check_invocation
+                .arguments
+                .iter()
+                .any(|argument| argument == "--emit=dep-info,metadata")
+        );
 
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
         let library_only = Manifest::load(&fixture.0).unwrap();

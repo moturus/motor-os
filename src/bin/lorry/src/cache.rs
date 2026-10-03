@@ -882,7 +882,9 @@ fn library_paths(output: &RustcOutput) -> Result<(&Path, &Path)> {
         RustcOutput::ProcMacro {
             dynamic_library, ..
         } => Ok((dynamic_library, dynamic_library)),
-        RustcOutput::Binary { .. } | RustcOutput::BuildScript { .. } => Err(Error::failure(
+        RustcOutput::Binary { .. }
+        | RustcOutput::Metadata { .. }
+        | RustcOutput::BuildScript { .. } => Err(Error::failure(
             "executable artifacts cannot be stored in the dependency unit cache",
         )),
     }

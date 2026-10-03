@@ -754,6 +754,7 @@ fn create_output_directories(output: &RustcOutput) -> Result<()> {
     let path = match output {
         RustcOutput::Library { rlib, .. } => rlib,
         RustcOutput::Binary { executable, .. } => executable,
+        RustcOutput::Metadata { metadata, .. } => metadata,
         RustcOutput::ProcMacro {
             dynamic_library, ..
         } => dynamic_library,
@@ -786,6 +787,7 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             executable,
             dep_info,
         } => vec![executable, dep_info],
+        RustcOutput::Metadata { metadata, dep_info } => vec![metadata, dep_info],
         RustcOutput::BuildScript {
             executable,
             dep_info,
@@ -819,6 +821,7 @@ fn validate_dep_info(
     let dep_info = match output {
         RustcOutput::Library { dep_info, .. }
         | RustcOutput::Binary { dep_info, .. }
+        | RustcOutput::Metadata { dep_info, .. }
         | RustcOutput::ProcMacro { dep_info, .. }
         | RustcOutput::BuildScript { dep_info, .. } => dep_info,
     };

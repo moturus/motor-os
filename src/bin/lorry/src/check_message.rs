@@ -231,6 +231,7 @@ impl EventReporter for Reporter {
                 vec![self.published_path(executable)?],
                 Some(self.published_path(executable)?),
             ),
+            RustcOutput::Metadata { metadata, .. } => (vec![self.published_path(metadata)?], None),
             RustcOutput::BuildScript {
                 executable,
                 unhashed_executable,

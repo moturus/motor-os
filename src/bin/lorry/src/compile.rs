@@ -9,7 +9,7 @@ use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
 use crate::manifest::{Edition, Manifest};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
-use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind};
+use crate::unit::{CompilationPlan, PlannedUnit, UnitEdgeKind, UnitKey, UnitKind, UnitMode};
 
 pub struct CommandOptions<'a> {
     pub cargo: &'a Path,
@@ -44,6 +44,10 @@ pub enum RustcOutput {
     },
     Binary {
         executable: PathBuf,
+        dep_info: PathBuf,
+    },
+    Metadata {
+        metadata: PathBuf,
         dep_info: PathBuf,
     },
     ProcMacro {
@@ -119,7 +123,7 @@ pub fn dependency_rustc_invocation_with_build_output(
     })?;
     let output_dir = unit_output_directory(planned, options);
     let binary_crate_name = key.target.as_deref().map(|name| name.replace('-', "_"));
-    let (crate_name, source, crate_type, emit, output_dir) = match key.kind {
+    let (crate_name, source, crate_type, mut emit, output_dir) = match key.kind {
         UnitKind::Library | UnitKind::ProcMacro => {
             let library = manifest.library.as_ref().ok_or_else(|| {
                 Error::failure(format!(
@@ -227,6 +231,9 @@ pub fn dependency_rustc_invocation_with_build_output(
         }
         UnitKind::BuildScriptRun => unreachable!(),
     };
+    if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) {
+        emit = "dep-info,metadata";
+    }
 
     let mut arguments = Vec::new();
     push(&mut arguments, "--crate-name");
@@ -538,7 +545,9 @@ fn dependency_arguments(
         let filename = if dependency.unit.kind == UnitKind::ProcMacro {
             proc_macro_filename(&stem)
         } else {
-            let extension = if planned.unit.key.kind == UnitKind::Library {
+            let extension = if planned.unit.key.kind == UnitKind::Library
+                || matches!(planned.unit.key.mode, UnitMode::Check | UnitMode::CheckTest)
+            {
                 "rmeta"
             } else {
                 "rlib"
@@ -625,6 +634,12 @@ fn expected_output(
     output_dir: &Path,
 ) -> RustcOutput {
     let stem = format!("{crate_name}{}", identity.extra_filename);
+    if matches!(key.mode, UnitMode::Check | UnitMode::CheckTest) {
+        return RustcOutput::Metadata {
+            metadata: output_dir.join(format!("lib{stem}.rmeta")),
+            dep_info: output_dir.join(format!("{stem}.d")),
+        };
+    }
     match key.kind {
         UnitKind::Library => RustcOutput::Library {
             rlib: output_dir.join(format!("lib{stem}.rlib")),
