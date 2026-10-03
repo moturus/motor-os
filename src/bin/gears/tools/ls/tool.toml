@@ -1,0 +1,22 @@
+version = 1
+kind = "process"
+name = "ls"
+description = "List one directory or file path. The path is passed literally."
+parameters = "parameters.json"
+display = "{path}"
+read_only = true
+
+[process]
+timeout_seconds = 30
+max_output_bytes = 1048576
+output = "stdout"
+
+[process.command]
+linux = ["/bin/ls"]
+motor = ["/system/bin/sysbox", "ls"]
+
+[process.arguments]
+after_double_dash = ["path"]
+
+[process.arguments.path]
+type = "string"

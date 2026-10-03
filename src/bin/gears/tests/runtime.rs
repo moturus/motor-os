@@ -350,6 +350,48 @@ fn shipped_sh_tool_runs_from_its_directory() {
 }
 
 #[test]
+fn shipped_ls_passes_literal_paths_to_the_program() {
+    let fixture = Fixture::new("shipped-ls");
+    let spaced = fixture.workspace.join("dir with spaces");
+    let option_like = fixture.workspace.join("-lh");
+    std::fs::create_dir_all(&spaced).unwrap();
+    std::fs::create_dir_all(&option_like).unwrap();
+    std::fs::write(spaced.join("literal[?].txt"), "data").unwrap();
+    std::fs::write(option_like.join("marker.txt"), "data").unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/ls"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let provider = Scripted::new(vec![
+        tool("ls", r#"{"path":"dir with spaces"}"#),
+        tool("ls", r#"{"path":"-lh"}"#),
+        answer("done"),
+    ]);
+    let mut runtime = fixture.runtime(provider.clone(), &config);
+    let mut output = String::new();
+    runtime
+        .turn("list".to_string(), &mut FixedApproval(true), &mut |event| {
+            if let Event::ToolOutput { name, text, .. } = event {
+                assert_eq!(name, "ls");
+                output.push_str(&text);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert!(output.contains("literal[?].txt"), "{output}");
+    assert!(output.contains("marker.txt"), "{output}");
+    assert!(
+        provider.requests.lock().unwrap()[0]
+            .tools
+            .iter()
+            .any(|spec| spec.name == "ls")
+    );
+}
+
+#[test]
 fn text_only_turn_streams_and_is_durable() {
     let fixture = Fixture::new("text");
     let provider = Scripted::new(vec![answer("hello")]);
