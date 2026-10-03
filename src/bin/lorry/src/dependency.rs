@@ -1226,6 +1226,135 @@ mod tests {
         assert_eq!(evidence[&second.key].source_tree_sha256, source_tree_sha256);
     }
 
+    fn assert_check_graph_matches_cargo(
+        fixture: &Path,
+        plan: &CompilationPlan,
+        cargo_selection: &[&str],
+    ) {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let output = Command::new(cargo)
+            .args(["-Z", "unstable-options", "check", "--release"])
+            .args(cargo_selection)
+            .args(["--unit-graph", "--offline"])
+            .arg("--manifest-path")
+            .arg(fixture.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let units = cargo["units"].as_array().unwrap();
+        let cargo_nodes = units
+            .iter()
+            .map(|unit| {
+                assert_eq!(unit["mode"], "check");
+                let package = if unit["pkg_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("path+file://{}#", fixture.display()))
+                {
+                    "root"
+                } else {
+                    "local"
+                };
+                (
+                    package.to_owned(),
+                    unit["target"]["kind"][0].as_str().unwrap().to_owned(),
+                    unit["target"]["name"].as_str().unwrap().to_owned(),
+                    unit["profile"]["panic"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let lorry_node = |key: &crate::unit::UnitKey| {
+            let unit = &plan.units[key];
+            if key.package.name == "root" {
+                assert!(matches!(key.mode, UnitMode::Check | UnitMode::CheckTest));
+            } else {
+                // Lorry intentionally builds dependency code while checking roots.
+                assert_eq!(key.mode, UnitMode::Build);
+            }
+            let kind = match key.kind {
+                UnitKind::Library | UnitKind::LibraryHarness => "lib",
+                UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+                UnitKind::IntegrationHarness => "test",
+                _ => panic!("unexpected unit in check oracle: {:?}", key.kind),
+            };
+            (
+                key.package.name.clone(),
+                kind.to_owned(),
+                key.target
+                    .clone()
+                    .unwrap_or_else(|| key.package.name.clone()),
+                match unit.settings.profile.panic {
+                    crate::identity::CargoPanicStrategy::Abort => "abort",
+                    crate::identity::CargoPanicStrategy::Unwind => "unwind",
+                    _ => unreachable!(),
+                }
+                .to_owned(),
+            )
+        };
+        let mut expected_nodes = cargo_nodes.clone();
+        expected_nodes.sort();
+        let mut actual_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
+        actual_nodes.sort();
+        assert_eq!(actual_nodes, expected_nodes);
+
+        let mut cargo_edges = Vec::new();
+        for (parent, unit) in units.iter().enumerate() {
+            for edge in unit["dependencies"].as_array().unwrap() {
+                cargo_edges.push((
+                    cargo_nodes[parent].clone(),
+                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
+                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        cargo_edges.sort();
+        let mut lorry_edges = plan
+            .units
+            .values()
+            .flat_map(|unit| {
+                unit.unit.dependencies.iter().map(|edge| {
+                    (
+                        lorry_node(&unit.unit.key),
+                        lorry_node(&edge.unit),
+                        edge.alias.clone().unwrap_or_default(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        lorry_edges.sort();
+        assert_eq!(lorry_edges, cargo_edges);
+
+        let mut cargo_roots = cargo["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
+            .collect::<Vec<_>>();
+        cargo_roots.sort();
+        let mut lorry_roots = plan
+            .units
+            .keys()
+            .filter(|key| {
+                key.package.name == "root"
+                    && (matches!(
+                        key.kind,
+                        UnitKind::LibraryHarness
+                            | UnitKind::BinaryHarness
+                            | UnitKind::IntegrationHarness
+                    ) || (key.profile == ProfileContext::Normal
+                        && matches!(key.kind, UnitKind::Library | UnitKind::Binary)))
+            })
+            .map(lorry_node)
+            .collect::<Vec<_>>();
+        lorry_roots.sort();
+        assert_eq!(lorry_roots, cargo_roots);
+    }
+
     #[test]
     fn prepares_a_path_only_graph_without_a_repository_or_staging() {
         let fixture = Fixture::new();
@@ -1569,6 +1698,22 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--emit=dep-info,metadata")
         );
+        assert_check_graph_matches_cargo(&fixture.0, &check_plan, &["--test", "integration"]);
+        let all_check = graph
+            .selected_check_plan(
+                &options,
+                &manifest,
+                &CheckTargetSelection {
+                    normal: true,
+                    binaries: true,
+                    binary_name: None,
+                    harnesses: true,
+                    integrations: true,
+                    integration_name: None,
+                },
+            )
+            .unwrap();
+        assert_check_graph_matches_cargo(&fixture.0, &all_check, &["--all-targets"]);
 
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
         let library_only = Manifest::load(&fixture.0).unwrap();
