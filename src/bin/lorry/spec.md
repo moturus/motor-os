@@ -1122,6 +1122,9 @@ or the linker. Strict mode reconstructs admission and rehashes all of those
 contents before reuse. A missing, malformed, stale, or differently-modeled
 record causes a normal rebuild. Test harnesses and bundle launchers are not
 reused by this profile-level check.
+The completed-profile record and each top-level selected binary are written
+through private file staging and atomically installed, so a failed copy or
+record write leaves the preceding complete file in place.
 
 Unit-cache writers publish atomically. A selected-library entry is replaced
 when an external dep-info input changes; other entries are never replaced.

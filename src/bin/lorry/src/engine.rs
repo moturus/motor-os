@@ -1,5 +1,5 @@
 use crate::admission_state::CompactState;
-use crate::atomic::AtomicDirectory;
+use crate::atomic::{AtomicDirectory, AtomicFile};
 use crate::bundle;
 use crate::cache;
 use crate::cargo_registry::CargoRegistry;
@@ -1482,12 +1482,9 @@ fn write_fresh_profile(
     for path in dep_info {
         document.push_str(&format!("dep-info={}\n", path.display()));
     }
-    fs::write(profile.join(FRESH_PROFILE_FILE), document).map_err(|error| {
-        Error::failure(format!(
-            "failed to write build freshness record `{}`: {error}",
-            profile.join(FRESH_PROFILE_FILE).display()
-        ))
-    })
+    let mut record = AtomicFile::new(&profile.join(FRESH_PROFILE_FILE))?;
+    record.write_all(document.as_bytes())?;
+    record.commit()
 }
 
 fn read_fresh_profile(profile: &Path) -> Option<FreshProfile> {
@@ -2195,15 +2192,9 @@ fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
 }
 
 fn install_primary(source: &Path, destination: &Path) -> Result<()> {
-    match fs::hard_link(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => fs::copy(source, destination).map(|_| ()).map_err(|error| {
-            Error::failure(format!(
-                "failed to install primary artifact `{}`: {error}",
-                destination.display()
-            ))
-        }),
-    }
+    let mut artifact = AtomicFile::new(destination)?;
+    artifact.copy_executable_from(source)?;
+    artifact.commit()
 }
 
 pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {

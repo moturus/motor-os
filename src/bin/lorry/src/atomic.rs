@@ -1,6 +1,6 @@
 use crate::diagnostic::{Error, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -82,6 +82,55 @@ impl AtomicFile {
                     self.path.display()
                 ))
             })
+    }
+
+    pub fn copy_executable_from(&mut self, source: &Path) -> Result<()> {
+        let mut input = File::open(source).map_err(|error| {
+            Error::failure(format!(
+                "failed to open source file `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        io::copy(
+            &mut input,
+            self.file
+                .as_mut()
+                .ok_or_else(|| Error::failure("atomic file staging is already closed"))?,
+        )
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to copy `{}` into atomic staging: {error}",
+                source.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    Error::failure(format!(
+                        "failed to make copied executable `{}` runnable: {error}",
+                        self.path.display()
+                    ))
+                },
+            )?;
+        }
+        #[cfg(target_os = "motor")]
+        {
+            use std::os::fd::AsRawFd;
+            let file = self.file.as_ref().unwrap();
+            moto_rt::fs::set_file_perm(
+                file.as_raw_fd(),
+                moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
+            )
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to make copied executable `{}` runnable: {error}",
+                    self.path.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     /// Persists and closes the staged file without making it visible.
@@ -516,6 +565,34 @@ mod tests {
         assert!(!second.commit_no_replace(&destination).unwrap());
         assert_eq!(fs::read(destination.join("value")).unwrap(), b"first");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copied_file_replaces_only_after_commit() {
+        let root = temp_root("copied-file");
+        let source = root.join("source");
+        let destination = root.join("artifact");
+        fs::write(&source, b"replacement").unwrap();
+        fs::write(&destination, b"previous").unwrap();
+
+        let mut abandoned = AtomicFile::new(&destination).unwrap();
+        abandoned.copy_executable_from(&source).unwrap();
+        drop(abandoned);
+        assert_eq!(fs::read(&destination).unwrap(), b"previous");
+
+        let mut committed = AtomicFile::new(&destination).unwrap();
+        committed.copy_executable_from(&source).unwrap();
+        committed.commit().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                fs::metadata(&destination).unwrap().permissions().mode() & 0o100,
+                0
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
