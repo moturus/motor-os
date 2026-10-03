@@ -251,6 +251,52 @@ fn continued_session_uses_its_recorded_provider() {
 }
 
 #[test]
+fn line_command_switches_provider_before_the_next_turn() {
+    let root = fixture("line-provider-switch");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let local = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"from local"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let remote = MockServer::start_one(sse_response(&[])).unwrap();
+    let config = root.join("gears.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\ndefault_provider = 'remote'\ndefault_model = 'test/model'\n[net]\negress_allowlist = ['127.0.0.1']\nplain_http_allowlist = ['127.0.0.1']\n[providers.local]\nbase_url = '{}'\n[providers.remote]\nbase_url = '{}'\n",
+            local.url("/v1"),
+            remote.url("/v1")
+        ),
+    )
+    .unwrap();
+    let mut child = gears(&root, &workspace, &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"/provider local\nhello\n/quit\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("from local"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("provider: local"));
+    assert_eq!(local.requests().len(), 1);
+    assert!(remote.requests().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unattended_sh_is_denied_and_the_turn_continues() {
     let root = fixture("deny");
     let workspace = root.join("workspace");

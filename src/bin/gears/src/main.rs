@@ -152,6 +152,8 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
         Ok(Arc::new(connect(&factory_config, &selected, &key, verbosity)?) as Arc<dyn Provider>)
     });
     runtime.install_provider_factory(factory);
+    let mut provider_names = vec!["default".to_string()];
+    provider_names.extend(config.providers.keys().cloned());
     let interactive = !one_shot;
     let result = match selected {
         gears::ui::select::Selected::Line => gears::ui::line::run(
@@ -159,12 +161,14 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
             args.prompt.clone(),
             interactive,
             &config.models,
+            &provider_names,
         ),
         gears::ui::select::Selected::Tui => gears::ui::tui::run(
             &mut runtime,
             args.prompt.clone(),
             interactive,
             &config.models,
+            &provider_names,
         ),
     };
     for notice in runtime.close() {

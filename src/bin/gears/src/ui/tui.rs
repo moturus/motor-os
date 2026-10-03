@@ -27,6 +27,7 @@ pub fn run(
     initial: Option<String>,
     interactive: bool,
     models: &[String],
+    providers: &[String],
 ) -> Result<(), String> {
     let mut screen = Screen::enter()?;
     let mut app = App::new(runtime);
@@ -51,7 +52,7 @@ pub fn run(
             match action {
                 Action::Quit => app.quit = true,
                 Action::Submit(text) if text.starts_with('/') => {
-                    handle_command(runtime, &mut app, &text, models)?
+                    handle_command(runtime, &mut app, &text, models, providers)?
                 }
                 Action::Submit(text) if !text.trim().is_empty() => {
                     app.push(Kind::User, text.clone(), false);
@@ -826,6 +827,7 @@ fn handle_command(
     app: &mut App,
     text: &str,
     models: &[String],
+    providers: &[String],
 ) -> Result<(), String> {
     let (name, argument) = text[1..]
         .split_once(char::is_whitespace)
@@ -834,14 +836,15 @@ fn handle_command(
         "quit" | "exit" => app.quit = true,
         "help" => app.push(
             Kind::Notice,
-            "commands: /new /resume /name /session /tree /label /fork /clone /compact /model /status /help /quit"
+            "commands: /new /resume /name /session /tree /label /fork /clone /compact /provider /model /status /help /quit"
                 .to_string(),
             false,
         ),
         "status" => app.push(
             Kind::Notice,
             format!(
-                "model: {}\nusage: {}\nsession: {}",
+                "provider: {}\nmodel: {}\nusage: {}\nsession: {}",
+                runtime.provider_name(),
                 runtime.model(),
                 runtime.usage().summary(),
                 runtime.summary().id
@@ -991,6 +994,22 @@ fn handle_command(
                 argument.to_string()
             };
             runtime.set_model(model, &mut AppObserver(app))?;
+        }
+        "provider" => {
+            let provider = if argument.is_empty() {
+                let mut choices = vec![runtime.provider_name().to_string()];
+                for provider in providers {
+                    if !choices.contains(provider) {
+                        choices.push(provider.clone());
+                    }
+                }
+                let selected = picker(app, "Select provider", &choices)?
+                    .ok_or("provider selection cancelled")?;
+                choices[selected].clone()
+            } else {
+                argument.to_string()
+            };
+            runtime.set_provider(&provider, &mut AppObserver(app))?;
         }
         "" => {}
         other => return Err(format!("unknown command /{other}")),

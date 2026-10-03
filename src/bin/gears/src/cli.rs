@@ -28,7 +28,7 @@ Options:
   --help              Print this help
 
 Interactive commands include /new, /resume, /name, /session, /tree, /label,
-/fork, /clone, /compact, /model, /status, /help, and /quit.
+/fork, /clone, /compact, /provider, /model, /status, /help, and /quit.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

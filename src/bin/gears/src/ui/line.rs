@@ -14,6 +14,7 @@ pub fn run(
     initial: Option<String>,
     interactive: bool,
     models: &[String],
+    providers: &[String],
 ) -> Result<(), String> {
     let mut input = Input::new()?;
     let mut renderer = Renderer::default();
@@ -42,7 +43,7 @@ pub fn run(
             continue;
         }
         if line.starts_with('/') {
-            match command(runtime, &line, models, &mut input, &mut renderer)? {
+            match command(runtime, &line, models, providers, &mut input, &mut renderer)? {
                 Command::Continue => continue,
                 Command::Quit => return Ok(()),
                 Command::Draft(draft) => {
@@ -70,6 +71,7 @@ fn command(
     runtime: &mut Runtime,
     line: &str,
     models: &[String],
+    providers: &[String],
     input: &mut Input,
     renderer: &mut Renderer,
 ) -> Result<Command, String> {
@@ -84,7 +86,8 @@ fn command(
         }
         "status" => {
             eprintln!(
-                "model: {}\nusage: {}",
+                "provider: {}\nmodel: {}\nusage: {}",
+                runtime.provider_name(),
                 runtime.model(),
                 runtime.usage().summary()
             );
@@ -174,6 +177,15 @@ fn command(
             runtime.set_model(model, renderer)?;
             Ok(Command::Continue)
         }
+        "provider" => {
+            let provider = if argument.is_empty() {
+                choose_named(runtime.provider_name(), providers, input, "provider")?
+            } else {
+                argument.to_string()
+            };
+            runtime.set_provider(&provider, renderer)?;
+            Ok(Command::Continue)
+        }
         "" => Ok(Command::Continue),
         other => Err(format!("unknown command /{other}; try /help")),
     }
@@ -258,22 +270,31 @@ fn choose_tree(runtime: &Runtime, input: &mut Input, user_only: bool) -> Result<
 }
 
 fn choose_model(current: &str, models: &[String], input: &mut Input) -> Result<String, String> {
+    choose_named(current, models, input, "model")
+}
+
+fn choose_named(
+    current: &str,
+    values: &[String],
+    input: &mut Input,
+    label: &str,
+) -> Result<String, String> {
     let mut choices = vec![current.to_string()];
-    for model in models {
-        if !choices.contains(model) {
-            choices.push(model.clone());
+    for value in values {
+        if !choices.contains(value) {
+            choices.push(value.clone());
         }
     }
-    for (index, model) in choices.iter().enumerate() {
-        eprintln!("{:>3}. {model}", index + 1);
+    for (index, value) in choices.iter().enumerate() {
+        eprintln!("{:>3}. {value}", index + 1);
     }
     let selected = input
-        .read_line("model number or id> ")?
-        .ok_or("model selection ended")?;
+        .read_line(&format!("{label} number or name> "))?
+        .ok_or_else(|| format!("{label} selection ended"))?;
     if let Ok(index) = selected.trim().parse::<usize>()
-        && let Some(model) = choices.get(index.saturating_sub(1))
+        && let Some(value) = choices.get(index.saturating_sub(1))
     {
-        return Ok(model.clone());
+        return Ok(value.clone());
     }
     Ok(selected.trim().to_string())
 }
