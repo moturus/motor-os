@@ -963,6 +963,10 @@ An integration test with no program binaries needs only the test-profile
 closure.
 `build` and `test` no longer use the separate selected-package rustc path;
 the remaining direct root compiler handles `check` targets.
+The check planner represents selected libraries, binaries, and enabled test
+harnesses with distinct check modes. It gives integration checks test-profile
+library dependencies without program-artifact edges. Dependency libraries
+remain full-compilation units while check execution moves to the DAG.
 Until example targets are implemented, `check --examples` fails explicitly
 instead of succeeding without checking a target.
 

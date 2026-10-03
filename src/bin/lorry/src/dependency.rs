@@ -159,6 +159,7 @@ impl PreparedGraph {
                 selected,
                 integration_name,
                 options.panic_abort,
+                true,
             )?;
         } else if options.test_profile {
             graph = graph.with_profile(ProfileContext::Test, options.panic_abort);
@@ -1054,7 +1055,10 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{ProfileContext, UnitEdgeKind, UnitKind};
+    use crate::unit::{
+        CheckTargetSelection, ProfileContext, UnitEdgeKind, UnitKind, UnitMode,
+        plan_dependency_units, selected_check_units,
+    };
     use semver::Version;
     use serde_json::Value;
     use std::fs;
@@ -1477,6 +1481,48 @@ mod tests {
                 .map(lorry_node)
                 .collect()
         );
+
+        let mut dependency_manifests = manifests.clone();
+        dependency_manifests.remove(&library.package);
+        let check_graph = selected_check_units(
+            &graph.resolution,
+            &dependency_manifests,
+            &manifest,
+            &CheckTargetSelection {
+                normal: false,
+                binaries: false,
+                binary_name: None,
+                harnesses: false,
+                integrations: true,
+                integration_name: Some("integration"),
+            },
+            options.panic_abort,
+        )
+        .unwrap();
+        let check_plan = plan_dependency_units(&check_graph, &manifests, &options).unwrap();
+        assert!(
+            check_plan.units.keys().all(|key| {
+                key.package != library.package || key.profile == ProfileContext::Test
+            })
+        );
+        assert!(check_plan.units.keys().any(|key| {
+            key.kind == UnitKind::IntegrationHarness && key.mode == UnitMode::CheckTest
+        }));
+        assert!(check_plan.units.keys().any(|key| {
+            key.kind == UnitKind::Library
+                && key.package == library.package
+                && key.mode == UnitMode::Check
+        }));
+        assert!(
+            !check_plan
+                .units
+                .keys()
+                .any(|key| key.kind == UnitKind::Binary)
+        );
+        assert!(check_plan.units.values().any(|unit| {
+            unit.unit.key.kind == UnitKind::IntegrationHarness
+                && unit.settings.mode == crate::identity::CargoCompileMode::Check { test: true }
+        }));
 
         fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
         let library_only = Manifest::load(&fixture.0).unwrap();

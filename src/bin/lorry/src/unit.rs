@@ -141,6 +141,35 @@ impl UnitGraph {
         self.order = topological_order(&self.units)?;
         Ok(())
     }
+
+    fn with_selected_check_mode(mut self, selected: &PackageKey) -> Result<Self> {
+        let rekey = |mut key: UnitKey| {
+            if &key.package == selected {
+                key.mode = if key.mode == UnitMode::Test {
+                    UnitMode::CheckTest
+                } else {
+                    UnitMode::Check
+                };
+            }
+            key
+        };
+        let mut units = BTreeMap::new();
+        for (_, mut unit) in std::mem::take(&mut self.units) {
+            unit.key = rekey(unit.key);
+            unit.dependencies = unit
+                .dependencies
+                .into_iter()
+                .map(|mut edge| {
+                    edge.unit = rekey(edge.unit);
+                    edge
+                })
+                .collect();
+            units.insert(unit.key.clone(), unit);
+        }
+        self.units = units;
+        self.order = topological_order(&self.units)?;
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -306,6 +335,69 @@ pub struct PlanOptions<'a> {
     /// explicit Motor target identity here.
     pub logical_target: Option<&'a str>,
     pub rustflags: &'a [String],
+}
+
+pub struct CheckTargetSelection<'a> {
+    pub normal: bool,
+    pub binaries: bool,
+    pub binary_name: Option<&'a str>,
+    pub harnesses: bool,
+    pub integrations: bool,
+    pub integration_name: Option<&'a str>,
+}
+
+pub fn selected_check_units(
+    resolution: &Resolution,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    selected: &Manifest,
+    selection: &CheckTargetSelection<'_>,
+    panic_abort: bool,
+) -> Result<UnitGraph> {
+    let package = selected_library_key(selected)?.package;
+    let mut normal = if selection.normal {
+        let mut graph = dependency_units(resolution, manifests)?;
+        if selected.library.is_some() {
+            add_selected_library(&mut graph, resolution, manifests, selected)?;
+        }
+        if selection.binaries {
+            add_selected_binaries(
+                &mut graph,
+                resolution,
+                manifests,
+                selected,
+                selection.binary_name,
+            )?;
+        }
+        graph.with_selected_check_mode(&package)?
+    } else {
+        UnitGraph {
+            units: BTreeMap::new(),
+            order: Vec::new(),
+        }
+    };
+    if selection.harnesses || selection.integrations {
+        let mut test = dependency_units(resolution, manifests)?;
+        if selected.library.is_some() {
+            add_selected_library(&mut test, resolution, manifests, selected)?;
+        }
+        if selection.harnesses {
+            add_selected_harnesses(&mut test, resolution, manifests, selected)?;
+        }
+        test = test.with_profile(ProfileContext::Test, panic_abort);
+        if selection.integrations {
+            add_selected_integration_harnesses(
+                &mut test,
+                resolution,
+                manifests,
+                selected,
+                selection.integration_name,
+                panic_abort,
+                false,
+            )?;
+        }
+        normal.merge(test.with_selected_check_mode(&package)?)?;
+    }
+    Ok(normal)
 }
 
 pub fn dependency_units(
@@ -586,6 +678,7 @@ pub fn add_selected_integration_harnesses(
     manifest: &Manifest,
     selected_name: Option<&str>,
     panic_abort: bool,
+    program_artifacts: bool,
 ) -> Result<Vec<UnitKey>> {
     let library = manifest
         .library
@@ -615,17 +708,19 @@ pub fn add_selected_integration_harnesses(
                 manifest.library.as_ref().map(|target| target.name.clone()),
             )?;
         }
-        for binary in &manifest.binaries {
-            let mut program = selected_library_key(manifest)?;
-            program.kind = UnitKind::Binary;
-            program.target = Some(binary.name.clone());
-            add_edge(
-                &mut graph.units,
-                &key,
-                program,
-                UnitEdgeKind::ArtifactDependency,
-                Some(binary.name.clone()),
-            )?;
+        if program_artifacts {
+            for binary in &manifest.binaries {
+                let mut program = selected_library_key(manifest)?;
+                program.kind = UnitKind::Binary;
+                program.target = Some(binary.name.clone());
+                add_edge(
+                    &mut graph.units,
+                    &key,
+                    program,
+                    UnitEdgeKind::ArtifactDependency,
+                    Some(binary.name.clone()),
+                )?;
+            }
         }
         harnesses.push(key);
     }
