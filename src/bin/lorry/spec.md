@@ -86,6 +86,10 @@ target, profile, native-tool, and host inputs:
   supported.
 - Native-Motor Lorry and Linux-to-Motor Lorry builds must match.
 
+The paired Cargo identity fixture covers a selected workspace member with a
+path dependency, its library and binary, and its library, binary, and
+integration-test harnesses and program.
+
 The sole supported metadata compatibility family is Cargo 1.99, selected by
 the current Motor Rust toolchain. Lorry must infer it from a Rust 1.99
 compiler, accept `cargo-compat-version = "1.99"` for an equivalent custom or

@@ -37,19 +37,16 @@ fail() {
 
 compare_workspace_harnesses() {
     local lorry_root="$1" cargo_root="$2" label="$3" name lorry_file cargo_file
-    local -a lorry_names cargo_names
-    mapfile -t lorry_names < <(find "$lorry_root" -type f -perm -111 \
-        -name 'app-*' -printf '%f\n' | sort)
+    local -a cargo_names
     mapfile -t cargo_names < <(find "$cargo_root" -type f -perm -111 \
-        -name 'app-*' -printf '%f\n' | sort)
-    [ "${#lorry_names[@]}" -eq 2 ] || fail "$label selected member harnesses are absent"
-    [ "${lorry_names[*]}" = "${cargo_names[*]}" ] ||
-        fail "$label selected member harness identities differ from Cargo"
-    for name in "${lorry_names[@]}"; do
+        ! -name app -printf '%f\n' | sort)
+    [ "${#cargo_names[@]}" -eq 3 ] || fail "$label Cargo harnesses are absent"
+    for name in "${cargo_names[@]}"; do
         lorry_file="$(find "$lorry_root" -type f -name "$name" -print -quit)"
         cargo_file="$(find "$cargo_root" -type f -name "$name" -print -quit)"
+        [ -n "$lorry_file" ] || fail "$label selected harness '$name' is absent"
         cmp "$lorry_file" "$cargo_file" ||
-            fail "$label selected member harness '$name' differs from Cargo"
+            fail "$label selected harness '$name' differs from Cargo"
     done
 }
 
@@ -132,6 +129,9 @@ cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
 compare_workspace_harnesses \
     "$WORKSPACE/target/lorry/packages/app/release/build/app" \
     "$WORK/cargo-workspace-native-test/release/build/app" native
+cmp "$WORKSPACE/target/lorry/packages/app/release/app" \
+    "$WORK/cargo-workspace-native-test/release/app" ||
+    fail "native integration-test program differs from Cargo"
 
 echo "== Comparing native dev panic-abort artifacts with Cargo =="
 (
@@ -217,6 +217,9 @@ cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
 compare_workspace_harnesses \
     "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/build/app" \
     "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/build/app" Motor
+cmp "$WORKSPACE/target/lorry/packages/app/$MOTOR_TARGET/release/app" \
+    "$WORK/cargo-workspace-motor-test/$MOTOR_TARGET/release/app" ||
+    fail "Motor integration-test program differs from Cargo"
 
 echo "== Cleaning the package-independent global Lorry cache =="
 [ -d "$GLOBAL_CACHE/v1/units/sha256" ] ||
