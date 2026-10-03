@@ -429,6 +429,11 @@ impl Runtime {
         observer.event(Event::Notice(format!("provider: {name}")))
     }
 
+    pub fn save_default_selection(&self) -> Result<(), String> {
+        crate::provider_choice::ProviderChoice::new(&self.provider_name, &self.model)?
+            .save_default()
+    }
+
     pub fn set_name(&mut self, name: &str) -> Result<(), String> {
         self.session.set_name(name)?;
         Ok(())

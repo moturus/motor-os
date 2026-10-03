@@ -13,6 +13,7 @@ use gears::net::motor_curl::MotorCurl as HttpBackend;
 use gears::provider::{
     ApiKey, Endpoint, EventSink, KEY_ENV, Message, OpenAiCompat, Provider, Request, StreamEvent,
 };
+use gears::provider_choice::ProviderChoice;
 use gears::run_lock::DirectoryLock;
 use gears::runtime::{ProviderFactory, Runtime};
 use gears::session::{Session, Store};
@@ -71,6 +72,13 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     // SAFETY: startup has not spawned any threads; descendants inherit this
     // owner so nested Gears can verify and use its ancestor's lock.
     unsafe { directory_lock.export_owner() };
+    let choice = match ProviderChoice::load_default() {
+        Ok(choice) => choice,
+        Err(error) => {
+            diagnostic(&format!("provider choice: {error}"));
+            return ExitCode::FAILURE;
+        }
+    };
     if let Some(path) = args.log_file.as_deref().or(config.log_file.as_deref()) {
         match gears::trace::Tracer::to_file(path, config.log_level) {
             Ok(tracer) => gears::trace::init(tracer),
@@ -91,8 +99,8 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
         );
     }
     let result = match args.action {
-        Action::Ask => ask(&args, &config, key_from_env),
-        Action::Run => agent(&args, &config, key_from_env),
+        Action::Ask => ask(&args, &config, choice.as_ref(), key_from_env),
+        Action::Run => agent(&args, &config, choice.as_ref(), key_from_env),
         Action::Version | Action::Help => unreachable!(),
     };
     match result {
@@ -105,7 +113,12 @@ fn run(args: Args, key_from_env: Option<String>) -> ExitCode {
     }
 }
 
-fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
+fn agent(
+    args: &Args,
+    config: &Config,
+    choice: Option<&ProviderChoice>,
+    key_from_env: Option<String>,
+) -> Result<(), String> {
     let workspace = args.workspace.clone().map_or_else(
         || std::env::current_dir().map_err(|error| format!("current directory: {error}")),
         Ok,
@@ -123,6 +136,7 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
         .provider
         .clone()
         .or_else(|| session.provider())
+        .or_else(|| choice.map(|choice| choice.provider.clone()))
         .unwrap_or_else(|| config.default_provider.clone());
     let selected_provider = config
         .provider(&provider_name)
@@ -137,6 +151,11 @@ fn agent(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(
         .model
         .clone()
         .or_else(|| session.model())
+        .or_else(|| {
+            choice
+                .filter(|choice| choice.provider == provider_name)
+                .map(|choice| choice.model.clone())
+        })
         .or_else(|| config.default_model.clone())
         .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
@@ -190,11 +209,28 @@ fn open_session(store: &Store, args: &Args) -> Result<Session, String> {
     }
 }
 
-fn ask(args: &Args, config: &Config, key_from_env: Option<String>) -> Result<(), String> {
-    let selected_provider = selected_provider(args, config)?;
+fn ask(
+    args: &Args,
+    config: &Config,
+    choice: Option<&ProviderChoice>,
+    key_from_env: Option<String>,
+) -> Result<(), String> {
+    let provider_name = args
+        .provider
+        .as_deref()
+        .or_else(|| choice.map(|choice| choice.provider.as_str()))
+        .unwrap_or(&config.default_provider);
+    let selected_provider = config
+        .provider(provider_name)
+        .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
     let model = args
         .model
         .clone()
+        .or_else(|| {
+            choice
+                .filter(|choice| choice.provider == provider_name)
+                .map(|choice| choice.model.clone())
+        })
         .or_else(|| config.default_model.clone())
         .or_else(|| selected_provider.model.clone())
         .or_else(|| config.models.first().cloned())
@@ -231,13 +267,6 @@ impl EventSink for AskSink {
             }
         }
     }
-}
-
-fn selected_provider(args: &Args, config: &Config) -> Result<NamedProvider, String> {
-    let name = args.provider.as_deref().unwrap_or(&config.default_provider);
-    config
-        .provider(name)
-        .ok_or_else(|| format!("unknown provider {name:?}"))
 }
 
 fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<ApiKey, String> {

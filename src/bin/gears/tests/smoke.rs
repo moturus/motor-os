@@ -297,6 +297,60 @@ fn line_command_switches_provider_before_the_next_turn() {
 }
 
 #[test]
+fn line_commands_save_provider_and_model_defaults() {
+    let root = fixture("saved-provider-choice");
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let local = MockServer::start_one(sse_response(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"saved choice"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ]))
+    .unwrap();
+    let remote = MockServer::start_one(sse_response(&[])).unwrap();
+    let config = root.join("custom-config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\ndefault_provider = 'remote'\ndefault_model = 'old/model'\n[net]\negress_allowlist = ['127.0.0.1']\nplain_http_allowlist = ['127.0.0.1']\n[providers.local]\nbase_url = '{}'\n[providers.remote]\nbase_url = '{}'\n",
+            local.url("/v1"),
+            remote.url("/v1")
+        ),
+    )
+    .unwrap();
+    let mut child = gears(&root, &workspace, &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"/provider local --default\n/model chosen/model --default\n/quit\n")
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(root.join(".gears/provider.toml").exists());
+
+    let output = gears(&root, &workspace, &config)
+        .args(["-p", "hello"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("saved choice"));
+    let requests = local.requests();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "chosen/model");
+    assert!(remote.requests().is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unattended_sh_is_denied_and_the_turn_continues() {
     let root = fixture("deny");
     let workspace = root.join("workspace");

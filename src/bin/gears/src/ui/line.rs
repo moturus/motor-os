@@ -169,21 +169,35 @@ fn command(
             Ok(Command::Continue)
         }
         "model" => {
+            let (argument, save_default) = super::selection_and_default(argument);
             let model = if argument.is_empty() {
                 choose_model(runtime.model(), models, input)?
             } else {
                 argument.to_string()
             };
             runtime.set_model(model, renderer)?;
+            if save_default {
+                runtime.save_default_selection()?;
+                renderer.event(Event::Notice(
+                    "saved provider and model defaults".to_string(),
+                ))?;
+            }
             Ok(Command::Continue)
         }
         "provider" => {
+            let (argument, save_default) = super::selection_and_default(argument);
             let provider = if argument.is_empty() {
                 choose_named(runtime.provider_name(), providers, input, "provider")?
             } else {
                 argument.to_string()
             };
             runtime.set_provider(&provider, renderer)?;
+            if save_default {
+                runtime.save_default_selection()?;
+                renderer.event(Event::Notice(
+                    "saved provider and model defaults".to_string(),
+                ))?;
+            }
             Ok(Command::Continue)
         }
         "" => Ok(Command::Continue),

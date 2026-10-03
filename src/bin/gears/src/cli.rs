@@ -29,6 +29,7 @@ Options:
 
 Interactive commands include /new, /resume, /name, /session, /tree, /label,
 /fork, /clone, /compact, /provider, /model, /status, /help, and /quit.
+Use /provider NAME --default or /model ID --default to save both defaults.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

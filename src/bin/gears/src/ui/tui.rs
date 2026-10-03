@@ -980,6 +980,7 @@ fn handle_command(
             )?;
         }
         "model" => {
+            let (argument, save_default) = super::selection_and_default(argument);
             let model = if argument.is_empty() {
                 let mut choices = vec![runtime.model().to_string()];
                 for model in models {
@@ -994,8 +995,17 @@ fn handle_command(
                 argument.to_string()
             };
             runtime.set_model(model, &mut AppObserver(app))?;
+            if save_default {
+                runtime.save_default_selection()?;
+                app.push(
+                    Kind::Notice,
+                    "saved provider and model defaults".to_string(),
+                    false,
+                );
+            }
         }
         "provider" => {
+            let (argument, save_default) = super::selection_and_default(argument);
             let provider = if argument.is_empty() {
                 let mut choices = vec![runtime.provider_name().to_string()];
                 for provider in providers {
@@ -1010,6 +1020,14 @@ fn handle_command(
                 argument.to_string()
             };
             runtime.set_provider(&provider, &mut AppObserver(app))?;
+            if save_default {
+                runtime.save_default_selection()?;
+                app.push(
+                    Kind::Notice,
+                    "saved provider and model defaults".to_string(),
+                    false,
+                );
+            }
         }
         "" => {}
         other => return Err(format!("unknown command /{other}")),
