@@ -926,6 +926,8 @@ Each unit key carries its normal or test profile context. Test plans rekey
 units and dependency edges only where their effective panic profile differs,
 so normal and test plans share host tools and build-script runs while a build
 can name separate abort-profile and unwind-profile target libraries.
+Equivalent units from those contexts merge into one dependency DAG; conflicting
+edges for the same unit key are rejected.
 
 For `build`, the selected package's library is compiled on the same unit DAG
 and executor as its normal dependencies. Its dependency edges retain the

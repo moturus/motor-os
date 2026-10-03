@@ -113,6 +113,23 @@ impl UnitGraph {
         self.units = units;
         self
     }
+
+    pub fn merge(&mut self, other: Self) -> Result<()> {
+        for (key, unit) in other.units {
+            if let Some(existing) = self.units.get(&key) {
+                if existing != &unit {
+                    return Err(Error::failure(format!(
+                        "unit graph has conflicting dependencies for `{} {}` {:?}",
+                        key.package.name, key.package.version, key.kind
+                    )));
+                }
+            } else {
+                self.units.insert(key, unit);
+            }
+        }
+        self.order = topological_order(&self.units)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1355,6 +1372,27 @@ mod tests {
             normal_plan.units[&selected].identity,
             test_plan.units[&test_key].identity
         );
+        let mut merged = graph.clone();
+        merged.merge(test_graph).unwrap();
+        assert_eq!(merged.units.len(), graph.units.len() * 2);
+        assert!(merged.units.contains_key(&selected));
+        assert!(merged.units.contains_key(&test_key));
+        let test_dependency = &merged.units[&test_key]
+            .dependencies
+            .iter()
+            .next()
+            .unwrap()
+            .unit;
+        assert_eq!(test_dependency.profile, ProfileContext::Test);
+        assert!(
+            merged.order.iter().position(|key| key == test_dependency)
+                < merged.order.iter().position(|key| key == &test_key)
+        );
+        let mut equivalent = graph.clone();
+        equivalent
+            .merge(graph.clone().with_profile(ProfileContext::Test, false))
+            .unwrap();
+        assert_eq!(equivalent, graph);
         let invocation = dependency_rustc_invocation(
             &plan,
             &manifests,
