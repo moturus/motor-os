@@ -91,6 +91,9 @@ fn run() -> Result<(), String> {
     interrupted.kill().map_err(|error| error.to_string())?;
     interrupted.wait().map_err(|error| error.to_string())?;
     drop(interrupted);
+    if abandoned_staging_count(&root)? == 0 {
+        return Err("killed compiler left no staging to recover".to_owned());
+    }
     fs::remove_file(root.join("block")).map_err(|error| error.to_string())?;
     let mut recovery = build().spawn().map_err(|error| error.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -110,9 +113,29 @@ fn run() -> Result<(), String> {
     if !output.status.success() || output.stdout != b"recovered\n" {
         return Err("recovered executable did not reflect the source edit".to_owned());
     }
+    if abandoned_staging_count(&root)? != 0 {
+        return Err("recovery left the killed compiler's staging behind".to_owned());
+    }
     verify_held_owner(&root, &build, &source)?;
     println!("PASS: Motor waited for killed and held compiler children before recovery");
     Ok(())
+}
+
+fn abandoned_staging_count(root: &Path) -> Result<usize, String> {
+    let parent = root.join("target/lorry/debug/build/cancel-probe-fixture");
+    fs::read_dir(parent)
+        .map_err(|error| error.to_string())?
+        .map(|entry| {
+            entry.map_err(|error| error.to_string()).map(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".lorry-staging-")
+            })
+        })
+        .try_fold(0, |count, matched| {
+            matched.map(|matched| count + usize::from(matched))
+        })
 }
 
 fn process_alive(pid: u32) -> Result<bool, String> {
