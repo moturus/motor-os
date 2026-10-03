@@ -9,6 +9,7 @@
 use crate::net::sse::{SseEvent, SseSink};
 use crate::net::{HttpClient, HttpRequest, NetError, ResponseHead, Timeouts, Url};
 use crate::trace::{self, Level};
+use sha2::{Digest, Sha256};
 
 use super::assembler::DeltaAssembler;
 use super::wire::{ApiError, StreamChunk};
@@ -36,6 +37,7 @@ pub struct Quirks {
     pub reports_cost: bool,
     /// Echo plaintext assistant reasoning in later requests.
     pub reasoning_echo: bool,
+    pub prompt_cache_key: bool,
 }
 
 impl Quirks {
@@ -48,11 +50,13 @@ impl Quirks {
                 usage: UsageStyle::Include,
                 reports_cost: true,
                 reasoning_echo: true,
+                prompt_cache_key: true,
             },
             _ => Quirks {
                 usage: UsageStyle::StreamOptions,
                 reports_cost: false,
                 reasoning_echo: false,
+                prompt_cache_key: false,
             },
         }
     }
@@ -108,16 +112,19 @@ pub struct OpenAiCompat<C> {
     key_env: Option<String>,
     extra_headers: Vec<(String, String)>,
     timeouts: Timeouts,
+    cache_identity: String,
 }
 
 impl<C: HttpClient> OpenAiCompat<C> {
     pub fn new(http: C, endpoint: Endpoint) -> OpenAiCompat<C> {
+        let cache_identity = endpoint.url.as_str().to_string();
         OpenAiCompat {
             http,
             endpoint,
             key_env: Some(KEY_ENV.to_string()),
             extra_headers: Vec::new(),
             timeouts: Timeouts::default(),
+            cache_identity,
         }
     }
 
@@ -140,6 +147,11 @@ impl<C: HttpClient> OpenAiCompat<C> {
 
     pub fn with_timeouts(mut self, timeouts: Timeouts) -> OpenAiCompat<C> {
         self.timeouts = timeouts;
+        self
+    }
+
+    pub fn with_cache_identity(mut self, identity: &str) -> OpenAiCompat<C> {
+        self.cache_identity = identity.to_string();
         self
     }
 
@@ -175,7 +187,7 @@ impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
         req: &Request,
         sink: &mut dyn EventSink,
     ) -> Result<Completion, ProviderError> {
-        let body = build_body(req, self.endpoint.quirks)?;
+        let body = build_body(req, self.endpoint.quirks, &self.cache_identity)?;
         trace::log(
             Level::Debug,
             &format!(
@@ -266,7 +278,11 @@ impl<C: HttpClient + Send + Sync> Provider for OpenAiCompat<C> {
 
 /// Serialize the request and add what the endpoint needs on top: streaming,
 /// always, and its usage knob unless the caller set one itself.
-fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
+fn build_body(
+    req: &Request,
+    quirks: Quirks,
+    cache_identity: &str,
+) -> Result<Vec<u8>, ProviderError> {
     let mut messages = Vec::new();
     if !req.system.is_empty() {
         messages.push(serde_json::json!({
@@ -294,6 +310,22 @@ fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
     let mut object = serde_json::Map::new();
     object.insert("model".to_string(), serde_json::json!(req.model));
     object.insert("messages".to_string(), serde_json::Value::Array(messages));
+    if quirks.prompt_cache_key {
+        // Keep routing stable as the tail grows, but separate a changed
+        // opening prompt, model, or selected provider.
+        let start = serde_json::to_vec(&(
+            cache_identity,
+            &req.model,
+            &req.system,
+            req.messages.first(),
+        ))
+        .map_err(|e| ProviderError::Protocol(format!("cannot hash prompt start: {e}")))?;
+        let digest = Sha256::digest(start);
+        object.insert(
+            "prompt_cache_key".to_string(),
+            serde_json::Value::String(format!("gears-{}", hex_prefix(&digest[..16]))),
+        );
+    }
     if !tools.is_empty() {
         object.insert("tools".to_string(), serde_json::Value::Array(tools));
     }
@@ -308,6 +340,15 @@ fn build_body(req: &Request, quirks: Quirks) -> Result<Vec<u8>, ProviderError> {
     object.entry(name.to_string()).or_insert(knob);
     serde_json::to_vec(&object)
         .map_err(|e| ProviderError::Protocol(format!("cannot serialize the request: {e}")))
+}
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 fn wire_messages(
@@ -446,7 +487,7 @@ mod tests {
     }
 
     fn body(req: &Request, quirks: Quirks) -> Value {
-        serde_json::from_slice(&build_body(req, quirks).unwrap()).unwrap()
+        serde_json::from_slice(&build_body(req, quirks, "default").unwrap()).unwrap()
     }
 
     fn request() -> Request {
@@ -502,6 +543,7 @@ mod tests {
         assert_eq!(openrouter.usage, UsageStyle::Include);
         assert!(openrouter.reports_cost);
         assert!(openrouter.reasoning_echo);
+        assert!(openrouter.prompt_cache_key);
 
         // Anything else gets the generic dialect: usable, just untested.
         let other = Endpoint::new("https://router.huggingface.co/v1")
@@ -510,6 +552,7 @@ mod tests {
         assert_eq!(other.usage, UsageStyle::StreamOptions);
         assert!(!other.reports_cost);
         assert!(!other.reasoning_echo);
+        assert!(!other.prompt_cache_key);
         assert!(
             !Endpoint::openrouter()
                 .with_reasoning_echo(Some(false))
@@ -556,6 +599,39 @@ mod tests {
         assert_eq!(openrouter["messages"][1]["reasoning"], "thought");
         let generic = body(&req, Quirks::for_host("elsewhere.test"));
         assert!(generic["messages"][1].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn cache_key_tracks_the_opening_prompt_and_selected_provider() {
+        let quirks = Quirks::for_host("openrouter.ai");
+        let first = request().with_system(vec!["instructions".into()]);
+        let mut continued = first.clone();
+        continued.messages.push(Message::assistant("answer"));
+        continued.messages.push(Message::user("follow up"));
+        let key = body(&first, quirks)["prompt_cache_key"].clone();
+        assert_eq!(body(&continued, quirks)["prompt_cache_key"], key);
+        assert_ne!(
+            body(&request().with_system(vec!["different".into()]), quirks)["prompt_cache_key"],
+            key
+        );
+        assert_ne!(
+            body(
+                &Request::new("other-model", first.messages.clone()).with_system(first.system),
+                quirks
+            )["prompt_cache_key"],
+            key
+        );
+        let second_provider: Value =
+            serde_json::from_slice(&build_body(&request(), quirks, "second").unwrap()).unwrap();
+        assert_ne!(
+            second_provider["prompt_cache_key"],
+            body(&request(), quirks)["prompt_cache_key"]
+        );
+        assert!(
+            body(&request(), Quirks::for_host("elsewhere.test"))
+                .get("prompt_cache_key")
+                .is_none()
+        );
     }
 
     #[test]

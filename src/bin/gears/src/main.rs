@@ -142,8 +142,13 @@ fn agent(
         .provider(&provider_name)
         .ok_or_else(|| format!("unknown provider {provider_name:?}"))?;
     let key = load_key(&selected_provider, key_from_env.clone())?;
-    let provider: Arc<dyn Provider> =
-        Arc::new(connect(config, &selected_provider, &key, args.verbosity)?);
+    let provider: Arc<dyn Provider> = Arc::new(connect(
+        config,
+        &provider_name,
+        &selected_provider,
+        &key,
+        args.verbosity,
+    )?);
     if session.provider().as_deref() != Some(&provider_name) {
         session.set_provider(&provider_name)?;
     }
@@ -168,7 +173,10 @@ fn agent(
             .provider(name)
             .ok_or_else(|| format!("unknown provider {name:?}"))?;
         let key = load_key(&selected, key_from_env.clone())?;
-        Ok(Arc::new(connect(&factory_config, &selected, &key, verbosity)?) as Arc<dyn Provider>)
+        Ok(
+            Arc::new(connect(&factory_config, name, &selected, &key, verbosity)?)
+                as Arc<dyn Provider>,
+        )
     });
     runtime.install_provider_factory(factory);
     let mut provider_names = vec!["default".to_string()];
@@ -236,7 +244,13 @@ fn ask(
         .or_else(|| config.models.first().cloned())
         .ok_or("gears ask needs a model; use --model or provider.model in the config")?;
     let key = load_key(&selected_provider, key_from_env)?;
-    let provider = connect(config, &selected_provider, &key, args.verbosity)?;
+    let provider = connect(
+        config,
+        provider_name,
+        &selected_provider,
+        &key,
+        args.verbosity,
+    )?;
     let request = Request::new(
         model,
         vec![Message::user(
@@ -284,6 +298,7 @@ fn load_key(provider: &NamedProvider, from_env: Option<String>) -> Result<ApiKey
 
 fn connect(
     config: &Config,
+    provider_name: &str,
     provider: &NamedProvider,
     key: &ApiKey,
     verbosity: u8,
@@ -301,7 +316,7 @@ fn connect(
     let endpoint = Endpoint::new(&provider.base_url)
         .map_err(|error| error.to_string())?
         .with_reasoning_echo(provider.reasoning_echo);
-    Ok(OpenAiCompat::new(http, endpoint))
+    Ok(OpenAiCompat::new(http, endpoint).with_cache_identity(provider_name))
 }
 
 fn diagnostic(message: &str) {
