@@ -1,8 +1,14 @@
 # Lorry workspace support
 
-Status: v3 proposal, updated after review on 2026-10-02. This revises the
-committed v3 (`3c90c8cf`). The only code changes so far are three fixes that
-are already committed (early fixes 1, 2, and 4 in the details file).
+Status: implementation in progress. This plan was updated after review on
+2026-10-02 and revises the committed v3 (`3c90c8cf`).
+
+The four first patches are committed. Milestone 1 has moved the selected
+library, binaries, and library/binary test harnesses onto the dependency
+planner and executor. The workspace path rule and a selected `build` graph
+oracle are in place. Selected integration tests and `check` targets still use
+their separate root compilation paths; the complete milestone gate remains
+to be run after those paths move.
 
 [workspace-plan-details.md](workspace-plan-details.md) is the reference. It
 has the evidence, the contract of each milestone, the list of defects, the
