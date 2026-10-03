@@ -490,6 +490,62 @@ esac
 }
 
 #[test]
+fn failed_tool_notice_keeps_the_executed_hook_result() {
+    let fixture = Fixture::new("hook-notice-error");
+    let hook = fixture.root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        r#"#!/bin/sh
+event=$(cat)
+case "$event" in
+  *'"event":"initialize"'*)
+    printf '%s' '{"tools":[{"name":"echo_hook","description":"fixture","parameters":{"type":"object"}}]}'
+    ;;
+  *'"event":"permission"'*)
+    printf '%s' '{"decision":"allow"}'
+    ;;
+  *'"event":"tool_execute"'*)
+    printf '%s' '{"tool_result":{"content":"executed once","is_error":false},"notice":"finished"}'
+    ;;
+  *) printf '%s' '{}';;
+esac
+"#,
+    )
+    .unwrap();
+    let mut config = Config::default();
+    config.hooks.push(HookConfig {
+        name: "fixture".to_string(),
+        command: vec!["sh".to_string(), hook.display().to_string()],
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 4096,
+    });
+    let mut runtime = fixture.runtime(Scripted::new(vec![tool("echo_hook", "{}")]), &config);
+    let error = runtime
+        .turn("go".to_string(), &mut UnexpectedApproval, &mut |event| {
+            if matches!(event, Event::Notice(ref message) if message.contains("finished")) {
+                Err("notice display failed".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(error.contains("notice display failed"));
+    let context = runtime.session().context_messages().unwrap();
+    assert!(
+        context
+            .iter()
+            .any(|message| message.text_content() == "executed once")
+    );
+    assert_eq!(
+        context
+            .iter()
+            .filter(|message| message.role == gears::provider::Role::Tool)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn manual_compaction_appends_a_checkpoint_without_deleting_history() {
     let fixture = Fixture::new("compact");
     let provider = Scripted::new(vec![

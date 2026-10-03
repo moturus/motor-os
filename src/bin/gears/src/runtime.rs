@@ -569,6 +569,7 @@ impl Runtime {
             )?;
             return Err(error);
         }
+        let mut post_error = None;
         let (result, outcome) = if !allowed {
             (
                 ToolResult {
@@ -587,7 +588,9 @@ impl Runtime {
                 &self.cancellation,
                 &mut |notice| notices.push(notice),
             );
-            emit_notices(observer, notices)?;
+            if let Err(error) = emit_notices(observer, notices) {
+                post_error.get_or_insert(error);
+            }
             let outcome = if self.cancellation.cancelled() {
                 ToolOutcome::InterruptedUnknown
             } else {
@@ -609,7 +612,6 @@ impl Runtime {
                 ToolOutcome::NotStarted,
             )
         };
-        let mut post_error = None;
         let result = if self.cancellation.cancelled() {
             result
         } else {
@@ -622,12 +624,12 @@ impl Runtime {
                 &mut |notice| notices.push(notice),
             );
             if let Err(error) = emit_notices(observer, notices) {
-                post_error = Some(error);
+                post_error.get_or_insert(error);
             }
             match transformed {
                 Ok(transformed) => transformed,
                 Err(error) => {
-                    post_error = Some(error);
+                    post_error.get_or_insert(error);
                     result
                 }
             }
