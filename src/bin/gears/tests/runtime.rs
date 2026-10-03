@@ -350,6 +350,119 @@ fn global_allow_survives_new_sessions_but_not_unattended_calls() {
 }
 
 #[test]
+fn failed_global_grant_write_keeps_the_pending_tool_unapproved() {
+    struct BreakGrantFile(PathBuf);
+    impl Approver for BreakGrantFile {
+        fn approve(&mut self, _request: &Permission) -> Approval {
+            std::fs::create_dir(self.0.join("permissions.toml")).unwrap();
+            Approval::Global
+        }
+    }
+
+    let fixture = Fixture::new("grant-write-failure");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch forbidden"}"#),
+        answer("done"),
+    ]);
+    let global_dir = fixture.root.join("global");
+    std::fs::create_dir(&global_dir).unwrap();
+    let mut runtime = Runtime::new_with_registry_at(
+        provider,
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        global_dir.clone(),
+    )
+    .unwrap();
+    runtime
+        .turn("try".into(), &mut BreakGrantFile(global_dir), &mut |_| {
+            Ok(())
+        })
+        .unwrap();
+    assert!(!fixture.workspace.join("forbidden").exists());
+    assert!(
+        runtime
+            .session()
+            .context_messages()
+            .unwrap()
+            .iter()
+            .any(|message| message.text_content().contains("unsafe state entry"))
+    );
+}
+
+#[test]
+fn global_denial_persists_and_refuses_later_attended_calls() {
+    let fixture = Fixture::new("global-denial");
+    let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
+    let session = store.create(false, None).unwrap();
+    let config = Config {
+        tools: vec![ToolDirectory {
+            directory: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/sh"),
+            enabled: true,
+        }],
+        ..Config::default()
+    };
+    let registry = Registry::load_config(&config).unwrap();
+    let provider = Scripted::new(vec![
+        tool("sh", r#"{"command":"touch first"}"#),
+        answer("done"),
+        tool("sh", r#"{"command":"touch second"}"#),
+        answer("done"),
+    ]);
+    let global_dir = fixture.root.join("global");
+    let mut runtime = Runtime::new_with_registry_at(
+        provider,
+        store,
+        session,
+        &config,
+        "test/model".into(),
+        registry,
+        global_dir.clone(),
+    )
+    .unwrap();
+    let mut deny = CountingApproval {
+        answer: Approval::DenyGlobal,
+        asked: 0,
+    };
+    runtime
+        .turn("first".into(), &mut deny, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(deny.asked, 1);
+    assert!(
+        !Grants::load(&global_dir)
+            .unwrap()
+            .by_identity
+            .values()
+            .next()
+            .unwrap()
+            .allow
+    );
+    runtime.new_session(false, None).unwrap();
+    let mut allow = CountingApproval {
+        answer: Approval::Once,
+        asked: 0,
+    };
+    runtime
+        .turn("second".into(), &mut allow, &mut |_| Ok(()))
+        .unwrap();
+    assert_eq!(allow.asked, 0);
+    assert!(!fixture.workspace.join("first").exists());
+    assert!(!fixture.workspace.join("second").exists());
+}
+
+#[test]
 fn empty_tool_configuration_is_chat_only() {
     let fixture = Fixture::new("chat-only");
     let store = Store::with_root(&fixture.workspace, fixture.root.join("state")).unwrap();
