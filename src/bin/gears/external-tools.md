@@ -484,6 +484,11 @@ program's default is ten lines; a negative count keeps the program's own
 command is `/system/bin/sysbox head`. It returns bounded stdout as plain text,
 is read-only, and treats exit status zero as normal.
 
+`tail` has the same `path` and optional `lines` mapping, using `tail -n` to
+read the last lines instead. Its fixed commands are `/usr/bin/tail` and
+`/system/bin/sysbox tail`; it does not expose follow mode. It is read-only,
+returns bounded stdout as plain text, and treats exit status zero as normal.
+
 The common commands follow the `ls` pattern, each a manifest naming the
 program's path per platform, a one-line description, typed parameters mapped
 to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
