@@ -26,9 +26,9 @@ The following choices are intentionally part of the review boundary:
 - a process child always starts in the selected workspace, while its package
   remains available through `GEARS_TOOL_DIR`; and
 - saved grants, allow or deny, for a session or globally, are distinct from
-  enablement, cannot override permission hooks, bind to a tool approval
-  identity rather than its name alone, and in unattended runs only the deny
-  grants apply.
+  enablement, bind to a tool approval identity rather than its name alone,
+  and in unattended runs only the deny grants apply. Gears checks them
+  before a hook can authorize the call (batteries plan question 1).
 
 No migration of old session data is required. Existing sessions containing
 historical `sh` calls remain readable provider messages; tool availability for
@@ -38,33 +38,36 @@ entries.
 ## 1. Parse and validate tool directories
 
 - Add a small `tools` module with common package metadata, normalized tool,
-  enablement, approval identity, registry, and a version-1 process-kind type. -
-  Read `gears.toml` from the Gears directory first, `/user/cfg/gears/gears.toml`
-  on Motor OS and `~/.gears/gears.toml` on Linux, falling back to the earlier
-  locations; rename `key_file` to `api_key_file`, still accepting the old name;
-  resolve a relative `api_key_file`, `ca_cert` or tool directory against that
-  directory (batteries plan Q10, 2026-09-29). - Extend config version 1 with
-  ordered `[[tools]]` entries containing a directory, absolute or relative to
-  the Gears directory, and a default `enabled` boolean. - Load `tool.toml`,
+  enablement, approval identity, registry, and a version-1 process-kind type.
+- Read `gears.toml` in its Gears-directory location. Its move, old-location
+  fallback, `api_key_file` alias and relative key/certificate paths belong to
+  batteries phase 2.1, before this phase. Extend config version 1 with ordered
+  `[[tools]]` entries containing a directory, absolute or relative to the
+  Gears directory, and a default `enabled` boolean.
+- Load `tool.toml`,
   `parameters.json`, and optional `prompt.md` without running the tool, applying
   the `[linux]` or `[motor]` overrides of description, parameters, prompt and
   display for the running system. Reject missing/special resource files,
   escaping relative paths, invalid names/schemas/templates, duplicate tool
   names, unsupported versions, unknown kinds and invalid process limits. A tool
   with no command for the running system is kept as "not available here":
-  validated, listed, never sent. - Require `kind = "process"` and keep timeout,
+  validated, listed, never sent.
+- Require `kind = "process"` and keep timeout,
   stdin, output bounds, the `output` mode (`shell` or `stdout`), and command
-  selection under `[process]`; parse the common `parallel_safe` flag, the
-  required `profile` and the `spawn` flag (batteries plan G7, milestone B). Do
-  not place process-only state in the common registry API a future loadable
-  executor would have to imitate. - Resolve a leading `./` program inside the
+  selection under `[process]`; parse the common `read_only` mark and the
+  process's normal exit statuses. A status outside that set, a signal, timeout
+  or failure to start is an execution error; stderr alone is not. Do not put
+  process-only state in the common registry API a future loadable executor
+  would have to imitate.
+- Resolve a leading `./` program inside the
   tool directory, allow an explicit absolute system program, and reject bare
   names so ambient `PATH` cannot silently change execution or approval identity.
-  - Keep parsing and normalization platform-neutral, selecting only the command
+  Resolve the one exception, `gears-batteries`, beside the Gears executable.
+- Keep parsing and normalization platform-neutral, selecting only the command
   vector through `cfg(unix)` / `cfg(not(unix))` so Motor OS remains a
-  first-class build target. - Add unit tests using temporary self-contained tool
-  directories. Do not add a dependency; use the existing `serde`, `serde_json`,
-  and `toml` crates.
+  first-class build target.
+- Add unit tests using temporary self-contained tool directories. Do not add
+  a dependency; use the existing `serde`, `serde_json`, and `toml` crates.
 
 ## 2. Implement the process executor and replace the built-in path
 
@@ -73,9 +76,11 @@ entries.
 - Remove `sh_spec`, `Runtime::execute_sh`, the hard-coded `call.name == "sh"`
   branch, and `runtime.sh_timeout_seconds` after the external `sh` manifest owns
   those settings.
-- Execute an enabled directory tool through the existing bounded process
-  runner. Expand only whole-argument string placeholders, refusing a value that
-  begins with `-` unless a literal `--` precedes it in the vector; optionally
+- Execute an enabled directory tool through the shared bounded process
+  runner. Expand typed string, boolean, integer, enum and list parameters into
+  fixed arguments; the model never supplies a flag vector. Reject a value
+  beginning with `-` unless it is after a literal `--` or exactly matches a
+  manifest `allowed_flags` entry, which is placed before `--`; optionally
   write the exact argument JSON to stdin; set the documented non-secret
   environment, including `GEARS_SESSION_PATH` for a saved session; and remove
   the provider credential. Map the child's streams to the model-facing result
@@ -83,7 +88,7 @@ entries.
 - Set the child working directory to the canonical selected workspace. Resolve
   a leading `./` program against the tool package first and expose the package
   separately as `GEARS_TOOL_DIR`.
-- Preserve separate live stdout/stderr events, exit status, cancellation,
+- Preserve separate live stdout/stderr events, raw exit status, cancellation,
   timeout, process-tree cleanup, result bounds, hook permission decisions, and
   hook result transformations.
 - Reserve every configured directory-tool name while hooks initialize. Reject
@@ -125,19 +130,20 @@ entries.
 
 - Replace the approver's boolean answer with six outcomes: allow once, allow
   for the session, allow globally, deny once, deny for the session, deny
-  globally (decided 2026-09-28, batteries plan Q3). Keep unattended approval
+  globally (batteries phase 3.3). Keep unattended approval
   as deny. A session or global answer in either direction is saved as a grant
   for the tool's approval identity; a saved denial refuses later calls
   without asking, a saved allowance runs them without asking.
 - Grant precedence: a session grant beats a global grant for the same
   identity, and within a scope the latest answer replaces the earlier one.
   In an unattended run (`-p`), deny grants apply and allow grants do not.
-- Preserve the decision order: unknown/disabled rejection, permission hooks,
-  matching grants, then interactive approval. A permission-hook deny or
-  failure must win even when a grant exists; a hook allow needs no grant. Add
-  a fourth hook answer, `confirm`, which asks the attended user even when an
-  allow grant matches, and denies unattended; hooks use it for calls that
-  publish or discard work.
+- Decide in this order: reject unknown/disabled tools; look up saved grants
+  for every call, with a saved denial winning; run permission hooks, whose
+  denial or failure refuses and whose `confirm` asks for fresh attended
+  approval; run when a hook allows; otherwise apply a saved allowance only
+  in an attended run, then ask the attended user or deny. In unattended runs
+  the batteries' hook policy supplies authority. Hooks use `confirm` for
+  calls that publish or discard work (batteries plan question 1).
 - Store session grants and revocations as session-wide append-only entries, not
   active-branch state. Saved sessions retain them across resume, ephemeral
   sessions retain them in memory, and new/forked/cloned sessions do not copy
@@ -155,8 +161,8 @@ entries.
   short fingerprints; retain stale records for diagnosis but never match them
   to a changed identity.
 - Test precedence, persistence, resume, branch changes, fork/clone exclusion,
-  identity changes, revocation, write failure, and the fact that grants never
-  bypass permission hooks.
+  identity changes, revocation, write failure, saved denials before hook
+  allowances, and `confirm` after saved allowances.
 
 ## 5. Expose slash commands and approval choices in both UIs
 
@@ -180,26 +186,29 @@ entries.
 ## 6. Ship optional tool directories for sh, ls and the common commands
 
 - Add `src/bin/gears/tools/sh/` with its manifest and one-string command schema.
-  Select `sh -c` on Linux and `/system/bin/rush -c` on Motor OS. Preserve the
-  exact-command permission display and current timeout/output semantics.
+  Select `bash -c` on Linux and `/system/bin/rush -c` on Motor OS. Preserve the
+  working directory and exported variables between calls on both systems,
+  exact-command permission display, and current timeout/output semantics.
 - Add `src/bin/gears/tools/ls/` with a required path schema and a direct,
-  non-shell `/bin/ls` or `/system/bin/ls` argument vector.
+  non-shell `/bin/ls` or `/system/bin/sysbox ls` argument vector.
 - Add directories for the common commands, each a manifest with the program's
-  path per platform, a one-line description, an argument-vector schema and a
-  timeout (decided 2026-09-28, batteries plan Q3): the read-only `rg`, `head`,
-  `tail`, `diff`, `find`, `wc` and `cat`, marked `parallel_safe` with
-  plain-text output, and `gix`, `lorry`, `cargo` and `sed`, which change or
-  publish things and are never marked `parallel_safe`. A value from the model
-  that starts with `-` is refused unless it follows `--`. Each directory
-  serves both systems (batteries plan Q10, 2026-09-29): where the programs
-  take different arguments, sysbox's `ls`, `find`, `head`, `tail`, `diff`,
+  path per platform, a one-line description, typed parameters written down
+  before building the directory, and a timeout. The read-only `rg`, `head`,
+  `tail`, `diff`, `find`, `wc` and `cat` set `read_only = true`; `gix`, `lorry`,
+  `cargo` and `sed` leave it false. Add `curl` for one HTTP or HTTPS URL,
+  returning a redirect without following it. Each directory serves both
+  systems: where the programs take different arguments, sysbox's `ls`,
+  `find`, `head`, `tail`, `diff`,
   `wc` and `cat` against GNU's, the manifest gives a description and schema
-  per system under `[motor]` and `[linux]`; `gix` and `lorry` have a Motor OS
+  per system under `[motor]` and `[linux]`. Sysbox-backed commands invoke
+  `/system/bin/sysbox COMMAND` directly; VM tests cover spaces and literal
+  glob characters. Linux `find` exposes only name, type and path parameters,
+  since GNU `find -exec` runs programs. `gix` and `lorry` have a Motor OS
   command only, `cargo` a Linux command only, and each is listed as not
   available on the other system. One example configuration lists every
   directory by a path relative to the Gears directory and is used on both
-  systems. The pipeline filters the batteries plan adds to sysbox (`sort`,
-  `uniq`, `cut`, `tr`; step 8a) and `xargs` get no directories: they work
+  systems. The pipeline filters the batteries plan's sysbox track adds
+  (`sort`, `uniq`, `cut`, `tr`) and `xargs` get no directories: they work
   between pipes, which only `sh` has, and `xargs` runs other programs.
 - Update the hermetic mock scenarios and integration fixtures so tests that
   need `sh` explicitly configure its directory. Add a real external-`ls` tool

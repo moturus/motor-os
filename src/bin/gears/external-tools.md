@@ -67,7 +67,9 @@ my_tool/
 path beginning with `./` is resolved inside the tool directory. An absolute
 program path may name a standard system command. Bare program names are
 rejected: tool behavior and approval identity must not depend on an ambient
-`PATH` that can change between invocations.
+`PATH` that can change between invocations. The shipped `gears-batteries`
+program is the one exception: Gears resolves that bare name beside its own
+executable (`/devtools/bin` on Motor OS).
 
 Gears reads tool directories only when they are explicitly listed in its
 configuration. It does not recursively scan a project, download tools, compile
@@ -89,15 +91,14 @@ description = "Describe exactly what the tool does for the model."
 parameters = "parameters.json"
 prompt = "prompt.md"                 # optional
 display = "{path}"                   # optional permission/UI detail
-parallel_safe = false                # optional; true only for read-only tools
-profile = "read"                     # read, write, net, user or user-net
-spawn = false                        # optional; true if it starts programs
+read_only = false                    # optional; true only for read-only tools
 
 [process]
 timeout_seconds = 30                 # optional; default 30
 max_output_bytes = 1048576           # optional; per stream
 stdin = "arguments"                  # optional: arguments or null
 output = "shell"                     # optional: shell or stdout
+normal_exit_statuses = [0]           # optional; statuses that are normal outcomes
 
 [process.command]
 common = ["./run"]
@@ -133,15 +134,9 @@ The fields mean:
   program whose arguments differ between systems, as sysbox's `find` differs
   from GNU `find`, describes each version to the model exactly; a program
   that is the same on both, such as `rg`, needs only the top-level fields.
-- `profile` names the capabilities the tool's process runs with: `read`,
-  `write`, `net`, `user` or `user-net`, defined in the batteries plan (§7,
-  G7). It is required; Gears refuses a manifest without one or with a name
-  it does not know, and the configuration may narrow a profile, never widen
-  it. `CAP_SPAWN` is not part of any profile: `spawn = true` adds it, for a
-  tool that starts other programs, such as a shell or a build tool.
-- `parallel_safe`, when true, declares that the tool only reads, so Gears may
-  run consecutive calls to such tools together (batteries plan G17). A tool
-  that writes, publishes or runs arbitrary commands must leave it false.
+- `read_only`, when true, declares that the tool only reads. The batteries
+  use this mark when recording evidence. Tools still run in request order.
+  A tool that writes, publishes or runs arbitrary commands leaves it false.
 - `process.timeout_seconds` is between 1 and 3600.
 - `process.max_output_bytes` is between 1024 and 16777216 for each output
   stream.
@@ -150,9 +145,11 @@ The fields mean:
   closed stdin.
 - `process.output = "shell"`, the default, gives the model the exit status
   and the bounded stdout and stderr, as the current `sh` tool does.
-  `process.output = "stdout"` gives the model the child's stdout as plain text
-  and reports a non-zero exit or any stderr as an error result; tools whose
-  output is meant to be read as-is, such as file readers, use it.
+  `process.output = "stdout"` gives the model the child's stdout as plain text.
+  Both modes retain the raw status and separate stdout and stderr in the result.
+  Statuses listed in `normal_exit_statuses` are normal outcomes (`diff` and
+  `rg` also list 1); any other status, signal, timeout or start failure is an
+  execution error. Stderr alone is never an execution error.
 - `process.command.common` supplies the command on both systems.
   `process.command.linux` or `process.command.motor` replaces it on that
   system. The selected vector must not be empty, and its program must be an
@@ -170,18 +167,21 @@ system program because that is the program the external tool wraps.
 
 ### Command templates
 
-An argument that consists entirely of `{field}` is replaced with the string
-value of that field from the model's argument object. Substitution produces one
-process argument; Gears never performs shell interpolation or word splitting.
-Every placeholder must name a present string field. Literal command arguments
-are passed unchanged.
+The model supplies typed parameters, never a flag vector. A manifest maps
+each parameter to a fixed command vector. A string fills one entire argument;
+a boolean adds its fixed flag or nothing; an integer fills a fixed flag's
+value; an enum selects a fixed subcommand; and a list expands into separate
+arguments after a literal `--`. The manifest declares each field's type and
+placement, and the JSON schema must agree. Gears never performs shell
+interpolation or word splitting. Invalid or missing required values fail
+before execution.
 
 For example:
 
 ```toml
 [process.command]
 linux = ["/bin/ls", "--", "{path}"]
-motor = ["/system/bin/ls", "--", "{path}"]
+motor = ["/system/bin/sysbox", "ls", "--", "{path}"]
 ```
 
 with `{"path":"directory with spaces"}` runs the equivalent of the following
@@ -191,20 +191,23 @@ argument vector, not a shell command:
 ["ls", "--", "directory with spaces"]
 ```
 
-Tools needing optional fields, arrays, objects, or richer argument handling
-should use a fixed command such as `["./run"]`, select
-`process.stdin = "arguments"`, and parse the JSON themselves. Keeping the
-template language this small avoids inventing a second shell.
+Tools with behavior beyond these mappings may use a fixed command such as
+`["./run"]`, select `process.stdin = "arguments"`, and validate the JSON
+themselves. Shipped common commands use typed mappings so the schema and
+their actual argument vector can be reviewed together.
 
 `display` uses the same whole-field placeholders, but is presentation only. A
 bad or missing placeholder makes that tool call fail visibly; it never falls
 back to executing an ambiguous command.
 
-A substituted value that begins with `-` is refused unless the command vector
-places a literal `--` before it, so a value from the model can never act as an
-option of the wrapped program. The shipped manifests put `--` before every
-placeholder that takes a path or pattern; in a prototype, a search path of
-`--pre=sh` made `rg` run arbitrary commands.
+A model value beginning with `-` is refused unless it is placed after a
+literal `--` or is exactly listed in the manifest's `allowed_flags` (such as
+`--release` for `lorry`). Allowed flags go before `--`. The shipped manifests
+put `--` before free-form paths and patterns; in a prototype, a search path
+of `--pre=sh` made `rg` run arbitrary commands. Each shipped common command's
+typed parameters are specified before its tool directory is built. GNU
+`find -exec` runs commands, so the Linux read-only `find` tool offers only
+name, type and path parameters.
 
 ## Process execution contract
 
@@ -223,13 +226,11 @@ and, when the session is saved to disk, `GEARS_SESSION_PATH`, as hooks
 receive it. The provider API key is removed from the environment.
 
 Stdout and stderr are streamed separately to the UI and retained within the
-configured bounds. In the default `output = "shell"` mode the model-facing
-result contains the exit status and bounded stdout/stderr, using the same
-representation that the current `sh` tool uses; in `output = "stdout"` mode it
-is the bounded stdout as plain text, and any stderr makes the result an error.
-A non-zero exit status, timeout, cancellation, spawn failure, invalid argument
-object, or invalid template is an error tool result. Timeout and cancellation
-stop the process tree through the existing Linux or Motor OS backend.
+configured bounds. The result keeps both streams and the raw exit status,
+separate from its execution-error flag. A status outside the manifest's normal
+set, signal, timeout, cancellation, spawn failure, invalid argument object,
+or invalid template is an error. Stderr alone is not. Timeout and cancellation
+stop the process tree through Gears' shared runner.
 
 External tools are trusted code. Running an approved process tool grants it the
 user's filesystem and process authority. The directory format is a packaging
@@ -249,19 +250,18 @@ approval also does not enable a disabled tool.
 Every call follows this order:
 
 1. Reject an unknown or disabled tool without executing it.
-2. Run permission hooks. Any deny, including failure of a configured
-   permission hook, denies the call. Any allow executes it immediately. A
-   `confirm` answer skips the grants of step 3 and asks the attended user;
-   an unattended run denies.
-3. If all hooks ask, consult matching session and global approval grants. A
-   session grant beats a global grant for the same identity; within a scope
-   the latest answer replaces the earlier one. A matching deny grant refuses
-   the call; a matching allow grant executes it. In an unattended run, deny
-   grants apply and allow grants do not.
-4. If no grant matches, ask an attended user; an unattended run denies.
+2. Look up matching session and global grants for the approval identity on
+   every call. A session grant beats a global grant; within a scope the latest
+   answer wins. A saved denial refuses the call.
+3. Run permission hooks. A hook denial or failure refuses the call. A hook's
+   `confirm` asks the attended user for fresh confirmation and refuses an
+   unattended call. A hook allowance runs the call.
+4. Without a hook decision, a saved allowance runs an attended call. Saved
+   allowances do not apply in `-p` runs, including workers and jobs. With
+   neither, ask the attended user or refuse the unattended call.
 
-Thus a saved grant never overrides a policy hook. External-tool manifests and
-future loadable modules cannot bypass the same decision path.
+The saved answer is checked before a hook can allow anything. A hook's
+`confirm` requires fresh confirmation even after a saved allowance.
 
 An interactive approval prompt offers six choices, allow or deny at each of
 three scopes:
@@ -339,13 +339,13 @@ enabled = false
 ```
 
 `directory` is absolute, or relative to the Gears directory: `/user/cfg/gears`
-on Motor OS and `~/.gears` on Linux. That directory holds `gears.toml` itself,
+on Motor OS and `~/.gears` on Linux. Phase 2.1 moves `gears.toml` into that
+directory; phase 3's tool registry reads it there. The directory also holds
 `tools.toml`, `permissions.toml`, the tool directories under `tools/`, the
-sessions and the batteries' data, so copying it to another computer, on
-either system, carries the configuration and the tools with it (batteries
-plan Q10). Gears reads `gears.toml` from there first and from the earlier
-locations, `/user/cfg/gears.toml` and `~/.config/gears.toml`, when it is
-absent; `api_key_file` (renamed from `key_file`, which stays accepted) and
+sessions and the batteries' data. Gears reads `gears.toml` from there first
+and from the earlier locations, `/user/cfg/gears.toml` and
+`~/.config/gears.toml`, when it is absent; `api_key_file` (renamed from
+`key_file`, which stays accepted) and
 `ca_cert` in it may be relative to the directory as well. `enabled` is the
 default when no later override exists. Gears loads and validates every listed
 directory at startup, including disabled tools and
@@ -430,34 +430,37 @@ notices and leave the previous state unchanged.
 
 ## Shipped reference tools
 
-`sh` has one required string parameter, `command`. Its manifest selects `sh -c`
+`sh` has one required string parameter, `command`. Its manifest selects `bash -c`
 on Linux and `/system/bin/rush -c` on Motor OS, uses `{command}` as the exact
 permission detail, gives the child a closed stdin, and retains the current
-120-second timeout. Once the registry is implemented, `sh` has no special
-execution path in Rust.
+120-second timeout. Its working directory and exported variables persist
+between calls on both systems. Once the registry is implemented, `sh` has no
+special execution path in Rust.
 
 `ls` has one required string parameter, `path`. It invokes `/bin/ls` on Linux
-or `/system/bin/ls` on Motor OS directly with a single path argument and no
-shell. Its purpose is to demonstrate a narrow external tool whose authority
+or `/system/bin/sysbox ls` on Motor OS directly with a single path argument
+and no shell. Its purpose is to demonstrate a narrow external tool whose authority
 and model interface are easier to review than arbitrary shell access.
 
 The common commands follow the `ls` pattern, each a manifest naming the
-program's path per platform, a one-line description, an argument-vector
-schema with `--` before every placeholder, and a timeout. The read-only ones,
-`rg`, `head`, `tail`, `diff`, `find`, `wc` and `cat`, set `parallel_safe` and
-`output = "stdout"`. The ones that change or publish things, `gix`, `lorry`,
-`cargo` and `sed`, keep the shell-style result and are never `parallel_safe`.
+program's path per platform, a one-line description, typed parameters mapped
+to a fixed argument vector, and a timeout. The read-only ones, `rg`, `head`,
+`tail`, `diff`, `find`, `wc` and `cat`, set `read_only = true`. The ones that
+change or publish things, `gix`, `lorry`, `cargo` and `sed`, leave it false.
+`curl` fetches one HTTP or HTTPS URL without following redirects.
 Running a command as its own tool gives it its own approval identity, so
 allowing `lorry` for a session does not allow arbitrary shell commands, and
 lets a policy hook allow the read-only ones without asking. Where the two
 systems' programs take different arguments, sysbox's `ls`, `find`, `head`,
 `tail`, `diff`, `wc` and `cat` against their GNU counterparts, the manifest
-gives a description and schema per system. `gix` and `lorry` have a command
+gives a description and schema per system. Sysbox-backed Motor OS tools call
+`/system/bin/sysbox COMMAND` directly, preserving spaces and literal glob
+characters in arguments. `gix` and `lorry` have a command
 for Motor OS only and `cargo` for Linux only; on the other system each is
 listed as not available and never offered to the model.
 
 Pipeline filters are not shipped as tools: `sort`, `uniq`, `cut` and `tr`
-(sysbox commands, batteries plan step 8a) do their work between pipes, which
+(the batteries plan's sysbox track) do their work between pipes, which
 only `sh` has, and `xargs` runs other programs, so it belongs behind the
 shell's approval rather than an identity of its own.
 
